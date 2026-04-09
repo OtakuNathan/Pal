@@ -1,0 +1,27 @@
+[project]
+name = "pal-v2"
+version = "0.1.0"
+description = "Independent Pal Architecture V1/V2 rebuild lane"
+requires-python = ">=3.11"
+dependencies = [
+    "cryptography>=43.0,<45",
+    "msgpack>=1.0,<2",
+    "peewee>=3.17,<4",
+    "python-telegram-bot>=20.7,<22",
+    "sentence-transformers>=3.0,<4",
+    "sqlite-vec>=0.1.6,<1",
+    "telegramify-markdown>=0.4,<1",
+]
+
+[project.scripts]
+pal = "pal.main:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

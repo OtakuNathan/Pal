@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+from collections import deque
+from dataclasses import dataclass, field
+from uuid import uuid4
+
+from pal.channel.contracts import ChannelAdapter, ChannelEnvelope, ChannelRuntimePort, QueuedReply, QueuedStatus, QueuedStreamEvent
+from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase
+from pal.core.mailbox import Mailbox
+from pal.foundation import EventEnvelope
+from pal.shared import EventKind, SourceKind
+from pal.stream_events import NormalizedLLMStreamEvent
+
+
+@dataclass
+class ChannelAdapterRegistry:
+    adapters: dict[str, ChannelAdapter] = field(default_factory=dict)
+
+    def register(self, adapter: ChannelAdapter) -> None:
+        self.adapters[adapter.channel_kind] = adapter
+
+    def get(self, channel_kind: str) -> ChannelAdapter | None:
+        return self.adapters.get(channel_kind)
+
+
+@dataclass
+class ChannelEndpointRegistry:
+    # ChannelRuntime owns the parent management layer for endpoint instances.
+    # Endpoint nodes can report their own state, but attach/detach and top-level
+    # enable/disable decisions are mediated here.
+    endpoints: dict[str, ChannelEndpointBase] = field(default_factory=dict)
+
+    def register(self, endpoint: ChannelEndpointBase) -> None:
+        self.endpoints[endpoint.endpoint.endpoint_id] = endpoint
+
+    def get(self, endpoint_id: str) -> ChannelEndpointBase | None:
+        return self.endpoints.get(endpoint_id)
+
+    def values(self) -> tuple[ChannelEndpointBase, ...]:
+        return tuple(self.endpoints.values())
+
+
+@dataclass
+class ChannelRuntime(ChannelRuntimePort):
+    adapter_registry: ChannelAdapterRegistry = field(default_factory=ChannelAdapterRegistry)
+    endpoint_registry: ChannelEndpointRegistry = field(default_factory=ChannelEndpointRegistry)
+    mailbox: Mailbox[EventEnvelope] = field(default_factory=Mailbox)
+    outbox: deque[QueuedReply] = field(default_factory=deque)
+    status_outbox: deque[QueuedStatus] = field(default_factory=deque)
+    stream_outbox: deque[QueuedStreamEvent] = field(default_factory=deque)
+
+    def register_endpoint(self, endpoint: ChannelEndpointBase) -> None:
+        self.endpoint_registry.register(endpoint)
+
+    async def start_async(self) -> None:
+        for endpoint in self.list_endpoints():
+            starter = getattr(endpoint, "start_async", None)
+            if callable(starter):
+                await starter()
+
+    async def stop_async(self) -> None:
+        for endpoint in self.list_endpoints():
+            stopper = getattr(endpoint, "stop_async", None)
+            if callable(stopper):
+                await stopper()
+
+    def get_endpoint(self, endpoint_id: str) -> ChannelEndpointBase | None:
+        return self.endpoint_registry.get(endpoint_id)
+
+    def list_endpoints(self) -> tuple[ChannelEndpointBase, ...]:
+        return self.endpoint_registry.values()
+
+    def enable_endpoint(self, endpoint_id: str) -> bool:
+        endpoint = self.get_endpoint(endpoint_id)
+        if endpoint is None:
+            return False
+        endpoint.enable()
+        return True
+
+    def disable_endpoint(self, endpoint_id: str) -> bool:
+        endpoint = self.get_endpoint(endpoint_id)
+        if endpoint is None:
+            return False
+        endpoint.disable()
+        return True
+
+    def attach_endpoint(self, endpoint_id: str) -> bool:
+        endpoint = self.get_endpoint(endpoint_id)
+        if endpoint is None:
+            return False
+        endpoint.attach()
+        return True
+
+    def detach_endpoint(self, endpoint_id: str) -> bool:
+        endpoint = self.get_endpoint(endpoint_id)
+        if endpoint is None:
+            return False
+        endpoint.detach()
+        return True
+
+    def sync_endpoints(self) -> None:
+        # Concrete endpoints own transport-specific ingress/outbox flow. The
+        # runtime aggregates those per-endpoint queues into the shared channel
+        # mailbox that MainLoop polls.
+        for endpoint in self.list_endpoints():
+            for envelope in endpoint.poll():
+                self.emit(envelope)
+            endpoint.flush_status_outbox()
+            for event in endpoint.flush_stream_outbox():
+                self.mailbox.put(event)
+            for event in endpoint.flush_outbox():
+                self.mailbox.put(event)
+
+    def emit(self, envelope: ChannelEnvelope) -> None:
+        # Channel owns normalization. Everything PalCore sees after this point
+        # is already canonical internal ingress.
+        self.mailbox.put(
+            EventEnvelope(
+                event_kind=envelope.event.event_kind,
+                source_kind=SourceKind.CHANNEL,
+                payload=envelope,
+                correlation_id=envelope.event.correlation_id or envelope.event.event_id,
+            )
+        )
+
+    @property
+    def inbox(self) -> tuple[EventEnvelope, ...]:
+        return self.mailbox.peek_all()
+
+    def queue_reply(self, envelope: ChannelEnvelope, text: str) -> str:
+        # Outbox acceptance is the turn-facing completion point; actual delivery
+        # is handled later by flush_outbox and surfaced as channel diagnostics.
+        endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
+        if endpoint is not None:
+            return endpoint.queue_reply(text, response_handle=envelope.response_handle)
+        reply_id = str(uuid4())
+        self.outbox.append(
+            QueuedReply(
+                reply_id=reply_id,
+                response_handle=envelope.response_handle,
+                endpoint=envelope.endpoint,
+                text=text,
+            )
+        )
+        return reply_id
+
+    def queue_stream_event(self, envelope: ChannelEnvelope, event: NormalizedLLMStreamEvent) -> str:
+        endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
+        if endpoint is not None:
+            return endpoint.queue_stream_event(event, response_handle=envelope.response_handle)
+        event_id = str(uuid4())
+        self.stream_outbox.append(
+            QueuedStreamEvent(
+                event_id=event_id,
+                response_handle=envelope.response_handle,
+                endpoint=envelope.endpoint,
+                event=event,
+            )
+        )
+        return event_id
+
+    def queue_status(
+        self,
+        envelope: ChannelEnvelope,
+        kind: str,
+        *,
+        payload: dict[str, object] | None = None,
+    ) -> str:
+        endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
+        if endpoint is not None:
+            return endpoint.queue_status(
+                kind,
+                response_handle=envelope.response_handle,
+                payload=dict(payload or {}),
+            )
+        status_id = str(uuid4())
+        self.status_outbox.append(
+            QueuedStatus(
+                status_id=status_id,
+                response_handle=envelope.response_handle,
+                endpoint=envelope.endpoint,
+                kind=str(kind),
+                payload=dict(payload or {}),
+            )
+        )
+        return status_id
+
+    def flush_outbox(self) -> None:
+        self.sync_endpoints()
+        if self.stream_outbox:
+            self.stream_outbox.clear()
+        if self.status_outbox:
+            self.status_outbox.clear()
+        if not self.outbox:
+            return
+        pending = list(self.outbox)
+        self.outbox.clear()
+        for item in pending:
+            adapter = self.adapter_registry.get(item.endpoint.channel_kind)
+            if adapter is None:
+                self.outbox.append(
+                    QueuedReply(
+                        reply_id=item.reply_id,
+                        response_handle=item.response_handle,
+                        endpoint=item.endpoint,
+                        text=item.text,
+                        attempts=item.attempts + 1,
+                    )
+                )
+                self.mailbox.put(
+                    EventEnvelope(
+                        event_kind=EventKind.REPLY_FAILED,
+                        source_kind=SourceKind.CHANNEL,
+                        payload={"reply_id": item.reply_id, "endpoint_id": item.endpoint.endpoint_id, "reason": "adapter_unavailable"},
+                    )
+                )
+                continue
+            try:
+                adapter.send(item.response_handle, item.text)
+            except Exception as exc:
+                self.outbox.append(
+                    QueuedReply(
+                        reply_id=item.reply_id,
+                        response_handle=item.response_handle,
+                        endpoint=item.endpoint,
+                        text=item.text,
+                        attempts=item.attempts + 1,
+                    )
+                )
+                self.mailbox.put(
+                    EventEnvelope(
+                        event_kind=EventKind.REPLY_FAILED,
+                        source_kind=SourceKind.CHANNEL,
+                        payload={"reply_id": item.reply_id, "endpoint_id": item.endpoint.endpoint_id, "reason": str(exc)},
+                    )
+                )
+                continue
+            self.mailbox.put(
+                EventEnvelope(
+                    event_kind=EventKind.REPLY_DELIVERED,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={"reply_id": item.reply_id, "endpoint_id": item.endpoint.endpoint_id},
+                )
+            )

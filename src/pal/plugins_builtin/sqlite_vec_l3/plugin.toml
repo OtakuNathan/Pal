@@ -1,0 +1,4 @@
+plugin_id = "sqlite_vec_l3"
+entrypoint = "pal.plugins_builtin.sqlite_vec_l3.runtime"
+version = "0.1.0"
+enabled_by_default = true

@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
+from pal.plugins.host import PluginHost
+from pal.shared import (
+    INTROSPECTION_NAMESPACE,
+    OPERATION_NAMESPACE,
+    IntrospectionCall,
+    IntrospectionResult,
+    RuntimeStatus,
+    capability_action,
+    capability_node,
+)
+
+
+@capability_node(
+    namespace=OPERATION_NAMESPACE,
+    scope="module",
+    kind="module",
+    source="builtin:plugins",
+    target_kind="module",
+    path_module_id="plugin",
+)
+@capability_node(
+    namespace=INTROSPECTION_NAMESPACE,
+    scope="module",
+    kind="module",
+    source="builtin:plugins",
+    target_kind="module",
+    path_module_id="plugins",
+)
+@dataclass
+class PluginsIntrospectionProvider:
+    host: PluginHost
+    module_id: str = "plugins"
+
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show plugin host summary")
+    def show(self, call: IntrospectionCall) -> IntrospectionResult:
+        _ = call
+        return IntrospectionResult(status=RuntimeStatus.OK, text="plugin host summary", structured=self.host.show_summary())
+
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="list", description="List known first-party and third-party plugins")
+    def list_plugins(self, call: IntrospectionCall) -> IntrospectionResult:
+        _ = call
+        return IntrospectionResult(status=RuntimeStatus.OK, text="plugin list", structured={"items": self.host.list_plugins()})
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="management",
+        action_name="attach",
+        description="Attach a plugin to the current runtime",
+        args_schema={"type": "object", "properties": {"plugin_id": {"type": "string"}}, "required": ["plugin_id"]},
+    )
+    def attach(self, call: IntrospectionCall) -> IntrospectionResult:
+        result = self.host.attach(str(call.args.get("plugin_id") or ""))
+        return IntrospectionResult(status=result["status"], text="plugin attach result", structured=result)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="management",
+        action_name="detach",
+        description="Detach a plugin from the current runtime",
+        args_schema={"type": "object", "properties": {"plugin_id": {"type": "string"}}, "required": ["plugin_id"]},
+    )
+    def detach(self, call: IntrospectionCall) -> IntrospectionResult:
+        result = self.host.detach(str(call.args.get("plugin_id") or ""))
+        return IntrospectionResult(status=result["status"], text="plugin detach result", structured=result)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="management",
+        action_name="enable",
+        description="Enable a plugin",
+        args_schema={"type": "object", "properties": {"plugin_id": {"type": "string"}}, "required": ["plugin_id"]},
+    )
+    def enable(self, call: IntrospectionCall) -> IntrospectionResult:
+        result = self.host.enable(str(call.args.get("plugin_id") or ""))
+        return IntrospectionResult(status=result["status"], text="plugin enable result", structured=result)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="management",
+        action_name="disable",
+        description="Disable a plugin",
+        args_schema={"type": "object", "properties": {"plugin_id": {"type": "string"}}, "required": ["plugin_id"]},
+    )
+    def disable(self, call: IntrospectionCall) -> IntrospectionResult:
+        result = self.host.disable(str(call.args.get("plugin_id") or ""))
+        return IntrospectionResult(status=result["status"], text="plugin disable result", structured=result)
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan plugin directories")
+    def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
+        _ = call
+        result = self.host.rescan()
+        return IntrospectionResult(status=RuntimeStatus.OK, text="plugin rescan result", structured=result)
+
+
+def register_with_core(context, host: PluginHost) -> ModuleHandle:
+    provider = PluginsIntrospectionProvider(host=host)
+    handle = ModuleHandle(
+        module_id="plugins",
+        tier=MODULE_TIER_CORE_FOUNDATION,
+        detachable=False,
+        introspection_provider=provider,
+        ports={"plugins": host},
+    )
+    context.register_module(handle)
+    return handle

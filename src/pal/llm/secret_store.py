@@ -1,0 +1,215 @@
+from __future__ import annotations
+
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from typing import Protocol
+
+
+@dataclass(frozen=True)
+class SecretRef:
+    service: str
+    account: str = "api-key"
+
+
+class SecretStorePort(Protocol):
+    def get_secret(self, ref: SecretRef) -> str | None:
+        ...
+
+    def set_secret(self, ref: SecretRef, secret: str) -> None:
+        ...
+
+    def delete_secret(self, ref: SecretRef) -> None:
+        ...
+
+
+@dataclass
+class KeyringSecretStore:
+    """Default system secret backend for PalV2 LLM credentials."""
+
+    keyring_module: object | None = None
+    macos_security_timeout_seconds: int = 60
+
+    def _get_from_macos_security(self, ref: SecretRef) -> str | None:
+        if sys.platform != "darwin":
+            return None
+        try:
+            result = subprocess.run(
+                (
+                    "/usr/bin/security",
+                    "find-generic-password",
+                    "-s",
+                    ref.service,
+                    "-a",
+                    ref.account,
+                    "-w",
+                ),
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self.macos_security_timeout_seconds,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        secret = result.stdout.strip()
+        return secret or None
+
+    def _load_keyring(self):
+        if self.keyring_module is not None:
+            return self.keyring_module
+        try:
+            import keyring  # type: ignore
+        except Exception:
+            return None
+        self.keyring_module = keyring
+        return keyring
+
+    def get_secret(self, ref: SecretRef) -> str | None:
+        secret = self._get_from_macos_security(ref)
+        if secret:
+            return secret
+        keyring = self._load_keyring()
+        if keyring is None:
+            return None
+        try:
+            secret = keyring.get_password(ref.service, ref.account)
+        except Exception:
+            return None
+        return str(secret) if secret else None
+
+    def set_secret(self, ref: SecretRef, secret: str) -> None:
+        keyring = self._load_keyring()
+        if keyring is None:
+            raise RuntimeError("system keyring is not available")
+        keyring.set_password(ref.service, ref.account, secret)
+
+    def delete_secret(self, ref: SecretRef) -> None:
+        keyring = self._load_keyring()
+        if keyring is None:
+            raise RuntimeError("system keyring is not available")
+        keyring.delete_password(ref.service, ref.account)
+
+
+@dataclass
+class InMemorySecretStore:
+    secrets: dict[tuple[str, str], str] = field(default_factory=dict)
+
+    def get_secret(self, ref: SecretRef) -> str | None:
+        return self.secrets.get((ref.service, ref.account))
+
+    def set_secret(self, ref: SecretRef, secret: str) -> None:
+        self.secrets[(ref.service, ref.account)] = secret
+
+    def delete_secret(self, ref: SecretRef) -> None:
+        self.secrets.pop((ref.service, ref.account), None)
+
+
+def _derive_fernet_key(*, runtime_root: str, salt_extra: str = "pal_v2_secrets") -> bytes:
+    """Derive a Fernet key from machine identity + runtime root path.
+
+    Deterministic per (hostname, username, runtime_root) so the same
+    deployment always decrypts its own secrets without a password prompt.
+    """
+    import base64
+    import hashlib
+    import getpass
+    import socket
+
+    material = f"{socket.gethostname()}:{getpass.getuser()}:{runtime_root}:{salt_extra}"
+    digest = hashlib.pbkdf2_hmac("sha256", material.encode(), b"pal_v2_secret_salt", 200_000)
+    return base64.urlsafe_b64encode(digest)
+
+
+class EncryptedFileSecretStore:
+    """Encrypted JSON file secret store — drop-in replacement for KeyringSecretStore.
+
+    File format (``{runtime_root}/secrets.json``):
+    ``{ "service:account": { "service": "...", "account": "...", "encrypted": "..." } }``
+
+    On first load, if a plaintext ``value`` field is found alongside no
+    ``encrypted`` field, the store transparently migrates (encrypts) the entry.
+    """
+
+    def __init__(self, secrets_path: str | object) -> None:
+        from pathlib import Path
+
+        self._path = Path(str(secrets_path))
+        self._fernet: object | None = None
+        self._cache: dict[tuple[str, str], str] = {}
+        self._load()
+
+    # -- public API (SecretStorePort) ----------------------------------------
+
+    def get_secret(self, ref: SecretRef) -> str | None:
+        return self._cache.get((ref.service, ref.account))
+
+    def set_secret(self, ref: SecretRef, secret: str) -> None:
+        self._cache[(ref.service, ref.account)] = secret
+        self._flush()
+
+    def delete_secret(self, ref: SecretRef) -> None:
+        self._cache.pop((ref.service, ref.account), None)
+        self._flush()
+
+    # -- internals -----------------------------------------------------------
+
+    def _ensure_fernet(self):
+        if self._fernet is not None:
+            return
+        from cryptography.fernet import Fernet
+
+        key = _derive_fernet_key(runtime_root=str(self._path.parent))
+        self._fernet = Fernet(key)
+
+    def _load(self) -> None:
+        import json
+
+        if not self._path.exists():
+            return
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+        dirty = False
+        for _key, entry in raw.items():
+            if not isinstance(entry, dict):
+                continue
+            service = str(entry.get("service") or "")
+            account = str(entry.get("account") or "api-key")
+            if not service:
+                continue
+            encrypted = entry.get("encrypted")
+            if isinstance(encrypted, str) and encrypted:
+                self._ensure_fernet()
+                try:
+                    value = self._fernet.decrypt(encrypted.encode()).decode()  # type: ignore[union-attr]
+                    self._cache[(service, account)] = value
+                except Exception:
+                    pass
+                continue
+            # Legacy plaintext migration
+            plaintext = entry.get("value")
+            if isinstance(plaintext, str) and plaintext:
+                self._cache[(service, account)] = plaintext
+                dirty = True
+        if dirty:
+            self._flush()
+
+    def _flush(self) -> None:
+        import json
+
+        self._ensure_fernet()
+        data: dict[str, dict[str, str]] = {}
+        for (service, account), secret in self._cache.items():
+            encrypted = self._fernet.encrypt(secret.encode()).decode()  # type: ignore[union-attr]
+            data[f"{service}:{account}"] = {
+                "service": service,
+                "account": account,
+                "encrypted": encrypted,
+            }
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

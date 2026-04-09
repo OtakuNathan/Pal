@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Protocol
+
+from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase
+from pal.channel.contracts import EndpointConfig
+from pal.channel.endpoints.socket_endpoint import SocketChannelEndpoint
+from pal.channel.endpoints.telegram_endpoint import TelegramChannelEndpointFactory
+from pal.channel.models import ChannelEndpointModel
+
+
+class ChannelEndpointFactory(Protocol):
+    channel_kind: str
+
+    def create(
+        self,
+        record: ChannelEndpointModel,
+        *,
+        runtime_root: Path,
+    ) -> ChannelEndpointBase | None:
+        ...
+
+
+@dataclass
+class ChannelEndpointFactoryRegistry:
+    factories: dict[str, ChannelEndpointFactory] = field(default_factory=dict)
+
+    def register(self, factory: ChannelEndpointFactory) -> None:
+        self.factories[factory.channel_kind] = factory
+
+    def create(
+        self,
+        record: ChannelEndpointModel,
+        *,
+        runtime_root: Path,
+    ) -> ChannelEndpointBase | None:
+        factory = self.factories.get(record.channel_kind)
+        if factory is None:
+            return None
+        return factory.create(record, runtime_root=runtime_root)
+
+
+@dataclass(frozen=True)
+class SocketChannelEndpointFactory:
+    channel_kind: str = "socket"
+
+    def create(
+        self,
+        record: ChannelEndpointModel,
+        *,
+        runtime_root: Path,
+    ) -> ChannelEndpointBase | None:
+        _ = runtime_root
+        endpoint = EndpointConfig(
+            endpoint_id=record.endpoint_id,
+            channel_kind=record.channel_kind,
+            binding_key=record.binding_key,
+            send_policy=dict(record.send_policy_blob or {}),
+        )
+        runtime_endpoint = SocketChannelEndpoint(endpoint=endpoint)
+        runtime_endpoint.enabled = bool(record.enabled)
+        runtime_endpoint.attached = record.detached_at is None
+        runtime_endpoint.paired = True
+        return runtime_endpoint
+
+
+def build_default_factory_registry() -> ChannelEndpointFactoryRegistry:
+    registry = ChannelEndpointFactoryRegistry()
+    registry.register(SocketChannelEndpointFactory())
+    registry.register(TelegramChannelEndpointFactory())
+    return registry

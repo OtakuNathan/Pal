@@ -1,0 +1,19 @@
+.DS_Store
+CLAUDE.md
+.idea/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+runtime.db
+*.db
+*.sqlite
+*.sqlite3
+
+dist/
+build/
+
+# Packaging artifacts
+*.egg-info/
