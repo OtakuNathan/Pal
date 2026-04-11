@@ -416,16 +416,16 @@ class PalV2BootstrapTests(unittest.TestCase):
             database=self.database,
         )
 
-        self.assertIn("introspection.module.plugins.show", handle.core.context.capability_registry.descriptors)
-        self.assertIn("operation.plugin.management.detach", handle.core.context.capability_registry.descriptors)
-        self.assertIn("introspection.provider.l3.show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
+        self.assertIn("introspection_module_plugins_show", handle.core.context.capability_registry.descriptors)
+        self.assertIn("operation_plugin_management_detach", handle.core.context.capability_registry.descriptors)
+        self.assertIn("introspection_provider_l3_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
 
         detached = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="operation.plugin.management.detach", args={"plugin_id": "sqlite_vec_l3"})
+            CapabilityCall(name="operation_plugin_management_detach", args={"plugin_id": "sqlite_vec_l3"})
         )
 
         self.assertEqual(detached.status, "ok")
-        self.assertNotIn("introspection.provider.l3.show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
+        self.assertNotIn("introspection_provider_l3_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
 
     def test_memory_l3_regression_build_pack_uses_builtin_sqlite_vec_provider(self) -> None:
         self.supervisor.seed_defaults(self.registration)
@@ -437,7 +437,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         commit = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="operation.l3.commit.write",
+                name="operation_l3_commit_write",
                 args={
                     "target_id": "sqlite_vec_l3",
                     "kind": "fact",
@@ -467,7 +467,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         committed = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="operation.l3.commit.write",
+                name="operation_l3_commit_write",
                 args={
                     "target_id": "sqlite_vec_l3",
                     "kind": "case",
@@ -486,7 +486,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         recalled = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="operation.l3.recall.query",
+                name="operation_l3_recall_query",
                 args={
                     "target_id": "sqlite_vec_l3",
                     "queries": ["worker memory pressure stabilize"],
@@ -496,7 +496,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         corrected = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="operation.l3.correct.patch",
+                name="operation_l3_correct_patch",
                 args={
                     "target_id": "sqlite_vec_l3",
                     "document_id": document_id,
@@ -507,7 +507,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         inventory = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="introspection.provider.l3.inventory",
+                name="introspection_provider_l3_inventory",
                 args={"target_id": "sqlite_vec_l3"},
             )
         )
@@ -659,7 +659,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(corrected.status, "ok")
         self.assertEqual(corrected.metadata["index_status"], "stale")
         inventory = provider.inspect()
-        self.assertGreaterEqual(inventory["pending_embeddings"], 1)
+        self.assertGreaterEqual(inventory["stale_embeddings"], 1)
 
     def test_memory_service_tracks_top_of_mind_with_lru_limit(self) -> None:
         service = MemoryService()
@@ -1042,7 +1042,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(handle.core.context.module_registry.get("llm"))
         self.assertIsNotNone(handle.core.context.module_registry.get("memory"))
         self.assertIsNotNone(handle.core.context.module_registry.get("identity"))
-        self.assertIsNotNone(handle.core.context.execution_runtime.capabilities.get("introspection.module.llm.list"))
+        self.assertIsNotNone(handle.core.context.execution_runtime.capabilities.get("introspection_module_llm_list"))
 
     def test_compose_runtime_registers_seeded_socket_endpoint(self) -> None:
         self.supervisor.seed_defaults(self.registration)
@@ -1089,16 +1089,16 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         llm_list = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="introspection.module.llm.list")
+            CapabilityCall(name="introspection_module_llm_list")
         )
         llm_active = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="introspection.module.llm.active")
+            CapabilityCall(name="introspection_module_llm_active")
         )
         llm_think_level = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="introspection.module.llm.think_level")
+            CapabilityCall(name="introspection_module_llm_think_level")
         )
         llm_show = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="introspection.endpoint.llm.show", args={"target_id": "stub_llm_default"})
+            CapabilityCall(name="introspection_endpoint_llm_show", args={"target_id": "stub_llm_default"})
         )
 
         self.assertEqual(llm_list.status, "ok")

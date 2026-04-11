@@ -16,8 +16,13 @@ class IntrospectionCall:
 @dataclass(frozen=True)
 class IntrospectionResult:
     status: str
+    llm_text: str
     text: str = ""
     structured: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if not str(self.llm_text or "").strip():
+            raise ValueError("IntrospectionResult.llm_text must be non-empty")
 
 
 @runtime_checkable
@@ -48,17 +53,17 @@ def standard_descriptors(
 ) -> list[CapabilityDescriptor]:
     canonical_target_id = target_id or module_id
     canonical_target_label = target_label or module_id
-    base_name = f"introspection.{scope}.{module_id}"
+    base_name = f"introspection_{scope}_{module_id}"
     return [
         CapabilityDescriptor(
-            name=f"{base_name}.observe",
+            name=f"{base_name}_observe",
             family="introspection",
             description=f"Observe {scope}-level state for {module_id}",
             source=source,
-            display_name=f"introspection.{scope}.{canonical_target_label}.observe",
+            display_name=f"introspection_{scope}_{canonical_target_label}_observe",
             aliases=aliases
             + (
-                f"{module_id}.introspection.observe",
+                f"{module_id}_introspection_observe",
                 f"observe {module_id}",
                 f"introspection {module_id} observe",
             ),
@@ -71,14 +76,14 @@ def standard_descriptors(
             detachable=detachable,
         ),
         CapabilityDescriptor(
-            name=f"{base_name}.configure",
+            name=f"{base_name}_configure",
             family="introspection",
             description=f"Configure {scope}-level state for {module_id}",
             source=source,
-            display_name=f"introspection.{scope}.{canonical_target_label}.configure",
+            display_name=f"introspection_{scope}_{canonical_target_label}_configure",
             aliases=aliases
             + (
-                f"{module_id}.introspection.configure",
+                f"{module_id}_introspection_configure",
                 f"configure {module_id}",
                 f"introspection {module_id} configure",
             ),

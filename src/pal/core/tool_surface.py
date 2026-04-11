@@ -35,12 +35,13 @@ class ToolSurface:
         seen: set[tuple[str, str]] = set()
 
         singleton_canonicals = (
-            "operation.execution.discovery.read",
-            "operation.execution.discovery.search",
-            "operation.execution.exec.run",
-            "introspection.module.identity.show",
-            "introspection.module.llm.active",
-            "introspection.module.llm.think_level",
+            "operation_execution_discovery_read",
+            "operation_execution_discovery_search",
+            "operation_execution_exec_run",
+            "introspection_module_identity_show",
+            "introspection_module_llm_active",
+            "introspection_module_llm_think_level",
+            "introspection_module_memory_active_provider",
         )
         for canonical_path in singleton_canonicals:
             for record_id in by_canonical.get(canonical_path, []):
@@ -63,9 +64,9 @@ class ToolSurface:
             return llm_descriptors
 
         provider_canonicals = (
-            "operation.l3.recall.query",
-            "operation.l3.commit.write",
-            "operation.l3.correct.patch",
+            "operation_l3_recall_query",
+            "operation_l3_commit_write",
+            "operation_l3_correct_patch",
         )
         for canonical_path in provider_canonicals:
             for record_id in by_canonical.get(canonical_path, []):
@@ -100,52 +101,52 @@ class ToolSurface:
                 seen.add(key)
                 selected.append(descriptor)
 
-        include("operation.execution.discovery.read")
+        include("operation_execution_discovery_read")
 
         if signal.subsystem == "memory":
-            include("introspection.module.memory.show")
-            include("introspection.module.memory.list_providers")
-            include("introspection.module.memory.active_provider")
-            include("operation.memory.management.set_active_provider")
+            include("introspection_module_memory_show")
+            include("introspection_module_memory_list_providers")
+            include("introspection_module_memory_active_provider")
+            include("operation_memory_management_set_active_provider")
             try:
                 memory_service = self.context.require_port("memory:memory")
                 active_provider_id = str(memory_service.l3_selector.active_provider_id or "").strip()
             except KeyError:
                 active_provider_id = ""
             if active_provider_id:
-                include("introspection.provider.l3.show", target_id=active_provider_id)
-                include("introspection.provider.l3.inventory", target_id=active_provider_id)
-                include("operation.l3.maintenance.refresh_indexes", target_id=active_provider_id)
+                include("introspection_provider_l3_show", target_id=active_provider_id)
+                include("introspection_provider_l3_inventory", target_id=active_provider_id)
+                include("operation_l3_maintenance_refresh_indexes", target_id=active_provider_id)
         elif signal.subsystem in {"plugin", "plugins"}:
-            include("introspection.module.plugins.show")
-            include("introspection.module.plugins.list")
-            include("operation.plugin.management.rescan")
-            include("operation.plugin.management.enable")
-            include("operation.plugin.management.disable")
+            include("introspection_module_plugins_show")
+            include("introspection_module_plugins_list")
+            include("operation_plugin_management_rescan")
+            include("operation_plugin_management_enable")
+            include("operation_plugin_management_disable")
         elif signal.subsystem == "channel":
-            include("introspection.module.channel.list")
-            include("operation.channel.management.enable")
-            include("operation.channel.management.disable")
-            include("operation.channel.management.attach")
-            include("operation.channel.management.detach")
+            include("introspection_module_channel_list")
+            include("operation_channel_management_enable")
+            include("operation_channel_management_disable")
+            include("operation_channel_management_attach")
+            include("operation_channel_management_detach")
             endpoint_id = (
                 str(signal.related_ids.get("endpoint_id") or "").strip()
                 or str(signal.component or "").strip()
             )
             if endpoint_id:
-                include("introspection.endpoint.channel.inspect", target_id=endpoint_id)
-                include("introspection.endpoint.channel.auth_state", target_id=endpoint_id)
-                include("introspection.endpoint.channel.backlog", target_id=endpoint_id)
-                include("introspection.endpoint.channel.health", target_id=endpoint_id)
+                include("introspection_endpoint_channel_inspect", target_id=endpoint_id)
+                include("introspection_endpoint_channel_auth_state", target_id=endpoint_id)
+                include("introspection_endpoint_channel_backlog", target_id=endpoint_id)
+                include("introspection_endpoint_channel_health", target_id=endpoint_id)
         elif signal.subsystem == "llm":
-            include("introspection.module.llm.list")
-            include("introspection.module.llm.active")
-            include("introspection.module.llm.think_level")
+            include("introspection_module_llm_list")
+            include("introspection_module_llm_active")
+            include("introspection_module_llm_think_level")
         elif signal.subsystem == "execution":
-            include("introspection.module.execution.show")
-            include("introspection.module.execution.tools")
+            include("introspection_module_execution_show")
+            include("introspection_module_execution_tools")
         else:
             module_name = str(signal.subsystem or "").strip()
             if module_name:
-                include(f"introspection.module.{module_name}.show")
+                include(f"introspection_module_{module_name}_show")
         return selected

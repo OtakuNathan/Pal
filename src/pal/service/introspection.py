@@ -16,6 +16,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -109,7 +110,12 @@ class ServiceIntrospectionProvider:
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_service(self)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="service snapshot", structured=snapshot.__dict__)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="service snapshot",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("Service snapshot", snapshot.__dict__),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -134,7 +140,13 @@ class ServiceIntrospectionProvider:
                     "last_run_at": self._last_run_at_for(definition.service_id),
                 }
             )
-        return IntrospectionResult(status=RuntimeStatus.OK, text="configured services", structured={"items": items})
+        payload = {"items": items}
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="configured services",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Configured services", payload),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -145,21 +157,27 @@ class ServiceIntrospectionProvider:
     def show_service(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_service_target(call)
         if target is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="service not found")
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="service not found",
+                llm_text="service not found",
+            )
+        payload = {
+            "service_id": target.service_id,
+            "goal": target.goal,
+            "method": target.method,
+            "skill_refs": list(target.skill_refs),
+            "out_channel_id": target.out_channel_id,
+            "enabled": target.enabled,
+            "schedule": dict(target.schedule),
+            "next_due_at": target.next_due_at,
+            "last_run_at": target.last_run_at,
+        }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="service snapshot",
-            structured={
-                "service_id": target.service_id,
-                "goal": target.goal,
-                "method": target.method,
-                "skill_refs": list(target.skill_refs),
-                "out_channel_id": target.out_channel_id,
-                "enabled": target.enabled,
-                "schedule": dict(target.schedule),
-                "next_due_at": target.next_due_at,
-                "last_run_at": target.last_run_at,
-            },
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Service snapshot", payload),
         )
 
     @capability_action(
@@ -171,17 +189,35 @@ class ServiceIntrospectionProvider:
     def last_run(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_service_target(call)
         if target is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="service not found")
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="service not found",
+                llm_text="service not found",
+            )
         repository = self.manager.repository
         if repository is None:
-            return IntrospectionResult(status=RuntimeStatus.OK, text="service run history unavailable", structured={"service_id": target.service_id, "run": None})
+            payload = {"service_id": target.service_id, "run": None}
+            return IntrospectionResult(
+                status=RuntimeStatus.OK,
+                text="service run history unavailable",
+                structured=payload,
+                llm_text=render_titled_structured_for_llm("Service latest run", payload),
+            )
         run = repository.latest_run(target.service_id)
         if run is None:
-            return IntrospectionResult(status=RuntimeStatus.OK, text="service has not run yet", structured={"service_id": target.service_id, "run": None})
+            payload = {"service_id": target.service_id, "run": None}
+            return IntrospectionResult(
+                status=RuntimeStatus.OK,
+                text="service has not run yet",
+                structured=payload,
+                llm_text=render_titled_structured_for_llm("Service latest run", payload),
+            )
+        payload = {"service_id": target.service_id, "run": self._render_run(run)}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="service latest run",
-            structured={"service_id": target.service_id, "run": self._render_run(run)},
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Service latest run", payload),
         )
 
     @capability_action(
@@ -201,16 +237,28 @@ class ServiceIntrospectionProvider:
     def list_runs(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_service_target(call)
         if target is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="service not found")
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="service not found",
+                llm_text="service not found",
+            )
         repository = self.manager.repository
         if repository is None:
-            return IntrospectionResult(status=RuntimeStatus.OK, text="service run history unavailable", structured={"service_id": target.service_id, "items": []})
+            payload = {"service_id": target.service_id, "items": []}
+            return IntrospectionResult(
+                status=RuntimeStatus.OK,
+                text="service run history unavailable",
+                structured=payload,
+                llm_text=render_titled_structured_for_llm("Service run history", payload),
+            )
         limit = max(1, min(50, int(call.args.get("limit") or 10)))
         items = [self._render_run(item) for item in repository.list_runs(target.service_id, limit=limit)]
+        payload = {"service_id": target.service_id, "items": items}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="service run history",
-            structured={"service_id": target.service_id, "items": items},
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Service run history", payload),
         )
 
     @capability_action(
@@ -237,7 +285,11 @@ class ServiceIntrospectionProvider:
         service_id = str(call.args.get("service_id") or "").strip()
         goal = str(call.args.get("goal") or "").strip()
         if not service_id or not goal:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="service_id and goal are required")
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="service_id and goal are required",
+                llm_text="service_id and goal are required",
+            )
         definition = self.manager.create_service(
             service_id=service_id,
             goal=goal,
@@ -248,13 +300,15 @@ class ServiceIntrospectionProvider:
             enabled=bool(call.args.get("enabled", True)),
         )
         self._refresh_capabilities()
+        payload = {
+            "service_id": definition.service_id,
+            "next_due_at": self.manager.schedule_engine.next_due_at(definition.service_id),
+        }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="service definition created",
-            structured={
-                "service_id": definition.service_id,
-                "next_due_at": self.manager.schedule_engine.next_due_at(definition.service_id),
-            },
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Service definition created", payload),
         )
 
     @capability_action(
@@ -272,11 +326,26 @@ class ServiceIntrospectionProvider:
     def destroy(self, call: IntrospectionCall) -> IntrospectionResult:
         service_id = str(call.args.get("target_id") or "").strip()
         if not service_id:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="target_id is required")
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="target_id is required",
+                llm_text="target_id is required",
+            )
         if not self.manager.destroy_service(service_id):
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="service not found", structured={"service_id": service_id})
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="service not found",
+                structured={"service_id": service_id},
+                llm_text="service not found",
+            )
         self._refresh_capabilities()
-        return IntrospectionResult(status=RuntimeStatus.OK, text="service destroyed", structured={"service_id": service_id})
+        payload = {"service_id": service_id}
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="service destroyed",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Service destroyed", payload),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -326,17 +395,28 @@ class ServiceIntrospectionProvider:
     def set_output_channel(self, call: IntrospectionCall) -> IntrospectionResult:
         service_id = str(call.args.get("target_id") or "").strip()
         if not service_id:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="target_id is required")
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="target_id is required",
+                llm_text="target_id is required",
+            )
         raw_channel = call.args.get("out_channel_id")
         out_channel_id = str(raw_channel or "").strip() or None
         updated = self.manager.set_output_channel(service_id, out_channel_id)
         if updated is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="service not found", structured={"service_id": service_id})
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="service not found",
+                structured={"service_id": service_id},
+                llm_text="service not found",
+            )
         self._refresh_capabilities()
+        payload = {"service_id": service_id, "out_channel_id": updated.out_channel_id}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="service output channel updated",
-            structured={"service_id": service_id, "out_channel_id": updated.out_channel_id},
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Service output channel updated", payload),
         )
 
     @capability_action(
@@ -358,17 +438,32 @@ class ServiceIntrospectionProvider:
         service_id = str(call.args.get("target_id") or "").strip()
         schedule = call.args.get("schedule")
         if not service_id:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="target_id is required")
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="target_id is required",
+                llm_text="target_id is required",
+            )
         if not isinstance(schedule, dict):
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="schedule must be an object")
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="schedule must be an object",
+                llm_text="schedule must be an object",
+            )
         updated = self.manager.update_schedule(service_id, dict(schedule))
         if updated is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="service not found", structured={"service_id": service_id})
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="service not found",
+                structured={"service_id": service_id},
+                llm_text="service not found",
+            )
         self._refresh_capabilities()
+        payload = {"service_id": service_id, "next_due_at": self.manager.schedule_engine.next_due_at(service_id)}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="service schedule updated",
-            structured={"service_id": service_id, "next_due_at": self.manager.schedule_engine.next_due_at(service_id)},
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Service schedule updated", payload),
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach service module")
@@ -376,31 +471,52 @@ class ServiceIntrospectionProvider:
         _ = call
         self.mounted = True
         self.degraded = False
-        return IntrospectionResult(status=RuntimeStatus.OK, text="service attached", structured={"mounted": True, "degraded": False})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="service attached",
+            structured={"mounted": True, "degraded": False},
+            llm_text=render_titled_structured_for_llm("Service attached", {"mounted": True, "degraded": False}),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach service module")
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
         self.degraded = False
-        return IntrospectionResult(status=RuntimeStatus.OK, text="service detached", structured={"mounted": False, "degraded": False})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="service detached",
+            structured={"mounted": False, "degraded": False},
+            llm_text=render_titled_structured_for_llm("Service detached", {"mounted": False, "degraded": False}),
+        )
 
     def _set_enabled(self, call: IntrospectionCall, *, enabled: bool) -> IntrospectionResult:
         service_id = str(call.args.get("target_id") or "").strip()
         if not service_id:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="target_id is required")
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="target_id is required",
+                llm_text="target_id is required",
+            )
         updated = self.manager.set_enabled(service_id, enabled)
         if updated is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="service not found", structured={"service_id": service_id})
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="service not found",
+                structured={"service_id": service_id},
+                llm_text="service not found",
+            )
         self._refresh_capabilities()
+        payload = {
+            "service_id": service_id,
+            "enabled": updated.enabled,
+            "next_due_at": self.manager.schedule_engine.next_due_at(service_id),
+        }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="service enabled" if enabled else "service disabled",
-            structured={
-                "service_id": service_id,
-                "enabled": updated.enabled,
-                "next_due_at": self.manager.schedule_engine.next_due_at(service_id),
-            },
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Service state updated", payload),
         )
 
     def _require_service_target(self, call: IntrospectionCall) -> ServiceTarget | None:

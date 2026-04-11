@@ -13,6 +13,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.tasking.service import TaskingService
 from pal.tasking.source import MinionEventSource
 
@@ -56,21 +57,36 @@ class TaskingIntrospectionProvider:
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_tasking(self)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="tasking snapshot", structured=snapshot.__dict__)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="tasking snapshot",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("Tasking snapshot", snapshot.__dict__),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Attach tasking module")
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
         self.degraded = False
-        return IntrospectionResult(status=RuntimeStatus.OK, text="tasking attached", structured={"mounted": True, "degraded": False})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="tasking attached",
+            structured={"mounted": True, "degraded": False},
+            llm_text=render_titled_structured_for_llm("Tasking attached", {"mounted": True, "degraded": False}),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Detach tasking module")
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
         self.degraded = False
-        return IntrospectionResult(status=RuntimeStatus.OK, text="tasking detached", structured={"mounted": False, "degraded": False})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="tasking detached",
+            structured={"mounted": False, "degraded": False},
+            llm_text=render_titled_structured_for_llm("Tasking detached", {"mounted": False, "degraded": False}),
+        )
 
 
 def inspect_tasking(provider: TaskingIntrospectionProvider) -> TaskingSnapshot:

@@ -11,6 +11,7 @@ from pal.shared import (
     RuntimeStatus,
     capability_action,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
 def inspect_tools(provider) -> list[dict[str, object]]:
@@ -69,6 +70,7 @@ class ExecutionToolSearchMixin:
             status=RuntimeStatus.OK,
             text="execution tools",
             structured={"tools": inspect_tools(self)},
+            llm_text=render_titled_structured_for_llm("Execution tools", {"tools": inspect_tools(self)}),
         )
 
 
@@ -78,6 +80,7 @@ def _tool_capability_result(runtime, tool_name: str, args: dict[str, object]) ->
         status=RuntimeStatus.OK if result.ok else RuntimeStatus.ERROR,
         text=result.text,
         structured=result.structured,
+        llm_text=result.llm_text,
     )
 
 
@@ -164,7 +167,7 @@ class ToolSearchTool:
 
         ranked: list[tuple[int, dict[str, object]]] = []
         for spec in self.runtime.list_capability_specs():
-            if str(spec["name"]).startswith("introspection.") and "execution tools" in str(spec.get("description") or "").lower():
+            if str(spec["name"]).startswith("introspection_") and "execution tools" in str(spec.get("description") or "").lower():
                 continue
             if family and str(spec.get("family") or "").lower() != family:
                 continue
@@ -183,7 +186,12 @@ class ToolSearchTool:
             ranked.append((score, spec))
         ranked.sort(key=lambda item: (-item[0], str(item[1].get("name") or "")))
         hits = [_compact_capability_hit(spec) for _, spec in ranked[:top_k]]
-        return CapabilityResult(status=RuntimeStatus.OK, text="capability search results", structured={"hits": hits})
+        return CapabilityResult(
+            status=RuntimeStatus.OK,
+            text="capability search results",
+            structured={"hits": hits},
+            llm_text=render_titled_structured_for_llm("Capability search results", {"hits": hits}),
+        )
 
 
 @dataclass
@@ -218,12 +226,23 @@ class ToolReadTool:
     def invoke(self, args: dict[str, object]) -> CapabilityResult:
         name = _read_name_arg(args, "name", "tool_name", "tool", "id", "target", "query")
         if not name:
-            return CapabilityResult(status=RuntimeStatus.INVALID, text="name missing", structured={"reason": "name_missing"})
+            return CapabilityResult(
+                status=RuntimeStatus.INVALID,
+                text="name missing",
+                structured={"reason": "name_missing"},
+                llm_text="name missing",
+            )
         capability = self.runtime.get_capability_spec(name)
         if capability is None:
             return CapabilityResult(
                 status=RuntimeStatus.NOT_FOUND,
                 text="capability not found",
                 structured={"reason": "capability_not_found"},
+                llm_text="capability not found",
             )
-        return CapabilityResult(status=RuntimeStatus.OK, text="capability definition", structured={"capability": capability})
+        return CapabilityResult(
+            status=RuntimeStatus.OK,
+            text="capability definition",
+            structured={"capability": capability},
+            llm_text=render_titled_structured_for_llm("Capability definition", {"capability": capability}),
+        )

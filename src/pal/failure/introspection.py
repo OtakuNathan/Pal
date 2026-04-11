@@ -12,6 +12,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
 @capability_node(
@@ -29,7 +30,13 @@ class FailureIntrospectionProvider:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show failure runtime summary")
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        return IntrospectionResult(status=RuntimeStatus.OK, text="failure runtime summary", structured=self.runtime.show_summary())
+        summary = self.runtime.show_summary()
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="failure runtime summary",
+            structured=summary,
+            llm_text=render_titled_structured_for_llm("Failure runtime summary", summary),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -40,7 +47,12 @@ class FailureIntrospectionProvider:
     def recent_reports(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         items = [report.__dict__ for report in self.runtime.recent_reports[-16:]]
-        return IntrospectionResult(status=RuntimeStatus.OK, text="recent failure reports", structured={"items": items})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="recent failure reports",
+            structured={"items": items},
+            llm_text=render_titled_structured_for_llm("Recent failure reports", {"items": items}),
+        )
 
 
 def register_with_core(core, runtime: FailureRuntime) -> ModuleHandle:

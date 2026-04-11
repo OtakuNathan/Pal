@@ -8,12 +8,14 @@ from pal.llm.models import LLMEndpointModel
 from pal.llm.runtime import LLMRuntime
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
+    OPERATION_NAMESPACE,
     IntrospectionCall,
     IntrospectionResult,
     RuntimeStatus,
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -57,6 +59,7 @@ class LLMActiveSnapshot:
     endpoint_id: str | None
     model_id: str | None
     provider: str | None
+    active_endpoint_id: str | None
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,13 @@ class LLMThinkLevelSnapshot:
     effective_think_level: str
 
 
+@capability_node(
+    namespace=OPERATION_NAMESPACE,
+    scope="module",
+    kind="module",
+    source="builtin:llm",
+    target_kind="module",
+)
 @capability_node(
     namespace=INTROSPECTION_NAMESPACE,
     scope="endpoint",
@@ -123,7 +133,12 @@ class LLMIntrospectionProvider:
             ).__dict__
             for endpoint in self.iter_endpoints()
         ]
-        return IntrospectionResult(status=RuntimeStatus.OK, text="llm endpoints", structured={"items": payload})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="llm endpoints",
+            structured={"items": payload},
+            llm_text=render_titled_structured_for_llm("LLM endpoints", {"items": payload}),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -134,7 +149,12 @@ class LLMIntrospectionProvider:
     def active(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_llm(self)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="llm active endpoint", structured=snapshot.__dict__)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="llm active endpoint",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("LLM active endpoint", snapshot.__dict__),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -149,7 +169,51 @@ class LLMIntrospectionProvider:
             persisted_think_level=self.runtime.settings_repository.get_think_level(),
             effective_think_level=self.runtime.think_level,
         )
-        return IntrospectionResult(status=RuntimeStatus.OK, text="llm think level", structured=snapshot.__dict__)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="llm think level",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("LLM think level", snapshot.__dict__),
+        )
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="management",
+        action_name="set_active_endpoint",
+        description="Switch the active llm endpoint used for future requests",
+        args_schema={
+            "type": "object",
+            "properties": {
+                "active_endpoint_id": {"type": "string"},
+            },
+            "required": ["active_endpoint_id"],
+        },
+    )
+    def set_active_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
+        endpoint_id = str(call.args.get("active_endpoint_id") or "").strip()
+        if not endpoint_id:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="active_endpoint_id is required",
+                llm_text="active_endpoint_id is required",
+            )
+        endpoint = next((item for item in self.runtime.endpoint_resolver.enabled() if item.endpoint_id == endpoint_id), None)
+        if endpoint is None:
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="unknown enabled llm endpoint",
+                structured={"active_endpoint_id": endpoint_id},
+                llm_text="unknown enabled llm endpoint",
+            )
+        self.runtime.set_active_endpoint(endpoint_id)
+        snapshot = inspect_llm(self)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="llm active endpoint updated",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("LLM active endpoint", snapshot.__dict__),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -160,7 +224,11 @@ class LLMIntrospectionProvider:
     def show_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
         endpoint = call.meta.get("resolved_target")
         if not isinstance(endpoint, LLMEndpointModel):
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="llm endpoint not found")
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="llm endpoint not found",
+                llm_text="llm endpoint not found",
+            )
         snapshot = LLMEndpointSnapshot(
             endpoint_id=endpoint.endpoint_id,
             display_name=endpoint.display_name,
@@ -176,16 +244,23 @@ class LLMIntrospectionProvider:
             priority=endpoint.priority,
             enabled=endpoint.enabled,
         )
-        return IntrospectionResult(status=RuntimeStatus.OK, text="llm endpoint metadata", structured=snapshot.__dict__)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="llm endpoint metadata",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("LLM endpoint metadata", snapshot.__dict__),
+        )
 
 
 def inspect_llm(provider: LLMIntrospectionProvider) -> LLMActiveSnapshot:
-    active = provider.runtime.endpoint_resolver.primary()
+    provider.runtime.refresh_runtime_settings()
+    active = provider.runtime.endpoint_resolver.primary(preferred_endpoint_id=provider.runtime.active_endpoint_id)
     return LLMActiveSnapshot(
         has_primary_endpoint=active is not None,
         endpoint_id=active.endpoint_id if active is not None else None,
         model_id=active.model_id if active is not None else None,
         provider=active.provider if active is not None else None,
+        active_endpoint_id=provider.runtime.active_endpoint_id,
     )
 
 

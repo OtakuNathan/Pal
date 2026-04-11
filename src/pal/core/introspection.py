@@ -13,6 +13,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
 @dataclass(frozen=True)
@@ -44,7 +45,12 @@ class CoreIntrospectionProvider:
     def observe(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_core(self)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="core snapshot", structured=snapshot.__dict__)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="core snapshot",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("Core snapshot", snapshot.__dict__),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -60,7 +66,12 @@ class CoreIntrospectionProvider:
         mode = call.args.get("mode")
         if mode is not None:
             self.core.state.mode = str(mode)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="core configuration updated", structured={"mode": self.core.state.mode})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="core configuration updated",
+            structured={"mode": self.core.state.mode},
+            llm_text=render_titled_structured_for_llm("Core configuration updated", {"mode": self.core.state.mode}),
+        )
 
 
 def inspect_core(provider: CoreIntrospectionProvider) -> CoreSnapshot:

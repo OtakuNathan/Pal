@@ -241,49 +241,54 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     def execute_tool(self, call: CanonicalToolCall, *, allow_tools: bool = True) -> CanonicalToolResult:
         call_id = getattr(call, "call_id", None)
-        if not allow_tools:
-            return CanonicalToolResult(
-                name=call.name,
-                ok=False,
-                text="tool execution disabled in finalization mode",
-                structured={"reason": "finalization_only"},
-                call_id=call_id,
-            )
-        tool = self.tools.get(call.name)
-        if tool is not None:
-            try:
-                result = tool.invoke(call.args)
-            except Exception as exc:
+        try:
+            if not allow_tools:
                 return CanonicalToolResult(
                     name=call.name,
                     ok=False,
-                    text=f"tool execution failed: {exc.__class__.__name__}",
-                    structured={"error": str(exc), "tool": call.name},
+                    text="tool execution disabled in finalization mode",
+                    structured={"reason": "finalization_only"},
                     call_id=call_id,
+                    llm_text="tool execution disabled in finalization mode",
+                )
+            tool = self.tools.get(call.name)
+            if tool is not None:
+                result = tool.invoke(call.args)
+                return CanonicalToolResult(
+                    name=call.name,
+                    ok=result.status == RuntimeStatus.OK,
+                    text=result.text,
+                    structured=result.structured,
+                    call_id=call_id,
+                    llm_text=getattr(result, "llm_text", ""),
+                )
+            capability_result = self.execute(CapabilityCall(name=call.name, args=dict(call.args)))
+            if capability_result.status == RuntimeStatus.ERROR and str(capability_result.text).startswith("unknown capability:"):
+                return CanonicalToolResult(
+                    name=call.name,
+                    ok=False,
+                    text=f"unknown tool: {call.name}",
+                    structured={"reason": "unknown_tool"},
+                    call_id=call_id,
+                    llm_text=f"unknown tool: {call.name}",
                 )
             return CanonicalToolResult(
                 name=call.name,
-                ok=result.status == RuntimeStatus.OK,
-                text=result.text,
-                structured=result.structured,
+                ok=capability_result.status == RuntimeStatus.OK,
+                text=capability_result.text,
+                structured=capability_result.structured,
                 call_id=call_id,
+                llm_text=getattr(capability_result, "llm_text", ""),
             )
-        capability_result = self.execute(CapabilityCall(name=call.name, args=dict(call.args)))
-        if capability_result.status == RuntimeStatus.ERROR and str(capability_result.text).startswith("unknown capability:"):
+        except Exception as exc:
             return CanonicalToolResult(
                 name=call.name,
                 ok=False,
-                text=f"unknown tool: {call.name}",
-                structured={"reason": "unknown_tool"},
+                text=f"tool execution failed: {exc.__class__.__name__}",
+                structured={"error": str(exc), "tool": call.name},
                 call_id=call_id,
+                llm_text=f"tool execution failed: {exc.__class__.__name__}",
             )
-        return CanonicalToolResult(
-            name=call.name,
-            ok=capability_result.status == RuntimeStatus.OK,
-            text=capability_result.text,
-            structured=capability_result.structured,
-            call_id=call_id,
-        )
 
     async def execute_tool_async(self, call: CanonicalToolCall, *, allow_tools: bool = True) -> CanonicalToolResult:
         return await asyncio.to_thread(self.execute_tool, call, allow_tools=allow_tools)
@@ -311,20 +316,52 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     status=RuntimeStatus.INVALID,
                     text="target_id is required for this capability",
                     structured={"canonical_path": call.name, "available_target_ids": instance_targets},
+                    llm_text="target_id is required for this capability",
                 )
         registered = self.capabilities.get(call.name)
         if registered is None:
-            return CapabilityResult(status=RuntimeStatus.ERROR, text=f"unknown capability: {call.name}")
+            alias_matches = self.compiled_capability_index.aliases.get(call.name, [])
+            if alias_matches:
+                if target_id == SINGLETON_TARGET:
+                    descriptors = [self.compiled_capability_index.records[record_id] for record_id in alias_matches]
+                    instance_targets = sorted(
+                        {
+                            descriptor.target_id
+                            for descriptor in descriptors
+                            if descriptor.target_id and descriptor.target_id != SINGLETON_TARGET
+                        }
+                    )
+                    if instance_targets:
+                        return CapabilityResult(
+                            status=RuntimeStatus.INVALID,
+                            text="target_id is required for this capability",
+                            structured={"canonical_path": call.name, "available_target_ids": instance_targets},
+                            llm_text="target_id is required for this capability",
+                        )
+                registered = self.capabilities.get(alias_matches[0])
+        if registered is None:
+            return CapabilityResult(
+                status=RuntimeStatus.ERROR,
+                text=f"unknown capability: {call.name}",
+                llm_text=f"unknown capability: {call.name}",
+            )
         return registered.callable(call)
 
     def execute(self, call: CapabilityCall) -> CapabilityResult:
         try:
-            return self.call_registered(call)
+            result = self.call_registered(call)
+            return CapabilityResult(
+                status=result.status,
+                text=result.text,
+                structured=result.structured,
+                llm_text=getattr(result, "llm_text", ""),
+            )
         except Exception as exc:
             return CapabilityResult(
                 status=RuntimeStatus.ERROR,
                 text=f"capability execution failed: {exc.__class__.__name__}",
                 structured={"error": str(exc), "capability": call.name},
+                llm_text=f"capability execution failed: {exc.__class__.__name__}",
             )
 
     async def execute_async(self, call: CapabilityCall) -> CapabilityResult:

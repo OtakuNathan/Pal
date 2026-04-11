@@ -35,6 +35,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
 def _stable_document_search_text(*parts: str) -> str:
@@ -116,12 +117,24 @@ class SQLiteVecL3Plugin:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="show", description="Show sqlite-backed l3 provider state")
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        return IntrospectionResult(status=RuntimeStatus.OK, text="sqlite vec l3 provider", structured=self.inspect())
+        payload = self.inspect()
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="sqlite vec l3 provider",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("SQLite vec L3 provider", payload),
+        )
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory", description="Inspect sqlite-backed l3 inventory")
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        return IntrospectionResult(status=RuntimeStatus.OK, text="sqlite vec l3 inventory", structured=self.inspect())
+        payload = self.inspect()
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="sqlite vec l3 inventory",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("SQLite vec L3 inventory", payload),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -154,14 +167,16 @@ class SQLiteVecL3Plugin:
                 scope=str(call.args.get("scope")) if call.args.get("scope") is not None else None,
             )
         )
+        payload = {
+            "hits": result.hits,
+            "projected_entries": [entry.__dict__ for entry in result.projected_entries],
+            "metadata": result.metadata,
+        }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="l3 recall result",
-            structured={
-                "hits": result.hits,
-                "projected_entries": [entry.__dict__ for entry in result.projected_entries],
-                "metadata": result.metadata,
-            },
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("L3 recall result", payload),
         )
 
     @capability_action(
@@ -206,7 +221,13 @@ class SQLiteVecL3Plugin:
                 result_text=str(call.args.get("result_text") or ""),
             )
         )
-        return IntrospectionResult(status=result.status, text="l3 commit result", structured=result.hit | {"metadata": result.metadata})
+        payload = result.hit | {"metadata": result.metadata}
+        return IntrospectionResult(
+            status=result.status,
+            text="l3 commit result",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("L3 commit result", payload),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -244,19 +265,35 @@ class SQLiteVecL3Plugin:
                 result_text=str(call.args.get("result_text")) if call.args.get("result_text") is not None else None,
             )
         )
-        return IntrospectionResult(status=result.status, text="l3 correction result", structured=result.hit | {"metadata": result.metadata})
+        payload = result.hit | {"metadata": result.metadata}
+        return IntrospectionResult(
+            status=result.status,
+            text="l3 correction result",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("L3 correction result", payload),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach l3 provider")
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
-        return IntrospectionResult(status=RuntimeStatus.OK, text="l3 provider attached", structured={"mounted": True})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="l3 provider attached",
+            structured={"mounted": True},
+            llm_text=render_titled_structured_for_llm("L3 provider attached", {"mounted": True}),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach l3 provider")
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
-        return IntrospectionResult(status=RuntimeStatus.OK, text="l3 provider detached", structured={"mounted": False})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="l3 provider detached",
+            structured={"mounted": False},
+            llm_text=render_titled_structured_for_llm("L3 provider detached", {"mounted": False}),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -266,13 +303,23 @@ class SQLiteVecL3Plugin:
         description="Refresh provider indexes and embedding state",
         args_schema={
             "type": "object",
-            "properties": {"limit": {"type": "integer"}},
+            "properties": {
+                "limit": {"type": "integer"},
+                "retry_failed": {"type": "boolean"},
+            },
         },
     )
     def refresh_indexes_action(self, call: IntrospectionCall) -> IntrospectionResult:
         limit = int(call.args.get("limit") or 8)
-        refreshed = self.refresh_indexes(limit=limit)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="l3 provider indexes refreshed", structured=dict(refreshed))
+        retry_failed = bool(call.args.get("retry_failed", False))
+        refreshed = self.refresh_indexes(limit=limit, retry_failed=retry_failed)
+        payload = dict(refreshed)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="l3 provider indexes refreshed",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("L3 provider indexes refreshed", payload),
+        )
 
     def commit(self, request: L3CommitRequest) -> L3MutationResult:
         if not self.mounted:
@@ -452,14 +499,18 @@ class SQLiteVecL3Plugin:
             },
         )
 
-    def refresh_indexes(self, *, limit: int = 8) -> dict[str, Any]:
+    def refresh_indexes(self, *, limit: int = 8, retry_failed: bool = False) -> dict[str, Any]:
         if self.embedder is None:
             return {"refreshed": 0, "vector_available": False, "detail": "embedder-unavailable"}
         refreshed = 0
-        for metadata in self.repository.list_pending_embeddings(limit=limit):
+        failed_retried = 0
+        failed_again = 0
+        for metadata in self.repository.list_retryable_embeddings(limit=limit, retry_failed=retry_failed):
             document = self.repository.get_document(metadata.document_id)
             if document is None:
                 continue
+            if metadata.index_status == "failed":
+                failed_retried += 1
             try:
                 vector = self.embedder.embed_document(str(document.get("search_text") or ""))
                 self.repository.upsert_vector_blob(
@@ -472,11 +523,15 @@ class SQLiteVecL3Plugin:
                 refreshed += 1
             except Exception as exc:
                 self.repository.mark_embedding_failed(embedding_id=metadata.embedding_id, error_text=str(exc))
+                failed_again += 1
         sqlite_vec_status = ensure_sqlite_vec_loaded()
         return {
             "refreshed": refreshed,
             "vector_available": bool(sqlite_vec_status.available and self.embedder is not None),
             "vector_backend_detail": sqlite_vec_status.detail,
+            "retry_failed": retry_failed,
+            "failed_retried": failed_retried,
+            "failed_again": failed_again,
         }
 
     def _mark_document_pending(self, document_id: str, *, stale: bool = False) -> None:

@@ -18,6 +18,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -147,7 +148,7 @@ class ChannelIntrospectionProvider:
         scope="module",
         action_name="list",
         description="List configured channel endpoints",
-        aliases=("introspection.module.channel.observe", "channel.introspection.observe"),
+        aliases=("introspection_module_channel_observe", "channel_introspection_observe"),
     )
     def list_endpoints(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -161,7 +162,12 @@ class ChannelIntrospectionProvider:
             ).__dict__
             for target in self.iter_endpoints()
         ]
-        return IntrospectionResult(status=RuntimeStatus.OK, text="channel endpoints", structured={"items": payload})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="channel endpoints",
+            structured={"items": payload},
+            llm_text=render_titled_structured_for_llm("Channel endpoints", {"items": payload}),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -228,12 +234,16 @@ class ChannelIntrospectionProvider:
         scope="endpoint",
         action_name="inspect",
         description="Inspect channel endpoint state",
-        aliases=("introspection.endpoint.channel.observe",),
+        aliases=("introspection_endpoint_channel_observe",),
     )
     def inspect_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="channel endpoint not found")
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="channel endpoint not found",
+                llm_text="channel endpoint not found",
+            )
         snapshot = ChannelEndpointSnapshot(
             endpoint_id=target.endpoint_id,
             channel_kind=target.channel_kind,
@@ -242,7 +252,12 @@ class ChannelIntrospectionProvider:
             attached=target.attached,
             paired=target.runtime_endpoint.paired if target.runtime_endpoint is not None else False,
         )
-        return IntrospectionResult(status=RuntimeStatus.OK, text="channel endpoint snapshot", structured=snapshot.__dict__)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="channel endpoint snapshot",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("Channel endpoint snapshot", snapshot.__dict__),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -253,21 +268,32 @@ class ChannelIntrospectionProvider:
     def auth_state(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="channel endpoint not found")
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="channel endpoint not found",
+                llm_text="channel endpoint not found",
+            )
         if target.runtime_endpoint is None:
+            payload = {
+                "endpoint_id": target.endpoint_id,
+                "paired": False,
+                "attached": target.attached,
+                "authorized": False,
+            }
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="channel endpoint authorization state",
-                structured={
-                    "endpoint_id": target.endpoint_id,
-                    "paired": False,
-                    "attached": target.attached,
-                    "authorized": False,
-                },
+                structured=payload,
+                llm_text=render_titled_structured_for_llm("Channel endpoint authorization state", payload),
             )
         auth_state = dict(target.runtime_endpoint.inspect_auth_state())
         auth_state.setdefault("endpoint_id", target.endpoint_id)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="channel endpoint authorization state", structured=auth_state)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="channel endpoint authorization state",
+            structured=auth_state,
+            llm_text=render_titled_structured_for_llm("Channel endpoint authorization state", auth_state),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -286,10 +312,18 @@ class ChannelIntrospectionProvider:
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None or target.runtime_endpoint is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="channel endpoint runtime not found")
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="channel endpoint runtime not found",
+                llm_text="channel endpoint runtime not found",
+            )
         material = call.args.get("material")
         if not isinstance(material, dict):
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="material must be an object")
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="material must be an object",
+                llm_text="material must be an object",
+            )
         # Authorization material is write-only from the LLM-facing surface. We
         # can persist non-sensitive hints about what was supplied, but never
         # echo secrets/tokens back through introspection.
@@ -315,7 +349,12 @@ class ChannelIntrospectionProvider:
         sanitized.pop("bot_token", None)
         sanitized.setdefault("endpoint_id", target.endpoint_id)
         sanitized.setdefault("accepted_keys", sorted(str(key) for key in material.keys()))
-        return IntrospectionResult(status=RuntimeStatus.OK, text="channel endpoint auth material updated", structured=sanitized)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="channel endpoint auth material updated",
+            structured=sanitized,
+            llm_text=render_titled_structured_for_llm("Channel endpoint auth material updated", sanitized),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -326,16 +365,27 @@ class ChannelIntrospectionProvider:
     def backlog(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="channel endpoint not found")
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="channel endpoint not found",
+                llm_text="channel endpoint not found",
+            )
         if target.runtime_endpoint is None:
+            payload = {"endpoint_id": target.endpoint_id, "inbox_size": 0, "outbox_size": 0}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="channel endpoint backlog state",
-                structured={"endpoint_id": target.endpoint_id, "inbox_size": 0, "outbox_size": 0},
+                structured=payload,
+                llm_text=render_titled_structured_for_llm("Channel endpoint backlog state", payload),
             )
         payload = dict(target.runtime_endpoint.inspect_backlog())
         payload.setdefault("endpoint_id", target.endpoint_id)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="channel endpoint backlog state", structured=payload)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="channel endpoint backlog state",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Channel endpoint backlog state", payload),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -346,18 +396,24 @@ class ChannelIntrospectionProvider:
     def health(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
         if target is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="channel endpoint not found")
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="channel endpoint not found",
+                llm_text="channel endpoint not found",
+            )
         if target.runtime_endpoint is None:
+            payload = {
+                "endpoint_id": target.endpoint_id,
+                "attached": target.attached,
+                "enabled": target.enabled,
+                "healthy": False,
+                "reason": "runtime_endpoint_missing",
+            }
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="channel endpoint health",
-                structured={
-                    "endpoint_id": target.endpoint_id,
-                    "attached": target.attached,
-                    "enabled": target.enabled,
-                    "healthy": False,
-                    "reason": "runtime_endpoint_missing",
-                },
+                structured=payload,
+                llm_text=render_titled_structured_for_llm("Channel endpoint health", payload),
             )
         payload = dict(target.runtime_endpoint.inspect_health())
         payload.setdefault("endpoint_id", target.endpoint_id)
@@ -365,7 +421,12 @@ class ChannelIntrospectionProvider:
         payload.setdefault("enabled", target.enabled)
         payload.pop("token", None)
         payload.pop("secret", None)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="channel endpoint health", structured=payload)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="channel endpoint health",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Channel endpoint health", payload),
+        )
 
     def _require_target(self, call: IntrospectionCall) -> ChannelEndpointTarget | None:
         target = call.meta.get("resolved_target")
@@ -374,7 +435,11 @@ class ChannelIntrospectionProvider:
     def _set_enabled(self, call: IntrospectionCall, *, enabled: bool) -> IntrospectionResult:
         endpoint_id = str(call.args.get("target_id") or "").strip()
         if not endpoint_id:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="target_id is required")
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="target_id is required",
+                llm_text="target_id is required",
+            )
         endpoint = self.runtime.get_endpoint(endpoint_id)
         if endpoint is not None:
             if enabled:
@@ -386,17 +451,27 @@ class ChannelIntrospectionProvider:
         except Exception:
             record = None
         if endpoint is None and record is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="channel endpoint not found")
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="channel endpoint not found",
+                llm_text="channel endpoint not found",
+            )
+        payload = {"endpoint_id": endpoint_id, "enabled": enabled}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text=f"channel endpoint {'enabled' if enabled else 'disabled'}",
-            structured={"endpoint_id": endpoint_id, "enabled": enabled},
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Channel endpoint state updated", payload),
         )
 
     def _set_attached(self, call: IntrospectionCall, *, attached: bool) -> IntrospectionResult:
         endpoint_id = str(call.args.get("target_id") or "").strip()
         if not endpoint_id:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="target_id is required")
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="target_id is required",
+                llm_text="target_id is required",
+            )
         endpoint = self.runtime.get_endpoint(endpoint_id)
         if endpoint is not None:
             if attached:
@@ -408,11 +483,17 @@ class ChannelIntrospectionProvider:
         except Exception:
             record = None
         if endpoint is None and record is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="channel endpoint not found")
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="channel endpoint not found",
+                llm_text="channel endpoint not found",
+            )
+        payload = {"endpoint_id": endpoint_id, "attached": attached}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text=f"channel endpoint {'attached' if attached else 'detached'}",
-            structured={"endpoint_id": endpoint_id, "attached": attached},
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Channel endpoint lifecycle updated", payload),
         )
 
 

@@ -16,6 +16,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -54,26 +55,41 @@ class ControlIntrospectionProvider:
         scope="module",
         action_name="show",
         description="Show control module status",
-        aliases=("introspection.module.control.observe",),
+        aliases=("introspection_module_control_observe",),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = ControlSnapshot(deterministic=True, mounted=self.mounted, degraded=self.degraded)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="control snapshot", structured=snapshot.__dict__)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="control snapshot",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("Control snapshot", snapshot.__dict__),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="attach", description="Re-attach control module")
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
         self.degraded = False
-        return IntrospectionResult(status=RuntimeStatus.OK, text="control re-attached", structured={"mounted": True, "degraded": False})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="control re-attached",
+            structured={"mounted": True, "degraded": False},
+            llm_text=render_titled_structured_for_llm("Control re-attached", {"mounted": True, "degraded": False}),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="lifecycle", action_name="detach", description="Degrade control module")
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
         self.degraded = True
-        return IntrospectionResult(status=RuntimeStatus.OK, text="control entered degraded mode", structured={"mounted": False, "degraded": True})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="control entered degraded mode",
+            structured={"mounted": False, "degraded": True},
+            llm_text=render_titled_structured_for_llm("Control entered degraded mode", {"mounted": False, "degraded": True}),
+        )
 
 
 def inspect_control(provider: ControlIntrospectionProvider) -> ControlSnapshot:

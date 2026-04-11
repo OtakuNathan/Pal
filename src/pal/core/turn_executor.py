@@ -221,6 +221,7 @@ class TurnExecutor:
                         "report_id": failure_result.report.report_id if failure_result.report is not None else None,
                     },
                     call_id=getattr(execution_call, "call_id", None),
+                    llm_text=self._render_failure_feedback_text(failure_result.user_feedback),
                 )
             from pal.core.turns import EffectResult
             from pal.core.turns import ToolObservation
@@ -256,9 +257,9 @@ class TurnExecutor:
                 text=tool_result.text,
             )
         if isinstance(effect, MailboxReplyEffect):
-            self._debug_log_reply(effect.text)
             channel_runtime = self.context.require_port("channel:channel")
             reply_id = channel_runtime.queue_reply(effect.channel_envelope, effect.text)
+            self._debug_log_reply(effect.text)
             continuation.waiting_effect_id = None
             from pal.core.turns import EffectResult
 
@@ -411,6 +412,8 @@ class TurnExecutor:
         continuation.pending_tool_results = []
 
     def _render_tool_result_content(self, result: CanonicalToolResult) -> str:
+        if str(result.llm_text or "").strip():
+            return str(result.llm_text).strip()
         if str(result.text or "").strip():
             return str(result.text).strip()
         if result.structured:

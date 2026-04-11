@@ -50,8 +50,8 @@ class DetachedL3Provider:
         _ = request
         return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id="")
 
-    def refresh_indexes(self, *, limit: int = 8) -> dict[str, object]:
-        _ = limit
+    def refresh_indexes(self, *, limit: int = 8, retry_failed: bool = False) -> dict[str, object]:
+        _ = (limit, retry_failed)
         return {"refreshed": 0, "vector_available": False}
 
 

@@ -232,6 +232,37 @@ class MemoryDurableRepository:
         )
         return list(query)
 
+    def list_retryable_embeddings(self, *, limit: int, retry_failed: bool = False) -> list[MemoryEmbeddingModel]:
+        statuses = ["pending", "stale"]
+        if retry_failed:
+            statuses.append("failed")
+        query = (
+            MemoryEmbeddingModel.select()
+            .where(MemoryEmbeddingModel.index_status.in_(tuple(statuses)))
+            .order_by(MemoryEmbeddingModel.updated_at, MemoryEmbeddingModel.embedding_id)
+            .limit(limit)
+        )
+        return list(query)
+
+    def list_failed_embeddings(self, *, limit: int = 5) -> list[dict[str, Any]]:
+        rows = (
+            MemoryEmbeddingModel.select()
+            .where(MemoryEmbeddingModel.index_status == "failed")
+            .order_by(MemoryEmbeddingModel.updated_at.desc(), MemoryEmbeddingModel.embedding_id.desc())
+            .limit(limit)
+        )
+        return [
+            {
+                "embedding_id": row.embedding_id,
+                "document_id": row.document_id,
+                "embedding_kind": row.embedding_kind,
+                "model_name": row.model_name,
+                "last_error": row.last_error,
+                "updated_at": row.updated_at,
+            }
+            for row in rows
+        ]
+
     def get_embedding(self, embedding_id: str) -> MemoryEmbeddingModel | None:
         return MemoryEmbeddingModel.get_or_none(MemoryEmbeddingModel.embedding_id == embedding_id)
 
@@ -343,12 +374,21 @@ class MemoryDurableRepository:
                 case.save()
 
     def inventory(self) -> dict[str, Any]:
+        ready_embeddings = MemoryEmbeddingModel.select().where(MemoryEmbeddingModel.index_status == "ready").count()
+        pending_embeddings = MemoryEmbeddingModel.select().where(MemoryEmbeddingModel.index_status == "pending").count()
+        stale_embeddings = MemoryEmbeddingModel.select().where(MemoryEmbeddingModel.index_status == "stale").count()
+        failed_embeddings = MemoryEmbeddingModel.select().where(MemoryEmbeddingModel.index_status == "failed").count()
         return {
             "fact_count": MemoryFactModel.select().count(),
             "case_count": MemoryCaseModel.select().count(),
             "topic_count": MemoryTopicModel.select().count(),
             "embedding_count": MemoryEmbeddingModel.select().count(),
-            "pending_embeddings": MemoryEmbeddingModel.select().where(MemoryEmbeddingModel.index_status != "ready").count(),
+            "ready_embeddings": ready_embeddings,
+            "pending_embeddings": pending_embeddings,
+            "stale_embeddings": stale_embeddings,
+            "failed_embeddings": failed_embeddings,
+            "retryable_embeddings": pending_embeddings + stale_embeddings + failed_embeddings,
+            "recent_embedding_errors": self.list_failed_embeddings(limit=5),
         }
 
 

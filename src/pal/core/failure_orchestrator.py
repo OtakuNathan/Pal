@@ -203,7 +203,7 @@ class FailureOrchestrator:
             self.context.execution_runtime,
             "execute_async",
             "execute",
-            CapabilityCall(name="operation.l3.commit.write", args=call_args),
+            CapabilityCall(name="operation_l3_commit_write", args=call_args),
         )
         summary = (
             f"Situation: {record.situation_text}\n"

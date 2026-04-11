@@ -21,6 +21,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -64,12 +65,17 @@ class ExecutionIntrospectionProvider(
         scope="module",
         action_name="show",
         description="Show execution runtime state",
-        aliases=("introspection.module.execution.observe", "execution.introspection.observe"),
+        aliases=("introspection_module_execution_observe", "execution_introspection_observe"),
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_execution(self)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="execution snapshot", structured=snapshot.__dict__)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="execution snapshot",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("Execution snapshot", snapshot.__dict__),
+        )
 
 
 def inspect_execution(provider: ExecutionIntrospectionProvider) -> ExecutionSnapshot:

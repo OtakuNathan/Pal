@@ -27,9 +27,14 @@ class CanonicalToolCall:
 class CanonicalToolResult:
     name: str
     ok: bool
+    llm_text: str
     text: str = ""
     structured: dict[str, Any] | None = None
     call_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not str(self.llm_text or "").strip():
+            raise ValueError("CanonicalToolResult.llm_text must be non-empty")
 
 
 @dataclass(frozen=True)

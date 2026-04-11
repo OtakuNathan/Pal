@@ -23,7 +23,7 @@ class ShellExecTool:
     description: str = "Execute a shell command in the local runtime and return stdout, stderr, and exit status."
     tags: tuple[str, ...] = ("shell", "system", "exec")
     keywords: tuple[str, ...] = ("command", "terminal", "bash", "zsh", "run")
-    args_schema: dict[str, object] = None  # type: ignore[assignment]
+    args_schema: dict[str, object] = None  # type: ignore[assignment]   
     result_schema: dict[str, object] = None  # type: ignore[assignment]
     default_timeout_ms: int = 30_000
     default_output_limit: int = 12_000
@@ -67,6 +67,7 @@ class ShellExecTool:
                 status=RuntimeStatus.INVALID,
                 text="cmd is required",
                 structured={"reason": "missing_cmd"},
+                llm_text="cmd is required",
             )
 
         cwd_value = args.get("cwd")
@@ -96,6 +97,7 @@ class ShellExecTool:
             structured={
                 "cmd": cmd,
                 "cwd": cwd or str(Path.cwd()),
+                "display_text": display_text,
                 "returncode": completed.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
@@ -103,6 +105,7 @@ class ShellExecTool:
                 "stderr_truncated": stderr_truncated,
                 "timeout_ms": timeout_ms,
             },
+            llm_text=display_text,
         )
 
     @staticmethod
@@ -157,4 +160,5 @@ class ShellExecCapabilityMixin:
             status=RuntimeStatus.OK if result.ok else RuntimeStatus.ERROR,
             text=result.text,
             structured=result.structured,
+            llm_text=result.llm_text,
         )

@@ -20,7 +20,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "Directly answer the user when you already have enough information.\n"
                     "Use capabilities only when they are actually needed to answer, inspect, or act.\n"
                     "If you need to discover available capabilities or confirm how to call one, use "
-                    "`operation.execution.discovery.search` and `operation.execution.discovery.read`.\n"
+                    "`operation_execution_discovery_search` and `operation_execution_discovery_read`.\n"
                     "Do not call discovery by default when a direct answer is enough.\n"
                     "You operate through capabilities, not raw tools."
                 ),

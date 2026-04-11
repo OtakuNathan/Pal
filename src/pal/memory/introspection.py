@@ -14,6 +14,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -51,7 +52,12 @@ class MemoryIntrospectionProvider:
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_memory(self)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="memory snapshot", structured=snapshot.__dict__)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="memory snapshot",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("Memory snapshot", snapshot.__dict__),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -71,7 +77,12 @@ class MemoryIntrospectionProvider:
                     "mounted": bool(getattr(provider, "mounted", True)) if provider is not None else False,
                 }
             )
-        return IntrospectionResult(status=RuntimeStatus.OK, text="memory l3 providers", structured={"items": items})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="memory l3 providers",
+            structured={"items": items},
+            llm_text=render_titled_structured_for_llm("Memory L3 providers", {"items": items}),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -91,6 +102,14 @@ class MemoryIntrospectionProvider:
                 "module_id": getattr(provider, "module_id", f"l3.{provider_id}") if provider is not None else f"l3.{provider_id}",
                 "mounted": bool(getattr(provider, "mounted", True)) if provider is not None else False,
             },
+            llm_text=render_titled_structured_for_llm(
+                "Memory active L3 provider",
+                {
+                    "provider_id": provider_id,
+                    "module_id": getattr(provider, "module_id", f"l3.{provider_id}") if provider is not None else f"l3.{provider_id}",
+                    "mounted": bool(getattr(provider, "mounted", True)) if provider is not None else False,
+                },
+            ),
         )
 
     @capability_action(
@@ -110,14 +129,24 @@ class MemoryIntrospectionProvider:
     def set_active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         provider_id = str(call.args.get("active_provider_id") or "").strip()
         if not provider_id:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="active_provider_id is required")
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="active_provider_id is required",
+                llm_text="active_provider_id is required",
+            )
         if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is None:
-            return IntrospectionResult(status=RuntimeStatus.NOT_FOUND, text="unknown l3 provider", structured={"active_provider_id": provider_id})
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="unknown l3 provider",
+                structured={"active_provider_id": provider_id},
+                llm_text="unknown l3 provider",
+            )
         self.service.l3_selector.active_provider_id = provider_id
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="memory active l3 provider updated",
             structured={"active_provider_id": provider_id},
+            llm_text=render_titled_structured_for_llm("Memory active L3 provider updated", {"active_provider_id": provider_id}),
         )
 
 

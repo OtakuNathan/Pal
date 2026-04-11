@@ -13,6 +13,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
 @capability_node(
@@ -39,12 +40,24 @@ class PluginsIntrospectionProvider:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show plugin host summary")
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        return IntrospectionResult(status=RuntimeStatus.OK, text="plugin host summary", structured=self.host.show_summary())
+        summary = self.host.show_summary()
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="plugin host summary",
+            structured=summary,
+            llm_text=render_titled_structured_for_llm("Plugin host summary", summary),
+        )
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="list", description="List known first-party and third-party plugins")
     def list_plugins(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        return IntrospectionResult(status=RuntimeStatus.OK, text="plugin list", structured={"items": self.host.list_plugins()})
+        items = self.host.list_plugins()
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="plugin list",
+            structured={"items": items},
+            llm_text=render_titled_structured_for_llm("Plugin list", {"items": items}),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -56,7 +69,12 @@ class PluginsIntrospectionProvider:
     )
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.attach(str(call.args.get("plugin_id") or ""))
-        return IntrospectionResult(status=result["status"], text="plugin attach result", structured=result)
+        return IntrospectionResult(
+            status=result["status"],
+            text="plugin attach result",
+            structured=result,
+            llm_text=render_titled_structured_for_llm("Plugin attach result", result),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -68,7 +86,12 @@ class PluginsIntrospectionProvider:
     )
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.detach(str(call.args.get("plugin_id") or ""))
-        return IntrospectionResult(status=result["status"], text="plugin detach result", structured=result)
+        return IntrospectionResult(
+            status=result["status"],
+            text="plugin detach result",
+            structured=result,
+            llm_text=render_titled_structured_for_llm("Plugin detach result", result),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -80,7 +103,12 @@ class PluginsIntrospectionProvider:
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.enable(str(call.args.get("plugin_id") or ""))
-        return IntrospectionResult(status=result["status"], text="plugin enable result", structured=result)
+        return IntrospectionResult(
+            status=result["status"],
+            text="plugin enable result",
+            structured=result,
+            llm_text=render_titled_structured_for_llm("Plugin enable result", result),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -92,13 +120,23 @@ class PluginsIntrospectionProvider:
     )
     def disable(self, call: IntrospectionCall) -> IntrospectionResult:
         result = self.host.disable(str(call.args.get("plugin_id") or ""))
-        return IntrospectionResult(status=result["status"], text="plugin disable result", structured=result)
+        return IntrospectionResult(
+            status=result["status"],
+            text="plugin disable result",
+            structured=result,
+            llm_text=render_titled_structured_for_llm("Plugin disable result", result),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="rescan", description="Rescan plugin directories")
     def rescan(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         result = self.host.rescan()
-        return IntrospectionResult(status=RuntimeStatus.OK, text="plugin rescan result", structured=result)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="plugin rescan result",
+            structured=result,
+            llm_text=render_titled_structured_for_llm("Plugin rescan result", result),
+        )
 
 
 def register_with_core(context, host: PluginHost) -> ModuleHandle:

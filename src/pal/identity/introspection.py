@@ -13,6 +13,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -48,7 +49,12 @@ class IdentityIntrospectionProvider:
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_identity(self)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="identity snapshot", structured=snapshot.__dict__)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="identity snapshot",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("Identity snapshot", snapshot.__dict__),
+        )
 
 
 def inspect_identity(provider: IdentityIntrospectionProvider) -> IdentitySnapshot:

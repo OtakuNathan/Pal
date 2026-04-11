@@ -19,6 +19,7 @@ from pal.shared import (
     capability_action,
     capability_node,
 )
+from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
 @capability_node(
@@ -68,7 +69,13 @@ class _L3ProviderCapabilityMixin:
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        return IntrospectionResult(status=RuntimeStatus.OK, text="l3 provider", structured=self.inspect())
+        payload = self.inspect()
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="l3 provider",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("L3 provider", payload),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -80,7 +87,12 @@ class _L3ProviderCapabilityMixin:
         _ = call
         snapshot = self.inspect()
         snapshot.setdefault("provider_id", self.provider_id)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="l3 provider inventory", structured=snapshot)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="l3 provider inventory",
+            structured=snapshot,
+            llm_text=render_titled_structured_for_llm("L3 provider inventory", snapshot),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -109,10 +121,12 @@ class _L3ProviderCapabilityMixin:
                 limit=int(call.args.get("limit") or 8),
             )
         )
+        payload = {"hits": result.hits, "projected_entries": [entry.__dict__ for entry in result.projected_entries]}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="l3 recall result",
-            structured={"hits": result.hits, "projected_entries": [entry.__dict__ for entry in result.projected_entries]},
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("L3 recall result", payload),
         )
 
     @capability_action(
@@ -157,7 +171,13 @@ class _L3ProviderCapabilityMixin:
                 result_text=str(call.args.get("result_text") or ""),
             )
         )
-        return IntrospectionResult(status=result.status, text="l3 commit result", structured=result.hit or {"document_id": result.document_id})
+        payload = result.hit or {"document_id": result.document_id}
+        return IntrospectionResult(
+            status=result.status,
+            text="l3 commit result",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("L3 commit result", payload),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -195,19 +215,35 @@ class _L3ProviderCapabilityMixin:
                 result_text=str(call.args.get("result_text")) if call.args.get("result_text") is not None else None,
             )
         )
-        return IntrospectionResult(status=result.status, text="l3 correction result", structured=result.hit or {"document_id": result.document_id})
+        payload = result.hit or {"document_id": result.document_id}
+        return IntrospectionResult(
+            status=result.status,
+            text="l3 correction result",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("L3 correction result", payload),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach l3 provider")
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
-        return IntrospectionResult(status=RuntimeStatus.OK, text="l3 provider attached", structured={"mounted": True})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="l3 provider attached",
+            structured={"mounted": True},
+            llm_text=render_titled_structured_for_llm("L3 provider attached", {"mounted": True}),
+        )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach l3 provider")
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
-        return IntrospectionResult(status=RuntimeStatus.OK, text="l3 provider detached", structured={"mounted": False})
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="l3 provider detached",
+            structured={"mounted": False},
+            llm_text=render_titled_structured_for_llm("L3 provider detached", {"mounted": False}),
+        )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -217,13 +253,23 @@ class _L3ProviderCapabilityMixin:
         description="Refresh provider indexes and embedding state",
         args_schema={
             "type": "object",
-            "properties": {"limit": {"type": "integer"}},
+            "properties": {
+                "limit": {"type": "integer"},
+                "retry_failed": {"type": "boolean"},
+            },
         },
     )
     def refresh_indexes_action(self, call: IntrospectionCall) -> IntrospectionResult:
         limit = int(call.args.get("limit") or 8)
-        refreshed = self.refresh_indexes(limit=limit)
-        return IntrospectionResult(status=RuntimeStatus.OK, text="l3 provider indexes refreshed", structured=dict(refreshed))
+        retry_failed = bool(call.args.get("retry_failed", False))
+        refreshed = self.refresh_indexes(limit=limit, retry_failed=retry_failed)
+        payload = dict(refreshed)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="l3 provider indexes refreshed",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("L3 provider indexes refreshed", payload),
+        )
 
 
 @dataclass
@@ -248,8 +294,8 @@ class NullL3Plugin(_L3ProviderCapabilityMixin):
         _ = request
         return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id="")
 
-    def refresh_indexes(self, *, limit: int = 8) -> dict[str, object]:
-        _ = limit
+    def refresh_indexes(self, *, limit: int = 8, retry_failed: bool = False) -> dict[str, object]:
+        _ = (limit, retry_failed)
         return {"refreshed": 0, "vector_available": False}
 
 
@@ -337,8 +383,8 @@ class MockL3Plugin(_L3ProviderCapabilityMixin):
             return L3MutationResult(status=RuntimeStatus.OK, document_id=request.document_id, hit=dict(record), projected_entry=entry)
         return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id=request.document_id)
 
-    def refresh_indexes(self, *, limit: int = 8) -> dict[str, object]:
-        _ = limit
+    def refresh_indexes(self, *, limit: int = 8, retry_failed: bool = False) -> dict[str, object]:
+        _ = (limit, retry_failed)
         return {"refreshed": 0, "vector_available": False}
 
 

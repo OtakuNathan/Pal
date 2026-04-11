@@ -134,19 +134,32 @@ def _canonical_path(
     action_blueprint: CapabilityActionBlueprint,
     node_blueprint: CapabilityNodeBlueprint,
 ) -> str:
+    return _underscore_canonical_path(
+        module_id=module_id,
+        action_blueprint=action_blueprint,
+        node_blueprint=node_blueprint,
+    )
+
+
+def _underscore_canonical_path(
+    *,
+    module_id: str,
+    action_blueprint: CapabilityActionBlueprint,
+    node_blueprint: CapabilityNodeBlueprint,
+) -> str:
     if action_blueprint.namespace == "introspection":
         if node_blueprint.scope == module_id:
-            return f"introspection.{module_id}.{action_blueprint.action_name}"
-        return f"introspection.{node_blueprint.scope}.{module_id}.{action_blueprint.action_name}"
+            return f"introspection_{module_id}_{action_blueprint.action_name}"
+        return f"introspection_{node_blueprint.scope}_{module_id}_{action_blueprint.action_name}"
     family = action_blueprint.family or "operation"
-    return f"operation.{module_id}.{family}.{action_blueprint.action_name}"
+    return f"operation_{module_id}_{family}_{action_blueprint.action_name}"
 
 
 def _display_name(canonical_path: str, node_blueprint: CapabilityNodeBlueprint, target: HydrationTarget) -> str:
     if target.target_id == SINGLETON_TARGET:
         return canonical_path
-    path_parts = canonical_path.split(".")
-    return ".".join([*path_parts[:-1], target.target_label, path_parts[-1]])
+    path_parts = canonical_path.split("_")
+    return "_".join([*path_parts[:-1], target.target_label, path_parts[-1]])
 
 
 def _aliases(
@@ -157,10 +170,10 @@ def _aliases(
 ) -> tuple[str, ...]:
     aliases = list(action_blueprint.aliases)
     if action_blueprint.namespace == "introspection" and node_blueprint.scope == "module":
-        aliases.append(f"{module_id}.introspection.{action_blueprint.action_name}")
+        aliases.append(f"{module_id}_introspection_{action_blueprint.action_name}")
     if action_blueprint.namespace == "operation":
         family = action_blueprint.family or "operation"
-        aliases.append(f"{module_id}.{family}.{action_blueprint.action_name}")
+        aliases.append(f"{module_id}_{family}_{action_blueprint.action_name}")
     if target.target_id != SINGLETON_TARGET:
         aliases.extend(
             [

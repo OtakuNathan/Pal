@@ -35,8 +35,13 @@ class CapabilityCall:
 @dataclass(frozen=True)
 class CapabilityResult:
     status: str
+    llm_text: str
     text: str = ""
     structured: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if not str(self.llm_text or "").strip():
+            raise ValueError("CapabilityResult.llm_text must be non-empty")
 
 
 CapabilityCallable = Callable[[CapabilityCall], CapabilityResult]
