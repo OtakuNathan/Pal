@@ -14,6 +14,7 @@ class ServiceDefinition:
     skill_refs: list[str] = field(default_factory=list)
     out_channel_id: str | None = None
     schedule: dict[str, object] = field(default_factory=dict)
+    out_reply_target: dict[str, object] = field(default_factory=dict)
     enabled: bool = True
 
 class ScheduleEnginePort(Protocol):

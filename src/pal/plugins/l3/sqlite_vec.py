@@ -328,7 +328,8 @@ class SQLiteVecL3Plugin:
         if request.kind == "fact":
             fact_id = f"fact_{uuid.uuid4().hex[:12]}"
             summary = request.summary or (request.title or "")
-            search_text = _stable_document_search_text(request.title or "", summary)
+            topic_text = " ".join(request.topics) if request.topics else ""
+            search_text = _stable_document_search_text(request.title or "", summary, topic_text)
             model = self.repository.upsert_fact(
                 fact_id=fact_id,
                 payload={
@@ -347,7 +348,8 @@ class SQLiteVecL3Plugin:
         elif request.kind == "case":
             case_id = f"case_{uuid.uuid4().hex[:12]}"
             summary = request.summary or (request.title or request.task_text or request.situation_text)
-            search_text = _stable_document_search_text(request.title or "", request.summary, request.situation_text, request.task_text)
+            topic_text = " ".join(request.topics) if request.topics else ""
+            search_text = _stable_document_search_text(request.title or "", summary, request.situation_text, request.task_text, topic_text)
             model = self.repository.upsert_case(
                 case_id=case_id,
                 payload={
@@ -387,6 +389,8 @@ class SQLiteVecL3Plugin:
         if not self.mounted:
             return L3MutationResult(status=RuntimeStatus.UNAVAILABLE, document_id=request.document_id)
         kind, _, raw_id = request.document_id.partition(":")
+        topic_values = list(request.topics) if request.topics is not None else self.repository.list_document_topics(request.document_id)
+        topic_text = " ".join(topic_values) if topic_values else ""
         if kind == "fact":
             model = self.repository.get_fact(raw_id)
             if model is None:
@@ -398,7 +402,7 @@ class SQLiteVecL3Plugin:
             payload = dict(model.payload_blob or {})
             payload.update(request.payload_patch)
             model.payload_blob = payload
-            model.search_text = _stable_document_search_text(model.title or "", model.summary)
+            model.search_text = _stable_document_search_text(model.title or "", model.summary, topic_text)
             model.updated_at = utc_now()
             model.save()
         elif kind == "case":
@@ -420,7 +424,7 @@ class SQLiteVecL3Plugin:
             payload = dict(model.payload_blob or {})
             payload.update(request.payload_patch)
             model.payload_blob = payload
-            model.search_text = _stable_document_search_text(model.title or "", model.summary, model.situation_text, model.task_text)
+            model.search_text = _stable_document_search_text(model.title or "", model.summary, model.situation_text, model.task_text, topic_text)
             model.updated_at = utc_now()
             model.save()
         else:
@@ -448,7 +452,8 @@ class SQLiteVecL3Plugin:
         search_text = _stable_document_search_text(*query.queries)
         fts_candidates = self.repository.list_fts_candidates(search_text, limit=max(query.limit * 3, 12))
         topic_candidates = self.repository.list_topic_candidates(query.topic_scope, limit=max(query.limit * 3, 12))
-        vector_candidates = self._vector_candidates(search_text, limit=max(query.limit * 3, 12))
+        vector_query_text = _stable_document_search_text(search_text, " ".join(query.topic_scope) if query.topic_scope else "")
+        vector_candidates = self._vector_candidates(vector_query_text, limit=max(query.limit * 3, 12))
         candidate_ids = set(fts_candidates) | set(topic_candidates) | set(vector_candidates)
         hits = []
         scored_hits = []

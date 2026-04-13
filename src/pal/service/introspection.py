@@ -39,6 +39,7 @@ class ServiceTarget:
     skill_refs: list[str]
     out_channel_id: str | None
     enabled: bool
+    out_reply_target: dict[str, object]
     schedule: dict[str, object]
     next_due_at: str | None
     last_run_at: str | None
@@ -88,6 +89,7 @@ class ServiceIntrospectionProvider:
                     skill_refs=list(definition.skill_refs),
                     out_channel_id=definition.out_channel_id,
                     enabled=definition.enabled,
+                    out_reply_target=dict(definition.out_reply_target),
                     schedule=dict(definition.schedule),
                     next_due_at=self.manager.schedule_engine.next_due_at(definition.service_id),
                     last_run_at=self._last_run_at_for(definition.service_id),
@@ -135,6 +137,7 @@ class ServiceIntrospectionProvider:
                     "skill_refs": list(definition.skill_refs),
                     "out_channel_id": definition.out_channel_id,
                     "enabled": definition.enabled,
+                    "out_reply_target": dict(definition.out_reply_target),
                     "schedule": dict(definition.schedule),
                     "next_due_at": self.manager.schedule_engine.next_due_at(definition.service_id),
                     "last_run_at": self._last_run_at_for(definition.service_id),
@@ -168,6 +171,7 @@ class ServiceIntrospectionProvider:
             "method": target.method,
             "skill_refs": list(target.skill_refs),
             "out_channel_id": target.out_channel_id,
+            "out_reply_target": dict(target.out_reply_target),
             "enabled": target.enabled,
             "schedule": dict(target.schedule),
             "next_due_at": target.next_due_at,
@@ -276,6 +280,7 @@ class ServiceIntrospectionProvider:
                 "skill_refs": {"type": "array", "items": {"type": "string"}},
                 "out_channel_id": {"type": "string"},
                 "enabled": {"type": "boolean"},
+                "out_reply_target": {"type": "object"},
                 "schedule": {"type": "object"},
             },
             "required": ["service_id", "goal"],
@@ -297,11 +302,14 @@ class ServiceIntrospectionProvider:
             skill_refs=[str(item).strip() for item in list(call.args.get("skill_refs") or []) if str(item).strip()],
             out_channel_id=str(call.args.get("out_channel_id") or "").strip() or None,
             schedule=dict(call.args.get("schedule") or {}),
+            out_reply_target=dict(call.args.get("out_reply_target") or {}),
             enabled=bool(call.args.get("enabled", True)),
         )
         self._refresh_capabilities()
         payload = {
             "service_id": definition.service_id,
+            "out_channel_id": definition.out_channel_id,
+            "out_reply_target": dict(definition.out_reply_target),
             "next_due_at": self.manager.schedule_engine.next_due_at(definition.service_id),
         }
         return IntrospectionResult(
@@ -411,12 +419,57 @@ class ServiceIntrospectionProvider:
                 llm_text="service not found",
             )
         self._refresh_capabilities()
-        payload = {"service_id": service_id, "out_channel_id": updated.out_channel_id}
+        payload = {
+            "service_id": service_id,
+            "out_channel_id": updated.out_channel_id,
+            "out_reply_target": dict(updated.out_reply_target),
+        }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="service output channel updated",
             structured=payload,
             llm_text=render_titled_structured_for_llm("Service output channel updated", payload),
+        )
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="management",
+        action_name="set_output_target",
+        description="Set or clear the output reply target for a service",
+        args_schema={
+            "type": "object",
+            "properties": {
+                "target_id": {"type": "string"},
+                "out_reply_target": {"type": "object"},
+            },
+            "required": ["target_id"],
+        },
+    )
+    def set_output_target(self, call: IntrospectionCall) -> IntrospectionResult:
+        service_id = str(call.args.get("target_id") or "").strip()
+        if not service_id:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="target_id is required",
+                llm_text="target_id is required",
+            )
+        out_reply_target = dict(call.args.get("out_reply_target") or {})
+        updated = self.manager.set_output_target(service_id, out_reply_target)
+        if updated is None:
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="service not found",
+                structured={"service_id": service_id},
+                llm_text="service not found",
+            )
+        self._refresh_capabilities()
+        payload = {"service_id": service_id, "out_reply_target": dict(updated.out_reply_target)}
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="service output target updated",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Service output target updated", payload),
         )
 
     @capability_action(

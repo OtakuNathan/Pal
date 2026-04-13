@@ -48,6 +48,15 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
+            elif normalized_section == "capability_guide":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="capability_guide",
+                        title="Capability Guide",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
             elif normalized_section == "memory":
                 user_context_blocks.append(
                     PromptIRBlock(
@@ -170,7 +179,7 @@ class PromptCompiler:
 
     def _normalize_prompt_section(self, section: str) -> str:
         lowered = str(section or "").strip().lower()
-        if lowered in {"identity", "memory", "runtime", "rules"}:
+        if lowered in {"identity", "memory", "runtime", "rules", "capability_guide"}:
             return lowered
         if lowered in {"control", "observation", "finalization"}:
             return "runtime"
@@ -234,10 +243,11 @@ class PromptCompiler:
     def _order_system_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
         identity_blocks = [block for block in blocks if block.block_id == "identity"]
         rule_blocks = [block for block in blocks if block.block_id == "operating_rules"]
+        capability_guide_blocks = [block for block in blocks if block.block_id == "capability_guide"]
         runtime_blocks = [block for block in blocks if block.block_id == "runtime_overlay"]
         ordered_runtime = [block for block in runtime_blocks if block.metadata.get("priority") != "finalization"]
         ordered_runtime.extend(block for block in runtime_blocks if block.metadata.get("priority") == "finalization")
-        return [*identity_blocks, *rule_blocks, *ordered_runtime]
+        return [*identity_blocks, *rule_blocks, *capability_guide_blocks, *ordered_runtime]
 
     def _order_user_context_blocks(self, blocks: list[PromptIRBlock], *, turn_kind: str) -> list[PromptIRBlock]:
         l1_blocks = [block for block in blocks if block.block_id.startswith("l1_recent_context")]

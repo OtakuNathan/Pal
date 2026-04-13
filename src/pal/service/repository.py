@@ -69,6 +69,7 @@ class ServiceRepository(ServiceRepositoryPort):
             "skill_refs_blob": list(definition.skill_refs),
             "out_channel_id": definition.out_channel_id,
             "schedule_blob": dict(definition.schedule),
+            "out_reply_target_blob": dict(definition.out_reply_target or {}),
             "enabled": bool(definition.enabled),
             "next_due_at_utc": next_due_at_utc,
         }
@@ -98,6 +99,7 @@ class ServiceRepository(ServiceRepositoryPort):
                         skill_refs=list(row.skill_refs_blob or []),
                         out_channel_id=row.out_channel_id,
                         schedule=dict(row.schedule_blob or {}),
+                        out_reply_target=dict(row.out_reply_target_blob or {}),
                         enabled=bool(row.enabled),
                     ),
                     next_due_at_utc=row.next_due_at_utc,

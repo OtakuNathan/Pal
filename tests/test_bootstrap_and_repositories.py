@@ -99,6 +99,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             method="Review recent changes and publish a short digest.",
             skill_refs=["git", "summary"],
             out_channel_id="socket_default",
+            out_reply_target={"session_id": "session-1", "request_id": "req-1"},
             schedule={"cadence": "daily", "hour": 9, "minute": 0, "timezone": "Asia/Shanghai"},
             enabled=True,
         )
@@ -109,6 +110,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(len(stored), 1)
         self.assertEqual(stored[0].definition.service_id, "daily_digest")
         self.assertEqual(stored[0].definition.skill_refs, ["git", "summary"])
+        self.assertEqual(stored[0].definition.out_reply_target, {"session_id": "session-1", "request_id": "req-1"})
         self.assertEqual(stored[0].next_due_at_utc, "2026-04-11T01:00:00+00:00")
 
     def test_supervisor_provision_runtime_creates_third_party_plugin_directory(self) -> None:
@@ -660,6 +662,93 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(corrected.metadata["index_status"], "stale")
         inventory = provider.inspect()
         self.assertGreaterEqual(inventory["stale_embeddings"], 1)
+        self.assertGreaterEqual(inventory["retryable_embeddings"], 1)
+
+    def test_sqlite_vec_l3_correct_preserves_existing_topics_when_topics_not_provided(self) -> None:
+        service = MemoryService()
+        provider = SQLiteVecL3Plugin(service=service, embedder=HashingEmbedder())
+        result = provider.commit(
+            L3CommitRequest(
+                kind="fact",
+                scope="system",
+                title="Redis cache",
+                summary="Redis stores cache entries.",
+                topics=["cache", "redis"],
+            )
+        )
+
+        provider.correct(
+            L3CorrectRequest(
+                document_id=result.document_id,
+                summary="Redis stores hot cache entries in memory.",
+            )
+        )
+
+        document = provider.repository.get_document(result.document_id)
+        self.assertIsNotNone(document)
+        assert document is not None
+        self.assertIn("cache", document["search_text"])
+        self.assertIn("redis", document["search_text"])
+        self.assertEqual(provider.repository.list_document_topics(result.document_id), ["cache", "redis"])
+
+    def test_sqlite_vec_l3_inventory_surfaces_failed_embedding_diagnostics(self) -> None:
+        class BrokenEmbedder(HashingEmbedder):
+            def embed_document(self, text: str) -> list[float]:
+                raise RuntimeError("doc-embed-disabled")
+
+        service = MemoryService()
+        provider = SQLiteVecL3Plugin(service=service, embedder=BrokenEmbedder())
+        provider.commit(
+            L3CommitRequest(
+                kind="fact",
+                scope="system",
+                title="Redis cache",
+                summary="Redis stores cache entries.",
+                topics=["cache"],
+            )
+        )
+
+        refreshed = provider.refresh_indexes(limit=8)
+        inventory = provider.inspect()
+
+        self.assertEqual(refreshed["refreshed"], 0)
+        self.assertEqual(inventory["failed_embeddings"], 1)
+        self.assertEqual(inventory["retryable_embeddings"], 1)
+        self.assertEqual(len(inventory["recent_embedding_errors"]), 1)
+        self.assertIn("doc-embed-disabled", inventory["recent_embedding_errors"][0]["last_error"])
+
+    def test_sqlite_vec_l3_refresh_indexes_can_retry_failed_embeddings(self) -> None:
+        class FlakyEmbedder(HashingEmbedder):
+            def __init__(self) -> None:
+                self.fail_once = True
+
+            def embed_document(self, text: str) -> list[float]:
+                if self.fail_once:
+                    self.fail_once = False
+                    raise RuntimeError("temporary-embed-error")
+                return super().embed_document(text)
+
+        service = MemoryService()
+        provider = SQLiteVecL3Plugin(service=service, embedder=FlakyEmbedder())
+        provider.commit(
+            L3CommitRequest(
+                kind="fact",
+                scope="system",
+                title="Redis cache",
+                summary="Redis stores cache entries.",
+                topics=["cache"],
+            )
+        )
+
+        first = provider.refresh_indexes(limit=8)
+        second = provider.refresh_indexes(limit=8, retry_failed=True)
+        inventory = provider.inspect()
+
+        self.assertEqual(first["refreshed"], 0)
+        self.assertEqual(second["failed_retried"], 1)
+        self.assertGreaterEqual(second["refreshed"], 1)
+        self.assertEqual(inventory["failed_embeddings"], 0)
+        self.assertEqual(inventory["ready_embeddings"], 1)
 
     def test_memory_service_tracks_top_of_mind_with_lru_limit(self) -> None:
         service = MemoryService()

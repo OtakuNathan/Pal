@@ -35,13 +35,53 @@ class ToolSurface:
         seen: set[tuple[str, str]] = set()
 
         singleton_canonicals = (
+            # -- execution (discovery + exec) --
             "operation_execution_discovery_read",
             "operation_execution_discovery_search",
             "operation_execution_exec_run",
+            # -- introspection: all module-level capabilities --
+            "introspection_module_channel_list",
+            "introspection_module_control_show",
+            "introspection_module_core_configure",
+            "introspection_module_core_observe",
+            "introspection_module_execution_show",
+            "introspection_module_execution_tools",
+            "introspection_module_failure_recent_reports",
+            "introspection_module_failure_show",
             "introspection_module_identity_show",
             "introspection_module_llm_active",
+            "introspection_module_llm_list",
             "introspection_module_llm_think_level",
             "introspection_module_memory_active_provider",
+            "introspection_module_memory_list_providers",
+            "introspection_module_memory_show",
+            "introspection_module_plugins_list",
+            "introspection_module_plugins_show",
+            "introspection_module_service_list",
+            "introspection_module_service_show",
+            # -- singleton operation capabilities --
+            "operation_channel_management_attach",
+            "operation_channel_management_detach",
+            "operation_channel_management_disable",
+            "operation_channel_management_enable",
+            "operation_control_lifecycle_attach",
+            "operation_control_lifecycle_detach",
+            "operation_llm_management_set_active_endpoint",
+            "operation_memory_management_set_active_provider",
+            "operation_plugin_management_attach",
+            "operation_plugin_management_detach",
+            "operation_plugin_management_disable",
+            "operation_plugin_management_enable",
+            "operation_plugin_management_rescan",
+            "operation_service_lifecycle_attach",
+            "operation_service_lifecycle_detach",
+            "operation_service_management_create",
+            "operation_service_management_destroy",
+            "operation_service_management_disable",
+            "operation_service_management_enable",
+            "operation_service_management_set_output_channel",
+            "operation_service_management_set_output_target",
+            "operation_service_management_update_schedule",
         )
         for canonical_path in singleton_canonicals:
             for record_id in by_canonical.get(canonical_path, []):

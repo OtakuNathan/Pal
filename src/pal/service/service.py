@@ -155,6 +155,7 @@ class ServiceManager(ServiceManagerPort):
         skill_refs: list[str] | None = None,
         out_channel_id: str | None = None,
         schedule: dict[str, object] | None = None,
+        out_reply_target: dict[str, object] | None = None,
         enabled: bool = True,
     ) -> ServiceDefinition:
         definition = ServiceDefinition(
@@ -164,6 +165,7 @@ class ServiceManager(ServiceManagerPort):
             skill_refs=list(skill_refs or []),
             out_channel_id=out_channel_id,
             schedule=dict(schedule or {}),
+            out_reply_target=dict(out_reply_target or {}),
             enabled=enabled,
         )
         self.register(definition)
@@ -187,6 +189,7 @@ class ServiceManager(ServiceManagerPort):
             method=current.method,
             skill_refs=list(current.skill_refs),
             out_channel_id=current.out_channel_id,
+            out_reply_target=dict(current.out_reply_target),
             schedule=dict(current.schedule),
             enabled=enabled,
         )
@@ -207,6 +210,24 @@ class ServiceManager(ServiceManagerPort):
             method=current.method,
             skill_refs=list(current.skill_refs),
             out_channel_id=out_channel_id,
+            out_reply_target=dict(current.out_reply_target),
+            schedule=dict(current.schedule),
+            enabled=current.enabled,
+        )
+        self.register(updated)
+        return updated
+
+    def set_output_target(self, service_id: str, out_reply_target: dict[str, object] | None) -> ServiceDefinition | None:
+        current = self.registered.get(service_id)
+        if current is None:
+            return None
+        updated = ServiceDefinition(
+            service_id=current.service_id,
+            goal=current.goal,
+            method=current.method,
+            skill_refs=list(current.skill_refs),
+            out_channel_id=current.out_channel_id,
+            out_reply_target=dict(out_reply_target or {}),
             schedule=dict(current.schedule),
             enabled=current.enabled,
         )
@@ -223,6 +244,7 @@ class ServiceManager(ServiceManagerPort):
             method=current.method,
             skill_refs=list(current.skill_refs),
             out_channel_id=current.out_channel_id,
+            out_reply_target=dict(current.out_reply_target),
             schedule=dict(schedule),
             enabled=current.enabled,
         )

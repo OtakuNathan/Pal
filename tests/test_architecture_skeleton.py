@@ -623,6 +623,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("introspection_module_identity_show", exposed_names)
             self.assertIn("introspection_module_llm_active", exposed_names)
             self.assertIn("introspection_module_llm_think_level", exposed_names)
+            self.assertIn("introspection_module_memory_active_provider", exposed_names)
             self.assertIn("operation_l3_recall_query", exposed_names)
             self.assertIn("operation_l3_commit_write", exposed_names)
             self.assertIn("operation_l3_correct_patch", exposed_names)
@@ -813,7 +814,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             fragments = core.collect_prompt_fragments(PromptAssemblyContext(core_mode="default"))
             sections = [fragment.section for fragment in fragments]
 
-            self.assertEqual(sections, ["identity", "memory", "rules"])
+            self.assertEqual(sections, ["identity", "memory", "rules", "capability_guide"])
             prompt_ir = core.build_prompt_ir(
                 PromptAssemblyContext(
                     core_mode="default",
@@ -834,7 +835,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     ),
                 )
             )
-            self.assertEqual(prompt.metadata["fragment_sections"], ["identity", "operating_rules"])
+            self.assertEqual(prompt.metadata["fragment_sections"], ["identity", "operating_rules", "capability_guide"])
             self.assertEqual(
                 prompt.metadata["user_context_blocks"],
                 ["l1_recent_context_0_0", "l1_recent_context_0_1", "l2_recent_summaries"],
@@ -844,7 +845,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(prompt.messages[-1], {"role": "user", "content": "Hello from user"})
             self.assertIn("## Identity", prompt.messages[0]["content"])
             self.assertIn("## Operating Rules", prompt.messages[0]["content"])
+            self.assertIn("## Capability Guide", prompt.messages[0]["content"])
             self.assertLess(prompt.messages[0]["content"].index("## Identity"), prompt.messages[0]["content"].index("## Operating Rules"))
+            self.assertLess(prompt.messages[0]["content"].index("## Operating Rules"), prompt.messages[0]["content"].index("## Capability Guide"))
             self.assertNotIn("## Runtime Overlay", prompt.messages[0]["content"])
             self.assertNotIn("## Memory Projection", prompt.messages[0]["content"])
             self.assertEqual(prompt.messages[1], {"role": "user", "content": "What timezone should you use?"})
@@ -953,6 +956,43 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("Goal: Summarize repository updates", transcript[0].content)
             self.assertEqual(transcript[1].role, "assistant")
             self.assertEqual(transcript[1].content, "Daily digest complete.")
+        finally:
+            database.close()
+            shutil.rmtree(runtime_root, ignore_errors=True)
+
+    def test_service_trigger_delivers_reply_to_persisted_output_target(self) -> None:
+        runtime_root, database = self._create_database()
+        try:
+            core = PalCore()
+            register_core_with_core(core)
+            register_execution_with_core(core.context)
+            identity_service = IdentityService(repository=IdentityRepository())
+            identity_service.ensure_defaults()
+            register_identity_with_core(core.context, identity_service)
+            channel_runtime = ChannelRuntime()
+            register_channel_with_core(core.context, channel_runtime)
+            endpoint = StubEndpoint(EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key="chat:12345"))
+            channel_runtime.register_endpoint(endpoint)
+            memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+            register_memory_with_core(core.context, memory_service)
+            service_manager = ServiceManager()
+            register_service_with_core(core.context, service_manager, None)
+            definition = ServiceDefinition(
+                service_id="daily_digest",
+                goal="Summarize repository updates",
+                method="Review recent changes and produce a concise digest.",
+                out_channel_id="telegram_main",
+                out_reply_target={"chat_id": "12345", "thread_id": "7"},
+            )
+            service_manager.register(definition)
+            core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
+                [CanonicalLLMOutcome(text="Daily digest complete.", tool_calls=[], finish_reason="stop")]
+            )
+
+            service_manager.enqueue_trigger(ServiceTriggerEvent(service_id="daily_digest", trigger_kind="scheduled"))
+            core.run_until_idle()
+
+            self.assertEqual(endpoint.sent, [("telegram_main", "Daily digest complete.")])
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -1200,6 +1240,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("operation_service_management_enable", core.context.capability_registry.descriptors)
         self.assertIn("operation_service_management_disable", core.context.capability_registry.descriptors)
         self.assertIn("operation_service_management_set_output_channel", core.context.capability_registry.descriptors)
+        self.assertIn("operation_service_management_set_output_target", core.context.capability_registry.descriptors)
         self.assertIn("operation_service_management_update_schedule", core.context.capability_registry.descriptors)
         self.assertIn("operation_service_lifecycle_attach", core.context.capability_registry.descriptors)
         self.assertIn("operation_service_lifecycle_detach", core.context.capability_registry.descriptors)
@@ -1221,6 +1262,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                         "method": "Review recent changes and produce a concise digest.",
                         "skill_refs": ["git", "summary"],
                         "out_channel_id": "socket_default",
+                        "out_reply_target": {"session_id": "session-1", "request_id": "req-1"},
                         "schedule": {"cadence": "daily", "hour": 9, "minute": 0, "timezone": "Asia/Shanghai"},
                     },
                 )
@@ -1232,6 +1274,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(len(listed.structured["items"]), 1)
             self.assertEqual(listed.structured["items"][0]["service_id"], "daily_digest")
             self.assertEqual(listed.structured["items"][0]["out_channel_id"], "socket_default")
+            self.assertEqual(listed.structured["items"][0]["out_reply_target"], {"session_id": "session-1", "request_id": "req-1"})
 
             changed_channel = core.context.execution_runtime.execute(
                 CapabilityCall(
@@ -1241,6 +1284,16 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
             self.assertEqual(changed_channel.status, "ok")
             self.assertEqual(changed_channel.structured["out_channel_id"], "telegram_main")
+            self.assertEqual(changed_channel.structured["out_reply_target"], {"session_id": "session-1", "request_id": "req-1"})
+
+            changed_target = core.context.execution_runtime.execute(
+                CapabilityCall(
+                    name="operation_service_management_set_output_target",
+                    args={"target_id": "daily_digest", "out_reply_target": {"chat_id": "12345", "thread_id": "7"}},
+                )
+            )
+            self.assertEqual(changed_target.status, "ok")
+            self.assertEqual(changed_target.structured["out_reply_target"], {"chat_id": "12345", "thread_id": "7"})
 
             rescheduled = core.context.execution_runtime.execute(
                 CapabilityCall(

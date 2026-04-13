@@ -185,6 +185,14 @@ class MemoryDurableRepository:
                 created_at=now,
             )
 
+    def list_document_topics(self, document_id: str) -> list[str]:
+        query = (
+            MemoryTopicModel.select()
+            .where(MemoryTopicModel.document_id == document_id)
+            .order_by(MemoryTopicModel.normalized_topic, MemoryTopicModel.topic_id)
+        )
+        return [str(row.topic).strip() for row in query if str(row.topic or "").strip()]
+
     def queue_embedding(
         self,
         *,

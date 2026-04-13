@@ -13,6 +13,7 @@ class ServiceDefinitionModel(BaseModel):
     skill_refs_blob = JSONField(default=list)
     out_channel_id = CharField(null=True)
     schedule_blob = JSONField(default=dict)
+    out_reply_target_blob = JSONField(default=dict)
     enabled = BooleanField(default=True)
     next_due_at_utc = TextField(null=True)
     last_run_at_utc = TextField(null=True)
