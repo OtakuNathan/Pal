@@ -48,6 +48,23 @@ class StubRuntimeHandle:
     control_plane: ControlPlane
     failure_runtime: FailureRuntime
 
+    async def stop_async(self) -> None:
+        await self.channel_runtime.stop_async()
+        for handle in tuple(self.core.context.module_registry.modules.values()):
+            shutdown_async = getattr(handle, "shutdown_async", None)
+            shutdown_sync = getattr(handle, "shutdown_sync", None)
+            if callable(shutdown_async):
+                try:
+                    await shutdown_async()
+                except Exception:
+                    continue
+            elif callable(shutdown_sync):
+                try:
+                    shutdown_sync()
+                except Exception:
+                    continue
+        self.database.close()
+
 
 def compose_runtime(
     *,

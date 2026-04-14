@@ -37,6 +37,8 @@ from pal.service import ServiceDefinition, ServiceRepository
 from pal.shared import LLMFinishReason, LLMStreamEventKind
 from pal.stream_events import NormalizedLLMStreamEvent
 from pal.supervisor import SupervisorService
+from pal.web_fetch import BrowserServiceManager, WebFetchProviderRepository
+from pal.web_search import WebSearchItem, WebSearchProviderRepository
 
 
 class PalV2BootstrapTests(unittest.TestCase):
@@ -75,6 +77,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("plugin_bundles", tables)
         self.assertIn("service_definitions", tables)
         self.assertIn("service_runs", tables)
+        self.assertIn("web_search_providers", tables)
+        self.assertIn("web_fetch_providers", tables)
         self.assertNotIn("users", tables)
         self.assertNotIn("conversation_routes", tables)
         self.assertNotIn("pal_memories", tables)
@@ -381,6 +385,53 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(handle.memory_service.l3_selector.active_provider_id, "sqlite_vec_l3")
         self.assertIn("sqlite_vec_l3", handle.core.context.execution_runtime.l3_plugin_registry.plugins)
 
+    def test_supervisor_seeds_default_web_providers_and_active_settings(self) -> None:
+        self.supervisor.seed_defaults(self.registration)
+
+        search_records = WebSearchProviderRepository().list_all()
+        fetch_records = WebFetchProviderRepository().list_all()
+        settings = RuntimeSettingRepository()
+
+        self.assertEqual(
+            [item.provider_id for item in search_records],
+            ["brave_search_default", "duckduckgo_search_default"],
+        )
+        self.assertEqual(
+            [item.provider_id for item in fetch_records],
+            ["playwright_fetch_default", "plain_http_fetch_default"],
+        )
+        self.assertEqual(settings.get("active_web_search_provider_id"), "brave_search_default")
+        self.assertEqual(settings.get("active_web_fetch_provider_id"), "playwright_fetch_default")
+
+    def test_compose_runtime_loads_first_party_web_plugins_and_default_tools(self) -> None:
+        self.supervisor.seed_defaults(self.registration)
+        handle = compose_runtime(
+            supervisor=self.supervisor,
+            registration=self.registration,
+            database=self.database,
+        )
+
+        records = handle.plugin_host.list_plugins()
+        plugin_ids = {item["plugin_id"] for item in records if item["source"] == "first_party" and item["attached"]}
+        tool_names = {item["function"]["name"] for item in handle.core._build_llm_tool_contracts()}
+
+        self.assertIn("web_search", plugin_ids)
+        self.assertIn("web_fetch", plugin_ids)
+        self.assertIsNotNone(handle.core.context.module_registry.get("web_search"))
+        self.assertIsNotNone(handle.core.context.module_registry.get("web_fetch"))
+        self.assertIn("operation_web_search_query", handle.core.context.capability_registry.descriptors)
+        self.assertIn("operation_web_fetch_read", handle.core.context.capability_registry.descriptors)
+        self.assertIn("introspection_module_web_search_show", handle.core.context.capability_registry.descriptors)
+        self.assertIn("introspection_module_web_fetch_show", handle.core.context.capability_registry.descriptors)
+        self.assertTrue(
+            any(name.startswith("operation_web_search_management_set_config") for name in handle.core.context.capability_registry.descriptors)
+        )
+        self.assertTrue(
+            any(name.startswith("operation_web_fetch_management_set_config") for name in handle.core.context.capability_registry.descriptors)
+        )
+        self.assertIn("operation_web_search_query", tool_names)
+        self.assertIn("operation_web_fetch_read", tool_names)
+
     def test_plugin_host_rescan_discovers_third_party_bundle_but_does_not_import_it(self) -> None:
         self.supervisor.seed_defaults(self.registration)
         handle = compose_runtime(
@@ -409,6 +460,71 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(discovered)
         self.assertEqual(discovered.last_load_status, "discovered")
         self.assertFalse(discovered.attached)
+
+    def test_plugin_host_rescan_and_attach_new_first_party_attaches_new_builtin_plugin(self) -> None:
+        self.supervisor.seed_defaults(self.registration)
+        handle = compose_runtime(
+            supervisor=self.supervisor,
+            registration=self.registration,
+            database=self.database,
+        )
+        builtin_root = self.runtime_root / "builtin_plugins"
+        plugin_root = builtin_root / "demo_builtin"
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        (plugin_root / "plugin.toml").write_text(
+            "\n".join(
+                [
+                    'plugin_id = "demo_builtin"',
+                    'entrypoint = "demo_builtin.runtime"',
+                    'version = "0.1.0"',
+                    "enabled_by_default = true",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+        (plugin_root / "runtime.py").write_text(
+            "\n".join(
+                [
+                    "from __future__ import annotations",
+                    "",
+                    "from dataclasses import dataclass",
+                    "",
+                    "from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle",
+                    "",
+                    "@dataclass",
+                    "class DemoBundle:",
+                    '    plugin_id: str = \"demo_builtin\"',
+                    '    version: str = \"0.1.0\"',
+                    "",
+                    "    def register_with_core(self, context):",
+                    "        handle = ModuleHandle(module_id=\"demo_builtin\", tier=MODULE_TIER_DETACHABLE, detachable=True)",
+                    "        context.register_module(handle)",
+                    "        return handle",
+                    "",
+                    "def build_plugin():",
+                    "    return DemoBundle()",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        handle.plugin_host.builtin_root = builtin_root
+        sys.path.insert(0, str(builtin_root))
+        try:
+            result = handle.core.context.execution_runtime.execute(
+                CapabilityCall(name="operation_plugin_management_rescan_and_attach_new_first_party")
+            )
+        finally:
+            sys.path.remove(str(builtin_root))
+
+        self.assertEqual(result.status, "ok")
+        self.assertIn("demo_builtin", result.structured["new_first_party_plugins"])
+        self.assertIn("demo_builtin", result.structured["attached_new_first_party_plugins"])
+        self.assertEqual(result.structured["attach_errors"], {})
+        self.assertIsNotNone(handle.core.context.module_registry.get("demo_builtin"))
+        records = handle.plugin_host.list_plugins()
+        demo_record = next(item for item in records if item["plugin_id"] == "demo_builtin")
+        self.assertTrue(demo_record["attached"])
 
     def test_plugins_module_publishes_management_capabilities_and_can_detach_first_party_plugin(self) -> None:
         self.supervisor.seed_defaults(self.registration)
@@ -1207,6 +1323,191 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(handle.database.db_path, self.registration.runtime.db_path)
         self.assertEqual(handle.registration.display_name, "PalV2 Test")
+
+    def test_web_search_capability_falls_back_and_auth_material_is_sanitized(self) -> None:
+        self.supervisor.seed_defaults(self.registration)
+        handle = compose_runtime(
+            supervisor=self.supervisor,
+            registration=self.registration,
+            database=self.database,
+        )
+        service = handle.core.context.module_registry.require("web_search").ports["web_search"]
+
+        auth_result = handle.core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="operation_web_search_management_set_auth_material",
+                args={
+                    "target_id": "brave_search_default",
+                    "material": {"api_key": "brave-secret"},
+                },
+            )
+        )
+
+        self.assertEqual(auth_result.status, "ok")
+        self.assertTrue(auth_result.structured["api_key_present"])
+        self.assertEqual(auth_result.structured["accepted_keys"], ["api_key"])
+        self.assertNotIn("api_key", auth_result.structured)
+        self.assertEqual(
+            WebSearchProviderRepository().get("brave_search_default").auth_material_blob["api_key"],
+            "brave-secret",
+        )
+
+        class RaisingSearchProvider:
+            provider_kind = "brave_search"
+
+            def search(self, record, query):
+                _ = record
+                _ = query
+                raise RuntimeError("brave unavailable")
+
+        class StaticSearchProvider:
+            provider_kind = "duckduckgo_search"
+
+            def search(self, record, query):
+                _ = query
+                return [
+                    WebSearchItem(
+                        title="Pal runtime docs",
+                        url="https://example.com/pal",
+                        snippet="Pal documentation result",
+                        provider_id=record.provider_id,
+                        provider_kind=record.provider_kind,
+                        rank=1,
+                    )
+                ]
+
+        service.providers = {
+            "brave_search": RaisingSearchProvider(),
+            "duckduckgo_search": StaticSearchProvider(),
+        }
+
+        result = handle.core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="operation_web_search_query",
+                args={"query": "pal runtime docs", "limit": 3},
+            )
+        )
+
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(result.structured["fallback_used"])
+        self.assertEqual(result.structured["configured_provider_id"], "brave_search_default")
+        self.assertEqual(result.structured["effective_provider_id"], "duckduckgo_search_default")
+        self.assertEqual(result.structured["items"][0]["title"], "Pal runtime docs")
+
+    def test_web_fetch_health_does_not_start_browser_service_and_disable_stops_manager(self) -> None:
+        self.supervisor.seed_defaults(self.registration)
+        handle = compose_runtime(
+            supervisor=self.supervisor,
+            registration=self.registration,
+            database=self.database,
+        )
+        service = handle.core.context.module_registry.require("web_fetch").ports["web_fetch"]
+
+        health = handle.core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="introspection_provider_web_fetch_health",
+                args={"target_id": "playwright_fetch_default"},
+            )
+        )
+
+        self.assertEqual(health.status, "ok")
+        self.assertIsNone(service.browser_manager.process)
+        self.assertFalse(health.structured["service_running"])
+
+        class FakeBrowserManager:
+            def __init__(self) -> None:
+                self.stop_calls = 0
+
+            def stop_sync(self) -> None:
+                self.stop_calls += 1
+
+            async def shutdown_async(self) -> None:
+                return None
+
+            def health(self, *, settings=None):
+                _ = settings
+                return {"healthy": True, "service_running": False, "reason": "idle"}
+
+        fake_manager = FakeBrowserManager()
+        service.browser_manager = fake_manager
+
+        disabled = handle.core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="operation_web_fetch_management_disable",
+                args={"target_id": "playwright_fetch_default"},
+            )
+        )
+
+        self.assertEqual(disabled.status, "ok")
+        self.assertEqual(fake_manager.stop_calls, 1)
+
+    def test_web_fetch_capability_falls_back_to_plain_http_and_runtime_stop_runs_shutdown_hook(self) -> None:
+        self.supervisor.seed_defaults(self.registration)
+        handle = compose_runtime(
+            supervisor=self.supervisor,
+            registration=self.registration,
+            database=self.database,
+        )
+        service = handle.core.context.module_registry.require("web_fetch").ports["web_fetch"]
+
+        class RaisingFetchProvider:
+            provider_kind = "playwright_fetch"
+
+            def read(self, record, request):
+                _ = record
+                _ = request
+                raise RuntimeError("browser unavailable")
+
+        class StaticFetchProvider:
+            provider_kind = "plain_http_fetch"
+
+            def read(self, record, request):
+                _ = record
+                return {
+                    "requested_url": request.url,
+                    "final_url": request.url,
+                    "title": "Example Domain",
+                    "text": "Example body text",
+                }
+
+        service.providers = {
+            "playwright_fetch": RaisingFetchProvider(),
+            "plain_http_fetch": StaticFetchProvider(),
+        }
+
+        result = handle.core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="operation_web_fetch_read",
+                args={"url": "https://example.com"},
+            )
+        )
+
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(result.structured["fallback_used"])
+        self.assertEqual(result.structured["configured_provider_id"], "playwright_fetch_default")
+        self.assertEqual(result.structured["effective_provider_id"], "plain_http_fetch_default")
+        self.assertEqual(result.structured["fetch_mode"], "http")
+
+        class ShutdownTrackingManager:
+            def __init__(self) -> None:
+                self.shutdown_calls = 0
+
+            def stop_sync(self) -> None:
+                return None
+
+            async def shutdown_async(self) -> None:
+                self.shutdown_calls += 1
+
+            def health(self, *, settings=None):
+                _ = settings
+                return {"healthy": True, "service_running": False, "reason": "idle"}
+
+        tracking_manager = ShutdownTrackingManager()
+        service.browser_manager = tracking_manager
+
+        asyncio.run(handle.stop_async())
+
+        self.assertEqual(tracking_manager.shutdown_calls, 1)
 
 
 class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):

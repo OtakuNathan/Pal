@@ -32,6 +32,9 @@
 11. [pal_memory_contract.md](/Users/nathan/Desktop/coding/Pal/design/architecture_v1/pal_memory_contract.md)
 12. [pal_failure_reporting_contract.md](/Users/nathan/Desktop/coding/Pal/design/architecture_v1/pal_failure_reporting_contract.md)
 13. [pal_migration_map.md](/Users/nathan/Desktop/coding/Pal/design/architecture_v1/pal_migration_map.md)
+14. [pal_web_search_contract.md](pal_web_search_contract.md)
+15. [pal_web_fetch_contract.md](pal_web_fetch_contract.md)
+16. [pal_tool_surface.md](pal_tool_surface.md)
 
 ## 文档定位
 
@@ -61,3 +64,9 @@
   自修失败后的开发者升级报告契约
 - `pal_migration_map.md`
   当前代码迁移归类
+- `pal_web_search_contract.md`
+  网页搜索子系统：provider registry、fallback 链、capability 集成
+- `pal_web_fetch_contract.md`
+  网页抓取子系统：Playwright 浏览器渲染、HTTP fallback、browser service 进程管理
+- `pal_tool_surface.md`
+  LLM 工具暴露配置：TOML 驱动的常用工具表、动态 provider 解析、discovery-first 设计

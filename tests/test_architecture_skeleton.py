@@ -280,6 +280,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.failure",
             "pal.tasking",
             "pal.service",
+            "pal.web_search",
+            "pal.web_fetch",
             "pal.minion",
             "pal.bootstrap",
             "pal.supervisor",
@@ -311,6 +313,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.execution": ("ExecutionIntrospectionProvider", "register_with_core", "inspect_execution"),
             "pal.tasking": ("TaskingIntrospectionProvider", "register_with_core", "inspect_tasking"),
             "pal.service": ("ServiceIntrospectionProvider", "register_with_core", "inspect_service"),
+            "pal.web_search": ("WebSearchIntrospectionProvider", "register_with_core", "inspect_web_search"),
+            "pal.web_fetch": ("WebFetchIntrospectionProvider", "register_with_core", "inspect_web_fetch"),
             "pal.control": ("ControlIntrospectionProvider", "register_with_core", "inspect_control"),
             "pal.failure": ("FailureIntrospectionProvider", "register_with_core"),
             "pal.plugins": ("PluginsIntrospectionProvider", "register_with_core"),
@@ -624,13 +628,16 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("introspection_module_llm_active", exposed_names)
             self.assertIn("introspection_module_llm_think_level", exposed_names)
             self.assertIn("introspection_module_memory_active_provider", exposed_names)
+            self.assertIn("operation_memory_management_set_active_provider", exposed_names)
             self.assertIn("operation_l3_recall_query", exposed_names)
             self.assertIn("operation_l3_commit_write", exposed_names)
             self.assertIn("operation_l3_correct_patch", exposed_names)
+            self.assertIn("operation_l3_maintenance_refresh_indexes", exposed_names)
+            self.assertIn("operation_l3_lifecycle_attach", exposed_names)
+            self.assertIn("operation_llm_management_set_active_endpoint", exposed_names)
             self.assertNotIn("echo", exposed_names)
             exec_tool = next(item for item in request.tools if item["function"]["name"] == "operation_execution_exec_run")
             self.assertIn("cmd", exec_tool["function"]["parameters"]["properties"])
-            self.assertNotIn("operation_memory_management_set_active_provider", exposed_names)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -846,6 +853,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("## Identity", prompt.messages[0]["content"])
             self.assertIn("## Operating Rules", prompt.messages[0]["content"])
             self.assertIn("## Capability Guide", prompt.messages[0]["content"])
+            self.assertIn("operation_web_search_query", prompt.messages[0]["content"])
+            self.assertIn("operation_web_fetch_read", prompt.messages[0]["content"])
             self.assertLess(prompt.messages[0]["content"].index("## Identity"), prompt.messages[0]["content"].index("## Operating Rules"))
             self.assertLess(prompt.messages[0]["content"].index("## Operating Rules"), prompt.messages[0]["content"].index("## Capability Guide"))
             self.assertNotIn("## Runtime Overlay", prompt.messages[0]["content"])

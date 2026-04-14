@@ -250,6 +250,44 @@ flowchart TD
 - wizard 必须完成模型选择和授权配置。
 - 授权信息存 ref，不存明文密钥。
 
+## 当前实现对齐（2026-04 更新）
+
+### compose_runtime() 扩展
+
+当前 `compose_runtime()` 已完成以下扩展：
+
+- 注册 `failure` 模块（`register_failure_with_core`）
+- 通过 `PluginHost.bootstrap()` 自动加载第一方插件（`plugins_builtin/`），包括 `web_search`、`web_fetch`、`sqlite_vec_l3`
+- `supervisor.seed_defaults()` 预置 web_search / web_fetch 的默认 provider 配置
+
+### StubRuntimeHandle.stop_async()
+
+`StubRuntimeHandle` 新增 `stop_async()` 方法，用于优雅关闭：
+
+```python
+async def stop_async(self) -> None:
+    await self.channel_runtime.stop_async()
+    for handle in self.core.context.module_registry.modules.values():
+        # 调用模块的 shutdown_async 或 shutdown_sync
+        ...
+    self.database.close()
+```
+
+这保证：
+
+- 先关闭所有 channel endpoint（停止接收新消息）
+- 再逐个调用注册模块的 shutdown hook
+- 最后关闭数据库
+
+### ModuleHandle shutdown hooks
+
+`ModuleHandle` 新增两个可选字段：
+
+- `shutdown_sync: Callable[[], None] | None` — 同步关闭
+- `shutdown_async: Callable[[], Awaitable[None]] | None` — 异步关闭
+
+模块可以在 `register_with_core()` 时注册 shutdown hook，用于清理资源（如关闭 browser service 进程）。
+
 ## Non-Goals
 
 - 不在本文件定义具体 UI 界面

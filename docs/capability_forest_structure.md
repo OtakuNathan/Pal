@@ -271,6 +271,22 @@ Forest 的存在不是为了替代哈希表，而是为了**生成哈希表**。
 - canonical path 负责稳定执行
 - display / alias 负责可读与召回
 
+### `omit_family_in_canonical` 元数据
+
+`CapabilityActionBlueprint` 的 `metadata` 中支持 `omit_family_in_canonical` 标志。
+
+当设为 `True` 时，编译器在生成 canonical path 时会跳过 family 段：
+
+- 正常：`operation_<module>_<family>_<action>`
+- 省略：`operation_<module>_<action>`
+
+适用场景：
+
+- 模块只有一个操作族（如 `web_search` 的 `query` 操作）
+- 强制 family 段只会增加路径长度，不提供额外信息
+
+这条规则必须显式声明，默认行为不变（保留 family 段）。
+
 ## 为什么实例级 action 必须自动注入 `target_id`
 
 实例级能力最典型的问题是：

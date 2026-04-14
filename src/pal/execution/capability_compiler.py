@@ -151,6 +151,8 @@ def _underscore_canonical_path(
         if node_blueprint.scope == module_id:
             return f"introspection_{module_id}_{action_blueprint.action_name}"
         return f"introspection_{node_blueprint.scope}_{module_id}_{action_blueprint.action_name}"
+    if bool(action_blueprint.metadata.get("omit_family_in_canonical")):
+        return f"operation_{module_id}_{action_blueprint.action_name}"
     family = action_blueprint.family or "operation"
     return f"operation_{module_id}_{family}_{action_blueprint.action_name}"
 

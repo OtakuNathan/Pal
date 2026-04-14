@@ -66,6 +66,39 @@ class PluginHost:
             "scan_errors": list(self.scan_errors),
         }
 
+    def rescan_and_attach_new_first_party(self) -> dict[str, Any]:
+        existing_first_party_ids = set(self.first_party_records)
+        attached_before = {
+            plugin_id
+            for plugin_id, record in self.first_party_records.items()
+            if record.attached
+        }
+        result = self.rescan()
+        newly_discovered = [
+            plugin_id
+            for plugin_id in self.first_party_records
+            if plugin_id not in existing_first_party_ids
+        ]
+        attached_now: list[str] = []
+        attach_errors: dict[str, str] = {}
+        for plugin_id in newly_discovered:
+            record = self.first_party_records.get(plugin_id)
+            if record is None or not record.enabled or plugin_id in attached_before:
+                continue
+            status = self._load_and_attach_first_party(plugin_id)
+            if status == RuntimeStatus.OK:
+                attached_now.append(plugin_id)
+                continue
+            attach_errors[plugin_id] = str(record.last_error or status)
+        result.update(
+            {
+                "new_first_party_plugins": newly_discovered,
+                "attached_new_first_party_plugins": attached_now,
+                "attach_errors": attach_errors,
+            }
+        )
+        return result
+
     def show_summary(self) -> dict[str, Any]:
         records = self.list_plugins()
         return {

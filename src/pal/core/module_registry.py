@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from pal.shared import IntrospectionPort, PromptFragmentProvider
 
@@ -29,6 +29,8 @@ class ModuleHandle:
     ports: dict[str, Any] = field(default_factory=dict)
     published_capabilities: list[str] = field(default_factory=list)
     mounted_subtree: "MountedSubtreeHandle | None" = None
+    shutdown_sync: Callable[[], None] | None = None
+    shutdown_async: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass

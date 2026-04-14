@@ -108,6 +108,18 @@ service 的输入 channel 和输出 channel 都不应再只是匿名 blob。
 - 所属关系：`out_channel_id` 必须引用 channel 子系统中的有效 endpoint
 - 约束方式：必须有 foreign key
 
+### Output Reply Target
+
+除了输出 channel，service 还支持 `out_reply_target_blob`。
+
+它用于指定回复目标的详细信息，例如：
+
+- 回复的 thread / topic ID
+- 回复的消息格式偏好
+- 其他 channel 特定的投递参数
+
+这个字段是 JSON blob，结构由具体 channel endpoint 决定。
+
 也就是说：
 
 - 如果用户在 Telegram 中创建 service

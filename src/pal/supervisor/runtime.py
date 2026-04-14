@@ -13,6 +13,8 @@ from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 from pal.memory import MemoryCaseModel, MemoryEmbeddingModel, MemoryEmbeddingVecModel, MemoryFactModel, MemoryTopicModel
 from pal.plugins import PluginBundleModel
 from pal.service import ServiceDefinitionModel, ServiceRunModel
+from pal.web_fetch import WebFetchProviderModel, WebFetchProviderRepository
+from pal.web_search import WebSearchProviderModel, WebSearchProviderRepository
 from pal.channel.models import ChannelEndpointModel
 from pal.supervisor.contracts import PalRegistration, ProvisionedRuntime, RuntimeLaunchSpec, SupervisorServicePort
 
@@ -32,6 +34,8 @@ ALL_MODELS = (
     PluginBundleModel,
     ServiceDefinitionModel,
     ServiceRunModel,
+    WebSearchProviderModel,
+    WebFetchProviderModel,
 )
 
 DEFAULT_DB_FILENAME = "pal.sqlite3"
@@ -73,6 +77,52 @@ DEFAULT_LLM_ENDPOINTS = (
         "enabled": True,
         "capabilities_blob": {"stub": True},
         "notes": "Seeded stub endpoint for local runtime composition.",
+    },
+)
+
+DEFAULT_WEB_SEARCH_PROVIDERS = (
+    {
+        "provider_id": "brave_search_default",
+        "provider_kind": "brave_search",
+        "display_name": "Brave Search",
+        "enabled": True,
+        "priority": 0,
+        "settings_blob": {},
+        "auth_material_blob": {},
+        "notes": "Primary web search provider.",
+    },
+    {
+        "provider_id": "duckduckgo_search_default",
+        "provider_kind": "duckduckgo_search",
+        "display_name": "DuckDuckGo Search",
+        "enabled": True,
+        "priority": 10,
+        "settings_blob": {},
+        "auth_material_blob": {},
+        "notes": "Best-effort web search fallback provider.",
+    },
+)
+
+DEFAULT_WEB_FETCH_PROVIDERS = (
+    {
+        "provider_id": "playwright_fetch_default",
+        "provider_kind": "playwright_fetch",
+        "display_name": "Playwright Fetch",
+        "enabled": True,
+        "priority": 0,
+        "settings_blob": {"idle_timeout_seconds": 60, "max_concurrency": 2},
+        "auth_material_blob": {},
+        "notes": "Primary rendered web fetch provider.",
+    },
+    {
+        "provider_id": "plain_http_fetch_default",
+        "provider_kind": "plain_http_fetch",
+        "display_name": "Plain HTTP Fetch",
+        "enabled": True,
+        "priority": 10,
+        "settings_blob": {},
+        "auth_material_blob": {},
+        "notes": "Plain HTTP fallback provider.",
     },
 )
 
@@ -124,7 +174,14 @@ class SupervisorService(SupervisorServicePort):
         for payload in default_channel_endpoints(registration.runtime.runtime_root):
             channel_repository.upsert(**dict(payload))
         LLMEndpointRepository().ensure_defaults(DEFAULT_LLM_ENDPOINTS)
-        RuntimeSettingRepository().ensure_defaults()
+        WebSearchProviderRepository().ensure_defaults(DEFAULT_WEB_SEARCH_PROVIDERS)
+        WebFetchProviderRepository().ensure_defaults(DEFAULT_WEB_FETCH_PROVIDERS)
+        settings = RuntimeSettingRepository()
+        settings.ensure_defaults()
+        if settings.get("active_web_search_provider_id") is None:
+            settings.set("active_web_search_provider_id", "brave_search_default")
+        if settings.get("active_web_fetch_provider_id") is None:
+            settings.set("active_web_fetch_provider_id", "playwright_fetch_default")
 
     def provision_stub_runtime(self, runtime_root: Path) -> ProvisionedRuntime:
         registration = self.provision_runtime(

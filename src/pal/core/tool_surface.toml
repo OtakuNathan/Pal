@@ -1,0 +1,81 @@
+# Tool Surface Configuration
+# Controls which capabilities are exposed to the LLM as function-calling tools.
+# Other capabilities remain discoverable via operation_execution_discovery_search.
+
+[singletons]
+# These capabilities have target_id = SINGLETON_TARGET and are always exposed.
+capabilities = [
+    # -- execution (discovery + exec) --
+    "operation_execution_discovery_read",
+    "operation_execution_discovery_search",
+    "operation_execution_exec_run",
+    # -- introspection: module-level --
+    "introspection_module_channel_list",
+    "introspection_module_control_show",
+    "introspection_module_core_configure",
+    "introspection_module_core_observe",
+    "introspection_module_execution_show",
+    "introspection_module_execution_tools",
+    "introspection_module_failure_recent_reports",
+    "introspection_module_failure_show",
+    "introspection_module_identity_show",
+    "introspection_module_llm_active",
+    "introspection_module_llm_list",
+    "introspection_module_llm_think_level",
+    "introspection_module_memory_active_provider",
+    "introspection_module_memory_list_providers",
+    "introspection_module_memory_show",
+    "introspection_module_plugins_list",
+    "introspection_module_plugins_show",
+    "introspection_module_service_list",
+    "introspection_module_service_show",
+    "introspection_module_web_search_active_provider",
+    "introspection_module_web_search_list_providers",
+    "introspection_module_web_search_show",
+    "introspection_module_web_fetch_active_provider",
+    "introspection_module_web_fetch_list_providers",
+    "introspection_module_web_fetch_show",
+    # -- singleton operations --
+    "operation_llm_management_set_active_endpoint",
+    "operation_memory_management_set_active_provider",
+    "operation_plugin_management_attach",
+    "operation_plugin_management_detach",
+    "operation_plugin_management_disable",
+    "operation_plugin_management_enable",
+    "operation_plugin_management_rescan",
+    "operation_service_lifecycle_attach",
+    "operation_service_lifecycle_detach",
+    "operation_service_management_create",
+    "operation_service_management_destroy",
+    "operation_service_management_disable",
+    "operation_service_management_enable",
+    "operation_service_management_set_output_channel",
+    "operation_service_management_set_output_target",
+    "operation_service_management_update_schedule",
+    "operation_web_search_query",
+    "operation_web_fetch_read",
+]
+
+# Dynamic capabilities: resolved at runtime by following the active provider.
+# provider_setting values:
+#   "memory" = read from MemoryService.l3_selector.active_provider_id
+#   any other string = read from RuntimeSettingRepository by that key
+[[dynamic]]
+canonical_path = "operation_l3_recall_query"
+provider_setting = "memory"
+
+[[dynamic]]
+canonical_path = "operation_l3_commit_write"
+provider_setting = "memory"
+
+[[dynamic]]
+canonical_path = "operation_l3_correct_patch"
+provider_setting = "memory"
+
+[[dynamic]]
+canonical_path = "introspection_provider_web_search_health"
+provider_setting = "active_web_search_provider_id"
+
+[[dynamic]]
+canonical_path = "introspection_provider_web_fetch_health"
+provider_setting = "active_web_fetch_provider_id"

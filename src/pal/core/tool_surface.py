@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
 from typing import Any
 
 from pal.shared import SINGLETON_TARGET
+
+_CONFIG_PATH = Path(__file__).parent / "tool_surface.toml"
 
 
 class ToolSurface:
     def __init__(self, context) -> None:
         self.context = context
+        self._config = self._load_config()
+
+    @staticmethod
+    def _load_config() -> dict[str, Any]:
+        with open(_CONFIG_PATH, "rb") as f:
+            return tomllib.load(f)
 
     def build_llm_tool_contracts(self) -> list[dict[str, object]]:
         return self.build_tool_contracts_from_descriptors(self.select_llm_descriptors())
@@ -34,56 +44,8 @@ class ToolSurface:
         llm_descriptors: list[Any] = []
         seen: set[tuple[str, str]] = set()
 
-        singleton_canonicals = (
-            # -- execution (discovery + exec) --
-            "operation_execution_discovery_read",
-            "operation_execution_discovery_search",
-            "operation_execution_exec_run",
-            # -- introspection: all module-level capabilities --
-            "introspection_module_channel_list",
-            "introspection_module_control_show",
-            "introspection_module_core_configure",
-            "introspection_module_core_observe",
-            "introspection_module_execution_show",
-            "introspection_module_execution_tools",
-            "introspection_module_failure_recent_reports",
-            "introspection_module_failure_show",
-            "introspection_module_identity_show",
-            "introspection_module_llm_active",
-            "introspection_module_llm_list",
-            "introspection_module_llm_think_level",
-            "introspection_module_memory_active_provider",
-            "introspection_module_memory_list_providers",
-            "introspection_module_memory_show",
-            "introspection_module_plugins_list",
-            "introspection_module_plugins_show",
-            "introspection_module_service_list",
-            "introspection_module_service_show",
-            # -- singleton operation capabilities --
-            "operation_channel_management_attach",
-            "operation_channel_management_detach",
-            "operation_channel_management_disable",
-            "operation_channel_management_enable",
-            "operation_control_lifecycle_attach",
-            "operation_control_lifecycle_detach",
-            "operation_llm_management_set_active_endpoint",
-            "operation_memory_management_set_active_provider",
-            "operation_plugin_management_attach",
-            "operation_plugin_management_detach",
-            "operation_plugin_management_disable",
-            "operation_plugin_management_enable",
-            "operation_plugin_management_rescan",
-            "operation_service_lifecycle_attach",
-            "operation_service_lifecycle_detach",
-            "operation_service_management_create",
-            "operation_service_management_destroy",
-            "operation_service_management_disable",
-            "operation_service_management_enable",
-            "operation_service_management_set_output_channel",
-            "operation_service_management_set_output_target",
-            "operation_service_management_update_schedule",
-        )
-        for canonical_path in singleton_canonicals:
+        # -- singleton capabilities from config --
+        for canonical_path in self._config.get("singletons", {}).get("capabilities", []):
             for record_id in by_canonical.get(canonical_path, []):
                 descriptor = records[record_id]
                 if descriptor.target_id != SINGLETON_TARGET:
@@ -94,24 +56,18 @@ class ToolSurface:
                 seen.add(key)
                 llm_descriptors.append(descriptor)
 
-        try:
-            memory_service = self.context.require_port("memory:memory")
-        except KeyError:
-            return llm_descriptors
-
-        active_provider_id = str(memory_service.l3_selector.active_provider_id or "").strip()
-        if not active_provider_id:
-            return llm_descriptors
-
-        provider_canonicals = (
-            "operation_l3_recall_query",
-            "operation_l3_commit_write",
-            "operation_l3_correct_patch",
-        )
-        for canonical_path in provider_canonicals:
+        # -- dynamic capabilities from config --
+        for entry in self._config.get("dynamic", []):
+            canonical_path = entry.get("canonical_path", "")
+            provider_setting = entry.get("provider_setting", "")
+            if not canonical_path or not provider_setting:
+                continue
+            active_target_id = self._resolve_dynamic_target(provider_setting)
+            if not active_target_id:
+                continue
             for record_id in by_canonical.get(canonical_path, []):
                 descriptor = records[record_id]
-                if descriptor.target_id != active_provider_id:
+                if descriptor.target_id != active_target_id:
                     continue
                 key = (descriptor.canonical_path or descriptor.name, descriptor.target_id or SINGLETON_TARGET)
                 if key in seen:
@@ -121,6 +77,25 @@ class ToolSurface:
                 break
 
         return llm_descriptors
+
+    def _resolve_dynamic_target(self, provider_setting: str) -> str:
+        if provider_setting == "memory":
+            return self._get_active_l3_provider_id()
+        return self._get_setting(provider_setting)
+
+    def _get_active_l3_provider_id(self) -> str:
+        try:
+            memory_service = self.context.require_port("memory:memory")
+        except KeyError:
+            return ""
+        return str(memory_service.l3_selector.active_provider_id or "").strip()
+
+    def _get_setting(self, key: str) -> str:
+        try:
+            from pal.llm.repository import RuntimeSettingRepository
+            return str(RuntimeSettingRepository().get(key) or "").strip()
+        except Exception:
+            return ""
 
     def select_failure_descriptors(self, signal) -> list[Any]:
         execution_runtime = self.context.execution_runtime
@@ -185,6 +160,22 @@ class ToolSurface:
         elif signal.subsystem == "execution":
             include("introspection_module_execution_show")
             include("introspection_module_execution_tools")
+        elif signal.subsystem == "web_search":
+            include("introspection_module_web_search_show")
+            include("introspection_module_web_search_active_provider")
+            include("introspection_module_web_search_list_providers")
+            active_web_search_provider_id = self._get_setting("active_web_search_provider_id")
+            if active_web_search_provider_id:
+                include("introspection_provider_web_search_health", target_id=active_web_search_provider_id)
+                include("operation_web_search_management_set_active_provider")
+        elif signal.subsystem == "web_fetch":
+            include("introspection_module_web_fetch_show")
+            include("introspection_module_web_fetch_active_provider")
+            include("introspection_module_web_fetch_list_providers")
+            active_web_fetch_provider_id = self._get_setting("active_web_fetch_provider_id")
+            if active_web_fetch_provider_id:
+                include("introspection_provider_web_fetch_health", target_id=active_web_fetch_provider_id)
+                include("operation_web_fetch_management_set_active_provider")
         else:
             module_name = str(signal.subsystem or "").strip()
             if module_name:

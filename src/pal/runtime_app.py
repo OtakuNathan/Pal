@@ -57,8 +57,7 @@ class PalRuntimeApp:
                 if not processed:
                     await asyncio.sleep(self.idle_sleep_seconds)
         finally:
-            await self.handle.channel_runtime.stop_async()
-            self.handle.database.close()
+            await self.handle.stop_async()
 
 
 def build_runtime_app(runtime_root: Path, *, debug_prompt: bool = False) -> PalRuntimeApp:

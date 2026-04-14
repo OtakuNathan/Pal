@@ -41,6 +41,11 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "- `operation_l3_maintenance_refresh_indexes` to refresh pending or stale memory indexes when needed.\n"
                     "- `introspection_module_memory_active_provider` and `operation_memory_management_set_active_provider` to inspect or switch the active memory provider.\n"
                     "- `introspection_provider_l3_show` and `introspection_provider_l3_inventory` to inspect the active L3 provider.\n"
+                    "For web access, use the explicit web capabilities:\n"
+                    "- `operation_web_search_query` to search the web.\n"
+                    "- `operation_web_fetch_read` to open a webpage and read its content.\n"
+                    "- `introspection_module_web_search_active_provider` and `introspection_module_web_fetch_active_provider` to inspect configured web providers.\n"
+                    "- `introspection_provider_web_search_health` and `introspection_provider_web_fetch_health` to inspect provider health when web calls fail.\n"
                     "If you need to discover or confirm a capability definition, use `operation_execution_discovery_search` and `operation_execution_discovery_read`.\n"
                     "Use the smallest capability that answers the need; if existing information is enough, answer directly."
                 ),

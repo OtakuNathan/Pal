@@ -11,6 +11,7 @@ from pal.llm import CanonicalToolCall
 from pal.runtime_app import build_runtime_app
 from pal.runtime_app import open_runtime
 from pal.socket_client import default_socket_path, send_message
+from pal.web_fetch import run_browser_service_cli
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -40,6 +41,17 @@ def _build_parser() -> argparse.ArgumentParser:
     cap_call_parser.add_argument("--runtime-root", type=Path, required=True)
     cap_call_parser.add_argument("--name", required=True)
     cap_call_parser.add_argument("--args", default="{}")
+
+    browser_service_parser = subparsers.add_parser(
+        "browser-service",
+        help="Run the internal Playwright fetch browser service",
+    )
+    browser_service_parser.add_argument("--runtime-root", type=Path, required=True)
+    browser_service_parser.add_argument("--host", required=True)
+    browser_service_parser.add_argument("--port", type=int, required=True)
+    browser_service_parser.add_argument("--token", required=True)
+    browser_service_parser.add_argument("--idle-timeout-seconds", type=int, default=60)
+    browser_service_parser.add_argument("--max-concurrency", type=int, default=2)
     return parser
 
 
@@ -105,7 +117,7 @@ async def _run_async(args: argparse.Namespace) -> int:
             )
             return 0 if result.ok else 2
         finally:
-            handle.database.close()
+            await handle.stop_async()
     if args.command == "cap-call":
         handle = open_runtime(args.runtime_root)
         try:
@@ -126,13 +138,22 @@ async def _run_async(args: argparse.Namespace) -> int:
             )
             return 0 if str(result.status).lower() == "ok" else 2
         finally:
-            handle.database.close()
+            await handle.stop_async()
     return 1
 
 
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
+    if args.command == "browser-service":
+        return run_browser_service_cli(
+            runtime_root=args.runtime_root,
+            host=str(args.host),
+            port=int(args.port),
+            token=str(args.token),
+            idle_timeout_seconds=int(args.idle_timeout_seconds),
+            max_concurrency=int(args.max_concurrency),
+        )
     return asyncio.run(_run_async(args))
 
 

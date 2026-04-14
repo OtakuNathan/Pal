@@ -138,6 +138,23 @@ class PluginsIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Plugin rescan result", result),
         )
 
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="management",
+        action_name="rescan_and_attach_new_first_party",
+        description="Rescan plugin directories and attach newly discovered enabled first-party plugins",
+    )
+    def rescan_and_attach_new_first_party(self, call: IntrospectionCall) -> IntrospectionResult:
+        _ = call
+        result = self.host.rescan_and_attach_new_first_party()
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="plugin rescan and attach result",
+            structured=result,
+            llm_text=render_titled_structured_for_llm("Plugin rescan and attach result", result),
+        )
+
 
 def register_with_core(context, host: PluginHost) -> ModuleHandle:
     provider = PluginsIntrospectionProvider(host=host)
