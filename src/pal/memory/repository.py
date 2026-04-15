@@ -659,7 +659,7 @@ class MemoryDurableRepository:
         ):
             db.execute_sql(
                 f"INSERT INTO {resolved_table_name}(rowid, embedding) VALUES (?, ?)",
-                (rowid, vector_blob.decode("utf-8")),
+                (rowid, bytes(vector_blob).decode("utf-8")),
             )
         return resolved_table_name
 
@@ -685,7 +685,7 @@ class MemoryDurableRepository:
             db.execute_sql(f"DELETE FROM {table_name} WHERE rowid = ?", (rowid,))
             db.execute_sql(
                 f"INSERT INTO {table_name}(rowid, embedding) VALUES (?, ?)",
-                (rowid, vector_blob.decode("utf-8")),
+                (rowid, bytes(vector_blob).decode("utf-8")),
             )
         except sqlite3.OperationalError:
             return
@@ -834,7 +834,7 @@ def _sanitize_query_term(term: str) -> str:
 
 
 def serialize_vector(vector: list[float]) -> bytes:
-    return sqlite3.Binary(json.dumps([float(value) for value in vector]).encode("utf-8"))  # type: ignore[return-value]
+    return bytes(json.dumps([float(value) for value in vector]).encode("utf-8"))
 
 
 def deserialize_vector(blob: bytes) -> list[float]:

@@ -127,7 +127,6 @@ class PalV2BootstrapTests(unittest.TestCase):
             language="zh",
             vibe="calm",
             tone="direct",
-            style_notes="Prefer concise Chinese replies.",
             core_policy=["Tool is the only execution primitive."],
             timezone="Asia/Shanghai",
         )
@@ -143,7 +142,6 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(persona.core_policy, ["Tool is the only execution primitive."])
 
         self.assertIsNotNone(preferences)
-        self.assertEqual(preferences.language_preference, "zh")
         self.assertEqual(preferences.timezone, "Asia/Shanghai")
         self.assertEqual(preferences.preferences_blob, {})
 

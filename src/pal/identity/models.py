@@ -12,7 +12,6 @@ class PalPersonaModel(BaseModel):
     language = CharField(default="en")
     vibe = TextField(null=True)
     tone = TextField(null=True)
-    style_notes = TextField(null=True)
     core_policy = JSONField(default=list)
     created_at = TextField(default=utc_now)
     updated_at = TextField(default=utc_now)
@@ -23,7 +22,6 @@ class PalPersonaModel(BaseModel):
 
 class UserPreferencesModel(BaseModel):
     preference_id = CharField(primary_key=True)
-    language_preference = CharField(null=True)
     style_preference = TextField(null=True)
     timezone = CharField(null=True)
     preferences_blob = JSONField(default=dict)

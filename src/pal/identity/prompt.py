@@ -24,17 +24,13 @@ class IdentityPromptFragmentProvider(PromptFragmentProvider):
                 lines.append(f"Vibe: {persona.vibe}")
             if persona.tone:
                 lines.append(f"Tone: {persona.tone}")
-            if persona.style_notes:
-                lines.append(f"Style notes: {persona.style_notes}")
+            if preferences is not None and preferences.style_preference:
+                lines.append(f"Style: {preferences.style_preference}")
             if persona.core_policy:
                 lines.append("Core policy:")
                 lines.extend(f"- {item}" for item in persona.core_policy)
         if preferences is not None and preferences.timezone:
             lines.append(f"Timezone: {preferences.timezone}")
-        if preferences is not None and preferences.language_preference:
-            lines.append(f"Preferred language: {preferences.language_preference}")
-        if preferences is not None and preferences.style_preference:
-            lines.append(f"Style preference: {preferences.style_preference}")
         if preferences is not None and preferences.preferences_blob:
             lines.append("User preferences:")
             for key, value in sorted(preferences.preferences_blob.items()):

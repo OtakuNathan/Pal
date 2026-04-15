@@ -28,7 +28,6 @@ class IdentityService(IdentityServicePort):
             language=persona.language,
             vibe=persona.vibe,
             tone=persona.tone,
-            style_notes=persona.style_notes,
             core_policy=list(persona.core_policy or []),
         )
 
@@ -38,7 +37,6 @@ class IdentityService(IdentityServicePort):
             return None
         return PalPreferencesProfile(
             preference_id=preferences.preference_id,
-            language_preference=preferences.language_preference,
             style_preference=preferences.style_preference,
             timezone=preferences.timezone,
             preferences_blob=dict(preferences.preferences_blob or {}),
@@ -59,7 +57,6 @@ class IdentityService(IdentityServicePort):
         preferences = self.repository.update_user_preferences(timezone=timezone)
         return PalPreferencesProfile(
             preference_id=preferences.preference_id,
-            language_preference=preferences.language_preference,
             style_preference=preferences.style_preference,
             timezone=preferences.timezone,
             preferences_blob=dict(preferences.preferences_blob or {}),

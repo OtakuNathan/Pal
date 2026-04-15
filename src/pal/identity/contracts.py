@@ -11,14 +11,12 @@ class PalPersonaProfile:
     language: str
     vibe: str | None = None
     tone: str | None = None
-    style_notes: str | None = None
     core_policy: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
 class PalPreferencesProfile:
     preference_id: str
-    language_preference: str | None = None
     style_preference: str | None = None
     timezone: str | None = None
     preferences_blob: dict[str, Any] = field(default_factory=dict)

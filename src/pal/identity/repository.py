@@ -18,7 +18,6 @@ class IdentityRepository:
         language: str = "en",
         vibe: str | None = None,
         tone: str | None = None,
-        style_notes: str | None = None,
         core_policy: list[str] | None = None,
         timezone: str | None = None,
     ) -> None:
@@ -30,7 +29,6 @@ class IdentityRepository:
                 "language": language,
                 "vibe": vibe,
                 "tone": tone,
-                "style_notes": style_notes,
                 "core_policy": list(core_policy or ()),
                 "created_at": now,
                 "updated_at": now,
@@ -40,7 +38,6 @@ class IdentityRepository:
         UserPreferencesModel.get_or_create(
             preference_id=DEFAULT_PREFERENCE_ID,
             defaults={
-                "language_preference": language,
                 "style_preference": None,
                 "timezone": timezone,
                 "preferences_blob": {},
@@ -74,7 +71,6 @@ class IdentityRepository:
     def update_user_preferences(
         self,
         *,
-        language_preference: str | None = None,
         style_preference: str | None = None,
         timezone: str | None = None,
         preferences_patch: dict[str, Any] | None = None,
@@ -84,7 +80,6 @@ class IdentityRepository:
         if preferences is None:
             preferences = UserPreferencesModel.create(
                 preference_id=DEFAULT_PREFERENCE_ID,
-                language_preference=language_preference,
                 style_preference=style_preference,
                 timezone=timezone,
                 preferences_blob=dict(preferences_patch or {}),
@@ -95,8 +90,6 @@ class IdentityRepository:
 
         merged = dict(preferences.preferences_blob or {})
         merged.update(dict(preferences_patch or {}))
-        if language_preference is not None:
-            preferences.language_preference = language_preference
         if style_preference is not None:
             preferences.style_preference = style_preference
         if timezone is not None:
