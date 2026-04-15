@@ -16,7 +16,6 @@ class IdentityPromptFragmentProvider(PromptFragmentProvider):
         _ = context
         persona = self.service.get_persona()
         preferences = self.service.get_preferences()
-        state = self.service.get_state()
         lines: list[str] = []
         if persona is not None:
             lines.append(f"Name: {persona.display_name}")
@@ -42,8 +41,6 @@ class IdentityPromptFragmentProvider(PromptFragmentProvider):
                 rendered_value = str(value).strip()
                 if rendered_value:
                     lines.append(f"- {key}: {rendered_value}")
-        if state is not None:
-            lines.append(f"Runtime status: {state.status}")
         if not lines:
             return []
         return [
