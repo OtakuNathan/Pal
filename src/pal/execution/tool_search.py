@@ -88,6 +88,38 @@ class ExecutionDiscoveryCapabilityMixin:
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="module",
+        family="exec",
+        action_name="capability_call",
+        description="Invoke any registered capability by canonical path. Use discovery_search to find available capabilities first.",
+        aliases=("capability.call",),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Canonical path of the capability to invoke."},
+                "args": {"type": "object", "description": "Arguments for the capability."},
+            },
+            "required": ["name"],
+        },
+        metadata={"llm_exposed": True, "omit_family_in_canonical": True},
+    )
+    def capability_call(self, call: IntrospectionCall) -> IntrospectionResult:
+        from pal.execution.contracts import CapabilityCall
+
+        name = str(call.args.get("name") or "").strip()
+        if not name:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="name is required")
+        capability_args = dict(call.args.get("args") or {})
+        result = self.runtime.execute(CapabilityCall(name=name, args=capability_args))
+        return IntrospectionResult(
+            status=result.status,
+            text=result.text,
+            structured=result.structured,
+            llm_text=getattr(result, "llm_text", ""),
+        )
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
         family="discovery",
         action_name="search",
         description="Search execution capabilities by name, family, tags, keywords, or description.",

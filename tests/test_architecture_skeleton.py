@@ -624,15 +624,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("operation_execution_discovery_search", exposed_names)
             self.assertIn("operation_execution_discovery_read", exposed_names)
             self.assertIn("operation_execution_exec_run", exposed_names)
-            self.assertIn("introspection_module_identity_show", exposed_names)
-            self.assertIn("introspection_module_llm_active", exposed_names)
-            self.assertIn("introspection_module_llm_think_level", exposed_names)
-            self.assertIn("introspection_module_memory_active_provider", exposed_names)
-            self.assertIn("operation_memory_management_set_active_provider", exposed_names)
-            self.assertIn("operation_l3_recall_query", exposed_names)
-            self.assertIn("operation_l3_commit_write", exposed_names)
-            self.assertIn("operation_l3_correct_patch", exposed_names)
-            self.assertIn("operation_llm_management_set_active_endpoint", exposed_names)
+            self.assertIn("operation_execution_capability_call", exposed_names)
+            self.assertNotIn("introspection_module_identity_show", exposed_names)
+            self.assertNotIn("introspection_module_llm_active", exposed_names)
+            self.assertNotIn("operation_llm_management_set_active_endpoint", exposed_names)
             self.assertNotIn("echo", exposed_names)
             exec_tool = next(item for item in request.tools if item["function"]["name"] == "operation_execution_exec_run")
             self.assertIn("cmd", exec_tool["function"]["parameters"]["properties"])
@@ -819,7 +814,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             fragments = core.collect_prompt_fragments(PromptAssemblyContext(core_mode="default"))
             sections = [fragment.section for fragment in fragments]
 
-            self.assertEqual(sections, ["identity", "rules", "capability_guide"])
+            self.assertEqual(sections, ["identity", "rules"])
             prompt_ir = core.build_prompt_ir(
                 PromptAssemblyContext(
                     core_mode="default",
@@ -840,7 +835,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     ),
                 )
             )
-            self.assertEqual(prompt.metadata["fragment_sections"], ["identity", "operating_rules", "capability_guide"])
+            self.assertEqual(prompt.metadata["fragment_sections"], ["identity", "operating_rules"])
             self.assertEqual(
                 prompt.metadata["user_context_blocks"],
                 ["l1_recent_context_0", "l1_recent_context_1", "memory_active_entries"],
@@ -850,11 +845,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(prompt.messages[-1], {"role": "user", "content": "Hello from user"})
             self.assertIn("## Identity", prompt.messages[0]["content"])
             self.assertIn("## Operating Rules", prompt.messages[0]["content"])
-            self.assertIn("## Capability Guide", prompt.messages[0]["content"])
-            self.assertIn("operation_web_search_query", prompt.messages[0]["content"])
-            self.assertIn("operation_web_fetch_read", prompt.messages[0]["content"])
+            self.assertNotIn("## Capability Guide", prompt.messages[0]["content"])
+            self.assertIn("operation_execution_discovery_search", prompt.messages[0]["content"])
+            self.assertIn("operation_execution_capability_call", prompt.messages[0]["content"])
             self.assertLess(prompt.messages[0]["content"].index("## Identity"), prompt.messages[0]["content"].index("## Operating Rules"))
-            self.assertLess(prompt.messages[0]["content"].index("## Operating Rules"), prompt.messages[0]["content"].index("## Capability Guide"))
+            self.assertLess(prompt.messages[0]["content"].index("## Operating Rules"), prompt.messages[0]["content"].index("operation_execution_discovery_search"))
             self.assertNotIn("## Runtime Overlay", prompt.messages[0]["content"])
             self.assertNotIn("## Memory Projection", prompt.messages[0]["content"])
             self.assertEqual(prompt.messages[1], {"role": "user", "content": "What timezone should you use?"})
