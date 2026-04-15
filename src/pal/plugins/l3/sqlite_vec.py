@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from typing import Any
 
 from pal.foundation import utc_now
@@ -12,10 +14,10 @@ from pal.memory import (
     L3CorrectRequest,
     L3MutationResult,
     L3RecallResult,
+    L3RetireResult,
     MemoryQuery,
-    MemoryService,
 )
-from pal.memory.embedding import EmbeddingRuntimePort, SentenceTransformerBGEEmbedder
+from pal.memory.embedding import EmbeddingProviderPort, InProcBGEEmbeddingProvider
 from pal.memory.repository import (
     MemoryDurableRepository,
     cosine_similarity,
@@ -40,6 +42,68 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 
 def _stable_document_search_text(*parts: str) -> str:
     return "\n".join(part.strip() for part in parts if str(part or "").strip())
+
+
+def _stable_hash(payload: dict[str, Any]) -> str:
+    blob = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _stable_fact_fingerprint(
+    *,
+    title: str,
+    summary: str,
+    payload: dict[str, Any],
+    canonical_key: str | None,
+    scope: str,
+    task_id: str | None,
+) -> str:
+    return _stable_hash(
+        {
+            "canonical_key": canonical_key or "",
+            "kind": "fact",
+            "payload": payload,
+            "scope": scope,
+            "summary": summary,
+            "task_id": task_id or "",
+            "title": title,
+        }
+    )
+
+
+def _stable_case_fingerprint(
+    *,
+    title: str,
+    summary: str,
+    situation_text: str,
+    task_text: str,
+    action_text: str,
+    result_text: str,
+    payload: dict[str, Any],
+    scope: str,
+    task_id: str | None,
+) -> str:
+    return _stable_hash(
+        {
+            "action_text": action_text,
+            "kind": "case",
+            "payload": payload,
+            "result_text": result_text,
+            "scope": scope,
+            "situation_text": situation_text,
+            "summary": summary,
+            "task_id": task_id or "",
+            "task_text": task_text,
+            "title": title,
+        }
+    )
+
+
+def _extract_entry_topics(entry: L2Entry) -> list[str]:
+    raw_topics = entry.payload.get("topics") if isinstance(entry.payload, dict) else None
+    if not isinstance(raw_topics, list):
+        return []
+    return [str(value).strip() for value in raw_topics if str(value).strip()]
 
 
 @capability_node(
@@ -68,7 +132,8 @@ def _stable_document_search_text(*parts: str) -> str:
 class SQLiteVecL3Plugin:
     service: MemoryService
     repository: MemoryDurableRepository = field(default_factory=MemoryDurableRepository)
-    embedder: EmbeddingRuntimePort | None = None
+    embedding_provider: EmbeddingProviderPort | None = None
+    embedder: InitVar[EmbeddingProviderPort | None] = None
     provider_id: str = "sqlite_vec_l3"
     mounted: bool = True
     fusion_weights: dict[str, float] = field(
@@ -81,11 +146,14 @@ class SQLiteVecL3Plugin:
         }
     )
     min_vector_similarity: float = 0.35
+    last_embedding_error: str = ""
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, embedder: EmbeddingProviderPort | None) -> None:
         self.repository.ensure_schema()
-        if self.embedder is None:
-            self.embedder = SentenceTransformerBGEEmbedder()
+        if self.embedding_provider is None and embedder is not None:
+            self.embedding_provider = embedder
+        if self.embedding_provider is None:
+            self.embedding_provider = InProcBGEEmbeddingProvider()
 
     @property
     def module_id(self) -> str:
@@ -103,13 +171,18 @@ class SQLiteVecL3Plugin:
     def inspect(self) -> dict[str, Any]:
         sqlite_vec_status = ensure_sqlite_vec_loaded()
         inventory = self.repository.inventory()
+        provider_health = self._embedding_health()
         inventory.update(
             {
                 "provider_id": self.provider_id,
                 "mounted": self.mounted,
                 "vector_backend": "sqlite-vec" if sqlite_vec_status.available else "python-fallback",
                 "vector_backend_detail": sqlite_vec_status.detail,
-                "embedding_model": getattr(self.embedder, "model_name", "unavailable"),
+                "embedding_provider_id": self._embedding_provider_id(),
+                "embedding_model": self._embedding_model_name(),
+                "embedding_transport": self._embedding_transport(),
+                "embedding_health": provider_health,
+                "last_embedding_error": self.last_embedding_error,
             }
         )
         return inventory
@@ -141,7 +214,11 @@ class SQLiteVecL3Plugin:
         scope="provider",
         family="recall",
         action_name="query",
-        description="Recall durable L3 memory records",
+        description=(
+            "Recall durable L3 memory records by searching against the source-of-truth text. "
+            "queries: natural language search terms — the system will match against original verbatim facts. "
+            "Provide descriptive, specific queries for best recall results."
+        ),
         args_schema={
             "type": "object",
             "properties": {
@@ -184,34 +261,54 @@ class SQLiteVecL3Plugin:
         scope="provider",
         family="commit",
         action_name="write",
-        description="Commit durable L3 memory",
+        description=(
+            "Commit a durable L3 memory record. "
+            "title: short label for this memory. "
+            "summary: concise summary for future LLM consumption (compressed). "
+            "search_text: the original verbatim fact or statement — source of truth for retrieval indexing. "
+            "Do NOT omit or leave empty — all three are required for correct indexing."
+        ),
         args_schema={
             "type": "object",
             "properties": {
-                "kind": {"type": "string"},
-                "scope": {"type": "string"},
+                "kind": {"type": "string", "description": "fact or case"},
+                "title": {"type": "string", "description": "Short label for this memory"},
+                "summary": {"type": "string", "description": "Concise summary (compressed, for prompt display)"},
+                "search_text": {"type": "string", "description": "Original verbatim fact — source of truth, used for FTS and vector embedding"},
+                "scope": {"type": "string", "description": "system or task"},
                 "task_id": {"type": "string"},
-                "title": {"type": "string"},
-                "summary": {"type": "string"},
                 "canonical_key": {"type": "string"},
                 "payload": {"type": "object"},
-                "topics": {"type": "array", "items": {"type": "string"}},
-                "situation_text": {"type": "string"},
-                "task_text": {"type": "string"},
-                "action_text": {"type": "string"},
-                "result_text": {"type": "string"},
+                "topics": {"type": "array", "items": {"type": "string"}, "description": "Topic tags for filtering"},
+                "situation_text": {"type": "string", "description": "For case kind: situation description"},
+                "task_text": {"type": "string", "description": "For case kind: task description"},
+                "action_text": {"type": "string", "description": "For case kind: action taken"},
+                "result_text": {"type": "string", "description": "For case kind: result outcome"},
             },
-            "required": ["kind"],
+            "required": ["kind", "title", "summary", "search_text"],
         },
     )
     def commit_write(self, call: IntrospectionCall) -> IntrospectionResult:
+        kind = str(call.args.get("kind") or "").strip()
+        title = str(call.args.get("title") or "").strip()
+        summary = str(call.args.get("summary") or "").strip()
+        search_text = str(call.args.get("search_text") or "").strip()
+        if not kind:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="kind is required")
+        if not title:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="title is required")
+        if not summary:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="summary is required")
+        if not search_text:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="search_text is required")
         result = self.commit(
             L3CommitRequest(
-                kind=str(call.args.get("kind") or ""),
+                kind=kind,
+                title=title,
+                summary=summary,
+                search_text=search_text,
                 scope=str(call.args.get("scope") or "system"),
                 task_id=str(call.args.get("task_id")) if call.args.get("task_id") is not None else None,
-                title=str(call.args.get("title")) if call.args.get("title") is not None else None,
-                summary=str(call.args.get("summary") or ""),
                 canonical_key=str(call.args.get("canonical_key")) if call.args.get("canonical_key") is not None else None,
                 payload=dict(call.args.get("payload") or {}),
                 topics=[str(value) for value in list(call.args.get("topics") or [])],
@@ -234,15 +331,20 @@ class SQLiteVecL3Plugin:
         scope="provider",
         family="correct",
         action_name="patch",
-        description="Correct durable L3 memory",
+        description=(
+            "Correct an existing durable L3 memory record. "
+            "Only provided fields will be updated. "
+            "search_text: updated source of truth for retrieval indexing."
+        ),
         args_schema={
             "type": "object",
             "properties": {
                 "document_id": {"type": "string"},
-                "title": {"type": "string"},
-                "summary": {"type": "string"},
+                "title": {"type": "string", "description": "Updated short label"},
+                "summary": {"type": "string", "description": "Updated concise summary"},
+                "search_text": {"type": "string", "description": "Updated source of truth — original verbatim fact for retrieval"},
                 "payload_patch": {"type": "object"},
-                "topics": {"type": "array", "items": {"type": "string"}},
+                "topics": {"type": "array", "items": {"type": "string"}, "description": "Replacement topic tags"},
                 "situation_text": {"type": "string"},
                 "task_text": {"type": "string"},
                 "action_text": {"type": "string"},
@@ -257,6 +359,7 @@ class SQLiteVecL3Plugin:
                 document_id=str(call.args.get("document_id") or ""),
                 title=str(call.args.get("title")) if call.args.get("title") is not None else None,
                 summary=str(call.args.get("summary")) if call.args.get("summary") is not None else None,
+                search_text=str(call.args.get("search_text")) if call.args.get("search_text") is not None else None,
                 payload_patch=dict(call.args.get("payload_patch") or {}),
                 topics=[str(value) for value in list(call.args.get("topics") or [])] if call.args.get("topics") is not None else None,
                 situation_text=str(call.args.get("situation_text")) if call.args.get("situation_text") is not None else None,
@@ -326,10 +429,21 @@ class SQLiteVecL3Plugin:
             return L3MutationResult(status=RuntimeStatus.UNAVAILABLE, document_id="")
         now = utc_now()
         if request.kind == "fact":
-            fact_id = f"fact_{uuid.uuid4().hex[:12]}"
-            summary = request.summary or (request.title or "")
-            topic_text = " ".join(request.topics) if request.topics else ""
-            search_text = _stable_document_search_text(request.title or "", summary, topic_text)
+            summary = request.summary or request.title
+            dedupe_fingerprint = request.dedupe_fingerprint or _stable_fact_fingerprint(
+                title=request.title or "",
+                summary=summary,
+                payload=dict(request.payload),
+                canonical_key=request.canonical_key,
+                scope=request.scope,
+                task_id=request.task_id,
+            )
+            existing = None
+            if request.canonical_key:
+                existing = self.repository.find_fact_by_canonical_key(request.canonical_key)
+            if existing is None and dedupe_fingerprint:
+                existing = self.repository.find_fact_by_dedupe_fingerprint(dedupe_fingerprint)
+            fact_id = existing.fact_id if existing is not None else f"fact_{uuid.uuid4().hex[:12]}"
             model = self.repository.upsert_fact(
                 fact_id=fact_id,
                 payload={
@@ -337,19 +451,29 @@ class SQLiteVecL3Plugin:
                     "task_id": request.task_id,
                     "title": request.title,
                     "summary": summary,
-                    "search_text": search_text,
+                    "search_text": request.search_text or summary,
                     "canonical_key": request.canonical_key,
-                    "dedupe_fingerprint": request.dedupe_fingerprint,
+                    "dedupe_fingerprint": dedupe_fingerprint,
                     "payload_blob": dict(request.payload),
                     "last_used_at": now,
                 },
             )
             document_id = f"fact:{model.fact_id}"
         elif request.kind == "case":
-            case_id = f"case_{uuid.uuid4().hex[:12]}"
-            summary = request.summary or (request.title or request.task_text or request.situation_text)
-            topic_text = " ".join(request.topics) if request.topics else ""
-            search_text = _stable_document_search_text(request.title or "", summary, request.situation_text, request.task_text, topic_text)
+            summary = request.summary or request.title or request.task_text or request.situation_text
+            dedupe_fingerprint = request.dedupe_fingerprint or _stable_case_fingerprint(
+                title=request.title or "",
+                summary=summary,
+                situation_text=request.situation_text,
+                task_text=request.task_text,
+                action_text=request.action_text,
+                result_text=request.result_text,
+                payload=dict(request.payload),
+                scope=request.scope,
+                task_id=request.task_id,
+            )
+            existing = self.repository.find_case_by_dedupe_fingerprint(dedupe_fingerprint)
+            case_id = existing.case_id if existing is not None else f"case_{uuid.uuid4().hex[:12]}"
             model = self.repository.upsert_case(
                 case_id=case_id,
                 payload={
@@ -361,8 +485,8 @@ class SQLiteVecL3Plugin:
                     "task_text": request.task_text,
                     "action_text": request.action_text,
                     "result_text": request.result_text,
-                    "search_text": search_text,
-                    "dedupe_fingerprint": request.dedupe_fingerprint,
+                    "search_text": request.search_text or summary,
+                    "dedupe_fingerprint": dedupe_fingerprint,
                     "payload_blob": dict(request.payload),
                     "last_used_at": now,
                 },
@@ -385,6 +509,80 @@ class SQLiteVecL3Plugin:
         self.service.project_mutation(result)
         return result
 
+    def retire_entries(self, entries: list[L2Entry]) -> L3RetireResult:
+        if not self.mounted:
+            return L3RetireResult(status=RuntimeStatus.UNAVAILABLE)
+        document_ids: list[str] = []
+        reused_document_ids: list[str] = []
+        for entry in entries:
+            if entry.kind not in {"fact", "case"}:
+                continue
+            if entry.kind == "fact":
+                existing = None
+                if entry.canonical_key:
+                    existing = self.repository.find_fact_by_canonical_key(entry.canonical_key)
+                if existing is None and entry.dedupe_fingerprint:
+                    existing = self.repository.find_fact_by_dedupe_fingerprint(entry.dedupe_fingerprint)
+                if existing is not None:
+                    document_id = f"fact:{existing.fact_id}"
+                    reused_document_ids.append(document_id)
+                    self._mark_document_pending(document_id, stale=True)
+                    document_ids.append(document_id)
+                    continue
+                model = self.repository.upsert_fact(
+                    fact_id=f"fact_{uuid.uuid4().hex[:12]}",
+                    payload={
+                        "scope": entry.scope,
+                        "task_id": entry.task_id,
+                        "title": entry.title,
+                        "summary": entry.summary,
+                        "search_text": entry.search_text or entry.summary,
+                        "canonical_key": entry.canonical_key,
+                        "dedupe_fingerprint": entry.dedupe_fingerprint,
+                        "payload_blob": dict(entry.payload),
+                        "last_used_at": utc_now(),
+                    },
+                )
+                document_id = f"fact:{model.fact_id}"
+            else:
+                existing = self.repository.find_case_by_dedupe_fingerprint(entry.dedupe_fingerprint or "")
+                if existing is not None:
+                    document_id = f"case:{existing.case_id}"
+                    reused_document_ids.append(document_id)
+                    self._mark_document_pending(document_id, stale=True)
+                    document_ids.append(document_id)
+                    continue
+                payload = dict(entry.payload or {})
+                model = self.repository.upsert_case(
+                    case_id=f"case_{uuid.uuid4().hex[:12]}",
+                    payload={
+                        "scope": entry.scope,
+                        "task_id": entry.task_id,
+                        "title": entry.title,
+                        "summary": entry.summary,
+                        "situation_text": str(payload.get("situation") or payload.get("situation_text") or ""),
+                        "task_text": str(payload.get("task") or payload.get("task_text") or ""),
+                        "action_text": str(payload.get("action") or payload.get("action_text") or ""),
+                        "result_text": str(payload.get("result") or payload.get("result_text") or ""),
+                        "search_text": entry.search_text or entry.summary,
+                        "dedupe_fingerprint": entry.dedupe_fingerprint,
+                        "payload_blob": payload,
+                        "last_used_at": utc_now(),
+                    },
+                )
+                document_id = f"case:{model.case_id}"
+            topics = _extract_entry_topics(entry)
+            self.repository.sync_fts_row(document_id)
+            self.repository.replace_topics(document_id, topics)
+            self._mark_document_pending(document_id)
+            document_ids.append(document_id)
+        return L3RetireResult(
+            status=RuntimeStatus.OK,
+            document_ids=document_ids,
+            reused_document_ids=reused_document_ids,
+            metadata={"retired": len(document_ids), "reused": len(reused_document_ids)},
+        )
+
     def correct(self, request: L3CorrectRequest) -> L3MutationResult:
         if not self.mounted:
             return L3MutationResult(status=RuntimeStatus.UNAVAILABLE, document_id=request.document_id)
@@ -402,7 +600,8 @@ class SQLiteVecL3Plugin:
             payload = dict(model.payload_blob or {})
             payload.update(request.payload_patch)
             model.payload_blob = payload
-            model.search_text = _stable_document_search_text(model.title or "", model.summary, topic_text)
+            if request.search_text is not None:
+                model.search_text = request.search_text
             model.updated_at = utc_now()
             model.save()
         elif kind == "case":
@@ -424,7 +623,8 @@ class SQLiteVecL3Plugin:
             payload = dict(model.payload_blob or {})
             payload.update(request.payload_patch)
             model.payload_blob = payload
-            model.search_text = _stable_document_search_text(model.title or "", model.summary, model.situation_text, model.task_text, topic_text)
+            if request.search_text is not None:
+                model.search_text = request.search_text
             model.updated_at = utc_now()
             model.save()
         else:
@@ -449,19 +649,27 @@ class SQLiteVecL3Plugin:
         if not self.mounted:
             return L3RecallResult()
         refreshed = self.refresh_indexes(limit=min(max(query.limit, 1), 8))
+        candidate_limit = max(query.limit * 4, 16)
         search_text = _stable_document_search_text(*query.queries)
-        fts_candidates = self.repository.list_fts_candidates(search_text, limit=max(query.limit * 3, 12))
-        topic_candidates = self.repository.list_topic_candidates(query.topic_scope, limit=max(query.limit * 3, 12))
+        lexical_candidates, lexical_source_counts = self.repository.collect_lexical_candidates(
+            search_text,
+            limit=candidate_limit,
+        )
+        topic_candidates = self.repository.list_topic_candidates(query.topic_scope, limit=candidate_limit)
         vector_query_text = _stable_document_search_text(search_text, " ".join(query.topic_scope) if query.topic_scope else "")
-        vector_candidates = self._vector_candidates(vector_query_text, limit=max(query.limit * 3, 12))
-        candidate_ids = set(fts_candidates) | set(topic_candidates) | set(vector_candidates)
+        embedding_health = self._embedding_health() if vector_query_text else {"healthy": True}
+        vector_candidates = self._vector_candidates(vector_query_text, limit=candidate_limit)
+        candidate_ids = set(lexical_candidates) | set(topic_candidates) | set(vector_candidates)
         hits = []
         scored_hits = []
         docs = {document_id: self.repository.get_document(document_id) for document_id in candidate_ids}
         docs = {document_id: doc for document_id, doc in docs.items() if doc is not None}
-        normalized_fts = self._normalize_scores(fts_candidates)
+        normalized_lexical = self._normalize_scores(lexical_candidates)
         normalized_topic = self._normalize_scores(topic_candidates)
         normalized_vector = self._normalize_scores(vector_candidates)
+        lexical_rank = self._rank_fusion_scores(lexical_candidates)
+        topic_rank = self._rank_fusion_scores(topic_candidates)
+        vector_rank = self._rank_fusion_scores(vector_candidates)
         use_counts = self._normalize_scores({doc_id: float(doc.get("use_count", 0) or 0) for doc_id, doc in docs.items()}, log_scale=True)
         recency = self._normalize_recency({doc_id: str(doc.get("last_used_at") or doc.get("updated_at") or "") for doc_id, doc in docs.items()})
         for document_id, hit in docs.items():
@@ -472,19 +680,32 @@ class SQLiteVecL3Plugin:
             if query.task_id and hit.get("task_id") not in (None, query.task_id):
                 continue
             final_score = (
-                self.fusion_weights["fts"] * normalized_fts.get(document_id, 0.0)
-                + self.fusion_weights["topic"] * normalized_topic.get(document_id, 0.0)
-                + self.fusion_weights["vector"] * normalized_vector.get(document_id, 0.0)
+                self.fusion_weights["fts"] * lexical_rank.get(document_id, 0.0)
+                + self.fusion_weights["topic"] * topic_rank.get(document_id, 0.0)
+                + self.fusion_weights["vector"] * vector_rank.get(document_id, 0.0)
                 + self.fusion_weights["use_count"] * use_counts.get(document_id, 0.0)
                 + self.fusion_weights["recency"] * recency.get(document_id, 0.0)
             )
+            source_count = sum(
+                1
+                for source_score in (
+                    lexical_rank.get(document_id, 0.0),
+                    topic_rank.get(document_id, 0.0),
+                    vector_rank.get(document_id, 0.0),
+                )
+                if source_score > 0.0
+            )
             merged = dict(hit)
             merged["scores"] = {
-                "fts": normalized_fts.get(document_id, 0.0),
+                "fts": normalized_lexical.get(document_id, 0.0),
                 "topic": normalized_topic.get(document_id, 0.0),
                 "vector": normalized_vector.get(document_id, 0.0),
+                "fts_rank": lexical_rank.get(document_id, 0.0),
+                "topic_rank": topic_rank.get(document_id, 0.0),
+                "vector_rank": vector_rank.get(document_id, 0.0),
                 "use_count": use_counts.get(document_id, 0.0),
                 "recency": recency.get(document_id, 0.0),
+                "source_count": float(source_count),
                 "final": final_score,
             }
             scored_hits.append((final_score, document_id, merged))
@@ -494,6 +715,8 @@ class SQLiteVecL3Plugin:
         projected_entries = [self._project_entry(hit, source_kind="l3_recall", candidate_state="candidate") for hit in hits]
         self.repository.bump_usage([hit["document_id"] for hit in hits])
         self.service.project_l3_entries(projected_entries, touch=True)
+        degraded_reason = str(self.last_embedding_error or embedding_health.get("last_error") or "").strip()
+        degraded = bool(vector_query_text) and bool(degraded_reason)
         return L3RecallResult(
             hits=hits,
             projected_entries=projected_entries,
@@ -501,42 +724,91 @@ class SQLiteVecL3Plugin:
                 "refreshed_embeddings": refreshed.get("refreshed", 0),
                 "vector_available": refreshed.get("vector_available", False),
                 "candidate_count": len(candidate_ids),
+                "candidate_sources": {
+                    "vector": len(vector_candidates),
+                    "topic": len(topic_candidates),
+                    "fts_word": lexical_source_counts.get("fts_word", 0),
+                    "fts_trigram": lexical_source_counts.get("fts_trigram", 0),
+                    "like": lexical_source_counts.get("like", 0),
+                },
+                "retrieval_mode": self._derive_retrieval_mode(
+                    lexical_candidates=lexical_candidates,
+                    topic_candidates=topic_candidates,
+                    vector_candidates=vector_candidates,
+                ),
+                "fusion_strategy": "ranked-hybrid-v1",
+                "degraded": degraded,
+                "degraded_reason": degraded_reason if degraded else "",
+                "embedding_healthy": bool(embedding_health.get("healthy", True)),
             },
         )
 
     def refresh_indexes(self, *, limit: int = 8, retry_failed: bool = False) -> dict[str, Any]:
-        if self.embedder is None:
-            return {"refreshed": 0, "vector_available": False, "detail": "embedder-unavailable"}
+        if self.embedding_provider is None:
+            return {"refreshed": 0, "vector_available": False, "detail": "embedding-provider-unavailable"}
+        active_provider_id = self._embedding_provider_id()
+        active_model_name = self._embedding_model_name()
+        retargeted = self.repository.retarget_embeddings(
+            provider_id=active_provider_id,
+            model_name=active_model_name,
+        )
         refreshed = 0
         failed_retried = 0
         failed_again = 0
+        pending: list[tuple[Any, dict[str, Any]]] = []
+        source_texts: list[str] = []
         for metadata in self.repository.list_retryable_embeddings(limit=limit, retry_failed=retry_failed):
             document = self.repository.get_document(metadata.document_id)
             if document is None:
                 continue
             if metadata.index_status == "failed":
                 failed_retried += 1
-            try:
-                vector = self.embedder.embed_document(str(document.get("search_text") or ""))
-                self.repository.upsert_vector_blob(
-                    embedding_id=metadata.embedding_id,
-                    vector_blob=serialize_vector(vector),
-                    dimension=len(vector),
-                )
-                norm = math.sqrt(sum(value * value for value in vector))
-                self.repository.mark_embedding_ready(embedding_id=metadata.embedding_id, norm=norm)
-                refreshed += 1
-            except Exception as exc:
-                self.repository.mark_embedding_failed(embedding_id=metadata.embedding_id, error_text=str(exc))
+            pending.append((metadata, document))
+            source_texts.append(str(document.get("search_text") or ""))
+        try:
+            vectors = self.embedding_provider.embed_documents(source_texts) if source_texts else []
+            if source_texts and len(vectors) != len(source_texts):
+                raise RuntimeError("embedding provider returned mismatched batch size")
+            self.last_embedding_error = ""
+        except Exception as exc:
+            self.last_embedding_error = str(exc)
+            for metadata, _ in pending:
+                self.repository.mark_embedding_failed(embedding_id=metadata.embedding_id, error_text=self.last_embedding_error)
                 failed_again += 1
+            sqlite_vec_status = ensure_sqlite_vec_loaded()
+            return {
+                "refreshed": 0,
+                "vector_available": bool(sqlite_vec_status.available),
+                "vector_backend_detail": sqlite_vec_status.detail,
+                "retry_failed": retry_failed,
+                "failed_retried": failed_retried,
+                "failed_again": failed_again,
+                "retargeted": retargeted,
+                "embedding_provider_id": active_provider_id,
+                "embedding_model": active_model_name,
+                "last_embedding_error": self.last_embedding_error,
+            }
+        for (metadata, _), vector in zip(pending, vectors):
+            self.repository.upsert_vector_blob(
+                embedding_id=metadata.embedding_id,
+                vector_blob=serialize_vector(vector),
+                dimension=len(vector),
+            )
+            norm = math.sqrt(sum(value * value for value in vector))
+            self.repository.mark_embedding_ready(embedding_id=metadata.embedding_id, norm=norm)
+            refreshed += 1
         sqlite_vec_status = ensure_sqlite_vec_loaded()
         return {
             "refreshed": refreshed,
-            "vector_available": bool(sqlite_vec_status.available and self.embedder is not None),
+            "vector_available": bool(sqlite_vec_status.available),
             "vector_backend_detail": sqlite_vec_status.detail,
             "retry_failed": retry_failed,
             "failed_retried": failed_retried,
             "failed_again": failed_again,
+            "retargeted": retargeted,
+            "embedding_provider_id": active_provider_id,
+            "embedding_model": active_model_name,
+            "last_embedding_error": self.last_embedding_error,
         }
 
     def _mark_document_pending(self, document_id: str, *, stale: bool = False) -> None:
@@ -546,7 +818,8 @@ class SQLiteVecL3Plugin:
         self.repository.queue_embedding(
             document_id=document_id,
             source_text=str(document.get("search_text") or ""),
-            model_name=getattr(self.embedder, "model_name", "unavailable"),
+            provider_id=self._embedding_provider_id(),
+            model_name=self._embedding_model_name(),
             index_status="stale" if stale else "pending",
         )
 
@@ -563,18 +836,34 @@ class SQLiteVecL3Plugin:
             candidate_state=candidate_state,
             touched_at=utc_now(),
             rendered=str(hit.get("rendered") or hit.get("summary") or ""),
+            search_text=str(hit.get("search_text") or ""),
+            canonical_key=str(hit.get("canonical_key")) if hit.get("canonical_key") is not None else None,
+            dedupe_fingerprint=str(hit.get("dedupe_fingerprint")) if hit.get("dedupe_fingerprint") is not None else None,
             payload=dict(hit.get("payload") or {}),
         )
 
     def _vector_candidates(self, search_text: str, *, limit: int) -> dict[str, float]:
-        if not search_text or self.embedder is None:
+        if not search_text or self.embedding_provider is None:
             return {}
         try:
-            query_vector = self.embedder.embed_query(search_text)
-        except Exception:
+            query_vector = self.embedding_provider.embed_query(search_text)
+            self.last_embedding_error = ""
+        except Exception as exc:
+            self.last_embedding_error = str(exc)
             return {}
+        sqlite_vec_scores = self.repository.query_vector_candidates_sqlite_vec(
+            provider_id=self._embedding_provider_id(),
+            model_name=self._embedding_model_name(),
+            query_vector=query_vector,
+            limit=limit,
+        )
+        if sqlite_vec_scores is not None:
+            return sqlite_vec_scores
         scores: dict[str, float] = {}
-        for metadata, blob in self.repository.list_vector_rows():
+        for metadata, blob in self.repository.list_vector_rows(
+            provider_id=self._embedding_provider_id(),
+            model_name=self._embedding_model_name(),
+        ):
             candidate = deserialize_vector(blob)
             similarity = cosine_similarity(query_vector, candidate)
             if similarity < self.min_vector_similarity:
@@ -582,6 +871,61 @@ class SQLiteVecL3Plugin:
             scores[metadata.document_id] = max(scores.get(metadata.document_id, 0.0), similarity)
         ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:limit]
         return dict(ordered)
+
+    def _derive_retrieval_mode(
+        self,
+        *,
+        lexical_candidates: dict[str, float],
+        topic_candidates: dict[str, float],
+        vector_candidates: dict[str, float],
+    ) -> str:
+        active_sources = [
+            name
+            for name, payload in (
+                ("vector", vector_candidates),
+                ("topic", topic_candidates),
+                ("lexical", lexical_candidates),
+            )
+            if payload
+        ]
+        if not active_sources:
+            return "none"
+        if len(active_sources) == 1:
+            return active_sources[0]
+        return "+".join(active_sources)
+
+    def _embedding_provider_id(self) -> str:
+        return str(getattr(self.embedding_provider, "provider_id", "unavailable") or "unavailable")
+
+    def _embedding_model_name(self) -> str:
+        return str(getattr(self.embedding_provider, "model_name", "unavailable") or "unavailable")
+
+    def _embedding_transport(self) -> str:
+        return str(getattr(self.embedding_provider, "transport", "unknown") or "unknown")
+
+    def _embedding_health(self) -> dict[str, Any]:
+        provider = self.embedding_provider
+        if provider is None:
+            return {
+                "healthy": False,
+                "provider_id": "unavailable",
+                "transport": "unknown",
+                "model_name": "unavailable",
+                "last_error": "embedding provider is not configured",
+            }
+        try:
+            payload = provider.health()
+        except Exception as exc:
+            payload = {
+                "healthy": False,
+                "provider_id": self._embedding_provider_id(),
+                "transport": self._embedding_transport(),
+                "model_name": self._embedding_model_name(),
+                "last_error": str(exc),
+            }
+        if not bool(payload.get("healthy")) and payload.get("last_error"):
+            self.last_embedding_error = str(payload.get("last_error"))
+        return payload
 
     def _normalize_scores(self, scores: dict[str, float], *, log_scale: bool = False) -> dict[str, float]:
         if not scores:
@@ -612,3 +956,12 @@ class SQLiteVecL3Plugin:
             else:
                 scores[key] = (value.timestamp() - low) / (high - low)
         return scores
+
+    def _rank_fusion_scores(self, scores: dict[str, float]) -> dict[str, float]:
+        if not scores:
+            return {}
+        ordered = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+        return {
+            document_id: 1.0 / float(rank)
+            for rank, (document_id, _) in enumerate(ordered, start=1)
+        }

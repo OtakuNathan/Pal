@@ -92,6 +92,7 @@ def compose_runtime(
     memory_service = MemoryService(
         l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require)
     )
+    runtime_settings_repository.ensure_defaults()
     plugin_host = PluginHost(
         context=core.context,
         runtime_root=registration.runtime.runtime_root,

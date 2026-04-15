@@ -164,7 +164,7 @@ def register_with_core(context: MainContext, service: MemoryService) -> ModuleHa
     from pal.memory.prompt import MemoryPromptFragmentProvider
 
     provider = MemoryIntrospectionProvider(service=service, context=context)
-    prompt_provider = MemoryPromptFragmentProvider(service=service)
+    prompt_provider = MemoryPromptFragmentProvider()
     handle = ModuleHandle(
         module_id="memory",
         tier=MODULE_TIER_CORE_FOUNDATION,

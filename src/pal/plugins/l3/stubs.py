@@ -8,6 +8,7 @@ from pal.memory.contracts import (
     L3CorrectRequest,
     L3MutationResult,
     L3RecallResult,
+    L3RetireResult,
     MemoryQuery,
 )
 from pal.shared import (
@@ -294,6 +295,10 @@ class NullL3Plugin(_L3ProviderCapabilityMixin):
         _ = request
         return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id="")
 
+    def retire_entries(self, entries: list[L2Entry]) -> L3RetireResult:
+        _ = entries
+        return L3RetireResult(status=RuntimeStatus.SKIPPED)
+
     def refresh_indexes(self, *, limit: int = 8, retry_failed: bool = False) -> dict[str, object]:
         _ = (limit, retry_failed)
         return {"refreshed": 0, "vector_available": False}
@@ -321,24 +326,57 @@ class MockL3Plugin(_L3ProviderCapabilityMixin):
                 summary=str(record.get("summary", record.get("title", ""))),
                 source_ref=str(record.get("document_id", "")),
                 rendered=str(record.get("rendered", record.get("summary", ""))),
+                search_text=str(record.get("search_text", "")),
+                canonical_key=str(record.get("canonical_key")) if record.get("canonical_key") is not None else None,
+                dedupe_fingerprint=str(record.get("dedupe_fingerprint")) if record.get("dedupe_fingerprint") is not None else None,
                 payload=dict(record),
             )
             for record in self.records
         ]
+        service = getattr(self, "service", None)
+        if service is not None and hasattr(service, "project_l3_entries"):
+            service.project_l3_entries(entries, touch=True)
         return L3RecallResult(hits=list(self.records), projected_entries=entries)
 
     def commit(self, request: L3CommitRequest) -> L3MutationResult:
-        document_id = f"{request.kind}:{len(self.records) + 1}"
+        existing = None
+        if request.kind == "fact" and request.canonical_key:
+            existing = next(
+                (
+                    record
+                    for record in self.records
+                    if str(record.get("document_kind")) == "fact"
+                    and str(record.get("canonical_key") or "").strip() == str(request.canonical_key or "").strip()
+                ),
+                None,
+            )
+        if existing is None and request.dedupe_fingerprint:
+            existing = next(
+                (
+                    record
+                    for record in self.records
+                    if str(record.get("document_kind")) == request.kind
+                    and str(record.get("dedupe_fingerprint") or "").strip() == str(request.dedupe_fingerprint or "").strip()
+                ),
+                None,
+            )
+        document_id = str(existing.get("document_id")) if existing is not None else f"{request.kind}:{len(self.records) + 1}"
         hit = {
             "document_id": document_id,
             "document_kind": request.kind,
             "scope": request.scope,
             "title": request.title or "",
             "summary": request.summary,
+            "search_text": request.summary or request.title or "",
+            "canonical_key": request.canonical_key,
+            "dedupe_fingerprint": request.dedupe_fingerprint,
             "topics": list(request.topics),
             "payload": dict(request.payload),
         }
-        self.records.append(hit)
+        if existing is None:
+            self.records.append(hit)
+        else:
+            existing.update(hit)
         entry = L2Entry(
             entry_id=document_id,
             kind=request.kind,
@@ -350,9 +388,72 @@ class MockL3Plugin(_L3ProviderCapabilityMixin):
             source_ref=document_id,
             candidate_state="stable",
             rendered=request.summary,
+            search_text=str(hit.get("search_text") or ""),
+            canonical_key=request.canonical_key,
+            dedupe_fingerprint=request.dedupe_fingerprint,
             payload=dict(hit),
         )
-        return L3MutationResult(status=RuntimeStatus.OK, document_id=document_id, hit=hit, projected_entry=entry)
+        result = L3MutationResult(status=RuntimeStatus.OK, document_id=document_id, hit=hit, projected_entry=entry)
+        service = getattr(self, "service", None)
+        if service is not None and hasattr(service, "project_mutation"):
+            service.project_mutation(result)
+        return result
+
+    def retire_entries(self, entries: list[L2Entry]) -> L3RetireResult:
+        document_ids: list[str] = []
+        reused_document_ids: list[str] = []
+        for entry in entries:
+            if entry.kind not in {"fact", "case"}:
+                continue
+            existing = None
+            if entry.kind == "fact" and entry.canonical_key:
+                existing = next(
+                    (
+                        record
+                        for record in self.records
+                        if str(record.get("document_kind")) == "fact"
+                        and str(record.get("canonical_key") or "").strip() == str(entry.canonical_key or "").strip()
+                    ),
+                    None,
+                )
+            if existing is None and entry.dedupe_fingerprint:
+                existing = next(
+                    (
+                        record
+                        for record in self.records
+                        if str(record.get("document_kind")) == entry.kind
+                        and str(record.get("dedupe_fingerprint") or "").strip() == str(entry.dedupe_fingerprint or "").strip()
+                    ),
+                    None,
+                )
+            if existing is not None:
+                document_id = str(existing.get("document_id") or "")
+                reused_document_ids.append(document_id)
+                document_ids.append(document_id)
+                continue
+            document_id = f"{entry.kind}:{len(self.records) + 1}"
+            self.records.append(
+                {
+                    "document_id": document_id,
+                    "document_kind": entry.kind,
+                    "scope": entry.scope,
+                    "task_id": entry.task_id,
+                    "title": entry.title,
+                    "summary": entry.summary,
+                    "rendered": entry.rendered,
+                    "search_text": entry.search_text,
+                    "canonical_key": entry.canonical_key,
+                    "dedupe_fingerprint": entry.dedupe_fingerprint,
+                    "payload": dict(entry.payload),
+                }
+            )
+            document_ids.append(document_id)
+        return L3RetireResult(
+            status=RuntimeStatus.OK,
+            document_ids=document_ids,
+            reused_document_ids=reused_document_ids,
+            metadata={"retired": len(document_ids), "reused": len(reused_document_ids)},
+        )
 
     def correct(self, request: L3CorrectRequest) -> L3MutationResult:
         for record in self.records:
@@ -378,9 +479,16 @@ class MockL3Plugin(_L3ProviderCapabilityMixin):
                 source_ref=request.document_id,
                 candidate_state="stable",
                 rendered=str(record.get("summary", "")),
+                search_text=str(record.get("search_text", "")),
+                canonical_key=str(record.get("canonical_key")) if record.get("canonical_key") is not None else None,
+                dedupe_fingerprint=str(record.get("dedupe_fingerprint")) if record.get("dedupe_fingerprint") is not None else None,
                 payload=dict(record),
             )
-            return L3MutationResult(status=RuntimeStatus.OK, document_id=request.document_id, hit=dict(record), projected_entry=entry)
+            result = L3MutationResult(status=RuntimeStatus.OK, document_id=request.document_id, hit=dict(record), projected_entry=entry)
+            service = getattr(self, "service", None)
+            if service is not None and hasattr(service, "project_mutation"):
+                service.project_mutation(result)
+            return result
         return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id=request.document_id)
 
     def refresh_indexes(self, *, limit: int = 8, retry_failed: bool = False) -> dict[str, object]:

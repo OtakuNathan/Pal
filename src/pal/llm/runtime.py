@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol
@@ -462,6 +463,82 @@ class LLMRuntime(LLMRuntimePort):
             preferred_model_id=preferred_model_id,
         )
 
+    _COMPACT_STRUCTURED_SYSTEM = (
+        "You are a memory compaction engine.\n"
+        "Read the conversation context below and produce a structured JSON object with two keys:\n"
+        "\n"
+        '  "summary": a JSON object with fields:\n'
+        "    - summary (string, required): rolling conversation summary (compressed, for prompt display)\n"
+        "    - search_text (string, required): the original verbatim conversation content that this summary covers — source of truth for retrieval\n"
+        "\n"
+        '  "entries": a list of zero or more extracted items, each with:\n'
+        "    - kind (string): \"fact\" or \"case\"\n"
+        "    - title (string, required): short label identifying this memory\n"
+        "    - summary (string, required): concise summary for future LLM consumption\n"
+        "    - search_text (string, required): the original verbatim fact or statement — source of truth, used for retrieval indexing. Do NOT compress or paraphrase.\n"
+        "    - canonical_key (string, optional): stable identity key for dedup\n"
+        "    - scope (string, optional): \"system\" or \"task\"\n"
+        "    - task_id (string, optional)\n"
+        "    - payload (object, optional): for case kind, include situation/task/action/result\n"
+        "\n"
+        "Rules:\n"
+        "- Output valid JSON only, no markdown fences.\n"
+        "- Extract user preferences, commitments, and domain facts as fact entries.\n"
+        "- Extract problem-solving episodes as case entries with situation/task/action/result.\n"
+        "- Do not invent information not present in the source.\n"
+        "- If nothing worth extracting, return an empty entries list.\n"
+        "- summary is always required and should cover the conversation arc.\n"
+        "- title, summary, and search_text serve different purposes:\n"
+        "  * title: short label for display\n"
+        "  * summary: compressed version for prompt consumption\n"
+        "  * search_text: original source text for retrieval — must preserve key terms and context\n"
+    )
+
+    def compact_memory_structured(
+        self,
+        text: str,
+        *,
+        max_output_tokens: int = 384,
+        preferred_endpoint_id: str | None = None,
+        preferred_model_id: str | None = None,
+    ) -> dict[str, Any]:
+        request = CanonicalLLMRequest(
+            messages=[
+                {"role": "system", "content": self._COMPACT_STRUCTURED_SYSTEM},
+                {"role": "user", "content": text.strip()},
+            ],
+            max_output_tokens=max_output_tokens,
+            model_hint=preferred_model_id,
+            temperature=0.15,
+            tools=[],
+            metadata={
+                "preferred_endpoint_id": preferred_endpoint_id,
+                "response_mode_hint": "operational",
+                "purpose": "memory_compaction_structured",
+            },
+        )
+        outcome = self.generate(request)
+        if outcome.finish_reason == LLMFinishReason.COMPACT_REQUIRED:
+            return {}
+        raw = str(outcome.text or "").strip()
+        return _extract_compaction_json(raw)
+
+    async def acompact_memory_structured(
+        self,
+        text: str,
+        *,
+        max_output_tokens: int = 384,
+        preferred_endpoint_id: str | None = None,
+        preferred_model_id: str | None = None,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self.compact_memory_structured,
+            text,
+            max_output_tokens=max_output_tokens,
+            preferred_endpoint_id=preferred_endpoint_id,
+            preferred_model_id=preferred_model_id,
+        )
+
     def _build_preflight_advice(
         self,
         *,
@@ -748,3 +825,23 @@ def _parse_litellm_stream_chunk(
             )
         )
     return events
+
+
+def _extract_compaction_json(raw: str) -> dict[str, Any]:
+    # Strip markdown code fences if present
+    stripped = raw.strip()
+    if stripped.startswith("```"):
+        first_newline = stripped.index("\n") if "\n" in stripped else len(stripped)
+        stripped = stripped[first_newline + 1:]
+        if stripped.endswith("```"):
+            stripped = stripped[:-3]
+        stripped = stripped.strip()
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    if "summary" not in parsed:
+        return {}
+    return parsed

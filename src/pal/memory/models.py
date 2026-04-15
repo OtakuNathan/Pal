@@ -77,6 +77,7 @@ class MemoryEmbeddingModel(BaseModel):
     embedding_id = CharField(primary_key=True)
     document_id = CharField()
     embedding_kind = CharField(default="primary")
+    provider_id = TextField(default="ollama_local_embedding")
     model_name = TextField()
     model_revision = TextField(null=True)
     source_text_hash = TextField()
@@ -93,6 +94,7 @@ class MemoryEmbeddingModel(BaseModel):
         table_name = "memory_embeddings"
         indexes = (
             (("document_id", "embedding_kind"), True),
+            (("provider_id", "model_name", "index_status"), False),
             (("index_status", "updated_at"), False),
         )
 

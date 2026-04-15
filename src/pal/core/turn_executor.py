@@ -24,7 +24,7 @@ from pal.core.turns import (
 )
 from pal.failure import FailureSignal
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolResult, LLMPreflightRequest
-from pal.memory.contracts import MemoryCommitRequest, MemoryCompactRequest
+from pal.memory.contracts import MemoryCommitRequest, MemoryCompactRequest, MemoryPackRequest
 from pal.shared import GuardAction, LLMFinishReason, LLMResponseMode, LLMStreamEventKind, RuntimeStatus
 
 _FORWARD_STREAM_KINDS = frozenset({
@@ -112,15 +112,25 @@ class TurnExecutor:
     async def _handle_memory_compact(self, effect, continuation):
         memory_service = self.context.require_port("memory:memory")
         metadata = dict(effect.assembly_context.metadata)
-        semantic_summary = await self.summarize_compaction_async(
+        structured_compaction = await self.build_structured_compaction_async(
             memory_service,
             target_input_budget=effect.target_input_budget,
             reserved_output_tokens=effect.reserved_output_tokens,
             preferred_endpoint_id=metadata.get("preferred_endpoint_id"),
             preferred_model_id=metadata.get("preferred_model_id"),
         )
-        if semantic_summary:
-            metadata["semantic_summary"] = semantic_summary
+        if structured_compaction:
+            metadata["structured_compaction"] = structured_compaction
+        else:
+            semantic_summary = await self.summarize_compaction_async(
+                memory_service,
+                target_input_budget=effect.target_input_budget,
+                reserved_output_tokens=effect.reserved_output_tokens,
+                preferred_endpoint_id=metadata.get("preferred_endpoint_id"),
+                preferred_model_id=metadata.get("preferred_model_id"),
+            )
+            if semantic_summary:
+                metadata["semantic_summary"] = semantic_summary
         compact_result = await self._call_port_async(
             memory_service,
             "acompact",
@@ -372,6 +382,22 @@ class TurnExecutor:
             metadata["preferred_endpoint_id"] = continuation.preferred_llm_endpoint_id
         if continuation.preferred_llm_model_id:
             metadata["preferred_model_id"] = continuation.preferred_llm_model_id
+        if assembly_context.turn_kind != "failure":
+            try:
+                memory_service = self.context.require_port("memory:memory")
+            except KeyError:
+                memory_service = None
+            if memory_service is not None and "memory_pack" not in metadata:
+                try:
+                    metadata["memory_pack"] = memory_service.build_pack(
+                        MemoryPackRequest(
+                            turn_kind=assembly_context.turn_kind,
+                            task_id=assembly_context.task_id,
+                            work_order_id=assembly_context.work_order_id,
+                        )
+                    )
+                except Exception:
+                    pass
         if continuation.finalization_only:
             metadata["finalization_directive"] = (
                 "Tool execution has been terminated. Use existing observations only and produce a pure text final reply."
@@ -557,19 +583,43 @@ class TurnExecutor:
         return ""
 
     def build_compaction_source_text(self, memory_service, *, target_input_budget: int) -> str:
-        transcripts = list(getattr(memory_service.l1_store, "items", [])[-12:])
-        rendered_turns: list[str] = []
-        for transcript in transcripts:
-            lines = []
-            for message in transcript:
-                role = str(getattr(message, "role", "") or "").strip()
-                content = str(getattr(message, "content", "") or "").strip()
-                if role and content:
-                    lines.append(f"{role}: {content}")
-            if lines:
-                rendered_turns.append("\n".join(lines))
-        raw = "\n\n".join(rendered_turns).strip()
-        if not raw:
+        builder = getattr(memory_service, "build_compaction_source_text", None)
+        if not callable(builder):
             return ""
-        limit = max(256, target_input_budget or 0)
-        return raw[:limit]
+        try:
+            return str(builder(target_input_budget=target_input_budget) or "").strip()
+        except Exception:
+            return ""
+
+    async def build_structured_compaction_async(
+        self,
+        memory_service,
+        *,
+        target_input_budget: int,
+        reserved_output_tokens: int,
+        preferred_endpoint_id: str | None = None,
+        preferred_model_id: str | None = None,
+    ) -> dict[str, Any]:
+        llm_runtime = self.context.port_registry.get("llm:llm")
+        if llm_runtime is None:
+            return {}
+        source_text = self.build_compaction_source_text(memory_service, target_input_budget=target_input_budget)
+        if not source_text:
+            return {}
+        async_method = getattr(llm_runtime, "acompact_memory_structured", None)
+        if callable(async_method):
+            result = async_method(
+                source_text,
+                max_output_tokens=min(max(192, reserved_output_tokens or 0), 384),
+                preferred_endpoint_id=preferred_endpoint_id,
+                preferred_model_id=preferred_model_id,
+            )
+            if inspect.isawaitable(result):
+                try:
+                    payload = await result
+                except Exception:
+                    return {}
+            else:
+                payload = result
+            return dict(payload or {}) if isinstance(payload, dict) else {}
+        return {}

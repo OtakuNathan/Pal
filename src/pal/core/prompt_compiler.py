@@ -21,6 +21,7 @@ class PromptCompiler:
     def build_prompt_ir(self, assembly_context: PromptAssemblyContext) -> PromptIR:
         if assembly_context.turn_kind == "failure":
             return self._build_failure_prompt_ir(assembly_context)
+        assembly_context = self._ensure_memory_pack(assembly_context)
         fragments = self.collect_prompt_fragments(assembly_context)
         system_blocks: list[PromptIRBlock] = []
         user_context_blocks: list[PromptIRBlock] = []
@@ -60,10 +61,14 @@ class PromptCompiler:
             elif normalized_section == "memory":
                 user_context_blocks.append(
                     PromptIRBlock(
-                        block_id="l2_recent_summaries",
-                        title="Recent Summaries",
+                        block_id=str(fragment.metadata.get("block_id") or "memory_projection"),
+                        title=str(fragment.title or "Memory Projection"),
                         content=rendered_body,
-                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                        metadata={
+                            **dict(fragment.metadata),
+                            "source_section": fragment.section,
+                            "source_title": fragment.title,
+                        },
                     )
                 )
             elif normalized_section == "runtime":
@@ -76,8 +81,6 @@ class PromptCompiler:
                     )
                 )
 
-        for item in self._collect_l1_recent_context(assembly_context):
-            user_context_blocks.append(item)
         system_blocks.extend(self._build_runtime_overlay_blocks(assembly_context))
 
         ordered_system_blocks = self._order_system_blocks(system_blocks)
@@ -185,30 +188,6 @@ class PromptCompiler:
             return "runtime"
         return lowered
 
-    def _collect_l1_recent_context(self, assembly_context: PromptAssemblyContext) -> list[PromptIRBlock]:
-        if assembly_context.turn_kind == "service_trigger":
-            return []
-        try:
-            memory_service = self.context.require_port("memory:memory")
-        except KeyError:
-            return []
-        blocks: list[PromptIRBlock] = []
-        for turn_index, transcript in enumerate(memory_service.l1_store.items):
-            for message_index, message in enumerate(transcript):
-                role = str(message.role or "").strip()
-                content = str(message.content or "").strip()
-                if role not in {"user", "assistant"} or not content:
-                    continue
-                blocks.append(
-                    PromptIRBlock(
-                        block_id=f"l1_recent_context_{turn_index}_{message_index}",
-                        title="Recent Context",
-                        content=content,
-                        metadata={"role": role},
-                    )
-                )
-        return blocks
-
     def _build_runtime_overlay_blocks(self, assembly_context: PromptAssemblyContext) -> list[PromptIRBlock]:
         blocks: list[PromptIRBlock] = []
         for block in assembly_context.metadata.get("observation_blocks", []):
@@ -240,6 +219,25 @@ class PromptCompiler:
             )
         return blocks
 
+    def _order_user_context_blocks(self, blocks: list[PromptIRBlock], *, turn_kind: str) -> list[PromptIRBlock]:
+        l1_blocks = [block for block in blocks if block.block_id.startswith("l1_recent_context")]
+        summary_blocks = [block for block in blocks if block.block_id == "memory_current_summary"]
+        top_of_mind_blocks = [block for block in blocks if block.block_id == "memory_top_of_mind"]
+        active_blocks = [block for block in blocks if block.block_id == "memory_active_entries"]
+        trailing_blocks = [
+            block
+            for block in blocks
+            if block.block_id not in {
+                *[item.block_id for item in l1_blocks],
+                "memory_current_summary",
+                "memory_top_of_mind",
+                "memory_active_entries",
+            }
+        ]
+        if turn_kind == "service_trigger":
+            return []
+        return [*l1_blocks, *summary_blocks, *top_of_mind_blocks, *active_blocks, *trailing_blocks]
+
     def _order_system_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
         identity_blocks = [block for block in blocks if block.block_id == "identity"]
         rule_blocks = [block for block in blocks if block.block_id == "operating_rules"]
@@ -248,13 +246,6 @@ class PromptCompiler:
         ordered_runtime = [block for block in runtime_blocks if block.metadata.get("priority") != "finalization"]
         ordered_runtime.extend(block for block in runtime_blocks if block.metadata.get("priority") == "finalization")
         return [*identity_blocks, *rule_blocks, *capability_guide_blocks, *ordered_runtime]
-
-    def _order_user_context_blocks(self, blocks: list[PromptIRBlock], *, turn_kind: str) -> list[PromptIRBlock]:
-        l1_blocks = [block for block in blocks if block.block_id.startswith("l1_recent_context")]
-        l2_blocks = [block for block in blocks if block.block_id == "l2_recent_summaries"]
-        if turn_kind == "service_trigger":
-            return []
-        return [*l1_blocks, *l2_blocks]
 
     def _compile_prompt_ir_messages(self, prompt_ir: PromptIR) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []
@@ -266,6 +257,13 @@ class PromptCompiler:
         if prompt_ir.primary_input.strip():
             messages.append({"role": "user", "content": prompt_ir.primary_input.strip()})
         return messages
+
+    def _render_user_context_message(self, block: PromptIRBlock) -> dict[str, str]:
+        rendered = block.content.strip()
+        if block.block_id.startswith("l1_recent_context"):
+            role = str(block.metadata.get("role") or "user")
+            return {"role": role, "content": rendered}
+        return {"role": "user", "content": f"<system-reminder>{block.title}:\n{rendered}</system-reminder>"}
 
     def _render_system_blocks(self, blocks: tuple[PromptIRBlock, ...]) -> str:
         if not blocks:
@@ -283,15 +281,6 @@ class PromptCompiler:
         if current_title is not None and current_parts:
             rendered_sections.append(f"## {current_title}\n" + "\n\n".join(current_parts))
         return "\n\n".join(rendered_sections)
-
-    def _render_user_context_message(self, block: PromptIRBlock) -> dict[str, str]:
-        rendered = block.content.strip()
-        if block.block_id.startswith("l1_recent_context"):
-            role = str(block.metadata.get("role") or "user")
-            return {"role": role, "content": rendered}
-        if block.block_id == "l2_recent_summaries":
-            return {"role": "user", "content": f"<system-reminder>Recent summaries:\n{rendered}</system-reminder>"}
-        return {"role": "user", "content": f"<system-reminder>{block.title}:\n{rendered}</system-reminder>"}
 
     def _prompt_ir_debug_dict(self, prompt_ir: PromptIR) -> dict[str, Any]:
         return {
@@ -325,3 +314,32 @@ class PromptCompiler:
 
     def _extract_user_message_text(self, event) -> str:
         return extract_text_from_payload(getattr(event, "payload", None))
+
+    def _ensure_memory_pack(self, assembly_context: PromptAssemblyContext) -> PromptAssemblyContext:
+        if assembly_context.turn_kind in {"failure", "service_trigger"}:
+            return assembly_context
+        if "memory_pack" in assembly_context.metadata:
+            return assembly_context
+        try:
+            from pal.memory import MemoryPackRequest
+
+            memory_service = self.context.require_port("memory:memory")
+            pack = memory_service.build_pack(
+                MemoryPackRequest(
+                    turn_kind=assembly_context.turn_kind,
+                    task_id=assembly_context.task_id,
+                    work_order_id=assembly_context.work_order_id,
+                )
+            )
+        except Exception:
+            return assembly_context
+        metadata = dict(assembly_context.metadata)
+        metadata["memory_pack"] = pack
+        return PromptAssemblyContext(
+            event=assembly_context.event,
+            core_mode=assembly_context.core_mode,
+            turn_kind=assembly_context.turn_kind,
+            task_id=assembly_context.task_id,
+            work_order_id=assembly_context.work_order_id,
+            metadata=metadata,
+        )

@@ -10,6 +10,11 @@ if TYPE_CHECKING:
 
 
 def register_with_core(context: MainContext, plugin: L3ProviderPort) -> ModuleHandle:
+    if getattr(plugin, "service", None) is None:
+        try:
+            plugin.service = context.require_port("memory:memory")
+        except Exception:
+            pass
     module_id = getattr(plugin, "module_id", f"l3.{plugin.provider_id}")
     handle = ModuleHandle(
         module_id=module_id,

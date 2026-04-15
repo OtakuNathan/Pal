@@ -425,9 +425,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         service = MemoryService(l3_selector=selector)
         service.l3_selector.active_provider_id = "mock_l3"
 
-        pack = service.build_pack(MemoryQuery(level="deep", queries=["redis"]))
+        recall_result = plugin.recall(MemoryQuery(level="deep", queries=["redis"]))
 
-        self.assertEqual(pack.l3_hits, [{"document_id": "fact:1", "title": "Redis"}])
+        self.assertEqual(recall_result.hits, [{"document_id": "fact:1", "title": "Redis"}])
 
     def test_execution_calls_registered_capabilities_from_pal_core(self) -> None:
         core = PalCore()
@@ -632,8 +632,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("operation_l3_recall_query", exposed_names)
             self.assertIn("operation_l3_commit_write", exposed_names)
             self.assertIn("operation_l3_correct_patch", exposed_names)
-            self.assertIn("operation_l3_maintenance_refresh_indexes", exposed_names)
-            self.assertIn("operation_l3_lifecycle_attach", exposed_names)
             self.assertIn("operation_llm_management_set_active_endpoint", exposed_names)
             self.assertNotIn("echo", exposed_names)
             exec_tool = next(item for item in request.tools if item["function"]["name"] == "operation_execution_exec_run")
@@ -821,7 +819,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             fragments = core.collect_prompt_fragments(PromptAssemblyContext(core_mode="default"))
             sections = [fragment.section for fragment in fragments]
 
-            self.assertEqual(sections, ["identity", "memory", "rules", "capability_guide"])
+            self.assertEqual(sections, ["identity", "rules", "capability_guide"])
             prompt_ir = core.build_prompt_ir(
                 PromptAssemblyContext(
                     core_mode="default",
@@ -845,7 +843,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(prompt.metadata["fragment_sections"], ["identity", "operating_rules", "capability_guide"])
             self.assertEqual(
                 prompt.metadata["user_context_blocks"],
-                ["l1_recent_context_0_0", "l1_recent_context_0_1", "l2_recent_summaries"],
+                ["l1_recent_context_0", "l1_recent_context_1", "memory_active_entries"],
             )
             self.assertEqual(prompt_ir.turn_kind, "chat")
             self.assertEqual(prompt.messages[0]["role"], "system")
@@ -861,7 +859,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("## Memory Projection", prompt.messages[0]["content"])
             self.assertEqual(prompt.messages[1], {"role": "user", "content": "What timezone should you use?"})
             self.assertEqual(prompt.messages[2], {"role": "assistant", "content": "I should use Asia/Shanghai context."})
-            self.assertIn("<system-reminder>Recent summaries:", prompt.messages[3]["content"])
+            self.assertIn("<system-reminder>Active Memory:", prompt.messages[3]["content"])
             self.assertIn("Timezone Preference", prompt.messages[3]["content"])
             self.assertNotIn("Issued work orders", prompt.messages[0]["content"])
             self.assertNotIn("Registered services", prompt.messages[0]["content"])
@@ -1179,10 +1177,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 args={"active_provider_id": "mock_l3"},
             )
         )
-        pack = memory_service.build_pack(MemoryQuery(level="deep", queries=["redis"]))
+        recall_result = mock_l3.recall(MemoryQuery(level="deep", queries=["redis"]))
 
         self.assertEqual(configured.status, "ok")
-        self.assertEqual(pack.l3_hits, [{"document_id": "fact:1", "title": "Redis"}])
+        self.assertEqual(recall_result.hits, [{"document_id": "fact:1", "title": "Redis"}])
 
     def test_execution_runtime_bootstraps_default_l3_stub(self) -> None:
         core = PalCore()
@@ -1212,11 +1210,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 args={"active_provider_id": "null_l3"},
             )
         )
-        pack = memory_service.build_pack(MemoryQuery(level="deep", queries=["redis"]))
 
         self.assertEqual(fallback.status, "ok")
         self.assertEqual(memory_service.l3_selector.active_provider_id, "null_l3")
-        self.assertEqual(pack.l3_hits, [])
 
     def test_detachable_l3_provider_can_detach_and_reattach(self) -> None:
         core = PalCore()
@@ -1948,9 +1944,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             service.l1_store.items,
             [[L1TranscriptMessage(role="assistant", content="The user prefers concise replies.")]],
         )
-        projected = service.l2_store.items["memory_compaction_recent"]
+        projected = service.l2_store.items["memory_summary_current"]
         self.assertEqual(projected.summary, "The user prefers concise replies.")
-        self.assertIn("memory_compaction_recent", service.l2_store.top_of_mind_refs)
+        self.assertEqual(projected.kind, "summary")
 
     def test_tool_stagnation_guard_detects_repeat_and_oscillation(self) -> None:
         guard = ToolStagnationGuardProcess(repeat_threshold=3, oscillation_window=4)

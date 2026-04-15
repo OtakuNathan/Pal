@@ -35,6 +35,9 @@ class L2Entry:
     candidate_state: str = "candidate"
     touched_at: str = ""
     rendered: str = ""
+    search_text: str = ""
+    canonical_key: str | None = None
+    dedupe_fingerprint: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
 
 
@@ -48,10 +51,11 @@ class L3RecallResult:
 @dataclass(frozen=True)
 class L3CommitRequest:
     kind: str
+    title: str = ""
+    summary: str = ""
+    search_text: str = ""
     scope: str = "system"
     task_id: str | None = None
-    title: str | None = None
-    summary: str = ""
     canonical_key: str | None = None
     dedupe_fingerprint: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
@@ -67,6 +71,7 @@ class L3CorrectRequest:
     document_id: str
     title: str | None = None
     summary: str | None = None
+    search_text: str | None = None
     payload_patch: dict[str, Any] = field(default_factory=dict)
     topics: list[str] | None = None
     situation_text: str | None = None
@@ -85,10 +90,27 @@ class L3MutationResult:
 
 
 @dataclass(frozen=True)
+class L3RetireResult:
+    status: str
+    document_ids: list[str] = field(default_factory=list)
+    reused_document_ids: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MemoryPackRequest:
+    turn_kind: str = "chat"
+    task_id: str | None = None
+    work_order_id: str | None = None
+
+
+@dataclass(frozen=True)
 class MemoryPack:
-    l1_items: list[list[L1TranscriptMessage]] = field(default_factory=list)
-    l2_items: list[L2Entry] = field(default_factory=list)
-    l3_hits: list[dict[str, Any]] = field(default_factory=list)
+    l1_recent_context: list[L1TranscriptMessage] = field(default_factory=list)
+    current_summary: L2Entry | None = None
+    l2_top_of_mind: list[L2Entry] = field(default_factory=list)
+    l2_active_entries: list[L2Entry] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -101,6 +123,7 @@ class MemoryCompactRequest:
 @dataclass(frozen=True)
 class MemoryCompactResult:
     summary: str
+    projected_entries: list[L2Entry] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -143,7 +166,10 @@ class L3ProviderPort(Protocol):
     def correct(self, request: L3CorrectRequest) -> L3MutationResult:
         ...
 
-    def refresh_indexes(self, *, limit: int = 8) -> dict[str, Any]:
+    def retire_entries(self, entries: list[L2Entry]) -> L3RetireResult:
+        ...
+
+    def refresh_indexes(self, *, limit: int = 8, retry_failed: bool = False) -> dict[str, Any]:
         ...
 
 
@@ -163,8 +189,11 @@ class MemoryServicePort(Protocol):
     async def acommit_l1(self, request: MemoryCommitRequest) -> MemoryCommitResult:
         ...
 
-    def build_pack(self, query: MemoryQuery) -> MemoryPack:
+    def build_pack(self, request: MemoryPackRequest) -> MemoryPack:
         ...
 
-    async def abuild_pack(self, query: MemoryQuery) -> MemoryPack:
+    async def abuild_pack(self, request: MemoryPackRequest) -> MemoryPack:
+        ...
+
+    def build_compaction_source_text(self, *, target_input_budget: int) -> str:
         ...

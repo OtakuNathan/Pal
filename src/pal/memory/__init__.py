@@ -8,16 +8,29 @@ from pal.memory.contracts import (
     L3MutationResult,
     L3ProviderPort,
     L3RecallResult,
+    L3RetireResult,
     L3ProviderResolver,
     MemoryCommitRequest,
     MemoryCommitResult,
     MemoryCompactRequest,
     MemoryCompactResult,
     MemoryPack,
+    MemoryPackRequest,
     MemoryQuery,
     MemoryServicePort,
 )
-from pal.memory.embedding import EmbeddingRuntimePort, HashingEmbedder, SentenceTransformerBGEEmbedder
+from pal.memory.embedding import (
+    DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_OLLAMA_KEEP_ALIVE,
+    DEFAULT_OLLAMA_MODEL_NAME,
+    DEFAULT_OLLAMA_PROVIDER_ID,
+    EmbeddingProviderPort,
+    EmbeddingRuntimePort,
+    HashingEmbedder,
+    InProcBGEEmbeddingProvider,
+    OllamaEmbeddingProvider,
+    SentenceTransformerBGEEmbedder,
+)
 from pal.memory.introspection import MemoryIntrospectionProvider, MemorySnapshot, inspect_memory, register_with_core
 from pal.memory.models import MemoryCaseModel, MemoryEmbeddingModel, MemoryEmbeddingVecModel, MemoryFactModel, MemoryTopicModel
 from pal.memory.repository import L3ProviderSelector, MemoryDurableRepository
@@ -25,8 +38,14 @@ from pal.memory.schema import ensure_memory_schema, ensure_sqlite_vec_loaded
 from pal.memory.service import MemoryService
 
 __all__ = [
+    "DEFAULT_OLLAMA_BASE_URL",
+    "DEFAULT_OLLAMA_KEEP_ALIVE",
+    "DEFAULT_OLLAMA_MODEL_NAME",
+    "DEFAULT_OLLAMA_PROVIDER_ID",
+    "EmbeddingProviderPort",
     "EmbeddingRuntimePort",
     "HashingEmbedder",
+    "InProcBGEEmbeddingProvider",
     "L1Store",
     "L1TranscriptMessage",
     "L2Entry",
@@ -36,6 +55,7 @@ __all__ = [
     "L3MutationResult",
     "L3ProviderPort",
     "L3RecallResult",
+    "L3RetireResult",
     "L3ProviderResolver",
     "L3ProviderSelector",
     "MemoryCaseModel",
@@ -49,11 +69,13 @@ __all__ = [
     "MemoryEmbeddingVecModel",
     "MemoryFactModel",
     "MemoryPack",
+    "MemoryPackRequest",
     "MemoryQuery",
     "MemorySnapshot",
     "MemoryService",
     "MemoryServicePort",
     "MemoryTopicModel",
+    "OllamaEmbeddingProvider",
     "SentenceTransformerBGEEmbedder",
     "ensure_memory_schema",
     "ensure_sqlite_vec_loaded",

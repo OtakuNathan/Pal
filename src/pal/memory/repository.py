@@ -16,7 +16,7 @@ from pal.memory.models import (
     MemoryFactModel,
     MemoryTopicModel,
 )
-from pal.memory.schema import ensure_memory_schema
+from pal.memory.schema import ensure_memory_schema, ensure_sqlite_vec_loaded
 
 from pal.memory.contracts import L3ProviderPort, L3ProviderResolver
 
@@ -33,6 +33,40 @@ class L3ProviderSelector:
 class MemoryDurableRepository:
     def ensure_schema(self) -> None:
         ensure_memory_schema()
+        self.ensure_fts_indexes_synced()
+
+    def find_fact_by_canonical_key(self, canonical_key: str) -> MemoryFactModel | None:
+        normalized = str(canonical_key or "").strip()
+        if not normalized:
+            return None
+        query = (
+            MemoryFactModel.select()
+            .where(MemoryFactModel.canonical_key == normalized)
+            .order_by(MemoryFactModel.updated_at.desc(), MemoryFactModel.fact_id.desc())
+        )
+        return query.first()
+
+    def find_fact_by_dedupe_fingerprint(self, dedupe_fingerprint: str) -> MemoryFactModel | None:
+        normalized = str(dedupe_fingerprint or "").strip()
+        if not normalized:
+            return None
+        query = (
+            MemoryFactModel.select()
+            .where(MemoryFactModel.dedupe_fingerprint == normalized)
+            .order_by(MemoryFactModel.updated_at.desc(), MemoryFactModel.fact_id.desc())
+        )
+        return query.first()
+
+    def find_case_by_dedupe_fingerprint(self, dedupe_fingerprint: str) -> MemoryCaseModel | None:
+        normalized = str(dedupe_fingerprint or "").strip()
+        if not normalized:
+            return None
+        query = (
+            MemoryCaseModel.select()
+            .where(MemoryCaseModel.dedupe_fingerprint == normalized)
+            .order_by(MemoryCaseModel.updated_at.desc(), MemoryCaseModel.case_id.desc())
+        )
+        return query.first()
 
     def upsert_fact(self, *, fact_id: str, payload: dict[str, Any]) -> MemoryFactModel:
         now = utc_now()
@@ -89,6 +123,7 @@ class MemoryDurableRepository:
                 "rendered": fact.summary,
                 "payload": dict(fact.payload_blob or {}),
                 "canonical_key": fact.canonical_key,
+                "dedupe_fingerprint": fact.dedupe_fingerprint,
                 "use_count": fact.use_count,
                 "last_used_at": fact.last_used_at,
                 "created_at": fact.created_at,
@@ -124,6 +159,7 @@ class MemoryDurableRepository:
                     "action_text": case.action_text,
                     "result_text": case.result_text,
                 },
+                "dedupe_fingerprint": case.dedupe_fingerprint,
                 "use_count": case.use_count,
                 "last_used_at": case.last_used_at,
                 "created_at": case.created_at,
@@ -155,15 +191,55 @@ class MemoryDurableRepository:
         columns = [column[0] for column in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
+    def ensure_fts_indexes_synced(self) -> None:
+        projection_count = self._count_projection_rows()
+        if (
+            self._count_fts_rows("memories_fts") == projection_count
+            and self._count_fts_rows("memories_fts_trigram") == projection_count
+        ):
+            return
+        self.rebuild_fts_indexes()
+
+    def rebuild_fts_indexes(self) -> None:
+        db = MemoryFactModel._meta.database
+        db.execute_sql("DELETE FROM memories_fts")
+        db.execute_sql("DELETE FROM memories_fts_trigram")
+        for row in self.list_projection_rows():
+            self._insert_fts_row("memories_fts", row)
+            self._insert_fts_row("memories_fts_trigram", row)
+
+    def _count_projection_rows(self) -> int:
+        db = MemoryFactModel._meta.database
+        cursor = db.execute_sql("SELECT COUNT(*) FROM memory_document_projection")
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+    def _count_fts_rows(self, table_name: str) -> int:
+        db = MemoryFactModel._meta.database
+        cursor = db.execute_sql(f"SELECT COUNT(*) FROM {table_name}")
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
     def sync_fts_row(self, document_id: str) -> None:
         row = self.get_document(document_id)
         db = MemoryFactModel._meta.database
         db.execute_sql("DELETE FROM memories_fts WHERE document_id = ?", (document_id,))
+        db.execute_sql("DELETE FROM memories_fts_trigram WHERE document_id = ?", (document_id,))
         if row is None:
             return
+        self._insert_fts_row("memories_fts", row)
+        self._insert_fts_row("memories_fts_trigram", row)
+
+    def _insert_fts_row(self, table_name: str, row: dict[str, Any]) -> None:
+        db = MemoryFactModel._meta.database
         db.execute_sql(
-            "INSERT INTO memories_fts(document_id, title, summary, search_text) VALUES (?, ?, ?, ?)",
-            (document_id, row["title"], row["summary"], row["search_text"]),
+            f"INSERT INTO {table_name}(document_id, title, summary, search_text) VALUES (?, ?, ?, ?)",
+            (
+                str(row.get("document_id") or ""),
+                str(row.get("title") or ""),
+                str(row.get("summary") or ""),
+                str(row.get("search_text") or ""),
+            ),
         )
 
     def replace_topics(self, document_id: str, topics: list[str]) -> None:
@@ -198,6 +274,7 @@ class MemoryDurableRepository:
         *,
         document_id: str,
         source_text: str,
+        provider_id: str,
         model_name: str,
         embedding_kind: str = "primary",
         index_status: str = "pending",
@@ -212,6 +289,7 @@ class MemoryDurableRepository:
                 embedding_id=embedding_id,
                 document_id=document_id,
                 embedding_kind=embedding_kind,
+                provider_id=provider_id,
                 model_name=model_name,
                 model_revision=None,
                 source_text_hash=source_text_hash,
@@ -223,6 +301,7 @@ class MemoryDurableRepository:
             )
         instance.document_id = document_id
         instance.embedding_kind = embedding_kind
+        instance.provider_id = provider_id
         instance.model_name = model_name
         instance.source_text_hash = source_text_hash
         instance.index_status = index_status
@@ -230,6 +309,30 @@ class MemoryDurableRepository:
         instance.updated_at = now
         instance.save()
         return instance
+
+    def retarget_embeddings(
+        self,
+        *,
+        provider_id: str,
+        model_name: str,
+        embedding_kind: str = "primary",
+    ) -> int:
+        now = utc_now()
+        query = MemoryEmbeddingModel.select().where(MemoryEmbeddingModel.embedding_kind == embedding_kind)
+        updated = 0
+        for instance in query:
+            current_provider_id = str(getattr(instance, "provider_id", "") or "").strip()
+            current_model_name = str(instance.model_name or "").strip()
+            if current_provider_id == provider_id and current_model_name == model_name:
+                continue
+            instance.provider_id = provider_id
+            instance.model_name = model_name
+            instance.index_status = "stale"
+            instance.last_error = None
+            instance.updated_at = now
+            instance.save()
+            updated += 1
+        return updated
 
     def list_pending_embeddings(self, *, limit: int) -> list[MemoryEmbeddingModel]:
         query = (
@@ -264,6 +367,7 @@ class MemoryDurableRepository:
                 "embedding_id": row.embedding_id,
                 "document_id": row.document_id,
                 "embedding_kind": row.embedding_kind,
+                "provider_id": str(getattr(row, "provider_id", "") or ""),
                 "model_name": row.model_name,
                 "last_error": row.last_error,
                 "updated_at": row.updated_at,
@@ -280,6 +384,17 @@ class MemoryDurableRepository:
             return None
         return bytes(vector.vector_blob)
 
+    def _get_vector_rowid(self, embedding_id: str) -> int | None:
+        db = MemoryEmbeddingVecModel._meta.database
+        cursor = db.execute_sql(
+            "SELECT rowid FROM memory_embedding_vec WHERE embedding_id = ?",
+            (embedding_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return int(row[0])
+
     def upsert_vector_blob(self, *, embedding_id: str, vector_blob: bytes, dimension: int) -> None:
         now = utc_now()
         instance = MemoryEmbeddingVecModel.get_or_none(MemoryEmbeddingVecModel.embedding_id == embedding_id)
@@ -295,6 +410,15 @@ class MemoryDurableRepository:
         instance.dimension = dimension
         instance.updated_at = now
         instance.save()
+        metadata = self.get_embedding(embedding_id)
+        if metadata is not None:
+            self._sync_vec_index_row(
+                embedding_id=embedding_id,
+                provider_id=str(getattr(metadata, "provider_id", "") or ""),
+                model_name=str(metadata.model_name or ""),
+                dimension=dimension,
+                vector_blob=vector_blob,
+            )
 
     def mark_embedding_ready(self, *, embedding_id: str, norm: float) -> None:
         instance = self.get_embedding(embedding_id)
@@ -330,27 +454,98 @@ class MemoryDurableRepository:
         return dict(ordered)
 
     def list_fts_candidates(self, text: str, *, limit: int) -> dict[str, float]:
-        query_text = " ".join(part.strip() for part in str(text).splitlines() if part.strip()).strip()
-        if not query_text:
+        scores, _ = self.collect_lexical_candidates(text, limit=limit)
+        return scores
+
+    def collect_lexical_candidates(self, text: str, *, limit: int) -> tuple[dict[str, float], dict[str, int]]:
+        normalized = _normalize_query_text(text)
+        empty_sources = {"fts_word": 0, "fts_trigram": 0, "like": 0}
+        if not normalized:
+            return {}, empty_sources
+
+        query_limit = max(limit * 2, 12)
+        compiled_queries = _compile_fts_queries(normalized)
+        word_scores = self._run_fts_queries("memories_fts", compiled_queries, limit=query_limit)
+        trigram_scores = self._run_fts_queries("memories_fts_trigram", compiled_queries, limit=query_limit)
+        like_scores: dict[str, float] = {}
+        if len(normalized) < 3 or (not word_scores and not trigram_scores):
+            like_scores = self._run_like_candidates(normalized, limit=query_limit)
+
+        combined: dict[str, float] = {}
+        for source_scores in (word_scores, trigram_scores, like_scores):
+            for document_id, score in source_scores.items():
+                combined[document_id] = max(combined.get(document_id, 0.0), score)
+
+        ordered = sorted(combined.items(), key=lambda item: (-item[1], item[0]))[:limit]
+        return dict(ordered), {
+            "fts_word": len(word_scores),
+            "fts_trigram": len(trigram_scores),
+            "like": len(like_scores),
+        }
+
+    def _run_fts_queries(self, table_name: str, queries: list[str], *, limit: int) -> dict[str, float]:
+        if not queries:
             return {}
+        db = MemoryFactModel._meta.database
+        scores: dict[str, float] = {}
+        for query_text in queries:
+            try:
+                cursor = db.execute_sql(
+                    f"""
+                    SELECT document_id, -bm25({table_name}) AS score
+                    FROM {table_name}
+                    WHERE {table_name} MATCH ?
+                    ORDER BY bm25({table_name})
+                    LIMIT ?
+                    """,
+                    (query_text, limit),
+                )
+            except sqlite3.OperationalError:
+                continue
+            for document_id, score in cursor.fetchall():
+                normalized_document_id = str(document_id)
+                scores[normalized_document_id] = max(scores.get(normalized_document_id, 0.0), float(score))
+        return scores
+
+    def _run_like_candidates(self, text: str, *, limit: int) -> dict[str, float]:
+        normalized = _normalize_query_text(text)
+        if not normalized:
+            return {}
+        lowered = normalized.lower()
         db = MemoryFactModel._meta.database
         cursor = db.execute_sql(
             """
-            SELECT document_id, -bm25(memories_fts) AS score
-            FROM memories_fts
-            WHERE memories_fts MATCH ?
-            ORDER BY bm25(memories_fts)
+            SELECT
+                document_id,
+                CASE
+                    WHEN instr(lower(title), ?) > 0 THEN 3.0 ELSE 0.0
+                END
+                + CASE
+                    WHEN instr(lower(summary), ?) > 0 THEN 2.0 ELSE 0.0
+                END
+                + CASE
+                    WHEN instr(lower(search_text), ?) > 0 THEN 1.0 ELSE 0.0
+                END AS score
+            FROM memory_document_projection
+            WHERE instr(lower(title), ?) > 0
+               OR instr(lower(summary), ?) > 0
+               OR instr(lower(search_text), ?) > 0
+            ORDER BY score DESC, document_id
             LIMIT ?
             """,
-            (query_text, limit),
+            (lowered, lowered, lowered, lowered, lowered, lowered, limit),
         )
-        return {str(document_id): float(score) for document_id, score in cursor.fetchall()}
+        return {str(document_id): float(score) for document_id, score in cursor.fetchall() if float(score) > 0.0}
 
-    def list_vector_rows(self) -> list[tuple[MemoryEmbeddingModel, bytes]]:
+    def list_vector_rows(self, *, provider_id: str, model_name: str) -> list[tuple[MemoryEmbeddingModel, bytes]]:
         rows: list[tuple[MemoryEmbeddingModel, bytes]] = []
         query = (
             MemoryEmbeddingModel.select()
-            .where(MemoryEmbeddingModel.index_status == "ready")
+            .where(
+                (MemoryEmbeddingModel.index_status == "ready")
+                & (MemoryEmbeddingModel.provider_id == str(provider_id))
+                & (MemoryEmbeddingModel.model_name == str(model_name))
+            )
             .order_by(MemoryEmbeddingModel.embedding_id)
         )
         for metadata in query:
@@ -358,6 +553,207 @@ class MemoryDurableRepository:
             if blob is None:
                 continue
             rows.append((metadata, blob))
+        return rows
+
+    def query_vector_candidates_sqlite_vec(
+        self,
+        *,
+        provider_id: str,
+        model_name: str,
+        query_vector: list[float],
+        limit: int,
+    ) -> dict[str, float] | None:
+        if not query_vector:
+            return {}
+        sqlite_vec_status = ensure_sqlite_vec_loaded()
+        if not sqlite_vec_status.available:
+            return None
+        dimension = len(query_vector)
+        table_name = self.ensure_vec_index_synced(
+            provider_id=provider_id,
+            model_name=model_name,
+            dimension=dimension,
+        )
+        if not table_name:
+            return {}
+        db = MemoryEmbeddingModel._meta.database
+        query_payload = json.dumps([float(value) for value in query_vector], ensure_ascii=True, separators=(",", ":"))
+        try:
+            cursor = db.execute_sql(
+                f"""
+                SELECT me.document_id, matches.distance
+                FROM (
+                    SELECT rowid, distance
+                    FROM {table_name}
+                    WHERE embedding MATCH ?
+                    ORDER BY distance
+                    LIMIT ?
+                ) AS matches
+                JOIN memory_embedding_vec mev ON mev.rowid = matches.rowid
+                JOIN memory_embeddings me ON me.embedding_id = mev.embedding_id
+                WHERE me.index_status = 'ready'
+                  AND me.provider_id = ?
+                  AND me.model_name = ?
+                ORDER BY matches.distance, me.document_id
+                """,
+                (query_payload, limit, str(provider_id), str(model_name)),
+            )
+        except sqlite3.OperationalError:
+            return None
+        scores: dict[str, float] = {}
+        for document_id, distance in cursor.fetchall():
+            normalized_document_id = str(document_id)
+            distance_value = float(distance)
+            score = 1.0 / (1.0 + max(distance_value, 0.0))
+            scores[normalized_document_id] = max(scores.get(normalized_document_id, 0.0), score)
+        return scores
+
+    def ensure_vec_index_synced(self, *, provider_id: str, model_name: str, dimension: int) -> str | None:
+        if dimension <= 0:
+            return None
+        sqlite_vec_status = ensure_sqlite_vec_loaded()
+        if not sqlite_vec_status.available:
+            return None
+        table_name = self._vec_index_table_name(provider_id=provider_id, model_name=model_name, dimension=dimension)
+        self._ensure_vec_index_table(table_name=table_name, dimension=dimension)
+        ready_count = self._count_ready_vector_group(
+            provider_id=provider_id,
+            model_name=model_name,
+            dimension=dimension,
+        )
+        if ready_count <= 0:
+            return table_name
+        index_count = self._count_vec_index_rows(table_name)
+        if index_count != ready_count:
+            self.rebuild_vec_index_group(
+                provider_id=provider_id,
+                model_name=model_name,
+                dimension=dimension,
+                table_name=table_name,
+            )
+        return table_name
+
+    def rebuild_vec_index_group(
+        self,
+        *,
+        provider_id: str,
+        model_name: str,
+        dimension: int,
+        table_name: str | None = None,
+    ) -> str | None:
+        sqlite_vec_status = ensure_sqlite_vec_loaded()
+        if not sqlite_vec_status.available:
+            return None
+        resolved_table_name = table_name or self._vec_index_table_name(
+            provider_id=provider_id,
+            model_name=model_name,
+            dimension=dimension,
+        )
+        self._ensure_vec_index_table(table_name=resolved_table_name, dimension=dimension)
+        db = MemoryEmbeddingVecModel._meta.database
+        db.execute_sql(f"DELETE FROM {resolved_table_name}")
+        for rowid, vector_blob in self._list_ready_vector_group_rows(
+            provider_id=provider_id,
+            model_name=model_name,
+            dimension=dimension,
+        ):
+            db.execute_sql(
+                f"INSERT INTO {resolved_table_name}(rowid, embedding) VALUES (?, ?)",
+                (rowid, vector_blob.decode("utf-8")),
+            )
+        return resolved_table_name
+
+    def _sync_vec_index_row(
+        self,
+        *,
+        embedding_id: str,
+        provider_id: str,
+        model_name: str,
+        dimension: int,
+        vector_blob: bytes,
+    ) -> None:
+        sqlite_vec_status = ensure_sqlite_vec_loaded()
+        if not sqlite_vec_status.available or dimension <= 0:
+            return
+        rowid = self._get_vector_rowid(embedding_id)
+        if rowid is None:
+            return
+        table_name = self._vec_index_table_name(provider_id=provider_id, model_name=model_name, dimension=dimension)
+        self._ensure_vec_index_table(table_name=table_name, dimension=dimension)
+        db = MemoryEmbeddingVecModel._meta.database
+        try:
+            db.execute_sql(f"DELETE FROM {table_name} WHERE rowid = ?", (rowid,))
+            db.execute_sql(
+                f"INSERT INTO {table_name}(rowid, embedding) VALUES (?, ?)",
+                (rowid, vector_blob.decode("utf-8")),
+            )
+        except sqlite3.OperationalError:
+            return
+
+    def _ensure_vec_index_table(self, *, table_name: str, dimension: int) -> None:
+        db = MemoryEmbeddingVecModel._meta.database
+        db.execute_sql(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS {table_name} USING vec0(embedding float[{int(dimension)}])"
+        )
+
+    def _vec_index_table_name(self, *, provider_id: str, model_name: str, dimension: int) -> str:
+        suffix = hashlib.sha1(
+            f"{provider_id}\x1f{model_name}\x1f{dimension}".encode("utf-8"),
+        ).hexdigest()[:16]
+        return f"memory_vec_idx_{int(dimension)}_{suffix}"
+
+    def _count_ready_vector_group(self, *, provider_id: str, model_name: str, dimension: int) -> int:
+        db = MemoryEmbeddingModel._meta.database
+        cursor = db.execute_sql(
+            """
+            SELECT COUNT(*)
+            FROM memory_embeddings me
+            JOIN memory_embedding_vec mev ON mev.embedding_id = me.embedding_id
+            WHERE me.index_status = 'ready'
+              AND me.provider_id = ?
+              AND me.model_name = ?
+              AND mev.dimension = ?
+            """,
+            (str(provider_id), str(model_name), int(dimension)),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+    def _count_vec_index_rows(self, table_name: str) -> int:
+        db = MemoryEmbeddingVecModel._meta.database
+        try:
+            cursor = db.execute_sql(f"SELECT COUNT(*) FROM {table_name}")
+        except sqlite3.OperationalError:
+            return 0
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+    def _list_ready_vector_group_rows(
+        self,
+        *,
+        provider_id: str,
+        model_name: str,
+        dimension: int,
+    ) -> list[tuple[int, bytes]]:
+        db = MemoryEmbeddingModel._meta.database
+        cursor = db.execute_sql(
+            """
+            SELECT mev.rowid, mev.vector_blob
+            FROM memory_embeddings me
+            JOIN memory_embedding_vec mev ON mev.embedding_id = me.embedding_id
+            WHERE me.index_status = 'ready'
+              AND me.provider_id = ?
+              AND me.model_name = ?
+              AND mev.dimension = ?
+            ORDER BY me.embedding_id
+            """,
+            (str(provider_id), str(model_name), int(dimension)),
+        )
+        rows: list[tuple[int, bytes]] = []
+        for rowid, vector_blob in cursor.fetchall():
+            if vector_blob is None:
+                continue
+            rows.append((int(rowid), bytes(vector_blob)))
         return rows
 
     def bump_usage(self, document_ids: list[str]) -> None:
@@ -402,6 +798,39 @@ class MemoryDurableRepository:
 
 def normalize_topic(topic: str) -> str:
     return " ".join(str(topic or "").strip().lower().split())
+
+
+def _normalize_query_text(text: str) -> str:
+    return " ".join(part.strip() for part in str(text or "").splitlines() if part.strip()).strip()
+
+
+def _compile_fts_queries(text: str) -> list[str]:
+    normalized = _normalize_query_text(text)
+    if not normalized:
+        return []
+    queries: list[str] = [_quote_fts_term(normalized)]
+    terms = [_sanitize_query_term(part) for part in normalized.split()]
+    terms = [term for term in terms if term]
+    if len(terms) > 1:
+        queries.append(" OR ".join(_quote_fts_term(term) for term in dict.fromkeys(terms)))
+    unique_queries: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        compiled = str(query or "").strip()
+        if not compiled or compiled in seen:
+            continue
+        seen.add(compiled)
+        unique_queries.append(compiled)
+    return unique_queries
+
+
+def _quote_fts_term(term: str) -> str:
+    escaped = str(term or "").replace('"', '""').strip()
+    return f'"{escaped}"' if escaped else ""
+
+
+def _sanitize_query_term(term: str) -> str:
+    return str(term or "").strip().strip(".,!?;:'\"()[]{}<>`~!@#$%^&*-_=+|\\/，。！？；：（）【】《》、")
 
 
 def serialize_vector(vector: list[float]) -> bytes:
