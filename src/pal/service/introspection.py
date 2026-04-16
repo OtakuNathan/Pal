@@ -281,7 +281,7 @@ class ServiceIntrospectionProvider:
                 "out_channel_id": {"type": "string", "description": "Use introspection_module_channel_list to find available endpoint IDs"},
                 "enabled": {"type": "boolean"},
                 "out_reply_target": {"type": "object", "description": "Query channel endpoint auth_state for routing info (session_id, request_id)"},
-                "schedule": {"type": "object", "description": "Scheduling config: cadence (manual/daily/weekly), interval, timezone, hour, minute"},
+                "schedule": {"type": "object", "description": "Scheduling config. cadence='cron': {cadence,cron,timezone} where cron is standard 5-field expression. cadence='once': {cadence,run_at_utc}. cadence='manual': no schedule. Example: {\"cadence\":\"cron\",\"cron\":\"0 9 * * *\",\"timezone\":\"Asia/Shanghai\"}"},
             },
             "required": ["service_id", "goal"],
         },
@@ -482,7 +482,7 @@ class ServiceIntrospectionProvider:
             "type": "object",
             "properties": {
                 "target_id": {"type": "string"},
-                "schedule": {"type": "object", "description": "Scheduling config: cadence (manual/daily/weekly), interval, timezone, hour, minute"},
+                "schedule": {"type": "object", "description": "Scheduling config. cadence='cron': {cadence,cron,timezone} where cron is standard 5-field expression. cadence='once': {cadence,run_at_utc}. cadence='manual': no schedule. Example: {\"cadence\":\"cron\",\"cron\":\"0 9 * * *\",\"timezone\":\"Asia/Shanghai\"}"},
             },
             "required": ["target_id", "schedule"],
         },

@@ -1006,14 +1006,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             service_id="heartbeat",
             goal="Check the repository status",
             schedule={
-                "cadence": "seconds",
-                "interval": 1,
-                "anchor_at_utc": (reference - timedelta(seconds=2)).isoformat(),
+                "cadence": "cron",
+                "cron": "* * * * *",
+                "timezone": "UTC",
             },
         )
         manager.register(definition)
 
-        due = manager.enqueue_due_triggers(now_utc=reference + timedelta(seconds=2))
+        due = manager.enqueue_due_triggers(now_utc=reference + timedelta(minutes=2))
 
         self.assertEqual(len(due), 1)
         self.assertEqual(due[0].service_id, "heartbeat")
@@ -1022,16 +1022,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(len(manager.pending_triggers), 1)
         self.assertIsNotNone(manager.schedule_engine.next_due_at("heartbeat"))
 
-    def test_compute_next_service_run_supports_weekly_schedule(self) -> None:
+    def test_compute_next_service_run_supports_cron_schedule(self) -> None:
         next_due = compute_next_service_run_at_utc(
             {
-                "cadence": "weekly",
-                "interval": 1,
-                "weekday": "fri",
-                "hour": 9,
-                "minute": 30,
+                "cadence": "cron",
+                "cron": "30 9 * * 5",
                 "timezone": "Asia/Shanghai",
-                "anchor_local_date": "2026-04-10",
             },
             now_utc=datetime(2026, 4, 10, 0, 0, tzinfo=timezone.utc),
         )
@@ -1300,7 +1296,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     name="operation_service_management_update_schedule",
                     args={
                         "target_id": "daily_digest",
-                        "schedule": {"cadence": "weekly", "weekday": "fri", "hour": 10, "minute": 15, "timezone": "Asia/Shanghai"},
+                        "schedule": {"cadence": "cron", "cron": "15 10 * * 5", "timezone": "Asia/Shanghai"},
                     },
                 )
             )
