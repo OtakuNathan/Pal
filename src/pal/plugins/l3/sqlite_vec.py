@@ -343,7 +343,7 @@ class SQLiteVecL3Plugin:
                 "title": {"type": "string", "description": "Updated short label"},
                 "summary": {"type": "string", "description": "Updated concise summary"},
                 "search_text": {"type": "string", "description": "Updated source of truth — original verbatim fact for retrieval"},
-                "payload_patch": {"type": "object"},
+                "payload_patch": {"type": "object", "description": "Merge patch for existing payload fields"},
                 "topics": {"type": "array", "items": {"type": "string"}, "description": "Replacement topic tags"},
                 "situation_text": {"type": "string"},
                 "task_text": {"type": "string"},

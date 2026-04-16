@@ -304,7 +304,7 @@ class ChannelIntrospectionProvider:
         args_schema={
             "type": "object",
             "properties": {
-                "material": {"type": "object"},
+                "material": {"type": "object", "description": "Provider-specific auth credentials (key-value pairs)"},
             },
             "required": ["material"],
         },

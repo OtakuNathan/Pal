@@ -289,7 +289,7 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="set_auth_material",
         description="Update web fetch provider auth material without exposing secrets",
-        args_schema={"type": "object", "properties": {"material": {"type": "object"}}, "required": ["material"]},
+        args_schema={"type": "object", "properties": {"material": {"type": "object", "description": "Provider-specific auth credentials (key-value pairs)"}}, "required": ["material"]},
     )
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
@@ -316,7 +316,7 @@ class WebFetchIntrospectionProvider:
         family="management",
         action_name="set_config",
         description="Merge config into a web fetch provider settings blob",
-        args_schema={"type": "object", "properties": {"config": {"type": "object"}}, "required": ["config"]},
+        args_schema={"type": "object", "properties": {"config": {"type": "object", "description": "Provider-specific settings (key-value pairs)"}}, "required": ["config"]},
     )
     def set_config(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self._require_provider(call)
