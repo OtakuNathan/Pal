@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol
 
@@ -20,6 +22,108 @@ from pal.llm.models import LLMEndpointModel
 from pal.llm.repository import DEFAULT_THINK_LEVEL, LLMEndpointRepository, RuntimeSettingRepository
 from pal.shared import LLMFinishReason, LLMPreflightStatus, LLMStreamEventKind
 from pal.stream_events import NormalizedLLMStreamEvent
+
+
+# ---------------------------------------------------------------------------
+# Retry helpers — inspired by Claude Code's withRetry.ts
+# ---------------------------------------------------------------------------
+
+_BASE_RETRY_DELAY_MS = 500
+_MAX_RETRY_DELAY_MS = 32_000
+_PERSISTENT_MAX_RETRY_DELAY_MS = 300_000
+_STALE_CONNECTION_SETTLE_MS = 300  # brief pause after stale connection for TCP cleanup
+
+
+def _is_stale_connection(message: str) -> bool:
+    """Detect keep-alive socket deaths: ECONNRESET, EPIPE, server disconnected.
+
+    These happen when the server closed the TCP connection but the local
+    connection pool still holds the dead socket.  The next request picks
+    up the stale socket and fails instantly — even to a *different* endpoint
+    if they share the same connection pool.
+
+    Claude Code handles this by disabling keep-alive and forcing a new
+    client.  We mark the error so the caller can take evasive action.
+    """
+    return any(
+        marker in message
+        for marker in (
+            "econnreset",
+            "epipe",
+            "broken pipe",
+            "server disconnected",
+            "remoteprotocolerror",
+        )
+    )
+
+
+def _classify_retry_error(exc: Exception) -> str:
+    """Classify an LLM invocation error into a retry category.
+
+    Returns one of: 'stale_connection', 'connection', 'rate_limit', 'server', 'unknown'.
+
+    'stale_connection' is a subset of 'connection' — it specifically means a
+    keep-alive socket was reused after the server closed it.  These warrant
+    immediate endpoint skip AND a brief settle delay.
+    """
+    message = str(exc).lower()
+    error_type = type(exc).__name__.lower()
+
+    if _is_stale_connection(message):
+        return "stale_connection"
+
+    # Network / connection level: timeouts, connection refused, etc.
+    if any(
+        marker in message
+        for marker in (
+            "timed out",
+            "timeout",
+            "connectionerror",
+            "connection refused",
+            "connection aborted",
+            "connectionreset",
+        )
+    ) or any(
+        marker in error_type
+        for marker in ("connection", "timeout", "protocol")
+    ):
+        return "connection"
+
+    # HTTP status codes embedded in the error message
+    if "429" in message or "rate" in message:
+        return "rate_limit"
+    if any(code in message for code in ("529", "overload", "502", "503", "504", "500")):
+        return "server"
+
+    return "unknown"
+
+
+def _compute_retry_delay(attempt: int, *, error_kind: str) -> float:
+    """Return delay in seconds before the next retry attempt.
+
+    Exponential backoff with jitter, capped at 32 s.
+    - stale_connection: brief settle pause only (TCP cleanup)
+    - connection: fast skip — just jitter to avoid thundering herd
+    - rate_limit / server: full exponential backoff
+    """
+    if error_kind == "stale_connection":
+        return _STALE_CONNECTION_SETTLE_MS / 1000.0
+
+    base = min(_BASE_RETRY_DELAY_MS * (2 ** (attempt - 1)), _MAX_RETRY_DELAY_MS)
+    jitter = random.random() * 0.25 * base  # noqa: S311
+    return (base + jitter) / 1000.0
+
+
+@dataclass
+class _EndpointInvocationResult:
+    """Carries the outcome of endpoint iteration with retry."""
+    kind: str  # "success" | "compact_required" | "error" | "no_endpoints"
+    value: Any = None
+    endpoint: LLMEndpointModel | None = None
+    effective_request: CanonicalLLMRequest | None = None
+    target_input_budget: int | None = None
+    reserved_output_tokens: int | None = None
+    error_message: str = ""
 
 
 @dataclass
@@ -175,6 +279,7 @@ class LiteLLMEndpointInvoker:
         kwargs: dict[str, Any] = {
             "model": _litellm_model(endpoint.model_id, endpoint.api_mode),
             "messages": _coerce_messages_for_litellm(list(request.messages), tool_name_aliases=tool_name_aliases),
+            "timeout": 120,
         }
         if endpoint.base_url and not str(endpoint.base_url).startswith("stub://"):
             kwargs["api_base"] = endpoint.base_url
@@ -272,24 +377,29 @@ class LLMRuntime(LLMRuntimePort):
     async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
         return await asyncio.to_thread(self.preflight, request)
 
-    def generate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        self.refresh_runtime_settings()
+    def _invoke_endpoints_with_retry(
+        self,
+        request: CanonicalLLMRequest,
+        invoke_fn,
+    ) -> _EndpointInvocationResult:
+        """Shared endpoint iteration with retry, backoff, and stale-connection handling."""
         explicit_preferred_endpoint_id = str(request.metadata.get("preferred_endpoint_id") or "").strip() or None
         preferred_endpoint_id = explicit_preferred_endpoint_id or self.active_endpoint_id
         enabled = list(self.endpoint_resolver.enabled(preferred_endpoint_id=preferred_endpoint_id))
         if not enabled:
-            self.last_request = self._build_effective_request(request, endpoint=None)
+            effective_request = self._build_effective_request(request, endpoint=None)
+            self.last_request = effective_request
             self.last_endpoint_id = None
             self.last_model_id = None
-            return CanonicalLLMOutcome(
-                text="LLM generation failed: no enabled endpoints are configured.",
-                reasoning_text="",
-                tool_calls=[],
-                finish_reason=LLMFinishReason.ERROR,
-            )
+            return _EndpointInvocationResult(kind="no_endpoints")
 
         last_error: Exception | None = None
+        had_stale_connection = False
         for endpoint in enabled:
+            if had_stale_connection:
+                time.sleep(_STALE_CONNECTION_SETTLE_MS / 1000.0)
+                had_stale_connection = False
+
             effective_request = self._build_effective_request(request, endpoint=endpoint)
             self.last_request = effective_request
             advice = self._build_preflight_advice(
@@ -305,33 +415,72 @@ class LLMRuntime(LLMRuntimePort):
             if advice.status == LLMPreflightStatus.COMPACT_REQUIRED:
                 self.last_endpoint_id = endpoint.endpoint_id
                 self.last_model_id = endpoint.model_id
-                return CanonicalLLMOutcome(
-                    text="",
-                    reasoning_text="",
-                    tool_calls=[],
-                    finish_reason=LLMFinishReason.COMPACT_REQUIRED,
+                return _EndpointInvocationResult(
+                    kind="compact_required",
+                    endpoint=endpoint,
+                    effective_request=effective_request,
                     target_input_budget=advice.target_input_budget,
                     reserved_output_tokens=advice.reserved_output_tokens,
-                    preferred_endpoint_id=endpoint.endpoint_id,
-                    preferred_model_id=endpoint.model_id,
                 )
-            for _attempt in range(max(1, self.endpoint_retry_attempts)):
+
+            for attempt in range(max(1, self.endpoint_retry_attempts)):
                 try:
-                    outcome = self._require_invoker().invoke(endpoint, effective_request)
+                    result = invoke_fn(endpoint, effective_request)
                     self.last_request = effective_request
                     self.last_endpoint_id = endpoint.endpoint_id
                     self.last_model_id = endpoint.model_id
                     if explicit_preferred_endpoint_id is None and endpoint.endpoint_id != self.active_endpoint_id:
                         self.set_active_endpoint(endpoint.endpoint_id)
-                    return outcome
+                    return _EndpointInvocationResult(
+                        kind="success",
+                        value=result,
+                        endpoint=endpoint,
+                        effective_request=effective_request,
+                    )
                 except Exception as exc:
                     last_error = exc
+                    error_kind = _classify_retry_error(exc)
+                    if error_kind == "stale_connection":
+                        had_stale_connection = True
+                        break
+                    if error_kind == "connection":
+                        break
+                    if attempt < max(1, self.endpoint_retry_attempts) - 1:
+                        delay = _compute_retry_delay(attempt + 1, error_kind=error_kind)
+                        time.sleep(delay)
 
         self.last_endpoint_id = None
         self.last_model_id = None
         reason = str(last_error) if last_error is not None else "unknown endpoint invocation error"
+        return _EndpointInvocationResult(kind="error", error_message=reason)
+
+    def generate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
+        self.refresh_runtime_settings()
+        result = self._invoke_endpoints_with_retry(
+            request,
+            invoke_fn=lambda ep, req: self._require_invoker().invoke(ep, req),
+        )
+        if result.kind == "success":
+            return result.value
+        if result.kind == "compact_required":
+            ep = result.endpoint
+            return CanonicalLLMOutcome(
+                text="",
+                reasoning_text="",
+                tool_calls=[],
+                finish_reason=LLMFinishReason.COMPACT_REQUIRED,
+                target_input_budget=result.target_input_budget,
+                reserved_output_tokens=result.reserved_output_tokens,
+                preferred_endpoint_id=ep.endpoint_id,
+                preferred_model_id=ep.model_id,
+            )
+        msg = (
+            "LLM generation failed: no enabled endpoints are configured."
+            if result.kind == "no_endpoints"
+            else f"LLM generation failed after exhausting all configured endpoints: {result.error_message}"
+        )
         return CanonicalLLMOutcome(
-            text=f"LLM generation failed after exhausting all configured endpoints: {reason}",
+            text=msg,
             reasoning_text="",
             tool_calls=[],
             finish_reason=LLMFinishReason.ERROR,
@@ -342,68 +491,33 @@ class LLMRuntime(LLMRuntimePort):
 
     def generate_stream(self, request: CanonicalLLMRequest) -> list[NormalizedLLMStreamEvent]:
         self.refresh_runtime_settings()
-        explicit_preferred_endpoint_id = str(request.metadata.get("preferred_endpoint_id") or "").strip() or None
-        preferred_endpoint_id = explicit_preferred_endpoint_id or self.active_endpoint_id
-        enabled = list(self.endpoint_resolver.enabled(preferred_endpoint_id=preferred_endpoint_id))
-        if not enabled:
-            self.last_request = self._build_effective_request(request, endpoint=None)
-            self.last_endpoint_id = None
-            self.last_model_id = None
+        result = self._invoke_endpoints_with_retry(
+            request,
+            invoke_fn=lambda ep, req: list(self._require_invoker().invoke_stream(ep, req)),
+        )
+        if result.kind == "success":
+            return result.value
+        if result.kind == "compact_required":
+            ep = result.endpoint
             return [
                 NormalizedLLMStreamEvent(
-                    event_kind=LLMStreamEventKind.ERROR,
-                    error_text="LLM generation failed: no enabled endpoints are configured.",
-                    finish_reason=LLMFinishReason.ERROR,
-                ),
-                NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.ERROR),
+                    event_kind=LLMStreamEventKind.COMPACT_REQUIRED,
+                    finish_reason=LLMFinishReason.COMPACT_REQUIRED,
+                    target_input_budget=result.target_input_budget,
+                    reserved_output_tokens=result.reserved_output_tokens,
+                    preferred_endpoint_id=ep.endpoint_id,
+                    preferred_model_id=ep.model_id,
+                )
             ]
-
-        last_error: Exception | None = None
-        for endpoint in enabled:
-            effective_request = self._build_effective_request(request, endpoint=endpoint)
-            self.last_request = effective_request
-            advice = self._build_preflight_advice(
-                endpoint=endpoint,
-                request=LLMPreflightRequest(
-                    messages=effective_request.messages,
-                    max_output_tokens=effective_request.max_output_tokens,
-                    model_hint=effective_request.model_hint,
-                    metadata=dict(effective_request.metadata),
-                ),
-                fallback_chain=[],
-            )
-            if advice.status == LLMPreflightStatus.COMPACT_REQUIRED:
-                self.last_endpoint_id = endpoint.endpoint_id
-                self.last_model_id = endpoint.model_id
-                return [
-                    NormalizedLLMStreamEvent(
-                        event_kind=LLMStreamEventKind.COMPACT_REQUIRED,
-                        finish_reason=LLMFinishReason.COMPACT_REQUIRED,
-                        target_input_budget=advice.target_input_budget,
-                        reserved_output_tokens=advice.reserved_output_tokens,
-                        preferred_endpoint_id=endpoint.endpoint_id,
-                        preferred_model_id=endpoint.model_id,
-                    )
-                ]
-            for _attempt in range(max(1, self.endpoint_retry_attempts)):
-                try:
-                    events = list(self._require_invoker().invoke_stream(endpoint, effective_request))
-                    self.last_request = effective_request
-                    self.last_endpoint_id = endpoint.endpoint_id
-                    self.last_model_id = endpoint.model_id
-                    if explicit_preferred_endpoint_id is None and endpoint.endpoint_id != self.active_endpoint_id:
-                        self.set_active_endpoint(endpoint.endpoint_id)
-                    return events
-                except Exception as exc:
-                    last_error = exc
-
-        self.last_endpoint_id = None
-        self.last_model_id = None
-        reason = str(last_error) if last_error is not None else "unknown endpoint invocation error"
+        msg = (
+            "LLM generation failed: no enabled endpoints are configured."
+            if result.kind == "no_endpoints"
+            else f"LLM generation failed after exhausting all configured endpoints: {result.error_message}"
+        )
         return [
             NormalizedLLMStreamEvent(
                 event_kind=LLMStreamEventKind.ERROR,
-                error_text=f"LLM generation failed after exhausting all configured endpoints: {reason}",
+                error_text=msg,
                 finish_reason=LLMFinishReason.ERROR,
             ),
             NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.ERROR),
