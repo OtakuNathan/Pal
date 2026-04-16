@@ -52,7 +52,7 @@ class OllamaEmbeddingProvider:
     model_name: str = DEFAULT_OLLAMA_MODEL_NAME
     base_url: str = DEFAULT_OLLAMA_BASE_URL
     keep_alive: str | None = DEFAULT_OLLAMA_KEEP_ALIVE
-    timeout_seconds: float = 30.0
+    timeout_seconds: float = 120.0
     transport: str = "http"
 
     def embed_query(self, text: str) -> list[float]:

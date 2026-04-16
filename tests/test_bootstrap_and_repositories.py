@@ -543,6 +543,58 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(detached.status, "ok")
         self.assertNotIn("introspection_provider_l3_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
 
+    def test_plugin_attach_detach_lifecycle_works_end_to_end(self) -> None:
+        self.supervisor.seed_defaults(self.registration)
+        handle = compose_runtime(
+            supervisor=self.supervisor,
+            registration=self.registration,
+            database=self.database,
+        )
+        runtime = handle.core.context.execution_runtime
+        cap_registry = handle.core.context.capability_registry
+        plugin_host = handle.plugin_host
+
+        # Verify sqlite_vec_l3 starts attached with capabilities
+        l3_caps_before = [name for name in cap_registry.descriptors if "sqlite_vec_l3" in name]
+        self.assertTrue(len(l3_caps_before) > 0, "L3 plugin should have capabilities on boot")
+        self.assertIsNotNone(runtime.l3_plugin_registry.get("sqlite_vec_l3"))
+
+        # DETACH
+        detached = runtime.execute(
+            CapabilityCall(name="operation_plugin_management_detach", args={"plugin_id": "sqlite_vec_l3"})
+        )
+        self.assertEqual(detached.status, "ok")
+
+        # Capabilities withdrawn
+        l3_caps_after_detach = [name for name in cap_registry.descriptors if "sqlite_vec_l3" in name]
+        self.assertEqual(len(l3_caps_after_detach), 0, "All L3 capabilities should be withdrawn after detach")
+
+        # Provider ref removed
+        self.assertIsNone(runtime.l3_plugin_registry.get("sqlite_vec_l3"))
+
+        # Record shows detached
+        records = plugin_host.list_plugins()
+        l3_record = next(r for r in records if r["plugin_id"] == "sqlite_vec_l3")
+        self.assertFalse(l3_record["attached"])
+
+        # RE-ATTACH
+        attached = runtime.execute(
+            CapabilityCall(name="operation_plugin_management_attach", args={"plugin_id": "sqlite_vec_l3"})
+        )
+        self.assertEqual(attached.status, "ok")
+
+        # Capabilities restored
+        l3_caps_after_reattach = [name for name in cap_registry.descriptors if "sqlite_vec_l3" in name]
+        self.assertEqual(len(l3_caps_after_reattach), len(l3_caps_before), "All L3 capabilities should be restored after re-attach")
+
+        # Provider ref restored
+        self.assertIsNotNone(runtime.l3_plugin_registry.get("sqlite_vec_l3"))
+
+        # Record shows attached
+        records2 = plugin_host.list_plugins()
+        l3_record2 = next(r for r in records2 if r["plugin_id"] == "sqlite_vec_l3")
+        self.assertTrue(l3_record2["attached"])
+
     def test_memory_l3_regression_build_pack_uses_builtin_sqlite_vec_provider(self) -> None:
         self.supervisor.seed_defaults(self.registration)
         handle = compose_runtime(

@@ -17,7 +17,7 @@ from pal.memory import (
     L3RetireResult,
     MemoryQuery,
 )
-from pal.memory.embedding import EmbeddingProviderPort, InProcBGEEmbeddingProvider
+from pal.memory.embedding import EmbeddingProviderPort, OllamaEmbeddingProvider
 from pal.memory.repository import (
     MemoryDurableRepository,
     cosine_similarity,
@@ -153,7 +153,7 @@ class SQLiteVecL3Plugin:
         if self.embedding_provider is None and embedder is not None:
             self.embedding_provider = embedder
         if self.embedding_provider is None:
-            self.embedding_provider = InProcBGEEmbeddingProvider()
+            self.embedding_provider = OllamaEmbeddingProvider()
 
     @property
     def module_id(self) -> str:

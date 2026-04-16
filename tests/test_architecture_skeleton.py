@@ -835,10 +835,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     ),
                 )
             )
-            self.assertEqual(prompt.metadata["fragment_sections"], ["identity", "operating_rules"])
+            self.assertEqual(prompt.metadata["fragment_sections"], ["identity", "operating_rules", "memory_context"])
             self.assertEqual(
                 prompt.metadata["user_context_blocks"],
-                ["l1_recent_context_0", "l1_recent_context_1", "memory_active_entries"],
+                ["l1_recent_context_0", "l1_recent_context_1"],
             )
             self.assertEqual(prompt_ir.turn_kind, "chat")
             self.assertEqual(prompt.messages[0]["role"], "system")
@@ -854,8 +854,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("## Memory Projection", prompt.messages[0]["content"])
             self.assertEqual(prompt.messages[1], {"role": "user", "content": "What timezone should you use?"})
             self.assertEqual(prompt.messages[2], {"role": "assistant", "content": "I should use Asia/Shanghai context."})
-            self.assertIn("<system-reminder>Active Memory:", prompt.messages[3]["content"])
-            self.assertIn("Timezone Preference", prompt.messages[3]["content"])
+            self.assertIn("Active Memory", prompt.messages[0]["content"])
+            self.assertIn("Timezone Preference", prompt.messages[0]["content"])
             self.assertNotIn("Issued work orders", prompt.messages[0]["content"])
             self.assertNotIn("Registered services", prompt.messages[0]["content"])
             self.assertNotIn("Active L3", prompt.messages[0]["content"])

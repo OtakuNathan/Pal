@@ -40,7 +40,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
             if summary_text:
                 fragments.append(
                     PromptFragment(
-                        section="memory",
+                        section="memory_system",
                         title="Current Summary",
                         content=summary_text,
                         priority=55,
@@ -52,7 +52,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
         if top_lines:
             fragments.append(
                 PromptFragment(
-                    section="memory",
+                    section="memory_system",
                     title="Top Of Mind",
                     content="\n".join(top_lines),
                     priority=56,
@@ -64,7 +64,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
         if active_lines:
             fragments.append(
                 PromptFragment(
-                    section="memory",
+                    section="memory_system",
                     title="Active Memory",
                     content="\n".join(active_lines),
                     priority=57,

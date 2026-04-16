@@ -18,8 +18,9 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                 title="Operating Rules",
                 content=(
                     "Answer directly when you have enough information.\n"
-                    "Use tools only when needed to act, search, or recall.\n"
+                    "Use tools only when needed to act, search, recall, or verify state.\n"
                     "Never infer memory or runtime state when it can be queried.\n"
+                    "Never infer user intent or social framing beyond the available evidence.\n"
                     "Capability names use stable snake_case paths grouped by namespace and domain.\n"
                     "Use operation_execution_discovery_search to find capabilities.\n"
                     "Use operation_execution_capability_call to invoke a discovered capability by name.\n"
