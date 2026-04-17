@@ -339,7 +339,7 @@ class LLMRuntime(LLMRuntimePort):
     endpoint_resolver: EndpointResolver
     settings_repository: RuntimeSettingRepository
     endpoint_invoker: LLMEndpointInvokerPort | None = None
-    safety_margin_tokens: int = 256
+    safety_margin_tokens: int = 16384
     endpoint_retry_attempts: int = 2
     last_request: CanonicalLLMRequest | None = None
     last_endpoint_id: str | None = None
@@ -667,8 +667,9 @@ class LLMRuntime(LLMRuntimePort):
         if endpoint is None or endpoint.context_window is None:
             target_budget = max(estimated_size, reserved_output_tokens)
         else:
+            margin = min(self.safety_margin_tokens, max(1024, int(endpoint.context_window * 0.05)))
             target_budget = max(
-                endpoint.context_window - reserved_output_tokens - self.safety_margin_tokens,
+                endpoint.context_window - reserved_output_tokens - margin,
                 reserved_output_tokens,
             )
         active_model = endpoint.model_id if endpoint is not None else request.model_hint

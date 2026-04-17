@@ -30,9 +30,8 @@ from pal.shared import RuntimeStatus
 
 SUMMARY_ENTRY_ID = "memory_summary_current"
 SUMMARY_TITLE = "Conversation Summary"
-L2_WORKING_SET_CAPACITY = 64
+L2_WORKING_SET_CAPACITY = 128
 TOP_OF_MIND_LIMIT = 8
-L1_RECENT_CONTEXT_LIMIT = 12
 
 
 @dataclass
@@ -217,7 +216,7 @@ class MemoryService(MemoryServicePort):
         top_of_mind = self.l2_store.list_top_of_mind_entries()
         active_entries = self.l2_store.list_active_entries()
         return MemoryPack(
-            l1_recent_context=_flatten_recent_l1_context(self.l1_store.items, limit=L1_RECENT_CONTEXT_LIMIT),
+            l1_recent_context=_flatten_recent_l1_context(self.l1_store.items),
             current_summary=current_summary,
             l2_top_of_mind=top_of_mind,
             l2_active_entries=active_entries,
@@ -233,7 +232,7 @@ class MemoryService(MemoryServicePort):
 
     def build_compaction_source_text(self, *, target_input_budget: int) -> str:
         current_summary = self.l2_store.get_entry(SUMMARY_ENTRY_ID)
-        recent_l1 = _flatten_recent_l1_context(self.l1_store.items, limit=L1_RECENT_CONTEXT_LIMIT)
+        recent_l1 = _flatten_recent_l1_context(self.l1_store.items)
         rendered_turns = _render_l1_recent_context(recent_l1)
         parts: list[str] = []
         if current_summary is not None and current_summary.summary.strip():
@@ -300,11 +299,11 @@ def _normalize_l1_transcript(item: list[L1TranscriptMessage] | list[dict[str, ob
     return normalized
 
 
-def _flatten_recent_l1_context(items: list[list[L1TranscriptMessage]], *, limit: int) -> list[L1TranscriptMessage]:
+def _flatten_recent_l1_context(items: list[list[L1TranscriptMessage]]) -> list[L1TranscriptMessage]:
     flattened: list[L1TranscriptMessage] = []
-    for transcript in items[-limit:]:
+    for transcript in items:
         flattened.extend(_normalize_l1_transcript(transcript))
-    return flattened[-limit:]
+    return flattened
 
 
 def _render_l1_recent_context(messages: list[L1TranscriptMessage]) -> str:

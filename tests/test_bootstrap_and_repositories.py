@@ -319,7 +319,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(advice.active_model, "stub-model")
         self.assertEqual(advice.reserved_output_tokens, 1200)
-        self.assertEqual(advice.target_input_budget, 8544)
+        self.assertEqual(advice.target_input_budget, 7776)
         self.assertEqual(advice.fallback_chain, [])
 
     def test_runtime_setting_repository_persists_think_level(self) -> None:
