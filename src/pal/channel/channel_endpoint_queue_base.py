@@ -54,6 +54,9 @@ class ChannelEndpointQueueBase(ABC):
     def inspect_auth_state(self) -> dict[str, Any]:
         ...
 
+    def derive_default_reply_target(self) -> dict[str, Any]:
+        return {}
+
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, Any]) -> None:
         _ = response_handle
         _ = kind

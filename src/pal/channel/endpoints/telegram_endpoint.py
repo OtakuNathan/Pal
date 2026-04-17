@@ -24,13 +24,45 @@ def _proxy_from_env() -> str | None:
     return None
 
 
-def _parse_binding_key(binding_key: str) -> tuple[str, tuple[str, ...]]:
-    raw = str(binding_key or "").strip()
-    if not raw or ":" not in raw:
-        return "", ()
-    scope, remainder = raw.split(":", 1)
-    parts = tuple(part for part in remainder.split(":") if part)
-    return scope, parts
+@dataclass(frozen=True)
+class TelegramBinding:
+    chat_id: str | None = None
+    user_id: str | None = None
+
+    @classmethod
+    def parse(cls, binding_key: str) -> TelegramBinding:
+        raw = str(binding_key or "").strip()
+        if not raw or ":" not in raw:
+            return cls()
+        scope, remainder = raw.split(":", 1)
+        parts = [p for p in remainder.split(":") if p]
+        if scope == "user" and parts:
+            return cls(user_id=parts[0])
+        if scope == "chat" and parts:
+            return cls(chat_id=parts[0])
+        if scope == "chat_user" and len(parts) >= 2:
+            return cls(chat_id=parts[0], user_id=parts[1])
+        return cls()
+
+    @property
+    def binding_key(self) -> str:
+        if self.chat_id and self.user_id:
+            return f"chat_user:{self.chat_id}:{self.user_id}"
+        if self.chat_id:
+            return f"chat:{self.chat_id}"
+        if self.user_id:
+            return f"user:{self.user_id}"
+        return ""
+
+    def matches(self, *, chat_id: int | None, user_id: int | None) -> bool:
+        if self.chat_id and self.user_id:
+            return (user_id is not None and str(user_id) == self.user_id
+                    and chat_id is not None and str(chat_id) == self.chat_id)
+        if self.chat_id:
+            return chat_id is not None and str(chat_id) == self.chat_id
+        if self.user_id:
+            return user_id is not None and str(user_id) == self.user_id
+        return False
 
 
 def _telegram_markdown(text: str) -> tuple[str, str | None]:
@@ -84,6 +116,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     poll_timeout_seconds: int = 30
     allowed_updates: tuple[str, ...] = ("message", "edited_message")
     proxy_url: str | None = None
+    binding: TelegramBinding = field(default_factory=TelegramBinding)
     application: Any = None
     polling_task: asyncio.Task[None] | None = None
     _start_event: asyncio.Event | None = None
@@ -97,6 +130,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _reconnect_delays: tuple[float, ...] = (1.0, 3.0, 10.0, 30.0)
     _reconnect_attempts: int = 0
     _reconnecting: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.binding.chat_id and not self.binding.user_id and self.endpoint.binding_key:
+            self.binding = TelegramBinding.parse(self.endpoint.binding_key)
 
     def normalize_raw(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
@@ -172,6 +209,16 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         self._authorized = bool(self.bot_token)
         self.pair(pairing_metadata={"accepted_keys": sorted(str(key) for key in material.keys())})
         return self.inspect_auth_state()
+
+    def pair(self, *, binding_key: str | None = None, send_policy: dict[str, Any] | None = None, pairing_metadata: dict[str, Any] | None = None) -> None:
+        super().pair(binding_key=binding_key, send_policy=send_policy, pairing_metadata=pairing_metadata)
+        self.binding = TelegramBinding.parse(self.endpoint.binding_key)
+
+    def derive_default_reply_target(self) -> dict[str, Any]:
+        chat_id = self.binding.chat_id or self.binding.user_id
+        if chat_id:
+            return {"chat_id": chat_id}
+        return {}
 
     def inspect_health(self) -> dict[str, Any]:
         reason = ""
@@ -362,14 +409,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         }
 
     def _matches_binding(self, *, chat_id: int | None, user_id: int | None) -> bool:
-        scope, parts = _parse_binding_key(self.endpoint.binding_key)
-        if scope == "user" and parts:
-            return user_id is not None and str(user_id) == parts[0]
-        if scope == "chat" and parts:
-            return chat_id is not None and str(chat_id) == parts[0]
-        if scope == "chat_user" and len(parts) >= 2:
-            return chat_id is not None and user_id is not None and str(chat_id) == parts[0] and str(user_id) == parts[1]
-        return False
+        return self.binding.matches(chat_id=chat_id, user_id=user_id)
 
     async def _extract_attachments(self, message: Any, *, chat_id: int | None) -> list[dict[str, Any]]:
         attachments: list[dict[str, Any]] = []
@@ -548,6 +588,7 @@ class TelegramChannelEndpointFactory:
             base_url=str(metadata.get("base_url") or "https://api.telegram.org"),
             poll_timeout_seconds=int(metadata.get("poll_timeout_seconds") or 30),
             allowed_updates=tuple(metadata.get("allowed_updates") or ("message", "edited_message")),
+            binding=TelegramBinding.parse(record.binding_key or ""),
         )
         runtime_endpoint.enabled = bool(record.enabled)
         runtime_endpoint.attached = record.detached_at is None

@@ -282,7 +282,8 @@ class PalCore:
         endpoint_runtime = channel_runtime.get_endpoint(out_channel_id)
         if endpoint_runtime is None:
             return None
-        reply_target = dict(definition.out_reply_target or {})
+        reply_target = endpoint_runtime.derive_default_reply_target()
+        reply_target.update(dict(definition.out_reply_target or {}))
         reply_target.update(dict(trigger.metadata.get("reply_target") or {}))
         if endpoint_runtime.endpoint.channel_kind == "socket" and not reply_target:
             return None
