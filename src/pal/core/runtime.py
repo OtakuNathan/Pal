@@ -41,17 +41,26 @@ class TurnManager:
     guard: ToolStagnationGuardProcess = field(default_factory=ToolStagnationGuardProcess)
 
     def start(self, channel_envelope: ChannelEnvelope) -> TurnContinuation:
-        # A turn becomes a resumable computation object as soon as it enters the
-        # runtime. After this point PalCore drives it by sending back effect results.
         turn_id = channel_envelope.event.event_id
+        max_output_tokens = self._resolve_max_output_tokens()
         continuation = TurnContinuation(
             turn_id=turn_id,
             channel_envelope=channel_envelope,
-            program=channel_turn_program(channel_envelope, core_mode=self.state.mode),
+            program=channel_turn_program(channel_envelope, core_mode=self.state.mode, max_output_tokens=max_output_tokens),
             correlation_id=channel_envelope.event.correlation_id or turn_id,
         )
         self.state.active_turns[turn_id] = continuation
         return continuation
+
+    def _resolve_max_output_tokens(self) -> int:
+        llm_runtime = self.context.port_registry.get("llm:llm")
+        if llm_runtime is not None:
+            primary_fn = getattr(llm_runtime, "primary", None)
+            if callable(primary_fn):
+                endpoint = primary_fn()
+                if endpoint is not None and getattr(endpoint, "max_output_tokens", None):
+                    return endpoint.max_output_tokens
+        return 4096
 
     def resume(
         self,
@@ -237,6 +246,7 @@ class PalCore:
                 trigger,
                 definition,
                 core_mode=self.state.mode,
+                max_output_tokens=self.turn_manager._resolve_max_output_tokens(),
                 reply_envelope=self._resolve_service_reply_envelope(service_event, definition, trigger),
             ),
             correlation_id=service_event.correlation_id or service_event.event_id,

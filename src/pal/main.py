@@ -89,9 +89,18 @@ def _capability_result_debug_payload(result) -> dict[str, Any]:
     }
 
 
+def _redirect_stdio_to_log(runtime_root: Path) -> None:
+    log_path = runtime_root / "pal.log"
+    log_file = open(log_path, "a", encoding="utf-8")  # noqa: SIM115
+    import sys
+    sys.stdout = log_file
+    sys.stderr = log_file
+
+
 async def _run_async(args: argparse.Namespace) -> int:
     if args.command == "run":
-        app = build_runtime_app(args.runtime_root, debug_prompt=bool(args.debug_prompt))
+        _redirect_stdio_to_log(args.runtime_root)
+        app = build_runtime_app(args.runtime_root, debug_prompt=True)
         await app.run()
         return 0
     if args.command == "client":

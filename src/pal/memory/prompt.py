@@ -17,7 +17,8 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
             return []
 
         fragments: list[PromptFragment] = []
-        for index, message in enumerate(pack.l1_recent_context):
+        block_index = 0
+        for message in pack.l1_recent_context:
             role = str(message.role or "").strip()
             content = str(message.content or "").strip()
             if role not in {"user", "assistant"} or not content:
@@ -27,13 +28,29 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     section="memory",
                     title="Recent Context",
                     content=content,
-                    priority=40 + index,
+                    priority=40 + block_index,
                     metadata={
-                        "block_id": f"l1_recent_context_{index}",
+                        "block_id": f"l1_recent_context_{block_index}",
                         "role": role,
                     },
                 )
             )
+            block_index += 1
+            tool_trace = getattr(message, "tool_trace", None)
+            if role == "assistant" and tool_trace:
+                fragments.append(
+                    PromptFragment(
+                        section="memory",
+                        title="Recent Context",
+                        content=f"Tools used: {tool_trace}",
+                        priority=40 + block_index,
+                        metadata={
+                            "block_id": f"l1_recent_context_{block_index}",
+                            "role": "user",
+                        },
+                    )
+                )
+                block_index += 1
 
         if pack.current_summary is not None:
             summary_text = pack.current_summary.rendered.strip() or pack.current_summary.summary.strip()

@@ -209,7 +209,7 @@ def channel_turn_program(
             final_reply=final_reply,
             commit_payload=L1CommitPayload(
                 turn_id=channel_envelope.event.event_id,
-                transcript=_build_turn_transcript(channel_envelope, final_reply),
+                transcript=_build_turn_transcript(channel_envelope, final_reply, observations=observations),
                 tool_observations=list(observations),
             ),
         )
@@ -227,13 +227,35 @@ def render_final_reply(channel_envelope: ChannelEnvelope, outcome: CanonicalLLMO
     return f"[thinking]\n{reasoning}\n\n{answer}"
 
 
-def _build_turn_transcript(channel_envelope: ChannelEnvelope, final_reply: str) -> list[L1TranscriptMessage]:
+def _render_tool_summary(observations: list[ToolObservation], *, max_summary_chars: int = 500) -> str:
+    if not observations:
+        return ""
+    per_item_limit = max_summary_chars // 3
+    parts: list[str] = []
+    total = 0
+    for obs in observations:
+        status = "ok" if obs.ok else "error"
+        summary = obs.summary[:per_item_limit]
+        line = f"{obs.tool_name}({status}): {summary}"
+        if total + len(line) > max_summary_chars:
+            remaining = len(observations) - len(parts)
+            if remaining > 0:
+                parts.append(f"... +{remaining} more")
+            break
+        parts.append(line)
+        total += len(line)
+    return "\n".join(parts)
+
+
+def _build_turn_transcript(channel_envelope: ChannelEnvelope, final_reply: str, observations: list[ToolObservation] | None = None) -> list[L1TranscriptMessage]:
     user_text = extract_text_from_payload(channel_envelope.event.payload)
     transcript: list[L1TranscriptMessage] = []
     if user_text:
         transcript.append(L1TranscriptMessage(role="user", content=user_text))
-    if final_reply.strip():
-        transcript.append(L1TranscriptMessage(role="assistant", content=final_reply.strip()))
+    assistant_content = final_reply.strip()
+    tool_summary = _render_tool_summary(observations or [])
+    if assistant_content:
+        transcript.append(L1TranscriptMessage(role="assistant", content=assistant_content, tool_trace=tool_summary or None))
     return transcript
 
 
@@ -314,18 +336,20 @@ def service_turn_program(
             final_reply=final_reply,
             commit_payload=L1CommitPayload(
                 turn_id=str(trigger.metadata.get("turn_id") or trigger.service_id),
-                transcript=_build_service_turn_transcript(service_input, final_reply),
+                transcript=_build_service_turn_transcript(service_input, final_reply, observations=observations),
                 tool_observations=list(observations),
             ),
         )
 
 
-def _build_service_turn_transcript(service_input: str, final_reply: str) -> list[L1TranscriptMessage]:
+def _build_service_turn_transcript(service_input: str, final_reply: str, observations: list[ToolObservation] | None = None) -> list[L1TranscriptMessage]:
     transcript: list[L1TranscriptMessage] = []
     if service_input.strip():
         transcript.append(L1TranscriptMessage(role="user", content=service_input.strip()))
-    if final_reply.strip():
-        transcript.append(L1TranscriptMessage(role="assistant", content=final_reply.strip()))
+    assistant_content = final_reply.strip()
+    tool_summary = _render_tool_summary(observations or [])
+    if assistant_content:
+        transcript.append(L1TranscriptMessage(role="assistant", content=assistant_content, tool_trace=tool_summary or None))
     return transcript
 
 

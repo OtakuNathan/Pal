@@ -9,6 +9,7 @@ from typing import Any, Protocol
 class L1TranscriptMessage:
     role: str
     content: str
+    tool_trace: str | None = None
 
 
 @dataclass(frozen=True)
