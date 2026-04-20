@@ -8,15 +8,20 @@ from typing import Any
 
 from pal.foundation import utc_now
 from pal.memory.contracts import (
+    DEFAULT_GHOST_TTL,
+    DEFAULT_HOT_TTL,
     L1Store,
     L1TranscriptMessage,
     L2Entry,
+    L2HeatLevel,
+    L2HeatState,
     L2Store,
     L3CommitRequest,
     L3CorrectRequest,
     L3MutationResult,
     L3RecallResult,
     L3RetireResult,
+    MAX_RENEWAL_COUNT,
     MemoryCommitRequest,
     MemoryCommitResult,
     MemoryCompactRequest,
@@ -84,6 +89,7 @@ class InMemoryL2Store(L2Store):
     top_of_mind_refs: list[str] = field(default_factory=list)
     capacity: int = L2_WORKING_SET_CAPACITY
     top_of_mind_limit: int = TOP_OF_MIND_LIMIT
+    heat_registry: dict[str, L2HeatState] = field(default_factory=dict)
 
     def list_entries(self) -> list[L2Entry]:
         return sorted(
@@ -96,17 +102,70 @@ class InMemoryL2Store(L2Store):
         return self.items.get(entry_id)
 
     def list_top_of_mind_entries(self) -> list[L2Entry]:
-        ordered: list[L2Entry] = []
-        for entry_id in reversed(self.top_of_mind_refs):
-            entry = self.items.get(entry_id)
-            if entry is None or _is_summary_entry(entry):
-                continue
-            ordered.append(entry)
-        return ordered
+        return self.list_hot_entries()
 
     def list_active_entries(self) -> list[L2Entry]:
-        excluded_ids = {SUMMARY_ENTRY_ID, *self.top_of_mind_refs}
-        return [entry for entry in self.list_entries() if entry.entry_id not in excluded_ids]
+        return []
+
+    def list_hot_entries(self) -> list[L2Entry]:
+        result: list[L2Entry] = []
+        for entry_id, state in self.heat_registry.items():
+            if state.heat_level == L2HeatLevel.HOT:
+                entry = self.items.get(entry_id)
+                if entry is not None and not _is_summary_entry(entry):
+                    result.append(entry)
+        result.sort(key=lambda e: e.touched_at, reverse=True)
+        return result
+
+    def get_heat_state(self, entry_id: str) -> L2HeatState | None:
+        return self.heat_registry.get(entry_id)
+
+    def promote_to_hot(self, entry_id: str, *, source: str = "") -> None:
+        if _is_summary_entry_by_id(entry_id):
+            return
+        current = self.heat_registry.get(entry_id)
+        if current is None or current.heat_level == L2HeatLevel.DORMANT:
+            state = L2HeatState(entry_id=entry_id, heat_level=L2HeatLevel.HOT, hot_ttl=DEFAULT_HOT_TTL, ghost_ttl=0, renewal_count=0)
+            self.heat_registry[entry_id] = state
+            print(f"[memory] memory_hot_promoted entry_id={entry_id} source={source}")
+        elif current.heat_level == L2HeatLevel.HOT:
+            state = L2HeatState(entry_id=entry_id, heat_level=L2HeatLevel.HOT, hot_ttl=DEFAULT_HOT_TTL, ghost_ttl=0, renewal_count=current.renewal_count)
+            self.heat_registry[entry_id] = state
+            print(f"[memory] memory_hot_refreshed entry_id={entry_id} remaining_ttl={DEFAULT_HOT_TTL}")
+        elif current.heat_level == L2HeatLevel.GHOST:
+            if current.renewal_count >= MAX_RENEWAL_COUNT:
+                print(f"[memory] memory_ghost_force_dormant entry_id={entry_id} renewal_count={current.renewal_count}")
+                return
+            new_count = current.renewal_count + 1
+            state = L2HeatState(entry_id=entry_id, heat_level=L2HeatLevel.HOT, hot_ttl=DEFAULT_HOT_TTL, ghost_ttl=0, renewal_count=new_count)
+            self.heat_registry[entry_id] = state
+            print(f"[memory] memory_ghost_reactivated entry_id={entry_id} renewal_count={new_count}")
+
+    def tick_heat(self) -> list[str]:
+        expired: list[str] = []
+        for entry_id in list(self.heat_registry):
+            state = self.heat_registry[entry_id]
+            if state.heat_level == L2HeatLevel.HOT:
+                new_ttl = state.hot_ttl - 1
+                if new_ttl <= 0:
+                    if state.renewal_count >= MAX_RENEWAL_COUNT:
+                        del self.heat_registry[entry_id]
+                        expired.append(entry_id)
+                        print(f"[memory] memory_ghost_force_dormant entry_id={entry_id} renewal_count={state.renewal_count}")
+                    else:
+                        self.heat_registry[entry_id] = L2HeatState(entry_id=entry_id, heat_level=L2HeatLevel.GHOST, hot_ttl=0, ghost_ttl=DEFAULT_GHOST_TTL, renewal_count=state.renewal_count)
+                        print(f"[memory] memory_hot_to_ghost entry_id={entry_id} renewal_count={state.renewal_count}")
+                else:
+                    self.heat_registry[entry_id] = L2HeatState(entry_id=entry_id, heat_level=L2HeatLevel.HOT, hot_ttl=new_ttl, ghost_ttl=0, renewal_count=state.renewal_count)
+            elif state.heat_level == L2HeatLevel.GHOST:
+                new_ttl = state.ghost_ttl - 1
+                if new_ttl <= 0:
+                    del self.heat_registry[entry_id]
+                    expired.append(entry_id)
+                    print(f"[memory] memory_ghost_to_dormant entry_id={entry_id}")
+                else:
+                    self.heat_registry[entry_id] = L2HeatState(entry_id=entry_id, heat_level=L2HeatLevel.GHOST, hot_ttl=0, ghost_ttl=new_ttl, renewal_count=state.renewal_count)
+        return expired
 
     def upsert_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = False) -> list[L2Entry]:
         for entry in entries:
@@ -116,6 +175,8 @@ class InMemoryL2Store(L2Store):
             self.items[normalized.entry_id] = merged
             if touch:
                 self.touch(normalized.entry_id, mark_top_of_mind=top_of_mind)
+            if top_of_mind:
+                self.promote_to_hot(normalized.entry_id, source="upsert")
         return self._evict_overflow()
 
     def touch(self, entry_id: str, *, mark_top_of_mind: bool = True) -> None:
@@ -125,11 +186,6 @@ class InMemoryL2Store(L2Store):
         now = utc_now()
         touched = replace(entry, touched_at=now)
         self.items[entry_id] = touched
-        if not mark_top_of_mind or _is_summary_entry(touched):
-            return
-        refs = [value for value in self.top_of_mind_refs if value != entry_id]
-        refs.append(entry_id)
-        self.top_of_mind_refs = refs[-self.top_of_mind_limit :]
 
     def _evict_overflow(self) -> list[L2Entry]:
         evicted: list[L2Entry] = []
@@ -138,6 +194,7 @@ class InMemoryL2Store(L2Store):
             victim = candidates[0]
             removed = self.items.pop(victim.entry_id, None)
             self.top_of_mind_refs = [value for value in self.top_of_mind_refs if value != victim.entry_id]
+            self.heat_registry.pop(victim.entry_id, None)
             if removed is not None:
                 evicted.append(removed)
             candidates = self._capacity_candidates()
@@ -213,13 +270,11 @@ class MemoryService(MemoryServicePort):
         if request.turn_kind == "service_trigger":
             return MemoryPack(metadata={"turn_kind": request.turn_kind})
         current_summary = self.l2_store.get_entry(SUMMARY_ENTRY_ID)
-        top_of_mind = self.l2_store.list_top_of_mind_entries()
-        active_entries = self.l2_store.list_active_entries()
+        hot_entries = self.l2_store.list_hot_entries()
         return MemoryPack(
             l1_recent_context=_flatten_recent_l1_context(self.l1_store.items),
             current_summary=current_summary,
-            l2_top_of_mind=top_of_mind,
-            l2_active_entries=active_entries,
+            l2_working_memory=hot_entries,
             metadata={
                 "turn_kind": request.turn_kind,
                 "task_id": request.task_id,
@@ -535,6 +590,10 @@ def _counts_against_l2_capacity(entry: L2Entry) -> bool:
 
 def _is_summary_entry(entry: L2Entry) -> bool:
     return entry.kind == "summary" or entry.entry_id == SUMMARY_ENTRY_ID
+
+
+def _is_summary_entry_by_id(entry_id: str) -> bool:
+    return entry_id == SUMMARY_ENTRY_ID
 
 
 def _should_retire_entry(entry: L2Entry) -> bool:

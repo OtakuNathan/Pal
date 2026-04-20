@@ -2,7 +2,32 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Protocol
+
+
+# -- L2 Heat State Machine --
+
+class L2HeatLevel(Enum):
+    DORMANT = "DORMANT"
+    HOT = "HOT"
+    GHOST = "GHOST"
+
+
+DEFAULT_HOT_TTL = 5
+DEFAULT_GHOST_TTL = 3
+MAX_RENEWAL_COUNT = 3
+VECTOR_DEDUP_THRESHOLD = 0.85
+RECALL_PROMOTION_THRESHOLD = 0.3
+
+
+@dataclass(frozen=True)
+class L2HeatState:
+    entry_id: str
+    heat_level: L2HeatLevel = L2HeatLevel.DORMANT
+    hot_ttl: int = 0
+    ghost_ttl: int = 0
+    renewal_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -40,6 +65,7 @@ class L2Entry:
     canonical_key: str | None = None
     dedupe_fingerprint: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
+    heat_state: L2HeatState | None = None
 
 
 @dataclass(frozen=True)
@@ -109,8 +135,7 @@ class MemoryPackRequest:
 class MemoryPack:
     l1_recent_context: list[L1TranscriptMessage] = field(default_factory=list)
     current_summary: L2Entry | None = None
-    l2_top_of_mind: list[L2Entry] = field(default_factory=list)
-    l2_active_entries: list[L2Entry] = field(default_factory=list)
+    l2_working_memory: list[L2Entry] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

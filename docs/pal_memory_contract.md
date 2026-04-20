@@ -74,13 +74,13 @@ flowchart LR
 
 - 决定 memory 行为的是 entry 内部 metadata
 - bucket 主要服务于 runtime 组织和 prompt 投影
-- `top_of_mind` 是可以保留的特殊优先级桶
+- `Working Memory` 仅包含当前处于 HOT 状态的条目
 
 ### 内容
 
 - compacted working facts
-- recalled entries
-- top-of-mind hot projections
+- recalled entries (HOT)
+- conversation summary
 - case candidates
 
 ### 边界
@@ -93,12 +93,12 @@ flowchart LR
 
 ### Runtime Shape
 
-`L2` 更接近 hot entry set + priority views，而不是队列。
+`L2` 更接近 hot entry set + lifecycle state machine，而不是队列。
 
 也就是说：
 
 - 它是当前热记忆的集合
-- `top_of_mind` 是其中一个特殊优先级视图
+- `Working Memory` 是 HOT 条目的 prompt 投影视图
 - 它不应被理解成先进先出的业务队列
 
 ### Scope 原则
@@ -206,67 +206,64 @@ flowchart LR
 - `L2` 同构
 - `retire` 时再根据 `kind` 决定落到 `memory_facts` 或 `memory_cases`
 
-### `top_of_mind` 约束
+### L2 Lifecycle Contract: HOT / GHOST / DORMANT
 
-`top_of_mind` 只允许作为 hot projection layer 存在。
+`L2` 条目有明确的生命周期状态，不再是只进不出的 LRU 缓存。
 
-它不是 durable commit bucket，也不是长期真相源。
+```
+DORMANT ──recall/commit──→ HOT       (renewal_count = 0)
+HOT      ──hot_ttl到期──→ GHOST       (renewal_count 不变)
+GHOST    ──再次recall──→ HOT          (renewal_count += 1)
+GHOST    ──ghost_ttl到期──→ DORMANT
+HOT      ──再次recall──→ HOT          (renewal_count 不变，只刷新 ttl)
+```
 
-`top_of_mind` 可以保留为 `L2` 的特殊桶，但它的语义不是内容分类，而是：
+**HOT 代表”当前被真正用上的东西”**，不是”刚被写出来的东西”。
 
-- 当前最优先和 LLM 建立语义挂钩的条目集合
-- prompt 组装时的最高优先级视图
+状态转换规则：
 
-更准确地说：
+- DORMANT → HOT: renewal_count = 0，hot_ttl = 5
+- HOT refresh（recall 命中已在 HOT 的条目）: renewal_count 不变，只重置 hot_ttl
+- HOT → GHOST: renewal_count 不变，ghost_ttl = 3
+- GHOST → HOT: renewal_count += 1
+- renewal_count >= MAX_RENEWAL_COUNT (3) 时，HOT 过期直接 DORMANT，跳过 GHOST
 
-- entry metadata 决定“这条东西是什么、从哪来、能不能 retire”
-- `top_of_mind` 决定“这条东西在 prompt 里是不是最先被看见”
+三条铁规则：
 
-为避免状态分叉，`top_of_mind` 最好保存 entry refs 或投影视图，而不是复制一份独立内容。
+1. TTL 续命封顶 3 次（防永久驻留）
+2. GHOST 只存 entry_id + heat_level + ghost_ttl（轻量）
+3. “再次召回” = 真正进入 working set，不是搜索命中
 
-### `top_of_mind` Update Policy
+TTL 是 turn-based，不是 function-call-based。`tick_heat()` 在 turn 结束时调用，不在 `build_pack()` 里调用。
 
-`top_of_mind` 的更新规则固定为基于 touch 的小容量 LRU 视图。
+### `Working Memory` Prompt Projection
+
+`Working Memory` 是 L2 中所有 HOT 条目的 prompt 投影。
 
 核心原则：
 
-- `top_of_mind` 描述的是最近被记忆系统真正触碰到的条目
-- 它不承担 truth、scope、retire 判定职责
-- 它只承担 prompt 前排优先级职责
+- `Working Memory` 只包含 HOT 条目
+- 无 HOT 条目时不注入任何 L2 块
+- GHOST 条目不渲染
+- compact 只更新 L1，不直接触发 HOT
 
-允许触发 touch 的动作：
+触发 HOT 的动作：
 
-- `commit`
-- `correct`
-- 被实际投影进当前 prompt 的 `recall`
+- `commit`（写入后自动进入 HOT）
+- `recall` 命中后进入 working set
 
-默认不触发 touch 的动作：
+### L3 Commit 向量去重
 
-- 单纯检索命中但未进入 prompt 的 recall 候选
-- 普通 `L1 -> L2` compact 产物
+写入前先 embed search_text，向量搜索已有记忆（top_k=1）。两阶段确认：
 
-更新行为：
+1. **Candidate 阶段**：cosine similarity > 0.85 → 标记为 candidate duplicate
+2. **Confirm 阶段**：检查 candidate 的 canonical_key 是否匹配，或 title/topic 是否强重叠
+   - 确认重叠 → merge（更新旧条目的 title/summary/search_text）
+   - 不确认 → 创建新条目（相似但不同主题）
 
-- 新 touch 的条目移动到最前
-- 已存在条目再次 touch 时只提升顺序，不复制
-- `commit` 成功后必须立即同步进入 `top_of_mind`
+这避免了误合并——比如两条关于不同编程语言的 fact 可能向量相似但主题不同。
 
-容量规则：
-
-- `top_of_mind` 固定容量为 `8`
-- 超出容量后，从尾部按 LRU 顺序淘汰
-
-移除规则：
-
-- 对应条目被 archive
-- 对应条目被 supersede 且不再有效
-- scope 已明显失效且不再应进入当前 prompt
-
-因此：
-
-- `top_of_mind` 是 `L2` 的优先级视图
-- 它最接近“最近摸到的记忆缓存”
-- 它不是独立 memory layer
+embedding provider 不可用时退化为原有 hash 去重。
 
 ## L3
 
@@ -730,6 +727,28 @@ flowchart LR
 - `warm`
 - `deep`
 
+### Recall 触发策略
+
+不是所有问题都应该触发 recall。以下规则约束模型何时应主动 recall，何时直接回答。
+
+应该触发 recall：
+
+- 关于用户本人的事实、偏好、历史
+- 关于 Pal 自身的来源、设定、过去事件
+- 用户显式引用过去（之前/上次/记得/回忆/以前/那次）
+- 影响后续行为的承诺或约定
+
+不应触发 recall：
+
+- 不依赖用户或 Pal 特定存储事实的通用知识问题
+- 不涉及特定过去事件或存储事实的闲聊
+
+模糊时偏向 recall——当答案可能依赖存储的个人或系统事实时，优先 recall。
+
+### Recall Promotion 阈值
+
+recall 返回的所有 hit 都会投影到 L2，但只有 final score >= `RECALL_PROMOTION_THRESHOLD`（当前 0.3）的条目才进入 HOT 状态。低于阈值的条目存入 L2 但不进 Working Memory，避免低相关性噪音污染 prompt。
+
 ## commit
 
 `commit` 表示：
@@ -743,7 +762,8 @@ flowchart LR
 - `commit` 必然影响当前 runtime 的 memory view
 - `commit` 的 durable 目标是 `L3`
 - `commit` 不带 `level`
-- `commit` 成功后可以立即热投影到 `L2`，例如进入 `top_of_mind`
+- `commit` 成功后立即进入 L2 HOT 状态
+- `commit` 写入前先做向量去重检查，相似度 > 0.85 且 canonical_key/title/topic 重叠时 merge 已有条目
 
 ## correct
 
@@ -800,14 +820,14 @@ LLM 不应逐字段消费 `L2` 内部 schema。
 
 默认推荐顺序：
 
-1. `Top of Mind`
-2. `Current Task / Working Facts`
-3. `Relevant Recalled Memory`
-4. `Recent L1 Context`
+1. `Working Memory`（仅 HOT 条目）
+2. `Current Summary`
+3. `Recent L1 Context`
 
 这意味着：
 
-- `top_of_mind` 主要通过 prompt 排序体现优先级
+- `Working Memory` 只包含当前真正被用上的记忆
+- 无 HOT 条目时不注入任何 L2 块
 - `source_kind / candidate_state / scope` 等字段主要服务于 runtime 逻辑，而不是逐字段暴露给 LLM
 
 ## Invariants
@@ -815,15 +835,18 @@ LLM 不应逐字段消费 `L2` 内部 schema。
 - `L1/L2` 只存在 RAM。
 - `L3` 是唯一 durable memory layer。
 - `L1` 是近无损压缩 transcript，不是 summary。
-- `L2` 的真相结构以 entry metadata 为主。
+- `L2` 的真相结构以 entry metadata + lifecycle state 为主。
 - `L1 -> L2` 叫 compact。
 - `L2 -> L3` 叫 retire。
 - `L3 -> L2` 叫 recall。
 - `commit` 是显式写入，不带 `level`。
-- `top_of_mind` 不是 durable bucket。
-- `top_of_mind` 可以作为特殊优先级桶保留，并在 prompt 中前置。
+- `Working Memory` 仅包含 HOT 条目，不是 durable bucket。
+- L2 条目有 HOT / GHOST / DORMANT 生命周期，TTL 续命封顶 3 次。
 - `task-wise memory` 是 scope，不是 bucket。
 - `page_fault` 正式废弃。
+- `commit` 写入前做向量去重，避免重复记忆。
+- recall 只在涉及用户/Pal 特定事实、过去事件引用、行为承诺时触发，不用于通用知识问题。
+- recall 结果中 final score < 0.3 的条目不进入 HOT，避免低相关性噪音污染 Working Memory。
 
 ## Non-Goals
 

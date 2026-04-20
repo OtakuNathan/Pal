@@ -238,21 +238,19 @@ class PromptCompiler:
     def _order_user_context_blocks(self, blocks: list[PromptIRBlock], *, turn_kind: str) -> list[PromptIRBlock]:
         l1_blocks = [block for block in blocks if block.block_id.startswith("l1_recent_context")]
         summary_blocks = [block for block in blocks if block.block_id == "memory_current_summary"]
-        top_of_mind_blocks = [block for block in blocks if block.block_id == "memory_top_of_mind"]
-        active_blocks = [block for block in blocks if block.block_id == "memory_active_entries"]
+        working_memory_blocks = [block for block in blocks if block.block_id == "memory_working_memory"]
         trailing_blocks = [
             block
             for block in blocks
             if block.block_id not in {
                 *[item.block_id for item in l1_blocks],
                 "memory_current_summary",
-                "memory_top_of_mind",
-                "memory_active_entries",
+                "memory_working_memory",
             }
         ]
         if turn_kind == "service_trigger":
             return []
-        return [*l1_blocks, *summary_blocks, *top_of_mind_blocks, *active_blocks, *trailing_blocks]
+        return [*l1_blocks, *summary_blocks, *working_memory_blocks, *trailing_blocks]
 
     def _order_system_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
         identity_blocks = [block for block in blocks if block.block_id == "identity"]

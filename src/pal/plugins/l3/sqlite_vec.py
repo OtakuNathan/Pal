@@ -17,6 +17,7 @@ from pal.memory import (
     L3RetireResult,
     MemoryQuery,
 )
+from pal.memory.contracts import RECALL_PROMOTION_THRESHOLD, VECTOR_DEDUP_THRESHOLD
 from pal.memory.embedding import EmbeddingProviderPort, OllamaEmbeddingProvider
 from pal.memory.repository import (
     MemoryDurableRepository,
@@ -424,9 +425,56 @@ class SQLiteVecL3Plugin:
             llm_text=render_titled_structured_for_llm("L3 provider indexes refreshed", payload),
         )
 
+    def _find_vector_duplicate(self, search_text: str) -> tuple[dict[str, Any], float] | None:
+        if not search_text or self.embedding_provider is None:
+            return None
+        candidates = self._vector_candidates(search_text, limit=1)
+        if not candidates:
+            return None
+        doc_id, score = next(iter(candidates.items()))
+        if score < VECTOR_DEDUP_THRESHOLD:
+            return None
+        hit = self.repository.get_document(doc_id)
+        if hit is None:
+            return None
+        return hit, score
+
+    def _confirm_duplicate(self, candidate: dict[str, Any], request: L3CommitRequest) -> bool:
+        candidate_key = str(candidate.get("canonical_key") or "").strip()
+        if candidate_key and candidate_key == (request.canonical_key or ""):
+            return True
+        candidate_title = str(candidate.get("title") or "").strip().lower()
+        candidate_topics = set(str(t).strip().lower() for t in (candidate.get("topics") or []))
+        request_title = str(request.title or "").strip().lower()
+        request_topics = set(str(t).strip().lower() for t in request.topics)
+        if candidate_title and request_title and candidate_title == request_title:
+            return True
+        if candidate_topics and request_topics and len(candidate_topics & request_topics) >= 2:
+            return True
+        return False
+
+    def _merge_from_commit(self, candidate: dict[str, Any], request: L3CommitRequest) -> L3MutationResult:
+        document_id = str(candidate.get("document_id", ""))
+        correct_request = L3CorrectRequest(
+            document_id=document_id,
+            title=request.title or None,
+            summary=request.summary or None,
+            search_text=request.search_text or None,
+            topics=request.topics or None,
+        )
+        return self.correct(correct_request)
+
     def commit(self, request: L3CommitRequest) -> L3MutationResult:
         if not self.mounted:
             return L3MutationResult(status=RuntimeStatus.UNAVAILABLE, document_id="")
+        search_text = request.search_text or request.summary or request.title or ""
+        vector_match = self._find_vector_duplicate(search_text)
+        if vector_match is not None:
+            candidate, score = vector_match
+            print(f"[memory] memory_vector_dedup_candidate new_title={request.title} candidate_id={candidate.get('document_id')} score={score:.3f}")
+            if self._confirm_duplicate(candidate, request):
+                print(f"[memory] memory_vector_dedup_confirmed merged_into={candidate.get('document_id')} score={score:.3f}")
+                return self._merge_from_commit(candidate, request)
         now = utc_now()
         if request.kind == "fact":
             summary = request.summary or request.title
@@ -714,7 +762,12 @@ class SQLiteVecL3Plugin:
         hits = [item[2] for item in limited]
         projected_entries = [self._project_entry(hit, source_kind="l3_recall", candidate_state="candidate") for hit in hits]
         self.repository.bump_usage([hit["document_id"] for hit in hits])
-        self.service.project_l3_entries(projected_entries, touch=True)
+        hot_entries = [entry for entry, (_, doc_id, hit) in zip(projected_entries, limited) if hit.get("scores", {}).get("final", 0) >= RECALL_PROMOTION_THRESHOLD]
+        cool_entries = [entry for entry in projected_entries if entry not in hot_entries]
+        if hot_entries:
+            self.service.project_l3_entries(hot_entries, touch=True, top_of_mind=True)
+        if cool_entries:
+            self.service.project_l3_entries(cool_entries, touch=True, top_of_mind=False)
         degraded_reason = str(self.last_embedding_error or embedding_health.get("last_error") or "").strip()
         degraded = bool(vector_query_text) and bool(degraded_reason)
         return L3RecallResult(

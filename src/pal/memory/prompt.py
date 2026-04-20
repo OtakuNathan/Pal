@@ -65,27 +65,15 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     )
                 )
 
-        top_lines = _render_entry_lines(pack.l2_top_of_mind)
-        if top_lines:
+        hot_lines = _render_entry_lines(pack.l2_working_memory)
+        if hot_lines:
             fragments.append(
                 PromptFragment(
                     section="memory_system",
-                    title="Top Of Mind",
-                    content="\n".join(top_lines),
+                    title="Working Memory",
+                    content="\n".join(hot_lines),
                     priority=56,
-                    metadata={"block_id": "memory_top_of_mind"},
-                )
-            )
-
-        active_lines = _render_entry_lines(pack.l2_active_entries)
-        if active_lines:
-            fragments.append(
-                PromptFragment(
-                    section="memory_system",
-                    title="Active Memory",
-                    content="\n".join(active_lines),
-                    priority=57,
-                    metadata={"block_id": "memory_active_entries"},
+                    metadata={"block_id": "memory_working_memory"},
                 )
             )
         return fragments

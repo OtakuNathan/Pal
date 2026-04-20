@@ -803,6 +803,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     )
                 ],
                 touch=True,
+                top_of_mind=True,
             )
 
             register_identity_with_core(core.context, identity_service)
@@ -854,7 +855,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("## Memory Projection", prompt.messages[0]["content"])
             self.assertEqual(prompt.messages[1], {"role": "user", "content": "What timezone should you use?"})
             self.assertEqual(prompt.messages[2], {"role": "assistant", "content": "I should use Asia/Shanghai context."})
-            self.assertIn("Active Memory", prompt.messages[0]["content"])
+            self.assertIn("Working Memory", prompt.messages[0]["content"])
             self.assertIn("Timezone Preference", prompt.messages[0]["content"])
             self.assertNotIn("Issued work orders", prompt.messages[0]["content"])
             self.assertNotIn("Registered services", prompt.messages[0]["content"])

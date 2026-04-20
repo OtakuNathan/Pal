@@ -686,7 +686,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(inventory.status, "ok")
         self.assertEqual(inventory.structured["provider_id"], "sqlite_vec_l3")
         self.assertIn(document_id, handle.memory_service.l2_store.items)
-        self.assertIn(document_id, handle.memory_service.l2_store.top_of_mind_refs)
+        self.assertIn(document_id, handle.memory_service.l2_store.heat_registry)
         self.assertEqual(handle.memory_service.l2_store.items[document_id].summary, "Recovered the worker after memory pressure.")
 
     def test_sqlite_vec_l3_commit_truth_topics_and_pending_index(self) -> None:
@@ -713,7 +713,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(inventory["fact_count"], 1)
         self.assertEqual(inventory["pending_embeddings"], 1)
         self.assertIn(result.document_id, service.l2_store.items)
-        self.assertIn(result.document_id, service.l2_store.top_of_mind_refs)
+        self.assertIn(result.document_id, service.l2_store.heat_registry)
 
     def test_sqlite_vec_l3_refresh_indexes_and_vector_recall(self) -> None:
         service = MemoryService()
@@ -1061,7 +1061,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(inventory["failed_embeddings"], 0)
         self.assertEqual(inventory["ready_embeddings"], 1)
 
-    def test_memory_service_tracks_top_of_mind_with_lru_limit(self) -> None:
+    def test_memory_service_promotes_commits_to_hot(self) -> None:
         service = MemoryService()
         provider = SQLiteVecL3Plugin(service=service, embedder=HashingEmbedder())
         service.l3_selector = L3ProviderSelector(resolver={provider.provider_id: provider}.get, active_provider_id=provider.provider_id)  # type: ignore[arg-type]
@@ -1077,8 +1077,9 @@ class PalV2BootstrapTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(len(service.l2_store.top_of_mind_refs), 8)
-        self.assertEqual(len(set(service.l2_store.top_of_mind_refs)), 8)
+        from pal.memory.contracts import L2HeatLevel
+        hot_ids = [eid for eid, state in service.l2_store.heat_registry.items() if state.heat_level == L2HeatLevel.HOT]
+        self.assertEqual(len(hot_ids), 10)
 
     def test_litellm_invoker_does_not_map_think_level_to_reasoning_effort_for_openai_chat(self) -> None:
         endpoint = LLMEndpointRepository().upsert(

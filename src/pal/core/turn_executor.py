@@ -535,6 +535,10 @@ class TurnExecutor:
                     "status": result.status,
                 }
             )
+        try:
+            memory_service.l2_store.tick_heat()
+        except Exception:
+            pass
 
     # ── compaction summary ───────────────────────────────────────────────
 
