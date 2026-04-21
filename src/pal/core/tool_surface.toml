@@ -1,30 +1,30 @@
 # Tool Surface Configuration
 # Controls which capabilities are exposed to the LLM as function-calling tools.
-# Other capabilities remain discoverable via operation_execution_discovery_search
-# and invocable via operation_execution_capability_call.
+# Other capabilities remain discoverable via op_exec_disc_search
+# and invocable via op_exec_capability_call.
 
 [singletons]
 # These capabilities have target_id = SINGLETON_TARGET and are always exposed.
 capabilities = [
     # -- execution (discovery + exec) --
-    "operation_execution_discovery_read",
-    "operation_execution_discovery_search",
-    "operation_execution_exec_run",
-    "operation_execution_capability_call",
+    "op_exec_disc_read",
+    "op_exec_disc_search",
+    "op_exec_run",
+    "op_exec_capability_call",
     # -- web --
-    "operation_web_search_query",
-    "operation_web_fetch_read",
+    "op_web_search_query",
+    "op_web_fetch_read",
 ]
 
 # Dynamic capabilities: resolved at runtime by following the active provider.
 [[dynamic]]
-canonical_path = "operation_l3_recall_query"
+canonical_path = "op_l3_recall_query"
 provider_setting = "memory"
 
 [[dynamic]]
-canonical_path = "operation_l3_commit_write"
+canonical_path = "op_l3_commit_write"
 provider_setting = "memory"
 
 [[dynamic]]
-canonical_path = "operation_l3_correct_patch"
+canonical_path = "op_l3_correct_patch"
 provider_setting = "memory"

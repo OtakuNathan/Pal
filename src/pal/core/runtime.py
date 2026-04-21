@@ -16,7 +16,7 @@ from pal.core.prompt_compiler import PromptCompiler
 from pal.core.tool_stagnation import ToolStagnationGuardProcess
 from pal.core.tool_surface import ToolSurface
 from pal.core.turn_executor import TurnExecutor
-from pal.core.turns import EffectRequest, EffectResult, TurnContinuation, TurnOutcome, channel_turn_program, service_turn_program
+from pal.core.turns import EffectRequest, EffectResult, TurnContinuation, TurnOutcome, L1CommitPayload, channel_turn_program, service_turn_program
 from pal.core.module_registry import ModuleHandle
 from pal.failure import FailureSignal, FailureUserFeedback
 from pal.foundation import EventEnvelope
@@ -52,14 +52,17 @@ class TurnManager:
         self.state.active_turns[turn_id] = continuation
         return continuation
 
-    def _resolve_max_output_tokens(self) -> int:
+    def _resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None) -> int:
         llm_runtime = self.context.port_registry.get("llm:llm")
         if llm_runtime is not None:
-            primary_fn = getattr(llm_runtime, "primary", None)
-            if callable(primary_fn):
-                endpoint = primary_fn()
-                if endpoint is not None and getattr(endpoint, "max_output_tokens", None):
-                    return endpoint.max_output_tokens
+            fn = getattr(llm_runtime, "resolve_max_output_tokens", None)
+            if callable(fn):
+                try:
+                    result = fn(preferred_endpoint_id=preferred_endpoint_id)
+                except TypeError:
+                    result = fn()
+                if result is not None:
+                    return result
         return 4096
 
     def resume(
@@ -259,9 +262,52 @@ class PalCore:
         while True:
             yielded = self.turn_manager.resume(continuation, current)
             if isinstance(yielded, TurnOutcome):
-                await self._schedule_post_turn_commit_async(yielded)
-                return yielded
+                outcome = self._enrich_transcript_with_tool_protocol(yielded, continuation)
+                await self._schedule_post_turn_commit_async(outcome)
+                return outcome
             current = await self._execute_turn_effect_async(continuation, yielded)
+
+    _TOOL_RESULT_PREVIEW_CHARS = 600
+    _TOOL_RESULT_L1_BUDGET = 2000
+
+    def _truncate_tool_result_for_l1(self, content: str) -> str:
+        if len(content) <= self._TOOL_RESULT_L1_BUDGET:
+            return content
+        preview = content[:self._TOOL_RESULT_PREVIEW_CHARS].rstrip()
+        return f"{preview}\n\n[... truncated, original: {len(content)} chars]"
+
+    def _enrich_transcript_with_tool_protocol(self, outcome: TurnOutcome, continuation: TurnContinuation) -> TurnOutcome:
+        from pal.memory.contracts import L1TranscriptMessage
+
+        if not continuation.tool_protocol_messages:
+            return outcome
+        original = outcome.commit_payload.transcript
+        user_msg = next((m for m in original if m.role == "user"), None)
+        new_transcript: list[L1TranscriptMessage] = []
+        if user_msg:
+            new_transcript.append(user_msg)
+        for msg in continuation.tool_protocol_messages:
+            content = str(msg.get("content", ""))
+            if msg.get("role") == "tool":
+                content = self._truncate_tool_result_for_l1(content)
+            new_transcript.append(L1TranscriptMessage(
+                role=str(msg.get("role", "")),
+                content=content,
+                tool_calls=msg.get("tool_calls"),
+                tool_call_id=msg.get("tool_call_id"),
+            ))
+        assistant_msgs = [m for m in original if m.role == "assistant"]
+        for m in assistant_msgs:
+            new_transcript.append(L1TranscriptMessage(role=m.role, content=m.content))
+        return TurnOutcome(
+            turn_id=outcome.turn_id,
+            final_reply=outcome.final_reply,
+            commit_payload=L1CommitPayload(
+                turn_id=outcome.commit_payload.turn_id,
+                transcript=new_transcript,
+                tool_observations=outcome.commit_payload.tool_observations,
+            ),
+        )
 
     def _build_service_endpoint_config(self, definition: ServiceDefinition):
         from pal.channel.contracts import EndpointConfig
@@ -433,21 +479,7 @@ class PalCore:
     def _debug_log_prompt(self, request: CanonicalLLMRequest) -> None:
         if not self.debug_prompt:
             return
-        prompt_ir = request.metadata.get("prompt_ir")
-        system_parts = [message["content"] for message in request.messages if message.get("role") == "system"]
-        user_parts = [message["content"] for message in request.messages if message.get("role") == "user"]
         print("=== PAL PROMPT DEBUG ===")
-        print(f"sections={request.metadata.get('fragment_sections', [])}")
-        if prompt_ir:
-            print("--- prompt ir ---")
-            print(prompt_ir)
-        if system_parts:
-            print("--- system ---")
-            print(system_parts[0])
-        if user_parts:
-            print("--- user messages ---")
-            for index, item in enumerate(user_parts):
-                print(f"[{index}] {item}")
         print("--- request.messages ---")
         print(request.messages)
         print("--- request.tools ---")

@@ -344,13 +344,24 @@ def _normalize_l1_transcript(item: list[L1TranscriptMessage] | list[dict[str, ob
     for entry in list(item or []):
         if isinstance(entry, L1TranscriptMessage):
             if entry.content.strip():
-                normalized.append(L1TranscriptMessage(role=entry.role, content=entry.content.strip()))
+                normalized.append(L1TranscriptMessage(
+                    role=entry.role,
+                    content=entry.content.strip(),
+                    tool_trace=entry.tool_trace,
+                    tool_calls=entry.tool_calls,
+                    tool_call_id=entry.tool_call_id,
+                ))
             continue
         if isinstance(entry, dict):
             role = str(entry.get("role") or "").strip()
             content = str(entry.get("content") or "").strip()
             if role and content:
-                normalized.append(L1TranscriptMessage(role=role, content=content))
+                normalized.append(L1TranscriptMessage(
+                    role=role,
+                    content=content,
+                    tool_calls=entry.get("tool_calls"),
+                    tool_call_id=entry.get("tool_call_id"),
+                ))
     return normalized
 
 

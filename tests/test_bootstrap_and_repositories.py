@@ -417,18 +417,18 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("web_fetch", plugin_ids)
         self.assertIsNotNone(handle.core.context.module_registry.get("web_search"))
         self.assertIsNotNone(handle.core.context.module_registry.get("web_fetch"))
-        self.assertIn("operation_web_search_query", handle.core.context.capability_registry.descriptors)
-        self.assertIn("operation_web_fetch_read", handle.core.context.capability_registry.descriptors)
-        self.assertIn("introspection_module_web_search_show", handle.core.context.capability_registry.descriptors)
-        self.assertIn("introspection_module_web_fetch_show", handle.core.context.capability_registry.descriptors)
+        self.assertIn("op_web_search_query", handle.core.context.capability_registry.descriptors)
+        self.assertIn("op_web_fetch_read", handle.core.context.capability_registry.descriptors)
+        self.assertIn("intro_module_web_search_show", handle.core.context.capability_registry.descriptors)
+        self.assertIn("intro_module_web_fetch_show", handle.core.context.capability_registry.descriptors)
         self.assertTrue(
-            any(name.startswith("operation_web_search_management_set_config") for name in handle.core.context.capability_registry.descriptors)
+            any(name.startswith("op_web_search_mgmt_set_config") for name in handle.core.context.capability_registry.descriptors)
         )
         self.assertTrue(
-            any(name.startswith("operation_web_fetch_management_set_config") for name in handle.core.context.capability_registry.descriptors)
+            any(name.startswith("op_web_fetch_mgmt_set_config") for name in handle.core.context.capability_registry.descriptors)
         )
-        self.assertIn("operation_web_search_query", tool_names)
-        self.assertIn("operation_web_fetch_read", tool_names)
+        self.assertIn("op_web_search_query", tool_names)
+        self.assertIn("op_web_fetch_read", tool_names)
 
     def test_plugin_host_rescan_discovers_third_party_bundle_but_does_not_import_it(self) -> None:
         self.supervisor.seed_defaults(self.registration)
@@ -510,7 +510,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         sys.path.insert(0, str(builtin_root))
         try:
             result = handle.core.context.execution_runtime.execute(
-                CapabilityCall(name="operation_plugin_management_rescan_and_attach_new_first_party")
+                CapabilityCall(name="op_plugin_mgmt_rescan_and_attach_new_first_party")
             )
         finally:
             sys.path.remove(str(builtin_root))
@@ -532,16 +532,16 @@ class PalV2BootstrapTests(unittest.TestCase):
             database=self.database,
         )
 
-        self.assertIn("introspection_module_plugins_show", handle.core.context.capability_registry.descriptors)
-        self.assertIn("operation_plugin_management_detach", handle.core.context.capability_registry.descriptors)
-        self.assertIn("introspection_provider_l3_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
+        self.assertIn("intro_module_plugins_show", handle.core.context.capability_registry.descriptors)
+        self.assertIn("op_plugin_mgmt_detach", handle.core.context.capability_registry.descriptors)
+        self.assertIn("intro_provider_l3_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
 
         detached = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="operation_plugin_management_detach", args={"plugin_id": "sqlite_vec_l3"})
+            CapabilityCall(name="op_plugin_mgmt_detach", args={"plugin_id": "sqlite_vec_l3"})
         )
 
         self.assertEqual(detached.status, "ok")
-        self.assertNotIn("introspection_provider_l3_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
+        self.assertNotIn("intro_provider_l3_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
 
     def test_plugin_attach_detach_lifecycle_works_end_to_end(self) -> None:
         self.supervisor.seed_defaults(self.registration)
@@ -561,7 +561,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         # DETACH
         detached = runtime.execute(
-            CapabilityCall(name="operation_plugin_management_detach", args={"plugin_id": "sqlite_vec_l3"})
+            CapabilityCall(name="op_plugin_mgmt_detach", args={"plugin_id": "sqlite_vec_l3"})
         )
         self.assertEqual(detached.status, "ok")
 
@@ -579,7 +579,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         # RE-ATTACH
         attached = runtime.execute(
-            CapabilityCall(name="operation_plugin_management_attach", args={"plugin_id": "sqlite_vec_l3"})
+            CapabilityCall(name="op_plugin_mgmt_attach", args={"plugin_id": "sqlite_vec_l3"})
         )
         self.assertEqual(attached.status, "ok")
 
@@ -605,7 +605,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         commit = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="operation_l3_commit_write",
+                name="op_l3_commit_write",
                 args={
                     "target_id": "sqlite_vec_l3",
                     "kind": "fact",
@@ -632,7 +632,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         committed = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="operation_l3_commit_write",
+                name="op_l3_commit_write",
                 args={
                     "target_id": "sqlite_vec_l3",
                     "kind": "case",
@@ -653,7 +653,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         recalled = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="operation_l3_recall_query",
+                name="op_l3_recall_query",
                 args={
                     "target_id": "sqlite_vec_l3",
                     "queries": ["worker memory pressure stabilize"],
@@ -663,7 +663,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         corrected = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="operation_l3_correct_patch",
+                name="op_l3_correct_patch",
                 args={
                     "target_id": "sqlite_vec_l3",
                     "document_id": document_id,
@@ -674,7 +674,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         inventory = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="introspection_provider_l3_inventory",
+                name="intro_provider_l3_inventory",
                 args={"target_id": "sqlite_vec_l3"},
             )
         )
@@ -1443,7 +1443,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(handle.core.context.module_registry.get("llm"))
         self.assertIsNotNone(handle.core.context.module_registry.get("memory"))
         self.assertIsNotNone(handle.core.context.module_registry.get("identity"))
-        self.assertIsNotNone(handle.core.context.execution_runtime.capabilities.get("introspection_module_llm_list"))
+        self.assertIsNotNone(handle.core.context.execution_runtime.capabilities.get("intro_module_llm_list"))
 
     def test_compose_runtime_registers_seeded_socket_endpoint(self) -> None:
         self.supervisor.seed_defaults(self.registration)
@@ -1490,16 +1490,16 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         llm_list = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="introspection_module_llm_list")
+            CapabilityCall(name="intro_module_llm_list")
         )
         llm_active = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="introspection_module_llm_active")
+            CapabilityCall(name="intro_module_llm_active")
         )
         llm_think_level = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="introspection_module_llm_think_level")
+            CapabilityCall(name="intro_module_llm_think_level")
         )
         llm_show = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="introspection_endpoint_llm_show", args={"target_id": "stub_llm_default"})
+            CapabilityCall(name="intro_endpoint_llm_show", args={"target_id": "stub_llm_default"})
         )
 
         self.assertEqual(llm_list.status, "ok")
@@ -1531,7 +1531,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         auth_result = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="operation_web_search_management_set_auth_material",
+                name="op_web_search_mgmt_set_auth_material",
                 args={
                     "target_id": "brave_search_default",
                     "material": {"api_key": "brave-secret"},
@@ -1579,7 +1579,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         result = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="operation_web_search_query",
+                name="op_web_search_query",
                 args={"query": "pal runtime docs", "limit": 3},
             )
         )
@@ -1601,7 +1601,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         health = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="introspection_provider_web_fetch_health",
+                name="intro_provider_web_fetch_health",
                 args={"target_id": "playwright_fetch_default"},
             )
         )
@@ -1629,7 +1629,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         disabled = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="operation_web_fetch_management_disable",
+                name="op_web_fetch_mgmt_disable",
                 args={"target_id": "playwright_fetch_default"},
             )
         )
@@ -1673,7 +1673,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         result = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="operation_web_fetch_read",
+                name="op_web_fetch_read",
                 args={"url": "https://example.com"},
             )
         )

@@ -350,6 +350,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         from telegram import Update
 
         builder = ApplicationBuilder().token(self.bot_token).concurrent_updates(True)
+        builder = builder.read_timeout(30).write_timeout(30).connect_timeout(10).pool_timeout(30)
         if self.proxy_url:
             builder = builder.proxy(self.proxy_url).get_updates_proxy(self.proxy_url)
         if self.base_url != "https://api.telegram.org":

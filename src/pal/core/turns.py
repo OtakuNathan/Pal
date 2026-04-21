@@ -121,6 +121,7 @@ class TurnContinuation:
     waiting_effect_id: str | None = None
     finalization_only: bool = False
     finalization_attempted: bool = False
+    finalization_reason: str = ""
     tool_batch_count: int = 0
     last_response_mode: str = "chat"
     preferred_llm_endpoint_id: str | None = None
@@ -173,8 +174,8 @@ def channel_turn_program(
             assembly_context=assembly_context,
             max_output_tokens=max_output_tokens,
         )
-        outcome = outcome_result.payload
-        if isinstance(outcome, CanonicalLLMOutcome) and outcome.finish_reason == LLMFinishReason.COMPACT_REQUIRED:
+        outcome = _as_llm_outcome(outcome_result.payload)
+        if outcome is not None and outcome.finish_reason == LLMFinishReason.COMPACT_REQUIRED:
             compact_result = yield MemoryCompactEffect(
                 assembly_context=assembly_context,
                 target_input_budget=outcome.target_input_budget,
@@ -182,25 +183,12 @@ def channel_turn_program(
             )
             compact_note = str(compact_result.payload.summary) if compact_result.payload is not None else ""
             continue
-        if isinstance(outcome, CanonicalLLMOutcome) and outcome.tool_calls:
-            batch: list[ToolObservation] = []
+        if outcome is not None and outcome.tool_calls:
             for tool_call in outcome.tool_calls:
                 tool_result = yield ToolCallEffect(tool_call=tool_call)
-                payload = tool_result.payload
-                if isinstance(payload, CanonicalToolResult):
-                    batch.append(
-                        ToolObservation(
-                            tool_name=payload.name,
-                            ok=payload.ok,
-                            summary=payload.text or ("tool succeeded" if payload.ok else "tool failed"),
-                            structured=payload.structured,
-                        )
-                    )
-            observations.extend(batch)
+                _append_tool_observation(observations, tool_result.payload)
             continue
-        final_reply = ""
-        if isinstance(outcome, CanonicalLLMOutcome):
-            final_reply = render_final_reply(channel_envelope, outcome)
+        final_reply = render_final_reply(channel_envelope, outcome) if outcome is not None else ""
         reply_result = yield MailboxReplyEffect(channel_envelope=channel_envelope, text=final_reply)
         if reply_result.status != RuntimeStatus.QUEUED:
             final_reply = reply_result.text or final_reply
@@ -299,8 +287,8 @@ def service_turn_program(
             assembly_context=assembly_context,
             max_output_tokens=max_output_tokens,
         )
-        outcome = outcome_result.payload
-        if isinstance(outcome, CanonicalLLMOutcome) and outcome.finish_reason == LLMFinishReason.COMPACT_REQUIRED:
+        outcome = _as_llm_outcome(outcome_result.payload)
+        if outcome is not None and outcome.finish_reason == LLMFinishReason.COMPACT_REQUIRED:
             compact_result = yield MemoryCompactEffect(
                 assembly_context=assembly_context,
                 target_input_budget=outcome.target_input_budget,
@@ -308,25 +296,12 @@ def service_turn_program(
             )
             compact_note = str(compact_result.payload.summary) if compact_result.payload is not None else ""
             continue
-        if isinstance(outcome, CanonicalLLMOutcome) and outcome.tool_calls:
-            batch: list[ToolObservation] = []
+        if outcome is not None and outcome.tool_calls:
             for tool_call in outcome.tool_calls:
                 tool_result = yield ToolCallEffect(tool_call=tool_call)
-                payload = tool_result.payload
-                if isinstance(payload, CanonicalToolResult):
-                    batch.append(
-                        ToolObservation(
-                            tool_name=payload.name,
-                            ok=payload.ok,
-                            summary=payload.text or ("tool succeeded" if payload.ok else "tool failed"),
-                            structured=payload.structured,
-                        )
-                    )
-            observations.extend(batch)
+                _append_tool_observation(observations, tool_result.payload)
             continue
-        final_reply = ""
-        if isinstance(outcome, CanonicalLLMOutcome):
-            final_reply = str(outcome.text or "")
+        final_reply = str(outcome.text or "") if outcome is not None else ""
         if reply_envelope is not None:
             reply_result = yield MailboxReplyEffect(channel_envelope=reply_envelope, text=final_reply)
             if reply_result.status != RuntimeStatus.QUEUED:
@@ -384,8 +359,8 @@ def failure_turn_program(
             max_output_tokens=max_output_tokens,
             tools_override=list(allowed_tools),
         )
-        outcome = diagnose_result.payload
-        if not isinstance(outcome, CanonicalLLMOutcome):
+        outcome = _as_llm_outcome(diagnose_result.payload)
+        if outcome is None:
             return FailureFlowOutcome(
                 verification=VerificationResult(status=FAILURE_VERIFICATION_FAILED, reason="Failure diagnosis did not return an LLM outcome."),
                 enriched_fields={},
@@ -393,16 +368,7 @@ def failure_turn_program(
         if outcome.tool_calls:
             for tool_call in outcome.tool_calls:
                 tool_result = yield ToolCallEffect(tool_call=tool_call)
-                payload = tool_result.payload
-                if isinstance(payload, CanonicalToolResult):
-                    observations.append(
-                        ToolObservation(
-                            tool_name=payload.name,
-                            ok=payload.ok,
-                            summary=payload.text or ("tool succeeded" if payload.ok else "tool failed"),
-                            structured=payload.structured,
-                        )
-                    )
+                _append_tool_observation(observations, tool_result.payload)
             verify_context = PromptAssemblyContext(
                 turn_kind="failure",
                 metadata={
@@ -422,8 +388,8 @@ def failure_turn_program(
                 max_output_tokens=max_output_tokens,
                 tools_override=[],
             )
-            verify_outcome = verify_result.payload
-            if isinstance(verify_outcome, CanonicalLLMOutcome):
+            verify_outcome = _as_llm_outcome(verify_result.payload)
+            if verify_outcome is not None:
                 verification, enriched_fields = _parse_failure_verification(verify_outcome.text)
                 if verification.status != FAILURE_VERIFICATION_FAILED or batch_index >= max_maintenance_batches - 1:
                     return FailureFlowOutcome(verification=verification, enriched_fields=enriched_fields)
@@ -529,3 +495,25 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _as_llm_outcome(payload: Any) -> CanonicalLLMOutcome | None:
+    return payload if isinstance(payload, CanonicalLLMOutcome) else None
+
+
+def _as_tool_result(payload: Any) -> CanonicalToolResult | None:
+    return payload if isinstance(payload, CanonicalToolResult) else None
+
+
+def _append_tool_observation(observations: list[ToolObservation], payload: Any) -> None:
+    tool_result = _as_tool_result(payload)
+    if tool_result is None:
+        return
+    observations.append(
+        ToolObservation(
+            tool_name=tool_result.name,
+            ok=tool_result.ok,
+            summary=tool_result.text or ("tool succeeded" if tool_result.ok else "tool failed"),
+            structured=tool_result.structured,
+        )
+    )

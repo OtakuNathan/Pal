@@ -4,9 +4,10 @@ import asyncio
 import inspect
 import json
 from functools import singledispatchmethod
-from uuid import uuid4
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
+from pal.execution.contracts import ToolCallBudget
 from pal.core.tool_stagnation import (
     ToolExecutionRecord,
     canonical_result_fingerprint,
@@ -34,6 +35,8 @@ _FORWARD_STREAM_KINDS = frozenset({
     LLMStreamEventKind.DONE,
     LLMStreamEventKind.ERROR,
 })
+
+_CHARS_PER_TOKEN = 3.5
 
 
 class TurnExecutor:
@@ -227,12 +230,14 @@ class TurnExecutor:
             pending_index = len(continuation.pending_tool_results)
             if 0 <= pending_index < len(continuation.pending_tool_call_batch):
                 execution_call = continuation.pending_tool_call_batch[pending_index]
+        tool_budget = self._build_tool_call_budget(continuation)
         tool_result = await self._call_port_async(
             self.context.execution_runtime,
             "execute_tool_async",
             "execute_tool",
             execution_call,
             allow_tools=not continuation.finalization_only,
+            budget=tool_budget,
         )
         if self._should_enter_failure_flow_for_tool_result(tool_result):
             failure_result = await self._handle_failure_async(
@@ -260,6 +265,11 @@ class TurnExecutor:
                 },
                 call_id=getattr(execution_call, "call_id", None),
                 llm_text=self._render_failure_feedback_text(failure_result.user_feedback),
+            )
+        if tool_result.status == "budget_exceeded":
+            continuation.finalization_only = True
+            continuation.finalization_reason = (
+                "The tool execution budget for this turn was exhausted. Use the existing observations and retained tool protocol only."
             )
         continuation.tool_observations.append(
             ToolObservation(
@@ -400,7 +410,8 @@ class TurnExecutor:
                     pass
         if continuation.finalization_only:
             metadata["finalization_directive"] = (
-                "Tool execution has been terminated. Use existing observations only and produce a pure text final reply."
+                continuation.finalization_reason
+                or "Tool execution has been terminated. Use existing observations only and produce a pure text final reply."
             )
         prompt_context = PromptAssemblyContext(
             event=assembly_context.event,
@@ -416,8 +427,163 @@ class TurnExecutor:
             model_hint=continuation.preferred_llm_model_id,
         )
         if continuation.tool_protocol_messages:
-            prompt.messages.extend(dict(message) for message in continuation.tool_protocol_messages)
+            budget = self._resolve_tool_result_budget(continuation, max_output_tokens=max_output_tokens)
+            prompt.messages.extend(
+                self._trim_tool_protocol_for_prompt(
+                    continuation.tool_protocol_messages,
+                    aggregate_budget=budget,
+                )
+            )
         return prompt
+
+    _ACTIVE_TOOL_RESULT_BUDGET = 12_000
+    _ACTIVE_TOOL_RESULT_PREVIEW = 1_000
+    _MIN_TOOL_PROTOCOL_BUDGET = 256
+    _TOOL_PROTOCOL_SHARE = 0.5
+    _MIN_TOOL_CALL_OUTPUT_BUDGET = 128
+
+    def _resolve_tool_result_budget(self, continuation, *, max_output_tokens: int) -> int:
+        facts = self._resolve_endpoint_facts(
+            continuation.preferred_llm_endpoint_id,
+            preferred_model_id=continuation.preferred_llm_model_id,
+        )
+        return self._compute_tool_protocol_budget(facts, max_output_tokens=max_output_tokens)
+
+    def _resolve_endpoint_facts(
+        self,
+        preferred_endpoint_id: str | None,
+        *,
+        preferred_model_id: str | None = None,
+    ) -> dict[str, Any]:
+        llm_runtime = self.context.port_registry.get("llm:llm")
+        if llm_runtime is not None:
+            facts_fn = getattr(llm_runtime, "resolve_endpoint_facts", None)
+            if callable(facts_fn):
+                try:
+                    payload = facts_fn(preferred_endpoint_id=preferred_endpoint_id)
+                except TypeError:
+                    payload = facts_fn()
+                if isinstance(payload, dict):
+                    normalized = dict(payload)
+                    if preferred_model_id and not normalized.get("model_id"):
+                        normalized["model_id"] = preferred_model_id
+                    return normalized
+            max_output_fn = getattr(llm_runtime, "resolve_max_output_tokens", None)
+            if callable(max_output_fn):
+                try:
+                    resolved_output = max_output_fn(preferred_endpoint_id=preferred_endpoint_id)
+                except TypeError:
+                    resolved_output = max_output_fn()
+                return {
+                    "endpoint_id": preferred_endpoint_id,
+                    "model_id": preferred_model_id,
+                    "context_window": None,
+                    "max_output_tokens": resolved_output,
+                }
+        return {
+            "endpoint_id": preferred_endpoint_id,
+            "model_id": preferred_model_id,
+            "context_window": None,
+            "max_output_tokens": None,
+        }
+
+    def _compute_tool_protocol_budget(self, facts: dict[str, Any], *, max_output_tokens: int) -> int:
+        context_window = facts.get("context_window")
+        endpoint_max_output = facts.get("max_output_tokens")
+        if not isinstance(context_window, int) or context_window <= 0:
+            return 80_000
+        reserved_output = max_output_tokens
+        if isinstance(endpoint_max_output, int) and endpoint_max_output > 0:
+            reserved_output = min(max_output_tokens, endpoint_max_output)
+        margin = min(16_384, max(1024, int(context_window * 0.05)))
+        input_tokens = max(context_window - reserved_output - margin, 0)
+        budget = int(input_tokens * self._TOOL_PROTOCOL_SHARE * _CHARS_PER_TOKEN)
+        return max(self._MIN_TOOL_PROTOCOL_BUDGET, budget)
+
+    def _build_tool_call_budget(self, continuation) -> ToolCallBudget:
+        facts = self._resolve_endpoint_facts(
+            continuation.preferred_llm_endpoint_id,
+            preferred_model_id=continuation.preferred_llm_model_id,
+        )
+        max_output_tokens = self._resolve_effective_max_output_tokens(continuation)
+        aggregate_budget = self._compute_tool_protocol_budget(facts, max_output_tokens=max_output_tokens)
+        consumed_budget = self._current_tool_protocol_budget(continuation.tool_protocol_messages)
+        remaining_budget = max(aggregate_budget - consumed_budget, 0)
+        max_output_chars = min(self._ACTIVE_TOOL_RESULT_BUDGET, remaining_budget)
+        if max_output_chars <= 0:
+            max_output_chars = 0
+        else:
+            max_output_chars = max(self._MIN_TOOL_CALL_OUTPUT_BUDGET, max_output_chars)
+        return ToolCallBudget(max_output_chars=max_output_chars)
+
+    def _resolve_effective_max_output_tokens(self, continuation) -> int:
+        llm_runtime = self.context.port_registry.get("llm:llm")
+        if llm_runtime is not None:
+            fn = getattr(llm_runtime, "resolve_max_output_tokens", None)
+            if callable(fn):
+                try:
+                    result = fn(preferred_endpoint_id=continuation.preferred_llm_endpoint_id)
+                except TypeError:
+                    result = fn()
+                if isinstance(result, int) and result > 0:
+                    return result
+        return 4096
+
+    def _current_tool_protocol_budget(self, messages: list[dict[str, Any]]) -> int:
+        total = 0
+        for message in messages:
+            if message.get("role") == "tool":
+                total += len(str(message.get("content", "")))
+        return total
+
+    def _trim_tool_protocol_for_prompt(self, messages: list[dict], *, aggregate_budget: int = 80_000) -> list[dict]:
+        result = []
+        for msg in messages:
+            if msg.get("role") == "tool":
+                content = str(msg.get("content", ""))
+                if len(content) > self._ACTIVE_TOOL_RESULT_BUDGET:
+                    preview = content[:self._ACTIVE_TOOL_RESULT_PREVIEW].rstrip()
+                    content = f"{preview}\n\n[... truncated, original: {len(content)} chars]"
+                    result.append({**msg, "content": content})
+                    continue
+            result.append(msg)
+
+        total = sum(len(str(m.get("content", ""))) for m in result if m.get("role") == "tool")
+        if total <= aggregate_budget:
+            return result
+
+        for batch_indices in self._tool_protocol_batches(result):
+            if total <= aggregate_budget:
+                break
+            for idx in batch_indices:
+                if result[idx].get("role") != "tool":
+                    continue
+                old = str(result[idx].get("content", ""))
+                cleared = "[old tool result cleared]"
+                total -= len(old) - len(cleared)
+                result[idx] = {**result[idx], "content": cleared}
+
+        return result
+
+    def _tool_protocol_batches(self, messages: list[dict[str, Any]]) -> list[list[int]]:
+        batches: list[list[int]] = []
+        index = 0
+        while index < len(messages):
+            message = messages[index]
+            role = str(message.get("role") or "").strip()
+            if role == "assistant" and message.get("tool_calls"):
+                batch: list[int] = [index]
+                cursor = index + 1
+                while cursor < len(messages) and str(messages[cursor].get("role") or "").strip() == "tool":
+                    batch.append(cursor)
+                    cursor += 1
+                batches.append(batch)
+                index = cursor
+                continue
+            if role == "tool":
+                batches.append([index])
+            index += 1
+        return batches
 
     def fallback_final_reply(self, continuation) -> str:
         if continuation.tool_observations:

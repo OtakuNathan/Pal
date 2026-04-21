@@ -91,23 +91,23 @@ Playwright 的进程管理器。负责：
 
 | canonical_path | 作用 |
 |----------------|------|
-| `introspection_module_web_fetch_show` | 模块概览 |
-| `introspection_module_web_fetch_list_providers` | 列出所有 provider |
-| `introspection_module_web_fetch_active_provider` | 当前活跃 provider |
-| `operation_web_fetch_read` | 抓取网页内容 |
-| `operation_web_fetch_management_set_active_provider` | 切换活跃 provider |
+| `intro_module_web_fetch_show` | 模块概览 |
+| `intro_module_web_fetch_list_providers` | 列出所有 provider |
+| `intro_module_web_fetch_active_provider` | 当前活跃 provider |
+| `op_web_fetch_read` | 抓取网页内容 |
+| `op_web_fetch_mgmt_set_active_provider` | 切换活跃 provider |
 
 ### Provider 实例级能力
 
 每个注册的 provider 会自动生成实例级能力：
 
-- `introspection_provider_web_fetch_health::<provider_id>`
-- `introspection_provider_web_fetch_show::<provider_id>`
-- `introspection_provider_web_fetch_auth_state::<provider_id>`
-- `operation_web_fetch_management_enable::<provider_id>`
-- `operation_web_fetch_management_disable::<provider_id>`
-- `operation_web_fetch_management_set_config::<provider_id>`
-- `operation_web_fetch_management_set_auth_material::<provider_id>`
+- `intro_provider_web_fetch_health::<provider_id>`
+- `intro_provider_web_fetch_show::<provider_id>`
+- `intro_provider_web_fetch_auth_state::<provider_id>`
+- `op_web_fetch_mgmt_enable::<provider_id>`
+- `op_web_fetch_mgmt_disable::<provider_id>`
+- `op_web_fetch_mgmt_set_config::<provider_id>`
+- `op_web_fetch_mgmt_set_auth_material::<provider_id>`
 
 ## 代理支持
 

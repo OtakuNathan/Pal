@@ -116,68 +116,68 @@ class ToolSurface:
                 seen.add(key)
                 selected.append(descriptor)
 
-        include("operation_execution_discovery_read")
+        include("op_exec_disc_read")
 
         if signal.subsystem == "memory":
-            include("introspection_module_memory_show")
-            include("introspection_module_memory_list_providers")
-            include("introspection_module_memory_active_provider")
-            include("operation_memory_management_set_active_provider")
+            include("intro_module_memory_show")
+            include("intro_module_memory_list_providers")
+            include("intro_module_memory_active_provider")
+            include("op_memory_mgmt_set_active_provider")
             try:
                 memory_service = self.context.require_port("memory:memory")
                 active_provider_id = str(memory_service.l3_selector.active_provider_id or "").strip()
             except KeyError:
                 active_provider_id = ""
             if active_provider_id:
-                include("introspection_provider_l3_show", target_id=active_provider_id)
-                include("introspection_provider_l3_inventory", target_id=active_provider_id)
-                include("operation_l3_maintenance_refresh_indexes", target_id=active_provider_id)
+                include("intro_provider_l3_show", target_id=active_provider_id)
+                include("intro_provider_l3_inventory", target_id=active_provider_id)
+                include("op_l3_maintenance_refresh_indexes", target_id=active_provider_id)
         elif signal.subsystem in {"plugin", "plugins"}:
-            include("introspection_module_plugins_show")
-            include("introspection_module_plugins_list")
-            include("operation_plugin_management_rescan")
-            include("operation_plugin_management_enable")
-            include("operation_plugin_management_disable")
+            include("intro_module_plugins_show")
+            include("intro_module_plugins_list")
+            include("op_plugin_mgmt_rescan")
+            include("op_plugin_mgmt_enable")
+            include("op_plugin_mgmt_disable")
         elif signal.subsystem == "channel":
-            include("introspection_module_channel_list")
-            include("operation_channel_management_enable")
-            include("operation_channel_management_disable")
-            include("operation_channel_management_attach")
-            include("operation_channel_management_detach")
+            include("intro_module_channel_list")
+            include("op_channel_mgmt_enable")
+            include("op_channel_mgmt_disable")
+            include("op_channel_mgmt_attach")
+            include("op_channel_mgmt_detach")
             endpoint_id = (
                 str(signal.related_ids.get("endpoint_id") or "").strip()
                 or str(signal.component or "").strip()
             )
             if endpoint_id:
-                include("introspection_endpoint_channel_inspect", target_id=endpoint_id)
-                include("introspection_endpoint_channel_auth_state", target_id=endpoint_id)
-                include("introspection_endpoint_channel_backlog", target_id=endpoint_id)
-                include("introspection_endpoint_channel_health", target_id=endpoint_id)
+                include("intro_endpoint_channel_inspect", target_id=endpoint_id)
+                include("intro_endpoint_channel_auth_state", target_id=endpoint_id)
+                include("intro_endpoint_channel_backlog", target_id=endpoint_id)
+                include("intro_endpoint_channel_health", target_id=endpoint_id)
         elif signal.subsystem == "llm":
-            include("introspection_module_llm_list")
-            include("introspection_module_llm_active")
-            include("introspection_module_llm_think_level")
+            include("intro_module_llm_list")
+            include("intro_module_llm_active")
+            include("intro_module_llm_think_level")
         elif signal.subsystem == "execution":
-            include("introspection_module_execution_show")
-            include("introspection_module_execution_tools")
+            include("intro_module_exec_show")
+            include("intro_module_exec_tools")
         elif signal.subsystem == "web_search":
-            include("introspection_module_web_search_show")
-            include("introspection_module_web_search_active_provider")
-            include("introspection_module_web_search_list_providers")
+            include("intro_module_web_search_show")
+            include("intro_module_web_search_active_provider")
+            include("intro_module_web_search_list_providers")
             active_web_search_provider_id = self._get_setting("active_web_search_provider_id")
             if active_web_search_provider_id:
-                include("introspection_provider_web_search_health", target_id=active_web_search_provider_id)
-                include("operation_web_search_management_set_active_provider")
+                include("intro_provider_web_search_health", target_id=active_web_search_provider_id)
+                include("op_web_search_mgmt_set_active_provider")
         elif signal.subsystem == "web_fetch":
-            include("introspection_module_web_fetch_show")
-            include("introspection_module_web_fetch_active_provider")
-            include("introspection_module_web_fetch_list_providers")
+            include("intro_module_web_fetch_show")
+            include("intro_module_web_fetch_active_provider")
+            include("intro_module_web_fetch_list_providers")
             active_web_fetch_provider_id = self._get_setting("active_web_fetch_provider_id")
             if active_web_fetch_provider_id:
-                include("introspection_provider_web_fetch_health", target_id=active_web_fetch_provider_id)
-                include("operation_web_fetch_management_set_active_provider")
+                include("intro_provider_web_fetch_health", target_id=active_web_fetch_provider_id)
+                include("op_web_fetch_mgmt_set_active_provider")
         else:
             module_name = str(signal.subsystem or "").strip()
             if module_name:
-                include(f"introspection_module_{module_name}_show")
+                include(f"intro_module_{module_name}_show")
         return selected

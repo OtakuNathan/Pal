@@ -14,6 +14,7 @@ from pal.execution.contracts import (
     ExecutionRuntimePort,
     RegisteredCapability,
     Tool,
+    ToolCallBudget,
 )
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.plugins.l3.registry import L3PluginRegistry
@@ -239,7 +240,13 @@ class ExecutionRuntime(ExecutionRuntimePort):
         self.capability_forest.unmount(subtree)
         return list(subtree.search_record_ids)
 
-    def execute_tool(self, call: CanonicalToolCall, *, allow_tools: bool = True) -> CanonicalToolResult:
+    def execute_tool(
+        self,
+        call: CanonicalToolCall,
+        *,
+        allow_tools: bool = True,
+        budget: ToolCallBudget | None = None,
+    ) -> CanonicalToolResult:
         call_id = getattr(call, "call_id", None)
         try:
             if not allow_tools:
@@ -250,18 +257,23 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     structured={"reason": "finalization_only"},
                     call_id=call_id,
                     llm_text="tool execution disabled in finalization mode",
+                    status="finalization_only",
                 )
+            if budget is not None and budget.max_output_chars is not None and budget.max_output_chars <= 0:
+                return self._budget_exceeded_result(call, budget=budget, original_size=0, limit_kind="max_output_chars")
             tool = self.tools.get(call.name)
             if tool is not None:
                 result = tool.invoke(call.args)
-                return CanonicalToolResult(
+                canonical_result = CanonicalToolResult(
                     name=call.name,
                     ok=result.status == RuntimeStatus.OK,
                     text=result.text,
                     structured=result.structured,
                     call_id=call_id,
                     llm_text=getattr(result, "llm_text", ""),
+                    status=result.status,
                 )
+                return self._apply_tool_budget(call, canonical_result, budget=budget)
             capability_result = self.execute(CapabilityCall(name=call.name, args=dict(call.args)))
             if capability_result.status == RuntimeStatus.ERROR and str(capability_result.text).startswith("unknown capability:"):
                 return CanonicalToolResult(
@@ -271,15 +283,18 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     structured={"reason": "unknown_tool"},
                     call_id=call_id,
                     llm_text=f"unknown tool: {call.name}",
+                    status="unknown_tool",
                 )
-            return CanonicalToolResult(
+            canonical_result = CanonicalToolResult(
                 name=call.name,
                 ok=capability_result.status == RuntimeStatus.OK,
                 text=capability_result.text,
                 structured=capability_result.structured,
                 call_id=call_id,
                 llm_text=getattr(capability_result, "llm_text", ""),
+                status=capability_result.status,
             )
+            return self._apply_tool_budget(call, canonical_result, budget=budget)
         except Exception as exc:
             return CanonicalToolResult(
                 name=call.name,
@@ -288,10 +303,70 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 structured={"error": str(exc), "tool": call.name},
                 call_id=call_id,
                 llm_text=f"tool execution failed: {exc.__class__.__name__}",
+                status=RuntimeStatus.ERROR,
             )
 
-    async def execute_tool_async(self, call: CanonicalToolCall, *, allow_tools: bool = True) -> CanonicalToolResult:
-        return await asyncio.to_thread(self.execute_tool, call, allow_tools=allow_tools)
+    async def execute_tool_async(
+        self,
+        call: CanonicalToolCall,
+        *,
+        allow_tools: bool = True,
+        budget: ToolCallBudget | None = None,
+    ) -> CanonicalToolResult:
+        return await asyncio.to_thread(self.execute_tool, call, allow_tools=allow_tools, budget=budget)
+
+    def _apply_tool_budget(
+        self,
+        call: CanonicalToolCall,
+        result: CanonicalToolResult,
+        *,
+        budget: ToolCallBudget | None,
+    ) -> CanonicalToolResult:
+        if budget is None or budget.max_output_chars is None:
+            return result
+        content_candidates = [
+            str(result.llm_text or ""),
+            str(result.text or ""),
+        ]
+        if result.structured:
+            import json
+
+            content_candidates.append(json.dumps(result.structured, ensure_ascii=False, sort_keys=True))
+        original_size = max(len(candidate) for candidate in content_candidates if candidate is not None)
+        if original_size <= budget.max_output_chars:
+            return result
+        return self._budget_exceeded_result(
+            call,
+            budget=budget,
+            original_size=original_size,
+            limit_kind="max_output_chars",
+        )
+
+    def _budget_exceeded_result(
+        self,
+        call: CanonicalToolCall,
+        *,
+        budget: ToolCallBudget,
+        original_size: int,
+        limit_kind: str,
+    ) -> CanonicalToolResult:
+        limit = getattr(budget, limit_kind, None)
+        message = f"tool output exceeded execution budget ({limit_kind}={limit})"
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=message,
+            structured={
+                "reason": "budget_exceeded",
+                "tool": call.name,
+                "limit_kind": limit_kind,
+                "limit": limit,
+                "original_size": original_size,
+            },
+            call_id=getattr(call, "call_id", None),
+            llm_text=message,
+            status="budget_exceeded",
+        )
 
     def call_registered(self, call: CapabilityCall) -> CapabilityResult:
         target_id = str(call.args.get("target_id") or SINGLETON_TARGET)

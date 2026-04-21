@@ -48,6 +48,15 @@ CapabilityCallable = Callable[[CapabilityCall], CapabilityResult]
 
 
 @dataclass(frozen=True)
+class ToolCallBudget:
+    max_output_chars: int | None = None
+    max_output_bytes: int | None = None
+    max_read_bytes: int | None = None
+    max_stdout_chars: int | None = None
+    timeout_ms: int | None = None
+
+
+@dataclass(frozen=True)
 class RegisteredCapability:
     descriptor: CapabilityDescriptor
     callable: CapabilityCallable
@@ -88,10 +97,16 @@ class ExecutionRuntimePort(Protocol):
     def register_tool(self, tool: Tool) -> None:
         ...
 
-    def execute_tool(self, call: Any, *, allow_tools: bool = True) -> Any:
+    def execute_tool(self, call: Any, *, allow_tools: bool = True, budget: ToolCallBudget | None = None) -> Any:
         ...
 
-    async def execute_tool_async(self, call: Any, *, allow_tools: bool = True) -> Any:
+    async def execute_tool_async(
+        self,
+        call: Any,
+        *,
+        allow_tools: bool = True,
+        budget: ToolCallBudget | None = None,
+    ) -> Any:
         ...
 
     def call_registered(self, call: CapabilityCall) -> CapabilityResult:

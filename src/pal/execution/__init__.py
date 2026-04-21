@@ -7,6 +7,7 @@ from pal.execution.contracts import (
     Plugin,
     RegisteredCapability,
     Tool,
+    ToolCallBudget,
 )
 
 __all__ = [
@@ -24,6 +25,7 @@ __all__ = [
     "ToolReadTool",
     "ToolSearchTool",
     "Tool",
+    "ToolCallBudget",
     "inspect_execution",
     "inspect_tools",
     "register_with_core",

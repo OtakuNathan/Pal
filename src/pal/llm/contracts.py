@@ -31,10 +31,13 @@ class CanonicalToolResult:
     text: str = ""
     structured: dict[str, Any] | None = None
     call_id: str | None = None
+    status: str = ""
 
     def __post_init__(self) -> None:
         if not str(self.llm_text or "").strip():
             raise ValueError("CanonicalToolResult.llm_text must be non-empty")
+        if not str(self.status or "").strip():
+            object.__setattr__(self, "status", "ok" if self.ok else "error")
 
 
 @dataclass(frozen=True)

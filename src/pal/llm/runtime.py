@@ -68,6 +68,7 @@ def _classify_retry_error(exc: Exception) -> str:
     """
     message = str(exc).lower()
     error_type = type(exc).__name__.lower()
+    print(f"[llm retry] error_type={error_type} message={message[:200]}")
 
     if _is_stale_connection(message):
         return "stale_connection"
@@ -334,6 +335,9 @@ class LiteLLMEndpointInvoker:
         )
 
 
+_CHARS_PER_TOKEN = 3.5
+
+
 @dataclass
 class LLMRuntime(LLMRuntimePort):
     endpoint_resolver: EndpointResolver
@@ -376,6 +380,31 @@ class LLMRuntime(LLMRuntimePort):
 
     async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
         return await asyncio.to_thread(self.preflight, request)
+
+    def resolve_endpoint_facts(self, *, preferred_endpoint_id: str | None = None) -> dict[str, Any]:
+        self.refresh_runtime_settings()
+        normalized_preferred = str(preferred_endpoint_id or "").strip() or None
+        normalized_preferred = normalized_preferred or self.active_endpoint_id
+        endpoint = self.endpoint_resolver.primary(preferred_endpoint_id=normalized_preferred)
+        if endpoint is None:
+            return {
+                "endpoint_id": normalized_preferred,
+                "model_id": None,
+                "context_window": None,
+                "max_output_tokens": None,
+            }
+        return {
+            "endpoint_id": endpoint.endpoint_id,
+            "model_id": endpoint.model_id,
+            "context_window": endpoint.context_window,
+            "max_output_tokens": endpoint.max_output_tokens,
+        }
+
+    def resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None) -> int | None:
+        endpoint = self.endpoint_resolver.primary(preferred_endpoint_id=preferred_endpoint_id or self.active_endpoint_id)
+        if endpoint is not None and endpoint.max_output_tokens is not None:
+            return endpoint.max_output_tokens
+        return None
 
     def _invoke_endpoints_with_retry(
         self,

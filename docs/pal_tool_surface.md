@@ -6,7 +6,7 @@
 
 Pal 注册了 100+ 个 capability，但 LLM 的 function-calling 窗口有限。不需要把所有能力都塞进 prompt。
 
-Tool Surface 负责从全部 capability 中筛选出"常用工具集"暴露给 LLM。其余能力通过 `operation_execution_discovery_search` 按需发现，通过 `operation_execution_exec_run` 执行。
+Tool Surface 负责从全部 capability 中筛选出"常用工具集"暴露给 LLM。其余能力通过 `op_exec_disc_search` 按需发现，通过 `op_exec_run` 执行。
 
 ## 设计原则
 
@@ -37,12 +37,12 @@ LLM 不需要一次看到所有工具。它只需要：
 ```toml
 [singletons]
 capabilities = [
-    "operation_execution_discovery_read",
-    "operation_execution_discovery_search",
-    "operation_execution_exec_run",
-    "introspection_module_llm_active",
-    "operation_web_search_query",
-    "operation_web_fetch_read",
+    "op_exec_disc_read",
+    "op_exec_disc_search",
+    "op_exec_run",
+    "intro_module_llm_active",
+    "op_web_search_query",
+    "op_web_fetch_read",
     # ...
 ]
 ```
@@ -53,11 +53,11 @@ capabilities = [
 
 ```toml
 [[dynamic]]
-canonical_path = "operation_l3_recall_query"
+canonical_path = "op_l3_recall_query"
 provider_setting = "memory"
 
 [[dynamic]]
-canonical_path = "introspection_provider_web_search_health"
+canonical_path = "intro_provider_web_search_health"
 provider_setting = "active_web_search_provider_id"
 ```
 
@@ -80,13 +80,13 @@ provider_setting = "active_web_search_provider_id"
 
 | 工具 | 作用 |
 |------|------|
-| `operation_execution_discovery_read` | 查看能力目录 |
-| `operation_execution_discovery_search` | 搜索能力 |
-| `operation_execution_exec_run` | 执行任意能力 |
+| `op_exec_disc_read` | 查看能力目录 |
+| `op_exec_disc_search` | 搜索能力 |
+| `op_exec_run` | 执行任意能力 |
 
 ### 自省（模块级）
 
-所有 `introspection_module_*` 能力。覆盖 channel、control、core、execution、failure、identity、llm、memory、plugins、service、web_search、web_fetch。
+所有 `intro_module_*` 能力。覆盖 channel、control、core、execution、failure、identity、llm、memory、plugins、service、web_search、web_fetch。
 
 ### 操作（模块级）
 

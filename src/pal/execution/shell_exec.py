@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,12 +23,12 @@ class ShellExecTool:
     family: str = "system"
     description: str = "Execute a shell command in the local runtime and return stdout, stderr, and exit status."
     tags: tuple[str, ...] = ("shell", "system", "exec")
-    keywords: tuple[str, ...] = ("command", "terminal", "bash", "zsh", "run")
+    keywords: tuple[str, ...] = ("command", "terminal", "bash", "zsh", "pwsh", "powershell", "run")
     args_schema: dict[str, object] = None  # type: ignore[assignment]   
     result_schema: dict[str, object] = None  # type: ignore[assignment]
     default_timeout_ms: int = 30_000
     default_output_limit: int = 12_000
-    shell_path: str = "/bin/zsh" if os.path.isfile("/bin/zsh") else "/bin/bash"
+    shell_path: str = ""
 
     def __post_init__(self) -> None:
         if self.args_schema is None:
@@ -59,6 +60,8 @@ class ShellExecTool:
                     "timeout_ms": {"type": "integer"},
                 },
             }
+        if not self.shell_path:
+            self.shell_path = self._default_shell_path()
 
     def invoke(self, args: dict[str, object]) -> CapabilityResult:
         cmd = str(args.get("cmd") or "").strip()
@@ -76,7 +79,7 @@ class ShellExecTool:
         output_limit = self._coerce_int(args.get("output_limit"), default=self.default_output_limit, minimum=256)
 
         completed = subprocess.run(
-            [self.shell_path, "-lc", cmd],
+            self._build_shell_command(cmd),
             capture_output=True,
             text=True,
             cwd=cwd,
@@ -107,6 +110,32 @@ class ShellExecTool:
             },
             llm_text=display_text,
         )
+
+    def _build_shell_command(self, cmd: str) -> list[str]:
+        shell = self.shell_path or self._default_shell_path()
+        shell_name = Path(shell).name.lower()
+        if shell_name in {"pwsh", "pwsh.exe", "powershell", "powershell.exe"}:
+            return [shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cmd]
+        if shell_name in {"cmd", "cmd.exe"}:
+            return [shell, "/d", "/s", "/c", cmd]
+        return [shell, "-lc", cmd]
+
+    @staticmethod
+    def _default_shell_path() -> str:
+        if os.name == "nt":
+            for candidate in ("pwsh.exe", "powershell.exe", "cmd.exe"):
+                resolved = shutil.which(candidate)
+                if resolved:
+                    return resolved
+            return "cmd.exe"
+        for candidate in ("/bin/zsh", "/bin/bash", "/bin/sh"):
+            if os.path.isfile(candidate):
+                return candidate
+        for candidate in ("zsh", "bash", "sh"):
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
+        return "/bin/sh"
 
     @staticmethod
     def _coerce_int(value: object, *, default: int, minimum: int) -> int:

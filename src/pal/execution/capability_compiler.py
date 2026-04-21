@@ -14,6 +14,20 @@ from pal.shared import (
     SINGLETON_TARGET,
 )
 
+_CANONICAL_NAMESPACE_ABBREVIATIONS = {
+    "operation": "op",
+    "introspection": "intro",
+}
+
+_CANONICAL_MODULE_ABBREVIATIONS = {
+    "execution": "exec",
+}
+
+_CANONICAL_FAMILY_ABBREVIATIONS = {
+    "management": "mgmt",
+    "discovery": "disc",
+}
+
 
 @dataclass(frozen=True)
 class HydrationTarget:
@@ -147,14 +161,18 @@ def _underscore_canonical_path(
     action_blueprint: CapabilityActionBlueprint,
     node_blueprint: CapabilityNodeBlueprint,
 ) -> str:
+    namespace = _abbreviate_canonical_namespace(action_blueprint.namespace)
+    canonical_module_id = _abbreviate_canonical_module(module_id)
     if action_blueprint.namespace == "introspection":
         if node_blueprint.scope == module_id:
-            return f"introspection_{module_id}_{action_blueprint.action_name}"
-        return f"introspection_{node_blueprint.scope}_{module_id}_{action_blueprint.action_name}"
+            return f"{namespace}_{canonical_module_id}_{action_blueprint.action_name}"
+        return f"{namespace}_{node_blueprint.scope}_{canonical_module_id}_{action_blueprint.action_name}"
     if bool(action_blueprint.metadata.get("omit_family_in_canonical")):
-        return f"operation_{module_id}_{action_blueprint.action_name}"
-    family = action_blueprint.family or "operation"
-    return f"operation_{module_id}_{family}_{action_blueprint.action_name}"
+        return f"{namespace}_{canonical_module_id}_{action_blueprint.action_name}"
+    family = _abbreviate_canonical_family(action_blueprint.family or "operation")
+    if family == canonical_module_id:
+        return f"{namespace}_{canonical_module_id}_{action_blueprint.action_name}"
+    return f"{namespace}_{canonical_module_id}_{family}_{action_blueprint.action_name}"
 
 
 def _display_name(canonical_path: str, node_blueprint: CapabilityNodeBlueprint, target: HydrationTarget) -> str:
@@ -184,6 +202,18 @@ def _aliases(
             ]
         )
     return tuple(dict.fromkeys(alias for alias in aliases if alias))
+
+
+def _abbreviate_canonical_namespace(value: str) -> str:
+    return _CANONICAL_NAMESPACE_ABBREVIATIONS.get(value, value)
+
+
+def _abbreviate_canonical_module(value: str) -> str:
+    return _CANONICAL_MODULE_ABBREVIATIONS.get(value, value)
+
+
+def _abbreviate_canonical_family(value: str) -> str:
+    return _CANONICAL_FAMILY_ABBREVIATIONS.get(value, value)
 
 
 def _parameters_schema(action_blueprint: CapabilityActionBlueprint, target: HydrationTarget) -> dict[str, Any]:

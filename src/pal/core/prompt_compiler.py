@@ -272,10 +272,20 @@ class PromptCompiler:
             messages.append({"role": "user", "content": prompt_ir.primary_input.strip()})
         return messages
 
-    def _render_user_context_message(self, block: PromptIRBlock) -> dict[str, str]:
+    def _render_user_context_message(self, block: PromptIRBlock) -> dict[str, Any]:
         rendered = block.content.strip()
         if block.block_id.startswith("l1_recent_context"):
             role = str(block.metadata.get("role") or "user")
+            tool_calls = block.metadata.get("tool_calls")
+            tool_call_id = block.metadata.get("tool_call_id")
+            if role == "tool":
+                msg: dict[str, Any] = {"role": "tool", "content": rendered}
+                if tool_call_id:
+                    msg["tool_call_id"] = tool_call_id
+                return msg
+            if role == "assistant" and tool_calls:
+                msg = {"role": "assistant", "content": rendered, "tool_calls": tool_calls}
+                return msg
             return {"role": role, "content": rendered}
         return {"role": "user", "content": f"<system-reminder>{block.title}:\n{rendered}</system-reminder>"}
 

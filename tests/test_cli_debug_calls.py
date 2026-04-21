@@ -18,8 +18,8 @@ class PalV2CliDebugCallsTests(unittest.TestCase):
                     argparse.Namespace(
                         command="tool-call",
                         runtime_root=runtime_root,
-                        name="operation_execution_exec_run",
-                        args='{"cmd":"printf hello"}',
+                        name="op_exec_run",
+                        args='{"cmd":"echo hello"}',
                     )
                 )
             )
@@ -33,8 +33,8 @@ class PalV2CliDebugCallsTests(unittest.TestCase):
                     argparse.Namespace(
                         command="cap-call",
                         runtime_root=runtime_root,
-                        name="operation_execution_exec_run",
-                        args='{"cmd":"printf hello"}',
+                        name="op_exec_run",
+                        args='{"cmd":"echo hello"}',
                     )
                 )
             )

@@ -35,6 +35,8 @@ class L1TranscriptMessage:
     role: str
     content: str
     tool_trace: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
 
 
 @dataclass(frozen=True)
