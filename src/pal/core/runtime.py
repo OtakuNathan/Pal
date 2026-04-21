@@ -8,6 +8,7 @@ from typing import Any
 
 from pal.channel.contracts import ChannelEnvelope
 from pal.core.contracts import CoreRuntimeState
+from pal.core.runtime_config import RuntimeConfig
 from pal.core.dispatcher import EventDispatcher
 from pal.core.failure_orchestrator import FailureHandlingResult, FailureOrchestrator
 from pal.core.main_context import MainContext
@@ -149,6 +150,7 @@ EventLoop = MainLoop
 class PalCore:
     context: MainContext = field(default_factory=MainContext)
     state: CoreRuntimeState = field(default_factory=CoreRuntimeState)
+    config: RuntimeConfig = field(default_factory=RuntimeConfig.defaults)
     main_loop: MainLoop = field(default_factory=MainLoop)
     debug_prompt: bool = False
     turn_manager: TurnManager = field(init=False)
@@ -159,7 +161,11 @@ class PalCore:
     module_lifecycle: ModuleLifecycle = field(init=False)
 
     def __post_init__(self) -> None:
-        self.turn_manager = TurnManager(context=self.context, state=self.state)
+        self.turn_manager = TurnManager(
+            context=self.context,
+            state=self.state,
+            guard=ToolStagnationGuardProcess.from_config(self.config),
+        )
         self.prompt_compiler = PromptCompiler(self.context)
         self.tool_surface = ToolSurface(self.context)
         self.module_lifecycle = ModuleLifecycle(self.context, self.state)
@@ -183,6 +189,7 @@ class PalCore:
             handle_failure_async=self.handle_failure_async,
             render_failure_feedback_text=self._render_failure_feedback_text,
             should_enter_failure_flow_for_tool_result=self._should_enter_failure_flow_for_tool_result,
+            config=self.config,
         )
 
     @property

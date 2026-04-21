@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any, Protocol
 
 
@@ -12,6 +12,11 @@ class L2HeatLevel(Enum):
     DORMANT = "DORMANT"
     HOT = "HOT"
     GHOST = "GHOST"
+
+
+class L3RecallView(StrEnum):
+    SUMMARY = "summary"
+    ORIGIN = "origin"
 
 
 DEFAULT_HOT_TTL = 5
@@ -48,6 +53,7 @@ class MemoryQuery:
     limit: int = 8
     kind: str | None = None
     scope: str | None = None
+    view: L3RecallView = L3RecallView.SUMMARY
 
 
 @dataclass(frozen=True)

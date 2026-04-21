@@ -661,6 +661,17 @@ class PalV2BootstrapTests(unittest.TestCase):
                 },
             )
         )
+        recalled_origin = handle.core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="op_l3_recall_query",
+                args={
+                    "target_id": "sqlite_vec_l3",
+                    "queries": ["worker memory pressure stabilize"],
+                    "limit": 4,
+                    "view": "origin",
+                },
+            )
+        )
         corrected = handle.core.context.execution_runtime.execute(
             CapabilityCall(
                 name="op_l3_correct_patch",
@@ -681,8 +692,22 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(committed.status, "ok")
         self.assertEqual(recalled.status, "ok")
+        self.assertEqual(recalled_origin.status, "ok")
         self.assertEqual(corrected.status, "ok")
-        self.assertEqual(recalled.structured["hits"][0]["document_id"], document_id)
+        self.assertEqual(recalled.structured["hit_count"], 1)
+        self.assertEqual(recalled.structured["hits_preview"][0]["document_id"], document_id)
+        self.assertEqual(recalled.structured["view"], "summary")
+        self.assertNotIn("hits", recalled.structured)
+        self.assertNotIn("projected_entries", recalled.structured)
+        self.assertNotIn("projected_entries", recalled.llm_text)
+        self.assertNotIn("Restarted the worker and reduced concurrency.", recalled.llm_text)
+        self.assertIn("Recovered the worker after memory pressure crash.", recalled.llm_text)
+        self.assertEqual(recalled_origin.structured["view"], "origin")
+        self.assertEqual(recalled_origin.structured["hit_count"], 1)
+        self.assertNotIn("hits", recalled_origin.structured)
+        self.assertNotIn("projected_entries", recalled_origin.structured)
+        self.assertIn("Restarted the worker and reduced concurrency.", recalled_origin.llm_text)
+        self.assertNotIn("projected_entries", recalled_origin.llm_text)
         self.assertEqual(inventory.status, "ok")
         self.assertEqual(inventory.structured["provider_id"], "sqlite_vec_l3")
         self.assertIn(document_id, handle.memory_service.l2_store.items)

@@ -27,6 +27,7 @@ from pal.memory.repository import (
     parse_iso_timestamp,
     serialize_vector,
 )
+from pal.plugins.l3.rendering import build_recall_structured_payload, normalize_recall_view, render_recall_result_for_llm
 from pal.memory.schema import ensure_sqlite_vec_loaded
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -230,31 +231,38 @@ class SQLiteVecL3Plugin:
                 "limit": {"type": "integer"},
                 "kind": {"type": "string"},
                 "scope": {"type": "string"},
+                "view": {"type": "string", "enum": ["summary", "origin"]},
             },
         },
     )
     def recall_query(self, call: IntrospectionCall) -> IntrospectionResult:
-        result = self.recall(
-            MemoryQuery(
-                level=str(call.args.get("level") or "warm"),
-                queries=[str(value) for value in list(call.args.get("queries") or [])],
-                topic_scope=[str(value) for value in list(call.args.get("topic_scope") or [])],
-                task_id=str(call.args.get("task_id")) if call.args.get("task_id") is not None else None,
-                limit=int(call.args.get("limit") or 8),
-                kind=str(call.args.get("kind")) if call.args.get("kind") is not None else None,
-                scope=str(call.args.get("scope")) if call.args.get("scope") is not None else None,
-            )
+        query = MemoryQuery(
+            level=str(call.args.get("level") or "warm"),
+            queries=[str(value) for value in list(call.args.get("queries") or [])],
+            topic_scope=[str(value) for value in list(call.args.get("topic_scope") or [])],
+            task_id=str(call.args.get("task_id")) if call.args.get("task_id") is not None else None,
+            limit=int(call.args.get("limit") or 8),
+            kind=str(call.args.get("kind")) if call.args.get("kind") is not None else None,
+            scope=str(call.args.get("scope")) if call.args.get("scope") is not None else None,
+            view=normalize_recall_view(call.args.get("view")),
         )
-        payload = {
-            "hits": result.hits,
-            "projected_entries": [entry.__dict__ for entry in result.projected_entries],
-            "metadata": result.metadata,
-        }
+        result = self.recall(query)
+        payload = build_recall_structured_payload(
+            provider_id=self.provider_id,
+            query=query,
+            result=result,
+            view=query.view,
+        )
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="l3 recall result",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("L3 recall result", payload),
+            llm_text=render_recall_result_for_llm(
+                provider_id=self.provider_id,
+                query=query,
+                result=result,
+                view=query.view,
+            ),
         )
 
     @capability_action(

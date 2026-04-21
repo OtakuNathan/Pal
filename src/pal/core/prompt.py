@@ -47,6 +47,8 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "- Questions about Pal's current runtime state must not use L3 recall by default. Use L3 only for past facts, history, lessons, or user-specific durable memory.\n"
                     "Memory:\n"
                     "- Use op_l3_recall_query when you need durable context from past interactions.\n"
+                    "- When using L3 recall, start with one concrete, high-signal query; only expand queries if the first recall is insufficient.\n"
+                    "- Avoid sending multiple overlapping or broad recall queries at once. For identity/history questions, recall the most central facts first.\n"
                     "- Use op_l3_commit_write only for information worth keeping as durable memory.\n"
                     "- Use op_l3_correct_patch to update an existing durable record instead of writing a duplicate.\n"
                     "- For mistakes, lessons, or completed repairs, prefer kind=\"case\" with situation/task/action/result.\n"

@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from dataclasses import dataclass
 from functools import singledispatchmethod
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from pal.execution.contracts import ToolCallBudget
+from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import (
     ToolExecutionRecord,
     canonical_result_fingerprint,
@@ -27,6 +29,7 @@ from pal.failure import FailureSignal
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolResult, LLMPreflightRequest
 from pal.memory.contracts import MemoryCommitRequest, MemoryCompactRequest, MemoryPackRequest
 from pal.shared import GuardAction, LLMFinishReason, LLMResponseMode, LLMStreamEventKind, RuntimeStatus
+from pal.stream_events import NormalizedLLMStreamEvent
 
 _FORWARD_STREAM_KINDS = frozenset({
     LLMStreamEventKind.TEXT_DELTA,
@@ -35,8 +38,6 @@ _FORWARD_STREAM_KINDS = frozenset({
     LLMStreamEventKind.DONE,
     LLMStreamEventKind.ERROR,
 })
-
-_CHARS_PER_TOKEN = 3.5
 
 
 class TurnExecutor:
@@ -55,10 +56,12 @@ class TurnExecutor:
         handle_failure_async: Callable[..., Awaitable[Any]],
         render_failure_feedback_text: Callable[[Any], str],
         should_enter_failure_flow_for_tool_result: Callable[[Any], bool],
+        config: RuntimeConfig | None = None,
     ) -> None:
         self.context = context
         self.state = state
         self.turn_manager = turn_manager
+        self._config = config or RuntimeConfig.defaults()
         self._call_port_async = call_port_async
         self._build_canonical_prompt = build_canonical_prompt
         self._debug_log_prompt = debug_log_prompt
@@ -342,7 +345,6 @@ class TurnExecutor:
                 )
             acc = self._stream_accumulators.get(event.event_kind)
             if acc is not None:
-                acc(event, text_parts, reasoning_parts, tool_calls, state)
 
         return CanonicalLLMOutcome(
             text="".join(text_parts),
@@ -436,12 +438,6 @@ class TurnExecutor:
             )
         return prompt
 
-    _ACTIVE_TOOL_RESULT_BUDGET = 12_000
-    _ACTIVE_TOOL_RESULT_PREVIEW = 1_000
-    _MIN_TOOL_PROTOCOL_BUDGET = 256
-    _TOOL_PROTOCOL_SHARE = 0.5
-    _MIN_TOOL_CALL_OUTPUT_BUDGET = 128
-
     def _resolve_tool_result_budget(self, continuation, *, max_output_tokens: int) -> int:
         facts = self._resolve_endpoint_facts(
             continuation.preferred_llm_endpoint_id,
@@ -488,19 +484,21 @@ class TurnExecutor:
         }
 
     def _compute_tool_protocol_budget(self, facts: dict[str, Any], *, max_output_tokens: int) -> int:
+        cfg = self._config
         context_window = facts.get("context_window")
         endpoint_max_output = facts.get("max_output_tokens")
         if not isinstance(context_window, int) or context_window <= 0:
-            return 80_000
+            return cfg.fallback_protocol_budget
         reserved_output = max_output_tokens
         if isinstance(endpoint_max_output, int) and endpoint_max_output > 0:
             reserved_output = min(max_output_tokens, endpoint_max_output)
-        margin = min(16_384, max(1024, int(context_window * 0.05)))
+        margin = min(cfg.context_margin_cap, max(cfg.context_margin_min, int(context_window * cfg.context_margin_factor)))
         input_tokens = max(context_window - reserved_output - margin, 0)
-        budget = int(input_tokens * self._TOOL_PROTOCOL_SHARE * _CHARS_PER_TOKEN)
-        return max(self._MIN_TOOL_PROTOCOL_BUDGET, budget)
+        budget = int(input_tokens * cfg.tool_protocol_share * cfg.chars_per_token)
+        return max(cfg.min_tool_protocol_budget, budget)
 
     def _build_tool_call_budget(self, continuation) -> ToolCallBudget:
+        cfg = self._config
         facts = self._resolve_endpoint_facts(
             continuation.preferred_llm_endpoint_id,
             preferred_model_id=continuation.preferred_llm_model_id,
@@ -509,11 +507,11 @@ class TurnExecutor:
         aggregate_budget = self._compute_tool_protocol_budget(facts, max_output_tokens=max_output_tokens)
         consumed_budget = self._current_tool_protocol_budget(continuation.tool_protocol_messages)
         remaining_budget = max(aggregate_budget - consumed_budget, 0)
-        max_output_chars = min(self._ACTIVE_TOOL_RESULT_BUDGET, remaining_budget)
+        max_output_chars = min(cfg.active_tool_result_budget, remaining_budget)
         if max_output_chars <= 0:
             max_output_chars = 0
         else:
-            max_output_chars = max(self._MIN_TOOL_CALL_OUTPUT_BUDGET, max_output_chars)
+            max_output_chars = max(cfg.min_tool_call_output_budget, max_output_chars)
         return ToolCallBudget(max_output_chars=max_output_chars)
 
     def _resolve_effective_max_output_tokens(self, continuation) -> int:
@@ -527,7 +525,7 @@ class TurnExecutor:
                     result = fn()
                 if isinstance(result, int) and result > 0:
                     return result
-        return 4096
+        return self._config.fallback_max_output_tokens
 
     def _current_tool_protocol_budget(self, messages: list[dict[str, Any]]) -> int:
         total = 0
@@ -536,13 +534,15 @@ class TurnExecutor:
                 total += len(str(message.get("content", "")))
         return total
 
-    def _trim_tool_protocol_for_prompt(self, messages: list[dict], *, aggregate_budget: int = 80_000) -> list[dict]:
+    def _trim_tool_protocol_for_prompt(self, messages: list[dict], *, aggregate_budget: int | None = None) -> list[dict]:
+        if aggregate_budget is None:
+            aggregate_budget = self._config.fallback_protocol_budget
         result = []
         for msg in messages:
             if msg.get("role") == "tool":
                 content = str(msg.get("content", ""))
-                if len(content) > self._ACTIVE_TOOL_RESULT_BUDGET:
-                    preview = content[:self._ACTIVE_TOOL_RESULT_PREVIEW].rstrip()
+                if len(content) > self._config.active_tool_result_budget:
+                    preview = content[:self._config.active_tool_result_preview].rstrip()
                     content = f"{preview}\n\n[... truncated, original: {len(content)} chars]"
                     result.append({**msg, "content": content})
                     continue
@@ -629,14 +629,16 @@ class TurnExecutor:
                 {
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": self._render_tool_result_content(result),
+                    "content": self._render_tool_result_content(tool_call, result),
                 }
             )
         continuation.pending_assistant_tool_text = ""
         continuation.pending_tool_call_batch = []
         continuation.pending_tool_results = []
 
-    def _render_tool_result_content(self, result: CanonicalToolResult) -> str:
+    def _render_tool_result_content(self, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> str:
+        if self._is_l3_recall_tool_call(tool_call.name):
+            return self._render_l3_recall_tool_observation(tool_call, result)
         if str(result.llm_text or "").strip():
             return str(result.llm_text).strip()
         if str(result.text or "").strip():
@@ -644,6 +646,33 @@ class TurnExecutor:
         if result.structured:
             return json.dumps(result.structured, ensure_ascii=False, sort_keys=True)
         return "ok" if result.ok else "error"
+
+    @staticmethod
+    def _is_l3_recall_tool_call(name: str) -> bool:
+        normalized = str(name or "").strip()
+        return normalized == "op_l3_recall_query" or normalized.endswith("_l3_recall_query")
+
+    def _render_l3_recall_tool_observation(self, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> str:
+        provider_id = str(tool_call.args.get("target_id") or "").strip() or "default"
+        queries = [str(value).strip() for value in list(tool_call.args.get("queries") or []) if str(value).strip()]
+        topic_scope = [str(value).strip() for value in list(tool_call.args.get("topic_scope") or []) if str(value).strip()]
+        hit_count = 0
+        if isinstance(result.structured, dict):
+            raw_count = result.structured.get("hit_count")
+            if isinstance(raw_count, int):
+                hit_count = raw_count
+            else:
+                hit_count = len(list(result.structured.get("hits") or []))
+        lines = [f"L3 recall {'completed' if result.ok else 'failed'}.", f"provider: {provider_id}"]
+        if queries:
+            lines.append(f"queries: {', '.join(queries)}")
+        if topic_scope:
+            lines.append(f"topics: {', '.join(topic_scope)}")
+        if result.ok:
+            lines.append(f"retrieved: {hit_count} memories")
+        elif str(result.text or "").strip():
+            lines.append(f"status: {str(result.text).strip()}")
+        return "\n".join(lines)
 
     # ── response / temperature helpers ───────────────────────────────────
 

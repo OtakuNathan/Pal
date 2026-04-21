@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.memory.service import MemoryService
@@ -160,11 +160,11 @@ def inspect_memory(provider: MemoryIntrospectionProvider) -> MemorySnapshot:
     )
 
 
-def register_with_core(context: MainContext, service: MemoryService) -> ModuleHandle:
+def register_with_core(context: MainContext, service: MemoryService, *, config: Any = None) -> ModuleHandle:
     from pal.memory.prompt import MemoryPromptFragmentProvider
 
     provider = MemoryIntrospectionProvider(service=service, context=context)
-    prompt_provider = MemoryPromptFragmentProvider()
+    prompt_provider = MemoryPromptFragmentProvider(config=config)
     handle = ModuleHandle(
         module_id="memory",
         tier=MODULE_TIER_CORE_FOUNDATION,

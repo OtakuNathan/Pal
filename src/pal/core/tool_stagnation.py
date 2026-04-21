@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pal.shared import GuardAction, GuardStatus
+
+if TYPE_CHECKING:
+    from pal.core.runtime_config import RuntimeConfig
 
 
 NOISY_RESULT_KEYS = frozenset(
@@ -76,9 +79,22 @@ class ToolStagnationVerdict:
 
 @dataclass
 class ToolStagnationGuardProcess:
-    repeat_threshold: int = 3
-    oscillation_window: int = 4
+    repeat_threshold: int = 0
+    oscillation_window: int = 0
     history_by_turn: dict[str, list[ToolExecutionRecord]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.repeat_threshold <= 0:
+            self.repeat_threshold = 3
+        if self.oscillation_window <= 0:
+            self.oscillation_window = 4
+
+    @classmethod
+    def from_config(cls, config: RuntimeConfig | None = None, **kwargs) -> ToolStagnationGuardProcess:
+        if config is not None:
+            kwargs.setdefault("repeat_threshold", config.stagnation_repeat_threshold)
+            kwargs.setdefault("oscillation_window", config.stagnation_oscillation_window)
+        return cls(**kwargs)
 
     def observe_batch(
         self,

@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from pal.memory.contracts import MemoryPack
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
 
-_KEEP_RECENT_TOOL_MESSAGES = 10
+if TYPE_CHECKING:
+    from pal.core.runtime_config import RuntimeConfig
+
+_DEFAULT_KEEP_RECENT_TOOL_MESSAGES = 10
 
 
 @dataclass
 class MemoryPromptFragmentProvider(PromptFragmentProvider):
     provider_id: str = "memory.prompt.default"
     module_id: str = "memory"
+    config: RuntimeConfig | None = None
+
+    @property
+    def _keep_recent(self) -> int:
+        return getattr(self.config, "keep_recent_tool_messages", _DEFAULT_KEEP_RECENT_TOOL_MESSAGES) if self.config else _DEFAULT_KEEP_RECENT_TOOL_MESSAGES
 
     def build_prompt_fragments(self, context: PromptAssemblyContext) -> list[PromptFragment]:
         pack = context.metadata.get("memory_pack")
@@ -19,7 +28,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
             return []
 
         messages = list(pack.l1_recent_context)
-        cleared_indices = _build_cleared_tool_indices(messages, keep_recent=_KEEP_RECENT_TOOL_MESSAGES)
+        cleared_indices = _build_cleared_tool_indices(messages, keep_recent=self._keep_recent)
 
         fragments: list[PromptFragment] = []
         block_index = 0
@@ -165,10 +174,25 @@ def _build_cleared_tool_indices(messages: list, *, keep_recent: int) -> set[int]
 
 def _render_entry_lines(entries) -> list[str]:
     lines: list[str] = []
+    seen_keys: set[str] = set()
     for entry in entries:
+        dedupe_key = _entry_render_dedupe_key(entry)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
         rendered = entry.rendered.strip() or entry.summary.strip() or entry.title.strip()
         if not rendered:
             continue
+        if str(getattr(entry, "source_kind", "") or "").strip() == "l3_recall":
+            rendered = f"{rendered} [L3 summary; origin available]"
         label = entry.title.strip() or entry.entry_id
         lines.append(f"- {label}: {rendered}")
     return lines
+
+
+def _entry_render_dedupe_key(entry) -> str:
+    for field_name in ("canonical_key", "dedupe_fingerprint", "source_ref"):
+        value = str(getattr(entry, field_name, "") or "").strip()
+        if value:
+            return f"{field_name}:{value}"
+    return f"entry:{str(getattr(entry, 'entry_id', '') or '').strip()}"

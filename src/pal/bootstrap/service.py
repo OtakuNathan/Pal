@@ -11,6 +11,7 @@ from pal.channel import (
 )
 from pal.control import ControlPlane, register_with_core as register_control_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
+from pal.core.runtime_config import RuntimeConfig
 from pal.execution import register_with_core as register_execution_with_core
 from pal.failure import FailureRuntime, register_with_core as register_failure_with_core
 from pal.foundation import PalV2Database
@@ -79,7 +80,8 @@ def compose_runtime(
     runtime_settings_repository = RuntimeSettingRepository()
     channel_repository = ChannelEndpointRepository()
 
-    core = PalCore()
+    config = RuntimeConfig.load(registration.runtime.runtime_root)
+    core = PalCore(config=config)
     channel_runtime = ChannelRuntime()
     secrets_path = registration.runtime.runtime_root / "secrets.json"
     secret_store = EncryptedFileSecretStore(secrets_path=str(secrets_path))
@@ -88,6 +90,7 @@ def compose_runtime(
         endpoint_resolver=EndpointResolver(repository=llm_repository),
         settings_repository=runtime_settings_repository,
         endpoint_invoker=LiteLLMEndpointInvoker(credentials=credential_resolver),
+        config=config,
     )
     memory_service = MemoryService(
         l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require)
@@ -110,7 +113,7 @@ def compose_runtime(
     register_channel_with_core(core.context, channel_runtime)
     register_identity_with_core(core.context, identity_service)
     register_llm_with_core(core.context, llm_runtime)
-    register_memory_with_core(core.context, memory_service)
+    register_memory_with_core(core.context, memory_service, config=config)
     register_plugins_with_core(core.context, plugin_host)
     register_service_with_core(core.context, service_manager, service_runner)
     register_control_with_core(core.context, control_plane)

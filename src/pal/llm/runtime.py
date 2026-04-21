@@ -28,10 +28,9 @@ from pal.stream_events import NormalizedLLMStreamEvent
 # Retry helpers — inspired by Claude Code's withRetry.ts
 # ---------------------------------------------------------------------------
 
-_BASE_RETRY_DELAY_MS = 500
-_MAX_RETRY_DELAY_MS = 32_000
-_PERSISTENT_MAX_RETRY_DELAY_MS = 300_000
-_STALE_CONNECTION_SETTLE_MS = 300  # brief pause after stale connection for TCP cleanup
+_DEFAULT_BASE_RETRY_DELAY_MS = 500
+_DEFAULT_MAX_RETRY_DELAY_MS = 32_000
+_DEFAULT_STALE_CONNECTION_SETTLE_MS = 300
 
 
 def _is_stale_connection(message: str) -> bool:
@@ -99,18 +98,25 @@ def _classify_retry_error(exc: Exception) -> str:
     return "unknown"
 
 
-def _compute_retry_delay(attempt: int, *, error_kind: str) -> float:
+def _compute_retry_delay(
+    attempt: int,
+    *,
+    error_kind: str,
+    base_delay_ms: int = _DEFAULT_BASE_RETRY_DELAY_MS,
+    max_delay_ms: int = _DEFAULT_MAX_RETRY_DELAY_MS,
+    stale_settle_ms: int = _DEFAULT_STALE_CONNECTION_SETTLE_MS,
+) -> float:
     """Return delay in seconds before the next retry attempt.
 
-    Exponential backoff with jitter, capped at 32 s.
+    Exponential backoff with jitter, capped at max_delay_ms.
     - stale_connection: brief settle pause only (TCP cleanup)
     - connection: fast skip — just jitter to avoid thundering herd
     - rate_limit / server: full exponential backoff
     """
     if error_kind == "stale_connection":
-        return _STALE_CONNECTION_SETTLE_MS / 1000.0
+        return stale_settle_ms / 1000.0
 
-    base = min(_BASE_RETRY_DELAY_MS * (2 ** (attempt - 1)), _MAX_RETRY_DELAY_MS)
+    base = min(base_delay_ms * (2 ** (attempt - 1)), max_delay_ms)
     jitter = random.random() * 0.25 * base  # noqa: S311
     return (base + jitter) / 1000.0
 
@@ -335,14 +341,12 @@ class LiteLLMEndpointInvoker:
         )
 
 
-_CHARS_PER_TOKEN = 3.5
-
-
 @dataclass
 class LLMRuntime(LLMRuntimePort):
     endpoint_resolver: EndpointResolver
     settings_repository: RuntimeSettingRepository
     endpoint_invoker: LLMEndpointInvokerPort | None = None
+    config: Any = None
     safety_margin_tokens: int = 16384
     endpoint_retry_attempts: int = 2
     last_request: CanonicalLLMRequest | None = None
@@ -355,6 +359,20 @@ class LLMRuntime(LLMRuntimePort):
         if self.endpoint_invoker is None:
             self.endpoint_invoker = LiteLLMEndpointInvoker()
         self.refresh_runtime_settings()
+        if self.config is not None:
+            self.endpoint_retry_attempts = self.config.llm_endpoint_retry_attempts
+
+    @property
+    def _retry_base_delay_ms(self) -> int:
+        return getattr(self.config, "llm_base_retry_delay_ms", _DEFAULT_BASE_RETRY_DELAY_MS) if self.config else _DEFAULT_BASE_RETRY_DELAY_MS
+
+    @property
+    def _retry_max_delay_ms(self) -> int:
+        return getattr(self.config, "llm_max_retry_delay_ms", _DEFAULT_MAX_RETRY_DELAY_MS) if self.config else _DEFAULT_MAX_RETRY_DELAY_MS
+
+    @property
+    def _retry_stale_settle_ms(self) -> int:
+        return getattr(self.config, "llm_stale_connection_settle_ms", _DEFAULT_STALE_CONNECTION_SETTLE_MS) if self.config else _DEFAULT_STALE_CONNECTION_SETTLE_MS
 
     def refresh_runtime_settings(self) -> None:
         self.think_level = self.settings_repository.get_think_level()
@@ -426,7 +444,7 @@ class LLMRuntime(LLMRuntimePort):
         had_stale_connection = False
         for endpoint in enabled:
             if had_stale_connection:
-                time.sleep(_STALE_CONNECTION_SETTLE_MS / 1000.0)
+                time.sleep(self._retry_stale_settle_ms / 1000.0)
                 had_stale_connection = False
 
             effective_request = self._build_effective_request(request, endpoint=endpoint)
@@ -475,7 +493,13 @@ class LLMRuntime(LLMRuntimePort):
                     if error_kind == "connection":
                         break
                     if attempt < max(1, self.endpoint_retry_attempts) - 1:
-                        delay = _compute_retry_delay(attempt + 1, error_kind=error_kind)
+                        delay = _compute_retry_delay(
+                            attempt + 1,
+                            error_kind=error_kind,
+                            base_delay_ms=self._retry_base_delay_ms,
+                            max_delay_ms=self._retry_max_delay_ms,
+                            stale_settle_ms=self._retry_stale_settle_ms,
+                        )
                         time.sleep(delay)
 
         self.last_endpoint_id = None

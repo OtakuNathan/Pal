@@ -30,7 +30,7 @@ from pal.core import (
     canonical_tool_signature_hash,
     register_with_core as register_core_with_core,
 )
-from pal.execution import CapabilityCall, CapabilityResult, register_with_core as register_execution_with_core
+from pal.execution import CapabilityCall, CapabilityResult, ToolCallBudget, register_with_core as register_execution_with_core
 from pal.failure import (
     FAILURE_VERIFICATION_FAILED,
     FAILURE_VERIFICATION_OK,
@@ -44,6 +44,7 @@ from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
 from pal.memory import (
     L1TranscriptMessage,
     L2Entry,
+    L3RecallView,
     L3ProviderSelector,
     MemoryCompactRequest,
     MemoryQuery,
@@ -1263,6 +1264,59 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertEqual(reattached, "ok")
         self.assertIsNotNone(core.context.execution_runtime.l3_plugin_registry.get("mock_l3"))
+
+    def test_l3_recall_query_supports_summary_and_origin_views(self) -> None:
+        core = PalCore()
+        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        register_memory_with_core(core.context, memory_service)
+        mock_l3 = MockL3Plugin(
+            records=[
+                {
+                    "document_id": "fact:1",
+                    "document_kind": "fact",
+                    "scope": "system",
+                    "title": "Nathan profile",
+                    "summary": "Nathan built Pal and wants it to act directly.",
+                    "rendered": "Nathan built Pal and wants it to act directly.",
+                    "search_text": "Nathan built Pal after being unhappy with OpenClaw and wants Pal to act directly for him.",
+                    "canonical_key": "nathan_profile",
+                    "dedupe_fingerprint": "fp_1",
+                }
+            ]
+        )
+        register_l3_with_core(core.context, mock_l3)
+        core.publish_module_capabilities(mock_l3.module_id)
+
+        summary_result = core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="op_l3_recall_query",
+                args={"target_id": "mock_l3", "queries": ["nathan"], "view": "summary"},
+            )
+        )
+        origin_result = core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="op_l3_recall_query",
+                args={"target_id": "mock_l3", "queries": ["nathan"], "view": "origin"},
+            )
+        )
+
+        self.assertEqual(summary_result.status, "ok")
+        self.assertEqual(summary_result.structured["view"], "summary")
+        self.assertEqual(summary_result.structured["hit_count"], 1)
+        self.assertEqual(summary_result.structured["hits_preview"][0]["document_id"], "fact:1")
+        self.assertNotIn("hits", summary_result.structured)
+        self.assertNotIn("projected_entries", summary_result.structured)
+        self.assertIn("Nathan built Pal and wants it to act directly.", summary_result.llm_text)
+        self.assertNotIn("projected_entries", summary_result.llm_text)
+        self.assertNotIn("OpenClaw", summary_result.llm_text)
+
+        self.assertEqual(origin_result.status, "ok")
+        self.assertEqual(origin_result.structured["view"], "origin")
+        self.assertEqual(origin_result.structured["hit_count"], 1)
+        self.assertNotIn("hits", origin_result.structured)
+        self.assertNotIn("projected_entries", origin_result.structured)
+        self.assertIn("OpenClaw", origin_result.llm_text)
+        self.assertNotIn("projected_entries", origin_result.llm_text)
         self.assertIn("intro_provider_l3_show::mock_l3", core.context.capability_registry.descriptors)
 
     def test_detachable_service_module_round_trips_through_core_registry(self) -> None:
@@ -1827,6 +1881,63 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn('"value": "rich"', tool_message["content"])
         self.assertNotIn("placeholder", tool_message["content"])
 
+    def test_l3_recall_tool_protocol_uses_minimal_observation_text(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        channel_runtime = ChannelRuntime()
+        register_channel_with_core(core.context, channel_runtime)
+        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        register_memory_with_core(core.context, memory_service)
+        mock_l3 = MockL3Plugin(
+            records=[
+                {
+                    "document_id": "fact:1",
+                    "document_kind": "fact",
+                    "scope": "system",
+                    "title": "Nathan profile",
+                    "summary": "Nathan built Pal and wants it to act directly.",
+                    "rendered": "Nathan built Pal and wants it to act directly.",
+                    "search_text": "Nathan built Pal after being unhappy with OpenClaw and wants Pal to act directly for him.",
+                }
+            ]
+        )
+        register_l3_with_core(core.context, mock_l3)
+        core.publish_module_capabilities(mock_l3.module_id)
+        scripted_llm = ScriptedLLMRuntime(
+            [
+                CanonicalLLMOutcome(
+                    text="",
+                    tool_calls=[
+                        CanonicalToolCall(
+                            name="op_l3_recall_query",
+                            args={"target_id": "mock_l3", "queries": ["nathan"], "view": "summary"},
+                        )
+                    ],
+                    finish_reason="tool_calls",
+                ),
+                CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop"),
+            ]
+        )
+        core.context.port_registry["llm:llm"] = scripted_llm
+
+        core.process_channel_turn(
+            ChannelEnvelope(
+                event=EventEnvelope(event_kind="user.message", source_kind="channel", payload={"text": "who am i"}),
+                endpoint=EndpointConfig(endpoint_id="stdio", channel_kind="stdio", binding_key="stdin"),
+                response_handle=ResponseHandle(endpoint_id="stdio"),
+            )
+        )
+
+        generate_requests = [request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"}]
+        self.assertGreaterEqual(len(generate_requests), 2)
+        tool_message = next(message for message in generate_requests[1].messages if message.get("role") == "tool")
+        self.assertIn("L3 recall completed.", tool_message["content"])
+        self.assertIn("provider: mock_l3", tool_message["content"])
+        self.assertIn("queries: nathan", tool_message["content"])
+        self.assertIn("retrieved: 1 memories", tool_message["content"])
+        self.assertNotIn("OpenClaw", tool_message["content"])
+        self.assertNotIn("Nathan built Pal and wants it to act directly.", tool_message["content"])
+
     def test_malformed_tool_result_does_not_crash_turn_runtime(self) -> None:
         core = PalCore()
         register_core_with_core(core)
@@ -2117,6 +2228,92 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         cleared = _build_cleared_tool_indices(messages, keep_recent=1)
 
         self.assertEqual(cleared, {0, 1, 2, 3})
+
+    def test_memory_prompt_dedupes_working_memory_entries_by_identity(self) -> None:
+        from pal.memory import MemoryPack
+        from pal.memory.prompt import MemoryPromptFragmentProvider
+
+        provider = MemoryPromptFragmentProvider()
+        pack = MemoryPack(
+            l2_working_memory=[
+                L2Entry(
+                    entry_id="fact:1",
+                    kind="fact",
+                    scope="system",
+                    title="Nathan profile",
+                    summary="Nathan built Pal.",
+                    rendered="Nathan built Pal.",
+                    canonical_key="nathan_profile",
+                    source_ref="fact:1",
+                    source_kind="l3_recall",
+                ),
+                L2Entry(
+                    entry_id="fact:2",
+                    kind="fact",
+                    scope="system",
+                    title="Nathan profile duplicate",
+                    summary="Nathan built Pal again.",
+                    rendered="Nathan built Pal again.",
+                    canonical_key="nathan_profile",
+                    source_ref="fact:2",
+                ),
+            ]
+        )
+
+        fragments = provider.build_prompt_fragments(
+            PromptAssemblyContext(metadata={"memory_pack": pack})
+        )
+
+        working_memory = next(fragment for fragment in fragments if fragment.metadata.get("block_id") == "memory_working_memory")
+        self.assertIn("Nathan built Pal. [L3 summary; origin available]", working_memory.content)
+        self.assertNotIn("Nathan built Pal again.", working_memory.content)
+
+    def test_memory_query_defaults_to_summary_view_enum(self) -> None:
+        self.assertEqual(MemoryQuery().view, L3RecallView.SUMMARY)
+
+    def test_l3_recall_tool_result_stays_under_budget_with_preview_shape(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        mock_l3 = MockL3Plugin(
+            records=[
+                {
+                    "document_id": f"fact:{index}",
+                    "document_kind": "fact",
+                    "scope": "system",
+                    "title": f"Nathan fact {index}",
+                    "summary": "Nathan built Pal and prefers direct execution." * 8,
+                    "rendered": "Nathan built Pal and prefers direct execution." * 8,
+                    "search_text": "Nathan built Pal after OpenClaw frustration and wants direct action." * 10,
+                }
+                for index in range(10)
+            ]
+        )
+        register_l3_with_core(core.context, mock_l3)
+        core.publish_module_capabilities(mock_l3.module_id)
+
+        result = core.context.execution_runtime.execute_tool(
+            CanonicalToolCall(
+                name="op_l3_recall_query",
+                args={
+                    "target_id": "mock_l3",
+                    "queries": ["用户是谁", "用户身份", "用户个人信息", "用户偏好"],
+                    "limit": 10,
+                },
+            ),
+            budget=ToolCallBudget(max_output_chars=12_000),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.structured["hit_count"], 10)
+        self.assertLess(len(str(result.llm_text)), 12_000)
+
+    def test_minimal_operating_rules_prompt_mentions_precise_recall_queries(self) -> None:
+        from pal.core.prompt import MinimalOperatingRulesPromptFragmentProvider
+
+        fragment = MinimalOperatingRulesPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext())[0]
+
+        self.assertIn("start with one concrete, high-signal query", fragment.content)
+        self.assertIn("Avoid sending multiple overlapping or broad recall queries at once.", fragment.content)
 
     def test_memory_service_compact_uses_semantic_summary_and_projects_to_l2(self) -> None:
         service = MemoryService()
