@@ -592,6 +592,7 @@ class PalCore:
             return
         await self._execute_soft_reset_async(scope_state, request)
         scope_state.pending_requests.pop("reset_confirm", None)
+        await self._notify_expired_request_async(request)
         await self._reply_to_route_async(route, "Soft reset complete. L1/L2 and working memory projection were cleared.")
 
     async def _handle_invoke_capability_async(self, action: ControlAction) -> None:
