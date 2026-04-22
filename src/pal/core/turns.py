@@ -190,6 +190,9 @@ def channel_turn_program(
             compact_note = str(compact_result.payload.summary) if compact_result.payload is not None else ""
             continue
         if outcome is not None and outcome.tool_calls:
+            mid_text = str(outcome.text or "").strip()
+            if mid_text:
+                yield MailboxReplyEffect(channel_envelope=channel_envelope, text=mid_text)
             for tool_call in outcome.tool_calls:
                 tool_result = yield ToolCallEffect(tool_call=tool_call)
                 _append_tool_observation(observations, tool_result.payload)
