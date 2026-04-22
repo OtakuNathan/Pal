@@ -30,6 +30,7 @@ from pal.core import (
     canonical_tool_signature_hash,
     register_with_core as register_core_with_core,
 )
+from pal.core.runtime_config import RuntimeConfig
 from pal.execution import CapabilityCall, CapabilityResult, ToolCallBudget, register_with_core as register_execution_with_core
 from pal.failure import (
     FAILURE_VERIFICATION_FAILED,
@@ -2012,7 +2013,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
         self.assertIn("stopped the tool loop", outcome.final_reply.lower())
 
-    def test_turn_runtime_enters_finalization_only_when_execution_budget_is_exceeded(self) -> None:
+    def test_turn_runtime_truncates_large_tool_results_without_forcing_finalization(self) -> None:
         class TinyBudgetLLMRuntime:
             def __init__(self) -> None:
                 self.requests = []
@@ -2060,25 +2061,27 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_memory_with_core(core.context, memory_service)
         scripted_llm = TinyBudgetLLMRuntime()
         core.context.port_registry["llm:llm"] = scripted_llm
-        core.context.execution_runtime.register_tool(HugeTool())
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core.context.execution_runtime.runtime_root = Path(tmpdir)
+            core.context.execution_runtime.register_tool(HugeTool(size=80_000))
 
-        outcome = core.process_channel_turn(
-            ChannelEnvelope(
-                event=EventEnvelope(event_kind="user.message", source_kind="channel", payload={"text": "hello"}),
-                endpoint=EndpointConfig(endpoint_id="stdio", channel_kind="stdio", binding_key="stdin"),
-                response_handle=ResponseHandle(endpoint_id="stdio"),
-            )
+            outcome = core.process_channel_turn(
+                ChannelEnvelope(
+                    event=EventEnvelope(event_kind="user.message", source_kind="channel", payload={"text": "hello"}),
+                    endpoint=EndpointConfig(endpoint_id="stdio", channel_kind="stdio", binding_key="stdin"),
+                    response_handle=ResponseHandle(endpoint_id="stdio"),
+                )
         )
 
         self.assertEqual(outcome.final_reply, "final answer")
         generate_requests = [request for kind, request in scripted_llm.requests if kind == "generate"]
-        self.assertEqual(generate_requests[-1].tools, [])
-        self.assertIn("Finalization Directive", generate_requests[-1].messages[0]["content"])
+        self.assertNotIn("Finalization Directive", generate_requests[-1].messages[0]["content"])
         tool_message = next(message for message in generate_requests[-1].messages if message.get("role") == "tool")
-        self.assertIn("budget", tool_message["content"])
+        self.assertIn("[truncated:", tool_message["content"])
+        self.assertIn("[artifact:", tool_message["content"])
 
-    def test_turn_runtime_trims_tool_protocol_using_fallback_endpoint_budget(self) -> None:
-        class FallbackBudgetLLMRuntime:
+    def test_turn_runtime_degrades_older_tool_results_when_current_turn_group_exceeds_limit(self) -> None:
+        class MultiToolLLMRuntime:
             def __init__(self) -> None:
                 self.requests = []
                 self.generate_count = 0
@@ -2093,54 +2096,37 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     reserved_output_tokens=request.max_output_tokens,
                 )
 
-            def resolve_endpoint_facts(self, *, preferred_endpoint_id: str | None = None) -> dict[str, object]:
-                if preferred_endpoint_id == "fallback-small":
-                    return {
-                        "endpoint_id": "fallback-small",
-                        "model_id": "fallback-small-model",
-                        "context_window": 2500,
-                        "max_output_tokens": 128,
-                    }
-                return {
-                    "endpoint_id": "primary-large",
-                    "model_id": "primary-large-model",
-                    "context_window": 64_000,
-                    "max_output_tokens": 4096,
-                }
-
-            def resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None) -> int:
-                return int(self.resolve_endpoint_facts(preferred_endpoint_id=preferred_endpoint_id)["max_output_tokens"])
-
             def generate(self, request):
                 self.requests.append(("generate", request))
                 self.generate_count += 1
                 if self.generate_count == 1:
                     return CanonicalLLMOutcome(
                         text="",
-                        tool_calls=[CanonicalToolCall(name="huge", args={"value": "proto"})],
+                        tool_calls=[CanonicalToolCall(name="huge_a", args={"value": "proto-a"})],
                         finish_reason="tool_calls",
                     )
                 if self.generate_count == 2:
                     return CanonicalLLMOutcome(
                         text="",
-                        tool_calls=[],
-                        finish_reason="compact_required",
-                        target_input_budget=256,
-                        reserved_output_tokens=64,
-                        preferred_endpoint_id="fallback-small",
-                        preferred_model_id="fallback-small-model",
+                        tool_calls=[CanonicalToolCall(name="huge_b", args={"value": "proto-b"})],
+                        finish_reason="tool_calls",
                     )
                 return CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop")
 
-        core = PalCore()
+        core = PalCore(config=RuntimeConfig(
+            max_tool_results_per_message_chars=20_000,
+            default_max_result_size_chars=120_000,
+            active_tool_result_preview=400,
+        ))
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
         memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
         register_memory_with_core(core.context, memory_service)
-        scripted_llm = FallbackBudgetLLMRuntime()
+        scripted_llm = MultiToolLLMRuntime()
         core.context.port_registry["llm:llm"] = scripted_llm
-        core.context.execution_runtime.register_tool(HugeTool())
+        core.context.execution_runtime.register_tool(type("HugeATool", (HugeTool,), {"name": "huge_a"})(size=12_000))
+        core.context.execution_runtime.register_tool(type("HugeBTool", (HugeTool,), {"name": "huge_b"})(size=12_000))
 
         outcome = core.process_channel_turn(
             ChannelEnvelope(
@@ -2154,9 +2140,33 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         generate_requests = [request for kind, request in scripted_llm.requests if kind == "generate"]
         self.assertGreaterEqual(len(generate_requests), 3)
         retry_request = generate_requests[-1]
-        self.assertEqual(retry_request.metadata.get("preferred_endpoint_id"), "fallback-small")
-        tool_message = next(message for message in retry_request.messages if message.get("role") == "tool")
-        self.assertEqual(tool_message["content"], "[old tool result cleared]")
+        tool_messages = [message for message in retry_request.messages if message.get("role") == "tool"]
+        self.assertEqual(len(tool_messages), 2)
+        self.assertIn("[preview only:", tool_messages[0]["content"])
+        self.assertNotIn("[preview only:", tool_messages[1]["content"])
+
+    def test_execution_runtime_spills_large_tool_results_to_artifacts(self) -> None:
+        core = PalCore()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core.context.execution_runtime.runtime_root = Path(tmpdir)
+            core.context.execution_runtime.register_tool(HugeTool(size=60_000))
+            result = core.context.execution_runtime.execute_tool(
+                CanonicalToolCall(name="huge", args={"value": "spill"}),
+                budget=ToolCallBudget(
+                    max_output_chars=10_000,
+                    max_output_tokens_estimate=25_000,
+                    max_result_spill_chars=50_000,
+                    preview_chars=500,
+                    artifact_bucket_id="turn_spill",
+                ),
+            )
+
+            self.assertTrue(result.ok)
+            self.assertTrue(result.structured["truncated"])
+            artifact_ref = result.structured["artifact_ref"]
+            self.assertIsNotNone(artifact_ref)
+            self.assertTrue(Path(str(artifact_ref["local_cached_path"])).exists())
+            self.assertIn("[truncated:", result.llm_text)
 
     def test_turn_runtime_recompacts_when_generate_requests_budget_for_fallback_endpoint(self) -> None:
         class FallbackBudgetLLMRuntime:

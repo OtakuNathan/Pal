@@ -40,6 +40,7 @@ class TurnManager:
     context: MainContext
     state: CoreRuntimeState
     guard: ToolStagnationGuardProcess = field(default_factory=ToolStagnationGuardProcess)
+    config: RuntimeConfig = field(default_factory=RuntimeConfig.defaults)
 
     def start(self, channel_envelope: ChannelEnvelope) -> TurnContinuation:
         turn_id = channel_envelope.event.event_id
@@ -64,7 +65,7 @@ class TurnManager:
                     result = fn()
                 if result is not None:
                     return result
-        return 4096
+        return self.config.fallback_max_output_tokens
 
     def resume(
         self,
@@ -165,6 +166,7 @@ class PalCore:
             context=self.context,
             state=self.state,
             guard=ToolStagnationGuardProcess.from_config(self.config),
+            config=self.config,
         )
         self.prompt_compiler = PromptCompiler(self.context)
         self.tool_surface = ToolSurface(self.context)

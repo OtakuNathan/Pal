@@ -82,6 +82,7 @@ def compose_runtime(
 
     config = RuntimeConfig.load(registration.runtime.runtime_root)
     core = PalCore(config=config)
+    core.context.execution_runtime.runtime_root = registration.runtime.runtime_root
     channel_runtime = ChannelRuntime()
     secrets_path = registration.runtime.runtime_root / "secrets.json"
     secret_store = EncryptedFileSecretStore(secrets_path=str(secrets_path))

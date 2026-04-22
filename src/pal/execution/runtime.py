@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pal.channel.ingest import ArtifactIngestor, StoredArtifact
 from pal.execution.capability_registry import CapabilityRegistry
 from pal.execution.capability_compiler import compile_provider_subtree
 from pal.execution.contracts import (
@@ -42,6 +45,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     tools: dict[str, Tool] = field(default_factory=dict)
     provider_registry: dict[str, Any] = field(default_factory=dict)
     l3_plugin_registry: L3PluginRegistry = field(default_factory=L3PluginRegistry)
+    runtime_root: Path | None = None
 
     def __post_init__(self) -> None:
         default_l3 = NullL3Plugin()
@@ -259,8 +263,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     llm_text="tool execution disabled in finalization mode",
                     status="finalization_only",
                 )
-            if budget is not None and budget.max_output_chars is not None and budget.max_output_chars <= 0:
-                return self._budget_exceeded_result(call, budget=budget, original_size=0, limit_kind="max_output_chars")
             tool = self.tools.get(call.name)
             if tool is not None:
                 result = tool.invoke(call.args)
@@ -322,51 +324,150 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         budget: ToolCallBudget | None,
     ) -> CanonicalToolResult:
-        if budget is None or budget.max_output_chars is None:
+        if budget is None:
             return result
-        content_candidates = [
-            str(result.llm_text or ""),
-            str(result.text or ""),
-        ]
-        if result.structured:
-            import json
-
-            content_candidates.append(json.dumps(result.structured, ensure_ascii=False, sort_keys=True))
-        original_size = max(len(candidate) for candidate in content_candidates if candidate is not None)
-        if original_size <= budget.max_output_chars:
-            return result
-        return self._budget_exceeded_result(
-            call,
-            budget=budget,
-            original_size=original_size,
-            limit_kind="max_output_chars",
+        normalized = self._apply_shell_exec_budget(call, result, budget=budget)
+        rendered = self._render_result_payload(normalized)
+        original_size = len(rendered)
+        char_limit = self._resolve_char_limit(budget)
+        if char_limit is None or original_size <= char_limit:
+            return normalized
+        preview_chars = max(256, int(budget.preview_chars or 1000))
+        preview_text = rendered[: min(preview_chars, char_limit)].rstrip()
+        artifact = None
+        if budget.max_result_spill_chars is not None and original_size > budget.max_result_spill_chars:
+            artifact = self._spill_tool_result(call, normalized, rendered, budget=budget)
+        lines = [preview_text] if preview_text else []
+        marker = f"[truncated: original={original_size} chars, kept={len(preview_text)} chars]"
+        lines.append(marker)
+        if artifact is not None:
+            lines.append(f"[artifact: {artifact.local_cached_path}]")
+        preview_payload = "\n\n".join(part for part in lines if part).strip() or marker
+        structured = dict(normalized.structured or {})
+        structured.update(
+            {
+                "truncated": True,
+                "original_size": original_size,
+                "preview_size": len(preview_text),
+                "max_output_chars": char_limit,
+                "max_output_tokens_estimate": budget.max_output_tokens_estimate,
+                "artifact_ref": self._artifact_ref(artifact),
+            }
+        )
+        return CanonicalToolResult(
+            name=normalized.name,
+            ok=normalized.ok,
+            text=preview_payload,
+            structured=structured,
+            call_id=normalized.call_id,
+            llm_text=preview_payload,
+            status=normalized.status,
         )
 
-    def _budget_exceeded_result(
+    def _apply_shell_exec_budget(
         self,
         call: CanonicalToolCall,
+        result: CanonicalToolResult,
         *,
         budget: ToolCallBudget,
-        original_size: int,
-        limit_kind: str,
     ) -> CanonicalToolResult:
-        limit = getattr(budget, limit_kind, None)
-        message = f"tool output exceeded execution budget ({limit_kind}={limit})"
+        if call.name != "shell.exec":
+            return result
+        structured = dict(result.structured or {})
+        max_lines = budget.max_lines_to_read
+        max_stdout_chars = budget.max_stdout_chars
+        changed = False
+        for key in ("stdout", "stderr", "display_text"):
+            value = structured.get(key)
+            if not isinstance(value, str):
+                continue
+            truncated_value, line_truncated = _truncate_linewise(value, max_lines=max_lines)
+            if max_stdout_chars is not None and len(truncated_value) > max_stdout_chars:
+                truncated_value = truncated_value[:max_stdout_chars].rstrip()
+                line_truncated = True
+            if truncated_value != value:
+                structured[key] = truncated_value
+                structured[f"{key}_truncated"] = True
+                if line_truncated and max_lines is not None:
+                    structured[f"{key}_line_limit"] = max_lines
+                changed = True
+        if not changed:
+            return result
+        display_text = str(structured.get("display_text") or result.text or result.llm_text or "").strip()
+        if not display_text:
+            display_text = result.text or result.llm_text
         return CanonicalToolResult(
-            name=call.name,
-            ok=False,
-            text=message,
-            structured={
-                "reason": "budget_exceeded",
-                "tool": call.name,
-                "limit_kind": limit_kind,
-                "limit": limit,
-                "original_size": original_size,
-            },
-            call_id=getattr(call, "call_id", None),
-            llm_text=message,
-            status="budget_exceeded",
+            name=result.name,
+            ok=result.ok,
+            text=display_text,
+            structured=structured,
+            call_id=result.call_id,
+            llm_text=display_text,
+            status=result.status,
         )
+
+    def _resolve_char_limit(self, budget: ToolCallBudget) -> int | None:
+        candidates = [value for value in (budget.max_output_chars, budget.max_stdout_chars) if isinstance(value, int) and value > 0]
+        if not candidates:
+            return None
+        return min(candidates)
+
+    @staticmethod
+    def _render_result_payload(result: CanonicalToolResult) -> str:
+        if str(result.llm_text or "").strip():
+            return str(result.llm_text).strip()
+        if str(result.text or "").strip():
+            return str(result.text).strip()
+        if result.structured:
+            return json.dumps(result.structured, ensure_ascii=False, sort_keys=True)
+        return ""
+
+    def _spill_tool_result(
+        self,
+        call: CanonicalToolCall,
+        result: CanonicalToolResult,
+        rendered: str,
+        *,
+        budget: ToolCallBudget,
+    ) -> StoredArtifact | None:
+        if self.runtime_root is None:
+            return None
+        ingestor = ArtifactIngestor(self.runtime_root)
+        payload = json.dumps(
+            {
+                "tool_name": call.name,
+                "call_id": getattr(call, "call_id", None),
+                "args": dict(call.args),
+                "status": result.status,
+                "ok": result.ok,
+                "text": result.text,
+                "llm_text": result.llm_text,
+                "structured": result.structured,
+                "rendered": rendered,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        ).encode("utf-8")
+        return ingestor.store_bytes(
+            channel_kind="tool_results",
+            bucket_id=str(budget.artifact_bucket_id or getattr(call, "call_id", None) or call.name or "tool"),
+            file_name=f"{call.name.replace('/', '_')}.json",
+            content=payload,
+            mime_type="application/json",
+        )
+
+    @staticmethod
+    def _artifact_ref(artifact: StoredArtifact | None) -> dict[str, Any] | None:
+        if artifact is None:
+            return None
+        return {
+            "artifact_id": artifact.artifact_id,
+            "local_cached_path": artifact.local_cached_path,
+            "sha256": artifact.sha256,
+            "size_bytes": artifact.size_bytes,
+            "mime_type": artifact.mime_type,
+        }
 
     def call_registered(self, call: CapabilityCall) -> CapabilityResult:
         target_id = str(call.args.get("target_id") or SINGLETON_TARGET)
@@ -441,3 +542,14 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     async def execute_async(self, call: CapabilityCall) -> CapabilityResult:
         return await asyncio.to_thread(self.execute, call)
+
+
+def _truncate_linewise(text: str, *, max_lines: int | None) -> tuple[str, bool]:
+    if not isinstance(max_lines, int) or max_lines <= 0:
+        return text, False
+    lines = text.splitlines()
+    if len(lines) <= max_lines:
+        return text, False
+    kept = "\n".join(lines[:max_lines]).rstrip()
+    suffix = f"\n\n[... truncated after {max_lines} lines, original: {len(lines)} lines]"
+    return f"{kept}{suffix}".strip(), True

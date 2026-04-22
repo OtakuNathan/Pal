@@ -50,8 +50,14 @@ CapabilityCallable = Callable[[CapabilityCall], CapabilityResult]
 @dataclass(frozen=True)
 class ToolCallBudget:
     max_output_chars: int | None = None
+    max_output_tokens_estimate: int | None = None
     max_output_bytes: int | None = None
+    max_result_spill_chars: int | None = None
+    max_result_group_chars: int | None = None
+    preview_chars: int | None = None
+    artifact_bucket_id: str | None = None
     max_read_bytes: int | None = None
+    max_lines_to_read: int | None = None
     max_stdout_chars: int | None = None
     timeout_ms: int | None = None
 

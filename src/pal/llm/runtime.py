@@ -713,27 +713,124 @@ class LLMRuntime(LLMRuntimePort):
         request: LLMPreflightRequest,
         fallback_chain: list[str],
     ) -> LLMPreflightAdvice:
-        estimated_size = sum(len(str(message.get("content", ""))) for message in request.messages)
+        breakdown = self._build_preflight_breakdown(request)
         reserved_output_tokens = request.max_output_tokens
         if endpoint is not None and endpoint.max_output_tokens is not None:
             reserved_output_tokens = min(request.max_output_tokens, endpoint.max_output_tokens)
         if endpoint is None or endpoint.context_window is None:
-            target_budget = max(estimated_size, reserved_output_tokens)
-        else:
-            margin = min(self.safety_margin_tokens, max(1024, int(endpoint.context_window * 0.05)))
-            target_budget = max(
-                endpoint.context_window - reserved_output_tokens - margin,
-                reserved_output_tokens,
+            available_input_budget_chars = max(
+                int(breakdown.get("estimated_input_chars", 0)),
+                int(breakdown.get("hard_keep_chars", 0)),
             )
+            target_budget = max(
+                256,
+                int(breakdown.get("conversation_chars", 0)),
+            )
+            hard_overflow = False
+        else:
+            margin_tokens = self._context_margin_tokens(endpoint.context_window)
+            available_input_tokens = max(endpoint.context_window - reserved_output_tokens - margin_tokens, 0)
+            available_input_budget_chars = int(available_input_tokens * self._chars_per_token())
+            remaining_conversation_budget = max(
+                available_input_budget_chars - int(breakdown.get("hard_keep_chars", 0)),
+                0,
+            )
+            target_budget = max(256, int(remaining_conversation_budget * 0.5))
+            hard_overflow = int(breakdown.get("hard_keep_chars", 0)) > available_input_budget_chars
+            breakdown["context_window_tokens"] = int(endpoint.context_window)
+            breakdown["margin_tokens"] = int(margin_tokens)
+            breakdown["available_input_tokens"] = int(available_input_tokens)
+        breakdown["available_input_budget_chars"] = int(available_input_budget_chars)
+        breakdown["hard_overflow"] = hard_overflow
         active_model = endpoint.model_id if endpoint is not None else request.model_hint
-        status = LLMPreflightStatus.COMPACT_REQUIRED if estimated_size > target_budget else LLMPreflightStatus.READY
+        estimated_input_chars = int(breakdown.get("estimated_input_chars", 0))
+        status = (
+            LLMPreflightStatus.COMPACT_REQUIRED
+            if estimated_input_chars > available_input_budget_chars
+            else LLMPreflightStatus.READY
+        )
         return LLMPreflightAdvice(
             status=status,
             active_model=active_model,
             fallback_chain=list(fallback_chain),
             target_input_budget=target_budget,
             reserved_output_tokens=reserved_output_tokens,
+            breakdown=breakdown,
         )
+
+    def _build_preflight_breakdown(self, request: LLMPreflightRequest) -> dict[str, int | bool]:
+        snapshot = request.metadata.get("prompt_budget_snapshot")
+        if isinstance(snapshot, dict):
+            breakdown = {
+                key: int(snapshot.get(key, 0))
+                for key in (
+                    "system_chars",
+                    "tool_protocol_chars",
+                    "conversation_chars",
+                    "current_user_chars",
+                    "estimated_input_chars",
+                    "hard_keep_chars",
+                )
+            }
+            return breakdown
+        system_chars = 0
+        tool_protocol_chars = 0
+        conversation_chars = 0
+        current_user_chars = 0
+        last_index = len(request.messages) - 1
+        for index, message in enumerate(request.messages):
+            content_chars = self._estimate_message_chars(message)
+            role = str(message.get("role") or "").strip()
+            if role == "system":
+                system_chars += content_chars
+                continue
+            if role == "tool" or (role == "assistant" and message.get("tool_calls")):
+                tool_protocol_chars += content_chars
+                continue
+            if role == "user" and index == last_index:
+                current_user_chars += content_chars
+                continue
+            conversation_chars += content_chars
+        estimated_input_chars = system_chars + tool_protocol_chars + conversation_chars + current_user_chars
+        return {
+            "system_chars": system_chars,
+            "tool_protocol_chars": tool_protocol_chars,
+            "conversation_chars": conversation_chars,
+            "current_user_chars": current_user_chars,
+            "estimated_input_chars": estimated_input_chars,
+            "hard_keep_chars": system_chars + tool_protocol_chars + current_user_chars,
+        }
+
+    @staticmethod
+    def _estimate_message_chars(message: dict[str, Any]) -> int:
+        total = len(str(message.get("content", "")))
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            try:
+                total += len(json.dumps(tool_calls, ensure_ascii=False, sort_keys=True))
+            except TypeError:
+                total += len(str(tool_calls))
+        tool_call_id = str(message.get("tool_call_id", "") or "").strip()
+        if tool_call_id:
+            total += len(tool_call_id)
+        return total
+
+    def _context_margin_tokens(self, context_window: int) -> int:
+        if self.config is None:
+            return min(self.safety_margin_tokens, max(1024, int(context_window * 0.05)))
+        return min(
+            int(getattr(self.config, "context_margin_cap", self.safety_margin_tokens)),
+            max(
+                int(getattr(self.config, "context_margin_min", 1024)),
+                int(context_window * float(getattr(self.config, "context_margin_factor", 0.05))),
+            ),
+        )
+
+    def _chars_per_token(self) -> float:
+        if self.config is None:
+            return 3.5
+        value = float(getattr(self.config, "chars_per_token", 3.5))
+        return value if value > 0 else 3.5
 
     def _build_effective_request(
         self,

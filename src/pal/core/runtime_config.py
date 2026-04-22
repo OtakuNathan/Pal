@@ -9,14 +9,17 @@ from pathlib import Path
 class RuntimeConfig:
     """Runtime tuning constants. Loaded from {runtime_root}/config.toml, fallback to defaults."""
 
-    # tool budget
-    active_tool_result_budget: int = 50_000
+    # read limits
+    max_lines_to_read: int = 2_000
+    default_max_output_tokens: int = 25_000
+    max_output_size_bytes: int = 262_144
+
+    # tool / prompt budget
+    default_max_result_size_chars: int = 50_000
+    max_tool_result_tokens: int = 100_000
+    max_tool_results_per_message_chars: int = 200_000
     active_tool_result_preview: int = 1_000
-    min_tool_protocol_budget: int = 256
-    tool_protocol_share: float = 0.6
-    min_tool_call_output_budget: int = 128
     chars_per_token: float = 3.5
-    fallback_protocol_budget: int = 80_000
     context_margin_factor: float = 0.05
     context_margin_cap: int = 16_384
     context_margin_min: int = 1_024
@@ -50,14 +53,17 @@ class RuntimeConfig:
         if not isinstance(raw, dict):
             return cls()
         kwargs: dict = {}
+        cls._apply_section(kwargs, raw, "read", {
+            "max_lines_to_read": int,
+            "default_max_output_tokens": int,
+            "max_output_size_bytes": int,
+        })
         cls._apply_section(kwargs, raw, "budget", {
-            "active_tool_result_budget": int,
+            "default_max_result_size_chars": int,
+            "max_tool_result_tokens": int,
+            "max_tool_results_per_message_chars": int,
             "active_tool_result_preview": int,
-            "min_tool_protocol_budget": int,
-            "tool_protocol_share": float,
-            "min_tool_call_output_budget": int,
             "chars_per_token": float,
-            "fallback_protocol_budget": int,
             "context_margin_factor": float,
             "context_margin_cap": int,
             "context_margin_min": int,

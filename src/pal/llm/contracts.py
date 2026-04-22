@@ -68,6 +68,7 @@ class LLMPreflightAdvice:
     fallback_chain: list[str] = field(default_factory=list)
     target_input_budget: int = 0
     reserved_output_tokens: int = 0
+    breakdown: dict[str, int | bool] = field(default_factory=dict)
 
 
 class LLMRuntimePort(Protocol):

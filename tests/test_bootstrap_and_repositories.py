@@ -15,6 +15,7 @@ from pal.channel.contracts import EndpointConfig
 from pal.channel.endpoints import SocketChannelEndpoint, TelegramChannelEndpoint
 from pal.channel.endpoints.socket_protocol import pack_socket_message, read_socket_message
 from pal.execution import CapabilityCall
+from pal.core.runtime_config import RuntimeConfig
 from pal.identity import DEFAULT_PERSONA_ID, IdentityRepository
 from pal.llm import (
     CanonicalLLMRequest,
@@ -319,8 +320,62 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(advice.active_model, "stub-model")
         self.assertEqual(advice.reserved_output_tokens, 1200)
-        self.assertEqual(advice.target_input_budget, 7776)
+        self.assertEqual(advice.target_input_budget, 11108)
         self.assertEqual(advice.fallback_chain, [])
+        self.assertEqual(advice.breakdown["system_chars"], 5000)
+        self.assertEqual(advice.breakdown["tool_protocol_chars"], 0)
+        self.assertEqual(advice.breakdown["conversation_chars"], 0)
+        self.assertEqual(advice.breakdown["current_user_chars"], 0)
+        self.assertEqual(advice.breakdown["hard_keep_chars"], 5000)
+        self.assertEqual(advice.breakdown["estimated_input_chars"], 5000)
+        self.assertEqual(advice.breakdown["available_input_budget_chars"], 27216)
+        self.assertFalse(bool(advice.breakdown["hard_overflow"]))
+
+    def test_llm_runtime_preflight_marks_hard_overflow_when_hard_keep_exceeds_budget(self) -> None:
+        repository = LLMEndpointRepository()
+        settings_repository = RuntimeSettingRepository()
+        settings_repository.ensure_defaults()
+        repository.ensure_defaults(
+            [
+                {
+                    "endpoint_id": "tiny_endpoint",
+                    "provider": "stub",
+                    "model_id": "tiny-model",
+                    "api_mode": "openai_chat",
+                    "base_url": "stub://local/llm",
+                    "credential_ref": "stub-key",
+                    "context_window": 2000,
+                    "max_output_tokens": 256,
+                    "priority": 0,
+                    "enabled": True,
+                }
+            ]
+        )
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=repository),
+            settings_repository=settings_repository,
+            config=RuntimeConfig(),
+        )
+
+        advice = runtime.preflight(
+            LLMPreflightRequest(
+                messages=[
+                    {"role": "system", "content": "s" * 3000},
+                    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
+                    {"role": "tool", "content": "t" * 2000, "tool_call_id": "call_1"},
+                    {"role": "user", "content": "u" * 1000},
+                ],
+                max_output_tokens=512,
+            )
+        )
+
+        self.assertEqual(advice.status, "compact_required")
+        self.assertTrue(bool(advice.breakdown["hard_overflow"]))
+        self.assertEqual(advice.breakdown["system_chars"], 3000)
+        self.assertGreaterEqual(advice.breakdown["tool_protocol_chars"], 2000)
+        self.assertEqual(advice.breakdown["current_user_chars"], 1000)
+        self.assertGreaterEqual(advice.breakdown["hard_keep_chars"], 6000)
+        self.assertLess(advice.breakdown["available_input_budget_chars"], advice.breakdown["hard_keep_chars"])
 
     def test_runtime_setting_repository_persists_think_level(self) -> None:
         repository = RuntimeSettingRepository()
