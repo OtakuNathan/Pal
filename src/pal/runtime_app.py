@@ -51,6 +51,9 @@ class PalRuntimeApp:
             except NotImplementedError:
                 pass
         await self.handle.channel_runtime.start_async()
+        publish_catalog = getattr(self.handle.core, "publish_control_catalog_async", None)
+        if callable(publish_catalog):
+            await publish_catalog()
         try:
             while not stop_event.is_set():
                 processed = await self.handle.core.run_until_idle_async(max_iterations=128)

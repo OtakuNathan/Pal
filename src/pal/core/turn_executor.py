@@ -87,8 +87,10 @@ class TurnExecutor:
         return asyncio.run(self.execute_turn_effect_async(continuation, effect))
 
     async def execute_turn_effect_async(self, continuation, effect):
+        self._ensure_not_interrupted(continuation)
         continuation.waiting_effect_id = effect.effect_id
         result = await self._dispatch_effect(effect, continuation)
+        self._ensure_not_interrupted(continuation)
         continuation.waiting_effect_id = None
         return result
 
@@ -278,6 +280,7 @@ class TurnExecutor:
             execution_call,
             allow_tools=not continuation.finalization_only,
             budget=tool_budget,
+            turn_id=continuation.turn_id,
         )
         if self._should_enter_failure_flow_for_tool_result(tool_result):
             failure_result = await self._handle_failure_async(
@@ -338,6 +341,8 @@ class TurnExecutor:
 
     @_dispatch_effect.register(MailboxReplyEffect)
     async def _handle_mailbox_reply(self, effect, continuation):
+        if continuation.interrupted:
+            return EffectResult(status=RuntimeStatus.SKIPPED, text="interrupted")
         channel_runtime = self.context.require_port("channel:channel")
         reply_id = channel_runtime.queue_reply(effect.channel_envelope, effect.text)
         self._debug_log_reply(effect.text)
@@ -345,6 +350,8 @@ class TurnExecutor:
 
     @_dispatch_effect.register(MailboxReplyStreamEffect)
     async def _handle_mailbox_reply_stream(self, effect, continuation):
+        if continuation.interrupted:
+            return EffectResult(status=RuntimeStatus.SKIPPED, text="interrupted")
         channel_runtime = self.context.require_port("channel:channel")
         event_id = channel_runtime.queue_stream_event(effect.channel_envelope, effect.event)
         return EffectResult(status=RuntimeStatus.QUEUED, payload={"event_id": event_id})
@@ -359,6 +366,7 @@ class TurnExecutor:
 
         events = await self._call_port_async(llm_runtime, "agenerate_stream", "generate_stream", request)
         for event in events:
+            self._ensure_not_interrupted(continuation)
             if event.event_kind == LLMStreamEventKind.COMPACT_REQUIRED:
                 return CanonicalLLMOutcome(
                     text="",
@@ -375,6 +383,7 @@ class TurnExecutor:
                     continuation,
                     MailboxReplyStreamEffect(channel_envelope=continuation.channel_envelope, event=event),
                 )
+                self._ensure_not_interrupted(continuation)
             acc = self._stream_accumulators.get(event.event_kind)
             if acc is not None:
                 acc(event, text_parts, reasoning_parts, tool_calls, state)
@@ -427,6 +436,9 @@ class TurnExecutor:
             metadata["preferred_endpoint_id"] = continuation.preferred_llm_endpoint_id
         if continuation.preferred_llm_model_id:
             metadata["preferred_model_id"] = continuation.preferred_llm_model_id
+        snapshot_think_level = str(continuation.turn_settings_snapshot.get("think_level") or "").strip()
+        if snapshot_think_level:
+            metadata["think_level"] = snapshot_think_level
         if assembly_context.turn_kind != "failure":
             try:
                 memory_service = self.context.require_port("memory:memory")
@@ -466,6 +478,8 @@ class TurnExecutor:
         if continuation.tool_protocol_messages:
             prompt.messages.extend(prepared_tool_protocol)
         metadata = dict(prompt.metadata)
+        if snapshot_think_level:
+            metadata["think_level"] = snapshot_think_level
         metadata["prompt_budget_snapshot"] = self._build_prompt_budget_snapshot(
             assembly_context,
             base_messages=base_messages,
@@ -480,6 +494,11 @@ class TurnExecutor:
             metadata=metadata,
         )
         return prompt
+
+    @staticmethod
+    def _ensure_not_interrupted(continuation) -> None:
+        if getattr(continuation, "interrupted", False):
+            raise asyncio.CancelledError(getattr(continuation, "interrupt_reason", "") or "interrupted")
 
     def _build_prompt_budget_snapshot(
         self,

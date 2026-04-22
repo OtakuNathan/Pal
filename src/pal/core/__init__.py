@@ -1,4 +1,5 @@
 from pal.core.contracts import CoreRuntimeState
+from pal.core.control_handler import CoreControlActionHandler
 from pal.core.dispatcher import EventDispatcher
 from pal.core.event_handler_registry import EventHandlerRegistry
 from pal.core.event_source_registry import EventSourceRegistry
@@ -40,6 +41,7 @@ from pal.core.turns import (
 
 __all__ = [
     "CoreIntrospectionProvider",
+    "CoreControlActionHandler",
     "CoreRuntimeState",
     "CoreSnapshot",
     "EventDispatcher",

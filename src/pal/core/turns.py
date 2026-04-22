@@ -117,15 +117,19 @@ class TurnContinuation:
     channel_envelope: ChannelEnvelope
     program: TurnProgram
     correlation_id: str
+    control_scope_key: str = ""
     started: bool = False
     waiting_effect_id: str | None = None
     finalization_only: bool = False
     finalization_attempted: bool = False
     finalization_reason: str = ""
+    interrupted: bool = False
+    interrupt_reason: str = ""
     tool_batch_count: int = 0
     last_response_mode: str = "chat"
     preferred_llm_endpoint_id: str | None = None
     preferred_llm_model_id: str | None = None
+    turn_settings_snapshot: dict[str, Any] = field(default_factory=dict)
     tool_observations: list[ToolObservation] = field(default_factory=list)
     tool_protocol_messages: list[dict[str, Any]] = field(default_factory=list)
     pending_tool_call_batch: list[CanonicalToolCall] = field(default_factory=list)

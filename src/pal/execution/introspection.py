@@ -98,6 +98,7 @@ def register_with_core(context: MainContext, runtime: ExecutionRuntime | None = 
         detachable=False,
         introspection_provider=provider,
         ports={"execution": resolved_runtime},
+        shutdown_sync=resolved_runtime.shutdown,
     )
     context.register_module(handle)
     return handle

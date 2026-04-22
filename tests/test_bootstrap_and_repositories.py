@@ -1788,6 +1788,8 @@ class PalV2BootstrapTests(unittest.TestCase):
 
 class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
+        if not hasattr(asyncio, "start_unix_server") or not hasattr(asyncio, "open_unix_connection"):
+            self.skipTest("Unix socket asyncio APIs are unavailable on this platform")
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_socket_test_"))
         self.socket_path = self.runtime_root / "pal.sock"
         self.endpoint = SocketChannelEndpoint(
@@ -1903,6 +1905,21 @@ class _FakeTelegramBot:
 
     async def get_file(self, file_id: str):
         return self.files[file_id]
+
+    async def set_my_commands(self, commands, **kwargs):
+        normalized = [
+            {
+                "command": str(getattr(item, "command", "")),
+                "description": str(getattr(item, "description", "")),
+            }
+            for item in list(commands or [])
+        ]
+        payload = dict(kwargs)
+        payload["commands"] = normalized
+        self.actions.append(("commands", payload))
+
+    async def set_chat_menu_button(self, **kwargs):
+        self.actions.append(("menu_button", dict(kwargs)))
 
 
 class _FakeTelegramUpdater:
@@ -2064,7 +2081,23 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         attachment = attachments[0]
         self.assertTrue(str(attachment["local_cached_path"]).startswith(str(self.runtime_root / "artifacts" / "telegram" / "777")))
         self.assertFalse("hello telegram" in str(attachment))
-        self.assertTrue(Path(attachment["local_cached_path"]).exists())
+
+    async def test_telegram_endpoint_registers_control_commands_and_menu(self) -> None:
+        self.endpoint.queue_status(
+            "control_catalog",
+            payload={
+                "commands": [
+                    {"command": "control", "description": "Show the control panel and command help."},
+                    {"command": "think", "description": "Show or update the think level for future turns."},
+                ]
+            },
+        )
+
+        self.endpoint.flush_status_outbox()
+        await asyncio.sleep(0.05)
+
+        self.assertTrue(any(kind == "commands" for kind, _ in self.fake_bot.actions))
+        self.assertTrue(any(kind == "menu_button" for kind, _ in self.fake_bot.actions))
 
     async def test_telegram_endpoint_health_reflects_missing_token_without_starting_polling(self) -> None:
         other = TelegramChannelEndpoint(

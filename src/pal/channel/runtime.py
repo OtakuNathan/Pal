@@ -159,6 +159,23 @@ class ChannelRuntime(ChannelRuntimePort):
         )
         return event_id
 
+    def abort_stream(self, response_handle, *, reason: str = "interrupted") -> None:
+        for endpoint in self.list_endpoints():
+            if endpoint.endpoint.endpoint_id == response_handle.endpoint_id:
+                endpoint.abort_stream(response_handle, reason=reason)
+                break
+        if not self.stream_outbox:
+            return
+        remaining: deque[QueuedStreamEvent] = deque()
+        while self.stream_outbox:
+            queued = self.stream_outbox.popleft()
+            same_endpoint = queued.response_handle.endpoint_id == response_handle.endpoint_id
+            same_target = queued.response_handle.reply_target == response_handle.reply_target
+            if same_endpoint and same_target:
+                continue
+            remaining.append(queued)
+        self.stream_outbox = remaining
+
     def queue_status(
         self,
         envelope: ChannelEnvelope,
@@ -184,6 +201,24 @@ class ChannelRuntime(ChannelRuntimePort):
             )
         )
         return status_id
+
+    def queue_endpoint_status(
+        self,
+        endpoint_id: str,
+        kind: str,
+        *,
+        payload: dict[str, object] | None = None,
+        reply_target: dict[str, object] | None = None,
+    ) -> str | None:
+        endpoint = self.get_endpoint(endpoint_id)
+        if endpoint is None:
+            return None
+        target = dict(reply_target or endpoint.derive_default_reply_target())
+        return endpoint.queue_status(
+            kind,
+            response_handle=endpoint.build_response_handle(reply_target=target),
+            payload=dict(payload or {}),
+        )
 
     def flush_outbox(self) -> None:
         self.sync_endpoints()

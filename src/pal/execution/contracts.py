@@ -81,6 +81,9 @@ class Tool(Protocol):
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         ...
 
+    async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
+        ...
+
 
 class Plugin(Protocol):
     def register(self, runtime: "ExecutionRuntimePort") -> None:
@@ -112,6 +115,7 @@ class ExecutionRuntimePort(Protocol):
         *,
         allow_tools: bool = True,
         budget: ToolCallBudget | None = None,
+        turn_id: str | None = None,
     ) -> Any:
         ...
 
@@ -122,4 +126,7 @@ class ExecutionRuntimePort(Protocol):
         ...
 
     async def execute_async(self, call: CapabilityCall) -> CapabilityResult:
+        ...
+
+    async def interrupt_turn(self, turn_id: str) -> None:
         ...

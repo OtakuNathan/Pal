@@ -185,6 +185,14 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         super().send_stream_event(response_handle, event)
         session.outbound.put_nowait(_stream_payload(response_handle, event))
 
+    def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
+        super().abort_stream(response_handle, reason=reason)
+        with contextlib.suppress(SocketSessionClosed):
+            session = self._require_session(response_handle)
+            request_id = str(response_handle.reply_target.get("request_id") or "")
+            session.outbound.put_nowait({"type": "llm_error", "request_id": request_id, "error_text": str(reason)})
+            session.outbound.put_nowait({"type": "llm_done", "request_id": request_id, "finish_reason": str(reason)})
+
     def prepare_final_reply(self, response_handle: ResponseHandle, text: str) -> str | None:
         return super().prepare_final_reply(response_handle, text)
 

@@ -4,16 +4,28 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import EndpointConfig, ResponseHandle
-from pal.channel.ingest import ArtifactIngestor
+from pal.foundation.artifact import ArtifactIngestor
 from pal.stream_events import NormalizedLLMStreamEvent
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _FallbackBotCommand:
+    command: str
+    description: str
+
+
+@dataclass(frozen=True)
+class _FallbackMenuButtonCommands:
+    type: str = "commands"
 
 
 def _proxy_from_env() -> str | None:
@@ -114,7 +126,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     bot_token: str = ""
     base_url: str = "https://api.telegram.org"
     poll_timeout_seconds: int = 30
-    allowed_updates: tuple[str, ...] = ("message", "edited_message")
+    allowed_updates: tuple[str, ...] = ("message", "edited_message", "callback_query")
     proxy_url: str | None = None
     binding: TelegramBinding = field(default_factory=TelegramBinding)
     application: Any = None
@@ -123,6 +135,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _stop_event: asyncio.Event | None = None
     _ingestor: ArtifactIngestor | None = None
     _typing_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    _control_prompt_messages: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _control_commands_manifest: list[dict[str, str]] = field(default_factory=list)
     _polling_running: bool = False
     _authorized: bool = False
     _last_poll_error: str = ""
@@ -187,6 +201,24 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
 
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, Any]) -> None:
         loop = asyncio.get_running_loop()
+        if kind == "control_catalog":
+            loop.create_task(self._apply_control_catalog_async(payload))
+            return
+        if kind == "control_panel":
+            loop.create_task(self._send_control_message_async(response_handle, payload, store_request_id=""))
+            return
+        if kind == "control_prompt":
+            loop.create_task(
+                self._send_control_message_async(
+                    response_handle,
+                    payload,
+                    store_request_id=str(payload.get("request_id") or ""),
+                )
+            )
+            return
+        if kind == "control_request_expired":
+            loop.create_task(self._expire_control_prompt_async(payload))
+            return
         if kind == "typing_start":
             key = self._typing_key(response_handle)
             if key in self._typing_tasks and not self._typing_tasks[key].done():
@@ -280,6 +312,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     self._last_poll_error = ""
                     self._reconnect_attempts = 0
                     self._reconnecting = False
+                    if self._control_commands_manifest:
+                        await self._apply_control_catalog_async({"commands": list(self._control_commands_manifest)})
                 except Exception as exc:
                     self._last_poll_error = str(exc)
                     self._authorized = False
@@ -370,6 +404,19 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
 
     async def _on_update(self, update: Any, context: Any) -> None:
         _ = context
+        callback_payload = await self._control_payload_from_update(update)
+        if callback_payload is not None:
+            self.accept_raw(
+                callback_payload,
+                event_kind="slash_command",
+                correlation_id=str(callback_payload.get("source_metadata", {}).get("telegram_callback_id") or ""),
+                reply_target={
+                    "chat_id": callback_payload["chat_id"],
+                    "message_id": callback_payload["message_id"],
+                    "thread_id": callback_payload.get("thread_id") or "",
+                },
+            )
+            return
         payload = await self._payload_from_update(update)
         if payload is None:
             return
@@ -387,6 +434,40 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             return
         self.queue_status("receipt_marker", response_handle=envelope.response_handle)
         self.queue_status("typing_start", response_handle=envelope.response_handle)
+
+    async def _control_payload_from_update(self, update: Any) -> dict[str, Any] | None:
+        callback_query = getattr(update, "callback_query", None)
+        if callback_query is None:
+            return None
+        data = str(getattr(callback_query, "data", "") or "").strip()
+        if not data.startswith("ctl:"):
+            return None
+        message = getattr(callback_query, "message", None)
+        if message is None:
+            return None
+        chat = getattr(message, "chat", None)
+        chat_id = _safe_int(getattr(chat, "id", None))
+        from_user = getattr(callback_query, "from_user", None)
+        user_id = _safe_int(getattr(from_user, "id", None))
+        if not self._matches_binding(chat_id=chat_id, user_id=user_id):
+            return None
+        with contextlib.suppress(Exception):
+            await callback_query.answer()
+        command_text = data[4:].strip()
+        if not command_text:
+            return None
+        return {
+            "text": command_text,
+            "chat_id": str(chat_id or ""),
+            "message_id": str(getattr(message, "message_id", "") or ""),
+            "thread_id": str(getattr(message, "message_thread_id", "") or ""),
+            "from_user_id": str(user_id or ""),
+            "attachments": [],
+            "source_metadata": {
+                "telegram_callback_id": str(getattr(callback_query, "id", "") or ""),
+                "callback_data": "control",
+            },
+        }
 
     async def _payload_from_update(self, update: Any) -> dict[str, Any] | None:
         message = getattr(update, "effective_message", None)
@@ -564,6 +645,128 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     self.last_delivery_error = str(exc)
                     break
 
+    async def _send_control_message_async(
+        self,
+        response_handle: ResponseHandle,
+        payload: dict[str, Any],
+        *,
+        store_request_id: str,
+    ) -> None:
+        if self.application is None:
+            return
+        chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
+        thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
+        if chat_id is None:
+            return
+        text = str(payload.get("text") or "").strip()
+        buttons = list(payload.get("buttons") or [])
+        markup = self._build_control_markup(buttons)
+        kwargs: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        if thread_id is not None:
+            kwargs["message_thread_id"] = thread_id
+        if markup is not None:
+            kwargs["reply_markup"] = markup
+        sent = None
+        try:
+            sent = await self.application.bot.send_message(**kwargs)
+        except Exception as exc:
+            self.last_delivery_error = str(exc)
+            return
+        if store_request_id:
+            self._control_prompt_messages[store_request_id] = {
+                "chat_id": chat_id,
+                "message_id": _safe_int(getattr(sent, "message_id", None)),
+            }
+
+    async def _expire_control_prompt_async(self, payload: dict[str, Any]) -> None:
+        if self.application is None:
+            return
+        request_id = str(payload.get("request_id") or "").strip()
+        text = str(payload.get("text") or "This request expired.").strip()
+        if not request_id:
+            return
+        target = self._control_prompt_messages.pop(request_id, None)
+        if not target:
+            return
+        chat_id = _safe_int(target.get("chat_id"))
+        message_id = _safe_int(target.get("message_id"))
+        if chat_id is None or message_id is None:
+            return
+        with contextlib.suppress(Exception):
+            await self.application.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+            )
+
+    async def _apply_control_catalog_async(self, payload: dict[str, Any]) -> None:
+        commands = self._normalize_control_commands(payload)
+        self._control_commands_manifest = commands
+        if self.application is None or not commands:
+            return
+        bot = getattr(self.application, "bot", None)
+        if bot is None:
+            return
+        try:
+            try:
+                from telegram import BotCommand
+            except Exception:
+                BotCommand = _FallbackBotCommand
+
+            await bot.set_my_commands(
+                commands=[
+                    BotCommand(command=item["command"], description=item["description"])
+                    for item in commands
+                ]
+            )
+        except Exception as exc:
+            self._last_status_error = str(exc)
+            return
+        with contextlib.suppress(Exception):
+            try:
+                from telegram import MenuButtonCommands
+            except Exception:
+                MenuButtonCommands = _FallbackMenuButtonCommands
+
+            await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+
+    def _normalize_control_commands(self, payload: dict[str, Any]) -> list[dict[str, str]]:
+        manifest: list[dict[str, str]] = []
+        for item in list(payload.get("commands") or []):
+            if not isinstance(item, dict):
+                continue
+            command = str(item.get("command") or "").strip().lower()
+            description = str(item.get("description") or "").strip()
+            if not command or not description:
+                continue
+            if re.fullmatch(r"[a-z0-9_]{1,32}", command) is None:
+                continue
+            manifest.append(
+                {
+                    "command": command,
+                    "description": description[:256],
+                }
+            )
+        return manifest
+
+    def _build_control_markup(self, buttons: list[dict[str, Any]]):
+        if not buttons:
+            return None
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        except Exception:
+            return None
+        rows = []
+        for item in buttons:
+            label = str(item.get("label") or "").strip()
+            command = str(item.get("command") or "").strip()
+            if not label or not command:
+                continue
+            rows.append([InlineKeyboardButton(text=label, callback_data=f"ctl:{command}")])
+        if not rows:
+            return None
+        return InlineKeyboardMarkup(rows)
+
 
 @dataclass(frozen=True)
 class TelegramChannelEndpointFactory:
@@ -588,7 +791,7 @@ class TelegramChannelEndpointFactory:
             bot_token=str(metadata.get("bot_token") or ""),
             base_url=str(metadata.get("base_url") or "https://api.telegram.org"),
             poll_timeout_seconds=int(metadata.get("poll_timeout_seconds") or 30),
-            allowed_updates=tuple(metadata.get("allowed_updates") or ("message", "edited_message")),
+            allowed_updates=tuple(metadata.get("allowed_updates") or ("message", "edited_message", "callback_query")),
             binding=TelegramBinding.parse(record.binding_key or ""),
         )
         runtime_endpoint.enabled = bool(record.enabled)

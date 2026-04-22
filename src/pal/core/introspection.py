@@ -85,6 +85,7 @@ def inspect_core(provider: CoreIntrospectionProvider) -> CoreSnapshot:
 
 
 def register_with_core(core: PalCore) -> ModuleHandle:
+    from pal.core.control_handler import CoreControlActionHandler
     from pal.core.prompt import MinimalOperatingRulesPromptFragmentProvider
     from pal.core.turn_handler import TurnEventHandler
 
@@ -101,4 +102,5 @@ def register_with_core(core: PalCore) -> ModuleHandle:
     core.context.register_module(handle)
     core.context.prompt_fragment_registry.register(prompt_provider)
     core.context.event_handler_registry.register(EventKind.USER_MESSAGE, TurnEventHandler(core=core))
+    core.context.event_handler_registry.register(EventKind.CONTROL_ACTION, CoreControlActionHandler(core=core))
     return handle

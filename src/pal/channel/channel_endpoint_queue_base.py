@@ -63,7 +63,12 @@ class ChannelEndpointQueueBase(ABC):
         _ = payload
 
     def send_stream_event(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
-        session = self._stream_sessions.setdefault(id(response_handle), {"text": "", "reasoning": "", "events": []})
+        session = self._stream_sessions.setdefault(
+            id(response_handle),
+            {"text": "", "reasoning": "", "events": [], "closed": False, "abort_reason": ""},
+        )
+        if bool(session.get("closed")):
+            return
         session["events"].append(event.event_kind)
         if event.text:
             session["text"] = f'{session["text"]}{event.text}'
@@ -74,9 +79,25 @@ class ChannelEndpointQueueBase(ABC):
         session = self._stream_sessions.pop(id(response_handle), None)
         if session is None:
             return text
+        if bool(session.get("closed")):
+            return None
         if self.endpoint.channel_kind in {"stdio", "socket"} and str(session.get("text") or "") == text:
             return None
         return text
+
+    def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
+        session = self._stream_sessions.setdefault(
+            id(response_handle),
+            {"text": "", "reasoning": "", "events": [], "closed": False, "abort_reason": ""},
+        )
+        session["closed"] = True
+        session["abort_reason"] = str(reason or "interrupted")
+        remaining: deque[QueuedStreamEvent] = deque()
+        while self.stream_outbox:
+            queued = self.stream_outbox.popleft()
+            if id(queued.response_handle) != id(response_handle):
+                remaining.append(queued)
+        self.stream_outbox = remaining
 
     def pair(
         self,
@@ -149,15 +170,24 @@ class ChannelEndpointQueueBase(ABC):
         reply_target: dict[str, Any] | None = None,
     ) -> ChannelEnvelope | None:
         normalized_payload = self.normalize_raw(payload)
+        resolved_event_kind = self._resolve_ingress_event_kind(event_kind, normalized_payload)
         return self.emit_normalized(
             EventEnvelope(
-                event_kind=event_kind,
+                event_kind=resolved_event_kind,
                 source_kind=SourceKind.CHANNEL,
                 payload=normalized_payload,
                 correlation_id=correlation_id,
             ),
             response_handle=self.build_response_handle(reply_target=reply_target),
         )
+
+    def _resolve_ingress_event_kind(self, event_kind: str, normalized_payload: dict[str, Any]) -> str:
+        if str(event_kind) != str(EventKind.USER_MESSAGE):
+            return event_kind
+        text = str(normalized_payload.get("text") or "").strip()
+        if text.startswith("/"):
+            return EventKind.SLASH_COMMAND
+        return event_kind
 
     def queue_reply(self, text: str, *, response_handle: ResponseHandle | None = None) -> str:
         handle = response_handle or self.build_response_handle()
@@ -181,11 +211,15 @@ class ChannelEndpointQueueBase(ABC):
         *,
         response_handle: ResponseHandle | None = None,
     ) -> str:
+        handle = response_handle or self.build_response_handle()
+        session = self._stream_sessions.get(id(handle))
+        if session is not None and bool(session.get("closed")):
+            return str(uuid4())
         event_id = str(uuid4())
         self.stream_outbox.append(
             QueuedStreamEvent(
                 event_id=event_id,
-                response_handle=response_handle or self.build_response_handle(),
+                response_handle=handle,
                 endpoint=self.endpoint,
                 event=event,
             )

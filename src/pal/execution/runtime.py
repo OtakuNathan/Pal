@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pal.channel.ingest import ArtifactIngestor, StoredArtifact
+from pal.foundation.artifact import ArtifactIngestor, StoredArtifact
 from pal.execution.capability_registry import CapabilityRegistry
 from pal.execution.capability_compiler import compile_provider_subtree
 from pal.execution.contracts import (
@@ -46,12 +49,27 @@ class ExecutionRuntime(ExecutionRuntimePort):
     provider_registry: dict[str, Any] = field(default_factory=dict)
     l3_plugin_registry: L3PluginRegistry = field(default_factory=L3PluginRegistry)
     runtime_root: Path | None = None
+    sync_executor_max_workers: int = 4
+    sync_executor: ThreadPoolExecutor | None = None
+    _interrupt_handles: dict[str, set[Any]] = field(default_factory=dict)
+    _interrupt_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    _interrupt_state_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self) -> None:
         default_l3 = NullL3Plugin()
         self.provider_registry.setdefault(default_l3.provider_id, default_l3)
         if self.l3_plugin_registry.get(default_l3.provider_id) is None:
             self.l3_plugin_registry.register(default_l3)
+        if self.sync_executor is None:
+            self.sync_executor = ThreadPoolExecutor(
+                max_workers=self.sync_executor_max_workers,
+                thread_name_prefix="pal-exec",
+            )
+
+    def shutdown(self) -> None:
+        if self.sync_executor is not None:
+            self.sync_executor.shutdown(wait=False, cancel_futures=True)
+            self.sync_executor = None
 
     def register_capability(self, descriptor: CapabilityDescriptor, callable: CapabilityCallable) -> None:
         self.capabilities[descriptor.name] = RegisteredCapability(descriptor=descriptor, callable=callable)
@@ -314,8 +332,42 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         allow_tools: bool = True,
         budget: ToolCallBudget | None = None,
+        turn_id: str | None = None,
     ) -> CanonicalToolResult:
-        return await asyncio.to_thread(self.execute_tool, call, allow_tools=allow_tools, budget=budget)
+        if not allow_tools:
+            return self.execute_tool(call, allow_tools=allow_tools, budget=budget)
+        tool = self.tools.get(call.name)
+        if tool is not None:
+            async_invoke = getattr(tool, "ainvoke", None)
+            if callable(async_invoke):
+                try:
+                    result = await async_invoke(dict(call.args), runtime=self, turn_id=turn_id)
+                    canonical = CanonicalToolResult(
+                        name=call.name,
+                        ok=result.status == RuntimeStatus.OK,
+                        text=result.text,
+                        structured=result.structured,
+                        call_id=getattr(call, "call_id", None),
+                        llm_text=getattr(result, "llm_text", ""),
+                        status=result.status,
+                    )
+                    return self._apply_tool_budget(call, canonical, budget=budget)
+                except Exception as exc:
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=False,
+                        text=f"tool execution failed: {exc.__class__.__name__}",
+                        structured={"error": str(exc), "tool": call.name},
+                        call_id=getattr(call, "call_id", None),
+                        llm_text=f"tool execution failed: {exc.__class__.__name__}",
+                        status=RuntimeStatus.ERROR,
+                    )
+        loop = asyncio.get_running_loop()
+        executor = self.sync_executor
+        return await loop.run_in_executor(
+            executor,
+            lambda: self.execute_tool(call, allow_tools=allow_tools, budget=budget),
+        )
 
     def _apply_tool_budget(
         self,
@@ -541,7 +593,63 @@ class ExecutionRuntime(ExecutionRuntimePort):
             )
 
     async def execute_async(self, call: CapabilityCall) -> CapabilityResult:
-        return await asyncio.to_thread(self.execute, call)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self.sync_executor, lambda: self.execute(call))
+
+    async def interrupt_turn(self, turn_id: str) -> None:
+        if not turn_id:
+            return
+        with self._interrupt_state_lock:
+            task = self._interrupt_tasks.get(turn_id)
+            if task is None or task.done():
+                task = asyncio.create_task(self._interrupt_turn_handles_async(turn_id))
+                self._interrupt_tasks[turn_id] = task
+        try:
+            await task
+        finally:
+            with self._interrupt_state_lock:
+                if self._interrupt_tasks.get(turn_id) is task and task.done():
+                    self._interrupt_tasks.pop(turn_id, None)
+
+    async def _interrupt_turn_handles_async(self, turn_id: str) -> None:
+        while True:
+            with self._interrupt_state_lock:
+                handles = list(self._interrupt_handles.get(turn_id, set()))
+            if not handles:
+                with self._interrupt_state_lock:
+                    self._interrupt_handles.pop(turn_id, None)
+                return
+            for handle in handles:
+                cancel = getattr(handle, "cancel", None)
+                if callable(cancel):
+                    with contextlib.suppress(Exception):
+                        result = cancel()
+                        if asyncio.iscoroutine(result):
+                            await result
+                with self._interrupt_state_lock:
+                    bucket = self._interrupt_handles.get(turn_id)
+                    if bucket:
+                        bucket.discard(handle)
+                        if not bucket:
+                            self._interrupt_handles.pop(turn_id, None)
+
+    def register_interrupt_handle(self, turn_id: str | None, handle: Any) -> None:
+        if not turn_id:
+            return
+        with self._interrupt_state_lock:
+            bucket = self._interrupt_handles.setdefault(turn_id, set())
+            bucket.add(handle)
+
+    def release_interrupt_handle(self, turn_id: str | None, handle: Any) -> None:
+        if not turn_id:
+            return
+        with self._interrupt_state_lock:
+            bucket = self._interrupt_handles.get(turn_id)
+            if not bucket:
+                return
+            bucket.discard(handle)
+            if not bucket:
+                self._interrupt_handles.pop(turn_id, None)
 
 
 def _truncate_linewise(text: str, *, max_lines: int | None) -> tuple[str, bool]:

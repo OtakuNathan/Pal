@@ -2,22 +2,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pal.channel.contracts import ChannelEnvelope
+from pal.control.contracts import ControlAction
 from pal.core.events import EventHandler
 from pal.foundation import EventEnvelope
 from pal.shared import EventKind
 
 
 @dataclass
-class TurnEventHandler(EventHandler):
+class CoreControlActionHandler(EventHandler):
     core: "PalCore"
 
     def can_handle(self, event_kind: str) -> bool:
-        return event_kind == EventKind.USER_MESSAGE
+        return event_kind == EventKind.CONTROL_ACTION
 
     async def handle(self, event: EventEnvelope, context) -> list[EventEnvelope] | None:
         _ = context
-        if not isinstance(event.payload, ChannelEnvelope):
+        action = event.payload
+        if not isinstance(action, ControlAction):
             return []
-        await self.core.schedule_channel_turn_async(event.payload)
+        await self.core.handle_control_action_async(action)
         return []

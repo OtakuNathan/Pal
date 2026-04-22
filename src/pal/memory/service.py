@@ -309,6 +309,15 @@ class MemoryService(MemoryServicePort):
             return
         self.project_l3_entries([result.projected_entry], touch=True, top_of_mind=True)
 
+    def soft_reset(self) -> None:
+        self.l1_store.items = []
+        self.l2_store.items = {}
+        self.l2_store.top_of_mind_refs = []
+        self.l2_store.heat_registry = {}
+
+    async def asoft_reset(self) -> None:
+        await asyncio.to_thread(self.soft_reset)
+
     def _retire_entries(self, entries: list[L2Entry]) -> int:
         retireable = [entry for entry in entries if _should_retire_entry(entry)]
         if not retireable:

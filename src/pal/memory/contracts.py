@@ -231,3 +231,9 @@ class MemoryServicePort(Protocol):
 
     def build_compaction_source_text(self, *, target_input_budget: int) -> str:
         ...
+
+    def soft_reset(self) -> None:
+        ...
+
+    async def asoft_reset(self) -> None:
+        ...

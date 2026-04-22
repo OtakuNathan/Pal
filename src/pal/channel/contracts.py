@@ -84,5 +84,18 @@ class ChannelRuntimePort(Protocol):
     def queue_stream_event(self, envelope: ChannelEnvelope, event: NormalizedLLMStreamEvent) -> str:
         ...
 
+    def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
+        ...
+
     def queue_status(self, envelope: ChannelEnvelope, kind: str, *, payload: dict[str, Any] | None = None) -> str:
+        ...
+
+    def queue_endpoint_status(
+        self,
+        endpoint_id: str,
+        kind: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        reply_target: dict[str, Any] | None = None,
+    ) -> str | None:
         ...

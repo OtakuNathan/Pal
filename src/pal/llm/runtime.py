@@ -838,9 +838,10 @@ class LLMRuntime(LLMRuntimePort):
         *,
         endpoint: LLMEndpointModel | None,
     ) -> CanonicalLLMRequest:
+        requested_think_level = str(request.metadata.get("think_level") or "").strip() or self.think_level
         metadata: dict[str, Any] = {
             **dict(request.metadata),
-            "think_level": self.think_level,
+            "think_level": requested_think_level,
         }
         if endpoint is not None:
             metadata.update(

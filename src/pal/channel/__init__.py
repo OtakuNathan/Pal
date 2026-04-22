@@ -14,7 +14,7 @@ from pal.channel.factory import (
     SocketChannelEndpointFactory,
     build_default_factory_registry,
 )
-from pal.channel.ingest import ArtifactIngestor, StoredArtifact
+from pal.foundation.artifact import ArtifactIngestor, StoredArtifact
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase, ChannelEndpointQueueBase
 from pal.channel.introspection import ChannelIntrospectionProvider, ChannelSnapshot, inspect_channel, register_with_core
 from pal.channel.models import ChannelEndpointModel
