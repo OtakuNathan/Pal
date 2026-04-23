@@ -195,7 +195,6 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         self._typing_tasks.clear()
 
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
-        self._stop_typing(response_handle)
         loop = asyncio.get_running_loop()
         loop.create_task(self._send_reply_async(response_handle, text))
 
@@ -225,7 +224,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 return
             self._typing_tasks[key] = loop.create_task(self._typing_loop(response_handle))
             return
-        if kind == "typing_stop":
+        if kind == "typing_stop" or kind == "working_stop":
             self._stop_typing(response_handle)
             return
         if kind == "receipt_marker":
@@ -749,7 +748,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             )
         return manifest
 
-    def _build_control_markup(self, buttons: list[dict[str, Any]]):
+    def _build_control_markup(self, buttons: list[list[dict[str, Any]]]):
         if not buttons:
             return None
         try:
@@ -757,12 +756,16 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         except Exception:
             return None
         rows = []
-        for item in buttons:
-            label = str(item.get("label") or "").strip()
-            command = str(item.get("command") or "").strip()
-            if not label or not command:
-                continue
-            rows.append([InlineKeyboardButton(text=label, callback_data=f"ctl:{command}")])
+        for row_items in buttons:
+            row = []
+            for item in row_items:
+                label = str(item.get("label") or "").strip()
+                command = str(item.get("command") or "").strip()
+                if not label or not command:
+                    continue
+                row.append(InlineKeyboardButton(text=label, callback_data=f"ctl:{command}"))
+            if row:
+                rows.append(row)
         if not rows:
             return None
         return InlineKeyboardMarkup(rows)

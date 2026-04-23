@@ -223,6 +223,17 @@ class ControlPlane(ControlPlanePort):
         )
         self.register_command(
             ControlCommandSpec(
+                name="compact",
+                handler=self._handle_compact,
+                description="Manually trigger memory compaction.",
+                usage="/compact",
+                show_in_panel=True,
+                panel_group="builtin",
+                panel_button=True,
+            )
+        )
+        self.register_command(
+            ControlCommandSpec(
                 name="reset",
                 handler=self._handle_reset,
                 description="Open memory reset confirmation for this scope.",
@@ -281,6 +292,13 @@ class ControlPlane(ControlPlanePort):
         return ControlAction(
             action_kind="interrupt_turn",
             target_scope="runtime",
+            route=invocation.route,
+        )
+
+    def _handle_compact(self, invocation: ControlCommandInvocation) -> ControlAction:
+        return ControlAction(
+            action_kind="compact_memory",
+            target_scope="memory",
             route=invocation.route,
         )
 

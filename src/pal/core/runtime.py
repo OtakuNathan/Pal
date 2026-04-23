@@ -429,6 +429,14 @@ class PalCore:
                     "error": f"{exc.__class__.__name__}: {exc}",
                 }
             )
+        finally:
+            channel_runtime = self.context.port_registry.get("channel:channel")
+            if channel_runtime is not None:
+                channel_runtime.queue_status(
+                    channel_envelope,
+                    "working_stop",
+                    response_handle=channel_envelope.response_handle,
+                )
 
     def _on_turn_task_done(self, turn_id: str, task: asyncio.Task[Any]) -> None:
         stored = self.state.turn_tasks.get(turn_id)
@@ -456,6 +464,9 @@ class PalCore:
             return
         if action.action_kind == "reset_memory":
             await self._handle_reset_memory_async(action)
+            return
+        if action.action_kind == "compact_memory":
+            await self._handle_compact_memory_async(action)
             return
         if action.action_kind == "invoke_capability":
             await self._handle_invoke_capability_async(action)
@@ -527,6 +538,28 @@ class PalCore:
         if callable(refresh):
             refresh()
         think_level = str(getattr(llm_runtime, "think_level", "balanced") or "balanced")
+        if action.route is not None and action.route.channel_kind == "telegram":
+            def _level_label(level: str) -> str:
+                return f"> {level}" if level == think_level else level
+            await self._status_to_route_async(
+                action.route,
+                "control_panel",
+                {
+                    "text": f"Think level: {think_level}\nSelect a level:",
+                    "buttons": [
+                        [
+                            {"label": _level_label("off"), "command": "/think off"},
+                            {"label": _level_label("low"), "command": "/think low"},
+                        ],
+                        [
+                            {"label": _level_label("balanced"), "command": "/think balanced"},
+                            {"label": _level_label("deep"), "command": "/think deep"},
+                        ],
+                        [{"label": "Back", "command": "/control"}],
+                    ],
+                },
+            )
+            return
         await self._reply_to_route_async(action.route, f"Current think level: {think_level}")
 
     async def _handle_set_think_async(self, action: ControlAction) -> None:
@@ -595,6 +628,78 @@ class PalCore:
         await self._notify_expired_request_async(request)
         await self._reply_to_route_async(route, "Soft reset complete. L1/L2 and working memory projection were cleared.")
 
+    async def _handle_compact_memory_async(self, action: ControlAction) -> None:
+        if action.route is None:
+            return
+        memory_service = self.context.require_port("memory:memory")
+        builder = getattr(memory_service, "build_compaction_source_text", None)
+        if not callable(builder):
+            await self._reply_to_route_async(action.route, "Memory service does not support compaction.")
+            return
+        source_text = str(builder(target_input_budget=8192) or "").strip()
+        if not source_text:
+            await self._reply_to_route_async(action.route, "Nothing to compact — memory is already minimal.")
+            return
+        await self._reply_to_route_async(action.route, "Compacting memory...")
+        summary = await self._generate_compaction_summary_async(source_text)
+        if not summary:
+            await self._reply_to_route_async(action.route, "Compaction failed — could not generate summary.")
+            return
+        compact_method = getattr(memory_service, "acompact", None)
+        if not callable(compact_method):
+            compact_method = getattr(memory_service, "compact", None)
+            if not callable(compact_method):
+                await self._reply_to_route_async(action.route, "Compaction failed — compact method not available.")
+                return
+        from pal.memory.contracts import MemoryCompactRequest
+        request = MemoryCompactRequest(
+            target_input_budget=4096,
+            reserved_output_tokens=256,
+            metadata={"semantic_summary": summary},
+        )
+        result = compact_method(request)
+        if inspect.isawaitable(result):
+            result = await result
+        entry_count = getattr(result, "metadata", {}).get("projected_entry_count", 0) if result else 0
+        retired = getattr(result, "metadata", {}).get("retired_count", 0) if result else 0
+        await self._reply_to_route_async(
+            action.route,
+            f"Memory compacted. {entry_count} entries projected, {retired} retired to L3.",
+        )
+
+    async def _generate_compaction_summary_async(self, source_text: str) -> str:
+        llm_runtime = self.context.require_port("llm:llm")
+        generate = getattr(llm_runtime, "agenerate", None)
+        if not callable(generate):
+            generate = getattr(llm_runtime, "generate", None)
+            if not callable(generate):
+                return ""
+        from pal.llm.contracts import CanonicalLLMRequest, LLMFinishReason
+        request = CanonicalLLMRequest(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Summarize the recent conversation into a short, durable working-memory summary. "
+                        "Preserve user preferences, commitments, active goals, and factual context. "
+                        "Do not include markdown, speaker labels, or commentary."
+                    ),
+                },
+                {"role": "user", "content": source_text.strip()},
+            ],
+            max_output_tokens=256,
+            temperature=0.2,
+            tools=[],
+            metadata={"response_mode_hint": "operational", "purpose": "manual_compaction"},
+        )
+        try:
+            outcome = generate(request)
+            if inspect.isawaitable(outcome):
+                outcome = await outcome
+            return str(outcome.text or "").strip()
+        except Exception:
+            return ""
+
     async def _handle_invoke_capability_async(self, action: ControlAction) -> None:
         capability_name = str(action.target_id or "").strip()
         if not capability_name:
@@ -649,8 +754,8 @@ class PalCore:
                     "cancel_command": "/control",
                     "prompt_kind": "reset_confirm",
                     "buttons": [
-                        {"label": "Confirm Reset", "command": f"/reset confirm {request.request_id}"},
-                        {"label": "Back", "command": "/control"},
+                        [{"label": "Confirm Reset", "command": f"/reset confirm {request.request_id}"}],
+                        [{"label": "Back", "command": "/control"}],
                     ],
                 },
             )
@@ -673,27 +778,24 @@ class PalCore:
 
     def _build_control_panel_payload(self, control_plane) -> dict[str, Any]:
         commands = control_plane.list_panel_commands()
-        buttons: list[dict[str, str]] = []
+        buttons: list[list[dict[str, str]]] = []
         for spec in commands:
             if spec.name == "control":
                 continue
             if spec.name == "think":
-                buttons.extend(
-                    [
-                        {"label": "Think: Low", "command": "/think low"},
-                        {"label": "Think: Balanced", "command": "/think balanced"},
-                        {"label": "Think: Deep", "command": "/think deep"},
-                    ]
-                )
+                buttons.append([{"label": "Think", "command": "/think"}])
+                continue
+            if spec.name == "compact":
+                buttons.append([{"label": "Compact", "command": "/compact"}])
                 continue
             if spec.name == "interrupt":
-                buttons.append({"label": "Interrupt", "command": "/interrupt"})
+                buttons.append([{"label": "Interrupt", "command": "/interrupt"}])
                 continue
             if spec.name == "reset":
-                buttons.append({"label": "Reset Memory", "command": "/reset"})
+                buttons.append([{"label": "Reset Memory", "command": "/reset"}])
                 continue
             if spec.panel_button:
-                buttons.append({"label": spec.name, "command": f"/{spec.name}"})
+                buttons.append([{"label": spec.name, "command": f"/{spec.name}"}])
         return {
             "text": control_plane.render_panel_text(),
             "buttons": buttons,
