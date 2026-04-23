@@ -38,7 +38,3 @@ class ServiceTriggerEvent:
     service_id: str
     trigger_kind: str
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-WorkerProgressEvent = MinionProgressEvent
-WorkerTerminalEvent = MinionTerminalEvent

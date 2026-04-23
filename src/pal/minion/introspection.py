@@ -38,11 +38,6 @@ def inspect_minion(runtime: MinionRuntime) -> MinionSnapshot:
     return MinionSnapshot(accepted_contexts=len(runtime.accepted_contexts))
 
 
-WorkerSnapshot = MinionSnapshot
-WorkerIntrospection = MinionIntrospection
-inspect_worker = inspect_minion
-
-
 # ── tasking module introspection ──────────────────────────────────────
 
 @dataclass(frozen=True)

@@ -50,8 +50,6 @@ from pal.shared.messages import (
     MinionTerminalEvent,
     ServiceTriggerEvent,
     TaskContextPack,
-    WorkerProgressEvent,
-    WorkerTerminalEvent,
 )
 from pal.shared.payloads import extract_text_from_payload
 
@@ -97,7 +95,5 @@ __all__ = [
     "capability_node",
     "standard_descriptors",
     "TaskContextPack",
-    "WorkerProgressEvent",
-    "WorkerTerminalEvent",
     "extract_text_from_payload",
 ]

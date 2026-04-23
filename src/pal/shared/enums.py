@@ -11,9 +11,6 @@ class EventKind(StrEnum):
     MINION_PROGRESS = "minion.progress"
     MINION_TERMINAL = "minion.terminal"
     MINION_CHECKPOINT = "minion.checkpoint"
-    WORKER_PROGRESS = "minion.progress"
-    WORKER_TERMINAL = "minion.terminal"
-    WORKER_CHECKPOINT = "minion.checkpoint"
     CONTROL_ACTION = "control.action"
     SLASH_COMMAND = "slash_command"
     APPROVAL_REQUEST = "approval_request"
@@ -23,7 +20,6 @@ class SourceKind(StrEnum):
     CHANNEL = "channel"
     SERVICE = "service"
     MINION = "minion"
-    WORKER = "minion"
     CONTROL = "control"
 
 

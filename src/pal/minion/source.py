@@ -31,6 +31,3 @@ class MinionEventSource(EventSource):
             for item in self.service.minion_mailbox.drain()
         ]
         return events
-
-
-WorkerEventSource = MinionEventSource

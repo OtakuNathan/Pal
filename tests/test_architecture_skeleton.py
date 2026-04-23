@@ -341,8 +341,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.bootstrap": ("inspect_bootstrap",),
             "pal.supervisor": ("inspect_supervisor",),
             "pal.plugins.l3": ("register_with_core",),
-            "pal.minion": ("inspect_minion",),
-            "pal.minion": ("inspect_minion", "inspect_worker", "inspect_tasking"),
+            "pal.minion": ("inspect_minion", "inspect_tasking"),
         }
         for module_name, symbols in exports.items():
             module = importlib.import_module(module_name)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from pal.shared import CheckpointEvent, EventKind, MinionProgressEvent, MinionTerminalEvent, TaskContextPack, WorkerProgressEvent, WorkerTerminalEvent
+from pal.shared import CheckpointEvent, EventKind, MinionProgressEvent, MinionTerminalEvent, TaskContextPack
 
 
 @dataclass(frozen=True)
@@ -41,8 +41,3 @@ class LedgerServicePort(Protocol):
 class TaskingServicePort(Protocol):
     def build_context_pack(self, work_order_id: str, goal: str) -> TaskContextPack:
         ...
-
-
-WorkerIPCHandlers = MinionIPCHandlers
-WorkerRuntimePort = MinionRuntimePort
-WorkerManagerPort = MinionManagerPort

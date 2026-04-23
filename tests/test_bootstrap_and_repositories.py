@@ -693,14 +693,14 @@ class PalV2BootstrapTests(unittest.TestCase):
                     "kind": "case",
                     "scope": "task",
                     "task_id": "task-1",
-                    "title": "Recover worker",
-                    "summary": "Recovered the worker after memory pressure crash.",
-                    "search_text": "Worker crashed under memory pressure. Restarted the worker and reduced concurrency. Queue drain recovered and latency normalized.",
-                    "situation_text": "Worker crashed under memory pressure",
-                    "task_text": "Stabilize the worker",
+                    "title": "Recover minion",
+                    "summary": "Recovered the minion after memory pressure crash.",
+                    "search_text": "Minion crashed under memory pressure. Restarted the minion and reduced concurrency. Queue drain recovered and latency normalized.",
+                    "situation_text": "Minion crashed under memory pressure",
+                    "task_text": "Stabilize the minion",
                     "action_text": "Restarted it and reduced concurrency",
                     "result_text": "Latency normalized",
-                    "topics": ["worker", "stability"],
+                    "topics": ["minion", "stability"],
                 },
             )
         )
@@ -711,7 +711,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 name="op_l3_recall_query",
                 args={
                     "target_id": "sqlite_vec_l3",
-                    "queries": ["worker memory pressure stabilize"],
+                    "queries": ["minion memory pressure stabilize"],
                     "limit": 4,
                 },
             )
@@ -721,7 +721,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 name="op_l3_recall_query",
                 args={
                     "target_id": "sqlite_vec_l3",
-                    "queries": ["worker memory pressure stabilize"],
+                    "queries": ["minion memory pressure stabilize"],
                     "limit": 4,
                     "view": "origin",
                 },
@@ -733,8 +733,8 @@ class PalV2BootstrapTests(unittest.TestCase):
                 args={
                     "target_id": "sqlite_vec_l3",
                     "document_id": document_id,
-                    "summary": "Recovered the worker after memory pressure.",
-                    "topics": ["worker", "recovery"],
+                    "summary": "Recovered the minion after memory pressure.",
+                    "topics": ["minion", "recovery"],
                 },
             )
         )
@@ -755,19 +755,19 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertNotIn("hits", recalled.structured)
         self.assertNotIn("projected_entries", recalled.structured)
         self.assertNotIn("projected_entries", recalled.llm_text)
-        self.assertNotIn("Restarted the worker and reduced concurrency.", recalled.llm_text)
-        self.assertIn("Recovered the worker after memory pressure crash.", recalled.llm_text)
+        self.assertNotIn("Restarted the minion and reduced concurrency.", recalled.llm_text)
+        self.assertIn("Recovered the minion after memory pressure crash.", recalled.llm_text)
         self.assertEqual(recalled_origin.structured["view"], "origin")
         self.assertEqual(recalled_origin.structured["hit_count"], 1)
         self.assertNotIn("hits", recalled_origin.structured)
         self.assertNotIn("projected_entries", recalled_origin.structured)
-        self.assertIn("Restarted the worker and reduced concurrency.", recalled_origin.llm_text)
+        self.assertIn("Restarted the minion and reduced concurrency.", recalled_origin.llm_text)
         self.assertNotIn("projected_entries", recalled_origin.llm_text)
         self.assertEqual(inventory.status, "ok")
         self.assertEqual(inventory.structured["provider_id"], "sqlite_vec_l3")
         self.assertIn(document_id, handle.memory_service.l2_store.items)
         self.assertIn(document_id, handle.memory_service.l2_store.heat_registry)
-        self.assertEqual(handle.memory_service.l2_store.items[document_id].summary, "Recovered the worker after memory pressure.")
+        self.assertEqual(handle.memory_service.l2_store.items[document_id].summary, "Recovered the minion after memory pressure.")
 
     def test_sqlite_vec_l3_commit_truth_topics_and_pending_index(self) -> None:
         service = MemoryService()
@@ -874,18 +874,18 @@ class PalV2BootstrapTests(unittest.TestCase):
                 kind="case",
                 scope="task",
                 task_id="task-1",
-                title="Recover worker",
-                summary="Recovered the worker after memory pressure crash.",
-                search_text="Worker crashed under memory pressure. Restarted the worker and reduced concurrency. Queue drain recovered and latency normalized.",
-                situation_text="Worker crashed under memory pressure",
-                task_text="Stabilize the worker",
+                title="Recover minion",
+                summary="Recovered the minion after memory pressure crash.",
+                search_text="Minion crashed under memory pressure. Restarted the minion and reduced concurrency. Queue drain recovered and latency normalized.",
+                situation_text="Minion crashed under memory pressure",
+                task_text="Stabilize the minion",
                 action_text="Restarted it and reduced concurrency",
                 result_text="Latency normalized",
-                topics=["worker", "stability"],
+                topics=["minion", "stability"],
             )
         )
 
-        recall = provider.recall(MemoryQuery(queries=["worker memory pressure stabilize"], limit=4))
+        recall = provider.recall(MemoryQuery(queries=["minion memory pressure stabilize"], limit=4))
 
         self.assertEqual(recall.hits[0]["document_id"], result.document_id)
         self.assertEqual(recall.metadata["retrieval_mode"], "lexical")
@@ -1001,23 +1001,23 @@ class PalV2BootstrapTests(unittest.TestCase):
                 kind="case",
                 scope="task",
                 task_id="task-1",
-                title="Restart flaky worker",
-                summary="Restarted flaky worker after memory pressure crash.",
-                search_text="Worker crashed after high memory pressure. Task was to stabilize the background worker. Restarted the worker and reduced concurrency. Queue drain recovered and latency normalized.",
-                situation_text="Worker crashed after high memory pressure",
-                task_text="Stabilize the background worker",
-                action_text="Restarted the worker and reduced concurrency",
+                title="Restart flaky minion",
+                summary="Restarted flaky minion after memory pressure crash.",
+                search_text="Minion crashed after high memory pressure. Task was to stabilize the background minion. Restarted the minion and reduced concurrency. Queue drain recovered and latency normalized.",
+                situation_text="Minion crashed after high memory pressure",
+                task_text="Stabilize the background minion",
+                action_text="Restarted the minion and reduced concurrency",
                 result_text="Queue drain recovered and latency normalized",
-                topics=["worker", "stability"],
+                topics=["minion", "stability"],
             )
         )
         provider.refresh_indexes(limit=8)
 
-        st_hit = provider.recall(MemoryQuery(queries=["worker high memory pressure stabilize"], limit=4))
+        st_hit = provider.recall(MemoryQuery(queries=["minion high memory pressure stabilize"], limit=4))
         ar_only = provider.recall(MemoryQuery(queries=["latency normalized"], limit=4))
 
         self.assertEqual(st_hit.hits[0]["document_id"], result.document_id)
-        self.assertIn("Action: Restarted the worker", st_hit.hits[0]["rendered"])
+        self.assertIn("Action: Restarted the minion", st_hit.hits[0]["rendered"])
         self.assertGreaterEqual(len(ar_only.hits), 0)
 
     def test_sqlite_vec_l3_correct_marks_stale_and_updates_topics(self) -> None:

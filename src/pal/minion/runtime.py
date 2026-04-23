@@ -14,7 +14,3 @@ class MinionRuntime(MinionRuntimePort):
     def accept(self, context_pack: TaskContextPack) -> None:
         self.accepted_contexts.append(context_pack)
 
-
-# Compatibility alias.
-WorkerRuntime = MinionRuntime
-

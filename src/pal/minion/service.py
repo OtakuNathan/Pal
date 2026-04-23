@@ -9,8 +9,6 @@ from pal.shared import (
     MinionProgressEvent,
     MinionTerminalEvent,
     TaskContextPack,
-    WorkerProgressEvent,
-    WorkerTerminalEvent,
 )
 from pal.minion.contracts import TaskingServicePort
 
@@ -42,14 +40,3 @@ class TaskingService(TaskingServicePort):
     @property
     def pending_minion_events(self) -> tuple[QueuedMinionEvent, ...]:
         return self.minion_mailbox.peek_all()
-
-    @property
-    def worker_mailbox(self):
-        return self.minion_mailbox
-
-    @property
-    def pending_worker_events(self):
-        return self.pending_minion_events
-
-    def enqueue_worker_progress(self, event: WorkerProgressEvent | WorkerTerminalEvent | CheckpointEvent) -> None:
-        self.enqueue_minion_progress(event)
