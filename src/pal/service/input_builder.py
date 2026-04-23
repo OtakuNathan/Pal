@@ -12,4 +12,5 @@ def build_service_trigger_input(definition: ServiceDefinition) -> str:
         lines.append(f"Skills: {', '.join(str(item).strip() for item in definition.skill_refs if str(item).strip())}")
     if definition.out_channel_id:
         lines.append(f"Output Channel: {definition.out_channel_id}")
+    lines.append("Instruction: Your response text will be automatically delivered to the configured output channel. Do not attempt to discover or call channel/capability to send messages — just produce the response content directly.")
     return "\n".join(lines)
