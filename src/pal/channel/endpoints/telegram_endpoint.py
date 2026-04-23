@@ -5,12 +5,17 @@ import contextlib
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import EndpointConfig, ResponseHandle
+from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec, InteractionResult
 from pal.foundation.artifact import ArtifactIngestor
+from pal.foundation import EventEnvelope
+from pal.shared import EventKind, SourceKind
 from pal.stream_events import NormalizedLLMStreamEvent
 
 
@@ -135,8 +140,9 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _stop_event: asyncio.Event | None = None
     _ingestor: ArtifactIngestor | None = None
     _typing_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
-    _control_prompt_messages: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _interactive_messages: dict[str, dict[str, Any]] = field(default_factory=dict)
     _control_commands_manifest: list[dict[str, str]] = field(default_factory=list)
+    _interactive_default_ttl_seconds: float = 60.0
     _polling_running: bool = False
     _authorized: bool = False
     _last_poll_error: str = ""
@@ -203,20 +209,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         if kind == "control_catalog":
             loop.create_task(self._apply_control_catalog_async(payload))
             return
-        if kind == "control_panel":
-            loop.create_task(self._send_control_message_async(response_handle, payload, store_request_id=""))
-            return
-        if kind == "control_prompt":
-            loop.create_task(
-                self._send_control_message_async(
-                    response_handle,
-                    payload,
-                    store_request_id=str(payload.get("request_id") or ""),
-                )
-            )
-            return
-        if kind == "control_request_expired":
-            loop.create_task(self._expire_control_prompt_async(payload))
+        if kind in {"interactive_open", "interactive_update", "interactive_resolve", "interactive_expire"}:
+            loop.create_task(self._apply_interactive_status_async(response_handle, kind=kind, payload=payload))
             return
         if kind == "typing_start":
             key = self._typing_key(response_handle)
@@ -403,18 +397,27 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
 
     async def _on_update(self, update: Any, context: Any) -> None:
         _ = context
-        callback_payload = await self._control_payload_from_update(update)
-        if callback_payload is not None:
-            self.accept_raw(
-                callback_payload,
-                event_kind="slash_command",
-                correlation_id=str(callback_payload.get("source_metadata", {}).get("telegram_callback_id") or ""),
-                reply_target={
-                    "chat_id": callback_payload["chat_id"],
-                    "message_id": callback_payload["message_id"],
-                    "thread_id": callback_payload.get("thread_id") or "",
-                },
+        if getattr(update, "callback_query", None) is not None:
+            interaction_result = await self._interaction_result_from_update(update)
+            if interaction_result is None:
+                return
+            message = getattr(getattr(update, "callback_query", None), "message", None)
+            reply_target = {
+                "chat_id": str(_safe_int(getattr(getattr(message, "chat", None), "id", None)) or ""),
+                "message_id": str(getattr(message, "message_id", "") or ""),
+                "thread_id": str(getattr(message, "message_thread_id", "") or ""),
+            }
+            envelope = self.emit_normalized(
+                EventEnvelope(
+                    event_kind=EventKind.INTERACTION_RESULT,
+                    source_kind=SourceKind.CHANNEL,
+                    payload=interaction_result,
+                    correlation_id=str(getattr(getattr(update, "callback_query", None), "id", "") or ""),
+                ),
+                response_handle=self.build_response_handle(reply_target=reply_target),
             )
+            if envelope is not None:
+                self.queue_status("typing_start", response_handle=envelope.response_handle)
             return
         payload = await self._payload_from_update(update)
         if payload is None:
@@ -434,12 +437,12 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         self.queue_status("receipt_marker", response_handle=envelope.response_handle)
         self.queue_status("typing_start", response_handle=envelope.response_handle)
 
-    async def _control_payload_from_update(self, update: Any) -> dict[str, Any] | None:
+    async def _interaction_result_from_update(self, update: Any) -> InteractionResult | None:
         callback_query = getattr(update, "callback_query", None)
         if callback_query is None:
             return None
         data = str(getattr(callback_query, "data", "") or "").strip()
-        if not data.startswith("ctl:"):
+        if not data.startswith("ix:"):
             return None
         message = getattr(callback_query, "message", None)
         if message is None:
@@ -452,21 +455,38 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             return None
         with contextlib.suppress(Exception):
             await callback_query.answer()
-        command_text = data[4:].strip()
-        if not command_text:
+        interaction_id, button_token = self._parse_interaction_callback_data(data)
+        if not interaction_id or not button_token:
             return None
-        return {
-            "text": command_text,
-            "chat_id": str(chat_id or ""),
-            "message_id": str(getattr(message, "message_id", "") or ""),
-            "thread_id": str(getattr(message, "message_thread_id", "") or ""),
-            "from_user_id": str(user_id or ""),
-            "attachments": [],
-            "source_metadata": {
-                "telegram_callback_id": str(getattr(callback_query, "id", "") or ""),
-                "callback_data": "control",
-            },
-        }
+        metadata = self._interactive_messages.get(interaction_id)
+        if not metadata:
+            return None
+        expires_at_monotonic = metadata.get("expires_at_monotonic")
+        if isinstance(expires_at_monotonic, (int, float)) and float(expires_at_monotonic) <= time.monotonic():
+            target = self._interactive_messages.pop(interaction_id, None)
+            if isinstance(target, dict):
+                await self._edit_interaction_message_async(
+                    target,
+                    spec=InteractionMessageSpec(
+                        interaction_id=interaction_id,
+                        interaction_kind=str(metadata.get("interaction_kind") or ""),
+                        text=self._expired_interaction_text(str(metadata.get("interaction_kind") or "")),
+                        buttons=(),
+                        expires_at=None,
+                    ),
+                    clear_keyboard=True,
+                )
+            return None
+        actions = metadata.get("actions")
+        action_payload = actions.get(button_token) if isinstance(actions, dict) else None
+        if not isinstance(action_payload, dict):
+            return None
+        return InteractionResult(
+            interaction_id=interaction_id,
+            interaction_kind=str(metadata.get("interaction_kind") or ""),
+            action_key=str(action_payload.get("action_key") or "").strip(),
+            action_args=dict(action_payload.get("action_args") or {}),
+        )
 
     async def _payload_from_update(self, update: Any) -> dict[str, Any] | None:
         message = getattr(update, "effective_message", None)
@@ -651,52 +671,217 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         *,
         store_request_id: str,
     ) -> None:
+        interaction_id = str(store_request_id or payload.get("request_id") or f"legacy_{time.monotonic_ns()}").strip()
+        spec = InteractionMessageSpec(
+            interaction_id=interaction_id,
+            interaction_kind=str(payload.get("prompt_kind") or "legacy_control").strip() or "legacy_control",
+            text=str(payload.get("text") or "").strip(),
+            buttons=self._legacy_control_buttons_to_rows(payload.get("buttons")),
+            expires_at=None,
+        )
+        allow_update = bool(store_request_id) and interaction_id in self._interactive_messages
+        await self._open_or_update_interaction_async(
+            response_handle,
+            spec=spec,
+            allow_update=allow_update,
+        )
+
+    async def _expire_control_prompt_async(self, payload: dict[str, Any]) -> None:
+        request_id = str(payload.get("request_id") or "").strip()
+        text = str(payload.get("text") or "This request expired.").strip()
+        if not request_id:
+            return
+        metadata = self._interactive_messages.get(request_id)
+        interaction_kind = "legacy_control"
+        if isinstance(metadata, dict):
+            interaction_kind = str(metadata.get("interaction_kind") or interaction_kind)
+        await self._resolve_interaction_async(
+            InteractionMessageSpec(
+                interaction_id=request_id,
+                interaction_kind=interaction_kind,
+                text=text,
+                buttons=(),
+                expires_at=None,
+            )
+        )
+
+    async def _apply_interactive_status_async(
+        self,
+        response_handle: ResponseHandle,
+        *,
+        kind: str,
+        payload: dict[str, Any],
+    ) -> None:
         if self.application is None:
+            return
+        await self._prune_interactive_messages_async()
+        spec = payload.get("spec")
+        if not isinstance(spec, InteractionMessageSpec):
+            return
+        if kind in {"interactive_open", "interactive_update"}:
+            await self._open_or_update_interaction_async(response_handle, spec=spec, allow_update=(kind == "interactive_update"))
+            return
+        if kind in {"interactive_resolve", "interactive_expire"}:
+            await self._resolve_interaction_async(spec)
+
+    async def _open_or_update_interaction_async(
+        self,
+        response_handle: ResponseHandle,
+        *,
+        spec: InteractionMessageSpec,
+        allow_update: bool,
+    ) -> None:
+        if self.application is None:
+            return
+        await self._prune_interactive_messages_async()
+        existing = self._interactive_messages.get(spec.interaction_id)
+        if allow_update and existing is not None:
+            await self._edit_interaction_message_async(existing, spec=spec)
+            self._remember_interaction_message(spec, existing)
             return
         chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
         thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
         if chat_id is None:
             return
-        text = str(payload.get("text") or "").strip()
-        buttons = list(payload.get("buttons") or [])
-        markup = self._build_control_markup(buttons)
-        kwargs: dict[str, Any] = {"chat_id": chat_id, "text": text}
+        kwargs: dict[str, Any] = {"chat_id": chat_id, "text": spec.text}
         if thread_id is not None:
             kwargs["message_thread_id"] = thread_id
+        markup = self._build_interaction_markup(spec)
         if markup is not None:
             kwargs["reply_markup"] = markup
-        sent = None
         try:
             sent = await self.application.bot.send_message(**kwargs)
         except Exception as exc:
             self.last_delivery_error = str(exc)
             return
-        if store_request_id:
-            self._control_prompt_messages[store_request_id] = {
+        self._remember_interaction_message(
+            spec,
+            {
                 "chat_id": chat_id,
                 "message_id": _safe_int(getattr(sent, "message_id", None)),
-            }
+            },
+        )
 
-    async def _expire_control_prompt_async(self, payload: dict[str, Any]) -> None:
+    async def _resolve_interaction_async(self, spec: InteractionMessageSpec) -> None:
         if self.application is None:
             return
-        request_id = str(payload.get("request_id") or "").strip()
-        text = str(payload.get("text") or "This request expired.").strip()
-        if not request_id:
+        target = self._interactive_messages.pop(spec.interaction_id, None)
+        if target is None:
             return
-        target = self._control_prompt_messages.pop(request_id, None)
-        if not target:
+        await self._edit_interaction_message_async(target, spec=spec, clear_keyboard=True)
+
+    async def _edit_interaction_message_async(
+        self,
+        target: dict[str, Any],
+        *,
+        spec: InteractionMessageSpec,
+        clear_keyboard: bool = False,
+    ) -> None:
+        if self.application is None:
             return
         chat_id = _safe_int(target.get("chat_id"))
         message_id = _safe_int(target.get("message_id"))
         if chat_id is None or message_id is None:
             return
+        kwargs: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": spec.text,
+            "reply_markup": None if clear_keyboard else self._build_interaction_markup(spec),
+        }
         with contextlib.suppress(Exception):
-            await self.application.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=message_id,
-                text=text,
+            await self.application.bot.edit_message_text(**kwargs)
+
+    def _remember_interaction_message(self, spec: InteractionMessageSpec, target: dict[str, Any]) -> None:
+        self._interactive_messages[spec.interaction_id] = {
+            "chat_id": _safe_int(target.get("chat_id")),
+            "message_id": _safe_int(target.get("message_id")),
+            "interaction_kind": spec.interaction_kind,
+            "expires_at_monotonic": self._interaction_expiry_monotonic(spec),
+            "actions": self._build_interaction_action_map(spec),
+        }
+
+    def _interaction_expiry_monotonic(self, spec: InteractionMessageSpec) -> float | None:
+        raw = str(spec.expires_at or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return time.monotonic() + float(self._interactive_default_ttl_seconds)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        current = datetime.now(timezone.utc)
+        delta = max((parsed.astimezone(timezone.utc) - current).total_seconds(), 0.0)
+        return time.monotonic() + delta
+
+    def _prune_interactive_messages(self, *, now: float | None = None) -> None:
+        current = float(now if now is not None else time.monotonic())
+        stale = [
+            interaction_id
+            for interaction_id, metadata in self._interactive_messages.items()
+            if isinstance(metadata.get("expires_at_monotonic"), (int, float))
+            and float(metadata["expires_at_monotonic"]) <= current
+        ]
+        for interaction_id in stale:
+            self._interactive_messages.pop(interaction_id, None)
+
+    async def _prune_interactive_messages_async(self, *, now: float | None = None) -> None:
+        current = float(now if now is not None else time.monotonic())
+        stale: list[tuple[str, dict[str, Any]]] = []
+        for interaction_id, metadata in list(self._interactive_messages.items()):
+            expires_at_monotonic = metadata.get("expires_at_monotonic")
+            if not isinstance(expires_at_monotonic, (int, float)):
+                continue
+            if float(expires_at_monotonic) <= current:
+                target = self._interactive_messages.pop(interaction_id, None)
+                if isinstance(target, dict):
+                    stale.append((interaction_id, target))
+        for interaction_id, target in stale:
+            await self._edit_interaction_message_async(
+                target,
+                spec=InteractionMessageSpec(
+                    interaction_id=interaction_id,
+                    interaction_kind=str(target.get("interaction_kind") or ""),
+                    text=self._expired_interaction_text(str(target.get("interaction_kind") or "")),
+                    buttons=(),
+                    expires_at=None,
+                ),
+                clear_keyboard=True,
             )
+
+    def _forget_interactive_message(self, interaction_id: str) -> None:
+        self._interactive_messages.pop(str(interaction_id or "").strip(), None)
+
+    def _expired_interaction_text(self, interaction_kind: str) -> str:
+        kind = str(interaction_kind or "").strip()
+        if kind == "reset_confirm":
+            return "This reset request expired."
+        if kind == "approval_request":
+            return "This approval request expired."
+        return "This interaction expired."
+
+    def _build_interaction_action_map(self, spec: InteractionMessageSpec) -> dict[str, dict[str, Any]]:
+        actions: dict[str, dict[str, Any]] = {}
+        button_index = 0
+        for row in spec.buttons:
+            for button in row:
+                token = f"b{button_index}"
+                button_index += 1
+                actions[token] = {
+                    "action_key": button.action_key,
+                    "action_args": dict(button.action_args),
+                }
+        return actions
+
+    def _parse_interaction_callback_data(self, data: str) -> tuple[str, str]:
+        raw = str(data or "").strip()
+        if not raw.startswith("ix:"):
+            return "", ""
+        parts = raw.split(":", 2)
+        if len(parts) != 3:
+            return "", ""
+        return parts[1].strip(), parts[2].strip()
 
     async def _apply_control_catalog_async(self, payload: dict[str, Any]) -> None:
         commands = self._normalize_control_commands(payload)
@@ -748,27 +933,92 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             )
         return manifest
 
-    def _build_control_markup(self, buttons: list[list[dict[str, Any]]]):
-        if not buttons:
+    def _build_interaction_markup(self, spec: InteractionMessageSpec):
+        if not spec.buttons:
             return None
         try:
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         except Exception:
             return None
         rows = []
-        for row_items in buttons:
+        button_index = 0
+        for row_items in spec.buttons:
             row = []
             for item in row_items:
-                label = str(item.get("label") or "").strip()
-                command = str(item.get("command") or "").strip()
-                if not label or not command:
+                if not isinstance(item, InteractionButtonSpec):
                     continue
-                row.append(InlineKeyboardButton(text=label, callback_data=f"ctl:{command}"))
+                label = str(item.label or "").strip()
+                if not label:
+                    continue
+                token = f"b{button_index}"
+                button_index += 1
+                row.append(
+                    InlineKeyboardButton(
+                        text=label,
+                        callback_data=f"ix:{spec.interaction_id}:{token}",
+                    )
+                )
             if row:
                 rows.append(row)
         if not rows:
             return None
         return InlineKeyboardMarkup(rows)
+
+    def _legacy_control_buttons_to_rows(self, buttons: Any) -> tuple[tuple[InteractionButtonSpec, ...], ...]:
+        rows: list[tuple[InteractionButtonSpec, ...]] = []
+        for row_items in list(buttons or []):
+            row: list[InteractionButtonSpec] = []
+            for item in list(row_items or []):
+                if not isinstance(item, dict):
+                    continue
+                button = self._legacy_control_command_to_button(
+                    str(item.get("label") or "").strip(),
+                    str(item.get("command") or "").strip(),
+                )
+                if button is not None:
+                    row.append(button)
+            if row:
+                rows.append(tuple(row))
+        return tuple(rows)
+
+    def _legacy_control_command_to_button(self, label: str, command: str) -> InteractionButtonSpec | None:
+        if not label or not command:
+            return None
+        raw = command.strip()
+        if not raw.startswith("/"):
+            return None
+        if raw == "/control":
+            return InteractionButtonSpec(label=label, action_key="control.panel.show")
+        if raw == "/think":
+            return InteractionButtonSpec(label=label, action_key="control.think.open")
+        if raw == "/interrupt":
+            return InteractionButtonSpec(label=label, action_key="control.interrupt.run")
+        if raw == "/compact":
+            return InteractionButtonSpec(label=label, action_key="control.compact.run")
+        if raw == "/reset":
+            return InteractionButtonSpec(label=label, action_key="control.reset.open")
+        if raw.startswith("/reset confirm "):
+            request_id = raw.removeprefix("/reset confirm ").strip()
+            if not request_id:
+                return None
+            return InteractionButtonSpec(
+                label=label,
+                action_key="control.reset.confirm",
+                action_args={"request_id": request_id},
+            )
+        return None
+
+    def _build_control_markup(self, buttons: list[list[dict[str, Any]]]):
+        rows = self._legacy_control_buttons_to_rows(buttons)
+        return self._build_interaction_markup(
+            InteractionMessageSpec(
+                interaction_id="legacy",
+                interaction_kind="legacy_control",
+                text="",
+                buttons=rows,
+                expires_at=None,
+            )
+        )
 
 
 @dataclass(frozen=True)

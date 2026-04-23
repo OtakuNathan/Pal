@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 from collections import deque
 from dataclasses import dataclass, field
@@ -10,7 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from pal.channel.contracts import ChannelEnvelope
-from pal.control.contracts import ControlAction, ControlRoute
+from pal.control.contracts import ControlAction, ControlRoute, InteractionButtonSpec, InteractionMessageSpec
 from pal.control.routing import derive_control_scope_key
 from pal.core.contracts import CoreRuntimeState
 from pal.core.runtime_config import RuntimeConfig
@@ -242,6 +243,9 @@ class MainLoop:
         for _ in range(max_iterations):
             envelope = self.run_once(context, state)
             if envelope is None:
+                self.drain_ready_sources(context)
+                if self.queue:
+                    continue
                 break
             processed.append(envelope)
         return processed
@@ -253,6 +257,9 @@ class MainLoop:
             if envelope is None:
                 pending = [task for task in state.turn_tasks.values() if task is not None and not task.done()]
                 if not pending:
+                    self.drain_ready_sources(context)
+                    if self.queue:
+                        continue
                     break
                 done, _ = await asyncio.wait(pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
                 if not done:
@@ -339,17 +346,37 @@ class PalCore:
             payload=channel_envelope.event.payload if isinstance(channel_envelope.event.payload, dict) else {},
         )
         scope_state = self._ensure_scope_state(control_scope_key)
-        if scope_state.quiescing:
+        turn_id = channel_envelope.event.event_id
+        should_reject = False
+        should_stop_only = False
+        task: asyncio.Task[Any] | None = None
+        async with scope_state.transition_lock:
+            if scope_state.quiescing:
+                should_reject = True
+            elif turn_id in self.state.turn_tasks and not self.state.turn_tasks[turn_id].done():
+                should_stop_only = True
+            else:
+                task = asyncio.create_task(self._background_channel_turn_runner_async(channel_envelope))
+                self.state.turn_tasks[turn_id] = task
+        if should_reject:
             await self._reply_to_route_async(
                 self._route_from_channel_envelope(channel_envelope),
                 "This scope is resetting. Please retry in a moment.",
             )
+            await self._status_to_route_async(
+                self._route_from_channel_envelope(channel_envelope),
+                "working_stop",
+                {},
+            )
             return
-        turn_id = channel_envelope.event.event_id
-        if turn_id in self.state.turn_tasks and not self.state.turn_tasks[turn_id].done():
+        if should_stop_only:
+            await self._status_to_route_async(
+                self._route_from_channel_envelope(channel_envelope),
+                "working_stop",
+                {},
+            )
             return
-        task = asyncio.create_task(self._background_channel_turn_runner_async(channel_envelope))
-        self.state.turn_tasks[turn_id] = task
+        assert task is not None
         task.add_done_callback(lambda finished, current_turn_id=turn_id: self._on_turn_task_done(current_turn_id, finished))
 
     def process_channel_turn(self, channel_envelope: ChannelEnvelope) -> TurnOutcome:
@@ -435,7 +462,6 @@ class PalCore:
                 channel_runtime.queue_status(
                     channel_envelope,
                     "working_stop",
-                    response_handle=channel_envelope.response_handle,
                 )
 
     def _on_turn_task_done(self, turn_id: str, task: asyncio.Task[Any]) -> None:
@@ -447,42 +473,49 @@ class PalCore:
 
     async def handle_control_action_async(self, action: ControlAction) -> None:
         await self.expire_pending_control_requests_async()
-        if action.action_kind == "show_panel":
-            await self._handle_show_panel_async(action)
-            return
-        if action.action_kind == "show_think":
-            await self._handle_show_think_async(action)
-            return
-        if action.action_kind == "set_think":
-            await self._handle_set_think_async(action)
-            return
-        if action.action_kind == "interrupt_turn":
-            await self._handle_interrupt_turn_async(action)
-            return
-        if action.action_kind == "open_reset_confirm":
-            await self._handle_open_reset_confirm_async(action)
-            return
-        if action.action_kind == "reset_memory":
-            await self._handle_reset_memory_async(action)
-            return
-        if action.action_kind == "compact_memory":
-            await self._handle_compact_memory_async(action)
-            return
-        if action.action_kind == "invoke_capability":
-            await self._handle_invoke_capability_async(action)
-            return
-        if action.action_kind == "invalid_command":
-            await self._reply_to_route_async(action.route, action.notes or "Invalid command.")
-            return
-        if action.action_kind == "unknown_command":
-            command_name = str(action.args.get("command_name") or "").strip()
-            text = f"Unknown command: /{command_name}" if command_name else "Unknown command."
-            await self._reply_to_route_async(action.route, text)
-            return
-        await self._reply_to_route_async(
-            action.route,
-            f"Control action '{action.action_kind}' is not wired yet.",
-        )
+        try:
+            if action.action_kind == "show_panel":
+                await self._handle_show_panel_async(action)
+                return
+            if action.action_kind == "show_think":
+                await self._handle_show_think_async(action)
+                return
+            if action.action_kind == "set_think":
+                await self._handle_set_think_async(action)
+                return
+            if action.action_kind == "interrupt_turn":
+                await self._handle_interrupt_turn_async(action)
+                return
+            if action.action_kind == "open_reset_confirm":
+                await self._handle_open_reset_confirm_async(action)
+                return
+            if action.action_kind == "cancel_reset_confirm":
+                await self._handle_cancel_reset_confirm_async(action)
+                return
+            if action.action_kind == "reset_memory":
+                await self._handle_reset_memory_async(action)
+                return
+            if action.action_kind == "compact_memory":
+                await self._handle_compact_memory_async(action)
+                return
+            if action.action_kind == "invoke_capability":
+                await self._handle_invoke_capability_async(action)
+                return
+            if action.action_kind == "invalid_command":
+                await self._reply_to_route_async(action.route, action.notes or "Invalid command.")
+                return
+            if action.action_kind == "unknown_command":
+                command_name = str(action.args.get("command_name") or "").strip()
+                text = f"Unknown command: /{command_name}" if command_name else "Unknown command."
+                await self._reply_to_route_async(action.route, text)
+                return
+            await self._reply_to_route_async(
+                action.route,
+                f"Control action '{action.action_kind}' is not wired yet.",
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                await self._status_to_route_async(action.route, "working_stop", {})
 
     async def publish_control_catalog_async(self, *, endpoint_id: str | None = None) -> None:
         control_plane = self.context.port_registry.get("control:control")
@@ -525,10 +558,13 @@ class PalCore:
     async def _handle_show_panel_async(self, action: ControlAction) -> None:
         control_plane = self.context.require_port("control:control")
         text = control_plane.render_panel_text()
-        panel_payload = self._build_control_panel_payload(control_plane)
         if action.route is not None and action.route.channel_kind == "telegram":
             await self.publish_control_catalog_async(endpoint_id=action.route.endpoint_id)
-            await self._status_to_route_async(action.route, "control_panel", panel_payload)
+            await self._interactive_to_route_async(
+                action.route,
+                "interactive_update",
+                self._build_control_panel_interaction(control_plane, action.route),
+            )
             return
         await self._reply_to_route_async(action.route, text)
 
@@ -539,25 +575,10 @@ class PalCore:
             refresh()
         think_level = str(getattr(llm_runtime, "think_level", "balanced") or "balanced")
         if action.route is not None and action.route.channel_kind == "telegram":
-            def _level_label(level: str) -> str:
-                return f"> {level}" if level == think_level else level
-            await self._status_to_route_async(
+            await self._interactive_to_route_async(
                 action.route,
-                "control_panel",
-                {
-                    "text": f"Think level: {think_level}\nSelect a level:",
-                    "buttons": [
-                        [
-                            {"label": _level_label("off"), "command": "/think off"},
-                            {"label": _level_label("low"), "command": "/think low"},
-                        ],
-                        [
-                            {"label": _level_label("balanced"), "command": "/think balanced"},
-                            {"label": _level_label("deep"), "command": "/think deep"},
-                        ],
-                        [{"label": "Back", "command": "/control"}],
-                    ],
-                },
+                "interactive_update",
+                self._build_think_panel_interaction(action.route, think_level),
             )
             return
         await self._reply_to_route_async(action.route, f"Current think level: {think_level}")
@@ -571,20 +592,20 @@ class PalCore:
         refresh = getattr(llm_runtime, "refresh_runtime_settings", None)
         if callable(refresh):
             refresh()
-        await self._reply_to_route_async(
-            action.route,
-            f"Think level updated to {requested}. This applies to new turns only.",
-        )
+        message = f"Think level updated to {requested}. This applies to new turns only."
+        if await self._resolve_interaction_action_async(action, message):
+            return
+        await self._reply_to_route_async(action.route, message)
 
     async def _handle_interrupt_turn_async(self, action: ControlAction) -> None:
         route = action.route
         if route is None:
             return
         interrupted = await self.turn_manager.interrupt_by_scope(route.control_scope_key, reason="interrupted")
-        if not interrupted:
-            await self._reply_to_route_async(route, "No active turn to interrupt in this scope.")
+        message = "Interrupted the current turn." if interrupted else "No active turn to interrupt in this scope."
+        if await self._resolve_interaction_action_async(action, message):
             return
-        await self._reply_to_route_async(route, "Interrupted the current turn.")
+        await self._reply_to_route_async(route, message)
 
     async def _handle_open_reset_confirm_async(self, action: ControlAction) -> None:
         route = action.route
@@ -609,6 +630,30 @@ class PalCore:
         scope_state.pending_requests["reset_confirm"] = request
         await self._render_reset_prompt_async(request)
 
+    async def _handle_cancel_reset_confirm_async(self, action: ControlAction) -> None:
+        route = action.route
+        if route is None:
+            return
+        request_id = str(action.args.get("request_id") or action.args.get("interaction_id") or "").strip()
+        scope_state = self._ensure_scope_state(route.control_scope_key)
+        request = scope_state.pending_requests.get("reset_confirm")
+        if request is not None and request.request_id == request_id:
+            scope_state.pending_requests.pop("reset_confirm", None)
+        message = "Reset cancelled."
+        if route.channel_kind == "telegram":
+            await self._interactive_to_route_async(
+                route,
+                "interactive_resolve",
+                self._build_terminal_interaction(
+                    interaction_id=request_id or str(action.args.get("interaction_id") or ""),
+                    interaction_kind="reset_confirm",
+                    route=route,
+                    text=message,
+                ),
+            )
+            return
+        await self._reply_to_route_async(route, message)
+
     async def _handle_reset_memory_async(self, action: ControlAction) -> None:
         route = action.route
         if route is None:
@@ -617,7 +662,20 @@ class PalCore:
         scope_state = self._ensure_scope_state(route.control_scope_key)
         request = scope_state.pending_requests.get("reset_confirm")
         if request is None or request.request_id != request_id:
-            await self._reply_to_route_async(route, "Reset request is missing, expired, or already consumed.")
+            message = "Reset request is missing, expired, or already consumed."
+            if self._is_interaction_action(action) and route.channel_kind == "telegram":
+                await self._interactive_to_route_async(
+                    route,
+                    "interactive_resolve",
+                    self._build_terminal_interaction(
+                        interaction_id=request_id or str(action.args.get("interaction_id") or ""),
+                        interaction_kind="reset_confirm",
+                        route=route,
+                        text=message,
+                    ),
+                )
+                return
+            await self._reply_to_route_async(route, message)
             return
         if _parse_utc_timestamp(request.expires_at) <= datetime.now(timezone.utc):
             scope_state.pending_requests.pop("reset_confirm", None)
@@ -625,8 +683,21 @@ class PalCore:
             return
         await self._execute_soft_reset_async(scope_state, request)
         scope_state.pending_requests.pop("reset_confirm", None)
-        await self._notify_expired_request_async(request)
-        await self._reply_to_route_async(route, "Soft reset complete. L1/L2 and working memory projection were cleared.")
+        message = "Soft reset complete. L1/L2 and working memory projection were cleared."
+        if route.channel_kind == "telegram":
+            await self._interactive_to_route_async(
+                route,
+                "interactive_resolve",
+                self._build_terminal_interaction(
+                    interaction_id=request.request_id,
+                    interaction_kind="reset_confirm",
+                    route=route,
+                    text=message,
+                ),
+            )
+            if self._is_interaction_action(action):
+                return
+        await self._reply_to_route_async(route, message)
 
     async def _handle_compact_memory_async(self, action: ControlAction) -> None:
         if action.route is None:
@@ -800,6 +871,247 @@ class PalCore:
             "text": control_plane.render_panel_text(),
             "buttons": buttons,
         }
+
+    async def _handle_compact_memory_async(self, action: ControlAction) -> None:
+        if action.route is None:
+            return
+        memory_service = self.context.require_port("memory:memory")
+        builder = getattr(memory_service, "build_compaction_source_text", None)
+        if not callable(builder):
+            await self._complete_compact_reply_async(action, "Memory service does not support compaction.")
+            return
+        source_text = str(builder(target_input_budget=8192) or "").strip()
+        if not source_text:
+            await self._complete_compact_reply_async(action, "Nothing to compact - memory is already minimal.")
+            return
+        if not self._is_interaction_action(action):
+            await self._reply_to_route_async(action.route, "Compacting memory...")
+        summary = await self._generate_compaction_summary_async(source_text)
+        if not summary:
+            await self._complete_compact_reply_async(action, "Compaction failed - could not generate summary.")
+            return
+        compact_method = getattr(memory_service, "acompact", None)
+        if not callable(compact_method):
+            compact_method = getattr(memory_service, "compact", None)
+            if not callable(compact_method):
+                await self._complete_compact_reply_async(action, "Compaction failed - compact method not available.")
+                return
+        from pal.memory.contracts import MemoryCompactRequest
+
+        request = MemoryCompactRequest(
+            target_input_budget=4096,
+            reserved_output_tokens=256,
+            metadata={"semantic_summary": summary},
+        )
+        result = compact_method(request)
+        if inspect.isawaitable(result):
+            result = await result
+        entry_count = getattr(result, "metadata", {}).get("projected_entry_count", 0) if result else 0
+        retired = getattr(result, "metadata", {}).get("retired_count", 0) if result else 0
+        await self._complete_compact_reply_async(
+            action,
+            f"Memory compacted. {entry_count} entries projected, {retired} retired to L3.",
+        )
+
+    async def _handle_invoke_capability_async(self, action: ControlAction) -> None:
+        capability_name = str(action.target_id or "").strip()
+        if not capability_name:
+            await self._reply_to_route_async(action.route, "Missing capability target.")
+            return
+        result = await self.context.execution_runtime.execute_async(
+            CapabilityCall(name=capability_name, args=dict(action.args))
+        )
+        text = str(result.text or result.llm_text)
+        if await self._resolve_interaction_action_async(action, text[:240].strip() or text):
+            return
+        await self._reply_to_route_async(action.route, text)
+
+    async def _render_reset_prompt_async(self, request) -> None:
+        route = request.route
+        text = (
+            "Reset working memory for this scope?\n"
+            "This clears L1, L2, and conversation-facing projection only.\n"
+            "Durable L3 memory stays intact."
+        )
+        if route.channel_kind == "telegram":
+            status_kind = "interactive_update" if bool(request.payload.get("opened")) else "interactive_open"
+            request.payload["opened"] = True
+            await self._interactive_to_route_async(
+                route,
+                status_kind,
+                self._build_reset_confirm_interaction(request),
+            )
+            return
+        text = f"{text}\nConfirm with /reset confirm {request.request_id}"
+        await self._reply_to_route_async(route, text)
+
+    async def _notify_expired_request_async(self, request) -> None:
+        text = "This reset request expired."
+        if request.route.channel_kind == "telegram":
+            await self._interactive_to_route_async(
+                request.route,
+                "interactive_expire",
+                self._build_terminal_interaction(
+                    interaction_id=request.request_id,
+                    interaction_kind="reset_confirm",
+                    route=request.route,
+                    text=text,
+                ),
+            )
+            return
+        await self._reply_to_route_async(request.route, text)
+
+    async def _complete_compact_reply_async(self, action: ControlAction, text: str) -> None:
+        route = action.route
+        if route is None:
+            return
+        if await self._resolve_interaction_action_async(action, text):
+            return
+        await self._reply_to_route_async(route, text)
+
+    def _is_interaction_action(self, action: ControlAction) -> bool:
+        return str(action.args.get("interaction_origin") or "").strip() == "button"
+
+    async def _resolve_interaction_action_async(self, action: ControlAction, text: str) -> bool:
+        route = action.route
+        if route is None or not self._is_interaction_action(action) or route.channel_kind != "telegram":
+            return False
+        interaction_id = str(action.args.get("interaction_id") or "").strip()
+        if not interaction_id:
+            interaction_id = self._control_panel_interaction_id(route)
+        interaction_kind = str(action.args.get("interaction_kind") or "").strip() or "control_panel"
+        await self._interactive_to_route_async(
+            route,
+            "interactive_resolve",
+            self._build_terminal_interaction(
+                interaction_id=interaction_id,
+                interaction_kind=interaction_kind,
+                route=route,
+                text=text,
+            ),
+        )
+        return True
+
+    async def _interactive_to_route_async(self, route: ControlRoute | None, kind: str, spec: InteractionMessageSpec) -> None:
+        await self._status_to_route_async(route, kind, {"spec": spec})
+
+    def _control_panel_interaction_id(self, route: ControlRoute) -> str:
+        scope = str(route.control_scope_key or route.endpoint_id or "control_panel")
+        digest = hashlib.sha1(scope.encode("utf-8")).hexdigest()[:12]
+        return f"ctl_panel_{digest}"
+
+    def _build_control_panel_interaction(
+        self,
+        control_plane,
+        route: ControlRoute,
+        *,
+        banner: str | None = None,
+    ) -> InteractionMessageSpec:
+        commands = control_plane.list_panel_commands()
+        rows: list[tuple[InteractionButtonSpec, ...]] = []
+        for spec in commands:
+            if not spec.panel_button:
+                continue
+            action_key = str(getattr(spec, "interaction_action_key", "") or "").strip() or "control.command.run"
+            action_args = {"command_name": spec.name} if action_key == "control.command.run" else {}
+            rows.append(
+                (
+                    InteractionButtonSpec(
+                        label=str(getattr(spec, "panel_label", "") or spec.name),
+                        action_key=action_key,
+                        action_args=action_args,
+                    ),
+                )
+            )
+        text = control_plane.render_panel_text()
+        if banner:
+            text = f"{banner}\n\n{text}"
+        return InteractionMessageSpec(
+            interaction_id=self._control_panel_interaction_id(route),
+            interaction_kind="control_panel",
+            route=route,
+            text=text,
+            buttons=tuple(rows),
+            expires_at=None,
+        )
+
+    def _build_think_panel_interaction(
+        self,
+        route: ControlRoute,
+        think_level: str,
+        *,
+        banner: str | None = None,
+    ) -> InteractionMessageSpec:
+        def _label(level: str) -> str:
+            return f"> {level}" if level == think_level else level
+
+        text = f"Think level: {think_level}\nSelect a level for new turns."
+        if banner:
+            text = f"{banner}\n\n{text}"
+        return InteractionMessageSpec(
+            interaction_id=self._control_panel_interaction_id(route),
+            interaction_kind="control_panel",
+            route=route,
+            text=text,
+            buttons=(
+                (
+                    InteractionButtonSpec(label=_label("off"), action_key="control.think.set", action_args={"think_level": "off"}),
+                    InteractionButtonSpec(label=_label("low"), action_key="control.think.set", action_args={"think_level": "low"}),
+                ),
+                (
+                    InteractionButtonSpec(label=_label("balanced"), action_key="control.think.set", action_args={"think_level": "balanced"}),
+                    InteractionButtonSpec(label=_label("deep"), action_key="control.think.set", action_args={"think_level": "deep"}),
+                ),
+                (InteractionButtonSpec(label="Back", action_key="control.panel.back"),),
+            ),
+            expires_at=None,
+        )
+
+    def _build_reset_confirm_interaction(self, request) -> InteractionMessageSpec:
+        return InteractionMessageSpec(
+            interaction_id=request.request_id,
+            interaction_kind="reset_confirm",
+            route=request.route,
+            text=(
+                "Reset working memory for this scope?\n"
+                "This clears L1, L2, and conversation-facing projection only.\n"
+                "Durable L3 memory stays intact."
+            ),
+            buttons=(
+                (
+                    InteractionButtonSpec(
+                        label="Confirm Reset",
+                        action_key="control.reset.confirm",
+                        action_args={"request_id": request.request_id},
+                    ),
+                ),
+                (
+                    InteractionButtonSpec(
+                        label="Cancel",
+                        action_key="control.reset.cancel",
+                        action_args={"request_id": request.request_id},
+                    ),
+                ),
+            ),
+            expires_at=request.expires_at,
+        )
+
+    def _build_terminal_interaction(
+        self,
+        *,
+        interaction_id: str,
+        interaction_kind: str,
+        route: ControlRoute,
+        text: str,
+    ) -> InteractionMessageSpec:
+        return InteractionMessageSpec(
+            interaction_id=interaction_id,
+            interaction_kind=interaction_kind,
+            route=route,
+            text=text,
+            buttons=(),
+            expires_at=None,
+        )
 
     def _build_control_catalog_payload(self, control_plane) -> dict[str, Any]:
         commands: list[dict[str, str]] = []

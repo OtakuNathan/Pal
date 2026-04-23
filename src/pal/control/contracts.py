@@ -38,6 +38,32 @@ class ControlAction:
     notes: str = ""
 
 
+@dataclass(frozen=True)
+class InteractionButtonSpec:
+    label: str
+    action_key: str
+    action_args: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class InteractionMessageSpec:
+    interaction_id: str
+    interaction_kind: str
+    route: ControlRoute | None = None
+    text: str = ""
+    buttons: tuple[tuple[InteractionButtonSpec, ...], ...] = ()
+    expires_at: str | None = None
+
+
+@dataclass(frozen=True)
+class InteractionResult:
+    interaction_id: str
+    interaction_kind: str
+    action_key: str
+    action_args: dict[str, Any] = field(default_factory=dict)
+    route: ControlRoute | None = None
+
+
 ControlCommandHandler = Callable[[ControlCommandInvocation], ControlAction | None]
 
 
@@ -51,6 +77,8 @@ class ControlCommandSpec:
     show_in_panel: bool = False
     panel_group: str = "builtin"
     panel_button: bool = False
+    panel_label: str = ""
+    interaction_action_key: str = ""
     confirm_policy: str = "none"
 
 
@@ -68,6 +96,9 @@ class ControlEvent:
 
 class ControlPlanePort(Protocol):
     def parse_event(self, event: ControlEvent) -> ControlAction | None:
+        ...
+
+    def handle_interaction(self, result: InteractionResult) -> ControlAction | None:
         ...
 
     def register_command(self, spec: ControlCommandSpec) -> None:

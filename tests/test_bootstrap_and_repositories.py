@@ -14,6 +14,7 @@ from pal.channel import ChannelEndpointRepository
 from pal.channel.contracts import EndpointConfig
 from pal.channel.endpoints import SocketChannelEndpoint, TelegramChannelEndpoint
 from pal.channel.endpoints.socket_protocol import pack_socket_message, read_socket_message
+from pal.control import InteractionButtonSpec, InteractionMessageSpec
 from pal.execution import CapabilityCall
 from pal.core.runtime_config import RuntimeConfig
 from pal.identity import DEFAULT_PERSONA_ID, IdentityRepository
@@ -1893,6 +1894,7 @@ class _FakeTelegramBot:
     def __init__(self) -> None:
         self.actions: list[tuple[str, dict[str, object]]] = []
         self.files: dict[str, _FakeTelegramFile] = {}
+        self._next_message_id = 1000
 
     async def set_message_reaction(self, **kwargs):
         self.actions.append(("reaction", dict(kwargs)))
@@ -1902,6 +1904,17 @@ class _FakeTelegramBot:
 
     async def send_message(self, **kwargs):
         self.actions.append(("message", dict(kwargs)))
+        message_id = self._next_message_id
+        self._next_message_id += 1
+
+        class _SentMessage:
+            def __init__(self, message_id: int) -> None:
+                self.message_id = message_id
+
+        return _SentMessage(message_id)
+
+    async def edit_message_text(self, **kwargs):
+        self.actions.append(("edit_message_text", dict(kwargs)))
 
     async def get_file(self, file_id: str):
         return self.files[file_id]
@@ -2098,6 +2111,92 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(any(kind == "commands" for kind, _ in self.fake_bot.actions))
         self.assertTrue(any(kind == "menu_button" for kind, _ in self.fake_bot.actions))
+
+    async def test_telegram_endpoint_interactive_update_and_resolve_reuse_same_message(self) -> None:
+        spec = InteractionMessageSpec(
+            interaction_id="ctl_panel_1",
+            interaction_kind="control_panel",
+            text="Pal Control Panel",
+            buttons=((InteractionButtonSpec(label="Think", action_key="control.think.open"),),),
+            expires_at=None,
+        )
+        self.endpoint.queue_status(
+            "interactive_update",
+            payload={"spec": spec},
+            response_handle=self.endpoint.build_response_handle(reply_target={"chat_id": "42"}),
+        )
+
+        self.endpoint.flush_status_outbox()
+        await asyncio.sleep(0.05)
+
+        self.assertIn("ctl_panel_1", self.endpoint._interactive_messages)
+        first_message = next(payload for kind, payload in self.fake_bot.actions if kind == "message")
+        stored = self.endpoint._interactive_messages["ctl_panel_1"]
+        self.assertEqual(stored["chat_id"], 42)
+        self.assertEqual(first_message["text"], "Pal Control Panel")
+
+        updated = InteractionMessageSpec(
+            interaction_id="ctl_panel_1",
+            interaction_kind="control_panel",
+            text="Think level: balanced",
+            buttons=((InteractionButtonSpec(label="Back", action_key="control.panel.back"),),),
+            expires_at=None,
+        )
+        self.endpoint.queue_status(
+            "interactive_update",
+            payload={"spec": updated},
+            response_handle=self.endpoint.build_response_handle(reply_target={"chat_id": "42"}),
+        )
+        self.endpoint.flush_status_outbox()
+        await asyncio.sleep(0.05)
+
+        self.assertTrue(any(kind == "edit_message_text" for kind, _ in self.fake_bot.actions))
+
+        resolved = InteractionMessageSpec(
+            interaction_id="ctl_panel_1",
+            interaction_kind="control_panel",
+            text="Done.",
+            buttons=(),
+            expires_at=None,
+        )
+        self.endpoint.queue_status(
+            "interactive_resolve",
+            payload={"spec": resolved},
+            response_handle=self.endpoint.build_response_handle(reply_target={"chat_id": "42"}),
+        )
+        self.endpoint.flush_status_outbox()
+        await asyncio.sleep(0.05)
+
+        self.assertNotIn("ctl_panel_1", self.endpoint._interactive_messages)
+
+    async def test_telegram_endpoint_prunes_expired_interactions(self) -> None:
+        self.endpoint._interactive_messages["expired"] = {
+            "chat_id": 42,
+            "message_id": 1000,
+            "interaction_kind": "reset_confirm",
+            "expires_at_monotonic": 1.0,
+            "actions": {},
+        }
+
+        self.endpoint._prune_interactive_messages(now=2.0)
+
+        self.assertNotIn("expired", self.endpoint._interactive_messages)
+
+    async def test_telegram_endpoint_async_prune_expires_message_and_removes_keyboard(self) -> None:
+        self.endpoint._interactive_messages["expired"] = {
+            "chat_id": 42,
+            "message_id": 1000,
+            "interaction_kind": "reset_confirm",
+            "expires_at_monotonic": 1.0,
+            "actions": {},
+        }
+
+        await self.endpoint._prune_interactive_messages_async(now=2.0)
+
+        self.assertNotIn("expired", self.endpoint._interactive_messages)
+        edit = next(payload for kind, payload in self.fake_bot.actions if kind == "edit_message_text")
+        self.assertEqual(edit["text"], "This reset request expired.")
+        self.assertIsNone(edit["reply_markup"])
 
     async def test_telegram_endpoint_health_reflects_missing_token_without_starting_polling(self) -> None:
         other = TelegramChannelEndpoint(

@@ -113,5 +113,6 @@ def register_with_core(context: MainContext, control_plane: ControlPlane) -> Mod
     context.register_module(handle)
     context.prompt_fragment_registry.register(prompt_provider)
     context.event_handler_registry.register(EventKind.SLASH_COMMAND, ControlEventHandler(control_plane=control_plane))
+    context.event_handler_registry.register(EventKind.INTERACTION_RESULT, ControlEventHandler(control_plane=control_plane))
     context.event_handler_registry.register(EventKind.APPROVAL_REQUEST, ControlEventHandler(control_plane=control_plane))
     return handle

@@ -8,6 +8,7 @@ from pal.control.contracts import (
     ControlCommandInvocation,
     ControlCommandSpec,
     ControlEvent,
+    InteractionResult,
     ControlPlanePort,
 )
 from pal.shared import EventKind
@@ -52,6 +53,8 @@ class ControlCommandRegistry:
             show_in_panel=spec.show_in_panel,
             panel_group=spec.panel_group,
             panel_button=spec.panel_button,
+            panel_label=spec.panel_label or spec.name,
+            interaction_action_key=spec.interaction_action_key,
             confirm_policy=spec.confirm_policy,
         )
         self.commands[normalized] = normalized_spec
@@ -150,6 +153,145 @@ class ControlPlane(ControlPlanePort):
             notes=action.notes,
         )
 
+    def handle_interaction(self, result: InteractionResult) -> ControlAction | None:
+        action_key = str(result.action_key or "").strip()
+        if not action_key:
+            return _with_interaction_context(
+                ControlAction(
+                    action_kind="invalid_command",
+                    target_scope="control",
+                    route=result.route,
+                    args={"reason": "empty interaction action"},
+                    notes="Unsupported interaction action.",
+                ),
+                result,
+            )
+        if action_key in {"control.panel.show", "control.panel.back"}:
+            action = ControlAction(
+                action_kind="show_panel",
+                target_scope="control",
+                route=result.route,
+            )
+            return _with_interaction_context(action, result)
+        if action_key == "control.think.open":
+            action = ControlAction(
+                action_kind="show_think",
+                target_scope="runtime",
+                route=result.route,
+            )
+            return _with_interaction_context(action, result)
+        if action_key == "control.think.set":
+            requested = _normalize_think_level(str(result.action_args.get("think_level") or ""))
+            if requested is None:
+                action = ControlAction(
+                    action_kind="invalid_command",
+                    target_scope="control",
+                    route=result.route,
+                    args={"reason": "invalid think level"},
+                    notes="Valid think levels: off, low, balanced, deep.",
+                )
+                return _with_interaction_context(action, result)
+            action = ControlAction(
+                action_kind="set_think",
+                target_scope="runtime",
+                route=result.route,
+                args={"think_level": requested},
+            )
+            return _with_interaction_context(action, result)
+        if action_key == "control.interrupt.run":
+            action = ControlAction(
+                action_kind="interrupt_turn",
+                target_scope="runtime",
+                route=result.route,
+            )
+            return _with_interaction_context(action, result)
+        if action_key == "control.compact.run":
+            action = ControlAction(
+                action_kind="compact_memory",
+                target_scope="memory",
+                route=result.route,
+            )
+            return _with_interaction_context(action, result)
+        if action_key == "control.reset.open":
+            action = ControlAction(
+                action_kind="open_reset_confirm",
+                target_scope="memory",
+                route=result.route,
+            )
+            return _with_interaction_context(action, result)
+        if action_key == "control.reset.confirm":
+            request_id = str(result.action_args.get("request_id") or result.interaction_id).strip()
+            action = ControlAction(
+                action_kind="reset_memory",
+                target_scope="memory",
+                route=result.route,
+                args={"request_id": request_id},
+            )
+            return _with_interaction_context(action, result)
+        if action_key == "control.reset.cancel":
+            request_id = str(result.action_args.get("request_id") or result.interaction_id).strip()
+            action = ControlAction(
+                action_kind="cancel_reset_confirm",
+                target_scope="memory",
+                route=result.route,
+                args={"request_id": request_id},
+            )
+            return _with_interaction_context(action, result)
+        if action_key == "control.command.run":
+            command_name = _normalize_command_name(str(result.action_args.get("command_name") or ""))
+            if not command_name:
+                return _with_interaction_context(
+                    ControlAction(
+                        action_kind="invalid_command",
+                        target_scope="control",
+                        route=result.route,
+                        args={"reason": "missing command_name"},
+                        notes="Missing control command target.",
+                    ),
+                    result,
+                )
+            spec = self.registry.resolve(command_name)
+            if spec is None:
+                action = ControlAction(
+                    action_kind="unknown_command",
+                    target_scope="control",
+                    route=result.route,
+                    args={"command_name": command_name},
+                    notes=f"Unknown command: /{command_name}",
+                )
+                return _with_interaction_context(action, result)
+            invocation = ControlCommandInvocation(
+                command_name=spec.name,
+                argv=(),
+                raw_text=f"/{spec.name}",
+                route=result.route,
+                source_kind="interaction",
+                origin_event_id=result.interaction_id,
+            )
+            action = spec.handler(invocation)
+            if action is None:
+                return _with_interaction_context(
+                    ControlAction(
+                        action_kind="invalid_command",
+                        target_scope="control",
+                        route=result.route,
+                        args={"reason": "interaction handler returned no action", "command_name": command_name},
+                        notes=f"Control command /{command_name} did not produce an action.",
+                    ),
+                    result,
+                )
+            return _with_interaction_context(action, result)
+        return _with_interaction_context(
+            ControlAction(
+                action_kind="invalid_command",
+                target_scope="control",
+                route=result.route,
+                args={"reason": "unsupported interaction action", "action_key": action_key},
+                notes=f"Unsupported interaction action: {action_key}",
+            ),
+            result,
+        )
+
     def _parse_invocation(self, event: ControlEvent) -> ControlCommandInvocation | None:
         payload = dict(event.payload or {})
         command_name = str(payload.get("command_name") or payload.get("command") or "").strip()
@@ -196,7 +338,8 @@ class ControlPlane(ControlPlanePort):
                 usage="/control",
                 show_in_panel=True,
                 panel_group="builtin",
-                panel_button=True,
+                panel_button=False,
+                panel_label="Control",
             )
         )
         self.register_command(
@@ -208,6 +351,8 @@ class ControlPlane(ControlPlanePort):
                 show_in_panel=True,
                 panel_group="builtin",
                 panel_button=True,
+                panel_label="Think",
+                interaction_action_key="control.think.open",
             )
         )
         self.register_command(
@@ -219,6 +364,8 @@ class ControlPlane(ControlPlanePort):
                 show_in_panel=True,
                 panel_group="builtin",
                 panel_button=True,
+                panel_label="Interrupt",
+                interaction_action_key="control.interrupt.run",
             )
         )
         self.register_command(
@@ -230,6 +377,8 @@ class ControlPlane(ControlPlanePort):
                 show_in_panel=True,
                 panel_group="builtin",
                 panel_button=True,
+                panel_label="Compact",
+                interaction_action_key="control.compact.run",
             )
         )
         self.register_command(
@@ -241,6 +390,8 @@ class ControlPlane(ControlPlanePort):
                 show_in_panel=True,
                 panel_group="builtin",
                 panel_button=True,
+                panel_label="Reset Memory",
+                interaction_action_key="control.reset.open",
                 confirm_policy="confirm",
             )
         )
@@ -357,3 +508,19 @@ def _normalize_command_name(value: str) -> str:
 
 def _normalize_think_level(value: str) -> str | None:
     return _THINK_ALIASES.get(str(value or "").strip().lower())
+
+
+def _with_interaction_context(action: ControlAction, result: InteractionResult) -> ControlAction:
+    args = dict(action.args)
+    args["interaction_origin"] = "button"
+    args["interaction_id"] = result.interaction_id
+    args["interaction_kind"] = result.interaction_kind
+    return ControlAction(
+        action_kind=action.action_kind,
+        target_scope=action.target_scope,
+        target_id=action.target_id,
+        requires_user_confirmation=action.requires_user_confirmation,
+        args=args,
+        route=action.route or result.route,
+        notes=action.notes,
+    )

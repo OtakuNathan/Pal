@@ -10,7 +10,15 @@ from pal.channel import ChannelRuntime, register_with_core as register_channel_w
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelEnvelope, EndpointConfig, ResponseHandle
 from pal.channel.endpoints.telegram_endpoint import TelegramChannelEndpoint
-from pal.control import ControlAction, ControlCommandSpec, ControlEvent, ControlPlane, ControlRoute, register_with_core as register_control_with_core
+from pal.control import (
+    ControlAction,
+    ControlCommandSpec,
+    ControlEvent,
+    ControlPlane,
+    ControlRoute,
+    InteractionResult,
+    register_with_core as register_control_with_core,
+)
 from pal.core import PalCore, TurnContinuation, register_with_core as register_core_with_core
 from pal.core.turns import channel_turn_program
 from pal.foundation import EventEnvelope
@@ -26,6 +34,11 @@ class _StubEndpoint(ChannelEndpointQueueBase):
 
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
         _ = (response_handle, text)
+
+    def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, object]) -> None:
+        if not hasattr(self, "sent_statuses"):
+            self.sent_statuses = []
+        self.sent_statuses.append((str(kind), dict(payload), dict(response_handle.reply_target)))
 
     def inspect_health(self) -> dict[str, object]:
         return {"healthy": True}
@@ -134,6 +147,29 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(action.action_kind, "set_think")
         self.assertEqual(action.args["think_level"], "deep")
 
+    def test_unknown_interaction_action_normalizes_to_invalid_command(self) -> None:
+        plane = ControlPlane()
+        route = ControlRoute(
+            endpoint_id="telegram_main",
+            channel_kind="telegram",
+            reply_target={"chat_id": "42"},
+            control_scope_key="tg:telegram_main:42:root",
+        )
+
+        action = plane.handle_interaction(
+            InteractionResult(
+                interaction_id="ix-1",
+                interaction_kind="control_panel",
+                action_key="control.unknown.action",
+                route=route,
+            )
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.action_kind, "invalid_command")
+        self.assertEqual(action.args["interaction_origin"], "button")
+
 
 class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -144,6 +180,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.endpoint = _StubEndpoint(
             endpoint=EndpointConfig(endpoint_id="socket_main", channel_kind="socket", binding_key="runtime.sock")
         )
+        self.endpoint.sent_statuses = []
         self.channel_runtime.register_endpoint(self.endpoint)
         register_channel_with_core(self.core.context, self.channel_runtime)
 
@@ -225,6 +262,153 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         second_request.expires_at = "2000-01-01T00:00:00+00:00"
         await self.core.expire_pending_control_requests_async()
         self.assertNotIn("reset_confirm", scope_state.pending_requests)
+
+    async def test_quiescing_scope_does_not_create_background_turn_task(self) -> None:
+        scope_state = self.core._ensure_scope_state(self.route.control_scope_key)
+        scope_state.quiescing = True
+        envelope = ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind=EventKind.USER_MESSAGE,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "hello", "session_id": "sess-1", "request_id": "req-1"},
+            ),
+            endpoint=self.endpoint.endpoint,
+            response_handle=ResponseHandle(endpoint_id="socket_main", reply_target={"session_id": "sess-1", "request_id": "req-1"}),
+        )
+
+        await self.core.schedule_channel_turn_async(envelope)
+
+        self.assertNotIn(envelope.event.event_id, self.core.state.turn_tasks)
+        self.assertTrue(self.endpoint.has_queued_replies())
+        self.assertEqual(self.endpoint.outbox[-1].text, "This scope is resetting. Please retry in a moment.")
+        self.assertTrue(self.endpoint.has_queued_status())
+        self.assertEqual(self.endpoint.status_outbox[-1].kind, "working_stop")
+
+    async def test_control_action_emits_working_stop(self) -> None:
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="show_think",
+                target_scope="runtime",
+                route=self.route,
+            )
+        )
+
+        self.assertTrue(self.endpoint.has_queued_status())
+        self.assertEqual(self.endpoint.status_outbox[-1].kind, "working_stop")
+
+    async def test_run_until_idle_flushes_working_stop_after_background_turn_completion(self) -> None:
+        envelope = ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind=EventKind.USER_MESSAGE,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "hello", "session_id": "sess-1", "request_id": "req-1"},
+            ),
+            endpoint=self.endpoint.endpoint,
+            response_handle=ResponseHandle(endpoint_id="socket_main", reply_target={"session_id": "sess-1", "request_id": "req-1"}),
+        )
+
+        async def _complete_turn(channel_envelope):
+            _ = channel_envelope
+            await asyncio.sleep(0)
+            return None
+
+        self.core.process_channel_turn_async = _complete_turn  # type: ignore[method-assign]
+
+        await self.core.schedule_channel_turn_async(envelope)
+        await self.core.run_until_idle_async(max_iterations=32)
+
+        self.assertTrue(any(kind == "working_stop" for kind, _, _ in self.endpoint.sent_statuses))
+
+    async def test_button_backed_set_think_resolves_interaction(self) -> None:
+        route = ControlRoute(
+            endpoint_id="telegram_main",
+            channel_kind="telegram",
+            reply_target={"chat_id": "42", "message_id": "12"},
+            control_scope_key="tg:telegram_main:42:root",
+            correlation_id="tg-1",
+        )
+
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="set_think",
+                target_scope="runtime",
+                args={
+                    "think_level": "deep",
+                    "interaction_origin": "button",
+                    "interaction_id": "ctl_panel_1",
+                    "interaction_kind": "control_panel",
+                },
+                route=route,
+            )
+        )
+
+        statuses = list(self.channel_runtime.status_outbox)
+        self.assertGreaterEqual(len(statuses), 2)
+        self.assertEqual(statuses[-2].kind, "interactive_resolve")
+        self.assertEqual(statuses[-2].payload["spec"].text, "Think level updated to deep. This applies to new turns only.")
+        self.assertEqual(statuses[-1].kind, "working_stop")
+
+    async def test_button_backed_interrupt_resolves_interaction(self) -> None:
+        route = ControlRoute(
+            endpoint_id="telegram_main",
+            channel_kind="telegram",
+            reply_target={"chat_id": "42", "message_id": "13"},
+            control_scope_key="tg:telegram_main:42:root",
+            correlation_id="tg-2",
+        )
+
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="interrupt_turn",
+                target_scope="runtime",
+                args={
+                    "interaction_origin": "button",
+                    "interaction_id": "ctl_panel_2",
+                    "interaction_kind": "control_panel",
+                },
+                route=route,
+            )
+        )
+
+        statuses = list(self.channel_runtime.status_outbox)
+        self.assertGreaterEqual(len(statuses), 2)
+        self.assertEqual(statuses[-2].kind, "interactive_resolve")
+        self.assertEqual(statuses[-2].payload["spec"].text, "No active turn to interrupt in this scope.")
+        self.assertEqual(statuses[-1].kind, "working_stop")
+
+    async def test_control_panel_buttons_are_driven_by_command_specs(self) -> None:
+        self.control_plane.register_command(
+            ControlCommandSpec(
+                name="ping",
+                handler=lambda invocation: ControlAction(
+                    action_kind="invoke_capability",
+                    target_scope="execution",
+                    target_id="op_demo_ping",
+                    route=invocation.route,
+                ),
+                description="Ping a capability.",
+                usage="/ping",
+                show_in_panel=True,
+                panel_button=True,
+                panel_label="Ping Plugin",
+            )
+        )
+
+        spec = self.core._build_control_panel_interaction(self.control_plane, self.route)
+        flattened = [button for row in spec.buttons for button in row]
+
+        self.assertTrue(any(button.label == "Think" and button.action_key == "control.think.open" for button in flattened))
+        self.assertTrue(any(button.label == "Compact" and button.action_key == "control.compact.run" for button in flattened))
+        self.assertTrue(any(button.label == "Interrupt" and button.action_key == "control.interrupt.run" for button in flattened))
+        self.assertTrue(any(button.label == "Reset Memory" and button.action_key == "control.reset.open" for button in flattened))
+        self.assertTrue(
+            any(
+                button.label == "Ping Plugin"
+                and button.action_key == "control.command.run"
+                and button.action_args == {"command_name": "ping"}
+                for button in flattened
+            )
+        )
 
     async def test_interrupt_by_scope_marks_turn_and_aborts_stream(self) -> None:
         response_handle = ResponseHandle(
@@ -332,7 +516,20 @@ class TelegramControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
             bot_token="token",
         )
 
-    async def test_callback_query_is_normalized_to_slash_command(self) -> None:
+    async def test_callback_query_is_normalized_to_interaction_result(self) -> None:
+        self.endpoint._interactive_messages["ctl_panel_1"] = {
+            "chat_id": 100,
+            "message_id": 12,
+            "interaction_kind": "control_panel",
+            "expires_at_monotonic": None,
+            "actions": {
+                "b0": {
+                    "action_key": "control.interrupt.run",
+                    "action_args": {},
+                }
+            },
+        }
+
         class _User:
             id = 42
 
@@ -345,7 +542,7 @@ class TelegramControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
             message_thread_id = None
 
         class _CallbackQuery:
-            data = "ctl:/interrupt"
+            data = "ix:ctl_panel_1:b0"
             message = _Message()
             from_user = _User()
             id = "cb-1"
@@ -356,9 +553,96 @@ class TelegramControlBoundaryTests(unittest.IsolatedAsyncioTestCase):
         class _Update:
             callback_query = _CallbackQuery()
 
-        payload = await self.endpoint._control_payload_from_update(_Update())
+        payload = await self.endpoint._interaction_result_from_update(_Update())
 
         self.assertIsNotNone(payload)
         assert payload is not None
-        self.assertEqual(payload["text"], "/interrupt")
-        self.assertEqual(payload["source_metadata"]["callback_data"], "control")
+        self.assertIsInstance(payload, InteractionResult)
+        self.assertEqual(payload.interaction_id, "ctl_panel_1")
+        self.assertEqual(payload.action_key, "control.interrupt.run")
+
+    async def test_callback_query_without_registered_interaction_does_not_fall_through_to_user_message(self) -> None:
+        class _User:
+            id = 42
+
+        class _Chat:
+            id = 100
+
+        class _Message:
+            chat = _Chat()
+            from_user = _User()
+            message_id = 12
+            message_thread_id = None
+            text = "should not become a user message"
+
+        class _CallbackQuery:
+            data = "ix:missing:b0"
+            message = _Message()
+            from_user = _User()
+            id = "cb-2"
+
+            async def answer(self) -> None:
+                return None
+
+        class _Update:
+            callback_query = _CallbackQuery()
+            effective_message = _Message()
+
+        await self.endpoint._on_update(_Update(), None)
+
+        self.assertEqual(self.endpoint.poll(), [])
+
+    async def test_expired_callback_query_edits_message_and_returns_none(self) -> None:
+        self.endpoint._interactive_messages["reset_1"] = {
+            "chat_id": 100,
+            "message_id": 12,
+            "interaction_kind": "reset_confirm",
+            "expires_at_monotonic": 0.0,
+            "actions": {
+                "b0": {
+                    "action_key": "control.reset.confirm",
+                    "action_args": {"request_id": "reset_1"},
+                }
+            },
+        }
+
+        edits: list[dict[str, object]] = []
+
+        class _AppBot:
+            async def edit_message_text(self, **kwargs):
+                edits.append(dict(kwargs))
+
+        class _App:
+            bot = _AppBot()
+
+        self.endpoint.application = _App()
+
+        class _User:
+            id = 42
+
+        class _Chat:
+            id = 100
+
+        class _Message:
+            chat = _Chat()
+            message_id = 12
+            message_thread_id = None
+
+        class _CallbackQuery:
+            data = "ix:reset_1:b0"
+            message = _Message()
+            from_user = _User()
+            id = "cb-expired"
+
+            async def answer(self) -> None:
+                return None
+
+        class _Update:
+            callback_query = _CallbackQuery()
+
+        payload = await self.endpoint._interaction_result_from_update(_Update())
+
+        self.assertIsNone(payload)
+        self.assertNotIn("reset_1", self.endpoint._interactive_messages)
+        self.assertEqual(len(edits), 1)
+        self.assertEqual(edits[0]["text"], "This reset request expired.")
