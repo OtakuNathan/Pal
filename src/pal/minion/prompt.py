@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
-from pal.tasking.service import TaskingService
+from pal.minion.service import TaskingService
 
 
 @dataclass

@@ -59,7 +59,7 @@ from pal.service.scheduling import compute_next_service_run_at_utc, utc_now_dt
 from pal.shared import LLMStreamEventKind, MinionProgressEvent, PromptAssemblyContext, SINGLETON_TARGET
 from pal.stream_events import NormalizedLLMStreamEvent
 from pal.supervisor import SupervisorService
-from pal.tasking import TaskingService, register_with_core as register_tasking_with_core
+from pal.minion import TaskingService, register_with_core as register_tasking_with_core
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -298,14 +298,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.memory",
             "pal.execution",
             "pal.failure",
-            "pal.tasking",
+            "pal.minion",
             "pal.service",
             "pal.web_search",
             "pal.web_fetch",
             "pal.minion",
             "pal.bootstrap",
             "pal.supervisor",
-            "pal.worker",
+            "pal.minion",
             "pal.plugins",
         )
         for module_name in modules:
@@ -331,7 +331,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.llm": ("LLMIntrospectionProvider", "register_with_core", "inspect_llm"),
             "pal.memory": ("MemoryIntrospectionProvider", "register_with_core", "inspect_memory"),
             "pal.execution": ("ExecutionIntrospectionProvider", "register_with_core", "inspect_execution"),
-            "pal.tasking": ("TaskingIntrospectionProvider", "register_with_core", "inspect_tasking"),
+            "pal.minion": ("TaskingIntrospectionProvider", "register_with_core", "inspect_tasking"),
             "pal.service": ("ServiceIntrospectionProvider", "register_with_core", "inspect_service"),
             "pal.web_search": ("WebSearchIntrospectionProvider", "register_with_core", "inspect_web_search"),
             "pal.web_fetch": ("WebFetchIntrospectionProvider", "register_with_core", "inspect_web_fetch"),
@@ -342,7 +342,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.supervisor": ("inspect_supervisor",),
             "pal.plugins.l3": ("register_with_core",),
             "pal.minion": ("inspect_minion",),
-            "pal.worker": ("inspect_worker",),
+            "pal.minion": ("inspect_minion", "inspect_worker", "inspect_tasking"),
         }
         for module_name, symbols in exports.items():
             module = importlib.import_module(module_name)
@@ -378,10 +378,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 forbidden_fragments=("pal.execution.runtime",),
             )
 
-    def test_worker_does_not_depend_on_user_facing_channel_modules(self) -> None:
+    def test_minion_does_not_depend_on_user_facing_channel_modules(self) -> None:
         for relative_path in (
-            "src/pal/worker/contracts.py",
-            "src/pal/worker/runtime.py",
+            "src/pal/minion/contracts.py",
+            "src/pal/minion/runtime.py",
         ):
             self._assert_no_forbidden_imports(
                 ROOT / relative_path,

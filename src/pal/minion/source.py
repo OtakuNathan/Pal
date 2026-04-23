@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from pal.core.events import EventSource
 from pal.foundation import EventEnvelope
-from pal.tasking.service import TaskingService
+from pal.minion.service import TaskingService
 
 
 @dataclass

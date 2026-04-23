@@ -12,7 +12,7 @@ from pal.shared import (
     WorkerProgressEvent,
     WorkerTerminalEvent,
 )
-from pal.tasking.contracts import TaskingServicePort
+from pal.minion.contracts import TaskingServicePort
 
 
 @dataclass(frozen=True)
