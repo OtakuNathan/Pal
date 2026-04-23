@@ -198,6 +198,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         self._stop_typing(response_handle)
         loop = asyncio.get_running_loop()
         loop.create_task(self._send_reply_async(response_handle, text))
+        self.queue_status("typing_start", response_handle=response_handle)
 
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, Any]) -> None:
         loop = asyncio.get_running_loop()
