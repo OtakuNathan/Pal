@@ -49,6 +49,33 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
+            elif normalized_section == "behavior_routing":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="behavior_routing",
+                        title="Behavior Routing",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
+            elif normalized_section == "memory_routing":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="memory_routing",
+                        title="Memory Routing",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
+            elif normalized_section == "resident_affordances":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="resident_affordances",
+                        title="Resident Affordances",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
             elif normalized_section == "memory":
                 user_context_blocks.append(
                     PromptIRBlock(
@@ -198,7 +225,16 @@ class PromptCompiler:
 
     def _normalize_prompt_section(self, section: str) -> str:
         lowered = str(section or "").strip().lower()
-        if lowered in {"identity", "memory", "memory_system", "runtime", "rules"}:
+        if lowered in {
+            "identity",
+            "memory",
+            "memory_system",
+            "runtime",
+            "rules",
+            "behavior_routing",
+            "memory_routing",
+            "resident_affordances",
+        }:
             return lowered
         if lowered in {"control", "observation", "finalization"}:
             return "runtime"
@@ -255,11 +291,22 @@ class PromptCompiler:
     def _order_system_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
         identity_blocks = [block for block in blocks if block.block_id == "identity"]
         rule_blocks = [block for block in blocks if block.block_id == "operating_rules"]
+        behavior_blocks = [block for block in blocks if block.block_id == "behavior_routing"]
+        memory_routing_blocks = [block for block in blocks if block.block_id == "memory_routing"]
+        resident_blocks = [block for block in blocks if block.block_id == "resident_affordances"]
         memory_blocks = [block for block in blocks if block.block_id == "memory_context"]
         runtime_blocks = [block for block in blocks if block.block_id == "runtime_overlay"]
         ordered_runtime = [block for block in runtime_blocks if block.metadata.get("priority") != "finalization"]
         ordered_runtime.extend(block for block in runtime_blocks if block.metadata.get("priority") == "finalization")
-        return [*identity_blocks, *rule_blocks, *memory_blocks, *ordered_runtime]
+        return [
+            *identity_blocks,
+            *rule_blocks,
+            *behavior_blocks,
+            *memory_routing_blocks,
+            *resident_blocks,
+            *memory_blocks,
+            *ordered_runtime,
+        ]
 
     def _compile_prompt_ir_messages(self, prompt_ir: PromptIR) -> list[dict[str, Any]]:
         messages: list[dict[str, Any]] = []

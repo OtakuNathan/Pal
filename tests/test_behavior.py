@@ -27,9 +27,11 @@ from pal.behavior import (
     SkillDescriptor,
     SkillInjectTool,
     affordance,
+    register_with_core as register_behavior_with_core,
     skill,
 )
 from pal.behavior.prompt import BehaviorPromptFragmentProvider
+from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityDescriptor
 from pal.foundation import PalV2Database
 from pal.memory.models import MemoryCaseModel
@@ -402,8 +404,76 @@ class BehaviorSubsystemTests(unittest.TestCase):
         content = "\n".join(fragment.content for fragment in fragments)
 
         self.assertIn("op_behavior_advise", content)
+        self.assertIn("op_exec_disc_search", content)
         self.assertIn("op_skill_inject", content)
         self.assertIn("op_behavior_affordance_submit", content)
+        self.assertIn("op_l3_commit_write", content)
+        self.assertIn("memory_query_hints", content)
+
+    def test_behavior_prompt_sections_enter_system_prompt_in_order(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_behavior_with_core(core.context, self.service)
+
+        prompt = core.build_canonical_prompt(PromptAssemblyContext())
+        system = prompt.messages[0]["content"]
+
+        self.assertIn("## Operating Rules", system)
+        self.assertIn("## Behavior Routing", system)
+        self.assertIn("## Memory Routing", system)
+        self.assertNotIn("## Resident Affordances", system)
+        self.assertLess(system.index("## Operating Rules"), system.index("## Behavior Routing"))
+        self.assertLess(system.index("## Behavior Routing"), system.index("## Memory Routing"))
+        self.assertEqual(
+            prompt.metadata["fragment_sections"],
+            ["operating_rules", "behavior_routing", "memory_routing"],
+        )
+
+        operating = system.split("## Behavior Routing", 1)[0]
+        self.assertNotIn("op_behavior_advise", operating)
+        self.assertNotIn("op_l3_recall_query", operating)
+        self.assertNotIn("op_l3_commit_write", operating)
+        self.assertIn('Capability search answers: "what executable ability exists?"', system)
+        self.assertIn('Behavior advice answers: "what route should Pal consider for this scenario?"', system)
+        self.assertIn(
+            'Affordance submission records: "when this scenario appears again, what route should Pal consider?"',
+            system,
+        )
+        self.assertIn("If the user teaches a future behavior, submit an affordance.", system)
+        self.assertIn("If the user teaches a stable fact, preference, or reusable experience, write memory.", system)
+        self.assertIn("If both apply, ask for clarification or create separate records.", system)
+
+    def test_resident_affordances_are_dynamic_system_prompt_blocks(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_behavior_with_core(core.context, self.service)
+
+        without_resident = core.build_canonical_prompt(PromptAssemblyContext()).messages[0]["content"]
+        self.assertNotIn("## Resident Affordances", without_resident)
+
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="resident.oled",
+                module_id="test",
+                title="OLED expression",
+                scenario_text="visible mood changed",
+                prompt_hint="Consider updating the OLED expression when visible mood changes.",
+                visibility_mode=AFFORDANCE_VISIBILITY_RESIDENT,
+                activation_kind=AFFORDANCE_ACTIVATION_DELIBERATIVE,
+                source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+            )
+        )
+
+        with_resident_prompt = core.build_canonical_prompt(PromptAssemblyContext())
+        with_resident = with_resident_prompt.messages[0]["content"]
+
+        self.assertIn("## Resident Affordances", with_resident)
+        self.assertIn("OLED expression", with_resident)
+        self.assertIn("Consider updating the OLED expression", with_resident)
+        self.assertEqual(
+            with_resident_prompt.metadata["fragment_sections"],
+            ["operating_rules", "behavior_routing", "memory_routing", "resident_affordances"],
+        )
 
     def test_module_capabilities_are_auto_declared_as_affordances(self) -> None:
         subtree = MountedSubtreeHandle(

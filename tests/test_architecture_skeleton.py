@@ -889,10 +889,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("## Identity", prompt.messages[0]["content"])
             self.assertIn("## Operating Rules", prompt.messages[0]["content"])
             self.assertNotIn("## Capability Guide", prompt.messages[0]["content"])
-            self.assertIn("op_exec_disc_search", prompt.messages[0]["content"])
-            self.assertIn("op_exec_capability_call", prompt.messages[0]["content"])
+            self.assertIn("Source-of-truth preference", prompt.messages[0]["content"])
+            self.assertNotIn("op_exec_disc_search", prompt.messages[0]["content"])
+            self.assertNotIn("op_exec_capability_call", prompt.messages[0]["content"])
             self.assertLess(prompt.messages[0]["content"].index("## Identity"), prompt.messages[0]["content"].index("## Operating Rules"))
-            self.assertLess(prompt.messages[0]["content"].index("## Operating Rules"), prompt.messages[0]["content"].index("op_exec_disc_search"))
             self.assertNotIn("## Runtime Overlay", prompt.messages[0]["content"])
             self.assertNotIn("## Memory Projection", prompt.messages[0]["content"])
             self.assertEqual(prompt.messages[1], {"role": "user", "content": "What timezone should you use?"})
@@ -2316,13 +2316,16 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(result.structured["hit_count"], 10)
         self.assertLess(len(str(result.llm_text)), 12_000)
 
-    def test_minimal_operating_rules_prompt_mentions_precise_recall_queries(self) -> None:
+    def test_minimal_operating_rules_prompt_omits_route_specific_tools(self) -> None:
         from pal.core.prompt import MinimalOperatingRulesPromptFragmentProvider
 
         fragment = MinimalOperatingRulesPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext())[0]
 
-        self.assertIn("start with one concrete, high-signal query", fragment.content)
-        self.assertIn("Avoid sending multiple overlapping or broad recall queries at once.", fragment.content)
+        self.assertIn("Source-of-truth preference", fragment.content)
+        self.assertIn("No success claim without confirmation", fragment.content)
+        self.assertNotIn("op_l3_recall_query", fragment.content)
+        self.assertNotIn("op_l3_commit_write", fragment.content)
+        self.assertNotIn("op_behavior_advise", fragment.content)
 
     def test_memory_service_compact_uses_semantic_summary_and_projects_to_l2(self) -> None:
         service = MemoryService()
