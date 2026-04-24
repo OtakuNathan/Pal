@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from pal.behavior import BehaviorAffordanceModel, BehaviorSkillModel
 from pal.channel import ChannelEndpointRepository
 from pal.channel.endpoints import DEFAULT_SOCKET_FILENAME
 from pal.foundation import PalV2Database
@@ -36,6 +37,8 @@ ALL_MODELS = (
     ServiceRunModel,
     WebSearchProviderModel,
     WebFetchProviderModel,
+    BehaviorAffordanceModel,
+    BehaviorSkillModel,
 )
 
 DEFAULT_DB_FILENAME = "pal.sqlite3"

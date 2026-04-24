@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pal.behavior import BehaviorRepository, BehaviorService, register_with_core as register_behavior_with_core
 from pal.bootstrap.contracts import RuntimeComposerPort
 from pal.channel import (
     ChannelEndpointRepository,
@@ -47,6 +48,7 @@ class StubRuntimeHandle:
     service_repository: ServiceRepository
     service_runner: ServiceRunner
     control_plane: ControlPlane
+    behavior_service: BehaviorService
     failure_runtime: FailureRuntime
 
     async def stop_async(self) -> None:
@@ -106,11 +108,13 @@ def compose_runtime(
     service_manager = ServiceManager(repository=service_repository)
     service_runner = ServiceRunner(repository=service_repository)
     control_plane = ControlPlane()
+    behavior_service = BehaviorService(repository=BehaviorRepository(), execution_runtime=core.context.execution_runtime)
     failure_runtime = FailureRuntime()
     endpoint_factories = build_default_factory_registry()
 
     register_core_with_core(core)
     register_execution_with_core(core.context)
+    register_behavior_with_core(core.context, behavior_service)
     register_channel_with_core(core.context, channel_runtime)
     register_identity_with_core(core.context, identity_service)
     register_llm_with_core(core.context, llm_runtime)
@@ -130,7 +134,7 @@ def compose_runtime(
         service_manager.hydrate(stored.definition, next_due_at_utc=stored.next_due_at_utc)
     plugin_host.bootstrap()
 
-    for module_id in ("core", "execution", "channel", "identity", "llm", "memory", "plugins", "service", "control", "failure"):
+    for module_id in ("core", "execution", "behavior", "channel", "identity", "llm", "memory", "plugins", "service", "control", "failure"):
         core.publish_module_capabilities(module_id)
 
     return StubRuntimeHandle(
@@ -147,6 +151,7 @@ def compose_runtime(
         service_repository=service_repository,
         service_runner=service_runner,
         control_plane=control_plane,
+        behavior_service=behavior_service,
         failure_runtime=failure_runtime,
     )
 

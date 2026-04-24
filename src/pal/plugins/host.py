@@ -345,6 +345,7 @@ class PluginHost:
             descriptor = self.context.execution_runtime.compiled_capability_index.records[descriptor_name]
             self.context.capability_registry.register(descriptor)
         handle.published_capabilities = published
+        self._register_behavior_declarations(handle)
         return published
 
     def _withdraw_module_capabilities(self, module_id: str) -> list[str]:
@@ -352,6 +353,7 @@ class PluginHost:
         handle = self.context.module_registry.get(module_id)
         if handle is not None:
             self.context.execution_runtime.unmount_subtree(handle)
+            self._unregister_behavior_declarations(handle.module_id)
             handle.published_capabilities = []
         return names
 
@@ -371,3 +373,15 @@ class PluginHost:
     def _restore_event_sources(self, handle: ModuleHandle) -> None:
         for source in handle.event_sources:
             self.context.event_source_registry.attach(handle.module_id, source)
+
+    def _register_behavior_declarations(self, handle: ModuleHandle) -> None:
+        behavior = self.context.port_registry.get("behavior:behavior")
+        register = getattr(behavior, "register_declared_module", None)
+        if callable(register):
+            register(handle)
+
+    def _unregister_behavior_declarations(self, module_id: str) -> None:
+        behavior = self.context.port_registry.get("behavior:behavior")
+        unregister = getattr(behavior, "unregister_declared_module", None)
+        if callable(unregister):
+            unregister(module_id)

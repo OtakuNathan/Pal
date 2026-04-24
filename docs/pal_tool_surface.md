@@ -113,6 +113,21 @@ provider_setting = "active_web_search_provider_id"
 3. 或在 `[[dynamic]]` 中添加跟随 provider 的能力
 4. 重启 Pal 生效
 
+## Behavior Tools
+
+The behavior subsystem adds three always-exposed tools:
+
+- `op_behavior_advise`: ask the affordance router which behavior routes fit the current scenario.
+- `op_skill_inject`: inject a full skill manual by `skill_id`.
+- `op_behavior_affordance_submit`: persist an instructed or learned recurring behavior rule.
+
+These tools are intentionally separate from capability discovery:
+
+- `op_exec_disc_search` searches the execution inventory.
+- `op_behavior_advise` searches behavior affordances and skills.
+
+See [pal_behavior_contract.md](pal_behavior_contract.md).
+
 ## Invariants
 
 - `discovery_search` 和 `exec_run` 必须始终暴露，保证 LLM 能发现和执行任意能力。

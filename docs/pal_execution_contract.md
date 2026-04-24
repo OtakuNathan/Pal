@@ -598,6 +598,25 @@ async def __call__(self, payload: InputModel, *, meta: InvocationMeta | None = N
 - `MCP` 只是 tool 来源之一，不是独立平级执行哲学层。
 - provider native tool calling 不能绕过本地 `Execution`。
 
+## Behavior Layer Integration
+
+Execution does not decide when a capability should come to mind. That is owned by the `behavior` subsystem.
+
+The split is:
+
+- `Execution` owns capability inventory and invocation.
+- `Behavior` owns scenario-to-action advice.
+- `Skill` remains manual-only.
+- `Affordance` points to capability refs, skill refs, and memory query hints.
+
+The LLM-facing difference is:
+
+- use `op_exec_disc_search` to discover available capability inventory.
+- use `op_behavior_advise` to ask which route fits a scenario.
+- use `op_skill_inject` to fetch a manual after advice returns a `skill_ref`.
+
+See [pal_behavior_contract.md](pal_behavior_contract.md).
+
 ## Non-Goals
 
 - 不在本文件定义具体 Python class 实现

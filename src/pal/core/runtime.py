@@ -808,69 +808,38 @@ class PalCore:
 
     async def _render_reset_prompt_async(self, request) -> None:
         route = request.route
+        if route.channel_kind == "telegram":
+            status_kind = "interactive_update" if bool(request.payload.get("opened")) else "interactive_open"
+            request.payload["opened"] = True
+            await self._interactive_to_route_async(
+                route,
+                status_kind,
+                self._build_reset_confirm_interaction(request),
+            )
+            return
         text = (
             "Reset working memory for this scope?\n"
             "This clears L1, L2, and conversation-facing projection only.\n"
             "Durable L3 memory stays intact.\n"
             f"Confirm with /reset confirm {request.request_id}"
         )
-        if route.channel_kind == "telegram":
-            await self._status_to_route_async(
-                route,
-                "control_prompt",
-                {
-                    "text": text,
-                    "request_id": request.request_id,
-                    "confirm_command": f"/reset confirm {request.request_id}",
-                    "cancel_command": "/control",
-                    "prompt_kind": "reset_confirm",
-                    "buttons": [
-                        [{"label": "Confirm Reset", "command": f"/reset confirm {request.request_id}"}],
-                        [{"label": "Back", "command": "/control"}],
-                    ],
-                },
-            )
-            return
         await self._reply_to_route_async(route, text)
 
     async def _notify_expired_request_async(self, request) -> None:
         text = "This reset request expired."
         if request.route.channel_kind == "telegram":
-            await self._status_to_route_async(
+            await self._interactive_to_route_async(
                 request.route,
-                "control_request_expired",
-                {
-                    "request_id": request.request_id,
-                    "text": text,
-                },
+                "interactive_expire",
+                self._build_terminal_interaction(
+                    interaction_id=request.request_id,
+                    interaction_kind="reset_confirm",
+                    route=request.route,
+                    text=text,
+                ),
             )
             return
         await self._reply_to_route_async(request.route, text)
-
-    def _build_control_panel_payload(self, control_plane) -> dict[str, Any]:
-        commands = control_plane.list_panel_commands()
-        buttons: list[list[dict[str, str]]] = []
-        for spec in commands:
-            if spec.name == "control":
-                continue
-            if spec.name == "think":
-                buttons.append([{"label": "Think", "command": "/think"}])
-                continue
-            if spec.name == "compact":
-                buttons.append([{"label": "Compact", "command": "/compact"}])
-                continue
-            if spec.name == "interrupt":
-                buttons.append([{"label": "Interrupt", "command": "/interrupt"}])
-                continue
-            if spec.name == "reset":
-                buttons.append([{"label": "Reset Memory", "command": "/reset"}])
-                continue
-            if spec.panel_button:
-                buttons.append([{"label": spec.name, "command": f"/{spec.name}"}])
-        return {
-            "text": control_plane.render_panel_text(),
-            "buttons": buttons,
-        }
 
     async def _handle_compact_memory_async(self, action: ControlAction) -> None:
         if action.route is None:
