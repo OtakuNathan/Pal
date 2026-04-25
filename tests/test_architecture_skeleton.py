@@ -2323,9 +2323,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertIn("Source-of-truth preference", fragment.content)
         self.assertIn("No success claim without confirmation", fragment.content)
+        self.assertIn("Advisor gate", fragment.content)
         self.assertNotIn("op_l3_recall_query", fragment.content)
         self.assertNotIn("op_l3_commit_write", fragment.content)
-        self.assertNotIn("op_behavior_advise", fragment.content)
 
     def test_memory_service_compact_uses_semantic_summary_and_projects_to_l2(self) -> None:
         service = MemoryService()

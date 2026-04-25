@@ -27,7 +27,7 @@ from pal.core.turns import (
 )
 from pal.failure import FailureSignal
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolResult, LLMPreflightRequest
-from pal.memory.contracts import MemoryCommitRequest, MemoryCompactRequest, MemoryPackRequest
+from pal.memory.contracts import L2Entry, MemoryCommitRequest, MemoryCompactRequest, MemoryPackRequest
 from pal.shared import GuardAction, LLMFinishReason, LLMPreflightStatus, LLMResponseMode, LLMStreamEventKind, RuntimeStatus
 from pal.shared.payloads import extract_text_from_payload
 from pal.stream_events import NormalizedLLMStreamEvent
@@ -317,6 +317,7 @@ class TurnExecutor:
                 structured=tool_result.structured,
             )
         )
+        await self._project_behavior_advice_result_async(execution_call.name, tool_result)
         record = ToolExecutionRecord(
             turn_id=continuation.turn_id,
             sequence=continuation.tool_batch_count,
@@ -338,6 +339,137 @@ class TurnExecutor:
             payload=tool_result,
             text=tool_result.text,
         )
+
+    async def _project_behavior_advice_result_async(self, tool_name: str, tool_result: CanonicalToolResult) -> None:
+        if not self._is_behavior_advise_tool_call(tool_name):
+            return
+        if not tool_result.ok:
+            return
+        entries = self._behavior_advice_l2_entries(tool_result)
+        if not entries:
+            return
+        try:
+            memory_service = self.context.require_port("memory:memory")
+        except KeyError:
+            return
+        try:
+            await self._call_port_async(
+                memory_service,
+                "aproject_l2_entries",
+                "project_l2_entries",
+                entries,
+                touch=True,
+                top_of_mind=True,
+            )
+        except Exception:
+            diagnostics = getattr(self.state, "diagnostics", None)
+            if isinstance(diagnostics, list):
+                diagnostics.append(
+                    {
+                        "kind": "memory.behavior_advice_projection_failed",
+                        "tool": tool_name,
+                    }
+                )
+
+    @staticmethod
+    def _behavior_advice_l2_entries(tool_result: CanonicalToolResult) -> list[L2Entry]:
+        structured = tool_result.structured if isinstance(tool_result.structured, dict) else {}
+        raw_candidates = structured.get("candidates") if isinstance(structured, dict) else None
+        if not isinstance(raw_candidates, list):
+            return []
+        entries: list[L2Entry] = []
+        for raw_candidate in raw_candidates:
+            if not isinstance(raw_candidate, dict):
+                continue
+            candidate = dict(raw_candidate)
+            affordance_id = str(candidate.get("affordance_id") or "").strip()
+            if not affordance_id:
+                continue
+            entry_id = f"behavior_advice:{affordance_id}"
+            title = str(candidate.get("title") or affordance_id).strip()
+            summary = str(candidate.get("prompt_hint") or candidate.get("reason") or title).strip()
+            rendered = TurnExecutor._render_behavior_guidance_entry(candidate)
+            entries.append(
+                L2Entry(
+                    entry_id=entry_id,
+                    kind="behavior_rule",
+                    scope="behavior",
+                    title=title,
+                    summary=summary,
+                    source_kind="behavior_advice",
+                    source_ref=affordance_id,
+                    candidate_state="active",
+                    rendered=rendered,
+                    search_text=TurnExecutor._behavior_candidate_search_text(candidate),
+                    canonical_key=entry_id,
+                    dedupe_fingerprint=entry_id,
+                    payload=candidate,
+                )
+            )
+        return entries
+
+    @staticmethod
+    def _is_behavior_advise_tool_call(name: str) -> bool:
+        normalized = str(name or "").strip()
+        return normalized == "op_behavior_advise" or normalized.endswith("_behavior_advise")
+
+    @staticmethod
+    def _render_behavior_guidance_entry(candidate: dict[str, Any]) -> str:
+        hint = str(candidate.get("prompt_hint") or "").strip()
+        reason = str(candidate.get("reason") or "").strip()
+        confidence = str(candidate.get("confidence") or "").strip()
+        availability = str(candidate.get("availability") or "").strip()
+        source_kind = str(candidate.get("source_kind") or "").strip()
+        activation_mode = str(candidate.get("activation_mode") or "").strip()
+        skill_refs = TurnExecutor._string_list(candidate.get("skill_refs"))
+        capability_refs = TurnExecutor._string_list(candidate.get("capability_refs"))
+        memory_query_hints = TurnExecutor._string_list(candidate.get("memory_query_hints"))
+
+        parts: list[str] = []
+        if hint:
+            parts.append(f"Hint: {hint}")
+        if reason:
+            parts.append(f"Reason: {reason}")
+        details = []
+        if confidence:
+            details.append(f"confidence={confidence}")
+        if availability:
+            details.append(f"availability={availability}")
+        if source_kind:
+            details.append(f"source={source_kind}")
+        if activation_mode:
+            details.append(f"activation={activation_mode}")
+        if details:
+            parts.append("Route metadata: " + ", ".join(details) + ".")
+        if skill_refs:
+            parts.append(f"Skill refs: {', '.join(skill_refs)}. Call `op_skill_inject` only if this route is selected.")
+        if capability_refs:
+            parts.append(f"Capability refs: {', '.join(capability_refs)}. Resolve current inventory before use.")
+        if memory_query_hints:
+            parts.append(f"Memory query hints: {', '.join(memory_query_hints)}. These are suggestions only; do not treat them as automatic recall.")
+        return " ".join(parts).strip()
+
+    @staticmethod
+    def _behavior_candidate_search_text(candidate: dict[str, Any]) -> str:
+        parts = [
+            str(candidate.get("title") or "").strip(),
+            str(candidate.get("prompt_hint") or "").strip(),
+            str(candidate.get("reason") or "").strip(),
+            " ".join(TurnExecutor._string_list(candidate.get("skill_refs"))),
+            " ".join(TurnExecutor._string_list(candidate.get("capability_refs"))),
+            " ".join(TurnExecutor._string_list(candidate.get("memory_query_hints"))),
+        ]
+        return "\n".join(part for part in parts if part).strip()
+
+    @staticmethod
+    def _string_list(value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value.strip()] if value.strip() else []
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return []
 
     @_dispatch_effect.register(MailboxReplyEffect)
     async def _handle_mailbox_reply(self, effect, continuation):

@@ -348,7 +348,7 @@ def _auto_affordances_from_handle(handle: Any, *, module_id: str) -> tuple[Affor
 
 
 def _tokenize(text: str) -> set[str]:
-    return {token for token in re.findall(r"[A-Za-z0-9_\-.]+", str(text).lower()) if token}
+    return {token for token in re.findall(r"[A-Za-z0-9_\-.]+|[一-鿿]+", str(text).lower()) if token}
 
 
 def _lexical_score(query_tokens: set[str], fields: Iterable[str]) -> float:

@@ -133,7 +133,10 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     )
                 )
 
-        hot_lines = _render_entry_lines(pack.l2_working_memory)
+        behavior_entries = [entry for entry in pack.l2_working_memory if _is_behavior_guidance_entry(entry)]
+        memory_entries = [entry for entry in pack.l2_working_memory if not _is_behavior_guidance_entry(entry)]
+
+        hot_lines = _render_entry_lines(memory_entries)
         if hot_lines:
             fragments.append(
                 PromptFragment(
@@ -142,6 +145,21 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     content="\n".join(hot_lines),
                     priority=56,
                     metadata={"block_id": "memory_working_memory"},
+                )
+            )
+        guidance_lines = _render_behavior_guidance_lines(behavior_entries)
+        if guidance_lines:
+            fragments.append(
+                PromptFragment(
+                    section="memory_system",
+                    title="Behavior Guidance",
+                    content=(
+                        "These are current-task behavior routing hints, not durable facts. "
+                        "Use them to choose workflow, skill injection, capability search, or optional recall.\n"
+                        + "\n".join(guidance_lines)
+                    ),
+                    priority=57,
+                    metadata={"block_id": "behavior_guidance"},
                 )
             )
         return fragments
@@ -188,6 +206,28 @@ def _render_entry_lines(entries) -> list[str]:
         label = entry.title.strip() or entry.entry_id
         lines.append(f"- {label}: {rendered}")
     return lines
+
+
+def _render_behavior_guidance_lines(entries) -> list[str]:
+    lines: list[str] = []
+    seen_keys: set[str] = set()
+    for entry in entries:
+        dedupe_key = _entry_render_dedupe_key(entry)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        rendered = entry.rendered.strip() or entry.summary.strip() or entry.title.strip()
+        if not rendered:
+            continue
+        label = entry.title.strip() or entry.entry_id
+        lines.append(f"- {label}: {rendered}")
+    return lines
+
+
+def _is_behavior_guidance_entry(entry) -> bool:
+    kind = str(getattr(entry, "kind", "") or "").strip()
+    source_kind = str(getattr(entry, "source_kind", "") or "").strip()
+    return kind == "behavior_rule" or source_kind == "behavior_advice"
 
 
 def _entry_render_dedupe_key(entry) -> str:

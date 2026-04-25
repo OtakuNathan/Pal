@@ -24,10 +24,11 @@ class BehaviorPromptFragmentProvider:
                     'Affordance submission records: "when this scenario appears again, what route should Pal consider?"\n\n'
                     "When Pal needs to act:\n"
                     "1. If the required capability is obvious, inspect/search capability inventory directly with `op_exec_disc_search`.\n"
-                    "2. If no suitable capability is found, or multiple behavior paths are possible, consult `op_behavior_advise`. Advice is for route selection, not execution.\n"
-                    "3. If advice returns a `skill_ref`, call `op_skill_inject` before executing that workflow. A skill is a playbook, not an executable action.\n"
-                    "4. If advice returns `capability_refs`, resolve them against current capability inventory before relying on them.\n"
-                    "5. Execute only through capability calls, respecting capability policy, approval, availability, and verification."
+                    "2. Advisor Gate: before starting a non-trivial task (research, coding, config changes, multi-step execution, or any task involving tools, external state, or user-specific procedure), check whether an applicable behavior rule already exists in prompt, hot memory, or conversation. If not, call `op_behavior_advise` before the first substantive action.\n"
+                    "3. Do not call advisor for casual conversation, simple one-shot answers, or when the correct workflow is already available.\n"
+                    "4. If advice returns a `skill_ref`, call `op_skill_inject` before executing that workflow. A skill is a playbook, not an executable action.\n"
+                    "5. If advice returns `capability_refs`, resolve them against current capability inventory before relying on them.\n"
+                    "6. Execute only through capability calls, respecting capability policy, approval, availability, and verification."
                 ),
                 priority=70,
                 metadata={"module_id": self.module_id, "kind": "behavior_routing"},

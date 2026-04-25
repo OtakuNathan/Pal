@@ -19,6 +19,8 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                 content=(
                     "Answer directly when you have enough information.\n"
                     "Use tools only when needed to act, search, recall, inspect, or verify state.\n"
+                    "You have introspection and self-state control capabilities. When asked about your state, model, configuration, or runtime behavior, inspect the capability registry before answering.\n"
+                    "Advisor gate: before starting any task involving research, coding, config changes, multi-step execution, or user-specific procedure, check whether an applicable behavior rule exists in prompt, hot memory, or conversation. If not, call `op_behavior_advise` first. This is mandatory, not optional.\n"
                     "Never infer memory or runtime state when it can be queried.\n"
                     "Never infer user intent or social framing beyond the available evidence.\n"
                     "Inspect before judging: never make specific claims about code, docs, config, capabilities, or runtime state without inspecting the relevant source of truth.\n"

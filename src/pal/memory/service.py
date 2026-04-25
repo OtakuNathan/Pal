@@ -301,6 +301,9 @@ class MemoryService(MemoryServicePort):
         return raw[:limit]
 
     def project_l3_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = True) -> None:
+        self.project_l2_entries(entries, touch=touch, top_of_mind=top_of_mind)
+
+    def project_l2_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = True) -> None:
         evicted = self.l2_store.upsert_entries(entries, touch=touch, top_of_mind=top_of_mind)
         self._retire_entries(evicted)
 
@@ -429,7 +432,7 @@ def _normalize_l2_entry(entry: L2Entry) -> L2Entry:
             payload=payload,
         )
 
-    if kind not in {"fact", "case"}:
+    if kind not in {"fact", "case", "behavior_rule"}:
         kind = "fact"
     rendered = rendered or _render_entry(kind=kind, title=title, summary=summary, payload=payload)
     search_text = search_text or _search_text_from_entry(kind=kind, title=title, summary=summary, payload=payload)
@@ -605,7 +608,7 @@ def _stable_entry_fingerprint(
 
 
 def _counts_against_l2_capacity(entry: L2Entry) -> bool:
-    return entry.kind in {"fact", "case"}
+    return entry.kind in {"fact", "case", "behavior_rule"}
 
 
 def _is_summary_entry(entry: L2Entry) -> bool:
@@ -617,6 +620,8 @@ def _is_summary_entry_by_id(entry_id: str) -> bool:
 
 
 def _should_retire_entry(entry: L2Entry) -> bool:
+    if entry.kind == "behavior_rule" or entry.source_kind == "behavior_advice":
+        return False
     if entry.kind not in {"fact", "case"}:
         return False
     if entry.candidate_state != "stable":

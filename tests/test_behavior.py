@@ -31,10 +31,14 @@ from pal.behavior import (
     skill,
 )
 from pal.behavior.prompt import BehaviorPromptFragmentProvider
+from pal.channel import ChannelEnvelope, ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityDescriptor
-from pal.foundation import PalV2Database
+from pal.foundation import EventEnvelope, PalV2Database
+from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
+from pal.memory import L2Entry, MemoryPack, MemoryService, register_with_core as register_memory_with_core
 from pal.memory.models import MemoryCaseModel
+from pal.memory.prompt import MemoryPromptFragmentProvider
 from pal.shared import MountedSubtreeHandle, PromptAssemblyContext
 
 
@@ -52,6 +56,22 @@ class _FakeExecutionRuntime:
 class _FakeHandle:
     module_id: str
     introspection_provider: object
+
+
+class _ScriptedLLMRuntime:
+    def __init__(self, outcomes: list[CanonicalLLMOutcome]) -> None:
+        self.outcomes = outcomes
+        self.requests = []
+
+    def preflight(self, request) -> LLMPreflightAdvice:
+        self.requests.append(("preflight", request))
+        return LLMPreflightAdvice(status="ready", active_model="stub-model", reserved_output_tokens=request.max_output_tokens)
+
+    def generate(self, request):
+        self.requests.append(("generate", request))
+        if self.outcomes:
+            return self.outcomes.pop(0)
+        return CanonicalLLMOutcome(text="done", tool_calls=[], finish_reason="stop")
 
 
 class BehaviorSubsystemTests(unittest.TestCase):
@@ -404,6 +424,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         content = "\n".join(fragment.content for fragment in fragments)
 
         self.assertIn("op_behavior_advise", content)
+        self.assertIn("Advisor Gate", content)
+        self.assertIn("Do not call advisor for casual conversation", content)
         self.assertIn("op_exec_disc_search", content)
         self.assertIn("op_skill_inject", content)
         self.assertIn("op_behavior_affordance_submit", content)
@@ -430,7 +452,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         )
 
         operating = system.split("## Behavior Routing", 1)[0]
-        self.assertNotIn("op_behavior_advise", operating)
+        self.assertIn("Advisor gate", operating)
+        self.assertIn("op_behavior_advise", operating)
         self.assertNotIn("op_l3_recall_query", operating)
         self.assertNotIn("op_l3_commit_write", operating)
         self.assertIn('Capability search answers: "what executable ability exists?"', system)
@@ -439,9 +462,134 @@ class BehaviorSubsystemTests(unittest.TestCase):
             'Affordance submission records: "when this scenario appears again, what route should Pal consider?"',
             system,
         )
+        self.assertIn("Do not call advisor for casual conversation", system)
         self.assertIn("If the user teaches a future behavior, submit an affordance.", system)
         self.assertIn("If the user teaches a stable fact, preference, or reusable experience, write memory.", system)
         self.assertIn("If both apply, ask for clarification or create separate records.", system)
+
+    def test_behavior_advice_tool_result_projects_to_behavior_guidance(self) -> None:
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="commit.guidance",
+                module_id="test",
+                title="Commit guidance",
+                scenario_text="commit code",
+                prompt_hint="Consider checking the commit workflow before changing git state.",
+                activation_terms=("commit", "code"),
+                skill_refs=("commit.skill",),
+                capability_refs=("cap.known",),
+                memory_query_hints=("commit preferences",),
+                activation_threshold=0.0,
+            )
+        )
+        self.repository.upsert_skill(
+            SkillDescriptor(
+                skill_id="commit.skill",
+                module_id="test",
+                title="Commit skill",
+                summary="Commit safely.",
+                manual_text="Review changes, then commit.",
+                capability_refs=("cap.known",),
+            )
+        )
+        core = PalCore()
+        register_core_with_core(core)
+        register_behavior_with_core(core.context, self.service)
+        register_channel_with_core(core.context, ChannelRuntime())
+        memory_service = MemoryService()
+        register_memory_with_core(core.context, memory_service)
+        scripted_llm = _ScriptedLLMRuntime(
+            [
+                CanonicalLLMOutcome(
+                    text="",
+                    tool_calls=[CanonicalToolCall(name="op_behavior_advise", args={"scenario": "commit code"})],
+                    finish_reason="tool_calls",
+                ),
+                CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop"),
+            ]
+        )
+        core.context.port_registry["llm:llm"] = scripted_llm
+
+        core.process_channel_turn(
+            ChannelEnvelope(
+                event=EventEnvelope(event_kind="user.message", source_kind="channel", payload={"text": "commit code"}),
+                endpoint=EndpointConfig(endpoint_id="stdio", channel_kind="stdio", binding_key="stdin"),
+                response_handle=ResponseHandle(endpoint_id="stdio"),
+            )
+        )
+
+        entry = memory_service.l2_store.get_entry("behavior_advice:commit.guidance")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.kind, "behavior_rule")
+        self.assertEqual(entry.source_kind, "behavior_advice")
+        self.assertEqual(entry.candidate_state, "active")
+        self.assertIn("op_skill_inject", entry.rendered)
+        self.assertIn("commit preferences", entry.rendered)
+
+        generate_requests = [request for kind, request in scripted_llm.requests if kind == "generate"]
+        self.assertGreaterEqual(len(generate_requests), 2)
+        followup_system = generate_requests[1].messages[0]["content"]
+        self.assertIn("## Behavior Guidance", followup_system)
+        self.assertIn("current-task behavior routing hints, not durable facts", followup_system)
+        self.assertIn("Commit guidance", followup_system)
+
+    def test_behavior_guidance_renders_separately_from_working_memory(self) -> None:
+        pack = MemoryPack(
+            l2_working_memory=[
+                L2Entry(
+                    entry_id="fact.timezone",
+                    kind="fact",
+                    scope="user",
+                    title="Timezone Preference",
+                    summary="User prefers Asia/Hong_Kong timezone.",
+                    source_kind="l3_recall",
+                    rendered="User prefers Asia/Hong_Kong timezone.",
+                ),
+                L2Entry(
+                    entry_id="behavior_advice:commit.guidance",
+                    kind="behavior_rule",
+                    scope="behavior",
+                    title="Commit guidance",
+                    summary="Consider checking the commit workflow.",
+                    source_kind="behavior_advice",
+                    rendered="Hint: Consider checking the commit workflow.",
+                ),
+            ]
+        )
+
+        fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext(metadata={"memory_pack": pack}))
+        by_title = {fragment.title: fragment.content for fragment in fragments}
+
+        self.assertIn("Working Memory", by_title)
+        self.assertIn("Behavior Guidance", by_title)
+        self.assertIn("Timezone Preference", by_title["Working Memory"])
+        self.assertNotIn("Commit guidance", by_title["Working Memory"])
+        self.assertIn("Commit guidance", by_title["Behavior Guidance"])
+        self.assertIn("not durable facts", by_title["Behavior Guidance"])
+        self.assertNotIn("[L3 summary; origin available]", by_title["Behavior Guidance"])
+
+    def test_behavior_guidance_l2_entries_do_not_retire_to_l3(self) -> None:
+        service = MemoryService()
+        service.l2_store.capacity = 0
+
+        service.project_l2_entries(
+            [
+                L2Entry(
+                    entry_id="behavior_advice:evict.me",
+                    kind="behavior_rule",
+                    scope="behavior",
+                    title="Evict me",
+                    summary="Temporary behavior guidance.",
+                    source_kind="behavior_advice",
+                    candidate_state="stable",
+                )
+            ],
+            touch=True,
+            top_of_mind=True,
+        )
+
+        self.assertIsNone(service.l2_store.get_entry("behavior_advice:evict.me"))
+        self.assertEqual(service.failed_retirements, [])
 
     def test_resident_affordances_are_dynamic_system_prompt_blocks(self) -> None:
         core = PalCore()
