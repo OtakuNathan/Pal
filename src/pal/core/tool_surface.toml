@@ -15,6 +15,8 @@ capabilities = [
     "op_behavior_advise",
     "op_behavior_affordance_submit",
     "op_skill_inject",
+    # -- channel output --
+    "op_channel_send_attachment",
     # -- web --
     "op_web_search_query",
     "op_web_fetch_read",

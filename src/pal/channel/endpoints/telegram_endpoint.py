@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import os
+from pathlib import Path
 import re
 import time
 from dataclasses import dataclass, field
@@ -14,7 +15,7 @@ from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import EndpointConfig, ResponseHandle
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec, InteractionResult
 from pal.foundation.artifact import ArtifactIngestor
-from pal.foundation import EventEnvelope
+from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import EventKind, SourceKind
 from pal.stream_events import NormalizedLLMStreamEvent
 
@@ -203,6 +204,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
         loop = asyncio.get_running_loop()
         loop.create_task(self._send_reply_async(response_handle, text))
+
+    def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
+        loop = asyncio.get_running_loop()
+        loop.create_task(self._send_attachment_async(response_handle, attachment))
 
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, Any]) -> None:
         loop = asyncio.get_running_loop()
@@ -663,6 +668,32 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 except Exception as exc:
                     self.last_delivery_error = str(exc)
                     break
+
+    async def _send_attachment_async(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
+        if self.application is None:
+            return
+        chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
+        thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
+        if chat_id is None:
+            return
+        path = Path(attachment.path).expanduser()
+        if not path.is_file():
+            self.last_delivery_error = f"attachment file not found: {path}"
+            return
+        kwargs: dict[str, Any] = {
+            "chat_id": chat_id,
+            "filename": attachment.file_name or path.name,
+        }
+        if attachment.caption:
+            kwargs["caption"] = attachment.caption
+        if thread_id is not None:
+            kwargs["message_thread_id"] = thread_id
+        try:
+            with path.open("rb") as file_obj:
+                await self.application.bot.send_document(document=file_obj, **kwargs)
+            self.last_delivery_error = ""
+        except Exception as exc:
+            self.last_delivery_error = str(exc)
 
     async def _send_control_message_async(
         self,

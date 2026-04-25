@@ -10,13 +10,14 @@ from pal.channel.contracts import (
     ChannelDeliveryError,
     ChannelEnvelope,
     EndpointConfig,
+    QueuedAttachment,
     QueuedReply,
     QueuedStatus,
     QueuedStreamEvent,
     ResponseHandle,
 )
 from pal.core.mailbox import Mailbox
-from pal.foundation import EventEnvelope
+from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import EventKind, SourceKind
 from pal.stream_events import NormalizedLLMStreamEvent
 
@@ -33,6 +34,7 @@ class ChannelEndpointQueueBase(ABC):
     pairing_metadata: dict[str, Any] = field(default_factory=dict)
     mailbox: Mailbox[ChannelEnvelope] = field(default_factory=Mailbox)
     outbox: deque[QueuedReply] = field(default_factory=deque)
+    attachment_outbox: deque[QueuedAttachment] = field(default_factory=deque)
     status_outbox: deque[QueuedStatus] = field(default_factory=deque)
     stream_outbox: deque[QueuedStreamEvent] = field(default_factory=deque)
     last_delivery_error: str = ""
@@ -61,6 +63,11 @@ class ChannelEndpointQueueBase(ABC):
         _ = response_handle
         _ = kind
         _ = payload
+
+    def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
+        _ = response_handle
+        _ = attachment
+        raise ChannelDeliveryError("endpoint does not support attachments", permanent=True)
 
     def send_stream_event(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
         session = self._stream_sessions.setdefault(
@@ -245,6 +252,23 @@ class ChannelEndpointQueueBase(ABC):
         )
         return status_id
 
+    def queue_attachment(
+        self,
+        attachment: AttachmentSpec,
+        *,
+        response_handle: ResponseHandle | None = None,
+    ) -> str:
+        attachment_id = str(uuid4())
+        self.attachment_outbox.append(
+            QueuedAttachment(
+                attachment_id=attachment_id,
+                response_handle=response_handle or self.build_response_handle(),
+                endpoint=self.endpoint,
+                attachment=attachment,
+            )
+        )
+        return attachment_id
+
     def has_pending(self) -> bool:
         return self.mailbox.has_pending()
 
@@ -256,6 +280,9 @@ class ChannelEndpointQueueBase(ABC):
 
     def has_queued_status(self) -> bool:
         return bool(self.status_outbox)
+
+    def has_queued_attachments(self) -> bool:
+        return bool(self.attachment_outbox)
 
     def poll(self) -> list[ChannelEnvelope]:
         return self.mailbox.drain()
@@ -374,11 +401,78 @@ class ChannelEndpointQueueBase(ABC):
             except Exception as exc:
                 self.last_delivery_error = str(exc)
 
+    def flush_attachment_outbox(self) -> list[EventEnvelope]:
+        if not self.attachment_outbox:
+            return []
+        pending = list(self.attachment_outbox)
+        self.attachment_outbox.clear()
+        emitted: list[EventEnvelope] = []
+        for item in pending:
+            if not self.attached or not self.enabled:
+                self.attachment_outbox.append(
+                    QueuedAttachment(
+                        attachment_id=item.attachment_id,
+                        response_handle=item.response_handle,
+                        endpoint=item.endpoint,
+                        attachment=item.attachment,
+                        attempts=item.attempts + 1,
+                    )
+                )
+                emitted.append(
+                    EventEnvelope(
+                        event_kind=EventKind.REPLY_FAILED,
+                        source_kind=SourceKind.CHANNEL,
+                        payload={
+                            "reply_id": item.attachment_id,
+                            "endpoint_id": self.endpoint.endpoint_id,
+                            "reason": "endpoint_unavailable",
+                        },
+                    )
+                )
+                continue
+            try:
+                self.send_attachment(item.response_handle, item.attachment)
+            except Exception as exc:
+                self.last_delivery_error = str(exc)
+                permanent = isinstance(exc, ChannelDeliveryError) and bool(getattr(exc, "permanent", False))
+                if not permanent:
+                    self.attachment_outbox.append(
+                        QueuedAttachment(
+                            attachment_id=item.attachment_id,
+                            response_handle=item.response_handle,
+                            endpoint=item.endpoint,
+                            attachment=item.attachment,
+                            attempts=item.attempts + 1,
+                        )
+                    )
+                emitted.append(
+                    EventEnvelope(
+                        event_kind=EventKind.REPLY_FAILED,
+                        source_kind=SourceKind.CHANNEL,
+                        payload={
+                            "reply_id": item.attachment_id,
+                            "endpoint_id": self.endpoint.endpoint_id,
+                            "reason": str(exc),
+                        },
+                    )
+                )
+                continue
+            self.last_delivery_error = ""
+            emitted.append(
+                EventEnvelope(
+                    event_kind=EventKind.REPLY_DELIVERED,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={"reply_id": item.attachment_id, "endpoint_id": self.endpoint.endpoint_id},
+                )
+            )
+        return emitted
+
     def inspect_backlog(self) -> dict[str, Any]:
         return {
             "endpoint_id": self.endpoint.endpoint_id,
             "inbox_size": len(self.mailbox.peek_all()),
             "outbox_size": len(self.outbox),
+            "attachment_outbox_size": len(self.attachment_outbox),
             "status_outbox_size": len(self.status_outbox),
         }
 

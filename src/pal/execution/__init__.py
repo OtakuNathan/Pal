@@ -15,6 +15,7 @@ __all__ = [
     "CapabilityCallable",
     "CapabilityDescriptor",
     "CapabilityResult",
+    "ChannelSendAttachmentTool",
     "ExecutionIntrospectionProvider",
     "ExecutionSnapshot",
     "ExecutionRuntime",
@@ -55,6 +56,10 @@ def __getattr__(name: str):
         from pal.execution.shell_exec import ShellExecTool
 
         return ShellExecTool
+    if name == "ChannelSendAttachmentTool":
+        from pal.execution.channel_attachment import ChannelSendAttachmentTool
+
+        return ChannelSendAttachmentTool
     if name in {"ToolSearchTool", "ToolReadTool", "inspect_tools"}:
         from pal.execution.tool_search import ToolReadTool, ToolSearchTool, inspect_tools
 

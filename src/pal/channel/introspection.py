@@ -172,6 +172,44 @@ class ChannelIntrospectionProvider:
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="module",
+        family="channel",
+        action_name="send_attachment",
+        description="Send a local file attachment back to the channel that started the current turn.",
+        aliases=("send.attachment", "channel.send_attachment"),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Local filesystem path to the file to send."},
+                "caption": {"type": "string", "description": "Optional caption to send with the attachment."},
+                "file_name": {"type": "string", "description": "Optional display filename."},
+                "mime_type": {"type": "string", "description": "Optional MIME type hint."},
+            },
+            "required": ["path"],
+        },
+        result_schema={
+            "type": "object",
+            "properties": {
+                "attachment_id": {"type": "string"},
+                "path": {"type": "string"},
+                "file_name": {"type": "string"},
+                "mime_type": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+        },
+        metadata={"llm_exposed": True},
+    )
+    def send_attachment(self, call: IntrospectionCall) -> IntrospectionResult:
+        _ = call
+        return IntrospectionResult(
+            status=RuntimeStatus.INVALID,
+            text="op_channel_send_attachment requires current async turn context",
+            structured={"reason": "async_required"},
+            llm_text="Use op_channel_send_attachment as a direct tool call during an active turn.",
+        )
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
         family="management",
         action_name="enable",
         description="Enable a channel endpoint",

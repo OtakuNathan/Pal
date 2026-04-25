@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from pal.foundation import EventEnvelope
+from pal.foundation.attachment import AttachmentSpec
 from pal.stream_events import NormalizedLLMStreamEvent
 
 
@@ -56,6 +57,15 @@ class QueuedStatus:
     attempts: int = 0
 
 
+@dataclass(frozen=True)
+class QueuedAttachment:
+    attachment_id: str
+    response_handle: ResponseHandle
+    endpoint: EndpointConfig
+    attachment: AttachmentSpec
+    attempts: int = 0
+
+
 class ChannelDeliveryError(RuntimeError):
     def __init__(self, message: str, *, permanent: bool = False) -> None:
         super().__init__(message)
@@ -88,6 +98,9 @@ class ChannelRuntimePort(Protocol):
         ...
 
     def queue_status(self, envelope: ChannelEnvelope, kind: str, *, payload: dict[str, Any] | None = None) -> str:
+        ...
+
+    def queue_attachment(self, envelope: ChannelEnvelope, attachment: AttachmentSpec) -> str:
         ...
 
     def queue_endpoint_status(

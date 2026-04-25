@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.runtime import ExecutionRuntime
+from pal.execution.channel_attachment import ChannelSendAttachmentTool
 from pal.execution.shell_exec import ShellExecCapabilityMixin, ShellExecTool
 from pal.execution.tool_search import (
     ExecutionDiscoveryCapabilityMixin,
@@ -91,6 +92,7 @@ def register_with_core(context: MainContext, runtime: ExecutionRuntime | None = 
     resolved_runtime.register_tool(ShellExecTool())
     resolved_runtime.register_tool(ToolSearchTool(runtime=resolved_runtime))
     resolved_runtime.register_tool(ToolReadTool(runtime=resolved_runtime))
+    resolved_runtime.register_tool(ChannelSendAttachmentTool())
     provider = ExecutionIntrospectionProvider(runtime=resolved_runtime)
     handle = ModuleHandle(
         module_id="execution",

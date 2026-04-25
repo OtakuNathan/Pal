@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import inspect
 from collections import deque
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -26,7 +27,8 @@ from pal.core.turn_executor import TurnExecutor
 from pal.core.turns import EffectRequest, EffectResult, TurnContinuation, TurnOutcome, L1CommitPayload, channel_turn_program, service_turn_program
 from pal.core.module_registry import ModuleHandle
 from pal.execution import CapabilityCall
-from pal.foundation import EventEnvelope, utc_now
+from pal.execution.contracts import CapabilityResult
+from pal.foundation import AttachmentSpec, EventEnvelope, utc_now
 from pal.failure import FailureSignal, FailureUserFeedback
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
 from pal.service import ServiceDefinition, ServiceTriggerEvent, build_service_trigger_input
@@ -273,6 +275,14 @@ EventLoop = MainLoop
 
 
 @dataclass
+class CoreTurnIOPort:
+    core: "PalCore"
+
+    async def send_attachment_for_turn(self, turn_id: str | None, attachment: AttachmentSpec) -> CapabilityResult:
+        return await self.core.send_attachment_for_turn(turn_id, attachment)
+
+
+@dataclass
 class PalCore:
     context: MainContext = field(default_factory=MainContext)
     state: CoreRuntimeState = field(default_factory=CoreRuntimeState)
@@ -318,8 +328,7 @@ class PalCore:
             should_enter_failure_flow_for_tool_result=self._should_enter_failure_flow_for_tool_result,
             config=self.config,
         )
-
-    @property
+        self.context.execution_runtime.register_provider_ref("core:turn_io", CoreTurnIOPort(core=self))
     def event_loop(self) -> MainLoop:
         return self.main_loop
 
@@ -337,6 +346,63 @@ class PalCore:
 
     async def run_until_idle_async(self, *, max_iterations: int = 64) -> list[EventEnvelope]:
         return await self.main_loop.run_until_idle_async(self.context, self.state, max_iterations=max_iterations)
+
+    async def send_attachment_for_turn(self, turn_id: str | None, attachment: AttachmentSpec) -> CapabilityResult:
+        normalized_turn_id = str(turn_id or "").strip()
+        if not normalized_turn_id:
+            return CapabilityResult(
+                status=RuntimeStatus.INVALID,
+                text="turn_id is required",
+                llm_text="Could not send attachment: turn_id is required.",
+                structured={"reason": "turn_id_required"},
+            )
+        continuation = self.state.active_turns.get(normalized_turn_id)
+        if not isinstance(continuation, TurnContinuation):
+            return CapabilityResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="active turn not found",
+                llm_text="Could not send attachment: active turn not found.",
+                structured={"reason": "turn_not_active", "turn_id": normalized_turn_id},
+            )
+        path = Path(attachment.path).expanduser()
+        if not path.is_file():
+            return CapabilityResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text=f"attachment file not found: {path}",
+                llm_text=f"Could not send attachment: file not found at {path}.",
+                structured={"reason": "file_not_found", "path": str(path)},
+            )
+        try:
+            resolved = path.resolve()
+        except Exception:
+            resolved = path
+        channel_runtime = self.context.port_registry.get("channel:channel")
+        queue_attachment = getattr(channel_runtime, "queue_attachment", None)
+        if not callable(queue_attachment):
+            return CapabilityResult(
+                status=RuntimeStatus.UNSUPPORTED,
+                text="channel runtime does not support attachments",
+                llm_text="Could not send attachment: channel runtime does not support attachments.",
+                structured={"reason": "attachment_not_supported"},
+            )
+        normalized = AttachmentSpec(
+            path=str(resolved),
+            caption=str(attachment.caption or ""),
+            file_name=str(attachment.file_name or resolved.name),
+            mime_type=str(attachment.mime_type or ""),
+        )
+        attachment_id = queue_attachment(continuation.channel_envelope, normalized)
+        return CapabilityResult(
+            status=RuntimeStatus.OK,
+            text=f"queued attachment: {normalized.file_name}",
+            llm_text=f"Queued attachment for delivery: {normalized.file_name}.",
+            structured={
+                "attachment_id": attachment_id,
+                "path": normalized.path,
+                "file_name": normalized.file_name,
+                "mime_type": normalized.mime_type,
+            },
+        )
 
     async def schedule_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
         control_scope_key = derive_control_scope_key(

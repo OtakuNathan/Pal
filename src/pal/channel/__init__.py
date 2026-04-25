@@ -4,6 +4,7 @@ from pal.channel.contracts import (
     ChannelNormalizer,
     ChannelRuntimePort,
     EndpointConfig,
+    QueuedAttachment,
     QueuedReply,
     QueuedStatus,
     ResponseHandle,
@@ -15,6 +16,7 @@ from pal.channel.factory import (
     build_default_factory_registry,
 )
 from pal.foundation.artifact import ArtifactIngestor, StoredArtifact
+from pal.foundation.attachment import AttachmentSpec
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase, ChannelEndpointQueueBase
 from pal.channel.introspection import ChannelIntrospectionProvider, ChannelSnapshot, inspect_channel, register_with_core
 from pal.channel.models import ChannelEndpointModel
@@ -41,6 +43,8 @@ __all__ = [
     "ChannelSnapshot",
     "EndpointConfig",
     "ArtifactIngestor",
+    "AttachmentSpec",
+    "QueuedAttachment",
     "QueuedReply",
     "QueuedStatus",
     "ResponseHandle",

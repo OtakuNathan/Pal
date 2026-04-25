@@ -4,10 +4,10 @@ from collections import deque
 from dataclasses import dataclass, field
 from uuid import uuid4
 
-from pal.channel.contracts import ChannelAdapter, ChannelEnvelope, ChannelRuntimePort, QueuedReply, QueuedStatus, QueuedStreamEvent
+from pal.channel.contracts import ChannelAdapter, ChannelEnvelope, ChannelRuntimePort, QueuedAttachment, QueuedReply, QueuedStatus, QueuedStreamEvent
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase
 from pal.core.mailbox import Mailbox
-from pal.foundation import EventEnvelope
+from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import EventKind, SourceKind
 from pal.stream_events import NormalizedLLMStreamEvent
 
@@ -46,6 +46,7 @@ class ChannelRuntime(ChannelRuntimePort):
     endpoint_registry: ChannelEndpointRegistry = field(default_factory=ChannelEndpointRegistry)
     mailbox: Mailbox[EventEnvelope] = field(default_factory=Mailbox)
     outbox: deque[QueuedReply] = field(default_factory=deque)
+    attachment_outbox: deque[QueuedAttachment] = field(default_factory=deque)
     status_outbox: deque[QueuedStatus] = field(default_factory=deque)
     stream_outbox: deque[QueuedStreamEvent] = field(default_factory=deque)
 
@@ -106,6 +107,8 @@ class ChannelRuntime(ChannelRuntimePort):
             for envelope in endpoint.poll():
                 self.emit(envelope)
             endpoint.flush_status_outbox()
+            for event in endpoint.flush_attachment_outbox():
+                self.mailbox.put(event)
             for event in endpoint.flush_stream_outbox():
                 self.mailbox.put(event)
             for event in endpoint.flush_outbox():
@@ -158,6 +161,21 @@ class ChannelRuntime(ChannelRuntimePort):
             )
         )
         return event_id
+
+    def queue_attachment(self, envelope: ChannelEnvelope, attachment: AttachmentSpec) -> str:
+        endpoint = self.get_endpoint(envelope.endpoint.endpoint_id)
+        if endpoint is not None:
+            return endpoint.queue_attachment(attachment, response_handle=envelope.response_handle)
+        attachment_id = str(uuid4())
+        self.attachment_outbox.append(
+            QueuedAttachment(
+                attachment_id=attachment_id,
+                response_handle=envelope.response_handle,
+                endpoint=envelope.endpoint,
+                attachment=attachment,
+            )
+        )
+        return attachment_id
 
     def abort_stream(self, response_handle, *, reason: str = "interrupted") -> None:
         for endpoint in self.list_endpoints():
@@ -226,6 +244,21 @@ class ChannelRuntime(ChannelRuntimePort):
             self.stream_outbox.clear()
         if self.status_outbox:
             self.status_outbox.clear()
+        if self.attachment_outbox:
+            pending_attachments = list(self.attachment_outbox)
+            self.attachment_outbox.clear()
+            for item in pending_attachments:
+                self.mailbox.put(
+                    EventEnvelope(
+                        event_kind=EventKind.REPLY_FAILED,
+                        source_kind=SourceKind.CHANNEL,
+                        payload={
+                            "reply_id": item.attachment_id,
+                            "endpoint_id": item.endpoint.endpoint_id,
+                            "reason": "endpoint_unavailable",
+                        },
+                    )
+                )
         if not self.outbox:
             return
         pending = list(self.outbox)

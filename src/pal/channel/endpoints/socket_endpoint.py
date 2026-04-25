@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelDeliveryError, EndpointConfig, ResponseHandle
+from pal.foundation import AttachmentSpec
 from pal.channel.endpoints.socket_protocol import (
     DEFAULT_SOCKET_FILENAME,
     pack_socket_message,
@@ -184,6 +185,20 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         session = self._require_session(response_handle)
         super().send_stream_event(response_handle, event)
         session.outbound.put_nowait(_stream_payload(response_handle, event))
+
+    def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
+        session = self._require_session(response_handle)
+        request_id = str(response_handle.reply_target.get("request_id") or "")
+        session.outbound.put_nowait(
+            {
+                "type": "attachment",
+                "request_id": request_id,
+                "path": attachment.path,
+                "file_name": attachment.file_name,
+                "caption": attachment.caption,
+                "mime_type": attachment.mime_type,
+            }
+        )
 
     def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
         super().abort_stream(response_handle, reason=reason)

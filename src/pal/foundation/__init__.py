@@ -1,4 +1,5 @@
 from pal.foundation.artifact import ArtifactIngestor, StoredArtifact
+from pal.foundation.attachment import AttachmentSpec
 from pal.foundation.io import EventEnvelope
 from pal.foundation.persistence import (
     BaseModel,
@@ -10,6 +11,7 @@ from pal.foundation.persistence import (
 
 __all__ = [
     "ArtifactIngestor",
+    "AttachmentSpec",
     "BaseModel",
     "EventEnvelope",
     "PalV2Database",
