@@ -188,6 +188,7 @@ class LiteLLMEndpointInvoker:
     """Unified invoker using LiteLLM, with stub:// endpoints kept local."""
 
     credentials: LiteLLMCredentialResolver = field(default_factory=LiteLLMCredentialResolver)
+    artifact_manager: Any = None
 
     def invoke(
         self,
@@ -285,7 +286,12 @@ class LiteLLMEndpointInvoker:
         tool_name_aliases = _build_tool_name_aliases(request.tools)
         kwargs: dict[str, Any] = {
             "model": _litellm_model(endpoint.model_id, endpoint.api_mode),
-            "messages": _coerce_messages_for_litellm(list(request.messages), tool_name_aliases=tool_name_aliases),
+            "messages": _coerce_messages_for_litellm(
+                list(request.messages),
+                tool_name_aliases=tool_name_aliases,
+                artifact_manager=self.artifact_manager,
+                supports_vision=bool(endpoint.supports_vision),
+            ),
             "timeout": 120,
         }
         if endpoint.base_url and not str(endpoint.base_url).startswith("stub://"):
@@ -410,12 +416,18 @@ class LLMRuntime(LLMRuntimePort):
                 "model_id": None,
                 "context_window": None,
                 "max_output_tokens": None,
+                "supports_vision": False,
+                "input_modalities": [],
+                "capabilities": {},
             }
         return {
             "endpoint_id": endpoint.endpoint_id,
             "model_id": endpoint.model_id,
             "context_window": endpoint.context_window,
             "max_output_tokens": endpoint.max_output_tokens,
+            "supports_vision": bool(endpoint.supports_vision),
+            "input_modalities": list(endpoint.input_modalities_blob or []),
+            "capabilities": dict(endpoint.capabilities_blob or {}),
         }
 
     def resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None) -> int | None:
@@ -970,10 +982,19 @@ def _coerce_messages_for_litellm(
     messages: list[dict[str, Any]],
     *,
     tool_name_aliases: dict[str, str] | None = None,
+    artifact_manager: Any = None,
+    supports_vision: bool = False,
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for message in messages:
         payload = dict(message)
+        content = payload.get("content")
+        if isinstance(content, list):
+            payload["content"] = _coerce_content_parts_for_litellm(
+                content,
+                artifact_manager=artifact_manager,
+                supports_vision=supports_vision,
+            )
         tool_calls = list(payload.get("tool_calls") or [])
         if tool_calls:
             coerced_calls: list[dict[str, Any]] = []
@@ -990,6 +1011,32 @@ def _coerce_messages_for_litellm(
             payload["tool_calls"] = coerced_calls
         normalized.append(payload)
     return normalized
+
+
+def _coerce_content_parts_for_litellm(
+    content: list[Any],
+    *,
+    artifact_manager: Any = None,
+    supports_vision: bool = False,
+) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        part_type = str(item.get("type") or "").strip()
+        if part_type == "artifact_image":
+            if not supports_vision or artifact_manager is None:
+                continue
+            to_data_url = getattr(artifact_manager, "to_data_url", None)
+            if not callable(to_data_url):
+                continue
+            data_url = to_data_url(str(item.get("representation_id") or ""))
+            if not data_url:
+                continue
+            parts.append({"type": "image_url", "image_url": {"url": data_url}})
+            continue
+        parts.append(dict(item))
+    return parts
 
 
 def _message_text(message: dict[str, Any]) -> str:

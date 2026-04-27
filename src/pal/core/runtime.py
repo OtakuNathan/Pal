@@ -303,6 +303,9 @@ class CoreTurnIOPort:
     async def send_attachment_for_turn(self, turn_id: str | None, attachment: AttachmentSpec) -> CapabilityResult:
         return await self.core.send_attachment_for_turn(turn_id, attachment)
 
+    def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:
+        return self.core.artifact_scope_for_turn(turn_id)
+
 
 @dataclass
 class PalCore:
@@ -489,6 +492,7 @@ class PalCore:
 
     async def schedule_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
         control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
+        channel_envelope = await self._prepare_channel_artifacts_async(channel_envelope, control_scope_key)
         scope_state = self._ensure_scope_state(control_scope_key)
         turn_id = channel_envelope.event.event_id
         should_reject = False
@@ -740,6 +744,72 @@ class PalCore:
         if await self._resolve_interaction_action_async(action, message):
             return
         await self._reply_to_route_async(action.route, message)
+
+    def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return None
+        continuation = self.state.active_turns.get(normalized)
+        if isinstance(continuation, TurnContinuation):
+            return continuation.control_scope_key
+        return self.state.turn_scopes.get(normalized)
+
+    async def _prepare_channel_artifacts_async(
+        self,
+        channel_envelope: ChannelEnvelope,
+        control_scope_key: str,
+    ) -> ChannelEnvelope:
+        payload = channel_envelope.event.payload
+        if not isinstance(payload, dict):
+            return channel_envelope
+        attachments = payload.get("attachments")
+        if not isinstance(attachments, list) or not attachments:
+            return channel_envelope
+        artifact_manager = self.context.port_registry.get("artifact:artifact")
+        register_ingested = getattr(artifact_manager, "register_ingested", None)
+        if not callable(register_ingested):
+            return channel_envelope
+        refs: list[dict[str, Any]] = []
+        for item in attachments:
+            try:
+                ref = register_ingested(
+                    item,
+                    scope_key=control_scope_key,
+                    turn_id=channel_envelope.event.event_id,
+                    source_channel=channel_envelope.endpoint.channel_kind,
+                    metadata={
+                        "source_text": str(payload.get("text") or ""),
+                        "caption": str(payload.get("caption") or payload.get("text") or ""),
+                        "endpoint_id": channel_envelope.endpoint.endpoint_id,
+                    },
+                )
+            except Exception as exc:
+                self.state.diagnostics.append(
+                    {
+                        "kind": "artifact.register.failed",
+                        "turn_id": channel_envelope.event.event_id,
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    }
+                )
+                continue
+            refs.append(ref.to_dict() if hasattr(ref, "to_dict") else dict(ref))
+        if not refs:
+            return channel_envelope
+        new_payload = dict(payload)
+        new_payload.pop("attachments", None)
+        new_payload["artifact_refs"] = refs
+        return ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind=channel_envelope.event.event_kind,
+                source_kind=channel_envelope.event.source_kind,
+                payload=new_payload,
+                correlation_id=channel_envelope.event.correlation_id,
+                created_at=channel_envelope.event.created_at,
+                event_id=channel_envelope.event.event_id,
+            ),
+            endpoint=channel_envelope.endpoint,
+            response_handle=channel_envelope.response_handle,
+        )
 
     async def _handle_show_log_async(self, action: ControlAction) -> None:
         enabled = bool(self.state.prompt_log_enabled)

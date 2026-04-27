@@ -89,6 +89,19 @@ class PromptCompiler:
                         },
                     )
                 )
+            elif normalized_section == "artifact":
+                user_context_blocks.append(
+                    PromptIRBlock(
+                        block_id=str(fragment.metadata.get("block_id") or "available_artifacts"),
+                        title=str(fragment.title or "Available Artifacts"),
+                        content=rendered_body,
+                        metadata={
+                            **dict(fragment.metadata),
+                            "source_section": fragment.section,
+                            "source_title": fragment.title,
+                        },
+                    )
+                )
             elif normalized_section == "memory_system":
                 system_blocks.append(
                     PromptIRBlock(
@@ -229,6 +242,7 @@ class PromptCompiler:
             "identity",
             "memory",
             "memory_system",
+            "artifact",
             "runtime",
             "rules",
             "behavior_routing",
@@ -321,6 +335,17 @@ class PromptCompiler:
 
     def _render_user_context_message(self, block: PromptIRBlock) -> dict[str, Any]:
         rendered = block.content.strip()
+        content_parts = list(block.metadata.get("content_parts") or [])
+        if content_parts:
+            message_parts: list[dict[str, Any]] = []
+            if rendered:
+                message_parts.append({"type": "text", "text": f"<system-reminder>{block.title}:\n{rendered}</system-reminder>"})
+            else:
+                message_parts.append({"type": "text", "text": f"<system-reminder>{block.title}: attached artifact content is included.</system-reminder>"})
+            for part in content_parts:
+                if isinstance(part, dict):
+                    message_parts.append(dict(part))
+            return {"role": "user", "content": message_parts}
         if block.block_id.startswith("l1_recent_context"):
             role = str(block.metadata.get("role") or "user")
             tool_calls = block.metadata.get("tool_calls")

@@ -572,6 +572,9 @@ class TurnExecutor:
         if snapshot_think_level:
             metadata["think_level"] = snapshot_think_level
         metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
+        metadata["artifact_scope_key"] = continuation.control_scope_key
+        metadata["artifact_turn_id"] = continuation.turn_id
+        metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
         if assembly_context.turn_kind != "failure":
             try:
                 memory_service = self.context.require_port("memory:memory")
@@ -614,6 +617,9 @@ class TurnExecutor:
         if snapshot_think_level:
             metadata["think_level"] = snapshot_think_level
         metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
+        metadata["artifact_scope_key"] = continuation.control_scope_key
+        metadata["artifact_turn_id"] = continuation.turn_id
+        metadata["llm_capabilities"] = self._resolve_llm_capabilities(continuation)
         metadata["prompt_budget_snapshot"] = self._build_prompt_budget_snapshot(
             assembly_context,
             base_messages=base_messages,
@@ -628,6 +634,29 @@ class TurnExecutor:
             metadata=metadata,
         )
         return prompt
+
+    def _resolve_llm_capabilities(self, continuation) -> dict[str, Any]:
+        llm_runtime = self.context.port_registry.get("llm:llm")
+        if llm_runtime is None:
+            return {}
+        resolver = getattr(llm_runtime, "resolve_endpoint_facts", None)
+        if not callable(resolver):
+            return {}
+        try:
+            facts = resolver(preferred_endpoint_id=continuation.preferred_llm_endpoint_id)
+        except TypeError:
+            facts = resolver()
+        except Exception:
+            return {}
+        if not isinstance(facts, dict):
+            return {}
+        return {
+            "endpoint_id": facts.get("endpoint_id"),
+            "model_id": facts.get("model_id"),
+            "supports_vision": bool(facts.get("supports_vision")),
+            "input_modalities": list(facts.get("input_modalities") or []),
+            "capabilities": dict(facts.get("capabilities") or {}),
+        }
 
     @staticmethod
     def _ensure_not_interrupted(continuation) -> None:

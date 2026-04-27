@@ -128,6 +128,22 @@ These tools are intentionally separate from capability discovery:
 
 See [pal_behavior_contract.md](pal_behavior_contract.md).
 
+## Artifact Tools
+
+The artifact subsystem adds conversation-attachment tools:
+
+- `op_artifact_list`: list hot artifacts visible to the current turn.
+- `op_artifact_info`: inspect one artifact by `artifact_id`.
+- `op_artifact_read`: read text-like representations.
+- `op_artifact_search`: find an artifact object by filename, kind, summary, or time hint.
+- `op_artifact_select`: refresh TTL after Pal chooses a search result.
+- `op_artifact_content_search`: search inside one known artifact.
+- `op_artifact_transcribe`: request transcript generation; V1 may return `needs_transcription`.
+
+These tools are separate from filesystem tools. Artifact tools accept `artifact_id` only and never expose local paths to the model.
+
+See [artifact_manager.md](artifact_manager.md).
+
 ## Invariants
 
 - `discovery_search` 和 `exec_run` 必须始终暴露，保证 LLM 能发现和执行任意能力。

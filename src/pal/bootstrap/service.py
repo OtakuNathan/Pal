@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pal.artifact import ArtifactManager, ArtifactRepository, register_with_core as register_artifact_with_core
 from pal.behavior import BehaviorRepository, BehaviorService, register_with_core as register_behavior_with_core
 from pal.bootstrap.contracts import RuntimeComposerPort
 from pal.channel import (
@@ -49,6 +50,7 @@ class StubRuntimeHandle:
     service_runner: ServiceRunner
     control_plane: ControlPlane
     behavior_service: BehaviorService
+    artifact_service: ArtifactManager
     failure_runtime: FailureRuntime
 
     async def stop_async(self) -> None:
@@ -85,6 +87,10 @@ def compose_runtime(
     config = RuntimeConfig.load(registration.runtime.runtime_root)
     core = PalCore(config=config)
     core.context.execution_runtime.runtime_root = registration.runtime.runtime_root
+    artifact_service = ArtifactManager(
+        runtime_root=registration.runtime.runtime_root,
+        repository=ArtifactRepository(),
+    )
     channel_runtime = ChannelRuntime()
     secrets_path = registration.runtime.runtime_root / "secrets.json"
     secret_store = EncryptedFileSecretStore(secrets_path=str(secrets_path))
@@ -92,7 +98,7 @@ def compose_runtime(
     llm_runtime = LLMRuntime(
         endpoint_resolver=EndpointResolver(repository=llm_repository),
         settings_repository=runtime_settings_repository,
-        endpoint_invoker=LiteLLMEndpointInvoker(credentials=credential_resolver),
+        endpoint_invoker=LiteLLMEndpointInvoker(credentials=credential_resolver, artifact_manager=artifact_service),
         config=config,
     )
     memory_service = MemoryService(
@@ -114,6 +120,7 @@ def compose_runtime(
 
     register_core_with_core(core)
     register_execution_with_core(core.context)
+    register_artifact_with_core(core.context, artifact_service)
     register_behavior_with_core(core.context, behavior_service)
     register_channel_with_core(core.context, channel_runtime)
     register_identity_with_core(core.context, identity_service)
@@ -134,7 +141,7 @@ def compose_runtime(
         service_manager.hydrate(stored.definition, next_due_at_utc=stored.next_due_at_utc)
     plugin_host.bootstrap()
 
-    for module_id in ("core", "execution", "behavior", "channel", "identity", "llm", "memory", "plugins", "service", "control", "failure"):
+    for module_id in ("core", "execution", "artifact", "behavior", "channel", "identity", "llm", "memory", "plugins", "service", "control", "failure"):
         core.publish_module_capabilities(module_id)
 
     return StubRuntimeHandle(
@@ -152,6 +159,7 @@ def compose_runtime(
         service_runner=service_runner,
         control_plane=control_plane,
         behavior_service=behavior_service,
+        artifact_service=artifact_service,
         failure_runtime=failure_runtime,
     )
 

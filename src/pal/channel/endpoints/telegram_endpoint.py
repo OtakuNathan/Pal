@@ -552,6 +552,16 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             )
             if item is not None:
                 attachments.append(item)
+        voice = getattr(message, "voice", None)
+        if voice is not None:
+            item = await self._download_telegram_file(
+                provider_file_id=str(getattr(voice, "file_id", "") or ""),
+                file_name=f"{str(getattr(voice, 'file_unique_id', '') or 'voice')}.ogg",
+                mime_type=getattr(voice, "mime_type", None) or "audio/ogg",
+                chat_id=chat_id,
+            )
+            if item is not None:
+                attachments.append(item)
         return attachments
 
     async def _download_telegram_file(
