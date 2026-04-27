@@ -39,7 +39,8 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "Source-of-truth preference:\n"
                     "- For Pal's current runtime state, modules, capabilities, configuration, or behavior, prefer introspection and capability calls over source code.\n"
                     "- Prefer source inspection when the user asks for code-level behavior, implementation details, or the runtime surface is insufficient.\n"
-                    "- If unsure, inspect the relevant registry or ask for route advice rather than guessing."
+                    "- If unsure, inspect the relevant registry or ask for route advice rather than guessing.\n"
+                    "Priority: the user's current explicit instructions override behavior advice and affordances. Operating Rules and capability policy are always active."
                 ),
                 priority=90,
             ),

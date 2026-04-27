@@ -1,9 +1,7 @@
-# supervisor
+# wizard
 
 Owns:
 - lifecycle registration and launch specs
-- pal process supervision boundary
-- external runtime hosting for Pal
 - runtime-root to database-file association
 - creation of the runtime database handle
 - first-run provisioning and initial defaults
@@ -15,15 +13,16 @@ Does not own:
 - memory
 - tool execution
 - normal chat handling
+- process supervision (handled by systemd)
 
 Exposes:
 - `RuntimeLaunchSpec`
 - `PalRegistration`
 - `ProvisionedRuntime`
-- `SupervisorService`
+- `WizardService`
 
 Boundary:
-- `supervisor` lives outside the Pal runtime
+- `wizard` lives outside the Pal runtime
 - it does not register with `PalCore`
 - it does not publish capabilities into `Execution`
 - it does not participate in the in-process `MainLoop`

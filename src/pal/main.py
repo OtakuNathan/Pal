@@ -18,14 +18,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pal")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    # -- setup (no --runtime-root; wizard asks for it) ----------------------
+    subparsers.add_parser("setup", help="Interactive setup wizard")
+
+    # -- run -----------------------------------------------------------------
     run_parser = subparsers.add_parser("run", help="Run the Pal runtime")
     run_parser.add_argument("--runtime-root", type=Path, required=True)
     run_parser.add_argument("--debug-prompt", action="store_true")
 
+    # -- client --------------------------------------------------------------
     client_parser = subparsers.add_parser("client", help="Send one message to a running Pal instance")
     client_parser.add_argument("--runtime-root", type=Path, required=True)
     client_parser.add_argument("--message", required=True)
 
+    # -- tool-call -----------------------------------------------------------
     tool_call_parser = subparsers.add_parser(
         "tool-call",
         help="Simulate one canonical tool call against the execution runtime",
@@ -34,6 +40,7 @@ def _build_parser() -> argparse.ArgumentParser:
     tool_call_parser.add_argument("--name", required=True)
     tool_call_parser.add_argument("--args", default="{}")
 
+    # -- cap-call ------------------------------------------------------------
     cap_call_parser = subparsers.add_parser(
         "cap-call",
         help="Invoke one capability directly against the execution runtime",
@@ -42,6 +49,7 @@ def _build_parser() -> argparse.ArgumentParser:
     cap_call_parser.add_argument("--name", required=True)
     cap_call_parser.add_argument("--args", default="{}")
 
+    # -- browser-service -----------------------------------------------------
     browser_service_parser = subparsers.add_parser(
         "browser-service",
         help="Run the internal Playwright fetch browser service",
@@ -52,6 +60,7 @@ def _build_parser() -> argparse.ArgumentParser:
     browser_service_parser.add_argument("--token", required=True)
     browser_service_parser.add_argument("--idle-timeout-seconds", type=int, default=60)
     browser_service_parser.add_argument("--max-concurrency", type=int, default=2)
+
     return parser
 
 
@@ -154,6 +163,12 @@ async def _run_async(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
+
+    # -- setup is synchronous, no asyncio ------------------------------------
+    if args.command == "setup":
+        from pal.wizard.cli import run_setup_wizard
+        return run_setup_wizard()
+
     if args.command == "browser-service":
         return run_browser_service_cli(
             runtime_root=args.runtime_root,

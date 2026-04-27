@@ -7,29 +7,29 @@ from pathlib import Path
 
 from pal.bootstrap import StubRuntimeHandle, compose_runtime
 from pal.channel import ChannelEndpointRepository
-from pal.supervisor.runtime import DEFAULT_DB_FILENAME, DEFAULT_PAL_ENTRYPOINT
-from pal.supervisor import PalRegistration, SupervisorService
+from pal.wizard.runtime import DEFAULT_DB_FILENAME, DEFAULT_PAL_ENTRYPOINT
+from pal.wizard import PalRegistration, WizardService
 
 
 def open_runtime(runtime_root: Path) -> StubRuntimeHandle:
-    supervisor = SupervisorService()
+    wizard = WizardService()
     db_path = runtime_root / DEFAULT_DB_FILENAME
     if db_path.exists():
-        registration = supervisor.provision_runtime(
+        registration = wizard.provision_runtime(
             display_name="PalV2",
             runtime_root=runtime_root,
             db_filename=DEFAULT_DB_FILENAME,
             pal_entrypoint=DEFAULT_PAL_ENTRYPOINT,
         )
-        database = supervisor.create_database(registration)
+        database = wizard.create_database(registration)
         if not ChannelEndpointRepository().list_all():
-            supervisor.seed_defaults(registration)
+            wizard.seed_defaults(registration)
     else:
-        provisioned = supervisor.provision_stub_runtime(runtime_root)
+        provisioned = wizard.provision_stub_runtime(runtime_root)
         registration = provisioned.registration
         database = provisioned.database
     return compose_runtime(
-        supervisor=supervisor,
+        wizard=wizard,
         registration=registration,
         database=database,
     )

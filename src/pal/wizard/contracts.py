@@ -27,7 +27,7 @@ class ProvisionedRuntime:
     database: "PalV2Database"
 
 
-class SupervisorServicePort(Protocol):
+class WizardServicePort(Protocol):
     def register(self, registration: PalRegistration) -> None:
         ...
 

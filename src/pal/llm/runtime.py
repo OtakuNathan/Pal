@@ -146,7 +146,7 @@ class EndpointResolver:
             self.endpoints = ()
             return
         # LLM endpoint topology is loaded once during bootstrap. Changes are
-        # picked up by restarting from supervisor-owned provisioning.
+        # picked up by restarting from wizard-owned provisioning.
         self.endpoints = tuple(self.repository.list_enabled())
 
     def primary(self, *, preferred_endpoint_id: str | None = None) -> LLMEndpointModel | None:

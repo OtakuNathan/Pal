@@ -30,12 +30,12 @@ from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.memory import L3ProviderSelector, MemoryService, register_with_core as register_memory_with_core
 from pal.plugins import PluginHost, register_with_core as register_plugins_with_core
 from pal.service import ServiceManager, ServiceRepository, ServiceRunner, register_with_core as register_service_with_core
-from pal.supervisor import PalRegistration, SupervisorService
+from pal.wizard import PalRegistration, WizardService
 
 
 @dataclass
 class StubRuntimeHandle:
-    supervisor: SupervisorService
+    wizard: WizardService
     registration: PalRegistration
     database: PalV2Database
     core: PalCore
@@ -71,12 +71,12 @@ class StubRuntimeHandle:
 
 def compose_runtime(
     *,
-    supervisor: SupervisorService,
+    wizard: WizardService,
     registration: PalRegistration,
     database: PalV2Database,
 ) -> StubRuntimeHandle:
     # Bootstrap only wires the in-process runtime graph. Any first-run
-    # provisioning and database-file ownership live in supervisor.
+    # provisioning and database-file ownership live in wizard.
     identity_service = IdentityService(repository=IdentityRepository())
     llm_repository = LLMEndpointRepository()
     runtime_settings_repository = RuntimeSettingRepository()
@@ -138,7 +138,7 @@ def compose_runtime(
         core.publish_module_capabilities(module_id)
 
     return StubRuntimeHandle(
-        supervisor=supervisor,
+        wizard=wizard,
         registration=registration,
         database=database,
         core=core,
@@ -161,12 +161,12 @@ class RuntimeComposer(RuntimeComposerPort):
     def compose_runtime(
         self,
         *,
-        supervisor: SupervisorService,
+        wizard: WizardService,
         registration: PalRegistration,
         database: PalV2Database,
     ) -> StubRuntimeHandle:
         return compose_runtime(
-            supervisor=supervisor,
+            wizard=wizard,
             registration=registration,
             database=database,
         )

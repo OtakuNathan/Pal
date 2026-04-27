@@ -58,7 +58,7 @@ from pal.service import ServiceDefinition, ServiceManager, ServiceTriggerEvent, 
 from pal.service.scheduling import compute_next_service_run_at_utc, utc_now_dt
 from pal.shared import LLMStreamEventKind, MinionProgressEvent, PromptAssemblyContext, SINGLETON_TARGET
 from pal.stream_events import NormalizedLLMStreamEvent
-from pal.supervisor import SupervisorService
+from pal.wizard import WizardService
 from pal.minion import TaskingService, register_with_core as register_tasking_with_core
 
 
@@ -276,14 +276,14 @@ class ScriptedLLMRuntime:
 class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def _create_database(self):
         runtime_root = Path(tempfile.mkdtemp(prefix="pal_architecture_test_"))
-        supervisor = SupervisorService()
-        registration = supervisor.provision_runtime(
+        wizard = WizardService()
+        registration = wizard.provision_runtime(
             display_name="PalV2 Architecture Test",
             runtime_root=runtime_root,
             db_filename="pal_test.sqlite3",
             pal_entrypoint="pal.runtime.test",
         )
-        database = supervisor.create_database(registration)
+        database = wizard.create_database(registration)
         return runtime_root, database
 
     def test_top_level_modules_import(self) -> None:
@@ -304,7 +304,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.web_fetch",
             "pal.minion",
             "pal.bootstrap",
-            "pal.supervisor",
+            "pal.wizard",
             "pal.minion",
             "pal.plugins",
         )
@@ -339,7 +339,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.failure": ("FailureIntrospectionProvider", "register_with_core"),
             "pal.plugins": ("PluginsIntrospectionProvider", "register_with_core"),
             "pal.bootstrap": ("inspect_bootstrap",),
-            "pal.supervisor": ("inspect_supervisor",),
+            "pal.wizard": ("inspect_wizard",),
             "pal.plugins.l3": ("register_with_core",),
             "pal.minion": ("inspect_minion", "inspect_tasking"),
         }
@@ -348,12 +348,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             for symbol in symbols:
                 self.assertTrue(hasattr(module, symbol), f"{module_name} missing {symbol}")
 
-    def test_supervisor_stays_outside_pal_core_registration_surface(self) -> None:
-        supervisor = importlib.import_module("pal.supervisor")
+    def test_wizard_stays_outside_pal_core_registration_surface(self) -> None:
+        wizard = importlib.import_module("pal.wizard")
         bootstrap = importlib.import_module("pal.bootstrap")
 
-        self.assertFalse(hasattr(supervisor, "register_with_core"))
-        self.assertFalse(hasattr(supervisor, "SupervisorIntrospectionProvider"))
+        self.assertFalse(hasattr(wizard, "register_with_core"))
+        self.assertFalse(hasattr(wizard, "WizardIntrospectionProvider"))
         self.assertFalse(hasattr(bootstrap, "register_with_core"))
         self.assertFalse(hasattr(bootstrap, "BootstrapIntrospectionProvider"))
 
@@ -1507,12 +1507,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
 
-    def test_supervisor_is_not_registered_or_governed_by_pal_core(self) -> None:
+    def test_wizard_is_not_registered_or_governed_by_pal_core(self) -> None:
         core = PalCore()
 
-        self.assertIsNone(core.context.module_registry.get("supervisor"))
+        self.assertIsNone(core.context.module_registry.get("wizard"))
         with self.assertRaises(KeyError):
-            core.detach_module("supervisor")
+            core.detach_module("wizard")
 
     def test_channel_outbox_emits_delivery_events_without_blocking_turn(self) -> None:
         core = PalCore()

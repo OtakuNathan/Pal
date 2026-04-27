@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,6 +23,7 @@ class PendingControlRequest:
 @dataclass
 class ControlScopeState:
     active_turn_id: str | None = None
+    pending_channel_turns: deque[Any] = field(default_factory=deque)
     pending_requests: dict[str, PendingControlRequest] = field(default_factory=dict)
     transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     interrupt_lock: asyncio.Lock = field(default_factory=asyncio.Lock)

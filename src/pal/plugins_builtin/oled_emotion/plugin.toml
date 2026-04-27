@@ -1,0 +1,4 @@
+plugin_id = "oled_emotion"
+entrypoint = "pal.plugins_builtin.oled_emotion.runtime"
+version = "0.1.0"
+enabled_by_default = true

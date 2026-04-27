@@ -61,8 +61,6 @@ class TurnManager:
             payload=channel_envelope.event.payload if isinstance(channel_envelope.event.payload, dict) else {},
         )
         scope_state = self._ensure_scope_state(control_scope_key)
-        scope_state.active_turn_id = turn_id
-        scope_state.drained_event.clear()
         continuation = TurnContinuation(
             turn_id=turn_id,
             channel_envelope=channel_envelope,
@@ -73,6 +71,7 @@ class TurnManager:
         )
         self.state.active_turns[turn_id] = continuation
         self.state.turn_scopes[turn_id] = control_scope_key
+        self._remember_active_turn(scope_state, turn_id)
         return continuation
 
     def _resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None) -> int:
@@ -112,7 +111,7 @@ class TurnManager:
     async def interrupt_by_scope(self, control_scope_key: str, *, reason: str = "interrupted") -> bool:
         scope_state = self._ensure_scope_state(control_scope_key)
         async with scope_state.interrupt_lock:
-            turn_id = scope_state.active_turn_id
+            turn_id = self.latest_active_turn_id(control_scope_key)
             if not turn_id:
                 return False
             in_flight = scope_state.interrupt_task
@@ -177,6 +176,26 @@ class TurnManager:
                     pass
             think_level = str(getattr(llm_runtime, "think_level", "") or "").strip() or None
         return {"think_level": think_level or "balanced"}
+
+    def latest_active_turn_id(self, control_scope_key: str) -> str | None:
+        scope_state = self._ensure_scope_state(control_scope_key)
+        turn_id = scope_state.active_turn_id
+        if turn_id and self._is_turn_live(turn_id):
+            scope_state.drained_event.clear()
+            return turn_id
+        scope_state.active_turn_id = None
+        scope_state.drained_event.set()
+        return None
+
+    def _remember_active_turn(self, scope_state, turn_id: str) -> None:
+        scope_state.active_turn_id = turn_id
+        scope_state.drained_event.clear()
+
+    def _is_turn_live(self, turn_id: str) -> bool:
+        task = self.state.turn_tasks.get(turn_id)
+        if task is not None and not task.done():
+            return True
+        return turn_id in self.state.active_turns
 
     def _ensure_scope_state(self, control_scope_key: str):
         scope_state = self.state.control_scopes.get(control_scope_key)
@@ -404,26 +423,85 @@ class PalCore:
             },
         )
 
-    async def schedule_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
-        control_scope_key = derive_control_scope_key(
+    def _derive_channel_control_scope_key(self, channel_envelope: ChannelEnvelope) -> str:
+        return derive_control_scope_key(
             endpoint_id=channel_envelope.endpoint.endpoint_id,
             channel_kind=channel_envelope.endpoint.channel_kind,
             reply_target=channel_envelope.response_handle.reply_target,
             payload=channel_envelope.event.payload if isinstance(channel_envelope.event.payload, dict) else {},
         )
+
+    def _turn_task_running(self, turn_id: str) -> bool:
+        task = self.state.turn_tasks.get(turn_id)
+        return task is not None and not task.done()
+
+    def _channel_turn_is_pending(self, scope_state, turn_id: str) -> bool:
+        return any(
+            getattr(getattr(envelope, "event", None), "event_id", None) == turn_id
+            for envelope in scope_state.pending_channel_turns
+        )
+
+    def _queue_channel_status(self, channel_envelope: ChannelEnvelope, kind: str, payload: dict[str, Any] | None = None) -> None:
+        channel_runtime = self.context.port_registry.get("channel:channel")
+        if channel_runtime is not None:
+            channel_runtime.queue_status(channel_envelope, kind, payload=dict(payload or {}))
+
+    def _start_channel_turn_task_locked(
+        self,
+        channel_envelope: ChannelEnvelope,
+        control_scope_key: str,
+        scope_state,
+        *,
+        emit_typing_start: bool = False,
+    ) -> asyncio.Task[Any]:
+        turn_id = channel_envelope.event.event_id
+        if emit_typing_start:
+            self._queue_channel_status(channel_envelope, "typing_start")
+        scope_state.active_turn_id = turn_id
+        scope_state.drained_event.clear()
+        self.state.turn_scopes[turn_id] = control_scope_key
+        task = asyncio.create_task(self._background_channel_turn_runner_async(channel_envelope))
+        self.state.turn_tasks[turn_id] = task
+        task.add_done_callback(lambda finished, current_turn_id=turn_id: self._on_turn_task_done(current_turn_id, finished))
+        return task
+
+    async def _start_next_queued_turn_async(self, control_scope_key: str) -> None:
+        scope_state = self._ensure_scope_state(control_scope_key)
+        async with scope_state.transition_lock:
+            if scope_state.quiescing:
+                return
+            if self.turn_manager.latest_active_turn_id(control_scope_key) is not None:
+                return
+            while scope_state.pending_channel_turns:
+                next_envelope = scope_state.pending_channel_turns.popleft()
+                next_turn_id = next_envelope.event.event_id
+                if self._turn_task_running(next_turn_id):
+                    continue
+                self._start_channel_turn_task_locked(
+                    next_envelope,
+                    control_scope_key,
+                    scope_state,
+                    emit_typing_start=True,
+                )
+                return
+
+    async def schedule_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
+        control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
         scope_state = self._ensure_scope_state(control_scope_key)
         turn_id = channel_envelope.event.event_id
         should_reject = False
         should_stop_only = False
-        task: asyncio.Task[Any] | None = None
+        should_queue = False
         async with scope_state.transition_lock:
             if scope_state.quiescing:
                 should_reject = True
-            elif turn_id in self.state.turn_tasks and not self.state.turn_tasks[turn_id].done():
+            elif self._turn_task_running(turn_id) or self._channel_turn_is_pending(scope_state, turn_id):
                 should_stop_only = True
+            elif self.turn_manager.latest_active_turn_id(control_scope_key) is not None:
+                scope_state.pending_channel_turns.append(channel_envelope)
+                should_queue = True
             else:
-                task = asyncio.create_task(self._background_channel_turn_runner_async(channel_envelope))
-                self.state.turn_tasks[turn_id] = task
+                self._start_channel_turn_task_locked(channel_envelope, control_scope_key, scope_state)
         if should_reject:
             await self._reply_to_route_async(
                 self._route_from_channel_envelope(channel_envelope),
@@ -435,26 +513,19 @@ class PalCore:
                 {},
             )
             return
-        if should_stop_only:
+        if should_stop_only or should_queue:
             await self._status_to_route_async(
                 self._route_from_channel_envelope(channel_envelope),
                 "working_stop",
                 {},
             )
             return
-        assert task is not None
-        task.add_done_callback(lambda finished, current_turn_id=turn_id: self._on_turn_task_done(current_turn_id, finished))
 
     def process_channel_turn(self, channel_envelope: ChannelEnvelope) -> TurnOutcome:
         return asyncio.run(self.process_channel_turn_async(channel_envelope))
 
     async def process_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> TurnOutcome:
-        control_scope_key = derive_control_scope_key(
-            endpoint_id=channel_envelope.endpoint.endpoint_id,
-            channel_kind=channel_envelope.endpoint.channel_kind,
-            reply_target=channel_envelope.response_handle.reply_target,
-            payload=channel_envelope.event.payload if isinstance(channel_envelope.event.payload, dict) else {},
-        )
+        control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
         scope_state = self._ensure_scope_state(control_scope_key)
         if scope_state.quiescing:
             raise RuntimeError("scope is quiescing")
@@ -509,6 +580,7 @@ class PalCore:
 
     async def _background_channel_turn_runner_async(self, channel_envelope: ChannelEnvelope) -> None:
         turn_id = channel_envelope.event.event_id
+        control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
         try:
             await self.process_channel_turn_async(channel_envelope)
         except asyncio.CancelledError:
@@ -523,12 +595,10 @@ class PalCore:
                 }
             )
         finally:
-            channel_runtime = self.context.port_registry.get("channel:channel")
-            if channel_runtime is not None:
-                channel_runtime.queue_status(
-                    channel_envelope,
-                    "working_stop",
-                )
+            if self.state.turn_scopes.get(turn_id) == control_scope_key and turn_id not in self.state.active_turns:
+                self.turn_manager._mark_turn_exited(turn_id)
+            self._queue_channel_status(channel_envelope, "working_stop")
+            await self._start_next_queued_turn_async(control_scope_key)
 
     def _on_turn_task_done(self, turn_id: str, task: asyncio.Task[Any]) -> None:
         stored = self.state.turn_tasks.get(turn_id)
@@ -853,7 +923,8 @@ class PalCore:
                 return
             scope_state.quiescing = True
             scope_state.drained_event = asyncio.Event()
-            current_turn_id = scope_state.active_turn_id
+            scope_state.pending_channel_turns.clear()
+            current_turn_id = self.turn_manager.latest_active_turn_id(request.control_scope_key)
             if current_turn_id is None:
                 scope_state.drained_event.set()
         if current_turn_id is not None:

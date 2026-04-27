@@ -155,7 +155,8 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     title="Behavior Guidance",
                     content=(
                         "These are current-task behavior routing hints, not durable facts. "
-                        "Use them to choose workflow, skill injection, capability search, or optional recall.\n"
+                        "They are not policy. Use them to choose workflow, skill injection, capability search, or optional recall. "
+                        "If they conflict with the user's current explicit instructions, follow the user's instructions unless capability policy, safety, approval, or availability blocks them.\n"
                         + "\n".join(guidance_lines)
                     ),
                     priority=57,

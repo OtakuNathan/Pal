@@ -38,7 +38,7 @@ from pal.plugins import PluginBundleRepository
 from pal.service import ServiceDefinition, ServiceRepository
 from pal.shared import LLMFinishReason, LLMStreamEventKind
 from pal.stream_events import NormalizedLLMStreamEvent
-from pal.supervisor import SupervisorService
+from pal.wizard import WizardService
 from pal.web_fetch import BrowserServiceManager, WebFetchProviderRepository
 from pal.web_search import WebSearchItem, WebSearchProviderRepository
 
@@ -46,15 +46,15 @@ from pal.web_search import WebSearchItem, WebSearchProviderRepository
 class PalV2BootstrapTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bootstrap_test_"))
-        self.supervisor = SupervisorService()
-        self.registration = self.supervisor.provision_runtime(
+        self.wizard = WizardService()
+        self.registration = self.wizard.provision_runtime(
             display_name="PalV2 Test",
             runtime_root=self.runtime_root,
             db_filename="pal_test.sqlite3",
             pal_entrypoint="pal.runtime.test",
         )
         self.db_path = self.registration.runtime.db_path
-        self.database = self.supervisor.create_database(self.registration)
+        self.database = self.wizard.create_database(self.registration)
 
     def tearDown(self) -> None:
         self.database.close()
@@ -87,7 +87,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_compose_runtime_includes_service_runtime(self) -> None:
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -119,7 +119,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(stored[0].definition.out_reply_target, {"session_id": "session-1", "request_id": "req-1"})
         self.assertEqual(stored[0].next_due_at_utc, "2026-04-11T01:00:00+00:00")
 
-    def test_supervisor_provision_runtime_creates_third_party_plugin_directory(self) -> None:
+    def test_wizard_provision_runtime_creates_third_party_plugin_directory(self) -> None:
         self.assertTrue((self.registration.runtime.runtime_root / "plugins").is_dir())
 
     def test_identity_repository_bootstraps_singletons(self) -> None:
@@ -424,10 +424,10 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(runtime.last_request.metadata["think_level"], "deep")
 
     def test_compose_runtime_loads_first_party_sqlite_vec_plugin_via_plugin_host(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
 
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -439,8 +439,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(handle.memory_service.l3_selector.active_provider_id, "sqlite_vec_l3")
         self.assertIn("sqlite_vec_l3", handle.core.context.execution_runtime.l3_plugin_registry.plugins)
 
-    def test_supervisor_seeds_default_web_providers_and_active_settings(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+    def test_wizard_seeds_default_web_providers_and_active_settings(self) -> None:
+        self.wizard.seed_defaults(self.registration)
 
         search_records = WebSearchProviderRepository().list_all()
         fetch_records = WebFetchProviderRepository().list_all()
@@ -458,9 +458,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(settings.get("active_web_fetch_provider_id"), "playwright_fetch_default")
 
     def test_compose_runtime_loads_first_party_web_plugins_and_default_tools(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -487,9 +487,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("op_web_fetch_read", tool_names)
 
     def test_plugin_host_rescan_discovers_third_party_bundle_but_does_not_import_it(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -516,9 +516,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertFalse(discovered.attached)
 
     def test_plugin_host_rescan_and_attach_new_first_party_attaches_new_builtin_plugin(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -581,9 +581,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(demo_record["attached"])
 
     def test_plugins_module_publishes_management_capabilities_and_can_detach_first_party_plugin(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -600,9 +600,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertNotIn("intro_provider_l3_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
 
     def test_plugin_attach_detach_lifecycle_works_end_to_end(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -652,9 +652,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(l3_record2["attached"])
 
     def test_memory_l3_regression_build_pack_uses_builtin_sqlite_vec_provider(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -679,9 +679,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(handle.memory_service.l3_selector.active_provider_id, "sqlite_vec_l3")
 
     def test_memory_l3_regression_capability_paths_round_trip_commit_recall_correct(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -1508,17 +1508,17 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertGreater(outcome.reserved_output_tokens, 0)
         self.assertGreater(outcome.target_input_budget, 0)
 
-    def test_supervisor_provisions_stub_runtime_before_bootstrap_composition(self) -> None:
-        provisioned = self.supervisor.provision_stub_runtime(self.runtime_root / "stub_runtime")
+    def test_wizard_provisions_stub_runtime_before_bootstrap_composition(self) -> None:
+        provisioned = self.wizard.provision_stub_runtime(self.runtime_root / "stub_runtime")
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=provisioned.registration,
             database=provisioned.database,
         )
         handle.database.close()
 
         self.assertEqual(handle.registration.runtime.db_path, handle.database.db_path)
-        self.assertEqual(handle.supervisor.registrations[-1], handle.registration)
+        self.assertEqual(handle.wizard.registrations[-1], handle.registration)
         self.assertIsNotNone(handle.core.context.module_registry.get("core"))
         self.assertIsNotNone(handle.core.context.module_registry.get("channel"))
         self.assertIsNotNone(handle.core.context.module_registry.get("llm"))
@@ -1527,9 +1527,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(handle.core.context.execution_runtime.capabilities.get("intro_module_llm_list"))
 
     def test_compose_runtime_registers_seeded_socket_endpoint(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -1540,7 +1540,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(Path(endpoint.endpoint.binding_key), self.registration.runtime.runtime_root / "pal.sock")
 
     def test_compose_runtime_registers_telegram_endpoint_via_factory_registry(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         ChannelEndpointRepository().upsert(
             endpoint_id="telegram_main",
             channel_kind="telegram",
@@ -1552,7 +1552,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             send_policy_blob={"max_message_chars": 4096},
         )
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -1563,9 +1563,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(endpoint.endpoint.binding_key, "chat:123")
 
     def test_llm_capabilities_are_read_only_and_do_not_expose_credentials(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -1591,9 +1591,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertNotIn("base_url", llm_show.structured)
         self.assertEqual(llm_think_level.structured["effective_think_level"], DEFAULT_THINK_LEVEL)
 
-    def test_compose_runtime_consumes_supervisor_owned_database(self) -> None:
+    def test_compose_runtime_consumes_wizard_owned_database(self) -> None:
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -1602,9 +1602,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(handle.registration.display_name, "PalV2 Test")
 
     def test_web_search_capability_falls_back_and_auth_material_is_sanitized(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -1672,9 +1672,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(result.structured["items"][0]["title"], "Pal runtime docs")
 
     def test_web_fetch_health_does_not_start_browser_service_and_disable_stops_manager(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
@@ -1719,9 +1719,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(fake_manager.stop_calls, 1)
 
     def test_web_fetch_capability_falls_back_to_plain_http_and_runtime_stop_runs_shutdown_hook(self) -> None:
-        self.supervisor.seed_defaults(self.registration)
+        self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
-            supervisor=self.supervisor,
+            wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )

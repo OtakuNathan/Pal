@@ -17,7 +17,7 @@ from pal.service import ServiceDefinitionModel, ServiceRunModel
 from pal.web_fetch import WebFetchProviderModel, WebFetchProviderRepository
 from pal.web_search import WebSearchProviderModel, WebSearchProviderRepository
 from pal.channel.models import ChannelEndpointModel
-from pal.supervisor.contracts import PalRegistration, ProvisionedRuntime, RuntimeLaunchSpec, SupervisorServicePort
+from pal.wizard.contracts import PalRegistration, ProvisionedRuntime, RuntimeLaunchSpec, WizardServicePort
 
 
 ALL_MODELS = (
@@ -131,7 +131,7 @@ DEFAULT_WEB_FETCH_PROVIDERS = (
 
 
 @dataclass
-class SupervisorService(SupervisorServicePort):
+class WizardService(WizardServicePort):
     registrations: list[PalRegistration] = field(default_factory=list)
 
     def register(self, registration: PalRegistration) -> None:
@@ -162,14 +162,14 @@ class SupervisorService(SupervisorServicePort):
         self,
         registration: PalRegistration,
     ) -> PalV2Database:
-        # Supervisor owns the on-disk runtime association. Bootstrap only
+        # Wizard owns the on-disk runtime association. Bootstrap only
         # composes in-process services from the already-associated database.
         database = PalV2Database(db_path=registration.runtime.db_path)
         database.initialize(ALL_MODELS)
         return database
 
     def seed_defaults(self, registration: PalRegistration) -> None:
-        # Supervisor owns first-run provisioning. Initial persona and endpoint
+        # Wizard owns first-run provisioning. Initial persona and endpoint
         # truth are written before Pal composes its in-process runtime.
         _ = registration
         IdentityRepository().ensure_defaults()
@@ -196,3 +196,124 @@ class SupervisorService(SupervisorServicePort):
         database = self.create_database(registration)
         self.seed_defaults(registration)
         return ProvisionedRuntime(registration=registration, database=database)
+
+    def seed_from_wizard(self, registration: PalRegistration, collected: object) -> None:
+        """Seed the database from wizard-collected data."""
+        from pal.wizard.prompts import WizardCollectedData
+        from pal.llm.secret_store import EncryptedFileSecretStore, SecretRef
+        from pal.channel import ChannelEndpointRepository
+        from pal.identity import IdentityRepository
+        from pal.identity.repository import DEFAULT_PERSONA_ID
+        from pal.llm import LLMEndpointRepository, RuntimeSettingRepository
+        from pal.web_search import WebSearchProviderRepository
+        from pal.web_fetch import WebFetchProviderRepository
+
+        data: WizardCollectedData = collected
+        runtime_root = registration.runtime.runtime_root
+
+        # 1. Identity — ensure_defaults creates if missing, then upsert fields
+        idata = data.identity
+        id_repo = IdentityRepository()
+        id_repo.ensure_defaults(
+            display_name=idata.display_name,
+            language=idata.language,
+            vibe=idata.vibe,
+            tone=idata.tone,
+            core_policy=idata.core_policy or None,
+            timezone=idata.timezone,
+        )
+        persona = id_repo.get_persona(DEFAULT_PERSONA_ID)
+        if persona is not None:
+            from pal.foundation import utc_now
+            now = utc_now()
+            persona.display_name = idata.display_name
+            persona.language = idata.language
+            persona.vibe = idata.vibe
+            persona.tone = idata.tone
+            persona.core_policy = list(idata.core_policy or ())
+            persona.updated_at = now
+            persona.save()
+        id_repo.update_user_preferences(timezone=idata.timezone)
+
+        # 2. LLM endpoints
+        llm_repo = LLMEndpointRepository()
+        secrets_path = runtime_root / "secrets.json"
+        secret_store = EncryptedFileSecretStore(str(secrets_path))
+
+        for ep in data.endpoints:
+            provider = ep.endpoint_id
+            # Determine provider from api_mode
+            if "anthropic" in ep.api_mode:
+                provider = "anthropic"
+            elif "openai" in ep.api_mode or ep.api_mode == "openai_chat":
+                # Try to infer from base_url
+                if "deepseek" in ep.base_url:
+                    provider = "deepseek"
+                elif "zhipu" in ep.base_url:
+                    provider = "zhipu"
+                elif "moonshot" in ep.base_url or "kimi" in ep.base_url:
+                    provider = "moonshot"
+                else:
+                    provider = "openai"
+
+            # Store API key in secret store
+            if ep.api_key:
+                secret_store.set_secret(
+                    SecretRef(service=ep.endpoint_id, account="api-key"),
+                    ep.api_key,
+                )
+
+            credential_ref = f"{ep.endpoint_id}:api-key"
+
+            payload = {
+                "endpoint_id": ep.endpoint_id,
+                "provider": provider,
+                "model_id": ep.model_id,
+                "display_name": ep.endpoint_id,
+                "api_mode": ep.api_mode,
+                "base_url": ep.base_url,
+                "credential_ref": credential_ref,
+                "context_window": ep.context_window or 8192,
+                "max_output_tokens": ep.max_output_tokens or 4096,
+                "supports_reasoning": ep.supports_reasoning,
+                "supports_tools": ep.supports_tools,
+                "supports_streaming": ep.supports_streaming,
+                "supports_vision": ep.supports_vision,
+                "input_modalities_blob": (
+                    ["text", "image"] if ep.supports_vision else ["text"]
+                ),
+                "output_modalities_blob": ["text"],
+                "priority": ep.priority,
+                "enabled": True,
+                "capabilities_blob": {},
+                "notes": f"Configured via setup wizard.",
+            }
+            llm_repo.upsert(**payload)
+
+        # 3. Set active endpoint
+        settings = RuntimeSettingRepository()
+        settings.ensure_defaults()
+        settings.set_active_llm_endpoint_id(data.active_endpoint_id)
+
+        # 4. Channel
+        ch = data.channel
+        channel_repo = ChannelEndpointRepository()
+        channel_payload: dict = {
+            "endpoint_id": ch.endpoint_id,
+            "channel_kind": ch.channel_kind,
+            "binding_key": ch.binding_key,
+            "enabled": True,
+            "supports_typing": ch.supports_typing,
+            "supports_receipt_marker": ch.supports_receipt_marker,
+            "binding_metadata": ch.binding_metadata,
+            "send_policy_blob": {},
+        }
+        channel_repo.upsert(**channel_payload)
+
+        # 5. Web search/fetch defaults (same as seed_defaults)
+        WebSearchProviderRepository().ensure_defaults(DEFAULT_WEB_SEARCH_PROVIDERS)
+        WebFetchProviderRepository().ensure_defaults(DEFAULT_WEB_FETCH_PROVIDERS)
+        if settings.get("active_web_search_provider_id") is None:
+            settings.set("active_web_search_provider_id", "brave_search_default")
+        if settings.get("active_web_fetch_provider_id") is None:
+            settings.set("active_web_fetch_provider_id", "playwright_fetch_default")
