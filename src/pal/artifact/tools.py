@@ -32,6 +32,7 @@ ARTIFACT_TOOL_ARGS_SCHEMAS: dict[str, dict[str, Any]] = {
                 "type": "string",
                 "enum": ["auto", "text", "page_text", "chunk_text", "transcript", "metadata"],
                 "default": "auto",
+                "description": "Text-like representation only. Do not use this to inspect visual image pixels.",
             },
             "page": {"type": "integer"},
             "chunk": {"type": "integer"},
@@ -156,7 +157,7 @@ class ArtifactReadTool:
     name: str = "op_artifact_read"
     display_name: str = "Read Artifact"
     family: str = "artifact"
-    description: str = "Read a text-like representation of a scoped artifact by artifact_id."
+    description: str = "Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels; use inline vision input for image contents."
     tags: tuple[str, ...] = ("artifact", "attachment", "read")
     keywords: tuple[str, ...] = ("artifact", "read", "pdf", "text", "transcript")
     args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_read"))

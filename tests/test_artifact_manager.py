@@ -238,6 +238,89 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image_part["type"], "image_url")
         self.assertTrue(image_part["image_url"]["url"].startswith("data:image/"))
         self.assertEqual(exposure.inline_parts[0].artifact_id, ref.artifact_id)
+        raw_base64_coerced = _coerce_messages_for_litellm(
+            [{"role": "user", "content": [{"type": "text", "text": "look"}, exposure.inline_parts[0].to_message_part()]}],
+            artifact_manager=self.manager,
+            supports_vision=True,
+            image_url_format="raw_base64",
+        )
+        raw_url = raw_base64_coerced[0]["content"][1]["image_url"]["url"]
+        self.assertFalse(raw_url.startswith("data:image/"))
+        self.assertNotIn(",", raw_url)
+
+        provider = ArtifactPromptFragmentProvider(service=self.manager)
+        compiler = PromptCompiler(type("Context", (), {"prompt_fragment_registry": _Registry(provider)})())
+        request = compiler.build_canonical_prompt(
+            PromptAssemblyContext(
+                event=EventEnvelope(
+                    event_kind=EventKind.USER_MESSAGE,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={"text": "what do you see?"},
+                ),
+                metadata={
+                    "artifact_scope_key": self.scope_key,
+                    "artifact_turn_id": self.turn_id,
+                    "llm_capabilities": {"supports_vision": True},
+                },
+            )
+        )
+
+        self.assertEqual(len(request.messages), 1)
+        merged_content = request.messages[0]["content"]
+        self.assertIsInstance(merged_content, list)
+        merged_text = "\n".join(str(part.get("text") or "") for part in merged_content if isinstance(part, dict))
+        self.assertIn("Available Artifacts", merged_text)
+        self.assertIn("visual_content: attached_inline", merged_text)
+        self.assertIn("answer from vision directly", merged_text)
+        self.assertIn("optional_tools: info", merged_text)
+        self.assertNotIn("inspect_inline_image", merged_text)
+        self.assertNotIn("actions: info, read, search", merged_text)
+        self.assertIn("what do you see?", merged_text)
+        self.assertEqual(merged_content[0]["type"], "artifact_image")
+        self.assertTrue(any(part.get("type") == "artifact_image" for part in merged_content if isinstance(part, dict)))
+
+        merged_coerced = _coerce_messages_for_litellm(
+            request.messages,
+            artifact_manager=self.manager,
+            supports_vision=True,
+        )
+        self.assertTrue(any(part.get("type") == "image_url" for part in merged_coerced[0]["content"]))
+
+        later_request = compiler.build_canonical_prompt(
+            PromptAssemblyContext(
+                event=EventEnvelope(
+                    event_kind=EventKind.USER_MESSAGE,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={"text": "try this artifact again"},
+                ),
+                metadata={
+                    "artifact_scope_key": self.scope_key,
+                    "artifact_turn_id": "later-turn",
+                    "llm_capabilities": {"supports_vision": True},
+                },
+            )
+        )
+        later_content = later_request.messages[0]["content"]
+        self.assertIsInstance(later_content, list)
+        self.assertTrue(any(part.get("type") == "artifact_image" for part in later_content if isinstance(part, dict)))
+
+        no_caption_request = compiler.build_canonical_prompt(
+            PromptAssemblyContext(
+                event=EventEnvelope(
+                    event_kind=EventKind.USER_MESSAGE,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={"text": ""},
+                ),
+                metadata={
+                    "artifact_scope_key": self.scope_key,
+                    "artifact_turn_id": self.turn_id,
+                    "llm_capabilities": {"supports_vision": True},
+                },
+            )
+        )
+        no_caption_content = no_caption_request.messages[0]["content"]
+        self.assertIsInstance(no_caption_content, list)
+        self.assertEqual(no_caption_content[0]["type"], "artifact_image")
 
     @unittest.skipUnless(importlib.util.find_spec("fitz") is not None, "PyMuPDF is not installed")
     def test_pdf_text_extraction_creates_page_representations(self) -> None:
@@ -273,6 +356,99 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("op_artifact_read", contracts)
         self.assertIn("artifact_id", contracts["op_artifact_read"]["properties"])
         self.assertIn("representation", contracts["op_artifact_read"]["properties"])
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
+    def test_image_source_url_passthrough_to_litellm(self) -> None:
+        from PIL import Image
+
+        image_path = self.root / "incoming" / "photo.jpg"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 8), color=(10, 20, 30)).save(image_path)
+
+        ref = self.manager.register_ingested(
+            {
+                "local_cached_path": str(image_path),
+                "file_name": "photo.jpg",
+                "mime_type": "image/jpeg",
+                "source_channel": "telegram",
+                "source_metadata": {
+                    "telegram_file_path": "photos/file_123.jpg",
+                    "source_url": "https://api.telegram.org/file/botFAKE_TOKEN/photos/file_123.jpg",
+                },
+            },
+            scope_key=self.scope_key,
+            turn_id=self.turn_id,
+            source_channel="telegram",
+        )
+
+        exposure = self.manager.select_prompt_exposure(
+            self.scope_key, self.turn_id, "",
+            {"supports_vision": True},
+        )
+        self.assertEqual(len(exposure.inline_parts), 1)
+        self.assertEqual(
+            exposure.inline_parts[0].source_url,
+            "https://api.telegram.org/file/botFAKE_TOKEN/photos/file_123.jpg",
+        )
+
+        part_dict = exposure.inline_parts[0].to_message_part()
+        self.assertEqual(part_dict["source_url"], "https://api.telegram.org/file/botFAKE_TOKEN/photos/file_123.jpg")
+
+        coerced = _coerce_messages_for_litellm(
+            [{"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                exposure.inline_parts[0].to_message_part(),
+            ]}],
+            artifact_manager=self.manager,
+            supports_vision=True,
+        )
+        image_part = coerced[0]["content"][1]
+        self.assertEqual(image_part["type"], "image_url")
+        self.assertEqual(
+            image_part["image_url"]["url"],
+            "https://api.telegram.org/file/botFAKE_TOKEN/photos/file_123.jpg",
+        )
+        self.assertFalse(image_part["image_url"]["url"].startswith("data:"))
+
+        # Verify source_url (containing bot token) does NOT appear in LLM-visible text
+        info = self.manager.info(ref.artifact_id, self.scope_key)
+        info_str = str(info)
+        self.assertNotIn("FAKE_TOKEN", info_str)
+        self.assertNotIn("source_url", info["artifact"]["metadata"].get("source_metadata", {}))
+        self.assertNotIn("source_url", exposure.text)
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
+    def test_image_without_source_url_falls_back_to_base64(self) -> None:
+        from PIL import Image
+
+        image_path = self.root / "incoming" / "local.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 8)).save(image_path)
+
+        self.manager.register_ingested(
+            image_path,
+            scope_key=self.scope_key,
+            turn_id=self.turn_id,
+            source_channel="socket",
+        )
+
+        exposure = self.manager.select_prompt_exposure(
+            self.scope_key, self.turn_id, "",
+            {"supports_vision": True},
+        )
+        self.assertEqual(len(exposure.inline_parts), 1)
+        self.assertEqual(exposure.inline_parts[0].source_url, "")
+
+        coerced = _coerce_messages_for_litellm(
+            [{"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                exposure.inline_parts[0].to_message_part(),
+            ]}],
+            artifact_manager=self.manager,
+            supports_vision=True,
+        )
+        image_part = coerced[0]["content"][1]
+        self.assertTrue(image_part["image_url"]["url"].startswith("data:image/"))
 
 
 class _Registry:

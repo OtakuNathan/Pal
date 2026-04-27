@@ -588,6 +588,11 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             content=bytes(content),
             mime_type=mime_type,
         )
+        tg_file_path = str(getattr(tg_file, "file_path", "") or "")
+        source_url = ""
+        if tg_file_path:
+            base = self.base_url.rstrip("/")
+            source_url = f"{base}/file/bot{self.bot_token}/{tg_file_path}"
         return {
             "attachment_id": f"telegram_{provider_file_id}",
             "provider_file_id": provider_file_id,
@@ -597,7 +602,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             "local_cached_path": stored.local_cached_path,
             "sha256": stored.sha256,
             "source_channel": "telegram",
-            "source_metadata": {"telegram_file_path": str(getattr(tg_file, "file_path", "") or "")},
+            "source_metadata": {"telegram_file_path": tg_file_path, "source_url": source_url},
         }
 
     async def _send_receipt_marker_async(self, response_handle: ResponseHandle, payload: dict[str, Any]) -> None:

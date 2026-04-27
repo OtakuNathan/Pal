@@ -191,7 +191,7 @@ class ImageArtifactProcessor:
     def process(self, context: ArtifactProcessingContext) -> ArtifactRecord:
         record = context.record
         output_path = context.representations_dir() / "normalized.jpg"
-        normalized = normalize_image_file(
+        normalized, normalized_mime_type = prepare_inline_image_file(
             context.original_path,
             output_path,
             policy=context.policy,
@@ -202,7 +202,7 @@ class ImageArtifactProcessor:
                 artifact_id=record.artifact_id,
                 representation_kind=REPRESENTATION_NORMALIZED_IMAGE,
                 path=str(normalized),
-                mime_type="image/jpeg",
+                mime_type=normalized_mime_type,
                 size_bytes=normalized.stat().st_size,
                 summary=f"normalized image {record.file_name}",
                 status=ARTIFACT_STATUS_READY,
@@ -212,7 +212,7 @@ class ImageArtifactProcessor:
         return replace(
             record,
             normalized_path=str(normalized),
-            normalized_mime_type="image/jpeg",
+            normalized_mime_type=normalized_mime_type,
             normalized_size_bytes=normalized.stat().st_size,
             summary=f"image artifact {record.file_name}",
             status=ARTIFACT_STATUS_READY,
@@ -318,6 +318,18 @@ class AudioArtifactProcessor:
         return replace(record, summary=summary, status=status)
 
 
+def prepare_inline_image_file(input_path: Path, output_path: Path, *, policy: ArtifactPolicy) -> tuple[Path, str]:
+    original_mime = mimetypes.guess_type(input_path.name)[0] or ""
+    if _can_preserve_original_image(input_path, original_mime, policy=policy):
+        suffix = input_path.suffix.lower() or _suffix_for_mime(original_mime)
+        preserved_path = output_path.with_name(f"normalized{suffix or '.img'}")
+        preserved_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(input_path, preserved_path)
+        return preserved_path, original_mime or "application/octet-stream"
+    normalized = normalize_image_file(input_path, output_path, policy=policy)
+    return normalized, "image/jpeg"
+
+
 def normalize_image_file(input_path: Path, output_path: Path, *, policy: ArtifactPolicy) -> Path:
     try:
         from PIL import Image, ImageOps  # type: ignore
@@ -354,6 +366,33 @@ def normalize_image_file(input_path: Path, output_path: Path, *, policy: Artifac
             img = img.resize((width, height), Image.Resampling.LANCZOS)
             img.save(best_path, format="JPEG", quality=int(policy.image.quality_ladder[-1]), optimize=True)
         return best_path
+
+
+def _can_preserve_original_image(input_path: Path, mime_type: str, *, policy: ArtifactPolicy) -> bool:
+    if mime_type not in {"image/jpeg", "image/png", "image/webp"}:
+        return False
+    try:
+        if _base64_size(input_path.stat().st_size) > policy.image.inline_base64_budget_bytes:
+            return False
+    except Exception:
+        return False
+    try:
+        from PIL import Image  # type: ignore
+
+        with Image.open(input_path) as img:
+            return max(img.size) <= policy.image.max_edge_px
+    except Exception:
+        return True
+
+
+def _suffix_for_mime(mime_type: str) -> str:
+    if mime_type == "image/jpeg":
+        return ".jpg"
+    if mime_type == "image/png":
+        return ".png"
+    if mime_type == "image/webp":
+        return ".webp"
+    return ""
 
 
 def image_data_url(path: Path, *, mime_type: str = "image/jpeg") -> str:

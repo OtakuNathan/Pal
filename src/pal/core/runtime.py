@@ -1667,6 +1667,8 @@ class PalCore:
                     "=== PAL PROMPT DEBUG ===",
                     "--- request.messages ---",
                     str(request.messages),
+                    "--- request.multimodal ---",
+                    _summarize_multimodal_prompt(request.messages),
                     "--- request.tools ---",
                     str(request.tools),
                     "=== END PAL PROMPT DEBUG ===",
@@ -1680,10 +1682,13 @@ class PalCore:
         outcome = _last_arg_of_type(args, CanonicalLLMOutcome)
         if outcome is None:
             return
+        provider_payload = _summarize_last_provider_payload(self.context.port_registry.get("llm:llm"))
         self._append_prompt_log(
             "\n".join(
                 [
                     "=== PAL LLM OUTCOME ===",
+                    "--- provider.payload ---",
+                    provider_payload,
                     f"finish_reason: {outcome.finish_reason}",
                     f"response_mode: {outcome.response_mode}",
                     f"tool_calls: {outcome.tool_calls}",
@@ -1785,3 +1790,44 @@ def _last_arg_of_type(args: tuple[Any, ...], expected_type):
         if isinstance(item, expected_type):
             return item
     return None
+
+
+def _summarize_multimodal_prompt(messages: list[dict[str, Any]]) -> str:
+    items: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type") or "")
+            if part_type == "artifact_image":
+                items.append(
+                    {
+                        "message_index": index,
+                        "type": "artifact_image",
+                        "artifact_id": part.get("artifact_id"),
+                        "representation_id": part.get("representation_id"),
+                        "mime_type": part.get("mime_type"),
+                        "bytes": "omitted",
+                    }
+                )
+            elif part_type == "image_url":
+                url = str((part.get("image_url") or {}).get("url") or "")
+                items.append(
+                    {
+                        "message_index": index,
+                        "type": "image_url",
+                        "url_prefix": url[:32],
+                        "url_length": len(url),
+                        "bytes": "omitted",
+                    }
+                )
+    return str(items)
+
+
+def _summarize_last_provider_payload(llm_runtime: Any) -> str:
+    invoker = getattr(llm_runtime, "endpoint_invoker", None)
+    summary = getattr(invoker, "last_payload_summary", None)
+    return str(summary or {})

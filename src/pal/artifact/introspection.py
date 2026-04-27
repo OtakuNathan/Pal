@@ -104,7 +104,7 @@ class ArtifactIntrospectionProvider:
         scope="module",
         family="artifact",
         action_name="read",
-        description="Read a text-like representation of a scoped artifact by artifact_id.",
+        description="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
         args_schema=artifact_args_schema("op_artifact_read"),
         result_schema=artifact_result_schema("op_artifact_read"),
         metadata={"llm_exposed": True, "async_required": True},

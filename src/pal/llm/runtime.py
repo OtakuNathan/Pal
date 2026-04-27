@@ -189,6 +189,7 @@ class LiteLLMEndpointInvoker:
 
     credentials: LiteLLMCredentialResolver = field(default_factory=LiteLLMCredentialResolver)
     artifact_manager: Any = None
+    last_payload_summary: dict[str, Any] = field(default_factory=dict, init=False)
 
     def invoke(
         self,
@@ -196,6 +197,7 @@ class LiteLLMEndpointInvoker:
         request: CanonicalLLMRequest,
     ) -> CanonicalLLMOutcome:
         if endpoint.provider == "stub" or str(endpoint.base_url).startswith("stub://"):
+            self.last_payload_summary = _summarize_provider_payload(endpoint, request.messages, image_url_format="stub")
             return self._invoke_stub(endpoint, request)
         return self._invoke_litellm(endpoint, request)
 
@@ -205,6 +207,7 @@ class LiteLLMEndpointInvoker:
         request: CanonicalLLMRequest,
     ) -> Iterable[NormalizedLLMStreamEvent]:
         if endpoint.provider == "stub" or str(endpoint.base_url).startswith("stub://"):
+            self.last_payload_summary = _summarize_provider_payload(endpoint, request.messages, image_url_format="stub")
             return self._invoke_stub_stream(endpoint, request)
         return self._invoke_litellm_stream(endpoint, request)
 
@@ -284,14 +287,18 @@ class LiteLLMEndpointInvoker:
         request: CanonicalLLMRequest,
     ) -> tuple[dict[str, Any], dict[str, str]]:
         tool_name_aliases = _build_tool_name_aliases(request.tools)
+        image_url_format = _image_url_format(endpoint)
+        messages = _coerce_messages_for_litellm(
+            list(request.messages),
+            tool_name_aliases=tool_name_aliases,
+            artifact_manager=self.artifact_manager,
+            supports_vision=bool(endpoint.supports_vision),
+            image_url_format=image_url_format,
+        )
+        self.last_payload_summary = _summarize_provider_payload(endpoint, messages, image_url_format=image_url_format)
         kwargs: dict[str, Any] = {
             "model": _litellm_model(endpoint.model_id, endpoint.api_mode),
-            "messages": _coerce_messages_for_litellm(
-                list(request.messages),
-                tool_name_aliases=tool_name_aliases,
-                artifact_manager=self.artifact_manager,
-                supports_vision=bool(endpoint.supports_vision),
-            ),
+            "messages": messages,
             "timeout": 120,
         }
         if endpoint.base_url and not str(endpoint.base_url).startswith("stub://"):
@@ -984,6 +991,7 @@ def _coerce_messages_for_litellm(
     tool_name_aliases: dict[str, str] | None = None,
     artifact_manager: Any = None,
     supports_vision: bool = False,
+    image_url_format: str = "data_url",
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for message in messages:
@@ -994,6 +1002,7 @@ def _coerce_messages_for_litellm(
                 content,
                 artifact_manager=artifact_manager,
                 supports_vision=supports_vision,
+                image_url_format=image_url_format,
             )
         tool_calls = list(payload.get("tool_calls") or [])
         if tool_calls:
@@ -1018,6 +1027,7 @@ def _coerce_content_parts_for_litellm(
     *,
     artifact_manager: Any = None,
     supports_vision: bool = False,
+    image_url_format: str = "data_url",
 ) -> list[dict[str, Any]]:
     parts: list[dict[str, Any]] = []
     for item in content:
@@ -1025,7 +1035,13 @@ def _coerce_content_parts_for_litellm(
             continue
         part_type = str(item.get("type") or "").strip()
         if part_type == "artifact_image":
-            if not supports_vision or artifact_manager is None:
+            if not supports_vision:
+                continue
+            source_url = str(item.get("source_url") or "").strip()
+            if source_url.startswith(("http://", "https://")):
+                parts.append({"type": "image_url", "image_url": {"url": source_url}})
+                continue
+            if artifact_manager is None:
                 continue
             to_data_url = getattr(artifact_manager, "to_data_url", None)
             if not callable(to_data_url):
@@ -1033,10 +1049,81 @@ def _coerce_content_parts_for_litellm(
             data_url = to_data_url(str(item.get("representation_id") or ""))
             if not data_url:
                 continue
-            parts.append({"type": "image_url", "image_url": {"url": data_url}})
+            parts.append({"type": "image_url", "image_url": {"url": _coerce_image_url_value(data_url, image_url_format)}})
             continue
         parts.append(dict(item))
     return parts
+
+
+def _image_url_format(endpoint: LLMEndpointModel) -> str:
+    capabilities = dict(endpoint.capabilities_blob or {})
+    configured = str(
+        capabilities.get("image_url_format")
+        or capabilities.get("vision_image_url_format")
+        or ""
+    ).strip().lower()
+    if configured in {"data_url", "raw_base64"}:
+        return configured
+    # OpenAI-compatible VLM endpoints agree on the multipart shape, but differ
+    # in accepted image_url transports. Default to the standards-friendly data
+    # URL and let endpoint metadata opt into provider-specific variants.
+    return "data_url"
+
+
+def _coerce_image_url_value(data_url: str, image_url_format: str) -> str:
+    if str(image_url_format or "").strip().lower() != "raw_base64":
+        return data_url
+    if "," not in data_url:
+        return data_url
+    return data_url.split(",", 1)[1]
+
+
+def _summarize_provider_payload(
+    endpoint: LLMEndpointModel,
+    messages: list[dict[str, Any]],
+    *,
+    image_url_format: str,
+) -> dict[str, Any]:
+    image_parts: list[dict[str, Any]] = []
+    for message_index, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part_index, part in enumerate(content):
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            url = str((part.get("image_url") or {}).get("url") or "")
+            if url.startswith("data:"):
+                transport = "data_url"
+                prefix = url.split(",", 1)[0][:96]
+            elif url.startswith("http://") or url.startswith("https://"):
+                transport = "http_url"
+                prefix = url[:96]
+            elif url:
+                transport = "raw_base64_or_provider_specific"
+                prefix = "<omitted>"
+            else:
+                transport = "empty"
+                prefix = ""
+            image_parts.append(
+                {
+                    "message_index": message_index,
+                    "part_index": part_index,
+                    "transport": transport,
+                    "prefix": prefix,
+                    "url_length": len(url),
+                    "bytes": "omitted",
+                }
+            )
+    return {
+        "endpoint_id": endpoint.endpoint_id,
+        "model_id": endpoint.model_id,
+        "provider": endpoint.provider,
+        "supports_vision": bool(endpoint.supports_vision),
+        "image_url_format": image_url_format,
+        "message_count": len(messages),
+        "image_parts": image_parts,
+    }
 
 
 def _message_text(message: dict[str, Any]) -> str:

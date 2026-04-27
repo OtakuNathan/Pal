@@ -75,6 +75,26 @@ class ArtifactExposurePolicy:
         "image",
         "photo",
         "picture",
+        "artifact",
+        "look",
+        "see",
+        "read",
+        "shown",
+        "\u521a\u624d",
+        "\u4e4b\u524d",
+        "\u8fd9\u4e2a",
+        "\u8fd9\u4efd",
+        "\u8fd9\u5f20",
+        "\u90a3\u4e2a",
+        "\u90a3\u5f20",
+        "\u9644\u4ef6",
+        "\u6587\u4ef6",
+        "\u56fe",
+        "\u56fe\u7247",
+        "\u7167\u7247",
+        "\u770b\u5230",
+        "\u770b\u4e00\u4e0b",
+        "\u8bfb\u53d6",
         "audio",
         "voice",
         "刚才",
@@ -175,14 +195,18 @@ class ArtifactInlinePart:
     artifact_id: str
     representation_id: str
     mime_type: str = ""
+    source_url: str = ""
 
     def to_message_part(self) -> dict[str, Any]:
-        return {
+        part: dict[str, Any] = {
             "type": self.part_type,
             "artifact_id": self.artifact_id,
             "representation_id": self.representation_id,
             "mime_type": self.mime_type,
         }
+        if self.source_url:
+            part["source_url"] = self.source_url
+        return part
 
 
 @dataclass(frozen=True)

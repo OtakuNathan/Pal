@@ -355,17 +355,28 @@ class ArtifactManager:
             inlined = False
             if supports_vision and inline_count < self.policy.image.max_inline_images:
                 image_rep = self._first_image_representation(record)
-                if image_rep is not None and _representation_base64_fits(image_rep, self.policy):
+                source_url = _resolve_source_url(record)
+                if image_rep is not None and (source_url or _representation_base64_fits(image_rep, self.policy)):
                     inline_parts.append(
                         ArtifactInlinePart(
                             part_type="artifact_image",
                             artifact_id=record.artifact_id,
                             representation_id=image_rep.representation_id,
                             mime_type=image_rep.mime_type,
+                            source_url=source_url,
                         )
                     )
                     inline_count += 1
                     inlined = True
+                    manifest_lines.append(
+                        f"- artifact_id: {record.artifact_id}\n"
+                        f"  file_name: {record.file_name}\n"
+                        f"  kind: {record.kind}\n"
+                        f"  visual_content: attached_inline\n"
+                        f"  summary: {record.summary}\n"
+                        f"  use: answer from the attached image pixels directly\n"
+                        f"  optional_tools: {', '.join(_prompt_actions_for(record, image_inlined=True))}"
+                    )
             text_rep = self._first_short_text_representation(record)
             if text_rep is not None:
                 manifest_lines.append(
@@ -381,7 +392,7 @@ class ArtifactManager:
                     f"  file_name: {record.file_name}\n"
                     f"  kind: {record.kind}\n"
                     f"  summary: {record.summary}\n"
-                    f"  actions: {', '.join(self.policy.exposure.default_prompt_actions)}"
+                    f"  actions: {', '.join(_prompt_actions_for(record, image_inlined=False))}"
                 )
         if not manifest_lines and inline_parts:
             text = "Attached artifact content is included in this user message."
@@ -389,7 +400,9 @@ class ArtifactManager:
             text = (
                 "These are short-lived conversation artifacts Pal can read by artifact_id. "
                 "Use artifact tools only when the current user request depends on them. "
-                "Do not treat artifact_id as a local path.\n"
+                "Do not treat artifact_id as a local path. "
+                "If visual_content is attached_inline, image pixels are already attached to this same user message; "
+                "answer from vision directly. Do not search for or call artifact tools to inspect visual image content.\n"
                 + "\n".join(manifest_lines)
             )
         else:
@@ -528,11 +541,7 @@ class ArtifactManager:
             "size_bytes": record.original_size_bytes,
             "created_at": record.created_at,
             "updated_at": record.updated_at,
-            "metadata": {
-                key: value
-                for key, value in dict(record.metadata).items()
-                if key not in {"local_cached_path", "path", "telegram_file_path"}
-            },
+            "metadata": _sanitize_metadata_for_llm(record.metadata),
         }
 
     def _representation_dict(self, representation: ArtifactRepresentation) -> dict[str, Any]:
@@ -595,11 +604,48 @@ def _representation_base64_fits(representation: ArtifactRepresentation, policy: 
         return False
 
 
+def _resolve_source_url(record: ArtifactRecord) -> str:
+    source_url = str(
+        (record.metadata.get("source_metadata") or {}).get("source_url") or ""
+    ).strip()
+    if source_url.startswith(("http://", "https://")):
+        return source_url
+    return ""
+
+
+_LLVM_HIDDEN_METADATA_KEYS = frozenset({"local_cached_path", "path", "telegram_file_path", "source_url"})
+_LLVM_HIDDEN_NESTED_KEYS = frozenset({"source_url"})
+
+
+def _sanitize_metadata_for_llm(metadata: dict[str, Any]) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if key in _LLVM_HIDDEN_METADATA_KEYS:
+            continue
+        if isinstance(value, dict):
+            cleaned[key] = {k: v for k, v in value.items() if k not in _LLVM_HIDDEN_NESTED_KEYS}
+        else:
+            cleaned[key] = value
+    return cleaned
+
+
 def _looks_artifact_relevant(user_text: str, policy: ArtifactPolicy) -> bool:
     text = str(user_text or "").strip().lower()
     if not text:
         return True
     return any(str(term).lower() in text for term in policy.exposure.relevance_terms)
+
+
+def _prompt_actions_for(record: ArtifactRecord, *, image_inlined: bool) -> tuple[str, ...]:
+    if record.kind == ARTIFACT_KIND_IMAGE:
+        if image_inlined:
+            return ("info",)
+        return ("info",)
+    if record.kind in {ARTIFACT_KIND_TEXT, ARTIFACT_KIND_PDF}:
+        return ("info", "read", "content_search")
+    if record.kind == ARTIFACT_KIND_AUDIO:
+        return ("info", "transcribe")
+    return ("info",)
 
 
 def _terms(text: str) -> list[str]:

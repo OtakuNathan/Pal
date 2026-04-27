@@ -327,11 +327,42 @@ class PromptCompiler:
         system_content = self._render_system_blocks(prompt_ir.system_blocks)
         if system_content:
             messages.append({"role": "system", "content": system_content})
+        deferred_user_parts: list[dict[str, Any]] = []
         for block in prompt_ir.user_context_blocks:
+            # Multimodal user-context needs to travel with the actual user request.
+            # Some OpenAI-compatible vision endpoints ignore image parts that live
+            # in a previous synthetic user message.
+            if block.metadata.get("content_parts"):
+                rendered_message = self._render_user_context_message(block)
+                content = rendered_message.get("content")
+                if isinstance(content, list):
+                    deferred_user_parts.extend(dict(part) for part in content if isinstance(part, dict))
+                elif content:
+                    deferred_user_parts.append({"type": "text", "text": str(content)})
+                continue
             messages.append(self._render_user_context_message(block))
         if prompt_ir.primary_input.strip():
-            messages.append({"role": "user", "content": prompt_ir.primary_input.strip()})
+            if deferred_user_parts:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            *self._image_parts_first(deferred_user_parts),
+                            {"type": "text", "text": prompt_ir.primary_input.strip()},
+                        ],
+                    }
+                )
+            else:
+                messages.append({"role": "user", "content": prompt_ir.primary_input.strip()})
+        elif deferred_user_parts:
+            messages.append({"role": "user", "content": self._image_parts_first(deferred_user_parts)})
         return messages
+
+    @staticmethod
+    def _image_parts_first(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        image_parts = [part for part in parts if part.get("type") == "artifact_image"]
+        other_parts = [part for part in parts if part.get("type") != "artifact_image"]
+        return [*image_parts, *other_parts]
 
     def _render_user_context_message(self, block: PromptIRBlock) -> dict[str, Any]:
         rendered = block.content.strip()
