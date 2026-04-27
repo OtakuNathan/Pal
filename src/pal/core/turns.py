@@ -467,7 +467,7 @@ def _render_failure_primary_input(
             "When verifying, return a JSON object with verification_status and any explanatory fields.",
         ],
     }
-    return json.dumps(payload, ensure_ascii=True, indent=2)
+    return json.dumps(payload, ensure_ascii=True)
 
 
 def _parse_failure_verification(text: str) -> tuple[VerificationResult, dict[str, Any]]:
