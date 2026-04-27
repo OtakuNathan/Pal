@@ -44,6 +44,7 @@ class CoreRuntimeState:
     turn_tasks: dict[str, Any] = field(default_factory=dict)
     turn_scopes: dict[str, str] = field(default_factory=dict)
     control_scopes: dict[str, ControlScopeState] = field(default_factory=dict)
+    prompt_log_enabled: bool = False
     mode: str = "default"
     detached_modules: set[str] = field(default_factory=set)
     diagnostics: list[dict[str, Any]] = field(default_factory=list)

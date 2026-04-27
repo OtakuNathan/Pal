@@ -35,9 +35,8 @@ def _generate_service_content(
     *,
     pal_bin: str,
     runtime_root: Path,
-    debug_prompt: bool = False,
 ) -> str:
-    debug_flag = " --debug-prompt" if debug_prompt else ""
+    runtime_path = runtime_root.as_posix()
     return (
         "[Unit]\n"
         "Description=Pal Agent Runtime\n"
@@ -46,12 +45,12 @@ def _generate_service_content(
         "\n"
         "[Service]\n"
         f"Type=simple\n"
-        f"ExecStart={pal_bin} run --runtime-root {runtime_root}{debug_flag}\n"
+        f"ExecStart={pal_bin} run --runtime-root {runtime_path}\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
         "Environment=PYTHONUNBUFFERED=1\n"
-        f"StandardOutput=append:{runtime_root}/pal.log\n"
-        f"StandardError=append:{runtime_root}/pal.log\n"
+        f"StandardOutput=append:{runtime_path}/pal.log\n"
+        f"StandardError=append:{runtime_path}/pal.log\n"
         "\n"
         "[Install]\n"
         "WantedBy=default.target\n"
@@ -72,7 +71,7 @@ def _pick_service_name(runtime_root: Path) -> str:
     # Check if existing pal.service already points to the same runtime_root
     try:
         content = candidate_path.read_text(encoding="utf-8")
-        if str(runtime_root) in content:
+        if runtime_root.as_posix() in content:
             return candidate
     except OSError:
         pass
@@ -85,7 +84,7 @@ def _pick_service_name(runtime_root: Path) -> str:
     if (_SYSTEMD_USER_DIR / candidate).exists():
         try:
             content = (_SYSTEMD_USER_DIR / candidate).read_text(encoding="utf-8")
-            if str(runtime_root) in content:
+            if runtime_root.as_posix() in content:
                 return candidate
         except OSError:
             pass
@@ -143,11 +142,9 @@ def _prompt_service_setup(runtime_root: Path) -> str | None:
     if service_path.exists():
         print(f"  (File exists at {service_path})")
 
-    debug_prompt = ask_yes_no("  Enable debug-prompt?", default=False)
     content = _generate_service_content(
         pal_bin=pal_bin,
         runtime_root=runtime_root,
-        debug_prompt=debug_prompt,
     )
 
     print()

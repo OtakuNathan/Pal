@@ -21,8 +21,10 @@ from pal.control import (
 )
 from pal.core import PalCore, TurnContinuation, register_with_core as register_core_with_core
 from pal.core.contracts import PendingControlRequest
+from pal.core.runtime_config import RuntimeConfig
 from pal.core.turns import channel_turn_program
 from pal.foundation import EventEnvelope
+from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
 from pal.llm.repository import DEFAULT_THINK_LEVEL
 from pal.memory import MemoryService, register_with_core as register_memory_with_core
 from pal.shared import EventKind, PromptAssemblyContext, RuntimeStatus, SourceKind
@@ -117,6 +119,7 @@ class ControlPlaneTests(unittest.TestCase):
 
         self.assertIn("/control", rendered)
         self.assertIn("/think [off|low|balanced|deep]", rendered)
+        self.assertIn("/log [start|end]", rendered)
         self.assertIn("/ping", rendered)
 
     def test_think_without_argument_shows_current_level(self) -> None:
@@ -147,6 +150,105 @@ class ControlPlaneTests(unittest.TestCase):
         assert action is not None
         self.assertEqual(action.action_kind, "set_think")
         self.assertEqual(action.args["think_level"], "deep")
+
+    def test_log_without_argument_shows_current_status(self) -> None:
+        plane = ControlPlane()
+        action = plane.parse_event(
+            ControlEvent(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "/log"},
+            )
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.action_kind, "show_log")
+
+    def test_log_start_and_end_parse_to_set_log(self) -> None:
+        plane = ControlPlane()
+        start = plane.parse_event(
+            ControlEvent(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "/log start"},
+            )
+        )
+        end = plane.parse_event(
+            ControlEvent(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "/log end"},
+            )
+        )
+
+        self.assertIsNotNone(start)
+        self.assertIsNotNone(end)
+        assert start is not None and end is not None
+        self.assertEqual(start.action_kind, "set_log")
+        self.assertTrue(start.args["prompt_log_enabled"])
+        self.assertEqual(end.action_kind, "set_log")
+        self.assertFalse(end.args["prompt_log_enabled"])
+
+    def test_invalid_log_subcommand_is_invalid_command(self) -> None:
+        plane = ControlPlane()
+        action = plane.parse_event(
+            ControlEvent(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "/log maybe"},
+            )
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.action_kind, "invalid_command")
+        self.assertEqual(action.notes, "Use /log start or /log end.")
+
+    def test_log_interactions_generate_typed_actions(self) -> None:
+        plane = ControlPlane()
+        route = ControlRoute(
+            endpoint_id="telegram_main",
+            channel_kind="telegram",
+            reply_target={"chat_id": "42"},
+            control_scope_key="tg:telegram_main:42:root",
+        )
+
+        open_action = plane.handle_interaction(
+            InteractionResult(
+                interaction_id="ctl_panel_1",
+                interaction_kind="control_panel",
+                action_key="control.log.open",
+                route=route,
+            )
+        )
+        start_action = plane.handle_interaction(
+            InteractionResult(
+                interaction_id="ctl_panel_1",
+                interaction_kind="control_panel",
+                action_key="control.log.start",
+                route=route,
+            )
+        )
+        end_action = plane.handle_interaction(
+            InteractionResult(
+                interaction_id="ctl_panel_1",
+                interaction_kind="control_panel",
+                action_key="control.log.end",
+                route=route,
+            )
+        )
+
+        self.assertIsNotNone(open_action)
+        self.assertIsNotNone(start_action)
+        self.assertIsNotNone(end_action)
+        assert open_action is not None and start_action is not None and end_action is not None
+        self.assertEqual(open_action.action_kind, "show_log")
+        self.assertEqual(start_action.action_kind, "set_log")
+        self.assertTrue(start_action.args["prompt_log_enabled"])
+        self.assertEqual(start_action.args["interaction_origin"], "button")
+        self.assertEqual(end_action.action_kind, "set_log")
+        self.assertFalse(end_action.args["prompt_log_enabled"])
 
     def test_unknown_interaction_action_normalizes_to_invalid_command(self) -> None:
         plane = ControlPlane()
@@ -256,6 +358,138 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(continuation.turn_settings_snapshot["think_level"], "deep")
         self.assertEqual(prompt.metadata["think_level"], "deep")
+
+    async def test_set_log_updates_future_turn_snapshot_only(self) -> None:
+        first = self._make_channel_envelope(turn_id="turn-log-1", request_id="req-log-1")
+        continuation = self.core.turn_manager.start(first)
+        self.assertFalse(continuation.turn_settings_snapshot["prompt_log_enabled"])
+
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="set_log",
+                target_scope="runtime",
+                args={"prompt_log_enabled": True},
+                route=self.route,
+            )
+        )
+
+        self.assertFalse(continuation.turn_settings_snapshot["prompt_log_enabled"])
+        second = self._make_channel_envelope(turn_id="turn-log-2", request_id="req-log-2")
+        second_continuation = self.core.turn_manager.start(second)
+        self.assertTrue(second_continuation.turn_settings_snapshot["prompt_log_enabled"])
+
+    async def test_show_log_reports_current_status(self) -> None:
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="show_log",
+                target_scope="runtime",
+                route=self.route,
+            )
+        )
+
+        self.assertEqual(self.endpoint.outbox[-1].text, "Prompt log: off\nUse /log start or /log end. Changes apply to new turns only.")
+
+    async def test_button_backed_set_log_resolves_interaction(self) -> None:
+        route = ControlRoute(
+            endpoint_id="socket_main",
+            channel_kind="telegram",
+            reply_target={"chat_id": "42", "message_id": "12"},
+            control_scope_key="tg:telegram_main:42:root",
+            correlation_id="tg-1",
+        )
+
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="set_log",
+                target_scope="runtime",
+                args={
+                    "prompt_log_enabled": True,
+                    "interaction_origin": "button",
+                    "interaction_id": "ctl_panel_1",
+                    "interaction_kind": "control_panel",
+                },
+                route=route,
+            )
+        )
+
+        statuses = list(self.endpoint.status_outbox)
+        self.assertGreaterEqual(len(statuses), 2)
+        self.assertTrue(self.core.state.prompt_log_enabled)
+        self.assertEqual(statuses[-2].kind, "interactive_resolve")
+        self.assertEqual(statuses[-2].payload["spec"].text, "Prompt debug logging enabled for new turns.")
+        self.assertEqual(statuses[-1].kind, "working_stop")
+
+    async def test_log_panel_marks_current_status(self) -> None:
+        route = ControlRoute(
+            endpoint_id="socket_main",
+            channel_kind="telegram",
+            reply_target={"chat_id": "42", "message_id": "12"},
+            control_scope_key="tg:telegram_main:42:root",
+            correlation_id="tg-1",
+        )
+        self.core.state.prompt_log_enabled = True
+
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="show_log",
+                target_scope="runtime",
+                route=route,
+            )
+        )
+
+        statuses = list(self.endpoint.status_outbox)
+        self.assertGreaterEqual(len(statuses), 2)
+        self.assertEqual(statuses[-2].kind, "interactive_update")
+        spec = statuses[-2].payload["spec"]
+        flattened = [button for row in spec.buttons for button in row]
+        self.assertEqual(spec.text, "Prompt log: on\nUse /log start or /log end. Changes apply to new turns only.")
+        self.assertTrue(any(button.label == "> Start logging" and button.action_key == "control.log.start" for button in flattened))
+        self.assertTrue(any(button.label == "Stop logging" and button.action_key == "control.log.end" for button in flattened))
+
+    async def test_prompt_log_writes_when_turn_snapshot_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.core.config = RuntimeConfig(runtime_root=Path(tmp))
+            envelope = self._make_channel_envelope(turn_id="turn-log-file", request_id="req-log-file")
+            continuation = TurnContinuation(
+                turn_id="turn-log-file",
+                channel_envelope=envelope,
+                program=channel_turn_program(envelope),
+                correlation_id="req-log-file",
+                control_scope_key="socket:socket_main:sess-1",
+                turn_settings_snapshot={"think_level": "balanced", "prompt_log_enabled": True},
+            )
+            request = CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=64,
+                tools=[{"type": "function", "function": {"name": "demo", "parameters": {}}}],
+            )
+
+            self.core._debug_log_prompt(continuation, request)
+            self.core._debug_log_outcome(continuation, CanonicalLLMOutcome(text="world"))
+            self.core._debug_log_reply(continuation, "final")
+
+            content = (Path(tmp) / "pal.log").read_text(encoding="utf-8")
+            self.assertIn("=== PAL PROMPT DEBUG ===", content)
+            self.assertIn("=== PAL LLM OUTCOME ===", content)
+            self.assertIn("=== PAL TG REPLY ===", content)
+
+    async def test_prompt_log_skips_when_turn_snapshot_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.core.config = RuntimeConfig(runtime_root=Path(tmp))
+            envelope = self._make_channel_envelope(turn_id="turn-log-file-off", request_id="req-log-file-off")
+            continuation = TurnContinuation(
+                turn_id="turn-log-file-off",
+                channel_envelope=envelope,
+                program=channel_turn_program(envelope),
+                correlation_id="req-log-file-off",
+                control_scope_key="socket:socket_main:sess-1",
+                turn_settings_snapshot={"think_level": "balanced", "prompt_log_enabled": False},
+            )
+            request = CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=64)
+
+            self.core._debug_log_prompt(continuation, request)
+
+            self.assertFalse((Path(tmp) / "pal.log").exists())
 
     async def test_core_publishes_control_catalog_to_channel_endpoint(self) -> None:
         await self.core.publish_control_catalog_async(endpoint_id="socket_main")
@@ -422,6 +656,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         flattened = [button for row in spec.buttons for button in row]
 
         self.assertTrue(any(button.label == "Think" and button.action_key == "control.think.open" for button in flattened))
+        self.assertTrue(any(button.label == "Log" and button.action_key == "control.log.open" for button in flattened))
         self.assertTrue(any(button.label == "Compact" and button.action_key == "control.compact.run" for button in flattened))
         self.assertTrue(any(button.label == "Interrupt" and button.action_key == "control.interrupt.run" for button in flattened))
         self.assertTrue(any(button.label == "Reset Memory" and button.action_key == "control.reset.open" for button in flattened))

@@ -9,6 +9,8 @@ from pathlib import Path
 class RuntimeConfig:
     """Runtime tuning constants. Loaded from {runtime_root}/config.toml, fallback to defaults."""
 
+    runtime_root: Path | None = None
+
     # read limits
     max_lines_to_read: int = 2_000
     default_max_output_tokens: int = 25_000
@@ -42,17 +44,18 @@ class RuntimeConfig:
     def load(cls, runtime_root: Path | None) -> RuntimeConfig:
         if runtime_root is None:
             return cls()
+        root = Path(runtime_root)
         config_path = Path(runtime_root) / "config.toml"
         if not config_path.exists():
-            return cls()
+            return cls(runtime_root=root)
         try:
             with open(config_path, "rb") as f:
                 raw = tomllib.load(f)
         except Exception:
-            return cls()
+            return cls(runtime_root=root)
         if not isinstance(raw, dict):
-            return cls()
-        kwargs: dict = {}
+            return cls(runtime_root=root)
+        kwargs: dict = {"runtime_root": root}
         cls._apply_section(kwargs, raw, "read", {
             "max_lines_to_read": int,
             "default_max_output_tokens": int,

@@ -38,12 +38,10 @@ def open_runtime(runtime_root: Path) -> StubRuntimeHandle:
 @dataclass
 class PalRuntimeApp:
     handle: StubRuntimeHandle
-    debug_prompt: bool = False
     idle_sleep_seconds: float = 0.02
 
     async def run(self) -> None:
         stop_event = asyncio.Event()
-        self.handle.core.debug_prompt = self.debug_prompt
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -63,5 +61,5 @@ class PalRuntimeApp:
             await self.handle.stop_async()
 
 
-def build_runtime_app(runtime_root: Path, *, debug_prompt: bool = False) -> PalRuntimeApp:
-    return PalRuntimeApp(handle=open_runtime(runtime_root), debug_prompt=debug_prompt)
+def build_runtime_app(runtime_root: Path) -> PalRuntimeApp:
+    return PalRuntimeApp(handle=open_runtime(runtime_root))

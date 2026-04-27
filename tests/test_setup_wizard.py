@@ -267,16 +267,6 @@ class TestServiceGeneration(unittest.TestCase):
         self.assertIn("StandardOutput=append:/home/test/.pal/pal.log", content)
         self.assertIn("WantedBy=default.target", content)
 
-    def test_generate_service_content_with_debug(self) -> None:
-        from pal.wizard.cli import _generate_service_content
-
-        content = _generate_service_content(
-            pal_bin="/usr/local/bin/pal",
-            runtime_root=Path("/home/test/.pal"),
-            debug_prompt=True,
-        )
-        self.assertIn("--debug-prompt", content)
-
     def test_pick_service_name_no_conflict(self) -> None:
         from pal.wizard import cli as cli_mod
 

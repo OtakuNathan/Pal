@@ -180,6 +180,13 @@ class ControlPlane(ControlPlanePort):
                 route=result.route,
             )
             return _with_interaction_context(action, result)
+        if action_key == "control.log.open":
+            action = ControlAction(
+                action_kind="show_log",
+                target_scope="runtime",
+                route=result.route,
+            )
+            return _with_interaction_context(action, result)
         if action_key == "control.think.set":
             requested = _normalize_think_level(str(result.action_args.get("think_level") or ""))
             if requested is None:
@@ -196,6 +203,15 @@ class ControlPlane(ControlPlanePort):
                 target_scope="runtime",
                 route=result.route,
                 args={"think_level": requested},
+            )
+            return _with_interaction_context(action, result)
+        if action_key in {"control.log.start", "control.log.end"}:
+            enabled = action_key == "control.log.start"
+            action = ControlAction(
+                action_kind="set_log",
+                target_scope="runtime",
+                route=result.route,
+                args={"prompt_log_enabled": enabled},
             )
             return _with_interaction_context(action, result)
         if action_key == "control.interrupt.run":
@@ -370,6 +386,19 @@ class ControlPlane(ControlPlanePort):
         )
         self.register_command(
             ControlCommandSpec(
+                name="log",
+                handler=self._handle_log,
+                description="Show or update prompt debug logging for future turns.",
+                usage="/log [start|end]",
+                show_in_panel=True,
+                panel_group="builtin",
+                panel_button=True,
+                panel_label="Log",
+                interaction_action_key="control.log.open",
+            )
+        )
+        self.register_command(
+            ControlCommandSpec(
                 name="compact",
                 handler=self._handle_compact,
                 description="Manually trigger memory compaction.",
@@ -437,6 +466,32 @@ class ControlPlane(ControlPlanePort):
             target_scope="runtime",
             route=invocation.route,
             args={"think_level": requested},
+        )
+
+    def _handle_log(self, invocation: ControlCommandInvocation) -> ControlAction:
+        if not invocation.argv:
+            return ControlAction(
+                action_kind="show_log",
+                target_scope="runtime",
+                route=invocation.route,
+            )
+        subcommand = str(invocation.argv[0] or "").strip().lower()
+        if subcommand not in {"start", "end"}:
+            return ControlAction(
+                action_kind="invalid_command",
+                target_scope="control",
+                route=invocation.route,
+                args={
+                    "command_name": invocation.command_name,
+                    "reason": "invalid log subcommand",
+                },
+                notes="Use /log start or /log end.",
+            )
+        return ControlAction(
+            action_kind="set_log",
+            target_scope="runtime",
+            route=invocation.route,
+            args={"prompt_log_enabled": subcommand == "start"},
         )
 
     def _handle_interrupt(self, invocation: ControlCommandInvocation) -> ControlAction:

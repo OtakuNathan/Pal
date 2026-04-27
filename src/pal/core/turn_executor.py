@@ -50,9 +50,9 @@ class TurnExecutor:
         *,
         call_port_async: Callable[..., Awaitable[Any]],
         build_canonical_prompt: Callable[..., Any],
-        debug_log_prompt: Callable[[CanonicalLLMRequest], None],
-        debug_log_outcome: Callable[[CanonicalLLMOutcome], None],
-        debug_log_reply: Callable[[str], None],
+        debug_log_prompt: Callable[..., None],
+        debug_log_outcome: Callable[..., None],
+        debug_log_reply: Callable[..., None],
         build_llm_tool_contracts: Callable[[], list[dict[str, object]]],
         handle_failure_async: Callable[..., Awaitable[Any]],
         render_failure_feedback_text: Callable[[Any], str],
@@ -204,12 +204,12 @@ class TurnExecutor:
             tools=tools,
             metadata=dict(prompt.metadata),
         )
-        self._debug_log_prompt(request)
+        self._debug_log_prompt(continuation, request)
         if self.should_stream_reply(continuation.channel_envelope) and hasattr(llm_runtime, "generate_stream"):
             outcome = await self.stream_llm_request_async(continuation, llm_runtime, request)
         else:
             outcome = await self._call_port_async(llm_runtime, "agenerate", "generate", request)
-        self._debug_log_outcome(outcome)
+        self._debug_log_outcome(continuation, outcome)
         preferred_endpoint_id = str(getattr(outcome, "preferred_endpoint_id", "") or "").strip() or None
         preferred_model_id = str(getattr(outcome, "preferred_model_id", "") or "").strip() or None
         if preferred_endpoint_id is None:
@@ -477,7 +477,7 @@ class TurnExecutor:
             return EffectResult(status=RuntimeStatus.SKIPPED, text="interrupted")
         channel_runtime = self.context.require_port("channel:channel")
         reply_id = channel_runtime.queue_reply(effect.channel_envelope, effect.text)
-        self._debug_log_reply(effect.text)
+        self._debug_log_reply(continuation, effect.text)
         return EffectResult(status=RuntimeStatus.QUEUED, payload={"reply_id": reply_id}, text=effect.text)
 
     @_dispatch_effect.register(MailboxReplyStreamEffect)
@@ -571,6 +571,7 @@ class TurnExecutor:
         snapshot_think_level = str(continuation.turn_settings_snapshot.get("think_level") or "").strip()
         if snapshot_think_level:
             metadata["think_level"] = snapshot_think_level
+        metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
         if assembly_context.turn_kind != "failure":
             try:
                 memory_service = self.context.require_port("memory:memory")
@@ -612,6 +613,7 @@ class TurnExecutor:
         metadata = dict(prompt.metadata)
         if snapshot_think_level:
             metadata["think_level"] = snapshot_think_level
+        metadata["prompt_log_enabled"] = bool(continuation.turn_settings_snapshot.get("prompt_log_enabled"))
         metadata["prompt_budget_snapshot"] = self._build_prompt_budget_snapshot(
             assembly_context,
             base_messages=base_messages,

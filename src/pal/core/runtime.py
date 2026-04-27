@@ -175,7 +175,10 @@ class TurnManager:
                 except Exception:
                     pass
             think_level = str(getattr(llm_runtime, "think_level", "") or "").strip() or None
-        return {"think_level": think_level or "balanced"}
+        return {
+            "think_level": think_level or "balanced",
+            "prompt_log_enabled": bool(self.state.prompt_log_enabled),
+        }
 
     def latest_active_turn_id(self, control_scope_key: str) -> str | None:
         scope_state = self._ensure_scope_state(control_scope_key)
@@ -307,7 +310,6 @@ class PalCore:
     state: CoreRuntimeState = field(default_factory=CoreRuntimeState)
     config: RuntimeConfig = field(default_factory=RuntimeConfig.defaults)
     main_loop: MainLoop = field(default_factory=MainLoop)
-    debug_prompt: bool = False
     turn_manager: TurnManager = field(init=False)
     prompt_compiler: PromptCompiler = field(init=False)
     tool_surface: ToolSurface = field(init=False)
@@ -619,6 +621,12 @@ class PalCore:
             if action.action_kind == "set_think":
                 await self._handle_set_think_async(action)
                 return
+            if action.action_kind == "show_log":
+                await self._handle_show_log_async(action)
+                return
+            if action.action_kind == "set_log":
+                await self._handle_set_log_async(action)
+                return
             if action.action_kind == "interrupt_turn":
                 await self._handle_interrupt_turn_async(action)
                 return
@@ -729,6 +737,29 @@ class PalCore:
         if callable(refresh):
             refresh()
         message = f"Think level updated to {requested}. This applies to new turns only."
+        if await self._resolve_interaction_action_async(action, message):
+            return
+        await self._reply_to_route_async(action.route, message)
+
+    async def _handle_show_log_async(self, action: ControlAction) -> None:
+        enabled = bool(self.state.prompt_log_enabled)
+        if action.route is not None and action.route.channel_kind == "telegram":
+            await self._interactive_to_route_async(
+                action.route,
+                "interactive_update",
+                self._build_log_panel_interaction(action.route, enabled),
+            )
+            return
+        await self._reply_to_route_async(action.route, self._render_log_status_text(enabled))
+
+    async def _handle_set_log_async(self, action: ControlAction) -> None:
+        enabled = bool(action.args.get("prompt_log_enabled"))
+        self.state.prompt_log_enabled = enabled
+        message = (
+            "Prompt debug logging enabled for new turns."
+            if enabled
+            else "Prompt debug logging disabled for new turns."
+        )
         if await self._resolve_interaction_action_async(action, message):
             return
         await self._reply_to_route_async(action.route, message)
@@ -1173,6 +1204,48 @@ class PalCore:
             expires_at=None,
         )
 
+    def _build_log_panel_interaction(
+        self,
+        route: ControlRoute,
+        enabled: bool,
+        *,
+        banner: str | None = None,
+    ) -> InteractionMessageSpec:
+        start_label = "> Start logging" if enabled else "Start logging"
+        end_label = "Stop logging" if enabled else "> Stop logging"
+        text = self._render_log_status_text(enabled)
+        if banner:
+            text = f"{banner}\n\n{text}"
+        return InteractionMessageSpec(
+            interaction_id=self._control_panel_interaction_id(route),
+            interaction_kind="control_panel",
+            route=route,
+            text=text,
+            buttons=(
+                (
+                    InteractionButtonSpec(
+                        label=start_label,
+                        action_key="control.log.start",
+                    ),
+                ),
+                (
+                    InteractionButtonSpec(
+                        label=end_label,
+                        action_key="control.log.end",
+                    ),
+                ),
+                (InteractionButtonSpec(label="Back", action_key="control.panel.back"),),
+            ),
+            expires_at=None,
+        )
+
+    def _render_log_status_text(self, enabled: bool) -> str:
+        status = "on" if enabled else "off"
+        return (
+            f"Prompt log: {status}\n"
+            "Use /log start or /log end. Changes apply to new turns only."
+        )
+
     def _build_reset_confirm_interaction(self, request) -> InteractionMessageSpec:
         return InteractionMessageSpec(
             interaction_id=request.request_id,
@@ -1512,33 +1585,77 @@ class PalCore:
     def _select_turn_temperature(self, response_mode: str) -> float:
         return self.turn_executor.select_turn_temperature(response_mode)
 
-    def _debug_log_prompt(self, request: CanonicalLLMRequest) -> None:
-        if not self.debug_prompt:
+    def _debug_log_prompt(self, *args) -> None:
+        if not self._prompt_log_enabled_from_args(*args):
             return
-        print("=== PAL PROMPT DEBUG ===")
-        print("--- request.messages ---")
-        print(request.messages)
-        print("--- request.tools ---")
-        print(request.tools)
-        print("=== END PAL PROMPT DEBUG ===")
+        request = _last_arg_of_type(args, CanonicalLLMRequest)
+        if request is None:
+            return
+        self._append_prompt_log(
+            "\n".join(
+                [
+                    "=== PAL PROMPT DEBUG ===",
+                    "--- request.messages ---",
+                    str(request.messages),
+                    "--- request.tools ---",
+                    str(request.tools),
+                    "=== END PAL PROMPT DEBUG ===",
+                ]
+            )
+        )
 
-    def _debug_log_outcome(self, outcome: CanonicalLLMOutcome) -> None:
-        if not self.debug_prompt:
+    def _debug_log_outcome(self, *args) -> None:
+        if not self._prompt_log_enabled_from_args(*args):
             return
-        print("=== PAL LLM OUTCOME ===")
-        print(f"finish_reason: {outcome.finish_reason}")
-        print(f"response_mode: {outcome.response_mode}")
-        print(f"tool_calls: {outcome.tool_calls}")
-        print(f"reasoning_text (first 500): {str(outcome.reasoning_text or '')[:500]}")
-        print(f"text (first 2000): {str(outcome.text or '')[:2000]}")
-        print("=== END PAL LLM OUTCOME ===")
+        outcome = _last_arg_of_type(args, CanonicalLLMOutcome)
+        if outcome is None:
+            return
+        self._append_prompt_log(
+            "\n".join(
+                [
+                    "=== PAL LLM OUTCOME ===",
+                    f"finish_reason: {outcome.finish_reason}",
+                    f"response_mode: {outcome.response_mode}",
+                    f"tool_calls: {outcome.tool_calls}",
+                    f"reasoning_text (first 500): {str(outcome.reasoning_text or '')[:500]}",
+                    f"text (first 2000): {str(outcome.text or '')[:2000]}",
+                    "=== END PAL LLM OUTCOME ===",
+                ]
+            )
+        )
 
-    def _debug_log_reply(self, text: str) -> None:
-        if not self.debug_prompt:
+    def _debug_log_reply(self, *args) -> None:
+        if not self._prompt_log_enabled_from_args(*args):
             return
-        print("=== PAL TG REPLY ===")
-        print(text)
-        print("=== END PAL TG REPLY ===")
+        text = str(args[-1] if args else "")
+        self._append_prompt_log(
+            "\n".join(
+                [
+                    "=== PAL TG REPLY ===",
+                    text,
+                    "=== END PAL TG REPLY ===",
+                ]
+            )
+        )
+
+    def _prompt_log_enabled_from_args(self, *args) -> bool:
+        for item in args:
+            if isinstance(item, TurnContinuation):
+                return bool(item.turn_settings_snapshot.get("prompt_log_enabled"))
+        request = _last_arg_of_type(args, CanonicalLLMRequest)
+        if request is not None and "prompt_log_enabled" in request.metadata:
+            return bool(request.metadata.get("prompt_log_enabled"))
+        return bool(self.state.prompt_log_enabled)
+
+    def _append_prompt_log(self, text: str) -> None:
+        root = getattr(self.config, "runtime_root", None)
+        if root is None:
+            print(text)
+            return
+        log_path = Path(root) / "pal.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(text.rstrip() + "\n")
 
     def _schedule_post_turn_commit(self, outcome: TurnOutcome) -> None:
         asyncio.run(self._schedule_post_turn_commit_async(outcome))
@@ -1591,3 +1708,10 @@ def _parse_utc_timestamp(value: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _last_arg_of_type(args: tuple[Any, ...], expected_type):
+    for item in reversed(args):
+        if isinstance(item, expected_type):
+            return item
+    return None

@@ -24,7 +24,6 @@ def _build_parser() -> argparse.ArgumentParser:
     # -- run -----------------------------------------------------------------
     run_parser = subparsers.add_parser("run", help="Run the Pal runtime")
     run_parser.add_argument("--runtime-root", type=Path, required=True)
-    run_parser.add_argument("--debug-prompt", action="store_true")
 
     # -- client --------------------------------------------------------------
     client_parser = subparsers.add_parser("client", help="Send one message to a running Pal instance")
@@ -109,7 +108,7 @@ def _redirect_stdio_to_log(runtime_root: Path) -> None:
 async def _run_async(args: argparse.Namespace) -> int:
     if args.command == "run":
         _redirect_stdio_to_log(args.runtime_root)
-        app = build_runtime_app(args.runtime_root, debug_prompt=True)
+        app = build_runtime_app(args.runtime_root)
         await app.run()
         return 0
     if args.command == "client":
