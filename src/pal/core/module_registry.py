@@ -29,6 +29,7 @@ class ModuleHandle:
     ports: dict[str, Any] = field(default_factory=dict)
     published_capabilities: list[str] = field(default_factory=list)
     mounted_subtree: "MountedSubtreeHandle | None" = None
+    cleanup_callbacks: list[Callable[[], None]] = field(default_factory=list)
     shutdown_sync: Callable[[], None] | None = None
     shutdown_async: Callable[[], Awaitable[None]] | None = None
 

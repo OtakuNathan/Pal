@@ -17,6 +17,7 @@ ALL_TURN_TOPICS = frozenset({TURN_START, TURN_END, TURN_TOOL_CALL_BEFORE, TURN_T
 @dataclass
 class TurnEventBus:
     _subscribers: dict[str, list[Callable[[str, TurnEvent], None]]] = field(default_factory=dict)
+    diagnostics: list[dict[str, Any]] = field(default_factory=list)
 
     def subscribe(self, topic: str, handler: Callable[[str, TurnEvent], None]) -> None:
         bucket = self._subscribers.setdefault(topic, [])
@@ -32,7 +33,25 @@ class TurnEventBus:
 
     def emit(self, topic: str, event: TurnEvent) -> None:
         for handler in list(self._subscribers.get(topic, ())):
-            handler(topic, event)
+            try:
+                handler(topic, event)
+            except Exception as exc:
+                self.diagnostics.append(
+                    {
+                        "kind": "turn_event_subscriber_failed",
+                        "topic": topic,
+                        "handler": _handler_name(handler),
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    }
+                )
 
     def subscribers_for(self, topic: str) -> tuple[Callable[[str, TurnEvent], None], ...]:
         return tuple(self._subscribers.get(topic, ()))
+
+
+def _handler_name(handler: Callable[[str, TurnEvent], None]) -> str:
+    qualified = getattr(handler, "__qualname__", None)
+    module = getattr(handler, "__module__", None)
+    if qualified and module:
+        return f"{module}.{qualified}"
+    return repr(handler)

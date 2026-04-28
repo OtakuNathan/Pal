@@ -600,6 +600,25 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(detached.status, "ok")
         self.assertNotIn("intro_provider_l3_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
 
+    def test_plugin_detach_runs_module_cleanup_callbacks(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        handle = compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        module = handle.core.context.module_registry.require("l3.sqlite_vec_l3")
+        calls: list[str] = []
+        module.cleanup_callbacks.append(lambda: calls.append("cleanup"))
+
+        detached = handle.core.context.execution_runtime.execute(
+            CapabilityCall(name="op_plugin_mgmt_detach", args={"plugin_id": "sqlite_vec_l3"})
+        )
+
+        self.assertEqual(detached.status, "ok")
+        self.assertEqual(calls, ["cleanup"])
+        self.assertEqual(module.cleanup_callbacks, [])
+
     def test_plugin_attach_detach_lifecycle_works_end_to_end(self) -> None:
         self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(

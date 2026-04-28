@@ -89,6 +89,26 @@ class TurnEventBusTests(unittest.TestCase):
 
         self.assertEqual(len(received), 0)
 
+    def test_subscriber_exception_is_captured_and_does_not_stop_emit(self) -> None:
+        bus = TurnEventBus()
+        received: list[tuple[str, dict]] = []
+
+        def bad_handler(topic: str, event: dict) -> None:
+            raise RuntimeError("boom")
+
+        def good_handler(topic: str, event: dict) -> None:
+            received.append((topic, event))
+
+        bus.subscribe(TURN_START, bad_handler)
+        bus.subscribe(TURN_START, good_handler)
+        bus.emit(TURN_START, {"turn_id": "t1"})
+
+        self.assertEqual(received, [(TURN_START, {"turn_id": "t1"})])
+        self.assertEqual(len(bus.diagnostics), 1)
+        self.assertEqual(bus.diagnostics[0]["kind"], "turn_event_subscriber_failed")
+        self.assertEqual(bus.diagnostics[0]["topic"], TURN_START)
+        self.assertIn("RuntimeError: boom", bus.diagnostics[0]["error"])
+
     def test_all_topics_defined(self) -> None:
         self.assertIn(TURN_START, ALL_TURN_TOPICS)
         self.assertIn(TURN_END, ALL_TURN_TOPICS)
