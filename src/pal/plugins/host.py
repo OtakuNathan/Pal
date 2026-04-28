@@ -405,6 +405,12 @@ class PluginHost:
         provider = handle.introspection_provider
         if provider is not None and hasattr(provider, "detach"):
             provider.detach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.detach"))
+        for cleanup in reversed(list(handle.cleanup_callbacks)):
+            try:
+                cleanup()
+            except Exception:
+                pass
+        handle.cleanup_callbacks.clear()
         handle.mounted = False
         self._withdraw_module_capabilities(handle.module_id)
         self.context.prompt_fragment_registry.unregister_module(handle.module_id)
