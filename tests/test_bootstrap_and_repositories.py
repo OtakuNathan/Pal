@@ -55,6 +55,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         self.db_path = self.registration.runtime.db_path
         self.database = self.wizard.create_database(self.registration)
+        self.wizard.provision_builtin_plugins(self.registration)
 
     def tearDown(self) -> None:
         self.database.close()
@@ -493,7 +494,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             registration=self.registration,
             database=self.database,
         )
-        plugin_root = self.registration.runtime.runtime_root / "plugins" / "demo_plugin"
+        plugin_root = self.registration.runtime.runtime_root / "plugins" / "community" / "demo_plugin"
         plugin_root.mkdir(parents=True, exist_ok=True)
         (plugin_root / "plugin.toml").write_text(
             "\n".join(

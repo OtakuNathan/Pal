@@ -7,6 +7,7 @@ from pal.core.event_handler_registry import EventHandlerRegistry
 from pal.core.event_source_registry import EventSourceRegistry
 from pal.core.module_registry import ModuleHandle, ModuleRegistry
 from pal.core.prompt_fragment_registry import PromptFragmentRegistry
+from pal.core.turn_events import TurnEventBus
 from pal.execution.capability_registry import CapabilityRegistry
 from pal.execution.runtime import ExecutionRuntime
 from pal.shared import IntrospectionPort
@@ -19,6 +20,7 @@ class MainContext:
     event_source_registry: EventSourceRegistry = field(default_factory=EventSourceRegistry)
     event_handler_registry: EventHandlerRegistry = field(default_factory=EventHandlerRegistry)
     prompt_fragment_registry: PromptFragmentRegistry = field(default_factory=PromptFragmentRegistry)
+    turn_event_bus: TurnEventBus = field(default_factory=TurnEventBus)
     introspection_registry: dict[str, IntrospectionPort] = field(default_factory=dict)
     port_registry: dict[str, Any] = field(default_factory=dict)
 

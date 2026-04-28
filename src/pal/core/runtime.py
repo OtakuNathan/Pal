@@ -353,6 +353,7 @@ class PalCore:
             config=self.config,
         )
         self.context.execution_runtime.register_provider_ref("core:turn_io", CoreTurnIOPort(core=self))
+
     def event_loop(self) -> MainLoop:
         return self.main_loop
 
@@ -462,6 +463,13 @@ class PalCore:
         turn_id = channel_envelope.event.event_id
         if emit_typing_start:
             self._queue_channel_status(channel_envelope, "typing_start")
+        self.context.turn_event_bus.emit("turn.start", {
+            "turn_id": turn_id,
+            "scope_key": control_scope_key,
+            "endpoint_id": channel_envelope.endpoint.endpoint_id,
+            "channel_kind": channel_envelope.endpoint.channel_kind,
+            "reply_target": dict(channel_envelope.response_handle.reply_target),
+        })
         scope_state.active_turn_id = turn_id
         scope_state.drained_event.clear()
         self.state.turn_scopes[turn_id] = control_scope_key
@@ -587,11 +595,14 @@ class PalCore:
     async def _background_channel_turn_runner_async(self, channel_envelope: ChannelEnvelope) -> None:
         turn_id = channel_envelope.event.event_id
         control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
+        turn_status = "success"
         try:
             await self.process_channel_turn_async(channel_envelope)
         except asyncio.CancelledError:
+            turn_status = "interrupted"
             self.turn_manager.cleanup_interrupted(turn_id, reason="interrupted")
         except Exception as exc:
+            turn_status = "failed"
             self.turn_manager.cleanup_interrupted(turn_id, reason="failed")
             self.state.diagnostics.append(
                 {
@@ -603,6 +614,14 @@ class PalCore:
         finally:
             if self.state.turn_scopes.get(turn_id) == control_scope_key and turn_id not in self.state.active_turns:
                 self.turn_manager._mark_turn_exited(turn_id)
+            self.context.turn_event_bus.emit("turn.end", {
+                "turn_id": turn_id,
+                "scope_key": control_scope_key,
+                "endpoint_id": channel_envelope.endpoint.endpoint_id,
+                "channel_kind": channel_envelope.endpoint.channel_kind,
+                "reply_target": dict(channel_envelope.response_handle.reply_target),
+                "status": turn_status,
+            })
             self._queue_channel_status(channel_envelope, "working_stop")
             await self._start_next_queued_turn_async(control_scope_key)
 
@@ -622,6 +641,7 @@ class PalCore:
             if action.action_kind == "show_think":
                 await self._handle_show_think_async(action)
                 return
+
             if action.action_kind == "set_think":
                 await self._handle_set_think_async(action)
                 return
