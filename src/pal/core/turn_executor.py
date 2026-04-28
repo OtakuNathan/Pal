@@ -273,6 +273,10 @@ class TurnExecutor:
             if 0 <= pending_index < len(continuation.pending_tool_call_batch):
                 execution_call = continuation.pending_tool_call_batch[pending_index]
         tool_budget = self._build_tool_call_budget(continuation, execution_call=execution_call)
+        self.context.turn_event_bus.emit("turn.tool_call_before", {
+            "turn_id": continuation.turn_id,
+            "tool_name": execution_call.name,
+        })
         tool_result = await self._call_port_async(
             self.context.execution_runtime,
             "execute_tool_async",
@@ -330,6 +334,11 @@ class TurnExecutor:
         verdict = self.turn_manager.guard.observe_batch(continuation.turn_id, [record])
         if verdict.recommended_action == GuardAction.TERMINATE_TOOL_LOOP:
             continuation.finalization_only = True
+        self.context.turn_event_bus.emit("turn.tool_call_after", {
+            "turn_id": continuation.turn_id,
+            "tool_name": execution_call.name,
+            "ok": tool_result.ok,
+        })
         if continuation.pending_tool_call_batch:
             continuation.pending_tool_results.append(tool_result)
             if len(continuation.pending_tool_results) >= len(continuation.pending_tool_call_batch):

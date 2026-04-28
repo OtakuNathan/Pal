@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
     from pal.core.main_context import MainContext
 
 
-def _builtin_plugins_root() -> Path:
+def _source_plugins_root() -> Path:
     return Path(__file__).resolve().parents[1] / "plugins_builtin"
 
 
@@ -39,21 +40,29 @@ class PluginHost:
     runtime_root: Path
     services: dict[str, Any] = field(default_factory=dict)
     third_party_repository: PluginBundleRepository = field(default_factory=PluginBundleRepository)
-    builtin_root: Path = field(default_factory=_builtin_plugins_root)
+    builtin_root: Path | None = None
     first_party_records: dict[str, PluginRecord] = field(default_factory=dict)
     first_party_handles: dict[str, ModuleHandle] = field(default_factory=dict)
+    third_party_handles: dict[str, ModuleHandle] = field(default_factory=dict)
     first_party_disabled: set[str] = field(default_factory=set)
     scan_errors: list[str] = field(default_factory=list)
     last_scan_status: str = PLUGIN_STATUS_DISCOVERED
 
+    def __post_init__(self) -> None:
+        if self.builtin_root is None:
+            self.builtin_root = self.runtime_root / "plugins" / "_builtin"
+
     def third_party_root(self) -> Path:
-        return self.runtime_root / "plugins"
+        return self.runtime_root / "plugins" / "community"
 
     def bootstrap(self) -> None:
         self.rescan()
         for plugin_id, record in list(self.first_party_records.items()):
             if record.enabled:
                 self._load_and_attach_first_party(plugin_id)
+        for row in self.third_party_repository.list_all():
+            if row.enabled and not row.attached:
+                self._load_and_attach_community(row.plugin_id)
 
     def rescan(self) -> dict[str, Any]:
         self.scan_errors = []
@@ -138,15 +147,19 @@ class PluginHost:
             if not record.enabled:
                 return {"status": RuntimeStatus.FORBIDDEN, "plugin_id": plugin_id}
             return {"status": self._attach_first_party(plugin_id), "plugin_id": plugin_id}
+        if plugin_id in self.third_party_handles:
+            return {"status": self._attach_community(plugin_id), "plugin_id": plugin_id}
         row = self.third_party_repository.set_attached(plugin_id, True)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
-        self.third_party_repository.set_load_status(plugin_id, status=PLUGIN_STATUS_UNSUPPORTED, error_text="third-party runtime host not implemented")
-        return {"status": RuntimeStatus.OK, "plugin_id": plugin_id, "attached": True}
+        status = self._load_and_attach_community(plugin_id)
+        return {"status": status, "plugin_id": plugin_id}
 
     def detach(self, plugin_id: str) -> dict[str, Any]:
         if plugin_id in self.first_party_records:
             return {"status": self._detach_first_party(plugin_id), "plugin_id": plugin_id}
+        if plugin_id in self.third_party_handles:
+            return {"status": self._detach_community(plugin_id), "plugin_id": plugin_id}
         row = self.third_party_repository.set_attached(plugin_id, False)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
@@ -163,6 +176,8 @@ class PluginHost:
         row = self.third_party_repository.set_enabled(plugin_id, True)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
+        if plugin_id not in self.third_party_handles:
+            self._load_and_attach_community(plugin_id)
         return {"status": RuntimeStatus.OK, "plugin_id": plugin_id, "enabled": True}
 
     def disable(self, plugin_id: str) -> dict[str, Any]:
@@ -173,11 +188,15 @@ class PluginHost:
             record.enabled = False
             record.last_load_status = PLUGIN_STATUS_DISABLED
             return {"status": RuntimeStatus.OK, "plugin_id": plugin_id, "enabled": False}
+        if plugin_id in self.third_party_handles:
+            self._detach_community(plugin_id)
         row = self.third_party_repository.set_enabled(plugin_id, False)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
         self.third_party_repository.set_attached(plugin_id, False)
         return {"status": RuntimeStatus.OK, "plugin_id": plugin_id, "enabled": False}
+
+    # --- scanning ---
 
     def _scan_first_party_manifests(self) -> list[PluginManifest]:
         manifests: list[PluginManifest] = []
@@ -244,13 +263,17 @@ class PluginHost:
 
     def _read_manifest(self, manifest_path: Path) -> PluginManifest:
         payload = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+        subscribed = payload.get("subscribed_events", [])
         return PluginManifest(
             plugin_id=str(payload["plugin_id"]),
             entrypoint=str(payload["entrypoint"]),
             version=str(payload["version"]),
             enabled_by_default=bool(payload.get("enabled_by_default", True)),
             filesystem_path=str(manifest_path.parent),
+            subscribed_events=tuple(str(e) for e in subscribed) if isinstance(subscribed, list) else (),
         )
+
+    # --- first-party lifecycle ---
 
     def _load_and_attach_first_party(self, plugin_id: str) -> str:
         if plugin_id in self.first_party_disabled:
@@ -269,7 +292,8 @@ class PluginHost:
         try:
             module = importlib.import_module(record.entrypoint)
             factory = getattr(module, "build_plugin")
-            instance = self._call_plugin_factory(factory)
+            plugin_dir = Path(record.filesystem_path) if record.filesystem_path else None
+            instance = self._call_plugin_factory(factory, plugin_dir=plugin_dir)
             handle = instance.register_with_core(self.context)
         except Exception as exc:
             record.last_load_status = PLUGIN_STATUS_LOAD_FAILED
@@ -281,19 +305,6 @@ class PluginHost:
         self.first_party_handles[plugin_id] = handle
         return RuntimeStatus.OK
 
-    def _call_plugin_factory(self, factory) -> FirstPartyPluginBundle:
-        signature = inspect.signature(factory)
-        kwargs = {}
-        build_context = PluginBuildContext(runtime_root=self.runtime_root, services=dict(self.services))
-        if "context" in signature.parameters:
-            kwargs["context"] = build_context
-        if "runtime_root" in signature.parameters:
-            kwargs["runtime_root"] = self.runtime_root
-        for key, value in self.services.items():
-            if key in signature.parameters:
-                kwargs[key] = value
-        return factory(**kwargs)
-
     def _attach_first_party(self, plugin_id: str) -> str:
         record = self.first_party_records.get(plugin_id)
         if record is None:
@@ -303,15 +314,7 @@ class PluginHost:
             if status != RuntimeStatus.OK:
                 return status
         handle = self.first_party_handles[plugin_id]
-        provider = handle.introspection_provider
-        if provider is not None and hasattr(provider, "attach"):
-            provider.attach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.attach"))
-        handle.mounted = True
-        handle.degraded = False
-        self._restore_provider_refs(handle)
-        self._restore_prompt_fragment_providers(handle)
-        self._restore_event_sources(handle)
-        self._publish_module_capabilities(handle.module_id)
+        self._do_attach(handle)
         record.attached = True
         record.last_load_status = PLUGIN_STATUS_ATTACHED
         return RuntimeStatus.OK
@@ -321,6 +324,84 @@ class PluginHost:
         record = self.first_party_records.get(plugin_id)
         if handle is None or record is None:
             return RuntimeStatus.NOT_FOUND
+        self._do_detach(handle)
+        record.attached = False
+        record.last_load_status = PLUGIN_STATUS_DETACHED
+        return RuntimeStatus.OK
+
+    # --- community (third-party) lifecycle ---
+
+    def _load_and_attach_community(self, plugin_id: str) -> str:
+        status = self._instantiate_community(plugin_id)
+        if status != RuntimeStatus.OK:
+            return status
+        return self._attach_community(plugin_id)
+
+    def _instantiate_community(self, plugin_id: str) -> str:
+        if plugin_id in self.third_party_handles:
+            return RuntimeStatus.OK
+        row = self.third_party_repository.get(plugin_id)
+        if row is None:
+            return RuntimeStatus.NOT_FOUND
+        plugin_dir = Path(row.filesystem_path)
+        if not plugin_dir.exists():
+            self.third_party_repository.set_load_status(
+                plugin_id, status=PLUGIN_STATUS_LOAD_FAILED,
+                error_text=f"plugin directory not found: {plugin_dir}",
+            )
+            return RuntimeStatus.NOT_FOUND
+        try:
+            dir_str = str(plugin_dir)
+            if dir_str not in sys.path:
+                sys.path.insert(0, dir_str)
+            module = importlib.import_module(row.entrypoint)
+            factory = getattr(module, "build_plugin")
+            instance = self._call_plugin_factory(factory, plugin_dir=plugin_dir)
+            handle = instance.register_with_core(self.context)
+        except Exception as exc:
+            self.third_party_repository.set_load_status(
+                plugin_id, status=PLUGIN_STATUS_LOAD_FAILED,
+                error_text=f"{exc.__class__.__name__}: {exc}",
+            )
+            return RuntimeStatus.ERROR
+        self.third_party_repository.set_load_status(plugin_id, status="loaded", error_text=None)
+        self.third_party_handles[plugin_id] = handle
+        return RuntimeStatus.OK
+
+    def _attach_community(self, plugin_id: str) -> str:
+        if plugin_id not in self.third_party_handles:
+            status = self._instantiate_community(plugin_id)
+            if status != RuntimeStatus.OK:
+                return status
+        handle = self.third_party_handles[plugin_id]
+        self._do_attach(handle)
+        self.third_party_repository.set_attached(plugin_id, True)
+        self.third_party_repository.set_load_status(plugin_id, status=PLUGIN_STATUS_ATTACHED, error_text=None)
+        return RuntimeStatus.OK
+
+    def _detach_community(self, plugin_id: str) -> str:
+        handle = self.third_party_handles.get(plugin_id)
+        if handle is None:
+            return RuntimeStatus.NOT_FOUND
+        self._do_detach(handle)
+        self.third_party_repository.set_attached(plugin_id, False)
+        self.third_party_repository.set_load_status(plugin_id, status=PLUGIN_STATUS_DETACHED, error_text=None)
+        return RuntimeStatus.OK
+
+    # --- shared attach/detach logic ---
+
+    def _do_attach(self, handle: ModuleHandle) -> None:
+        provider = handle.introspection_provider
+        if provider is not None and hasattr(provider, "attach"):
+            provider.attach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.attach"))
+        handle.mounted = True
+        handle.degraded = False
+        self._restore_provider_refs(handle)
+        self._restore_prompt_fragment_providers(handle)
+        self._restore_event_sources(handle)
+        self._publish_module_capabilities(handle.module_id)
+
+    def _do_detach(self, handle: ModuleHandle) -> None:
         provider = handle.introspection_provider
         if provider is not None and hasattr(provider, "detach"):
             provider.detach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.detach"))
@@ -332,9 +413,29 @@ class PluginHost:
             self.context.execution_runtime.unregister_provider_ref(provider_id)
             if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is not None:
                 self.context.execution_runtime.l3_plugin_registry.plugins.pop(provider_id, None)
-        record.attached = False
-        record.last_load_status = PLUGIN_STATUS_DETACHED
-        return RuntimeStatus.OK
+
+    # --- factory ---
+
+    def _call_plugin_factory(self, factory, *, plugin_dir: Path | None = None) -> FirstPartyPluginBundle:
+        signature = inspect.signature(factory)
+        kwargs = {}
+        build_context = PluginBuildContext(
+            runtime_root=self.runtime_root,
+            services=dict(self.services),
+            plugin_dir=plugin_dir,
+        )
+        if "context" in signature.parameters:
+            kwargs["context"] = build_context
+        if "runtime_root" in signature.parameters:
+            kwargs["runtime_root"] = self.runtime_root
+        if "plugin_dir" in signature.parameters:
+            kwargs["plugin_dir"] = plugin_dir
+        for key, value in self.services.items():
+            if key in signature.parameters:
+                kwargs[key] = value
+        return factory(**kwargs)
+
+    # --- capability management ---
 
     def _publish_module_capabilities(self, module_id: str) -> list[str]:
         handle = self.context.module_registry.require(module_id)

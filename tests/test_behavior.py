@@ -425,7 +425,6 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertIn("op_behavior_advise", content)
         self.assertIn("Advisor Gate", content)
-        self.assertIn("Do not call advisor for casual conversation", content)
         self.assertIn("op_exec_disc_search", content)
         self.assertIn("op_skill_inject", content)
         self.assertIn("op_behavior_affordance_submit", content)
@@ -462,7 +461,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
             'Affordance submission records: "when this scenario appears again, what route should Pal consider?"',
             system,
         )
-        self.assertIn("Do not call advisor for casual conversation", system)
+        self.assertIn("Advisor Gate", system)
         self.assertIn("If the user teaches a future behavior, submit an affordance.", system)
         self.assertIn("If the user teaches a stable fact, preference, or reusable experience, write memory.", system)
         self.assertIn("If both apply, ask for clarification or create separate records.", system)

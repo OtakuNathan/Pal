@@ -28,6 +28,7 @@ class PluginManifest:
     version: str
     enabled_by_default: bool = True
     filesystem_path: str = ""
+    subscribed_events: tuple[str, ...] = ()
 
 
 @dataclass
@@ -57,3 +58,4 @@ class FirstPartyPluginBundle(Protocol):
 class PluginBuildContext:
     runtime_root: Path
     services: dict[str, Any] = field(default_factory=dict)
+    plugin_dir: Path | None = None

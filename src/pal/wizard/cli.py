@@ -208,6 +208,7 @@ def run_setup_wizard() -> int:
         pal_entrypoint=DEFAULT_PAL_ENTRYPOINT,
     )
     service.create_database(registration)
+    service.provision_builtin_plugins(registration)
     service.seed_from_wizard(registration, collected)
 
     print(f"\n  Database configured at {db_path}")

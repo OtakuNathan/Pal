@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -146,7 +147,8 @@ class WizardService(WizardServicePort):
         pal_entrypoint: str,
     ) -> PalRegistration:
         runtime_root.mkdir(parents=True, exist_ok=True)
-        (runtime_root / "plugins").mkdir(parents=True, exist_ok=True)
+        (runtime_root / "plugins" / "_builtin").mkdir(parents=True, exist_ok=True)
+        (runtime_root / "plugins" / "community").mkdir(parents=True, exist_ok=True)
         registration = PalRegistration(
             display_name=display_name,
             runtime=RuntimeLaunchSpec(
@@ -185,6 +187,28 @@ class WizardService(WizardServicePort):
             settings.set("active_web_search_provider_id", "brave_search_default")
         if settings.get("active_web_fetch_provider_id") is None:
             settings.set("active_web_fetch_provider_id", "playwright_fetch_default")
+
+    def provision_builtin_plugins(self, registration: PalRegistration) -> None:
+        from pal.plugins.host import _source_plugins_root
+
+        source_root = _source_plugins_root()
+        builtin_root = registration.runtime.runtime_root / "plugins" / "_builtin"
+        builtin_root.mkdir(parents=True, exist_ok=True)
+
+        for source_dir in sorted(source_root.iterdir()):
+            if not source_dir.is_dir():
+                continue
+            manifest = source_dir / "plugin.toml"
+            if not manifest.exists():
+                continue
+            plugin_id = source_dir.name
+            target_dir = builtin_root / plugin_id
+            target_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(manifest, target_dir / "plugin.toml")
+
+        sentinel = builtin_root / ".managed"
+        if not sentinel.exists():
+            sentinel.write_text("# Managed by Pal. Do not modify manually.\n", encoding="utf-8")
 
     def provision_stub_runtime(self, runtime_root: Path) -> ProvisionedRuntime:
         registration = self.provision_runtime(

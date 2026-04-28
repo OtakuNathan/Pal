@@ -8,6 +8,7 @@ from pal.channel.models import ChannelEndpointModel
 from pal.channel.repository import ChannelEndpointRepository
 from pal.channel.runtime import ChannelRuntime
 from pal.channel.source import ChannelEventSource
+from pal.core.turn_events import TURN_END, TURN_START, TurnEvent
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -544,6 +545,25 @@ def inspect_channel(provider: ChannelIntrospectionProvider) -> ChannelSnapshot:
     )
 
 
+class TypingSubscriber:
+    def __init__(self, runtime: ChannelRuntime) -> None:
+        self._runtime = runtime
+
+    def __call__(self, topic: str, event: TurnEvent) -> None:
+        endpoint_id = str(event.get("endpoint_id") or "")
+        reply_target = dict(event.get("reply_target") or {})
+        if not endpoint_id:
+            return
+        if topic == TURN_START:
+            self._runtime.queue_endpoint_status(
+                endpoint_id, "typing_start", reply_target=reply_target,
+            )
+        elif topic == TURN_END:
+            self._runtime.queue_endpoint_status(
+                endpoint_id, "working_stop", reply_target=reply_target,
+            )
+
+
 def register_with_core(context: MainContext, runtime: ChannelRuntime) -> ModuleHandle:
     provider = ChannelIntrospectionProvider(runtime=runtime, repository=ChannelEndpointRepository())
     source = ChannelEventSource(runtime=runtime)
@@ -557,4 +577,7 @@ def register_with_core(context: MainContext, runtime: ChannelRuntime) -> ModuleH
     )
     context.register_module(handle)
     context.event_source_registry.attach("channel", source)
+    typing_sub = TypingSubscriber(runtime)
+    context.turn_event_bus.subscribe(TURN_START, typing_sub)
+    context.turn_event_bus.subscribe(TURN_END, typing_sub)
     return handle

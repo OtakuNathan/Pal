@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import signal
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,24 @@ from pal.bootstrap import StubRuntimeHandle, compose_runtime
 from pal.channel import ChannelEndpointRepository
 from pal.wizard.runtime import DEFAULT_DB_FILENAME, DEFAULT_PAL_ENTRYPOINT
 from pal.wizard import PalRegistration, WizardService
+
+
+def _ensure_plugin_layout(runtime_root: Path, wizard: WizardService, registration: PalRegistration) -> None:
+    builtin_dir = runtime_root / "plugins" / "_builtin"
+    community_dir = runtime_root / "plugins" / "community"
+    old_plugins = runtime_root / "plugins"
+
+    # Upgrade: if flat plugins/ exists without _builtin/community subdirs
+    if old_plugins.exists() and not builtin_dir.exists():
+        community_dir.mkdir(parents=True, exist_ok=True)
+        for item in list(old_plugins.iterdir()):
+            if item.is_dir() and item.name not in ("_builtin", "community"):
+                target = community_dir / item.name
+                if not target.exists():
+                    shutil.move(str(item), str(target))
+
+    if not builtin_dir.exists() or not any(builtin_dir.glob("*/plugin.toml")):
+        wizard.provision_builtin_plugins(registration)
 
 
 def open_runtime(runtime_root: Path) -> StubRuntimeHandle:
@@ -22,6 +41,7 @@ def open_runtime(runtime_root: Path) -> StubRuntimeHandle:
             pal_entrypoint=DEFAULT_PAL_ENTRYPOINT,
         )
         database = wizard.create_database(registration)
+        _ensure_plugin_layout(runtime_root, wizard, registration)
         if not ChannelEndpointRepository().list_all():
             wizard.seed_defaults(registration)
     else:
