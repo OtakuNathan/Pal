@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import importlib
 import inspect
 import sys
@@ -314,9 +315,16 @@ class PluginHost:
             if status != RuntimeStatus.OK:
                 return status
         handle = self.first_party_handles[plugin_id]
-        self._do_attach(handle)
+        try:
+            self._do_attach(handle)
+        except Exception as exc:
+            record.attached = False
+            record.last_load_status = PLUGIN_STATUS_LOAD_FAILED
+            record.last_error = f"{exc.__class__.__name__}: {exc}"
+            return RuntimeStatus.ERROR
         record.attached = True
         record.last_load_status = PLUGIN_STATUS_ATTACHED
+        record.last_error = None
         return RuntimeStatus.OK
 
     def _detach_first_party(self, plugin_id: str) -> str:
@@ -374,7 +382,15 @@ class PluginHost:
             if status != RuntimeStatus.OK:
                 return status
         handle = self.third_party_handles[plugin_id]
-        self._do_attach(handle)
+        try:
+            self._do_attach(handle)
+        except Exception as exc:
+            self._rollback_failed_attach(handle)
+            self.third_party_repository.set_load_status(
+                plugin_id, status=PLUGIN_STATUS_LOAD_FAILED,
+                error_text=f"{exc.__class__.__name__}: {exc}",
+            )
+            return RuntimeStatus.ERROR
         self.third_party_repository.set_attached(plugin_id, True)
         self.third_party_repository.set_load_status(plugin_id, status=PLUGIN_STATUS_ATTACHED, error_text=None)
         return RuntimeStatus.OK
@@ -392,14 +408,18 @@ class PluginHost:
 
     def _do_attach(self, handle: ModuleHandle) -> None:
         provider = handle.introspection_provider
-        if provider is not None and hasattr(provider, "attach"):
-            provider.attach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.attach"))
-        handle.mounted = True
-        handle.degraded = False
-        self._restore_provider_refs(handle)
-        self._restore_prompt_fragment_providers(handle)
-        self._restore_event_sources(handle)
-        self._publish_module_capabilities(handle.module_id)
+        try:
+            if provider is not None and hasattr(provider, "attach"):
+                provider.attach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.attach"))
+            handle.mounted = True
+            handle.degraded = False
+            self._restore_provider_refs(handle)
+            self._restore_prompt_fragment_providers(handle)
+            self._restore_event_sources(handle)
+            self._publish_module_capabilities(handle.module_id)
+        except Exception:
+            self._rollback_failed_attach(handle)
+            raise
 
     def _do_detach(self, handle: ModuleHandle) -> None:
         provider = handle.introspection_provider
@@ -447,13 +467,22 @@ class PluginHost:
         handle = self.context.module_registry.require(module_id)
         if handle.introspection_provider is None:
             return []
+        if handle.mounted_subtree is None or not handle.mounted_subtree.mounted:
+            self.context.execution_runtime.hydrate_module_handle(handle)
         published = self.context.execution_runtime.mount_subtree(handle)
-        for descriptor_name in published:
-            descriptor = self.context.execution_runtime.compiled_capability_index.records[descriptor_name]
-            self.context.capability_registry.register(descriptor)
-        handle.published_capabilities = published
-        self._register_behavior_declarations(handle)
-        return published
+        try:
+            for descriptor_name in published:
+                descriptor = self.context.execution_runtime.compiled_capability_index.records[descriptor_name]
+                self.context.capability_registry.register(descriptor)
+            handle.published_capabilities = published
+            self._register_behavior_declarations(handle)
+            return published
+        except Exception:
+            self.context.capability_registry.unregister_module(module_id)
+            self.context.execution_runtime.unmount_subtree(handle)
+            self._unregister_behavior_declarations(module_id)
+            handle.published_capabilities = []
+            raise
 
     def _withdraw_module_capabilities(self, module_id: str) -> list[str]:
         names = self.context.capability_registry.unregister_module(module_id)
@@ -500,3 +529,23 @@ class PluginHost:
         skill_unregister = getattr(skill, "unregister_declared_module", None)
         if callable(skill_unregister):
             skill_unregister(module_id)
+
+    def _rollback_failed_attach(self, handle: ModuleHandle) -> None:
+        with contextlib.suppress(Exception):
+            self._withdraw_module_capabilities(handle.module_id)
+        with contextlib.suppress(Exception):
+            self.context.prompt_fragment_registry.unregister_module(handle.module_id)
+        with contextlib.suppress(Exception):
+            self.context.event_source_registry.detach_module(handle.module_id)
+        for provider_id in list(handle.provider_refs):
+            with contextlib.suppress(Exception):
+                self.context.execution_runtime.unregister_provider_ref(provider_id)
+            with contextlib.suppress(Exception):
+                if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is not None:
+                    self.context.execution_runtime.l3_plugin_registry.plugins.pop(provider_id, None)
+        provider = handle.introspection_provider
+        if provider is not None and hasattr(provider, "detach"):
+            with contextlib.suppress(Exception):
+                provider.detach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.detach"))
+        handle.mounted = False
+        handle.degraded = True

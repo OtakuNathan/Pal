@@ -156,8 +156,17 @@ class SkillService:
         module_id = str(getattr(handle, "module_id", "") or getattr(provider, "module_id", "") or "")
         if not module_id:
             return
+        self.repository.delete_declared_skills_for_module(module_id)
         for blueprint in _collect_skill_blueprints(provider):
             self.repository.upsert_skill(_descriptor_from_skill_blueprint(blueprint, module_id=module_id))
+        declared_skills = getattr(provider, "declared_skills", None)
+        if callable(declared_skills):
+            for descriptor in declared_skills():
+                if getattr(descriptor, "source_kind", "") != SKILL_SOURCE_DECLARED:
+                    continue
+                if getattr(descriptor, "module_id", "") != module_id:
+                    descriptor = _copy_skill(descriptor, module_id=module_id)
+                self.repository.upsert_skill(descriptor)
 
     def unregister_declared_module(self, module_id: str) -> None:
         self.repository.delete_declared_skills_for_module(module_id)

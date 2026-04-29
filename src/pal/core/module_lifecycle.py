@@ -20,12 +20,19 @@ class ModuleLifecycle:
         if handle.mounted_subtree is None or not handle.mounted_subtree.mounted:
             self.context.execution_runtime.hydrate_module_handle(handle)
         published = self.context.execution_runtime.mount_subtree(handle)
-        for descriptor_name in published:
-            descriptor = self.context.execution_runtime.compiled_capability_index.records[descriptor_name]
-            self.context.capability_registry.register(descriptor)
-        handle.published_capabilities = published
-        self._register_behavior_declarations(handle)
-        return published
+        try:
+            for descriptor_name in published:
+                descriptor = self.context.execution_runtime.compiled_capability_index.records[descriptor_name]
+                self.context.capability_registry.register(descriptor)
+            handle.published_capabilities = published
+            self._register_behavior_declarations(handle)
+            return published
+        except Exception:
+            self.context.capability_registry.unregister_module(module_id)
+            self.context.execution_runtime.unmount_subtree(handle)
+            self._unregister_behavior_declarations(module_id)
+            handle.published_capabilities = []
+            raise
 
     def withdraw_module_capabilities(self, module_id: str) -> list[str]:
         names = self.context.capability_registry.unregister_module(module_id)

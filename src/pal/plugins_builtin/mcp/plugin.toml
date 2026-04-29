@@ -1,0 +1,4 @@
+plugin_id = "mcp"
+entrypoint = "pal.plugins_builtin.mcp.runtime"
+version = "0.1.0"
+enabled_by_default = false

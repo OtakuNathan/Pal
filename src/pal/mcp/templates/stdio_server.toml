@@ -1,0 +1,16 @@
+# Copy this file to runtime_root/plugins/mcp/<server_id>.toml and edit it.
+
+server_id = "filesystem"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/wufen/Desktop"]
+enabled = true
+trust_level = "local"
+
+startup_timeout_ms = 10000
+request_timeout_ms = 30000
+shutdown_timeout_ms = 5000
+kill_on_close = true
+
+[env]
+# API_KEY = "..."

@@ -216,15 +216,27 @@ class ExecutionRuntime(ExecutionRuntimePort):
         provider = handle.introspection_provider
         if provider is None:
             return
-        # Hydration is separate from publication. At this point we only compile
-        # the subtree from blueprint metadata; PalCore decides when it becomes
-        # visible and callable.
         handle.mounted_subtree = compile_provider_subtree(
             provider,
             module_id=handle.module_id,
             lifecycle_scope=handle.tier,
             detachable=handle.detachable,
         )
+        build_dynamic_subtree = getattr(provider, "build_mounted_subtree", None)
+        if callable(build_dynamic_subtree):
+            dynamic = build_dynamic_subtree(
+                module_id=handle.module_id,
+                lifecycle_scope=handle.tier,
+                detachable=handle.detachable,
+            )
+            if dynamic is not None:
+                handle.mounted_subtree.nodes.extend(dynamic.nodes)
+                handle.mounted_subtree.descriptors.extend(dynamic.descriptors)
+                handle.mounted_subtree.bound_actions.extend(dynamic.bound_actions)
+                handle.mounted_subtree.node_ids.extend(dynamic.node_ids)
+                handle.mounted_subtree.bound_action_keys.extend(dynamic.bound_action_keys)
+                handle.mounted_subtree.search_record_ids.extend(dynamic.search_record_ids)
+            return
 
     def mount_subtree(self, handle: "ModuleHandle") -> list[str]:
         subtree = handle.mounted_subtree
