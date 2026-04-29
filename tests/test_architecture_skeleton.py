@@ -857,7 +857,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             fragments = core.collect_prompt_fragments(PromptAssemblyContext(core_mode="default"))
             sections = [fragment.section for fragment in fragments]
 
-            self.assertEqual(sections, ["identity", "rules"])
+            self.assertEqual(sections, ["identity", "memory_routing", "system_surfaces", "rules"])
             prompt_ir = core.build_prompt_ir(
                 PromptAssemblyContext(
                     core_mode="default",
@@ -878,7 +878,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     ),
                 )
             )
-            self.assertEqual(prompt.metadata["fragment_sections"], ["identity", "operating_rules", "memory_context"])
+            self.assertEqual(
+                prompt.metadata["fragment_sections"],
+                ["identity", "system_surfaces", "operating_rules", "memory_routing", "memory_context"],
+            )
             self.assertEqual(
                 prompt.metadata["user_context_blocks"],
                 ["l1_recent_context_0", "l1_recent_context_1"],
@@ -887,12 +890,23 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(prompt.messages[0]["role"], "system")
             self.assertEqual(prompt.messages[-1], {"role": "user", "content": "Hello from user"})
             self.assertIn("## Identity", prompt.messages[0]["content"])
+            self.assertIn("## System Surfaces", prompt.messages[0]["content"])
             self.assertIn("## Operating Rules", prompt.messages[0]["content"])
+            self.assertIn("## Memory Routing", prompt.messages[0]["content"])
             self.assertNotIn("## Capability Guide", prompt.messages[0]["content"])
-            self.assertIn("Source-of-truth preference", prompt.messages[0]["content"])
+            self.assertIn("Source-of-Truth Preference", prompt.messages[0]["content"])
+            self.assertIn('Capability answers: "What executable ability exists right now?"', prompt.messages[0]["content"])
+            self.assertIn("op_l3_recall_query", prompt.messages[0]["content"])
+            self.assertIn("op_l3_commit_write", prompt.messages[0]["content"])
+            self.assertIn("op_l3_correct_patch", prompt.messages[0]["content"])
+            self.assertIn("memory_query_hints", prompt.messages[0]["content"])
+            self.assertIn("blocker, ambiguity, missing user/project context", prompt.messages[0]["content"])
+            self.assertIn("custom term", prompt.messages[0]["content"])
             self.assertNotIn("op_exec_disc_search", prompt.messages[0]["content"])
             self.assertNotIn("op_exec_capability_call", prompt.messages[0]["content"])
-            self.assertLess(prompt.messages[0]["content"].index("## Identity"), prompt.messages[0]["content"].index("## Operating Rules"))
+            self.assertLess(prompt.messages[0]["content"].index("## Identity"), prompt.messages[0]["content"].index("## System Surfaces"))
+            self.assertLess(prompt.messages[0]["content"].index("## System Surfaces"), prompt.messages[0]["content"].index("## Operating Rules"))
+            self.assertLess(prompt.messages[0]["content"].index("## Operating Rules"), prompt.messages[0]["content"].index("## Memory Routing"))
             self.assertNotIn("## Runtime Overlay", prompt.messages[0]["content"])
             self.assertNotIn("## Memory Projection", prompt.messages[0]["content"])
             self.assertEqual(prompt.messages[1], {"role": "user", "content": "What timezone should you use?"})
@@ -2319,13 +2333,19 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_minimal_operating_rules_prompt_omits_route_specific_tools(self) -> None:
         from pal.core.prompt import MinimalOperatingRulesPromptFragmentProvider
 
-        fragment = MinimalOperatingRulesPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext())[0]
+        fragments = MinimalOperatingRulesPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext())
+        by_section = {fragment.section: fragment for fragment in fragments}
+        surfaces = by_section["system_surfaces"]
+        rules = by_section["rules"]
 
-        self.assertIn("Source-of-truth preference", fragment.content)
-        self.assertIn("No success claim without confirmation", fragment.content)
-        self.assertIn("Advisor gate", fragment.content)
-        self.assertNotIn("op_l3_recall_query", fragment.content)
-        self.assertNotIn("op_l3_commit_write", fragment.content)
+        self.assertIn("Capability answers", surfaces.content)
+        self.assertIn("Memory answers", surfaces.content)
+        self.assertIn("Source-of-Truth Preference", rules.content)
+        self.assertIn("If the preferred source is unavailable", rules.content)
+        self.assertIn("No success claim without confirmation", rules.content)
+        self.assertIn("Mutation and Side-Effect Boundary", rules.content)
+        self.assertNotIn("op_l3_recall_query", rules.content)
+        self.assertNotIn("op_l3_commit_write", rules.content)
 
     def test_memory_service_compact_uses_semantic_summary_and_projects_to_l2(self) -> None:
         service = MemoryService()

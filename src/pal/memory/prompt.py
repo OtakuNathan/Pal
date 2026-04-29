@@ -23,14 +23,14 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
         return getattr(self.config, "keep_recent_tool_messages", _DEFAULT_KEEP_RECENT_TOOL_MESSAGES) if self.config else _DEFAULT_KEEP_RECENT_TOOL_MESSAGES
 
     def build_prompt_fragments(self, context: PromptAssemblyContext) -> list[PromptFragment]:
+        fragments: list[PromptFragment] = [_memory_routing_fragment()]
         pack = context.metadata.get("memory_pack")
         if not isinstance(pack, MemoryPack):
-            return []
+            return fragments
 
         messages = list(pack.l1_recent_context)
         cleared_indices = _build_cleared_tool_indices(messages, keep_recent=self._keep_recent)
 
-        fragments: list[PromptFragment] = []
         block_index = 0
         for i, message in enumerate(messages):
             role = str(message.role or "").strip()
@@ -164,6 +164,36 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                 )
             )
         return fragments
+
+
+def _memory_routing_fragment() -> PromptFragment:
+    return PromptFragment(
+        section="memory_routing",
+        title="Memory Routing",
+        content=(
+            "Use memory for durable facts, preferences, commitments, history, task experience, approved repair lessons, and reusable lessons.\n\n"
+            "Choose storage type:\n"
+            "- Future behavior rule -> affordance via `op_behavior_affordance_submit`.\n"
+            "- Reusable procedure -> skill candidate via `op_skill_assimilate`.\n"
+            "- Stable fact/preference -> memory via `op_l3_commit_write` or `op_l3_correct_patch`.\n"
+            "- Repair lesson / reusable task experience -> propose memory candidate or skill candidate first.\n"
+            "- Mixed content -> separate records.\n\n"
+            "Recall policy:\n"
+            "- Use `op_l3_recall_query` when past facts, user preferences, Pal history, commitments, or reusable prior lessons may affect the current answer.\n"
+            "- If a task runs into a blocker, ambiguity, missing user/project context, or an unfamiliar reference that may come from Pal history, try memory recall before giving up, guessing, or asking the user.\n"
+            "- If the user mentions a person, project, preference, prior decision, custom term, or past event Pal does not know, recall memory when Pal history may plausibly contain it.\n"
+            "- Do not recall memory automatically for every task or every unknown.\n"
+            "- For code/runtime truth, inspect the live/source truth; for current external facts, search or verify externally when available.\n"
+            "- Recall when it materially improves correctness, continuity, personalization, or safety.\n"
+            "- Treat `memory_query_hints` from behavior advice as suggestions only; they do not automatically recall memory.\n\n"
+            "Write policy:\n"
+            "- Write memory directly only when the user explicitly asks Pal to remember/save it, or the user states a clear durable fact/preference with low ambiguity.\n"
+            "- Do not directly commit inferred, ambiguous, temporary, emotional, sensitive, repair-case, or reusable-experience records unless the user approves or this category has explicit auto-commit permission.\n"
+            "- Use `op_l3_correct_patch` to update an existing durable record instead of writing a duplicate."
+        ),
+        priority=71,
+        metadata={"module_id": "memory", "kind": "memory_routing"},
+    )
 
 
 def _build_cleared_tool_indices(messages: list, *, keep_recent: int) -> set[int]:

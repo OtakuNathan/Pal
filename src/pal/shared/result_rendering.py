@@ -10,7 +10,7 @@ def render_structured_for_llm(structured: Any, *, fallback_text: str = "") -> st
     if isinstance(structured, str):
         return structured.strip()
     try:
-        return json.dumps(structured, ensure_ascii=False, sort_keys=True, indent=2)
+        return json.dumps(structured, ensure_ascii=False, sort_keys=True)
     except TypeError:
         return str(structured)
 

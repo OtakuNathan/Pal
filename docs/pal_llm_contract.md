@@ -38,6 +38,22 @@
 - control decisions
 - memory ranking
 
+## Multimodal Serialization Boundary
+
+`llm` is the final provider-wire serialization boundary for multimodal content.
+
+Internal prompt messages may contain typed content parts such as `artifact_image`. These are not provider payloads. During LiteLLM invocation, `llm` asks the artifact manager for the normalized representation and converts the part into a provider-compatible `image_url` data URL only when the selected endpoint advertises vision support.
+
+Rules:
+
+- `PromptCompiler` emits provider-neutral prompt IR and message parts.
+- `PalCore` supplies endpoint capability facts such as `supports_vision`.
+- `ArtifactManager` owns normalized artifact representations.
+- `LLMRuntime` owns conversion to LiteLLM/OpenAI-style wire format.
+- Non-vision endpoints must not crash on image parts; they receive text guidance instead.
+
+See [artifact_manager.md](artifact_manager.md).
+
 ## 设计结论
 
 ### 保留旧版 canonical shape

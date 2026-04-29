@@ -68,8 +68,11 @@ Foundation 是系统最低层：
 - `Channel`
 - `Memory`
 - `Execution`
+- `Artifact`
 
 它们负责感知、表达、记忆、行动。
+
+`Artifact` owns short-lived conversation attachments. It is separate from both filesystem tools and durable memory. Channels provide normalized attachment inputs; `PalCore` registers them; the LLM sees only prompt-safe `artifact_id` references and artifact tools.
 
 ### Control Plane
 

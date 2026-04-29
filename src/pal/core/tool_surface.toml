@@ -14,7 +14,21 @@ capabilities = [
     # -- behavior (affordance + skill) --
     "op_behavior_advise",
     "op_behavior_affordance_submit",
+    "op_skill_assimilate",
+    "op_skill_commit",
+    "op_skill_update",
+    "op_skill_disable",
+    "op_skill_search",
+    "op_skill_read",
     "op_skill_inject",
+    # -- artifacts (conversation attachments) --
+    "op_artifact_list",
+    "op_artifact_info",
+    "op_artifact_read",
+    "op_artifact_search",
+    "op_artifact_select",
+    "op_artifact_content_search",
+    "op_artifact_transcribe",
     # -- channel output --
     "op_channel_send_attachment",
     # -- web --

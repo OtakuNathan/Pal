@@ -33,6 +33,7 @@ class PluginBundleRepository:
         instance.version = version
         instance.filesystem_path = filesystem_path
         instance.updated_at = now
+        instance.attached = False
         instance.save()
         return instance
 

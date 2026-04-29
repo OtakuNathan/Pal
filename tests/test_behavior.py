@@ -25,7 +25,6 @@ from pal.behavior import (
     BehaviorService,
     BehaviorSkillModel,
     SkillDescriptor,
-    SkillInjectTool,
     affordance,
     register_with_core as register_behavior_with_core,
     skill,
@@ -39,6 +38,7 @@ from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
 from pal.memory import L2Entry, MemoryPack, MemoryService, register_with_core as register_memory_with_core
 from pal.memory.models import MemoryCaseModel
 from pal.memory.prompt import MemoryPromptFragmentProvider
+from pal.skill import SkillInjectTool, SkillService
 from pal.shared import MountedSubtreeHandle, PromptAssemblyContext
 
 
@@ -82,6 +82,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.repository = BehaviorRepository()
         self.runtime = _FakeExecutionRuntime(available={"cap.known"})
         self.service = BehaviorService(repository=self.repository, execution_runtime=self.runtime)
+        self.skill_service = SkillService(repository=self.repository.skill_repository, behavior_repository=self.repository)
 
     def tearDown(self) -> None:
         self.database.close()
@@ -236,7 +237,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual([item.affordance_id for item in ordered], ["instructed-a", "instructed-b", "declared-low"])
 
     def test_skill_inject_returns_structured_failure_for_missing_or_disabled(self) -> None:
-        tool = SkillInjectTool(service=self.service)
+        tool = SkillInjectTool(service=self.skill_service)
         self.repository.upsert_skill(
             SkillDescriptor(
                 skill_id="disabled",
@@ -251,8 +252,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         missing = tool.invoke({"skill_id": "missing"})
         disabled = tool.invoke({"skill_id": "disabled"})
 
-        self.assertEqual(missing.structured["reason"], "skill_not_found_or_disabled")
-        self.assertEqual(disabled.structured["reason"], "skill_not_found_or_disabled")
+        self.assertEqual(missing.structured["reason"], "skill_not_found_or_inactive")
+        self.assertEqual(disabled.structured["reason"], "skill_not_found_or_inactive")
 
     def test_declared_detach_removes_search_hit_but_instructed_and_learned_remain_unavailable(self) -> None:
         @skill(
@@ -303,6 +304,37 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         retained = asyncio.run(self.service.advise_async(BehaviorAdviceRequest(scenario="missing capability", top_k=10)))
         self.assertEqual({candidate.availability for candidate in retained.candidates}, {AFFORDANCE_UNAVAILABLE})
+
+    def test_declared_resident_affordance_registers_prompt_provider_without_database_record(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_behavior_with_core(core.context, self.service)
+
+        @affordance(
+            affordance_id="declared.resident",
+            title="Declared resident",
+            scenario_text="declared resident scenario",
+            prompt_hint="Consider declared resident guidance.",
+            visibility_mode=AFFORDANCE_VISIBILITY_RESIDENT,
+        )
+        class DeclaredResidentProvider:
+            module_id = "declared_resident_plugin"
+
+        handle = _FakeHandle(module_id="declared_resident_plugin", introspection_provider=DeclaredResidentProvider())
+        self.service.register_declared_module(handle)
+
+        self.assertIsNone(self.repository.get_affordance("declared.resident"))
+        prompt = core.build_canonical_prompt(PromptAssemblyContext())
+        system = prompt.messages[0]["content"]
+
+        self.assertIn("## Resident Affordances", system)
+        self.assertIn("Declared resident", system)
+        self.assertIn("Consider declared resident guidance.", system)
+        self.assertIn("resident_affordances", prompt.metadata["fragment_sections"])
+
+        self.service.unregister_declared_module("declared_resident_plugin")
+        after = core.build_canonical_prompt(PromptAssemblyContext()).messages[0]["content"]
+        self.assertNotIn("Declared resident", after)
 
     def test_learned_affordance_uses_weak_wording(self) -> None:
         self.repository.upsert_affordance(
@@ -393,7 +425,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
                 capability_refs=("cap.known",),
             )
         )
-        result = SkillInjectTool(service=self.service).invoke({"skill_id": "commit"})
+        result = SkillInjectTool(service=self.skill_service).invoke({"skill_id": "commit"})
 
         self.assertEqual(result.structured["manual_text"], "1. Review changes.\n2. Commit.")
         self.assertEqual(result.structured["capability_refs"], ["cap.known"])
@@ -428,8 +460,9 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("op_exec_disc_search", content)
         self.assertIn("op_skill_inject", content)
         self.assertIn("op_behavior_affordance_submit", content)
-        self.assertIn("op_l3_commit_write", content)
         self.assertIn("memory_query_hints", content)
+        self.assertNotIn("op_l3_recall_query", content)
+        self.assertNotIn("op_l3_commit_write", content)
 
     def test_behavior_prompt_sections_enter_system_prompt_in_order(self) -> None:
         core = PalCore()
@@ -439,32 +472,32 @@ class BehaviorSubsystemTests(unittest.TestCase):
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
         system = prompt.messages[0]["content"]
 
+        self.assertIn("## System Surfaces", system)
         self.assertIn("## Operating Rules", system)
         self.assertIn("## Behavior Routing", system)
-        self.assertIn("## Memory Routing", system)
+        self.assertNotIn("## Memory Routing", system)
         self.assertNotIn("## Resident Affordances", system)
+        self.assertLess(system.index("## System Surfaces"), system.index("## Operating Rules"))
         self.assertLess(system.index("## Operating Rules"), system.index("## Behavior Routing"))
-        self.assertLess(system.index("## Behavior Routing"), system.index("## Memory Routing"))
         self.assertEqual(
             prompt.metadata["fragment_sections"],
-            ["operating_rules", "behavior_routing", "memory_routing"],
+            ["system_surfaces", "operating_rules", "behavior_routing"],
         )
 
-        operating = system.split("## Behavior Routing", 1)[0]
-        self.assertIn("Advisor gate", operating)
-        self.assertIn("op_behavior_advise", operating)
+        surfaces = system.split("## Operating Rules", 1)[0]
+        self.assertIn('Capability answers: "What executable ability exists right now?"', surfaces)
+        self.assertIn('Affordance answers: "When this kind of situation appears, what route should Pal consider?"', surfaces)
+        self.assertIn('Skill answers: "What reusable procedure should Pal follow to accomplish this kind of task?"', surfaces)
+        self.assertIn('Memory answers: "What durable fact, preference, history, or lesson may matter now?"', surfaces)
+        operating = system.split("## Operating Rules", 1)[1].split("## Behavior Routing", 1)[0]
+        self.assertIn("Source-of-Truth Preference", operating)
+        self.assertIn("Mutation and Side-Effect Boundary", operating)
+        self.assertIn("Priority", operating)
+        self.assertNotIn("op_behavior_advise", operating)
         self.assertNotIn("op_l3_recall_query", operating)
         self.assertNotIn("op_l3_commit_write", operating)
-        self.assertIn('Capability search answers: "what executable ability exists?"', system)
-        self.assertIn('Behavior advice answers: "what route should Pal consider for this scenario?"', system)
-        self.assertIn(
-            'Affordance submission records: "when this scenario appears again, what route should Pal consider?"',
-            system,
-        )
         self.assertIn("Advisor Gate", system)
-        self.assertIn("If the user teaches a future behavior, submit an affordance.", system)
-        self.assertIn("If the user teaches a stable fact, preference, or reusable experience, write memory.", system)
-        self.assertIn("If both apply, ask for clarification or create separate records.", system)
+        self.assertIn("If the user teaches a future behavior rule, submit an affordance", system)
 
     def test_behavior_advice_tool_result_projects_to_behavior_guidance(self) -> None:
         self.repository.upsert_affordance(
@@ -567,6 +600,20 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("not durable facts", by_title["Behavior Guidance"])
         self.assertNotIn("[L3 summary; origin available]", by_title["Behavior Guidance"])
 
+    def test_memory_prompt_always_projects_memory_routing(self) -> None:
+        fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext())
+        self.assertEqual([fragment.section for fragment in fragments], ["memory_routing"])
+        routing = fragments[0].content
+
+        self.assertIn("op_l3_recall_query", routing)
+        self.assertIn("op_l3_commit_write", routing)
+        self.assertIn("op_l3_correct_patch", routing)
+        self.assertIn("memory_query_hints", routing)
+        self.assertIn("approved repair lessons", routing)
+        self.assertIn("blocker, ambiguity, missing user/project context", routing)
+        self.assertIn("custom term", routing)
+        self.assertIn("Do not recall memory automatically for every task or every unknown.", routing)
+
     def test_behavior_guidance_l2_entries_do_not_retire_to_l3(self) -> None:
         service = MemoryService()
         service.l2_store.capacity = 0
@@ -619,7 +666,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("Consider updating the OLED expression", with_resident)
         self.assertEqual(
             with_resident_prompt.metadata["fragment_sections"],
-            ["operating_rules", "behavior_routing", "memory_routing", "resident_affordances"],
+            ["system_surfaces", "operating_rules", "behavior_routing", "resident_affordances"],
         )
 
     def test_module_capabilities_are_auto_declared_as_affordances(self) -> None:

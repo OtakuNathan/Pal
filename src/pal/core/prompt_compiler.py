@@ -40,6 +40,15 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
+            elif normalized_section == "system_surfaces":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="system_surfaces",
+                        title="System Surfaces",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
             elif normalized_section == "rules":
                 system_blocks.append(
                     PromptIRBlock(
@@ -67,6 +76,15 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
+            elif normalized_section == "skill_learning":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="skill_learning",
+                        title="Skill Learning",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
             elif normalized_section == "resident_affordances":
                 system_blocks.append(
                     PromptIRBlock(
@@ -81,6 +99,19 @@ class PromptCompiler:
                     PromptIRBlock(
                         block_id=str(fragment.metadata.get("block_id") or "memory_projection"),
                         title=str(fragment.title or "Memory Projection"),
+                        content=rendered_body,
+                        metadata={
+                            **dict(fragment.metadata),
+                            "source_section": fragment.section,
+                            "source_title": fragment.title,
+                        },
+                    )
+                )
+            elif normalized_section == "artifact":
+                user_context_blocks.append(
+                    PromptIRBlock(
+                        block_id=str(fragment.metadata.get("block_id") or "available_artifacts"),
+                        title=str(fragment.title or "Available Artifacts"),
                         content=rendered_body,
                         metadata={
                             **dict(fragment.metadata),
@@ -229,10 +260,13 @@ class PromptCompiler:
             "identity",
             "memory",
             "memory_system",
+            "artifact",
             "runtime",
+            "system_surfaces",
             "rules",
             "behavior_routing",
             "memory_routing",
+            "skill_learning",
             "resident_affordances",
         }:
             return lowered
@@ -290,9 +324,11 @@ class PromptCompiler:
 
     def _order_system_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
         identity_blocks = [block for block in blocks if block.block_id == "identity"]
+        system_surface_blocks = [block for block in blocks if block.block_id == "system_surfaces"]
         rule_blocks = [block for block in blocks if block.block_id == "operating_rules"]
         behavior_blocks = [block for block in blocks if block.block_id == "behavior_routing"]
         memory_routing_blocks = [block for block in blocks if block.block_id == "memory_routing"]
+        skill_learning_blocks = [block for block in blocks if block.block_id == "skill_learning"]
         resident_blocks = [block for block in blocks if block.block_id == "resident_affordances"]
         memory_blocks = [block for block in blocks if block.block_id == "memory_context"]
         runtime_blocks = [block for block in blocks if block.block_id == "runtime_overlay"]
@@ -300,9 +336,11 @@ class PromptCompiler:
         ordered_runtime.extend(block for block in runtime_blocks if block.metadata.get("priority") == "finalization")
         return [
             *identity_blocks,
+            *system_surface_blocks,
             *rule_blocks,
             *behavior_blocks,
             *memory_routing_blocks,
+            *skill_learning_blocks,
             *resident_blocks,
             *memory_blocks,
             *ordered_runtime,
@@ -313,14 +351,56 @@ class PromptCompiler:
         system_content = self._render_system_blocks(prompt_ir.system_blocks)
         if system_content:
             messages.append({"role": "system", "content": system_content})
+        deferred_user_parts: list[dict[str, Any]] = []
         for block in prompt_ir.user_context_blocks:
+            # Multimodal user-context needs to travel with the actual user request.
+            # Some OpenAI-compatible vision endpoints ignore image parts that live
+            # in a previous synthetic user message.
+            if block.metadata.get("content_parts"):
+                rendered_message = self._render_user_context_message(block)
+                content = rendered_message.get("content")
+                if isinstance(content, list):
+                    deferred_user_parts.extend(dict(part) for part in content if isinstance(part, dict))
+                elif content:
+                    deferred_user_parts.append({"type": "text", "text": str(content)})
+                continue
             messages.append(self._render_user_context_message(block))
         if prompt_ir.primary_input.strip():
-            messages.append({"role": "user", "content": prompt_ir.primary_input.strip()})
+            if deferred_user_parts:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            *self._image_parts_first(deferred_user_parts),
+                            {"type": "text", "text": prompt_ir.primary_input.strip()},
+                        ],
+                    }
+                )
+            else:
+                messages.append({"role": "user", "content": prompt_ir.primary_input.strip()})
+        elif deferred_user_parts:
+            messages.append({"role": "user", "content": self._image_parts_first(deferred_user_parts)})
         return messages
+
+    @staticmethod
+    def _image_parts_first(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        image_parts = [part for part in parts if part.get("type") == "artifact_image"]
+        other_parts = [part for part in parts if part.get("type") != "artifact_image"]
+        return [*image_parts, *other_parts]
 
     def _render_user_context_message(self, block: PromptIRBlock) -> dict[str, Any]:
         rendered = block.content.strip()
+        content_parts = list(block.metadata.get("content_parts") or [])
+        if content_parts:
+            message_parts: list[dict[str, Any]] = []
+            if rendered:
+                message_parts.append({"type": "text", "text": f"<system-reminder>{block.title}:\n{rendered}</system-reminder>"})
+            else:
+                message_parts.append({"type": "text", "text": f"<system-reminder>{block.title}: attached artifact content is included.</system-reminder>"})
+            for part in content_parts:
+                if isinstance(part, dict):
+                    message_parts.append(dict(part))
+            return {"role": "user", "content": message_parts}
         if block.block_id.startswith("l1_recent_context"):
             role = str(block.metadata.get("role") or "user")
             tool_calls = block.metadata.get("tool_calls")

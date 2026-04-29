@@ -61,7 +61,7 @@ class PluginHost:
             if record.enabled:
                 self._load_and_attach_first_party(plugin_id)
         for row in self.third_party_repository.list_all():
-            if row.enabled and not row.attached:
+            if row.enabled:
                 self._load_and_attach_community(row.plugin_id)
 
     def rescan(self) -> dict[str, Any]:
@@ -482,6 +482,10 @@ class PluginHost:
             self.context.event_source_registry.attach(handle.module_id, source)
 
     def _register_behavior_declarations(self, handle: ModuleHandle) -> None:
+        skill = self.context.port_registry.get("skill:skill")
+        skill_register = getattr(skill, "register_declared_module", None)
+        if callable(skill_register):
+            skill_register(handle)
         behavior = self.context.port_registry.get("behavior:behavior")
         register = getattr(behavior, "register_declared_module", None)
         if callable(register):
@@ -492,3 +496,7 @@ class PluginHost:
         unregister = getattr(behavior, "unregister_declared_module", None)
         if callable(unregister):
             unregister(module_id)
+        skill = self.context.port_registry.get("skill:skill")
+        skill_unregister = getattr(skill, "unregister_declared_module", None)
+        if callable(skill_unregister):
+            skill_unregister(module_id)

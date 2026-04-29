@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from pal.behavior.service import BehaviorService
+from pal.behavior.contracts import AffordanceDescriptor
 from pal.shared import PromptAssemblyContext, PromptFragment
+
+if TYPE_CHECKING:
+    from pal.behavior.service import BehaviorService
 
 
 @dataclass
@@ -19,35 +23,27 @@ class BehaviorPromptFragmentProvider:
                 section="behavior_routing",
                 title="Behavior Routing",
                 content=(
-                    'Capability search answers: "what executable ability exists?"\n'
-                    'Behavior advice answers: "what route should Pal consider for this scenario?"\n'
-                    'Affordance submission records: "when this scenario appears again, what route should Pal consider?"\n\n'
                     "When Pal needs to act:\n"
-                    "1. If the required capability is obvious, inspect/search capability inventory directly with `op_exec_disc_search`.\n"
-                    "2. Advisor Gate: for simple obvious capability use, inspect capability inventory directly. For non-trivial, risky, user-specific, external-state-dependent, or unclear workflows, call `op_behavior_advise` before execution unless an applicable rule is already active.\n"
-                    "4. If advice returns a `skill_ref`, call `op_skill_inject` before executing that workflow. A skill is a playbook, not an executable action.\n"
-                    "5. If advice returns `capability_refs`, resolve them against current capability inventory before relying on them.\n"
-                    "6. Execute only through capability calls, respecting capability policy, approval, availability, and verification."
+                    "1. Answer-only task\n"
+                    "- If no tool is needed, answer directly.\n\n"
+                    "2. Obvious single-capability task\n"
+                    "- If the needed capability is obvious, inspect/search capability inventory directly with `op_exec_disc_search`.\n"
+                    "- Resolve the capability before using it.\n"
+                    "- Execute only through capability calls.\n\n"
+                    "3. Non-trivial workflow\n"
+                    "- Advisor Gate: if the task is risky, unclear, user-specific, external-state-dependent, multi-step, or involves research/coding/configuration/system state, call `op_behavior_advise` unless an active prompt rule, injected skill, affordance, hot memory, or conversation context already gives a clear route.\n\n"
+                    "4. Advice result\n"
+                    "- If advice returns `skill_ref`, call `op_skill_inject` before executing that workflow.\n"
+                    "- If advice returns `capability_refs`, resolve them against current capability inventory before relying on them.\n"
+                    "- Treat `memory_query_hints` as suggestions only; they do not automatically recall memory.\n\n"
+                    "5. Execution\n"
+                    "- Execute only through capability calls.\n"
+                    "- Respect capability policy, approval requirements, availability, and verification.\n"
+                    "- Prefer the simplest viable action path.\n\n"
+                    "If the user teaches a future behavior rule, submit an affordance with `op_behavior_affordance_submit`."
                 ),
                 priority=70,
                 metadata={"module_id": self.module_id, "kind": "behavior_routing"},
-            ),
-            PromptFragment(
-                section="memory_routing",
-                title="Memory Routing",
-                content=(
-                    "If the user teaches a future behavior, submit an affordance.\n"
-                    "If the user teaches a stable fact, preference, or reusable experience, write memory.\n"
-                    "If both apply, ask for clarification or create separate records.\n\n"
-                    "Use `op_behavior_affordance_submit` only when the user defines a durable behavior-routing rule.\n"
-                    "Use `op_l3_recall_query` when past facts, user preferences, Pal history, commitments, or reusable prior lessons may affect the current answer.\n"
-                    "Use `op_l3_commit_write` for durable facts, preferences, task experience, repair cases, and reusable solution cases.\n"
-                    "Use `op_l3_correct_patch` to update an existing durable record instead of writing a duplicate.\n\n"
-                    "Affordance is behavior routing knowledge. Memory is durable factual/task knowledge.\n"
-                    "`memory_query_hints` from behavior advice are suggestions only; they do not automatically recall memory."
-                ),
-                priority=71,
-                metadata={"module_id": self.module_id, "kind": "memory_routing"},
             ),
         ]
         resident = self._resident_affordance_fragment()
@@ -71,3 +67,37 @@ class BehaviorPromptFragmentProvider:
             priority=75,
             metadata={"module_id": self.module_id, "kind": "resident_affordances"},
         )
+
+
+@dataclass
+class DeclaredResidentAffordancePromptFragmentProvider:
+    module_id: str
+    affordances: tuple[AffordanceDescriptor, ...]
+
+    @property
+    def provider_id(self) -> str:
+        return declared_resident_affordance_provider_id(self.module_id)
+
+    def build_prompt_fragments(self, context: PromptAssemblyContext) -> list[PromptFragment]:
+        _ = context
+        lines = []
+        for item in sorted(self.affordances, key=lambda item: (item.priority, item.title, item.affordance_id)):
+            hint = item.prompt_hint.strip() or item.scenario_text.strip()
+            if not hint:
+                continue
+            lines.append(f"- {item.title}: {hint}")
+        if not lines:
+            return []
+        return [
+            PromptFragment(
+                section="resident_affordances",
+                title="Resident Affordances",
+                content="\n".join(lines),
+                priority=75,
+                metadata={"module_id": self.module_id, "kind": "declared_resident_affordances"},
+            )
+        ]
+
+
+def declared_resident_affordance_provider_id(module_id: str) -> str:
+    return f"behavior.prompt.declared_resident.{module_id}"

@@ -303,6 +303,9 @@ class CoreTurnIOPort:
     async def send_attachment_for_turn(self, turn_id: str | None, attachment: AttachmentSpec) -> CapabilityResult:
         return await self.core.send_attachment_for_turn(turn_id, attachment)
 
+    def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:
+        return self.core.artifact_scope_for_turn(turn_id)
+
 
 @dataclass
 class PalCore:
@@ -350,6 +353,7 @@ class PalCore:
             config=self.config,
         )
         self.context.execution_runtime.register_provider_ref("core:turn_io", CoreTurnIOPort(core=self))
+
     def event_loop(self) -> MainLoop:
         return self.main_loop
 
@@ -457,6 +461,8 @@ class PalCore:
         emit_typing_start: bool = False,
     ) -> asyncio.Task[Any]:
         turn_id = channel_envelope.event.event_id
+        if emit_typing_start:
+            self._queue_channel_status(channel_envelope, "typing_start")
         self.context.turn_event_bus.emit("turn.start", {
             "turn_id": turn_id,
             "scope_key": control_scope_key,
@@ -494,6 +500,7 @@ class PalCore:
 
     async def schedule_channel_turn_async(self, channel_envelope: ChannelEnvelope) -> None:
         control_scope_key = self._derive_channel_control_scope_key(channel_envelope)
+        channel_envelope = await self._prepare_channel_artifacts_async(channel_envelope, control_scope_key)
         scope_state = self._ensure_scope_state(control_scope_key)
         turn_id = channel_envelope.event.event_id
         should_reject = False
@@ -615,6 +622,7 @@ class PalCore:
                 "reply_target": dict(channel_envelope.response_handle.reply_target),
                 "status": turn_status,
             })
+            self._queue_channel_status(channel_envelope, "working_stop")
             await self._start_next_queued_turn_async(control_scope_key)
 
     def _on_turn_task_done(self, turn_id: str, task: asyncio.Task[Any]) -> None:
@@ -633,6 +641,7 @@ class PalCore:
             if action.action_kind == "show_think":
                 await self._handle_show_think_async(action)
                 return
+
             if action.action_kind == "set_think":
                 await self._handle_set_think_async(action)
                 return
@@ -755,6 +764,72 @@ class PalCore:
         if await self._resolve_interaction_action_async(action, message):
             return
         await self._reply_to_route_async(action.route, message)
+
+    def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:
+        normalized = str(turn_id or "").strip()
+        if not normalized:
+            return None
+        continuation = self.state.active_turns.get(normalized)
+        if isinstance(continuation, TurnContinuation):
+            return continuation.control_scope_key
+        return self.state.turn_scopes.get(normalized)
+
+    async def _prepare_channel_artifacts_async(
+        self,
+        channel_envelope: ChannelEnvelope,
+        control_scope_key: str,
+    ) -> ChannelEnvelope:
+        payload = channel_envelope.event.payload
+        if not isinstance(payload, dict):
+            return channel_envelope
+        attachments = payload.get("attachments")
+        if not isinstance(attachments, list) or not attachments:
+            return channel_envelope
+        artifact_manager = self.context.port_registry.get("artifact:artifact")
+        register_ingested = getattr(artifact_manager, "register_ingested", None)
+        if not callable(register_ingested):
+            return channel_envelope
+        refs: list[dict[str, Any]] = []
+        for item in attachments:
+            try:
+                ref = register_ingested(
+                    item,
+                    scope_key=control_scope_key,
+                    turn_id=channel_envelope.event.event_id,
+                    source_channel=channel_envelope.endpoint.channel_kind,
+                    metadata={
+                        "source_text": str(payload.get("text") or ""),
+                        "caption": str(payload.get("caption") or payload.get("text") or ""),
+                        "endpoint_id": channel_envelope.endpoint.endpoint_id,
+                    },
+                )
+            except Exception as exc:
+                self.state.diagnostics.append(
+                    {
+                        "kind": "artifact.register.failed",
+                        "turn_id": channel_envelope.event.event_id,
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                    }
+                )
+                continue
+            refs.append(ref.to_dict() if hasattr(ref, "to_dict") else dict(ref))
+        if not refs:
+            return channel_envelope
+        new_payload = dict(payload)
+        new_payload.pop("attachments", None)
+        new_payload["artifact_refs"] = refs
+        return ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind=channel_envelope.event.event_kind,
+                source_kind=channel_envelope.event.source_kind,
+                payload=new_payload,
+                correlation_id=channel_envelope.event.correlation_id,
+                created_at=channel_envelope.event.created_at,
+                event_id=channel_envelope.event.event_id,
+            ),
+            endpoint=channel_envelope.endpoint,
+            response_handle=channel_envelope.response_handle,
+        )
 
     async def _handle_show_log_async(self, action: ControlAction) -> None:
         enabled = bool(self.state.prompt_log_enabled)
@@ -1612,6 +1687,8 @@ class PalCore:
                     "=== PAL PROMPT DEBUG ===",
                     "--- request.messages ---",
                     str(request.messages),
+                    "--- request.multimodal ---",
+                    _summarize_multimodal_prompt(request.messages),
                     "--- request.tools ---",
                     str(request.tools),
                     "=== END PAL PROMPT DEBUG ===",
@@ -1625,10 +1702,13 @@ class PalCore:
         outcome = _last_arg_of_type(args, CanonicalLLMOutcome)
         if outcome is None:
             return
+        provider_payload = _summarize_last_provider_payload(self.context.port_registry.get("llm:llm"))
         self._append_prompt_log(
             "\n".join(
                 [
                     "=== PAL LLM OUTCOME ===",
+                    "--- provider.payload ---",
+                    provider_payload,
                     f"finish_reason: {outcome.finish_reason}",
                     f"response_mode: {outcome.response_mode}",
                     f"tool_calls: {outcome.tool_calls}",
@@ -1730,3 +1810,44 @@ def _last_arg_of_type(args: tuple[Any, ...], expected_type):
         if isinstance(item, expected_type):
             return item
     return None
+
+
+def _summarize_multimodal_prompt(messages: list[dict[str, Any]]) -> str:
+    items: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type") or "")
+            if part_type == "artifact_image":
+                items.append(
+                    {
+                        "message_index": index,
+                        "type": "artifact_image",
+                        "artifact_id": part.get("artifact_id"),
+                        "representation_id": part.get("representation_id"),
+                        "mime_type": part.get("mime_type"),
+                        "bytes": "omitted",
+                    }
+                )
+            elif part_type == "image_url":
+                url = str((part.get("image_url") or {}).get("url") or "")
+                items.append(
+                    {
+                        "message_index": index,
+                        "type": "image_url",
+                        "url_prefix": url[:32],
+                        "url_length": len(url),
+                        "bytes": "omitted",
+                    }
+                )
+    return str(items)
+
+
+def _summarize_last_provider_payload(llm_runtime: Any) -> str:
+    invoker = getattr(llm_runtime, "endpoint_invoker", None)
+    summary = getattr(invoker, "last_payload_summary", None)
+    return str(summary or {})

@@ -40,6 +40,20 @@
 - tool execution
 - conversation-owned durable route state
 
+## Attachment Ingress
+
+Channel endpoints may normalize incoming platform attachments into `payload.attachments`.
+
+Rules:
+
+- The endpoint may download/cache platform bytes when required by the platform.
+- The endpoint must not decide prompt exposure or LLM serialization.
+- The endpoint must not expose platform callback/file details beyond normalized metadata.
+- `PalCore` hands normalized attachments to `pal.artifact`.
+- After registration, inner layers use `artifact_id` and artifact tools, not channel-specific file handles.
+
+For the full managed artifact lifecycle, see [artifact_manager.md](artifact_manager.md).
+
 ## 简化结论
 
 `channel` 在新架构中的统一形状应尽量简单。

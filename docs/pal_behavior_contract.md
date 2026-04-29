@@ -9,7 +9,7 @@
 - which capability refs are relevant?
 - which memory queries may be useful later?
 
-It does not execute capabilities, does not trigger memory recall, and does not own approval. Actual side effects still go through `Execution`.
+It does not execute capabilities, does not trigger memory recall, does not own skill lifecycle, and does not own approval. Actual side effects still go through `Execution`.
 
 ## Concept Boundaries
 
@@ -27,7 +27,7 @@ Capability answers:
 
 ### Skill
 
-`Skill` is a manual or playbook.
+`Skill` is a manual or playbook owned by the `skill` subsystem.
 
 It tells Pal how to complete a class of behavior safely, but it is not executable by itself.
 
@@ -60,9 +60,14 @@ It records concrete previous situations and outcomes. It must not be mixed into 
 `pal.behavior` owns:
 
 - affordance descriptors
-- skill descriptors
 - behavior advice retrieval and ranking
 - resident affordance prompt hints
+
+`pal.skill` owns:
+
+- skill descriptors
+- skill assimilation and sanitization
+- skill storage and versioning
 - skill manual injection
 
 `PalCore` owns:
@@ -128,19 +133,9 @@ Core fields:
 
 ### `SkillDescriptor`
 
-Core fields:
+`SkillDescriptor` is defined by `pal.skill`.
 
-- `skill_id`
-- `module_id`
-- `title`
-- `summary`
-- `manual_text`
-- `source_kind`
-- `activation_terms`
-- `capability_refs`
-- `enabled`
-
-Disabled skills must not be returned through advice and must fail structured injection.
+Behavior only stores and returns `skill_refs`. It may use active skill metadata for routing, but it must not own skill content or lifecycle.
 
 ## Source And Lifecycle Rules
 
@@ -246,6 +241,8 @@ Rules:
 - does not execute capabilities
 - missing skill returns structured failure
 - disabled skill returns structured failure
+- over-budget skill manuals return structured failure
+- owned by `pal.skill`, not `pal.behavior`
 
 ### `op_behavior_affordance_submit`
 
@@ -291,6 +288,7 @@ Behavior contributes a small prompt fragment:
 - use `op_behavior_advise` when Pal intends to act and needs route advice.
 - use `op_skill_inject` when advice returns a `skill_ref`.
 - use `op_behavior_affordance_submit` only for recurring behavior rules.
+- keep affordance hints thin; multi-step procedures belong in skills.
 
 Resident affordances may also be injected as short hints, under a strict budget.
 
@@ -344,6 +342,7 @@ Rules:
 - no separate approval path in behavior
 - no automatic memory recall from `memory_query_hints`
 - no capability execution from `op_behavior_advise`
+- no skill learning or skill storage ownership inside `behavior`
 
 ## Implementation Entry Points
 

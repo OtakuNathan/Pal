@@ -134,6 +134,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                         "text": text,
                         "request_id": request_id,
                         "session_id": session_id,
+                        "attachments": list(incoming.get("attachments") or []),
                     },
                     event_kind=event_kind,
                     correlation_id=request_id,
@@ -173,6 +174,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             "text": str(payload.get("text") or ""),
             "request_id": str(payload.get("request_id") or ""),
             "session_id": str(payload.get("session_id") or ""),
+            "attachments": list(payload.get("attachments") or []),
         }
 
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:

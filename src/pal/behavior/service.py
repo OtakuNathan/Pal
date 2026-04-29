@@ -25,11 +25,11 @@ from pal.behavior.contracts import (
     BehaviorAdviceRequest,
     BehaviorAdviceResult,
     BehaviorRouteCandidate,
-    SkillDescriptor,
 )
-from pal.behavior.decorators import AffordanceBlueprint, SkillBlueprint
+from pal.behavior.decorators import AffordanceBlueprint
 from pal.behavior.repository import BehaviorRepository
 from pal.foundation.persistence import utc_now
+from pal.skill.repository import SkillRepository
 
 
 SOURCE_PRIORS = {
@@ -48,7 +48,9 @@ SOURCE_SORT_ORDER = {
 @dataclass
 class BehaviorService:
     repository: BehaviorRepository = field(default_factory=BehaviorRepository)
+    skill_repository: SkillRepository | None = None
     execution_runtime: Any | None = None
+    prompt_fragment_registry: Any | None = None
     semantic_router: Callable[..., Any] | None = None
     router_timeout_seconds: float = 2.0
     resident_prompt_budget: int = 5
@@ -68,12 +70,6 @@ class BehaviorService:
                 fallback_used=True,
                 router_error=f"{exc.__class__.__name__}: {exc}",
             )
-
-    def inject_skill(self, skill_id: str) -> SkillDescriptor | None:
-        skill = self.repository.get_skill(skill_id)
-        if skill is None or not skill.enabled:
-            return None
-        return skill
 
     def submit_affordance(self, payload: dict[str, Any]) -> AffordanceDescriptor:
         scenario_text = str(payload.get("scenario_text") or "").strip()
@@ -129,16 +125,21 @@ class BehaviorService:
         module_id = str(getattr(handle, "module_id", "") or getattr(provider, "module_id", "") or "")
         if not module_id:
             return
+        self.repository.delete_declared_affordances_for_module(module_id)
         for descriptor in _auto_affordances_from_handle(handle, module_id=module_id):
             self.repository.upsert_affordance(descriptor)
+        resident_descriptors: list[AffordanceDescriptor] = []
         for blueprint in _collect_affordance_blueprints(provider):
-            self.repository.upsert_affordance(_descriptor_from_affordance_blueprint(blueprint, module_id=module_id))
-        for blueprint in _collect_skill_blueprints(provider):
-            self.repository.upsert_skill(_descriptor_from_skill_blueprint(blueprint, module_id=module_id))
+            descriptor = _descriptor_from_affordance_blueprint(blueprint, module_id=module_id)
+            if descriptor.visibility_mode == AFFORDANCE_VISIBILITY_RESIDENT:
+                resident_descriptors.append(descriptor)
+            else:
+                self.repository.upsert_affordance(descriptor)
+        self._register_declared_resident_prompt_provider(module_id, tuple(resident_descriptors))
 
     def unregister_declared_module(self, module_id: str) -> None:
         self.repository.delete_declared_affordances_for_module(module_id)
-        self.repository.delete_declared_skills_for_module(module_id)
+        self._unregister_declared_resident_prompt_provider(module_id)
 
     def resident_affordances(self, *, limit: int | None = None) -> tuple[AffordanceDescriptor, ...]:
         affordances = [
@@ -150,9 +151,28 @@ class BehaviorService:
         max_items = self.resident_prompt_budget if limit is None else max(0, int(limit))
         return tuple(affordances[:max_items])
 
+    def _register_declared_resident_prompt_provider(self, module_id: str, affordances: tuple[AffordanceDescriptor, ...]) -> None:
+        registry = self.prompt_fragment_registry
+        if registry is None:
+            return
+        from pal.behavior.prompt import DeclaredResidentAffordancePromptFragmentProvider, declared_resident_affordance_provider_id
+
+        registry.unregister(declared_resident_affordance_provider_id(module_id))
+        if affordances:
+            registry.register(DeclaredResidentAffordancePromptFragmentProvider(module_id=module_id, affordances=affordances))
+
+    def _unregister_declared_resident_prompt_provider(self, module_id: str) -> None:
+        registry = self.prompt_fragment_registry
+        if registry is None:
+            return
+        from pal.behavior.prompt import declared_resident_affordance_provider_id
+
+        registry.unregister(declared_resident_affordance_provider_id(module_id))
+
     def _rank_candidates(self, request: BehaviorAdviceRequest) -> list[BehaviorRouteCandidate]:
         candidates: list[BehaviorRouteCandidate] = []
-        enabled_skills = {skill.skill_id for skill in self.repository.list_skills(enabled_only=True)}
+        repository = self.skill_repository or self.repository.skill_repository
+        enabled_skills = {skill.skill_id for skill in repository.list_skills(active_only=True)}
         already_considered = {str(item).strip() for item in request.already_considered if str(item).strip()}
         query_text = " ".join(
             part
@@ -254,14 +274,6 @@ def _collect_affordance_blueprints(provider: Any) -> tuple[AffordanceBlueprint, 
     return tuple(collected)
 
 
-def _collect_skill_blueprints(provider: Any) -> tuple[SkillBlueprint, ...]:
-    collected: list[SkillBlueprint] = []
-    collected.extend(getattr(provider.__class__, "__behavior_skill_blueprints__", ()))
-    for _, value in inspect.getmembers(provider.__class__):
-        collected.extend(getattr(value, "__behavior_skill_blueprints__", ()))
-    return tuple(collected)
-
-
 def _descriptor_from_affordance_blueprint(blueprint: AffordanceBlueprint, *, module_id: str) -> AffordanceDescriptor:
     now = utc_now()
     return AffordanceDescriptor(
@@ -280,24 +292,6 @@ def _descriptor_from_affordance_blueprint(blueprint: AffordanceBlueprint, *, mod
         memory_query_hints=blueprint.memory_query_hints,
         priority=blueprint.priority,
         activation_threshold=blueprint.activation_threshold,
-        enabled=blueprint.enabled,
-        metadata=blueprint.metadata,
-        created_at=now,
-        updated_at=now,
-    )
-
-
-def _descriptor_from_skill_blueprint(blueprint: SkillBlueprint, *, module_id: str) -> SkillDescriptor:
-    now = utc_now()
-    return SkillDescriptor(
-        skill_id=blueprint.skill_id,
-        module_id=module_id,
-        title=blueprint.title,
-        summary=blueprint.summary,
-        manual_text=blueprint.manual_text,
-        source_kind=blueprint.source_kind,
-        activation_terms=blueprint.activation_terms,
-        capability_refs=blueprint.capability_refs,
         enabled=blueprint.enabled,
         metadata=blueprint.metadata,
         created_at=now,
