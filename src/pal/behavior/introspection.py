@@ -108,6 +108,7 @@ def register_with_core(context: "MainContext", service: BehaviorService) -> Modu
     from pal.behavior.prompt import BehaviorPromptFragmentProvider
 
     service.execution_runtime = service.execution_runtime or context.execution_runtime
+    service.prompt_fragment_registry = service.prompt_fragment_registry or context.prompt_fragment_registry
     context.execution_runtime.register_tool(BehaviorAdviceTool(service=service))
     context.execution_runtime.register_tool(AffordanceSubmitTool(service=service))
     provider = BehaviorIntrospectionProvider(service=service)

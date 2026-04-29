@@ -40,6 +40,15 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
+            elif normalized_section == "system_surfaces":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="system_surfaces",
+                        title="System Surfaces",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
             elif normalized_section == "rules":
                 system_blocks.append(
                     PromptIRBlock(
@@ -253,6 +262,7 @@ class PromptCompiler:
             "memory_system",
             "artifact",
             "runtime",
+            "system_surfaces",
             "rules",
             "behavior_routing",
             "memory_routing",
@@ -314,6 +324,7 @@ class PromptCompiler:
 
     def _order_system_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
         identity_blocks = [block for block in blocks if block.block_id == "identity"]
+        system_surface_blocks = [block for block in blocks if block.block_id == "system_surfaces"]
         rule_blocks = [block for block in blocks if block.block_id == "operating_rules"]
         behavior_blocks = [block for block in blocks if block.block_id == "behavior_routing"]
         memory_routing_blocks = [block for block in blocks if block.block_id == "memory_routing"]
@@ -325,6 +336,7 @@ class PromptCompiler:
         ordered_runtime.extend(block for block in runtime_blocks if block.metadata.get("priority") == "finalization")
         return [
             *identity_blocks,
+            *system_surface_blocks,
             *rule_blocks,
             *behavior_blocks,
             *memory_routing_blocks,

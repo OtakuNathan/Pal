@@ -50,6 +50,7 @@ class BehaviorService:
     repository: BehaviorRepository = field(default_factory=BehaviorRepository)
     skill_repository: SkillRepository | None = None
     execution_runtime: Any | None = None
+    prompt_fragment_registry: Any | None = None
     semantic_router: Callable[..., Any] | None = None
     router_timeout_seconds: float = 2.0
     resident_prompt_budget: int = 5
@@ -124,13 +125,21 @@ class BehaviorService:
         module_id = str(getattr(handle, "module_id", "") or getattr(provider, "module_id", "") or "")
         if not module_id:
             return
+        self.repository.delete_declared_affordances_for_module(module_id)
         for descriptor in _auto_affordances_from_handle(handle, module_id=module_id):
             self.repository.upsert_affordance(descriptor)
+        resident_descriptors: list[AffordanceDescriptor] = []
         for blueprint in _collect_affordance_blueprints(provider):
-            self.repository.upsert_affordance(_descriptor_from_affordance_blueprint(blueprint, module_id=module_id))
+            descriptor = _descriptor_from_affordance_blueprint(blueprint, module_id=module_id)
+            if descriptor.visibility_mode == AFFORDANCE_VISIBILITY_RESIDENT:
+                resident_descriptors.append(descriptor)
+            else:
+                self.repository.upsert_affordance(descriptor)
+        self._register_declared_resident_prompt_provider(module_id, tuple(resident_descriptors))
 
     def unregister_declared_module(self, module_id: str) -> None:
         self.repository.delete_declared_affordances_for_module(module_id)
+        self._unregister_declared_resident_prompt_provider(module_id)
 
     def resident_affordances(self, *, limit: int | None = None) -> tuple[AffordanceDescriptor, ...]:
         affordances = [
@@ -141,6 +150,24 @@ class BehaviorService:
         affordances.sort(key=_resident_sort_key)
         max_items = self.resident_prompt_budget if limit is None else max(0, int(limit))
         return tuple(affordances[:max_items])
+
+    def _register_declared_resident_prompt_provider(self, module_id: str, affordances: tuple[AffordanceDescriptor, ...]) -> None:
+        registry = self.prompt_fragment_registry
+        if registry is None:
+            return
+        from pal.behavior.prompt import DeclaredResidentAffordancePromptFragmentProvider, declared_resident_affordance_provider_id
+
+        registry.unregister(declared_resident_affordance_provider_id(module_id))
+        if affordances:
+            registry.register(DeclaredResidentAffordancePromptFragmentProvider(module_id=module_id, affordances=affordances))
+
+    def _unregister_declared_resident_prompt_provider(self, module_id: str) -> None:
+        registry = self.prompt_fragment_registry
+        if registry is None:
+            return
+        from pal.behavior.prompt import declared_resident_affordance_provider_id
+
+        registry.unregister(declared_resident_affordance_provider_id(module_id))
 
     def _rank_candidates(self, request: BehaviorAdviceRequest) -> list[BehaviorRouteCandidate]:
         candidates: list[BehaviorRouteCandidate] = []

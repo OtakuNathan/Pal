@@ -15,15 +15,22 @@ class SkillPromptFragmentProvider:
         return [
             PromptFragment(
                 section="skill_learning",
-                title="Skill Learning",
+                title="Skill Use and Skill Learning",
                 content=(
-                    "Skill is reusable future procedure. Memory is past facts, preferences, or experience.\n"
-                    "When the user explicitly asks to use a named skill, call `op_skill_search` first to resolve the skill identity, then `op_skill_inject` if a clear active match is found.\n"
-                    "When the user explicitly asks Pal to learn, summarize, sanitize, or import a reusable workflow, call `op_skill_assimilate` first.\n"
-                    "`op_skill_assimilate` only creates a candidate; it does not persist anything.\n"
-                    "Only call `op_skill_commit` when the user explicitly wants the candidate saved.\n"
-                    "If the user teaches a stable fact or a past lesson, write memory instead of skill.\n"
-                    "If a past lesson can become a workflow, create a skill candidate rather than committing automatically."
+                    "Use skills for reusable procedures, not facts.\n\n"
+                    "When to search/inject skill:\n"
+                    "- If the user explicitly asks to use a named skill, call `op_skill_search` first.\n"
+                    "- If a clear active match is found, call `op_skill_inject`.\n"
+                    "- Do not inject a skill merely because it exists. Inject only when it clearly matches the current task or explicit request.\n\n"
+                    "When to learn a skill:\n"
+                    "- If the user explicitly asks Pal to learn, summarize, sanitize, import, or turn a workflow into a reusable procedure, call `op_skill_assimilate`.\n"
+                    "- `op_skill_assimilate` creates a candidate only. It does not persist anything.\n"
+                    "- Only call `op_skill_commit` when the user explicitly wants the candidate saved.\n\n"
+                    "Storage boundary:\n"
+                    "- Stable facts and preferences belong in memory.\n"
+                    "- Future behavior routes belong in affordances.\n"
+                    "- Reusable procedures belong in skill candidates.\n"
+                    "- If a past lesson can become a workflow, create a skill candidate before committing durable procedure text."
                 ),
                 priority=72,
                 metadata={"module_id": self.module_id, "kind": "skill_learning"},
