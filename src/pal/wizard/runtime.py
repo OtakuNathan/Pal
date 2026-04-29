@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pal.artifact import ArtifactHotStateModel, ArtifactRecordModel, ArtifactRepresentationModel
-from pal.behavior import BehaviorAffordanceModel, BehaviorSkillModel
+from pal.behavior import BehaviorAffordanceModel
 from pal.channel import ChannelEndpointRepository
 from pal.channel.endpoints import DEFAULT_SOCKET_FILENAME
 from pal.foundation import PalV2Database
@@ -16,6 +16,7 @@ from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 from pal.memory import MemoryCaseModel, MemoryEmbeddingModel, MemoryEmbeddingVecModel, MemoryFactModel, MemoryTopicModel
 from pal.plugins import PluginBundleModel
 from pal.service import ServiceDefinitionModel, ServiceRunModel
+from pal.skill import SkillModel
 from pal.web_fetch import WebFetchProviderModel, WebFetchProviderRepository
 from pal.web_search import WebSearchProviderModel, WebSearchProviderRepository
 from pal.channel.models import ChannelEndpointModel
@@ -40,7 +41,7 @@ ALL_MODELS = (
     WebSearchProviderModel,
     WebFetchProviderModel,
     BehaviorAffordanceModel,
-    BehaviorSkillModel,
+    SkillModel,
     ArtifactRecordModel,
     ArtifactRepresentationModel,
     ArtifactHotStateModel,

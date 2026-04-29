@@ -67,6 +67,15 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
+            elif normalized_section == "skill_learning":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="skill_learning",
+                        title="Skill Learning",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
             elif normalized_section == "resident_affordances":
                 system_blocks.append(
                     PromptIRBlock(
@@ -247,6 +256,7 @@ class PromptCompiler:
             "rules",
             "behavior_routing",
             "memory_routing",
+            "skill_learning",
             "resident_affordances",
         }:
             return lowered
@@ -307,6 +317,7 @@ class PromptCompiler:
         rule_blocks = [block for block in blocks if block.block_id == "operating_rules"]
         behavior_blocks = [block for block in blocks if block.block_id == "behavior_routing"]
         memory_routing_blocks = [block for block in blocks if block.block_id == "memory_routing"]
+        skill_learning_blocks = [block for block in blocks if block.block_id == "skill_learning"]
         resident_blocks = [block for block in blocks if block.block_id == "resident_affordances"]
         memory_blocks = [block for block in blocks if block.block_id == "memory_context"]
         runtime_blocks = [block for block in blocks if block.block_id == "runtime_overlay"]
@@ -317,6 +328,7 @@ class PromptCompiler:
             *rule_blocks,
             *behavior_blocks,
             *memory_routing_blocks,
+            *skill_learning_blocks,
             *resident_blocks,
             *memory_blocks,
             *ordered_runtime,

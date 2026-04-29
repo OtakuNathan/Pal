@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from pal.skill.contracts import SkillDescriptor, SkillInjectRequest
+
 
 AFFORDANCE_VISIBILITY_RESIDENT = "resident"
 AFFORDANCE_VISIBILITY_DISCOVERABLE = "discoverable"
@@ -42,22 +44,6 @@ class AffordanceDescriptor:
     activation_threshold: float = 0.25
     enabled: bool = True
     evidence_refs: tuple[str, ...] = ()
-    metadata: dict[str, Any] = field(default_factory=dict)
-    created_at: str = ""
-    updated_at: str = ""
-
-
-@dataclass(frozen=True)
-class SkillDescriptor:
-    skill_id: str
-    module_id: str
-    title: str
-    summary: str
-    manual_text: str
-    source_kind: str = AFFORDANCE_SOURCE_DECLARED
-    activation_terms: tuple[str, ...] = ()
-    capability_refs: tuple[str, ...] = ()
-    enabled: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
@@ -123,8 +109,3 @@ class BehaviorAdviceResult:
             "fallback_used": self.fallback_used,
             "router_error": self.router_error,
         }
-
-
-@dataclass(frozen=True)
-class SkillInjectRequest:
-    skill_id: str

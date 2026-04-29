@@ -24,7 +24,7 @@ from pal.behavior.introspection import BehaviorIntrospectionProvider, register_w
 from pal.behavior.models import BehaviorAffordanceModel, BehaviorSkillModel
 from pal.behavior.repository import BehaviorRepository
 from pal.behavior.service import BehaviorService
-from pal.behavior.tools import AffordanceSubmitTool, BehaviorAdviceTool, SkillInjectTool
+from pal.behavior.tools import AffordanceSubmitTool, BehaviorAdviceTool
 
 __all__ = [
     "AFFORDANCE_ACTIVATION_DELIBERATIVE",
@@ -55,7 +55,6 @@ __all__ = [
     "SkillBlueprint",
     "SkillDescriptor",
     "SkillInjectRequest",
-    "SkillInjectTool",
     "affordance",
     "register_with_core",
     "skill",

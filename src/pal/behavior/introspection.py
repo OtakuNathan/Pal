@@ -10,10 +10,7 @@ from pal.behavior.tools import (
     AFFORDANCE_SUBMIT_ARGS_SCHEMA,
     AFFORDANCE_SUBMIT_RESULT_SCHEMA,
     AffordanceSubmitTool,
-    SKILL_INJECT_ARGS_SCHEMA,
-    SKILL_INJECT_RESULT_SCHEMA,
     BehaviorAdviceTool,
-    SkillInjectTool,
 )
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
@@ -32,14 +29,6 @@ if TYPE_CHECKING:
     from pal.core.main_context import MainContext
 
 
-@capability_node(
-    namespace=OPERATION_NAMESPACE,
-    scope="skill",
-    kind="module",
-    source="builtin:behavior",
-    target_kind="module",
-    path_module_id="skill",
-)
 @capability_node(
     namespace=OPERATION_NAMESPACE,
     scope="module",
@@ -68,7 +57,8 @@ class BehaviorIntrospectionProvider:
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         affordances = self.service.repository.list_affordances()
-        skills = self.service.repository.list_skills()
+        skill_repository = self.service.skill_repository or self.service.repository.skill_repository
+        skills = skill_repository.list_skills()
         structured = {
             "affordance_count": len(affordances),
             "skill_count": len(skills),
@@ -114,26 +104,11 @@ class BehaviorIntrospectionProvider:
     def submit_affordance(self, call: CapabilityCall) -> CapabilityResult:
         return AffordanceSubmitTool(service=self.service).invoke(call.args)
 
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="skill",
-        family="skill",
-        action_name="inject",
-        description="Inject a registered skill manual as a tool observation without executing capabilities.",
-        args_schema=SKILL_INJECT_ARGS_SCHEMA,
-        result_schema=SKILL_INJECT_RESULT_SCHEMA,
-        metadata={"llm_exposed": True},
-    )
-    def inject_skill(self, call: CapabilityCall) -> CapabilityResult:
-        return SkillInjectTool(service=self.service).invoke(call.args)
-
-
 def register_with_core(context: "MainContext", service: BehaviorService) -> ModuleHandle:
     from pal.behavior.prompt import BehaviorPromptFragmentProvider
 
     service.execution_runtime = service.execution_runtime or context.execution_runtime
     context.execution_runtime.register_tool(BehaviorAdviceTool(service=service))
-    context.execution_runtime.register_tool(SkillInjectTool(service=service))
     context.execution_runtime.register_tool(AffordanceSubmitTool(service=service))
     provider = BehaviorIntrospectionProvider(service=service)
     prompt_provider = BehaviorPromptFragmentProvider(service=service)

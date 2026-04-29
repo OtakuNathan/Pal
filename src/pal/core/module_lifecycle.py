@@ -102,6 +102,10 @@ class ModuleLifecycle:
             self.context.prompt_fragment_registry.register(provider)
 
     def _register_behavior_declarations(self, handle) -> None:
+        skill = self.context.port_registry.get("skill:skill")
+        skill_register = getattr(skill, "register_declared_module", None)
+        if callable(skill_register):
+            skill_register(handle)
         behavior = self.context.port_registry.get("behavior:behavior")
         register = getattr(behavior, "register_declared_module", None)
         if callable(register):
@@ -112,3 +116,7 @@ class ModuleLifecycle:
         unregister = getattr(behavior, "unregister_declared_module", None)
         if callable(unregister):
             unregister(module_id)
+        skill = self.context.port_registry.get("skill:skill")
+        skill_unregister = getattr(skill, "unregister_declared_module", None)
+        if callable(skill_unregister):
+            skill_unregister(module_id)

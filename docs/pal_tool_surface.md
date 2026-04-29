@@ -113,20 +113,30 @@ provider_setting = "active_web_search_provider_id"
 3. 或在 `[[dynamic]]` 中添加跟随 provider 的能力
 4. 重启 Pal 生效
 
-## Behavior Tools
+## Behavior And Skill Tools
 
-The behavior subsystem adds three always-exposed tools:
+The behavior subsystem adds route tools:
 
 - `op_behavior_advise`: ask the affordance router which behavior routes fit the current scenario.
-- `op_skill_inject`: inject a full skill manual by `skill_id`.
 - `op_behavior_affordance_submit`: persist an instructed or learned recurring behavior rule.
+
+The skill subsystem adds skill lifecycle tools:
+
+- `op_skill_assimilate`: create a sanitized skill candidate from plain text or SKILL.md content.
+- `op_skill_commit`: commit a skill candidate and its thin affordance.
+- `op_skill_update`: update a normalized skill.
+- `op_skill_disable`: disable a normalized skill.
+- `op_skill_search`: search normalized skills for the current scenario or explicit skill name without returning manuals.
+- `op_skill_read`: read normalized skill metadata, optionally including manual text.
+- `op_skill_inject`: inject an active normalized skill manual by `skill_id`.
 
 These tools are intentionally separate from capability discovery:
 
 - `op_exec_disc_search` searches the execution inventory.
-- `op_behavior_advise` searches behavior affordances and skills.
+- `op_behavior_advise` searches behavior affordances and returns skill/capability refs.
+- `op_skill_inject` loads the selected skill playbook.
 
-See [pal_behavior_contract.md](pal_behavior_contract.md).
+See [pal_behavior_contract.md](pal_behavior_contract.md) and [pal_skill_contract.md](pal_skill_contract.md).
 
 ## Artifact Tools
 

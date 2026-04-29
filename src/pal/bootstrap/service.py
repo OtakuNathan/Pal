@@ -31,6 +31,7 @@ from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.memory import L3ProviderSelector, MemoryService, register_with_core as register_memory_with_core
 from pal.plugins import PluginHost, register_with_core as register_plugins_with_core
 from pal.service import ServiceManager, ServiceRepository, ServiceRunner, register_with_core as register_service_with_core
+from pal.skill import SkillRepository, SkillService, register_with_core as register_skill_with_core
 from pal.wizard import PalRegistration, WizardService
 
 
@@ -50,6 +51,7 @@ class StubRuntimeHandle:
     service_runner: ServiceRunner
     control_plane: ControlPlane
     behavior_service: BehaviorService
+    skill_service: SkillService
     artifact_service: ArtifactManager
     failure_runtime: FailureRuntime
 
@@ -114,17 +116,30 @@ def compose_runtime(
     service_manager = ServiceManager(repository=service_repository)
     service_runner = ServiceRunner(repository=service_repository)
     control_plane = ControlPlane()
-    behavior_service = BehaviorService(repository=BehaviorRepository(), execution_runtime=core.context.execution_runtime)
+    skill_repository = SkillRepository()
+    behavior_repository = BehaviorRepository(skill_repository=skill_repository)
+    skill_service = SkillService(
+        repository=skill_repository,
+        behavior_repository=behavior_repository,
+        runtime_root=registration.runtime.runtime_root,
+    )
+    behavior_service = BehaviorService(
+        repository=behavior_repository,
+        skill_repository=skill_repository,
+        execution_runtime=core.context.execution_runtime,
+    )
     failure_runtime = FailureRuntime()
     endpoint_factories = build_default_factory_registry()
 
     register_core_with_core(core)
     register_execution_with_core(core.context)
     register_artifact_with_core(core.context, artifact_service)
+    register_skill_with_core(core.context, skill_service)
     register_behavior_with_core(core.context, behavior_service)
     register_channel_with_core(core.context, channel_runtime)
     register_identity_with_core(core.context, identity_service)
     register_llm_with_core(core.context, llm_runtime)
+    skill_service.llm_runtime = llm_runtime
     register_memory_with_core(core.context, memory_service, config=config)
     register_plugins_with_core(core.context, plugin_host)
     register_service_with_core(core.context, service_manager, service_runner)
@@ -141,7 +156,7 @@ def compose_runtime(
         service_manager.hydrate(stored.definition, next_due_at_utc=stored.next_due_at_utc)
     plugin_host.bootstrap()
 
-    for module_id in ("core", "execution", "artifact", "behavior", "channel", "identity", "llm", "memory", "plugins", "service", "control", "failure"):
+    for module_id in ("core", "execution", "artifact", "skill", "behavior", "channel", "identity", "llm", "memory", "plugins", "service", "control", "failure"):
         core.publish_module_capabilities(module_id)
 
     return StubRuntimeHandle(
@@ -159,6 +174,7 @@ def compose_runtime(
         service_runner=service_runner,
         control_plane=control_plane,
         behavior_service=behavior_service,
+        skill_service=skill_service,
         artifact_service=artifact_service,
         failure_runtime=failure_runtime,
     )

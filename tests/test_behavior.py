@@ -25,7 +25,6 @@ from pal.behavior import (
     BehaviorService,
     BehaviorSkillModel,
     SkillDescriptor,
-    SkillInjectTool,
     affordance,
     register_with_core as register_behavior_with_core,
     skill,
@@ -39,6 +38,7 @@ from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
 from pal.memory import L2Entry, MemoryPack, MemoryService, register_with_core as register_memory_with_core
 from pal.memory.models import MemoryCaseModel
 from pal.memory.prompt import MemoryPromptFragmentProvider
+from pal.skill import SkillInjectTool, SkillService
 from pal.shared import MountedSubtreeHandle, PromptAssemblyContext
 
 
@@ -82,6 +82,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.repository = BehaviorRepository()
         self.runtime = _FakeExecutionRuntime(available={"cap.known"})
         self.service = BehaviorService(repository=self.repository, execution_runtime=self.runtime)
+        self.skill_service = SkillService(repository=self.repository.skill_repository, behavior_repository=self.repository)
 
     def tearDown(self) -> None:
         self.database.close()
@@ -236,7 +237,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual([item.affordance_id for item in ordered], ["instructed-a", "instructed-b", "declared-low"])
 
     def test_skill_inject_returns_structured_failure_for_missing_or_disabled(self) -> None:
-        tool = SkillInjectTool(service=self.service)
+        tool = SkillInjectTool(service=self.skill_service)
         self.repository.upsert_skill(
             SkillDescriptor(
                 skill_id="disabled",
@@ -251,8 +252,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         missing = tool.invoke({"skill_id": "missing"})
         disabled = tool.invoke({"skill_id": "disabled"})
 
-        self.assertEqual(missing.structured["reason"], "skill_not_found_or_disabled")
-        self.assertEqual(disabled.structured["reason"], "skill_not_found_or_disabled")
+        self.assertEqual(missing.structured["reason"], "skill_not_found_or_inactive")
+        self.assertEqual(disabled.structured["reason"], "skill_not_found_or_inactive")
 
     def test_declared_detach_removes_search_hit_but_instructed_and_learned_remain_unavailable(self) -> None:
         @skill(
@@ -393,7 +394,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
                 capability_refs=("cap.known",),
             )
         )
-        result = SkillInjectTool(service=self.service).invoke({"skill_id": "commit"})
+        result = SkillInjectTool(service=self.skill_service).invoke({"skill_id": "commit"})
 
         self.assertEqual(result.structured["manual_text"], "1. Review changes.\n2. Commit.")
         self.assertEqual(result.structured["capability_refs"], ["cap.known"])

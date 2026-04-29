@@ -5,13 +5,11 @@ from typing import Iterable
 
 from peewee import DoesNotExist
 
-from pal.behavior.contracts import (
-    AFFORDANCE_SOURCE_DECLARED,
-    AffordanceDescriptor,
-    SkillDescriptor,
-)
-from pal.behavior.models import BehaviorAffordanceModel, BehaviorSkillModel
+from pal.behavior.contracts import AFFORDANCE_SOURCE_DECLARED, AffordanceDescriptor
+from pal.behavior.models import BehaviorAffordanceModel
 from pal.foundation.persistence import utc_now
+from pal.skill.contracts import SkillDescriptor
+from pal.skill.repository import SkillRepository
 
 
 def _tuple(value: object) -> tuple[str, ...]:
@@ -26,6 +24,12 @@ def _tuple(value: object) -> tuple[str, ...]:
 
 @dataclass
 class BehaviorRepository:
+    skill_repository: SkillRepository = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.skill_repository is None:
+            self.skill_repository = SkillRepository()
+
     def upsert_affordance(self, descriptor: AffordanceDescriptor) -> AffordanceDescriptor:
         now = utc_now()
         existing = BehaviorAffordanceModel.get_or_none(BehaviorAffordanceModel.affordance_id == descriptor.affordance_id)
@@ -56,25 +60,7 @@ class BehaviorRepository:
         return self.get_affordance(descriptor.affordance_id) or descriptor
 
     def upsert_skill(self, descriptor: SkillDescriptor) -> SkillDescriptor:
-        now = utc_now()
-        existing = BehaviorSkillModel.get_or_none(BehaviorSkillModel.skill_id == descriptor.skill_id)
-        created_at = descriptor.created_at or (existing.created_at if existing is not None else now)
-        updated_at = descriptor.updated_at or now
-        BehaviorSkillModel.insert(
-            skill_id=descriptor.skill_id,
-            module_id=descriptor.module_id,
-            title=descriptor.title,
-            summary=descriptor.summary,
-            manual_text=descriptor.manual_text,
-            source_kind=descriptor.source_kind,
-            activation_terms_blob=list(descriptor.activation_terms),
-            capability_refs_blob=list(descriptor.capability_refs),
-            metadata_blob=dict(descriptor.metadata),
-            enabled=descriptor.enabled,
-            created_at=created_at,
-            updated_at=updated_at,
-        ).on_conflict_replace().execute()
-        return self.get_skill(descriptor.skill_id) or descriptor
+        return self.skill_repository.upsert_skill(descriptor)
 
     def get_affordance(self, affordance_id: str) -> AffordanceDescriptor | None:
         try:
@@ -83,10 +69,7 @@ class BehaviorRepository:
             return None
 
     def get_skill(self, skill_id: str) -> SkillDescriptor | None:
-        try:
-            return _skill_from_model(BehaviorSkillModel.get_by_id(skill_id))
-        except DoesNotExist:
-            return None
+        return self.skill_repository.get_skill(skill_id)
 
     def list_affordances(self, *, enabled_only: bool = False) -> tuple[AffordanceDescriptor, ...]:
         query = BehaviorAffordanceModel.select()
@@ -96,11 +79,7 @@ class BehaviorRepository:
         return tuple(_affordance_from_model(row) for row in query)
 
     def list_skills(self, *, enabled_only: bool = False) -> tuple[SkillDescriptor, ...]:
-        query = BehaviorSkillModel.select()
-        if enabled_only:
-            query = query.where(BehaviorSkillModel.enabled == True)  # noqa: E712
-        query = query.order_by(BehaviorSkillModel.skill_id)
-        return tuple(_skill_from_model(row) for row in query)
+        return self.skill_repository.list_skills(enabled_only=enabled_only)
 
     def delete_declared_affordances_for_module(self, module_id: str) -> int:
         return (
@@ -113,11 +92,7 @@ class BehaviorRepository:
         )
 
     def delete_declared_skills_for_module(self, module_id: str) -> int:
-        return (
-            BehaviorSkillModel.delete()
-            .where((BehaviorSkillModel.module_id == module_id) & (BehaviorSkillModel.source_kind == AFFORDANCE_SOURCE_DECLARED))
-            .execute()
-        )
+        return self.skill_repository.delete_declared_skills_for_module(module_id)
 
 
 def _affordance_from_model(row: BehaviorAffordanceModel) -> AffordanceDescriptor:
@@ -144,19 +119,3 @@ def _affordance_from_model(row: BehaviorAffordanceModel) -> AffordanceDescriptor
         updated_at=row.updated_at,
     )
 
-
-def _skill_from_model(row: BehaviorSkillModel) -> SkillDescriptor:
-    return SkillDescriptor(
-        skill_id=row.skill_id,
-        module_id=row.module_id,
-        title=row.title,
-        summary=row.summary,
-        manual_text=row.manual_text,
-        source_kind=row.source_kind,
-        activation_terms=_tuple(row.activation_terms_blob),
-        capability_refs=_tuple(row.capability_refs_blob),
-        enabled=bool(row.enabled),
-        metadata=dict(row.metadata_blob or {}),
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-    )

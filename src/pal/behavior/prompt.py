@@ -22,12 +22,13 @@ class BehaviorPromptFragmentProvider:
                     'Capability search answers: "what executable ability exists?"\n'
                     'Behavior advice answers: "what route should Pal consider for this scenario?"\n'
                     'Affordance submission records: "when this scenario appears again, what route should Pal consider?"\n\n'
+                    "Affordance routes; skill instructs. Affordance must stay thin and must not contain multi-step procedures.\n\n"
                     "When Pal needs to act:\n"
                     "1. If the required capability is obvious, inspect/search capability inventory directly with `op_exec_disc_search`.\n"
                     "2. Advisor Gate: for simple obvious capability use, inspect capability inventory directly. For non-trivial, risky, user-specific, external-state-dependent, or unclear workflows, call `op_behavior_advise` before execution unless an applicable rule is already active.\n"
-                    "4. If advice returns a `skill_ref`, call `op_skill_inject` before executing that workflow. A skill is a playbook, not an executable action.\n"
-                    "5. If advice returns `capability_refs`, resolve them against current capability inventory before relying on them.\n"
-                    "6. Execute only through capability calls, respecting capability policy, approval, availability, and verification."
+                    "3. If advice returns a `skill_ref`, call `op_skill_inject` before executing that workflow. Skill injection loads the selected playbook.\n"
+                    "4. If advice returns `capability_refs`, resolve them against current capability inventory before relying on them.\n"
+                    "5. Execute only through capability calls, respecting capability policy, approval, availability, and verification."
                 ),
                 priority=70,
                 metadata={"module_id": self.module_id, "kind": "behavior_routing"},
@@ -37,6 +38,7 @@ class BehaviorPromptFragmentProvider:
                 title="Memory Routing",
                 content=(
                     "If the user teaches a future behavior, submit an affordance.\n"
+                    "If the user teaches a reusable procedure, create a skill candidate first.\n"
                     "If the user teaches a stable fact, preference, or reusable experience, write memory.\n"
                     "If both apply, ask for clarification or create separate records.\n\n"
                     "Use `op_behavior_affordance_submit` only when the user defines a durable behavior-routing rule.\n"

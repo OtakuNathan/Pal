@@ -32,23 +32,6 @@ ADVISE_RESULT_SCHEMA = {
     },
 }
 
-SKILL_INJECT_ARGS_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "skill_id": {"type": "string", "description": "Skill id to inject."},
-    },
-    "required": ["skill_id"],
-}
-
-SKILL_INJECT_RESULT_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "skill_id": {"type": "string"},
-        "title": {"type": "string"},
-        "manual_text": {"type": "string"},
-    },
-}
-
 AFFORDANCE_SUBMIT_ARGS_SCHEMA = {
     "type": "object",
     "properties": {
@@ -119,65 +102,6 @@ class BehaviorAdviceTool:
             text=f"behavior advice returned {len(result.candidates)} candidate(s)",
             structured=structured,
             llm_text=render_titled_structured_for_llm("Behavior advice", structured),
-        )
-
-
-@dataclass
-class SkillInjectTool:
-    service: BehaviorService
-    name: str = "op_skill_inject"
-    display_name: str = "Skill injection"
-    family: str = "behavior"
-    description: str = "Inject a registered skill manual into the current tool observation."
-    args_schema: dict[str, Any] = None  # type: ignore[assignment]
-    result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("behavior", "skill")
-    keywords: tuple[str, ...] = ("skill", "manual", "procedure")
-
-    def __post_init__(self) -> None:
-        if self.args_schema is None:
-            self.args_schema = SKILL_INJECT_ARGS_SCHEMA
-        if self.result_schema is None:
-            self.result_schema = SKILL_INJECT_RESULT_SCHEMA
-
-    def invoke(self, args: dict[str, Any]) -> CapabilityResult:
-        return self._inject(args)
-
-    async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
-        _ = kwargs
-        return self._inject(args)
-
-    def _inject(self, args: dict[str, Any]) -> CapabilityResult:
-        skill_id = str(args.get("skill_id") or "").strip()
-        if not skill_id:
-            structured = {"reason": "invalid_request", "field": "skill_id"}
-            return CapabilityResult(
-                status=RuntimeStatus.INVALID,
-                text="skill_id is required",
-                structured=structured,
-                llm_text=render_titled_structured_for_llm("Skill injection failed", structured),
-            )
-        skill = self.service.inject_skill(skill_id)
-        if skill is None:
-            structured = {"reason": "skill_not_found_or_disabled", "skill_id": skill_id}
-            return CapabilityResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="skill not found or disabled",
-                structured=structured,
-                llm_text=render_titled_structured_for_llm("Skill injection failed", structured),
-            )
-        structured = {
-            "skill_id": skill.skill_id,
-            "title": skill.title,
-            "summary": skill.summary,
-            "manual_text": skill.manual_text,
-            "capability_refs": list(skill.capability_refs),
-        }
-        return CapabilityResult(
-            status=RuntimeStatus.OK,
-            text=skill.manual_text,
-            structured=structured,
-            llm_text=render_titled_structured_for_llm("Skill manual", structured),
         )
 
 
