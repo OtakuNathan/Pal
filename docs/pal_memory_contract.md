@@ -1,5 +1,44 @@
 # Pal Memory Contract
 
+## Current Implementation Notes
+
+The current code treats memory as a prompt and routing surface, not as an executor.
+
+Prompt ownership:
+
+- `pal.memory.prompt.MemoryPromptFragmentProvider` always contributes `Memory Routing` when the memory module is registered.
+- Dynamic memory context is appended only when a `MemoryPack` is present.
+- `Memory Routing` is no longer owned by `pal.behavior`.
+
+Current system prompt rules:
+
+- If memory has been recalled or is present in the prompt, Pal MUST use it as reference before deciding, writing, retrying, debugging, or taking external action.
+- If a tool/capability call fails and memory recall is available, Pal MUST call `op_l3_recall_query` for relevant experience before debugging, retrying, or asking the user.
+- If the user challenges Pal's memory, says Pal already knows/remembers something, or corrects a recalled/stored fact, Pal MUST recall relevant memory before writing, patching, or insisting.
+- `memory_query_hints` from behavior advice are suggestions only; they do not automatically recall memory.
+
+Current prompt projection:
+
+- Recent L1 context is projected as `Recent Context`.
+- Current summary is projected as `Current Summary`.
+- L2 factual/project/preference entries are projected as `Remembered Facts`.
+- L2 case/repair/task-experience entries are projected as `Relevant Experience`.
+- Behavior-route entries are projected separately as `Behavior Guidance`.
+- The old single `Working Memory` prompt label is no longer the current projection.
+- L3 recall render suffixes such as `[L3 summary; origin available]` are not shown in prompt output.
+
+L1 tool-result compaction:
+
+- Old tool protocol messages are cleared by complete turn groups.
+- A single tool-heavy turn is not partially cleared inside itself.
+
+Storage boundary:
+
+- Stable fact or preference -> memory commit/correction.
+- Future behavior route -> affordance.
+- Reusable procedure -> skill candidate.
+- Repair lesson or reusable task experience -> propose memory or skill candidate first unless explicitly approved.
+
 > 目标：把 `L1 / L2 / L3`、memory lifecycle 和 memory action contract 一次写死。
 
 ## 目标

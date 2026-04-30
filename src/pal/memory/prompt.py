@@ -135,16 +135,37 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
 
         behavior_entries = [entry for entry in pack.l2_working_memory if _is_behavior_guidance_entry(entry)]
         memory_entries = [entry for entry in pack.l2_working_memory if not _is_behavior_guidance_entry(entry)]
+        fact_entries = [entry for entry in memory_entries if not _is_experience_entry(entry)]
+        experience_entries = [entry for entry in memory_entries if _is_experience_entry(entry)]
 
-        hot_lines = _render_entry_lines(memory_entries)
-        if hot_lines:
+        fact_lines = _render_entry_lines(fact_entries)
+        if fact_lines:
             fragments.append(
                 PromptFragment(
                     section="memory_system",
-                    title="Working Memory",
-                    content="\n".join(hot_lines),
+                    title="Remembered Facts",
+                    content=(
+                        "Use these as recalled durable facts, preferences, and project context. "
+                        "Verify live/runtime/current external facts before relying on them.\n"
+                        + "\n".join(fact_lines)
+                    ),
                     priority=56,
-                    metadata={"block_id": "memory_working_memory"},
+                    metadata={"block_id": "memory_remembered_facts"},
+                )
+            )
+        experience_lines = _render_entry_lines(experience_entries)
+        if experience_lines:
+            fragments.append(
+                PromptFragment(
+                    section="memory_system",
+                    title="Relevant Experience",
+                    content=(
+                        "Use these as prior cases or lessons that may suggest an approach. "
+                        "Adapt them to the current situation; they are not commands.\n"
+                        + "\n".join(experience_lines)
+                    ),
+                    priority=56,
+                    metadata={"block_id": "memory_relevant_experience"},
                 )
             )
         guidance_lines = _render_behavior_guidance_lines(behavior_entries)
@@ -180,8 +201,10 @@ def _memory_routing_fragment() -> PromptFragment:
             "- Mixed content -> separate records.\n\n"
             "Recall policy:\n"
             "- Use `op_l3_recall_query` when past facts, user preferences, Pal history, commitments, or reusable prior lessons may affect the current answer.\n"
+            "- If memory has been recalled or is present in the prompt, Pal MUST use it as reference before deciding, writing, retrying, debugging, or taking external action.\n"
             "- If a task runs into a blocker, ambiguity, missing user/project context, or an unfamiliar reference that may come from Pal history, try memory recall before giving up, guessing, or asking the user.\n"
-            "- Before deep debugging a blocker or tool/capability failure, consider whether Pal history may help: prior setup, repairs, project/user context, custom paths, plugin/device state, or earlier decisions. If yes, try recall first.\n"
+            "- If a tool/capability call fails and memory recall is available, Pal MUST use `op_l3_recall_query` to recall relevant experience before debugging, retrying, or asking the user.\n"
+            "- If the user challenges Pal's memory, says Pal already knows/remembers something, or corrects a recalled/stored fact, Pal MUST recall relevant memory before writing, patching, or insisting.\n"
             "- If the user mentions a person, project, preference, prior decision, custom term, or past event Pal does not know, recall memory when Pal history may plausibly contain it.\n"
             "- Do not recall memory automatically for every task or every unknown.\n"
             "- For code/runtime truth, inspect the live/source truth; for current external facts, search or verify externally when available.\n"
@@ -198,11 +221,35 @@ def _memory_routing_fragment() -> PromptFragment:
 
 
 def _build_cleared_tool_indices(messages: list, *, keep_recent: int) -> set[int]:
-    groups: list[list[int]] = []
+    turns = _build_l1_turn_tool_groups(messages)
+    total_groups = sum(len(groups) for groups in turns)
+    if total_groups <= keep_recent:
+        return set()
+
+    cleared: set[int] = set()
+    remaining_groups = total_groups
+    for groups in turns[:-1]:
+        if remaining_groups <= keep_recent:
+            break
+        for group in groups:
+            cleared.update(group)
+        remaining_groups -= len(groups)
+    return cleared
+
+
+def _build_l1_turn_tool_groups(messages: list) -> list[list[list[int]]]:
+    turns: list[list[list[int]]] = []
+    current: list[list[int]] = []
     index = 0
     while index < len(messages):
         message = messages[index]
         role = str(message.role or "").strip()
+        if role == "user" and (current or not turns):
+            if current:
+                turns.append(current)
+            current = []
+            index += 1
+            continue
         tool_calls = getattr(message, "tool_calls", None)
         if role == "assistant" and tool_calls:
             group = [index]
@@ -210,16 +257,15 @@ def _build_cleared_tool_indices(messages: list, *, keep_recent: int) -> set[int]
             while cursor < len(messages) and str(messages[cursor].role or "").strip() == "tool":
                 group.append(cursor)
                 cursor += 1
-            groups.append(group)
+            current.append(group)
             index = cursor
             continue
         if role == "tool":
-            groups.append([index])
+            current.append([index])
         index += 1
-    if len(groups) <= keep_recent:
-        return set()
-    clear_from = max(0, len(groups) - keep_recent)
-    return {item for group in groups[:clear_from] for item in group}
+    if current or not turns:
+        turns.append(current)
+    return turns
 
 
 def _render_entry_lines(entries) -> list[str]:
@@ -233,8 +279,6 @@ def _render_entry_lines(entries) -> list[str]:
         rendered = entry.rendered.strip() or entry.summary.strip() or entry.title.strip()
         if not rendered:
             continue
-        if str(getattr(entry, "source_kind", "") or "").strip() == "l3_recall":
-            rendered = f"{rendered} [L3 summary; origin available]"
         label = entry.title.strip() or entry.entry_id
         lines.append(f"- {label}: {rendered}")
     return lines
@@ -260,6 +304,12 @@ def _is_behavior_guidance_entry(entry) -> bool:
     kind = str(getattr(entry, "kind", "") or "").strip()
     source_kind = str(getattr(entry, "source_kind", "") or "").strip()
     return kind == "behavior_rule" or source_kind == "behavior_advice"
+
+
+def _is_experience_entry(entry) -> bool:
+    kind = str(getattr(entry, "kind", "") or "").strip()
+    source_kind = str(getattr(entry, "source_kind", "") or "").strip()
+    return kind == "case" or source_kind in {"repair_resolution", "task_experience"}
 
 
 def _entry_render_dedupe_key(entry) -> str:

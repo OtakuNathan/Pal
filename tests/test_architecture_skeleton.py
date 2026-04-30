@@ -735,7 +735,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         tool_names = [tool["function"]["name"] for tool in request.tools]
         self.assertIn("op_l3_maintenance_refresh_indexes", tool_names)
         self.assertNotIn("op_exec_run", tool_names)
-        self.assertIn("Before deep maintenance", request.messages[-1]["content"])
 
     def test_failure_flow_llm_blocker_fails_without_work_order(self) -> None:
         core = PalCore()
@@ -901,9 +900,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("op_l3_commit_write", prompt.messages[0]["content"])
             self.assertIn("op_l3_correct_patch", prompt.messages[0]["content"])
             self.assertIn("memory_query_hints", prompt.messages[0]["content"])
+            self.assertIn("If memory has been recalled or is present in the prompt", prompt.messages[0]["content"])
             self.assertIn("blocker, ambiguity, missing user/project context", prompt.messages[0]["content"])
-            self.assertIn("tool/capability failure", prompt.messages[0]["content"])
-            self.assertIn("If yes, try recall first.", prompt.messages[0]["content"])
+            self.assertIn("If a tool/capability call fails", prompt.messages[0]["content"])
+            self.assertIn("MUST use `op_l3_recall_query`", prompt.messages[0]["content"])
             self.assertIn("custom term", prompt.messages[0]["content"])
             self.assertNotIn("op_exec_disc_search", prompt.messages[0]["content"])
             self.assertNotIn("op_exec_capability_call", prompt.messages[0]["content"])
@@ -914,7 +914,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("## Memory Projection", prompt.messages[0]["content"])
             self.assertEqual(prompt.messages[1], {"role": "user", "content": "What timezone should you use?"})
             self.assertEqual(prompt.messages[2], {"role": "assistant", "content": "I should use Asia/Shanghai context."})
-            self.assertIn("Working Memory", prompt.messages[0]["content"])
+            self.assertIn("Remembered Facts", prompt.messages[0]["content"])
+            self.assertNotIn("Working Memory", prompt.messages[0]["content"])
             self.assertIn("Timezone Preference", prompt.messages[0]["content"])
             self.assertNotIn("Issued work orders", prompt.messages[0]["content"])
             self.assertNotIn("Registered services", prompt.messages[0]["content"])
@@ -1952,7 +1953,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("provider: mock_l3", tool_message["content"])
         self.assertIn("queries: nathan", tool_message["content"])
         self.assertIn("retrieved: 1 memories", tool_message["content"])
-        self.assertNotIn("consider memory recall if available", tool_message["content"])
         self.assertNotIn("OpenClaw", tool_message["content"])
         self.assertNotIn("Nathan built Pal and wants it to act directly.", tool_message["content"])
 
@@ -1994,7 +1994,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             if message.get("role") == "tool"
         )
         self.assertIn("tool execution failed: ValueError", tool_message["content"])
-        self.assertIn("consider memory recall if available", tool_message["content"])
+        self.assertNotIn("memory recall", tool_message["content"])
 
     def test_stagnation_guard_forces_finalization_only_and_strips_tools(self) -> None:
         core = PalCore()
@@ -2241,10 +2241,29 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(preflight_requests[-1].model_hint, "fallback-small-model")
         self.assertTrue(memory_service.l1_store.items)
 
-    def test_memory_prompt_clears_old_tool_protocol_in_complete_batches(self) -> None:
+    def test_memory_prompt_clears_old_tool_protocol_by_complete_turns(self) -> None:
         from pal.memory.prompt import _build_cleared_tool_indices
 
         messages = [
+            L1TranscriptMessage(role="user", content="turn 1"),
+            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_1"}]),
+            L1TranscriptMessage(role="tool", content="tool-1", tool_call_id="call_1"),
+            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_2"}]),
+            L1TranscriptMessage(role="tool", content="tool-2", tool_call_id="call_2"),
+            L1TranscriptMessage(role="user", content="turn 2"),
+            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_3"}]),
+            L1TranscriptMessage(role="tool", content="tool-3", tool_call_id="call_3"),
+        ]
+
+        cleared = _build_cleared_tool_indices(messages, keep_recent=1)
+
+        self.assertEqual(cleared, {1, 2, 3, 4})
+
+    def test_memory_prompt_does_not_partially_clear_single_tool_heavy_turn(self) -> None:
+        from pal.memory.prompt import _build_cleared_tool_indices
+
+        messages = [
+            L1TranscriptMessage(role="user", content="single turn"),
             L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_1"}]),
             L1TranscriptMessage(role="tool", content="tool-1", tool_call_id="call_1"),
             L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_2"}]),
@@ -2255,7 +2274,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         cleared = _build_cleared_tool_indices(messages, keep_recent=1)
 
-        self.assertEqual(cleared, {0, 1, 2, 3})
+        self.assertEqual(cleared, set())
 
     def test_memory_prompt_dedupes_working_memory_entries_by_identity(self) -> None:
         from pal.memory import MemoryPack
@@ -2292,9 +2311,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             PromptAssemblyContext(metadata={"memory_pack": pack})
         )
 
-        working_memory = next(fragment for fragment in fragments if fragment.metadata.get("block_id") == "memory_working_memory")
-        self.assertIn("Nathan built Pal. [L3 summary; origin available]", working_memory.content)
-        self.assertNotIn("Nathan built Pal again.", working_memory.content)
+        remembered_facts = next(fragment for fragment in fragments if fragment.metadata.get("block_id") == "memory_remembered_facts")
+        self.assertIn("Nathan built Pal.", remembered_facts.content)
+        self.assertNotIn("origin available", remembered_facts.content)
+        self.assertNotIn("Nathan built Pal again.", remembered_facts.content)
 
     def test_memory_query_defaults_to_summary_view_enum(self) -> None:
         self.assertEqual(MemoryQuery().view, L3RecallView.SUMMARY)
@@ -2345,6 +2365,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertIn("Capability answers", surfaces.content)
         self.assertIn("Memory answers", surfaces.content)
+        self.assertIn("Recalled memory is reference context", surfaces.content)
         self.assertIn("Source-of-Truth Preference", rules.content)
         self.assertIn("If the preferred source is unavailable", rules.content)
         self.assertIn("No success claim without confirmation", rules.content)

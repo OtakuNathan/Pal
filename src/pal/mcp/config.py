@@ -58,7 +58,7 @@ def _server_from_payload(*, server_id: str, payload: dict[str, Any]) -> McpServe
         transport=str(payload.get("transport") or "stdio"),
         protocol_version=str(payload.get("protocol_version") or payload.get("protocolVersion") or "2025-06-18"),
         startup_timeout_ms=int(payload.get("startup_timeout_ms") or payload.get("startupTimeoutMs") or 10_000),
-        request_timeout_ms=int(payload.get("request_timeout_ms") or payload.get("requestTimeoutMs") or 30_000),
+        request_timeout_ms=int(payload.get("request_timeout_ms") or payload.get("requestTimeoutMs") or 300_000),
         shutdown_timeout_ms=int(payload.get("shutdown_timeout_ms") or payload.get("shutdownTimeoutMs") or 5_000),
         kill_on_close=bool(payload.get("kill_on_close", payload.get("killOnClose", True))),
         trust_level=str(payload.get("trust_level") or payload.get("trustLevel") or "unknown"),
@@ -70,7 +70,9 @@ def _server_from_payload(*, server_id: str, payload: dict[str, Any]) -> McpServe
 
 def _normalize_command(payload: dict[str, Any]) -> tuple[str, ...]:
     command = payload.get("command")
-    args = payload.get("args") or ()
+    args = payload.get("args")
+    if args is None:
+        args = []
     if isinstance(command, str):
         command_parts = (command,)
     elif isinstance(command, list) and all(isinstance(item, str) for item in command):

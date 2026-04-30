@@ -12,7 +12,7 @@ from pal.behavior import BehaviorAffordanceModel, BehaviorRepository, BehaviorSe
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
 from pal.foundation import PalV2Database
-from pal.mcp import AsyncStdioMcpConnector, McpCompiler, McpDiscoverySnapshot, McpProtocolError, McpServerConfig
+from pal.mcp import AsyncStdioMcpConnector, McpCompiler, McpDiscoverySnapshot, McpProtocolError, McpServerConfig, load_mcp_server_file
 from pal.mcp.ipc import McpManagerClient
 from pal.mcp.manager import McpManager
 from pal.mcp.model import McpPromptArgumentSpec, McpPromptSpec, McpToolSpec
@@ -99,6 +99,9 @@ class McpCompilerTests(unittest.TestCase):
         result = projection.mounted_subtree.bound_actions[0].callable(CapabilityCall(name="op_mcp_demo_tool_run", args={}))
         self.assertEqual(result.status, RuntimeStatus.ERROR)
         self.assertEqual(result.structured["error_kind"], "tool_execution")
+        self.assertEqual(result.structured["tool_text"], "failed")
+        self.assertEqual(result.text, "failed")
+        self.assertIn("MCP tool execution failed:\nfailed", result.llm_text)
 
         projection = McpCompiler().compile(
             module_id="mcp",
@@ -108,6 +111,8 @@ class McpCompilerTests(unittest.TestCase):
         result = projection.mounted_subtree.bound_actions[0].callable(CapabilityCall(name="op_mcp_demo_tool_run", args={}))
         self.assertEqual(result.status, RuntimeStatus.ERROR)
         self.assertEqual(result.structured["error_kind"], "protocol")
+        self.assertIn("closed", result.text)
+        self.assertIn("closed", result.llm_text)
 
     def test_prompt_compiles_to_declared_skill_and_render_capability(self) -> None:
         prompt = McpPromptSpec(
@@ -135,6 +140,25 @@ class McpConnectorAndManagerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_default_mcp_request_timeouts_are_long_running_friendly(self) -> None:
+        config_path = self.root / "server.toml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    'server_id = "demo"',
+                    f"command = '{sys.executable}'",
+                    "args = []",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        (file_config,) = load_mcp_server_file(config_path)
+
+        self.assertEqual(McpServerConfig(server_id="demo", command=("cmd",)).request_timeout_ms, 300_000)
+        self.assertEqual(file_config.config.request_timeout_ms, 300_000)
+        self.assertEqual(McpManagerClient(runtime_root=self.root).request_timeout_seconds, 300.0)
 
     def _write_fake_server(self) -> Path:
         server = self.root / "fake_mcp_server.py"

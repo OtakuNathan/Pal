@@ -7,9 +7,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/wufen/Desktop
 enabled = true
 trust_level = "local"
 
-startup_timeout_ms = 60000
-request_timeout_ms = 60000
-shutdown_timeout_ms = 10000
+startup_timeout_ms = 10000
+request_timeout_ms = 300000
+shutdown_timeout_ms = 5000
 kill_on_close = true
 
 [env]

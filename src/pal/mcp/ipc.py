@@ -43,7 +43,7 @@ class McpManagerRpcError(RuntimeError):
 @dataclass
 class McpManagerClient:
     runtime_root: Path
-    request_timeout_seconds: float = 30.0
+    request_timeout_seconds: float = 300.0
 
     @property
     def socket_path(self) -> Path:

@@ -578,6 +578,15 @@ class BehaviorSubsystemTests(unittest.TestCase):
                     rendered="User prefers Asia/Hong_Kong timezone.",
                 ),
                 L2Entry(
+                    entry_id="case.plugin",
+                    kind="case",
+                    scope="system",
+                    title="Plugin repair",
+                    summary="A prior plugin attach failure was fixed by rescanning.",
+                    source_kind="l3_recall",
+                    rendered="A prior plugin attach failure was fixed by rescanning.",
+                ),
+                L2Entry(
                     entry_id="behavior_advice:commit.guidance",
                     kind="behavior_rule",
                     scope="behavior",
@@ -592,13 +601,23 @@ class BehaviorSubsystemTests(unittest.TestCase):
         fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext(metadata={"memory_pack": pack}))
         by_title = {fragment.title: fragment.content for fragment in fragments}
 
-        self.assertIn("Working Memory", by_title)
+        self.assertIn("Remembered Facts", by_title)
+        self.assertIn("Relevant Experience", by_title)
         self.assertIn("Behavior Guidance", by_title)
-        self.assertIn("Timezone Preference", by_title["Working Memory"])
-        self.assertNotIn("Commit guidance", by_title["Working Memory"])
+        self.assertNotIn("Working Memory", by_title)
+        self.assertIn("recalled durable facts", by_title["Remembered Facts"])
+        self.assertIn("Timezone Preference", by_title["Remembered Facts"])
+        self.assertNotIn("Plugin repair", by_title["Remembered Facts"])
+        self.assertIn("prior cases or lessons", by_title["Relevant Experience"])
+        self.assertIn("Plugin repair", by_title["Relevant Experience"])
+        self.assertNotIn("Timezone Preference", by_title["Relevant Experience"])
+        self.assertNotIn("Commit guidance", by_title["Remembered Facts"])
+        self.assertNotIn("Commit guidance", by_title["Relevant Experience"])
         self.assertIn("Commit guidance", by_title["Behavior Guidance"])
         self.assertIn("not durable facts", by_title["Behavior Guidance"])
-        self.assertNotIn("[L3 summary; origin available]", by_title["Behavior Guidance"])
+        self.assertNotIn("origin available", by_title["Remembered Facts"])
+        self.assertNotIn("origin available", by_title["Relevant Experience"])
+        self.assertNotIn("origin available", by_title["Behavior Guidance"])
 
     def test_memory_prompt_always_projects_memory_routing(self) -> None:
         fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext())
@@ -610,9 +629,12 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("op_l3_correct_patch", routing)
         self.assertIn("memory_query_hints", routing)
         self.assertIn("approved repair lessons", routing)
+        self.assertIn("If memory has been recalled or is present in the prompt", routing)
         self.assertIn("blocker, ambiguity, missing user/project context", routing)
-        self.assertIn("tool/capability failure", routing)
-        self.assertIn("If yes, try recall first.", routing)
+        self.assertIn("If a tool/capability call fails", routing)
+        self.assertIn("MUST use `op_l3_recall_query`", routing)
+        self.assertIn("challenges Pal's memory", routing)
+        self.assertIn("MUST recall relevant memory", routing)
         self.assertIn("custom term", routing)
         self.assertIn("Do not recall memory automatically for every task or every unknown.", routing)
 

@@ -17,9 +17,9 @@ class McpServerConfig:
     env: dict[str, str] = field(default_factory=dict)
     transport: str = "stdio"
     protocol_version: str = "2025-06-18"
-    startup_timeout_ms: int = 60_000
-    request_timeout_ms: int = 60_000
-    shutdown_timeout_ms: int = 10_000
+    startup_timeout_ms: int = 10_000
+    request_timeout_ms: int = 300_000
+    shutdown_timeout_ms: int = 5_000
     kill_on_close: bool = True
     trust_level: str = "unknown"
 

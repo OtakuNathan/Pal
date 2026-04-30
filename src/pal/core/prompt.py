@@ -33,6 +33,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "4. Memory\n"
                     '- Memory answers: "What durable fact, preference, history, or lesson may matter now?"\n'
                     "- Memory stores past facts, user preferences, project facts, task experience, repair lessons, and reusable case knowledge.\n"
+                    "- Recalled memory is reference context Pal must consider before acting; it does not override live truth or the user's current instruction.\n"
                     "- Memory recalls context; it does not execute actions."
                 ),
                 priority=80,

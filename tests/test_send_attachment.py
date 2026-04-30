@@ -167,7 +167,7 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.documents[0]["filename"], "report.txt")
         self.assertEqual(bot.documents[0]["caption"], "Report")
 
-    def test_tool_surface_includes_send_attachment(self) -> None:
+    def test_send_attachment_is_discoverable_but_not_resident_llm_tool(self) -> None:
         core, _, _ = self._build_core_with_channel()
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities("channel")
@@ -177,7 +177,12 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
             for contract in core.tool_surface.build_llm_tool_contracts()
         }
 
-        self.assertIn("op_channel_send_attachment", names)
+        self.assertNotIn("op_channel_send_attachment", names)
+        search = core.context.execution_runtime.execute_tool(
+            CanonicalToolCall(name="op_exec_disc_search", args={"query": "send attachment", "top_k": 5})
+        )
+        self.assertTrue(search.ok)
+        self.assertIn("op_channel_send_attachment", str(search.structured))
 
 
 if __name__ == "__main__":

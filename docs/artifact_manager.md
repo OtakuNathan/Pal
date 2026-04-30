@@ -34,6 +34,8 @@ flowchart LR
 
 The channel layer only normalizes incoming attachment metadata. `PalCore` passes attachments to the artifact port and replaces raw `attachments` with prompt-safe `artifact_refs`.
 
+`artifact_refs` in the current event payload are authoritative for that turn. If they are present, prompt exposure must show only those artifacts in payload order and must not fall back to old hot artifacts.
+
 ## Lifecycle
 
 Default lifecycle:
@@ -69,26 +71,37 @@ Default representations:
 
 Rules:
 
-- Do not expose local paths.
-- Do not expose all internal metadata.
-- Prefer current-turn artifacts.
-- Include hot same-scope artifacts only when user text appears artifact-relevant.
-- Vision-capable endpoints may receive normalized image/page-image parts under budget.
-- Non-vision endpoints receive manifest/tool guidance only.
+- Do not expose raw source secrets such as Telegram bot-token URLs, `telegram_file_path`, or raw `source_url`.
+- Prefer explicit current-event `artifact_refs`.
+- If no explicit refs exist, show same-turn records.
+- If no current records exist and user text is empty, show no historical hot artifacts.
+- Historical hot artifacts are shown only for explicit artifact/file/image/audio references, not weak deictic phrases such as "this" or "that".
+- URLs are ignored when checking whether user text references a historical artifact, so a URL path segment like `file` or `photos` cannot trigger hot artifact fallback.
+- Vision-capable endpoints may receive normalized image/page-image parts under budget. URL source is preferred when available; otherwise Pal serializes a normalized image data URL at the final LLM boundary.
+- If image pixels are attached inline, the manifest marks `visual_content: attached_inline` and Pal should answer from vision directly.
+- Non-vision endpoints receive an LLM-safe manifest with artifact metadata, representations, and `local_file.preferred_path` when available.
+- `local_file.preferred_path` may be used only with a capability that explicitly accepts local paths. It is a bridge for path-capable processors, not a general filesystem permission.
 
 Internal image parts become LiteLLM `image_url` data URLs only at the final LLM serialization boundary.
 
 ## Tools
 
-LLM-visible tools:
+Artifact capabilities:
 
 - `op_artifact_list`: list hot artifacts visible to the current turn.
 - `op_artifact_info`: inspect metadata and available representations for one artifact.
 - `op_artifact_read`: read text-like representations by `artifact_id`.
 - `op_artifact_search`: search artifact objects by filename, kind, time, caption, or summary.
 - `op_artifact_select`: mark one artifact as chosen and refresh TTL.
-- `op_artifact_content_search`: search inside one known artifact.
+- `op_artifact_content_search`: search existing text-like representations inside one known artifact. It does not inspect image pixels, run OCR, or create audio transcripts.
 - `op_artifact_transcribe`: request transcript generation; V1 returns `needs_transcription` without an ASR provider.
+
+Resident LLM tools currently include only:
+
+- `op_artifact_info`
+- `op_artifact_read`
+
+Other artifact capabilities remain discoverable through execution discovery.
 
 Tool boundary:
 
@@ -109,7 +122,8 @@ Future additions should register new behavior through tables/registries:
 ## Invariants
 
 - Artifact scope is `control_scope_key`.
-- Local paths never appear in prompt exposure or tool-facing metadata.
+- Raw source secrets never appear in prompt exposure.
+- Local paths may appear only as LLM-safe `local_file` metadata and only for tools/capabilities that explicitly accept paths.
 - Artifact metadata is not memory and never automatically becomes L3.
 - Search does not refresh TTL; selection or actual use does.
 - LLM serialization is the only place internal image parts become provider wire format.

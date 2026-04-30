@@ -22,15 +22,11 @@ capabilities = [
     "op_skill_read",
     "op_skill_inject",
     # -- artifacts (conversation attachments) --
-    "op_artifact_list",
     "op_artifact_info",
     "op_artifact_read",
-    "op_artifact_search",
-    "op_artifact_select",
-    "op_artifact_content_search",
-    "op_artifact_transcribe",
     # -- channel output --
-    "op_channel_send_attachment",
+    # Discover via op_exec_disc_search when needed:
+    # "op_channel_send_attachment",
     # -- web --
     "op_web_search_query",
     "op_web_fetch_read",

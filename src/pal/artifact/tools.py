@@ -247,7 +247,10 @@ class ArtifactContentSearchTool:
     name: str = "op_artifact_content_search"
     display_name: str = "Search Artifact Content"
     family: str = "artifact"
-    description: str = "Search inside a known artifact's text, PDF pages/chunks, transcript, or OCR text."
+    description: str = (
+        "Search inside existing text representations of a known artifact, such as text files, PDF page text/chunks, "
+        "or an already-created transcript. Does not inspect image pixels or create transcripts from audio."
+    )
     tags: tuple[str, ...] = ("artifact", "content", "search")
     keywords: tuple[str, ...] = ("artifact", "content", "pdf", "transcript", "search")
     args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_content_search"))

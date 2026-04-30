@@ -463,7 +463,6 @@ def _render_failure_primary_input(
         "instructions": [
             "Work only on the primary blocker.",
             "You may inspect and perform bounded maintenance with the allowed capabilities.",
-            "Before deep maintenance, consider whether Pal history may help; if relevant recall is available, use it before repeated retries.",
             "Do not expand scope to secondary issues.",
             "When verifying, return a JSON object with verification_status and any explanatory fields.",
         ],

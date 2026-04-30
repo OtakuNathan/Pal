@@ -108,32 +108,38 @@ def normalize_tool_result(result: dict[str, Any], *, server_id: str, tool_name: 
         text = str(raw.get("structuredContent") or raw.get("content") or "").strip()
     if not text:
         text = f"MCP tool `{tool_name}` returned no text content."
+    is_error = bool(raw.get("isError"))
     structured = {
         "mcp": {"server_id": server_id, "tool_name": tool_name},
+        "tool_text": text,
         "raw_result": raw,
-        "error_kind": "tool_execution" if bool(raw.get("isError")) else None,
+        "error_kind": "tool_execution" if is_error else None,
     }
-    status = RuntimeStatus.ERROR if bool(raw.get("isError")) else RuntimeStatus.OK
-    title = "MCP tool execution failed" if bool(raw.get("isError")) else "MCP tool result"
+    status = RuntimeStatus.ERROR if is_error else RuntimeStatus.OK
+    title = "MCP tool execution failed" if is_error else "MCP tool result"
+    structured_text = render_titled_structured_for_llm(title, structured)
+    llm_text = f"{title}:\n{text}\n\n{structured_text}" if is_error else structured_text
     return CapabilityResult(
         status=status,
         text=text,
         structured=structured,
-        llm_text=render_titled_structured_for_llm(title, structured),
+        llm_text=llm_text,
     )
 
 
 def normalize_protocol_error(exc: Exception, *, server_id: str, name: str, kind: str) -> CapabilityResult:
+    error_text = str(exc).strip() or exc.__class__.__name__
     structured = {
         "mcp": {"server_id": server_id, "name": name, "kind": kind},
         "error_kind": "protocol",
-        "error": str(exc),
+        "error": error_text,
+        "error_type": exc.__class__.__name__,
     }
     return CapabilityResult(
         status=RuntimeStatus.ERROR,
-        text=f"MCP {kind} failed: {exc.__class__.__name__}",
+        text=f"MCP {kind} protocol error: {error_text}",
         structured=structured,
-        llm_text=render_titled_structured_for_llm("MCP protocol error", structured),
+        llm_text=f"MCP protocol error:\n{error_text}\n\n{render_titled_structured_for_llm('MCP protocol error detail', structured)}",
     )
 
 

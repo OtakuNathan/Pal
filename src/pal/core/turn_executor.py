@@ -40,12 +40,6 @@ _FORWARD_STREAM_KINDS = frozenset({
     LLMStreamEventKind.ERROR,
 })
 
-_TOOL_FAILURE_MEMORY_RECALL_REMINDER = (
-    "If this failure may depend on Pal history (prior setup, repairs, project/user context, custom paths, "
-    "plugin/device state, or earlier decisions), consider memory recall if available before repeated retries or deep debugging."
-)
-
-
 class TurnExecutor:
     def __init__(
         self,
@@ -904,19 +898,12 @@ class TurnExecutor:
         if self._is_l3_recall_tool_call(tool_call.name):
             return self._render_l3_recall_tool_observation(tool_call, result)
         if str(result.llm_text or "").strip():
-            return self._append_tool_failure_memory_recall_reminder(tool_call, result, str(result.llm_text).strip())
+            return str(result.llm_text).strip()
         if str(result.text or "").strip():
-            return self._append_tool_failure_memory_recall_reminder(tool_call, result, str(result.text).strip())
+            return str(result.text).strip()
         if result.structured:
-            return self._append_tool_failure_memory_recall_reminder(tool_call, result, json.dumps(result.structured, ensure_ascii=False, sort_keys=True))
-        return self._append_tool_failure_memory_recall_reminder(tool_call, result, "ok" if result.ok else "error")
-
-    def _append_tool_failure_memory_recall_reminder(self, tool_call: CanonicalToolCall, result: CanonicalToolResult, content: str) -> str:
-        if result.ok or self._is_l3_recall_tool_call(tool_call.name):
-            return content
-        if _TOOL_FAILURE_MEMORY_RECALL_REMINDER in content:
-            return content
-        return f"{content.rstrip()}\n\n[reminder] {_TOOL_FAILURE_MEMORY_RECALL_REMINDER}"
+            return json.dumps(result.structured, ensure_ascii=False, sort_keys=True)
+        return "ok" if result.ok else "error"
 
     @staticmethod
     def _is_l3_recall_tool_call(name: str) -> bool:

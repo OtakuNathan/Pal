@@ -146,7 +146,10 @@ class ArtifactIntrospectionProvider:
         scope="module",
         family="artifact",
         action_name="content_search",
-        description="Search inside a known artifact's text, PDF pages/chunks, transcript, or OCR text.",
+        description=(
+            "Search inside existing text representations of a known artifact, such as text files, PDF page text/chunks, "
+            "or an already-created transcript. Does not inspect image pixels or create transcripts from audio."
+        ),
         args_schema=artifact_args_schema("op_artifact_content_search"),
         result_schema=artifact_result_schema("op_artifact_content_search"),
         metadata={"llm_exposed": True, "async_required": True},

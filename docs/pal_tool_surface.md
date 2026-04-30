@@ -1,162 +1,98 @@
-# Pal Tool Surface Configuration
+# Pal Tool Surface
 
-> 目标：定义哪些 capability 暴露给 LLM 作为 function-calling 工具，以及如何配置。
+`ToolSurface` controls which registered capabilities are exposed to the LLM as direct function-calling tools.
 
-## 目标
+Pal may register many capabilities, but only a small resident set should enter the LLM tool window. Everything else remains in the execution inventory and is discoverable through capability search.
 
-Pal 注册了 100+ 个 capability，但 LLM 的 function-calling 窗口有限。不需要把所有能力都塞进 prompt。
+## Source Of Truth
 
-Tool Surface 负责从全部 capability 中筛选出"常用工具集"暴露给 LLM。其余能力通过 `op_exec_disc_search` 按需发现，通过 `op_exec_run` 执行。
+The resident surface is data-driven:
 
-## 设计原则
+- Config file: `src/pal/core/tool_surface.toml`
+- Runtime selector: `src/pal/core/tool_surface.py`
 
-### Discovery-First
+Changing the direct LLM tool set should normally be a TOML edit, not a Python code change.
 
-LLM 不需要一次看到所有工具。它只需要：
+## Current Resident Surface
 
-1. 常用工具直接可用
-2. 发现机制按需查找更多
-3. 执行机制调用任意已注册能力
+As of the current implementation, resident tools are intentionally small:
 
-### 数据驱动
+### Execution
 
-工具暴露列表不硬编码在 Python 里。而是通过 `src/pal/core/tool_surface.toml` 配置文件管理。
+- `op_exec_disc_read`
+- `op_exec_disc_search`
+- `op_exec_run`
+- `op_exec_capability_call`
 
-好处：
+These keep the model able to inspect and invoke any registered capability without making every capability resident.
 
-- 加减工具只改 TOML，不改代码
-- 配置与逻辑分离
-- 易于审计和版本控制
+### Behavior And Skill
 
-## 配置文件格式
+- `op_behavior_advise`
+- `op_behavior_affordance_submit`
+- `op_skill_assimilate`
+- `op_skill_commit`
+- `op_skill_update`
+- `op_skill_disable`
+- `op_skill_search`
+- `op_skill_read`
+- `op_skill_inject`
 
-`src/pal/core/tool_surface.toml`
+Behavior advice is routing. Skill search/read/inject is procedure loading. Neither surface executes arbitrary side effects by itself.
 
-### `[singletons]` — 静态能力
+### Artifact
 
-```toml
-[singletons]
-capabilities = [
-    "op_exec_disc_read",
-    "op_exec_disc_search",
-    "op_exec_run",
-    "intro_module_llm_active",
-    "op_web_search_query",
-    "op_web_fetch_read",
-    # ...
-]
-```
+- `op_artifact_info`
+- `op_artifact_read`
 
-这些 capability 的 `target_id` 为 `SINGLETON_TARGET`，始终暴露。
+Only metadata inspection and text-like reads are resident. Artifact list/search/select/content-search/transcribe remain discoverable when needed.
 
-### `[[dynamic]]` — 动态能力
+### Web
 
-```toml
-[[dynamic]]
-canonical_path = "op_l3_recall_query"
-provider_setting = "memory"
+- `op_web_search_query`
+- `op_web_fetch_read`
 
-[[dynamic]]
-canonical_path = "intro_provider_web_search_health"
-provider_setting = "active_web_search_provider_id"
-```
+### Dynamic Memory Provider Tools
 
-这些 capability 跟随"当前活跃 provider"动态解析。
+The active L3 provider is resolved at runtime:
 
-`provider_setting` 的取值：
+- `op_l3_recall_query`
+- `op_l3_commit_write`
+- `op_l3_correct_patch`
 
-- `"memory"` — 从 `MemoryService.l3_selector.active_provider_id` 读取
-- 其他字符串 — 从 `RuntimeSettingRepository` 按 key 读取
+These stay resident because recall, commit, and correction are frequent global workflows.
 
-运行时解析流程：
+## Non-Resident But Discoverable
 
-1. 读取 setting 获取 active provider ID
-2. 在 `compiled_capability_index` 中查找该 `canonical_path + target_id == active_provider_id` 的 descriptor
-3. 匹配到则暴露给 LLM
+Examples:
 
-## 当前暴露的工具分类
+- `op_artifact_list`
+- `op_artifact_search`
+- `op_artifact_select`
+- `op_artifact_content_search`
+- `op_artifact_transcribe`
+- `op_channel_send_attachment`
+- MCP-projected tools such as `op_mcp_<server>_tool_<tool>`
+- MCP prompt render capabilities such as `op_mcp_<server>_prompt_<prompt>_render`
 
-### 核心（始终暴露）
+The model should find these through `op_exec_disc_search` and invoke them through `op_exec_capability_call` or `op_exec_run`.
 
-| 工具 | 作用 |
-|------|------|
-| `op_exec_disc_read` | 查看能力目录 |
-| `op_exec_disc_search` | 搜索能力 |
-| `op_exec_run` | 执行任意能力 |
+## Artifact Tool Boundary
 
-### 自省（模块级）
+Artifact tools accept `artifact_id`, not arbitrary local paths.
 
-所有 `intro_module_*` 能力。覆盖 channel、control、core、execution、failure、identity、llm、memory、plugins、service、web_search、web_fetch。
+`op_artifact_content_search` searches existing text-like representations only. It does not inspect image pixels, perform OCR, or create audio transcripts. If an artifact needs OCR, ASR, PDF parsing, or image processing, Pal must discover a suitable capability for that representation or path.
 
-### 操作（模块级）
+## MCP Tool Boundary
 
-常用管理操作：channel 管理、control 生命周期、LLM 切换、memory provider 切换、plugin 管理、service CRUD、web 搜索/抓取。
+MCP tools are not resident by default. The MCP manager plugin compiles discovered server tools into Pal-native capabilities and publishes them into the capability inventory.
 
-### 动态（跟随 provider）
-
-- L3 memory 操作：recall、commit、correct
-- web_search provider health
-- web_fetch provider health
-
-## 代码入口
-
-`src/pal/core/tool_surface.py` 中的 `ToolSurface` 类：
-
-- `__init__` 读取 `tool_surface.toml`
-- `select_llm_descriptors()` 根据 TOML 配置筛选 descriptor
-- `build_llm_tool_contracts()` 将 descriptor 转为 LLM function-calling 格式
-
-## 修改工具列表
-
-1. 编辑 `src/pal/core/tool_surface.toml`
-2. 在 `[singletons]` 中加减 canonical_path
-3. 或在 `[[dynamic]]` 中添加跟随 provider 的能力
-4. 重启 Pal 生效
-
-## Behavior And Skill Tools
-
-The behavior subsystem adds route tools:
-
-- `op_behavior_advise`: ask the affordance router which behavior routes fit the current scenario.
-- `op_behavior_affordance_submit`: persist an instructed or learned recurring behavior rule.
-
-The skill subsystem adds skill lifecycle tools:
-
-- `op_skill_assimilate`: create a sanitized skill candidate from plain text or SKILL.md content.
-- `op_skill_commit`: commit a skill candidate and its thin affordance.
-- `op_skill_update`: update a normalized skill.
-- `op_skill_disable`: disable a normalized skill.
-- `op_skill_search`: search normalized skills for the current scenario or explicit skill name without returning manuals.
-- `op_skill_read`: read normalized skill metadata, optionally including manual text.
-- `op_skill_inject`: inject an active normalized skill manual by `skill_id`.
-
-These tools are intentionally separate from capability discovery:
-
-- `op_exec_disc_search` searches the execution inventory.
-- `op_behavior_advise` searches behavior affordances and returns skill/capability refs.
-- `op_skill_inject` loads the selected skill playbook.
-
-See [pal_behavior_contract.md](pal_behavior_contract.md) and [pal_skill_contract.md](pal_skill_contract.md).
-
-## Artifact Tools
-
-The artifact subsystem adds conversation-attachment tools:
-
-- `op_artifact_list`: list hot artifacts visible to the current turn.
-- `op_artifact_info`: inspect one artifact by `artifact_id`.
-- `op_artifact_read`: read text-like representations.
-- `op_artifact_search`: find an artifact object by filename, kind, summary, or time hint.
-- `op_artifact_select`: refresh TTL after Pal chooses a search result.
-- `op_artifact_content_search`: search inside one known artifact.
-- `op_artifact_transcribe`: request transcript generation; V1 may return `needs_transcription`.
-
-These tools are separate from filesystem tools. Artifact tools accept `artifact_id` only and never expose local paths to the model.
-
-See [artifact_manager.md](artifact_manager.md).
+MCP prompt templates become declared skills plus render capabilities. They do not enter the resident prompt automatically.
 
 ## Invariants
 
-- `discovery_search` 和 `exec_run` 必须始终暴露，保证 LLM 能发现和执行任意能力。
-- 单例能力列表从 TOML 文件读取，不在 Python 中硬编码。
-- 动态能力必须在运行时解析 active provider，不能静态配置 target_id。
-- 未暴露的能力仍然在 capability index 中，可通过 discovery 找到。
+- Resident tools are only the small high-frequency surface.
+- All non-resident capabilities remain discoverable through execution discovery.
+- Dynamic provider tools must resolve the live active provider at runtime.
+- Tool exposure is not capability availability. Availability is runtime state and must be inspected when it matters.
+- External protocol surfaces such as MCP must not bypass Pal execution, approval, or capability policy.
