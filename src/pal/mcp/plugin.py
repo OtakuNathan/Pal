@@ -193,14 +193,14 @@ class McpManagerPluginProvider:
         scope="module",
         family="mcp",
         action_name="image_prepare",
-        description="Prepare an image artifact/path/url for external MCP tool arguments as URL or base64 data",
+        description="Prepare an image artifact/path/url for external MCP tool arguments as URL, local path, or base64 data",
         args_schema={
             "type": "object",
             "properties": {
                 "artifact_id": {"type": "string"},
                 "path": {"type": "string"},
                 "url": {"type": "string"},
-                "mode": {"type": "string", "enum": ["auto", "url", "base64", "data_url"]},
+                "mode": {"type": "string", "enum": ["auto", "url", "path", "base64", "data_url"]},
             },
             "required": [],
         },
@@ -352,8 +352,20 @@ class McpManagerPluginProvider:
         path = Path(path_text).expanduser()
         if not path.is_file():
             raise ValueError(f"image file not found: {path}")
-        raw = path.read_bytes()
+        path = path.resolve()
         detected_mime = mime_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if mode == "path":
+            payload = {
+                "kind": "path",
+                "path": str(path),
+                "mime_type": detected_mime,
+                "file_name": file_name or path.name,
+                "size_bytes": path.stat().st_size,
+            }
+            if artifact_id:
+                payload["artifact_id"] = artifact_id
+            return payload
+        raw = path.read_bytes()
         encoded = base64.b64encode(raw).decode("ascii")
         payload = {
             "kind": "base64" if mode != "data_url" else "data_url",

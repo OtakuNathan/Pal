@@ -181,6 +181,7 @@ def _memory_routing_fragment() -> PromptFragment:
             "Recall policy:\n"
             "- Use `op_l3_recall_query` when past facts, user preferences, Pal history, commitments, or reusable prior lessons may affect the current answer.\n"
             "- If a task runs into a blocker, ambiguity, missing user/project context, or an unfamiliar reference that may come from Pal history, try memory recall before giving up, guessing, or asking the user.\n"
+            "- Before deep debugging a blocker or tool/capability failure, consider whether Pal history may help: prior setup, repairs, project/user context, custom paths, plugin/device state, or earlier decisions. If yes, try recall first.\n"
             "- If the user mentions a person, project, preference, prior decision, custom term, or past event Pal does not know, recall memory when Pal history may plausibly contain it.\n"
             "- Do not recall memory automatically for every task or every unknown.\n"
             "- For code/runtime truth, inspect the live/source truth; for current external facts, search or verify externally when available.\n"

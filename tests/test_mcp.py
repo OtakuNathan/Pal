@@ -335,6 +335,13 @@ class McpPluginSidecarTests(unittest.TestCase):
             self.assertEqual(show.status, RuntimeStatus.OK)
             image = core.context.execution_runtime.execute(CapabilityCall(name="op_mcp_image_prepare", args={"url": "https://example.test/a.png"}))
             self.assertEqual(image.structured["kind"], "url")
+            image_path = self.root / "image.png"
+            image_path.write_bytes(b"not really an image")
+            path_image = core.context.execution_runtime.execute(
+                CapabilityCall(name="op_mcp_image_prepare", args={"path": str(image_path), "mode": "path"})
+            )
+            self.assertEqual(path_image.structured["kind"], "path")
+            self.assertEqual(Path(path_image.structured["path"]), image_path.resolve())
         finally:
             host._do_detach(handle)
         missing = core.context.execution_runtime.execute(CapabilityCall(name="op_mcp_demo_tool_alpha", args={}))

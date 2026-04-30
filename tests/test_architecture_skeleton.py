@@ -735,6 +735,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         tool_names = [tool["function"]["name"] for tool in request.tools]
         self.assertIn("op_l3_maintenance_refresh_indexes", tool_names)
         self.assertNotIn("op_exec_run", tool_names)
+        self.assertIn("Before deep maintenance", request.messages[-1]["content"])
 
     def test_failure_flow_llm_blocker_fails_without_work_order(self) -> None:
         core = PalCore()
@@ -901,6 +902,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("op_l3_correct_patch", prompt.messages[0]["content"])
             self.assertIn("memory_query_hints", prompt.messages[0]["content"])
             self.assertIn("blocker, ambiguity, missing user/project context", prompt.messages[0]["content"])
+            self.assertIn("tool/capability failure", prompt.messages[0]["content"])
+            self.assertIn("If yes, try recall first.", prompt.messages[0]["content"])
             self.assertIn("custom term", prompt.messages[0]["content"])
             self.assertNotIn("op_exec_disc_search", prompt.messages[0]["content"])
             self.assertNotIn("op_exec_capability_call", prompt.messages[0]["content"])
@@ -1949,6 +1952,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("provider: mock_l3", tool_message["content"])
         self.assertIn("queries: nathan", tool_message["content"])
         self.assertIn("retrieved: 1 memories", tool_message["content"])
+        self.assertNotIn("consider memory recall if available", tool_message["content"])
         self.assertNotIn("OpenClaw", tool_message["content"])
         self.assertNotIn("Nathan built Pal and wants it to act directly.", tool_message["content"])
 
@@ -1990,6 +1994,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             if message.get("role") == "tool"
         )
         self.assertIn("tool execution failed: ValueError", tool_message["content"])
+        self.assertIn("consider memory recall if available", tool_message["content"])
 
     def test_stagnation_guard_forces_finalization_only_and_strips_tools(self) -> None:
         core = PalCore()

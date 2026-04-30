@@ -611,6 +611,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("memory_query_hints", routing)
         self.assertIn("approved repair lessons", routing)
         self.assertIn("blocker, ambiguity, missing user/project context", routing)
+        self.assertIn("tool/capability failure", routing)
+        self.assertIn("If yes, try recall first.", routing)
         self.assertIn("custom term", routing)
         self.assertIn("Do not recall memory automatically for every task or every unknown.", routing)
 

@@ -75,6 +75,29 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             metadata={"source_text": "please inspect the attached refund file"},
         )
 
+    def _register_image(
+        self,
+        *,
+        name: str = "photo.jpg",
+        turn_id: str | None = None,
+        source_metadata: dict[str, str] | None = None,
+    ):
+        path = self.root / "incoming" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not really an image")
+        return self.manager.register_ingested(
+            {
+                "local_cached_path": str(path),
+                "file_name": name,
+                "mime_type": "image/jpeg",
+                "source_channel": "telegram",
+                "source_metadata": dict(source_metadata or {}),
+            },
+            scope_key=self.scope_key,
+            turn_id=turn_id or self.turn_id,
+            source_channel="telegram",
+        )
+
     def test_text_artifact_read_search_and_ttl_rules(self) -> None:
         ref = self._register_text()
 
@@ -135,6 +158,107 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(request.messages[-2]["role"], "user")
         self.assertIn("Available Artifacts", request.messages[-2]["content"])
+
+    def test_artifact_info_exposes_local_file_metadata_for_tool_use(self) -> None:
+        ref = self._register_text(name="invoice.txt", text="invoice total is 42")
+
+        info = self.manager.info(ref.artifact_id, self.scope_key)
+        local_file = info["artifact"]["metadata"]["local_file"]
+
+        self.assertEqual(local_file["preferred_path_kind"], "normalized")
+        self.assertTrue(Path(local_file["preferred_path"]).is_file())
+        self.assertTrue(Path(local_file["original_path"]).is_file())
+        self.assertTrue(Path(local_file["normalized_path"]).is_file())
+
+        exposure = self.manager.select_prompt_exposure(
+            self.scope_key,
+            self.turn_id,
+            "look at the attachment",
+            {"supports_vision": False},
+        )
+        self.assertNotIn(str(self.root), exposure.text)
+
+    def test_current_artifact_refs_prevent_empty_caption_from_falling_back_to_hot_history(self) -> None:
+        old_ref = self._register_image(name="old_caption.jpg", turn_id="old-turn")
+        current_ref = self._register_image(
+            name="fresh.jpg",
+            turn_id="current-turn",
+            source_metadata={
+                "telegram_file_path": "photos/fresh.jpg",
+                "source_url": "https://api.telegram.org/file/botFAKE_TOKEN/photos/fresh.jpg",
+            },
+        )
+        provider = ArtifactPromptFragmentProvider(service=self.manager)
+
+        fragments = provider.build_prompt_fragments(
+            PromptAssemblyContext(
+                event=EventEnvelope(
+                    event_kind=EventKind.USER_MESSAGE,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={"text": "", "artifact_refs": [current_ref.to_dict()]},
+                ),
+                metadata={
+                    "artifact_scope_key": self.scope_key,
+                    "artifact_turn_id": "current-turn",
+                    "llm_capabilities": {"supports_vision": False},
+                },
+            )
+        )
+
+        self.assertEqual(len(fragments), 1)
+        content = fragments[0].content
+        self.assertIn(current_ref.artifact_id, content)
+        self.assertIn("fresh.jpg", content)
+        self.assertNotIn(old_ref.artifact_id, content)
+        self.assertNotIn("old_caption.jpg", content)
+        self.assertIn("direct_content: unavailable", content)
+        self.assertIn("current capability/tool surface", content)
+        self.assertIn("local_file:", content)
+        self.assertIn("preferred_path:", content)
+        self.assertNotIn("source_url", content)
+        self.assertNotIn("telegram_file_path", content)
+        self.assertNotIn("FAKE_TOKEN", content)
+        self.assertNotIn("ocr", content.lower())
+
+    def test_empty_text_without_current_artifact_refs_does_not_expose_hot_artifacts(self) -> None:
+        self._register_image(name="old.jpg", turn_id="old-turn")
+
+        exposure = self.manager.select_prompt_exposure(
+            self.scope_key,
+            "later-turn",
+            "",
+            {"supports_vision": False},
+        )
+
+        self.assertEqual(exposure.text, "")
+        self.assertEqual(exposure.inline_parts, ())
+
+    def test_historical_reference_without_current_artifact_refs_can_expose_hot_artifacts(self) -> None:
+        ref = self._register_image(name="old.jpg", turn_id="old-turn")
+
+        exposure = self.manager.select_prompt_exposure(
+            self.scope_key,
+            "later-turn",
+            "that attachment",
+            {"supports_vision": False},
+        )
+
+        self.assertIn(ref.artifact_id, exposure.text)
+
+    def test_current_image_artifact_refs_with_vision_still_attach_inline(self) -> None:
+        ref = self._register_image(name="fresh.jpg", turn_id="current-turn")
+
+        exposure = self.manager.select_prompt_exposure(
+            self.scope_key,
+            "current-turn",
+            "",
+            {"supports_vision": True},
+            artifact_ids=(ref.artifact_id,),
+        )
+
+        self.assertEqual(len(exposure.inline_parts), 1)
+        self.assertEqual(exposure.inline_parts[0].artifact_id, ref.artifact_id)
+        self.assertIn("visual_content: attached_inline", exposure.text)
 
     def test_expired_artifact_is_not_exposed_by_default(self) -> None:
         self._register_text()

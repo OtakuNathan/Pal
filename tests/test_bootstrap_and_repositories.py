@@ -2114,6 +2114,30 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         attachment = attachments[0]
         self.assertTrue(str(attachment["local_cached_path"]).startswith(str(self.runtime_root / "artifacts" / "telegram" / "777")))
         self.assertFalse("hello telegram" in str(attachment))
+        self.assertEqual(
+            attachment["source_metadata"]["source_url"],
+            "https://api.telegram.org/file/bottoken-123/docs/file.txt",
+        )
+
+    async def test_telegram_endpoint_preserves_absolute_file_url(self) -> None:
+        absolute = "https://api.telegram.org/file/bottoken-123/photos/file_31.jpg"
+        self.fake_bot.files["doc-absolute"] = _FakeTelegramFile(content=b"photo", file_path=absolute)
+        update = _FakeTelegramUpdate(
+            update_id=4,
+            message=_FakeTelegramMessage(
+                chat_id=777,
+                user_id=42,
+                message_id=12,
+                document=_FakeTelegramDocument(file_id="doc-absolute", file_name="photo.jpg", mime_type="image/jpeg"),
+            ),
+        )
+
+        await self.endpoint._on_update(update, None)
+
+        envelopes = self.endpoint.poll()
+        attachment = envelopes[0].event.payload["attachments"][0]
+        self.assertEqual(attachment["source_metadata"]["source_url"], absolute)
+        self.assertNotIn("/https://", attachment["source_metadata"]["source_url"].removeprefix("https://"))
 
     async def test_telegram_endpoint_registers_control_commands_and_menu(self) -> None:
         self.endpoint.queue_status(

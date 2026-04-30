@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import mimetypes
 import shutil
 from dataclasses import dataclass, replace
@@ -342,15 +343,23 @@ class ArtifactManager:
         turn_id: str,
         user_text: str,
         llm_capabilities: dict[str, Any] | None,
+        *,
+        artifact_ids: tuple[str, ...] = (),
     ) -> ArtifactPromptExposure:
         capabilities = dict(llm_capabilities or {})
         supports_vision = bool(capabilities.get("supports_vision"))
-        records = self._visible_records_for_prompt(scope_key=scope_key, turn_id=turn_id, user_text=user_text)
+        records = self._visible_records_for_prompt(
+            scope_key=scope_key,
+            turn_id=turn_id,
+            user_text=user_text,
+            artifact_ids=tuple(artifact_ids or ()),
+        )
         if not records:
             return ArtifactPromptExposure()
         inline_parts: list[ArtifactInlinePart] = []
         manifest_lines: list[str] = []
         inline_count = 0
+        needs_tool_handling = False
         for record in records:
             inlined = False
             if supports_vision and inline_count < self.policy.image.max_inline_images:
@@ -387,22 +396,28 @@ class ArtifactManager:
                 )
                 continue
             if not inlined:
-                manifest_lines.append(
-                    f"- artifact_id: {record.artifact_id}\n"
-                    f"  file_name: {record.file_name}\n"
-                    f"  kind: {record.kind}\n"
-                    f"  summary: {record.summary}\n"
-                    f"  actions: {', '.join(_prompt_actions_for(record, image_inlined=False))}"
-                )
+                manifest_lines.append(self._tool_handling_manifest(record))
+                needs_tool_handling = True
         if not manifest_lines and inline_parts:
             text = "Attached artifact content is included in this user message."
         elif manifest_lines:
+            handling_reminder = ""
+            if needs_tool_handling:
+                handling_reminder = (
+                    "Some artifact content below is not directly attached or readable by this model. "
+                    "Use the metadata to check the current capability/tool surface for a suitable processor. "
+                    "If one exists, call it with the supported path, URL, base64 payload, or representation. "
+                    "If none exists, say the current runtime cannot process that artifact content directly. "
+                )
             text = (
                 "These are short-lived conversation artifacts Pal can read by artifact_id. "
                 "Use artifact tools only when the current user request depends on them. "
                 "Do not treat artifact_id as a local path. "
+                "Use local_file.preferred_path only with a tool/capability that explicitly accepts local paths. "
                 "If visual_content is attached_inline, image pixels are already attached to this same user message; "
-                "answer from vision directly. Do not search for or call artifact tools to inspect visual image content.\n"
+                "answer from vision directly. Do not search for or call artifact tools to inspect visual image content. "
+                + handling_reminder
+                + "\n"
                 + "\n".join(manifest_lines)
             )
         else:
@@ -418,7 +433,14 @@ class ArtifactManager:
             return None
         return image_data_url(path, mime_type=representation.mime_type or "image/jpeg")
 
-    def _visible_records_for_prompt(self, *, scope_key: str, turn_id: str, user_text: str) -> list[ArtifactRecord]:
+    def _visible_records_for_prompt(
+        self,
+        *,
+        scope_key: str,
+        turn_id: str,
+        user_text: str,
+        artifact_ids: tuple[str, ...] = (),
+    ) -> list[ArtifactRecord]:
         now = _utc_now_dt()
         hot = {
             state.artifact_id: state
@@ -426,12 +448,64 @@ class ArtifactManager:
             if _parse_dt(state.expires_at) > now
         }
         records = [record for record in self.repository.list_records(scope_key=scope_key) if record.artifact_id in hot]
+        explicit_ids = tuple(str(item or "").strip() for item in artifact_ids if str(item or "").strip())
+        if explicit_ids:
+            by_id = {record.artifact_id: record for record in records}
+            return [by_id[artifact_id] for artifact_id in explicit_ids if artifact_id in by_id]
         current = [record for record in records if record.turn_id == turn_id]
         if current:
             return current
+        if not str(user_text or "").strip():
+            return []
         if not _looks_artifact_relevant(user_text, self.policy):
             return []
         return records[: max(1, int(self.policy.exposure.max_hot_prompt_refs))]
+
+    def _tool_handling_manifest(self, record: ArtifactRecord) -> str:
+        local_file = _local_file_metadata(record)
+        representations = [
+            _representation_prompt_dict(item)
+            for item in self.repository.list_representations(record.artifact_id)
+        ]
+        lines = [
+            f"- artifact_id: {record.artifact_id}",
+            f"  file_name: {_prompt_scalar(record.file_name)}",
+            f"  kind: {record.kind}",
+            f"  mime_type: {_prompt_scalar(record.original_mime_type)}",
+            f"  size_bytes: {record.original_size_bytes}",
+            f"  status: {record.status}",
+            f"  summary: {_prompt_scalar(record.summary)}",
+            "  direct_content: unavailable",
+            "  handling: inspect current capabilities/tools for a suitable processor using the metadata below",
+        ]
+        if local_file:
+            lines.extend(
+                [
+                    "  local_file:",
+                    f"    preferred_path: {_prompt_scalar(local_file.get('preferred_path', ''))}",
+                    f"    preferred_path_kind: {_prompt_scalar(local_file.get('preferred_path_kind', ''))}",
+                    f"    preferred_mime_type: {_prompt_scalar(local_file.get('preferred_mime_type', ''))}",
+                    f"    preferred_size_bytes: {int(local_file.get('preferred_size_bytes') or 0)}",
+                ]
+            )
+        if representations:
+            lines.append("  representations:")
+            for item in representations:
+                lines.extend(
+                    [
+                        f"    - representation_kind: {_prompt_scalar(item.get('representation_kind', ''))}",
+                        f"      mime_type: {_prompt_scalar(item.get('mime_type', ''))}",
+                        f"      size_bytes: {int(item.get('size_bytes') or 0)}",
+                        f"      status: {_prompt_scalar(item.get('status', ''))}",
+                    ]
+                )
+                summary = str(item.get("summary") or "").strip()
+                if summary:
+                    lines.append(f"      summary: {_prompt_scalar(summary)}")
+                selector = item.get("selector")
+                if isinstance(selector, dict) and selector:
+                    lines.append(f"      selector: {_prompt_scalar(selector)}")
+        return "\n".join(lines)
 
     def _first_image_representation(self, record: ArtifactRecord) -> ArtifactRepresentation | None:
         for kind in (REPRESENTATION_NORMALIZED_IMAGE, REPRESENTATION_PAGE_IMAGE):
@@ -530,6 +604,10 @@ class ArtifactManager:
         )
 
     def _record_dict(self, record: ArtifactRecord) -> dict[str, Any]:
+        metadata = _sanitize_metadata_for_llm(record.metadata)
+        local_file = _local_file_metadata(record)
+        if local_file:
+            metadata["local_file"] = local_file
         return {
             "artifact_id": record.artifact_id,
             "kind": record.kind,
@@ -541,7 +619,7 @@ class ArtifactManager:
             "size_bytes": record.original_size_bytes,
             "created_at": record.created_at,
             "updated_at": record.updated_at,
-            "metadata": _sanitize_metadata_for_llm(record.metadata),
+            "metadata": metadata,
         }
 
     def _representation_dict(self, representation: ArtifactRepresentation) -> dict[str, Any]:
@@ -613,8 +691,57 @@ def _resolve_source_url(record: ArtifactRecord) -> str:
     return ""
 
 
+def _representation_prompt_dict(representation: ArtifactRepresentation) -> dict[str, Any]:
+    return {
+        "representation_kind": representation.representation_kind,
+        "selector": dict(representation.selector),
+        "mime_type": representation.mime_type,
+        "size_bytes": representation.size_bytes,
+        "summary": representation.summary,
+        "status": representation.status,
+    }
+
+
+def _local_file_metadata(record: ArtifactRecord) -> dict[str, Any]:
+    original = _existing_path_text(record.original_path)
+    normalized = _existing_path_text(record.normalized_path)
+    preferred = normalized or original
+    if not preferred:
+        return {}
+    preferred_kind = "normalized" if normalized else "original"
+    payload: dict[str, Any] = {
+        "preferred_path": preferred,
+        "preferred_path_kind": preferred_kind,
+        "preferred_mime_type": record.normalized_mime_type if normalized else record.original_mime_type,
+        "preferred_size_bytes": record.normalized_size_bytes if normalized else record.original_size_bytes,
+    }
+    if original:
+        payload["original_path"] = original
+        payload["original_mime_type"] = record.original_mime_type
+        payload["original_size_bytes"] = record.original_size_bytes
+    if normalized:
+        payload["normalized_path"] = normalized
+        payload["normalized_mime_type"] = record.normalized_mime_type
+        payload["normalized_size_bytes"] = record.normalized_size_bytes
+    return payload
+
+
+def _existing_path_text(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw).expanduser()
+    if not path.is_file():
+        return ""
+    return str(path.resolve())
+
+
 _LLVM_HIDDEN_METADATA_KEYS = frozenset({"local_cached_path", "path", "telegram_file_path", "source_url"})
-_LLVM_HIDDEN_NESTED_KEYS = frozenset({"source_url"})
+_LLVM_HIDDEN_NESTED_KEYS = frozenset({"source_url", "telegram_file_path"})
+
+
+def _prompt_scalar(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _sanitize_metadata_for_llm(metadata: dict[str, Any]) -> dict[str, Any]:
