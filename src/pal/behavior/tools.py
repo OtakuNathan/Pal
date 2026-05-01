@@ -97,11 +97,12 @@ class BehaviorAdviceTool:
         request = _advice_request_from_args(args)
         result = await self.service.advise_async(request)
         structured = result.to_dict()
+        llm_payload = _advice_llm_payload(structured)
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text=f"behavior advice returned {len(result.candidates)} candidate(s)",
             structured=structured,
-            llm_text=render_titled_structured_for_llm("Behavior advice", structured),
+            llm_text=render_titled_structured_for_llm("Behavior advice", llm_payload),
         )
 
 
@@ -169,3 +170,43 @@ def _advice_request_from_args(args: dict[str, Any]) -> BehaviorAdviceRequest:
         already_considered=tuple(str(item) for item in (args.get("already_considered") or ()) if str(item).strip()),
         top_k=int(args.get("top_k") or 5),
     )
+
+
+def _advice_llm_payload(structured: dict[str, Any]) -> dict[str, Any]:
+    raw_candidates = structured.get("candidates")
+    safe_candidates: list[dict[str, Any]] = []
+    if isinstance(raw_candidates, list):
+        for index, raw_candidate in enumerate(raw_candidates, start=1):
+            if not isinstance(raw_candidate, dict):
+                continue
+            title = str(raw_candidate.get("title") or "").strip() or f"Route {index}"
+            item: dict[str, Any] = {"title": title}
+            hint = str(raw_candidate.get("prompt_hint") or "").strip()
+            if hint:
+                item["prompt_hint"] = hint
+            capability_refs = _string_list(raw_candidate.get("capability_refs"))
+            if capability_refs:
+                item["capability_refs"] = capability_refs
+            skill_refs = _string_list(raw_candidate.get("skill_refs"))
+            if skill_refs:
+                item["skill_refs"] = skill_refs
+            memory_query_hints = _string_list(raw_candidate.get("memory_query_hints"))
+            if memory_query_hints:
+                item["memory_query_hints"] = memory_query_hints
+            safe_candidates.append(item)
+    payload: dict[str, Any] = {"candidates": safe_candidates}
+    if bool(structured.get("fallback_used")):
+        payload["fallback_used"] = True
+    if str(structured.get("router_error") or "").strip():
+        payload["router_error"] = "present"
+    return payload
+
+
+def _string_list(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []

@@ -178,6 +178,40 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(availability["partial.route"], AFFORDANCE_PARTIAL)
         self.assertEqual(availability["unavailable.route"], AFFORDANCE_UNAVAILABLE)
 
+    def test_behavior_advice_requires_relevance_before_source_priority(self) -> None:
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="mcp.manager",
+                module_id="test",
+                title="MCP manager",
+                scenario_text="MCP sidecar attach rescan detach",
+                prompt_hint="Use MCP manager capabilities.",
+                source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+                priority=100,
+            )
+        )
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="research.note",
+                module_id="test",
+                title="代码调研后自动写研究笔记",
+                scenario_text="研究代码仓库后写研究笔记",
+                prompt_hint="研究完成后写结构化研究笔记。",
+                source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+                priority=100,
+            )
+        )
+
+        result = asyncio.run(
+            self.service.advise_async(
+                BehaviorAdviceRequest(scenario="帮我研究 flux_foundry 仓库 flow，并写研究笔记", top_k=10)
+            )
+        )
+        ids = {candidate.affordance_id for candidate in result.candidates}
+
+        self.assertIn("research.note", ids)
+        self.assertNotIn("mcp.manager", ids)
+
     def test_resident_affordance_budget_sorting_is_deterministic(self) -> None:
         service = BehaviorService(repository=self.repository, execution_runtime=self.runtime, resident_prompt_budget=3)
         for item in (
@@ -413,6 +447,11 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(sync_result.structured["reason"], "async_required")
         self.assertTrue(async_result.structured["fallback_used"])
         self.assertEqual(async_result.structured["candidates"][0]["affordance_id"], "tool.route")
+        self.assertIn("Route safely.", async_result.llm_text)
+        self.assertNotIn("confidence", async_result.llm_text)
+        self.assertNotIn("lexical score", async_result.llm_text)
+        self.assertNotIn("source_kind", async_result.llm_text)
+        self.assertNotIn("metadata", async_result.llm_text)
 
     def test_skill_inject_returns_manual_without_executing_capability(self) -> None:
         self.repository.upsert_skill(
@@ -457,6 +496,12 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertIn("op_behavior_advise", content)
         self.assertIn("Advisor Gate", content)
+        self.assertIn("Casual chat", content)
+        self.assertIn("Code, system, design, debugging, configuration, project, or memory-related requests are not casual chat", content)
+        self.assertLess(content.index("Advisor Gate"), content.index("Primitive single-capability task"))
+        self.assertIn("before reading files or taking action", content)
+        self.assertIn('"Look at/read/check the code" is NOT a primitive read', content)
+        self.assertIn("Do not use this shortcut for codebase analysis or system work", content)
         self.assertIn("op_exec_disc_search", content)
         self.assertIn("op_skill_inject", content)
         self.assertIn("op_behavior_affordance_submit", content)
@@ -561,9 +606,13 @@ class BehaviorSubsystemTests(unittest.TestCase):
         generate_requests = [request for kind, request in scripted_llm.requests if kind == "generate"]
         self.assertGreaterEqual(len(generate_requests), 2)
         followup_system = generate_requests[1].messages[0]["content"]
-        self.assertIn("## Behavior Guidance", followup_system)
-        self.assertIn("current-task behavior routing hints, not durable facts", followup_system)
+        self.assertIn("## Active Route Guidance", followup_system)
+        self.assertIn("active current-task route instructions", followup_system)
+        self.assertIn("do not ignore it as background context", followup_system)
         self.assertIn("Commit guidance", followup_system)
+        self.assertNotIn("Route metadata", followup_system)
+        self.assertNotIn("confidence=", followup_system)
+        self.assertNotIn("lexical score", followup_system)
 
     def test_behavior_guidance_renders_separately_from_working_memory(self) -> None:
         pack = MemoryPack(
@@ -603,21 +652,23 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertIn("Remembered Facts", by_title)
         self.assertIn("Relevant Experience", by_title)
-        self.assertIn("Behavior Guidance", by_title)
+        self.assertIn("Active Route Guidance", by_title)
         self.assertNotIn("Working Memory", by_title)
         self.assertIn("recalled durable facts", by_title["Remembered Facts"])
         self.assertIn("Timezone Preference", by_title["Remembered Facts"])
         self.assertNotIn("Plugin repair", by_title["Remembered Facts"])
-        self.assertIn("prior cases or lessons", by_title["Relevant Experience"])
+        self.assertIn("prior lessons", by_title["Relevant Experience"])
+        self.assertIn("do not ignore them unless current evidence makes them irrelevant", by_title["Relevant Experience"])
         self.assertIn("Plugin repair", by_title["Relevant Experience"])
         self.assertNotIn("Timezone Preference", by_title["Relevant Experience"])
         self.assertNotIn("Commit guidance", by_title["Remembered Facts"])
         self.assertNotIn("Commit guidance", by_title["Relevant Experience"])
-        self.assertIn("Commit guidance", by_title["Behavior Guidance"])
-        self.assertIn("not durable facts", by_title["Behavior Guidance"])
+        self.assertIn("Commit guidance", by_title["Active Route Guidance"])
+        self.assertIn("not durable facts", by_title["Active Route Guidance"])
+        self.assertIn("do not ignore it as background context", by_title["Active Route Guidance"])
         self.assertNotIn("origin available", by_title["Remembered Facts"])
         self.assertNotIn("origin available", by_title["Relevant Experience"])
-        self.assertNotIn("origin available", by_title["Behavior Guidance"])
+        self.assertNotIn("origin available", by_title["Active Route Guidance"])
 
     def test_memory_prompt_always_projects_memory_routing(self) -> None:
         fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext())
@@ -630,6 +681,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("memory_query_hints", routing)
         self.assertIn("approved repair lessons", routing)
         self.assertIn("If memory has been recalled or is present in the prompt", routing)
+        self.assertIn("If relevant memory or active route guidance is present", routing)
         self.assertIn("blocker, ambiguity, missing user/project context", routing)
         self.assertIn("If a tool/capability call fails", routing)
         self.assertIn("MUST use `op_l3_recall_query`", routing)
@@ -637,6 +689,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("MUST recall relevant memory", routing)
         self.assertIn("custom term", routing)
         self.assertIn("Do not recall memory automatically for every task or every unknown.", routing)
+        self.assertIn("When recall is required, use them as query seeds.", routing)
 
     def test_behavior_guidance_l2_entries_do_not_retire_to_l3(self) -> None:
         service = MemoryService()

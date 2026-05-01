@@ -424,11 +424,6 @@ class TurnExecutor:
     @staticmethod
     def _render_behavior_guidance_entry(candidate: dict[str, Any]) -> str:
         hint = str(candidate.get("prompt_hint") or "").strip()
-        reason = str(candidate.get("reason") or "").strip()
-        confidence = str(candidate.get("confidence") or "").strip()
-        availability = str(candidate.get("availability") or "").strip()
-        source_kind = str(candidate.get("source_kind") or "").strip()
-        activation_mode = str(candidate.get("activation_mode") or "").strip()
         skill_refs = TurnExecutor._string_list(candidate.get("skill_refs"))
         capability_refs = TurnExecutor._string_list(candidate.get("capability_refs"))
         memory_query_hints = TurnExecutor._string_list(candidate.get("memory_query_hints"))
@@ -436,25 +431,12 @@ class TurnExecutor:
         parts: list[str] = []
         if hint:
             parts.append(f"Hint: {hint}")
-        if reason:
-            parts.append(f"Reason: {reason}")
-        details = []
-        if confidence:
-            details.append(f"confidence={confidence}")
-        if availability:
-            details.append(f"availability={availability}")
-        if source_kind:
-            details.append(f"source={source_kind}")
-        if activation_mode:
-            details.append(f"activation={activation_mode}")
-        if details:
-            parts.append("Route metadata: " + ", ".join(details) + ".")
         if skill_refs:
             parts.append(f"Skill refs: {', '.join(skill_refs)}. Call `op_skill_inject` only if this route is selected.")
         if capability_refs:
             parts.append(f"Capability refs: {', '.join(capability_refs)}. Resolve current inventory before use.")
         if memory_query_hints:
-            parts.append(f"Memory query hints: {', '.join(memory_query_hints)}. These are suggestions only; do not treat them as automatic recall.")
+            parts.append(f"Memory query hints: {', '.join(memory_query_hints)}. They do not trigger recall by themselves; when recall is required, use them as query seeds.")
         return " ".join(parts).strip()
 
     @staticmethod

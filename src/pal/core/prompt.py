@@ -49,6 +49,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "- Inspect before judging: never make specific claims about code, docs, config, capabilities, plugins, runtime state, or memory state without inspecting the relevant source of truth.\n"
                     "- Do not infer exact current memory, runtime state, capability availability, plugin status, or configuration when the answer depends on their current value. Query the relevant source of truth instead.\n"
                     "- No success claim without confirmation: never claim a write, modification, send, execution, attach, detach, restart, repair, or state change succeeded unless the result was confirmed.\n"
+                    "- If a tool/capability call fails and memory recall is available, recall relevant experience before retrying or debugging.\n"
                     "- When asked about Pal's current state, model, configuration, capabilities, plugins, runtime behavior, or self-analysis, inspect the relevant runtime/capability surface before answering.\n\n"
                     "Source-of-Truth Preference:\n"
                     "Use the right source for the kind of truth needed:\n"

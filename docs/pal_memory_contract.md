@@ -15,7 +15,7 @@ Current system prompt rules:
 - If memory has been recalled or is present in the prompt, Pal MUST use it as reference before deciding, writing, retrying, debugging, or taking external action.
 - If a tool/capability call fails and memory recall is available, Pal MUST call `op_l3_recall_query` for relevant experience before debugging, retrying, or asking the user.
 - If the user challenges Pal's memory, says Pal already knows/remembers something, or corrects a recalled/stored fact, Pal MUST recall relevant memory before writing, patching, or insisting.
-- `memory_query_hints` from behavior advice are suggestions only; they do not automatically recall memory.
+- `memory_query_hints` from behavior advice do not trigger recall by themselves; when recall is required, use them as query seeds.
 
 Current prompt projection:
 
@@ -23,7 +23,7 @@ Current prompt projection:
 - Current summary is projected as `Current Summary`.
 - L2 factual/project/preference entries are projected as `Remembered Facts`.
 - L2 case/repair/task-experience entries are projected as `Relevant Experience`.
-- Behavior-route entries are projected separately as `Behavior Guidance`.
+- Behavior-route entries are projected separately as `Active Route Guidance`.
 - The old single `Working Memory` prompt label is no longer the current projection.
 - L3 recall render suffixes such as `[L3 summary; origin available]` are not shown in prompt output.
 

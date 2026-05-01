@@ -30,7 +30,7 @@ Current memory-context blocks:
 - `Current Summary`
 - `Remembered Facts`
 - `Relevant Experience`
-- `Behavior Guidance`
+- `Active Route Guidance`
 
 If memory has been recalled or is present in the prompt, Pal is instructed to treat it as reference context before decisions or actions. This is a prompt-level governance rule; runtime still cannot inspect the model's private reasoning.
 

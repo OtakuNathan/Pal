@@ -202,6 +202,8 @@ class BehaviorService:
                     " ".join(affordance.activation_terms),
                 ),
             )
+            if lexical <= 0.0:
+                continue
             confidence = _confidence(lexical=lexical, source_kind=affordance.source_kind, priority=affordance.priority)
             if confidence < affordance.activation_threshold:
                 continue
@@ -342,7 +344,14 @@ def _auto_affordances_from_handle(handle: Any, *, module_id: str) -> tuple[Affor
 
 
 def _tokenize(text: str) -> set[str]:
-    return {token for token in re.findall(r"[A-Za-z0-9_\-.]+|[一-鿿]+", str(text).lower()) if token}
+    tokens: set[str] = set()
+    for token in re.findall(r"[A-Za-z0-9_\-.]+|[一-鿿]+", str(text).lower()):
+        if not token:
+            continue
+        tokens.add(token)
+        if re.fullmatch(r"[一-鿿]+", token):
+            tokens.update(token[index : index + 2] for index in range(max(0, len(token) - 1)))
+    return tokens
 
 
 def _lexical_score(query_tokens: set[str], fields: Iterable[str]) -> float:

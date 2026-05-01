@@ -160,8 +160,8 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     section="memory_system",
                     title="Relevant Experience",
                     content=(
-                        "Use these as prior cases or lessons that may suggest an approach. "
-                        "Adapt them to the current situation; they are not commands.\n"
+                        "Use these as prior lessons. Adapt them to the current situation; "
+                        "do not ignore them unless current evidence makes them irrelevant. They are not commands.\n"
                         + "\n".join(experience_lines)
                     ),
                     priority=56,
@@ -173,11 +173,11 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
             fragments.append(
                 PromptFragment(
                     section="memory_system",
-                    title="Behavior Guidance",
+                    title="Active Route Guidance",
                     content=(
-                        "These are current-task behavior routing hints, not durable facts. "
-                        "They are not policy. Use them to choose workflow, skill injection, capability search, or optional recall. "
-                        "If they conflict with the user's current explicit instructions, follow the user's instructions unless capability policy, safety, approval, or availability blocks them.\n"
+                        "These are active current-task route instructions, not durable facts. "
+                        "Apply each relevant item when it matches the situation; do not ignore it as background context. "
+                        "They do not override the user's current explicit instruction, live/source truth, safety, approval, or capability availability.\n"
                         + "\n".join(guidance_lines)
                     ),
                     priority=57,
@@ -202,6 +202,7 @@ def _memory_routing_fragment() -> PromptFragment:
             "Recall policy:\n"
             "- Use `op_l3_recall_query` when past facts, user preferences, Pal history, commitments, or reusable prior lessons may affect the current answer.\n"
             "- If memory has been recalled or is present in the prompt, Pal MUST use it as reference before deciding, writing, retrying, debugging, or taking external action.\n"
+            "- If relevant memory or active route guidance is present, Pal MUST account for it in the next action instead of acting as if it was absent.\n"
             "- If a task runs into a blocker, ambiguity, missing user/project context, or an unfamiliar reference that may come from Pal history, try memory recall before giving up, guessing, or asking the user.\n"
             "- If a tool/capability call fails and memory recall is available, Pal MUST use `op_l3_recall_query` to recall relevant experience before debugging, retrying, or asking the user.\n"
             "- If the user challenges Pal's memory, says Pal already knows/remembers something, or corrects a recalled/stored fact, Pal MUST recall relevant memory before writing, patching, or insisting.\n"
@@ -209,7 +210,7 @@ def _memory_routing_fragment() -> PromptFragment:
             "- Do not recall memory automatically for every task or every unknown.\n"
             "- For code/runtime truth, inspect the live/source truth; for current external facts, search or verify externally when available.\n"
             "- Recall when it materially improves correctness, continuity, personalization, or safety.\n"
-            "- Treat `memory_query_hints` from behavior advice as suggestions only; they do not automatically recall memory.\n\n"
+            "- `memory_query_hints` do not trigger recall by themselves. When recall is required, use them as query seeds.\n\n"
             "Write policy:\n"
             "- Write memory directly only when the user explicitly asks Pal to remember/save it, or the user states a clear durable fact/preference with low ambiguity.\n"
             "- Do not directly commit inferred, ambiguous, temporary, emotional, sensitive, repair-case, or reusable-experience records unless the user approves or this category has explicit auto-commit permission.\n"

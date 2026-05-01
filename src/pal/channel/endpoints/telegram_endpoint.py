@@ -148,6 +148,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _authorized: bool = False
     _last_poll_error: str = ""
     _last_status_error: str = ""
+    _last_poll_error_at: float = 0.0
+    _poll_error_stale_threshold_seconds: float = 90.0
     _reconnect_delays: tuple[float, ...] = (1.0, 3.0, 10.0, 30.0)
     _reconnect_attempts: int = 0
     _reconnecting: bool = False
@@ -175,6 +177,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         self.proxy_url = _proxy_from_env()
         self._ingestor = ArtifactIngestor(self.runtime_root)
         self._last_poll_error = ""
+        self._last_poll_error_at = 0.0
         self._reconnect_attempts = 0
         self._reconnecting = False
         if not self._can_start():
@@ -308,6 +311,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     self._authorized = True
                     self._polling_running = True
                     self._last_poll_error = ""
+                    self._last_poll_error_at = 0.0
                     self._reconnect_attempts = 0
                     self._reconnecting = False
                     if self._control_commands_manifest:
@@ -332,8 +336,18 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                         updater = getattr(app, "updater", None)
                         if updater is not None and not bool(getattr(updater, "running", False)):
                             self._last_poll_error = "polling_stopped"
+                            self._last_poll_error_at = time.monotonic()
                             self._polling_running = False
                             break
+                        if self._last_poll_error and self._last_poll_error_at:
+                            elapsed = time.monotonic() - self._last_poll_error_at
+                            if elapsed >= self._poll_error_stale_threshold_seconds:
+                                logger.warning(
+                                    "telegram polling error persisted for %.0fs (%s), forcing reconnect",
+                                    elapsed, self._last_poll_error,
+                                )
+                                self._polling_running = False
+                                break
                         await asyncio.sleep(0.5)
                 except asyncio.CancelledError:
                     raise
@@ -399,9 +413,13 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     async def _on_error(self, update: object, context: Any) -> None:
         _ = update
         self._last_poll_error = str(getattr(context, "error", "") or "telegram_error")
+        if not self._last_poll_error_at:
+            self._last_poll_error_at = time.monotonic()
 
     async def _on_update(self, update: Any, context: Any) -> None:
         _ = context
+        self._last_poll_error = ""
+        self._last_poll_error_at = 0.0
         if getattr(update, "callback_query", None) is not None:
             interaction_result = await self._interaction_result_from_update(update)
             if interaction_result is None:
@@ -591,8 +609,11 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         tg_file_path = str(getattr(tg_file, "file_path", "") or "")
         source_url = ""
         if tg_file_path:
-            base = self.base_url.rstrip("/")
-            source_url = f"{base}/file/bot{self.bot_token}/{tg_file_path}"
+            if re.match(r"^https?://", tg_file_path, flags=re.IGNORECASE):
+                source_url = tg_file_path
+            else:
+                base = self.base_url.rstrip("/")
+                source_url = f"{base}/file/bot{self.bot_token}/{tg_file_path.lstrip('/')}"
         return {
             "attachment_id": f"telegram_{provider_file_id}",
             "provider_file_id": provider_file_id,

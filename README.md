@@ -1,170 +1,132 @@
-# PalV2
+# Pal
 
-`PalV2` is an isolated rebuild lane for the new architecture.
+> Your personal AI companion — not a framework, not a platform. One Pal, one person.
 
-The goal is to let the new system evolve independently from the legacy `pal`
-runtime, with its own package layout, dependencies, tests, and persistence
-layer.
+Pal is an event-driven agent runtime built for a single user. It runs as a daemon on your machine, talks through Unix sockets and messaging channels, remembers what matters, and acts on your behalf through a governed capability system.
 
-Current direction:
+## Quick Start
 
-- SQLite via `peewee`
-- per-domain repositories
-- raw SQL reserved for features `peewee` cannot model cleanly, such as FTS,
-  projection views, and future vector indexes
-- schema migration handled by external scripts, not by the PalV2 runtime
+```bash
+pip install -e .
 
-For local development and architecture bring-up, `PalV2` also exposes a
-stub provisioning + runtime composition path:
+# Launch the runtime (daemon mode, logs → pal.log)
+pal run --runtime-root /path/to/runtime
 
-- `supervisor` owns the runtime-root to database-file association
-- `supervisor.provision_stub_runtime(...)` creates the database and seeds
-  default identity / channel / llm records
-- `bootstrap.compose_runtime(...)` composes the in-process runtime from that
-  provisioned database
-- the composed runtime returns a ready-to-drive `PalCore` plus the key stub
-  services
+# Send a message
+pal client --runtime-root /path/to/runtime --message "hello"
 
-## Core Rule
+# Invoke a capability directly
+pal tool-call --runtime-root /path/to/runtime --name <name> --args '<json>'
+```
 
-`PalV2` uses a split responsibility model:
+## How It Works
 
-- `PalCore` owns governance
-- `Execution` owns invocation
+Pal runs as a systemd-supervised daemon. You talk to it through channels (Unix socket, Telegram, etc.). Every conversation is a **turn** — Pal normalizes your input, runs it through the LLM, executes tools if needed, and replies.
 
-That means:
+```
+systemd → Pal daemon → minions
+                ↑
+         Unix socket / Telegram
+```
 
-- `Pal` reaches capabilities through `PalCore -> Execution`
-- `Execution` may physically store the capability registry and invoke registered
-  callables
-- `PalCore` decides what gets registered, published, detached, reattached, or
-  withdrawn
-- modules must not register themselves directly into each other or call each
-  other's internal runtime/service/repository surfaces
-- `supervisor` is outside the Pal runtime and is not part of `PalCore`
-  governance or the in-process `MainLoop`
+### Architecture at a Glance
 
-In short:
+```
+Foundation (async I/O, events, persistence)
+  ├── Data Plane: LLM, Channel, Memory, Execution
+  └── Control Plane: deterministic governance
+Pal Core (thin governance center)
+Governed Extensions: plugins, tasking, services
+Wizard (outside runtime — provisions databases, first-run setup)
+```
 
-- `Execution` knows how to call
-- `PalCore` knows what is allowed to be called
+**PalCore** decides *what is allowed to run*. **Execution** knows *how to run it*. They never cross boundaries — modules register through PalCore, execute through Execution, and never talk to each other directly.
 
-Capability names should use the canonical namespace-first form:
+### Memory
 
-- `introspection.<scope>.<module>.<action>`
-- `operation.<module>.<family>.<action>`
+Pal has three memory layers, modeled after how you actually think:
 
-Examples:
+- **L1** — the current conversation. Fleeting, gone when the turn ends.
+- **L2** — recent context (128 items, 8 top-of-mind). Runtime-only, with hot/ghost/dormant heat states.
+- **L3** — durable long-term memory. Pluggable backends (default: `sqlite-vec` with Ollama vector embeddings + FTS). This is where Pal remembers your preferences, project facts, and lessons learned.
 
-- `introspection.module.channel.list`
-- `introspection.endpoint.channel.inspect`
-- `operation.channel.management.attach`
-- `operation.execution.exec.run`
+### Capability Forest
 
-This naming rule is constitutional:
+Everything Pal can *do* lives in a single Capability Forest — a unified tree of `introspection` and `operation` nodes. The LLM discovers capabilities by fuzzy search, then invokes them by strict canonical path.
 
-- namespace is always explicit
-- module is always explicit
-- family is explicit on the `operation` line
-- action names may repeat across modules, but canonical paths remain stable and non-conflicting
+```python
+# Read-only observation
+introspection.module.llm.list
+introspection.endpoint.channel.inspect::telegram_main
 
-L3 memory providers are treated as an execution-owned plugin family:
+# Side-effect actions
+operation.channel.management.attach
+operation.execution.exec.run
+```
 
-- `Execution` always carries a default stub provider: `null_l3`
-- `memory.introspection.configure` can switch the active provider to a real
-  backend
-- `memory.introspection.configure` can also fall back to `null_l3`
+The surface exposed to the LLM is deliberately small: 6 singletons + 3 dynamic tools. Discovery-first — Pal searches for what it needs, then calls it.
 
-Prompt assembly uses an explicit fragment provider registry:
+### Tool System
 
-- modules register `PromptFragmentProvider` with `PalCore`
-- `PalCore` collects only registered fragment providers
-- modules do not implicitly participate in prompt assembly
-- `PalCore` is the only prompt assembler
+Tools are the **only** execution primitive. Built-in: `shell.exec`, `tool.search`, `tool.read`. Every tool call is budgeted (max output size, timeout, read limits). Oversized results spill to artifact storage. A stagnation guard detects loops and force-terminates them.
 
-Turn execution uses a mailbox-driven computation model:
+### Prompt Assembly
 
-- `channel` owns ingress normalization and reply outbox handoff
-- `MainLoop` polls mailbox-backed event sources
-- `PalCore` owns turn suspend/resume and orchestration
-- `Execution` interprets turn effects such as `llm.request`, `tool.call`, and
-  `mailbox.reply`
-- a turn is considered reply-complete once the final response is accepted by
-  the channel outbox
-- delivery success/failure is tracked later as channel-side diagnostics
+PalCore gathers prompt fragments from registered providers (identity, rules, behavior, memory, etc.) and assembles them into a single system prompt. The priority hierarchy is explicit:
 
-Tool-loop stagnation is guarded by a dedicated process:
+> **User's explicit instructions > behavior advice > affordances. Operating Rules and capability policy are always active.**
 
-- the guard evaluates canonical tool signature hashes plus normalized result
-  fingerprints
-- it can force `PalCore` into `finalization_only` mode
-- in `finalization_only`, the next `llm.request` is physically disarmed by
-  sending no tools and forcing a text-only final reply attempt
+### Turn Flow
 
-Capability discovery and execution now use a unified Capability Forest:
+```
+Channel receives raw input
+  → normalize
+  → PalCore queues turn (one active turn per scope)
+  → LLM processes with tools
+  → reply routed back through channel
+  → L1 committed
+```
 
-- physical structure is one forest, not two separate tree implementations
-- logical namespaces are:
-  - `introspection`
-  - `operation`
-- decorators define static blueprints
-- `register_with_core(...)` hydrates those blueprints against runtime
-  instances
-- `Execution` compiles hydrated subtrees into:
-  - a fuzzy search index for discovery
-  - an O(1) dispatch table for execution
-- alias/search and execute are strictly separated
-- instance-level actions auto-inject `target_id` into the LLM-facing schema
-- module-level actions use `SINGLETON_TARGET="__singleton__"` internally
+Control actions (`/interrupt`, `/reset`) bypass the turn queue.
 
-Capability Forest deep-dive:
+### Plugin System
+
+First-party plugins live in `{runtime_root}/plugins/_builtin/`. Community plugins in `{runtime_root}/plugins/community/`. Plugins register capabilities, subscribe to turn events, and extend Pal without touching core.
+
+Built-in plugins: SQLite-vec L3 memory, web search (Brave + DuckDuckGo), web fetch (Playwright + HTTP).
+
+## Architecture Deep Dives
+
+Detailed design docs (in Chinese) live in `docs/`. Key reads:
 
 - [Capability Forest Structure](./docs/capability_forest_structure.md)
 - [Turn Runtime Structure](./docs/turn_runtime_structure.md)
+- [Architecture Overview](./docs/README.md)
 
-Capability Forest constitutional rule:
+## Testing
 
-- parent nodes govern only their direct children
-- no node may skip levels and directly manage deeper descendants
-- generic governance stays at the parent level
-- concrete configuration must sink into the corresponding child subtree
-- control-plane slash commands are runtime-private governance ingress
-- slash commands may affect policy outcomes, but their raw command text must
-  never be exposed to LLM-visible capability surfaces
-- slash commands must not be persisted into L1 as conversational memory
+```bash
+python -m pytest tests/
 
-Channel-specific application of that rule:
+# Single test
+python -m pytest tests/test_architecture_skeleton.py::PalV2ArchitectureSkeletonTests::test_top_level_modules_import
+```
 
-- `channel` root manages endpoint membership and availability only
-- endpoint nodes own their own introspection/configuration surface
-- endpoint nodes do not self-govern `attach/detach`
-- channel endpoints are visible to `Pal/LLM` only through management and
-  introspection; direct transport operations stay runtime-private
-- secrets/tokens are never returned through endpoint introspection
+Tests use `unittest` with `tempfile.mkdtemp` for isolation. No Makefile or tox.
 
-Identity-specific application of that rule:
+## Database
 
-- `identity` is always-on foundation state
-- `Pal/LLM` may query identity, but may not modify it through capability calls
-- `identity` does not expose lifecycle capabilities
-- any runtime tuning derived from model output must live in runtime-private
-  orchestration, not inside `identity`
+SQLite via Peewee. The runtime expects a pre-migrated database — schema migration is external. `RawSQLHookRegistry` lets plugins register SQL (e.g., FTS tables) without auto-executing.
 
-## Feature Extension Rule
+## Constitutional Rules
 
-When adding a new feature surface to `PalV2`, prefer concrete capability names
-over vague `observe/configure` placeholders.
+These are the lines that don't get crossed:
 
-The rule of thumb is:
-
-- introspection nodes should expose specific read-oriented actions such as
-  `list`, `inspect`, `health`, `backlog`, or `auth_state`
-- management nodes should expose specific governance actions such as `enable`,
-  `disable`, `attach`, or `detach`
-- new business behavior belongs on plugin/provider operation nodes, not on
-  module roots
-
-All callable surfaces still use the shared minimal envelope style:
-
-- call object: `name`, `args`, optional `meta`
-- result object: `status`, `text`, optional `structured`
+- **`core` does not import `.models` or `.repository` from other modules**
+- **`control` does not depend on `execution.runtime`**
+- **`minion` does not import `channel`**
+- **`memory` does not import plugin implementations directly**
+- **`wizard` and `bootstrap` do not expose `register_with_core`**
+- **Secrets are write-only** — never returned through introspection
+- **Slash commands are runtime-private** — never exposed to the LLM
+- **Capability names use canonical namespace-first form** — always explicit, always stable
