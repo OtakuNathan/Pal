@@ -180,12 +180,16 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
         session = self._require_session(response_handle)
         request_id = str(response_handle.reply_target.get("request_id") or "")
-        session.outbound.put_nowait({"type": "text_delta", "request_id": request_id, "text": text})
+        already_streamed = getattr(response_handle, "_streamed_to_client", False)
+        if not already_streamed:
+            session.outbound.put_nowait({"type": "text_delta", "request_id": request_id, "text": text})
         session.outbound.put_nowait({"type": "done", "request_id": request_id, "finish_reason": "stop"})
 
     def send_stream_event(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
         session = self._require_session(response_handle)
         super().send_stream_event(response_handle, event)
+        if event.text:
+            response_handle._streamed_to_client = True
         session.outbound.put_nowait(_stream_payload(response_handle, event))
 
     def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
