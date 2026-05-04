@@ -54,7 +54,7 @@ from pal.memory import (
 )
 from pal.plugins import PluginHost, register_with_core as register_plugins_with_core
 from pal.plugins.l3 import MockL3Plugin, register_with_core as register_l3_with_core
-from pal.service import ServiceDefinition, ServiceManager, ServiceTriggerEvent, register_with_core as register_service_with_core
+from pal.service import ServiceDefinition, ServiceManager, ServiceRepository, ServiceRunner, ServiceTriggerEvent, register_with_core as register_service_with_core
 from pal.service.scheduling import compute_next_service_run_at_utc, utc_now_dt
 from pal.shared import LLMStreamEventKind, MinionProgressEvent, PromptAssemblyContext, SINGLETON_TARGET
 from pal.stream_events import NormalizedLLMStreamEvent
@@ -1056,6 +1056,65 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             core.run_until_idle()
 
             self.assertEqual(endpoint.sent, [("telegram_main", "Daily digest complete.")])
+        finally:
+            database.close()
+            shutil.rmtree(runtime_root, ignore_errors=True)
+
+    def test_service_trigger_delivers_and_settles_all_turn_replies(self) -> None:
+        runtime_root, database = self._create_database()
+        try:
+            core = PalCore()
+            register_core_with_core(core)
+            register_execution_with_core(core.context)
+            core.context.execution_runtime.register_tool(EchoTool())
+            identity_service = IdentityService(repository=IdentityRepository())
+            identity_service.ensure_defaults()
+            register_identity_with_core(core.context, identity_service)
+            channel_runtime = ChannelRuntime()
+            register_channel_with_core(core.context, channel_runtime)
+            endpoint = StubEndpoint(EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key="chat:12345"))
+            channel_runtime.register_endpoint(endpoint)
+            memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+            register_memory_with_core(core.context, memory_service)
+            service_repository = ServiceRepository()
+            service_manager = ServiceManager(repository=service_repository)
+            service_runner = ServiceRunner(repository=service_repository)
+            register_service_with_core(core.context, service_manager, service_runner)
+            definition = ServiceDefinition(
+                service_id="daily_digest",
+                goal="Summarize repository updates",
+                method="Review recent changes and produce a concise digest.",
+                out_channel_id="telegram_main",
+                out_reply_target={"chat_id": "12345", "thread_id": "7"},
+            )
+            service_manager.register(definition)
+            core.context.port_registry["llm:llm"] = ScriptedLLMRuntime(
+                [
+                    CanonicalLLMOutcome(
+                        text="Starting digest.",
+                        tool_calls=[CanonicalToolCall(name="echo", args={"value": "digest"})],
+                        finish_reason="tool_calls",
+                    ),
+                    CanonicalLLMOutcome(text="Daily digest complete.", tool_calls=[], finish_reason="stop"),
+                ]
+            )
+
+            service_manager.enqueue_trigger(ServiceTriggerEvent(service_id="daily_digest", trigger_kind="scheduled"))
+            core.run_until_idle()
+
+            self.assertEqual(
+                endpoint.sent,
+                [
+                    ("telegram_main", "Starting digest."),
+                    ("telegram_main", "Daily digest complete."),
+                ],
+            )
+            latest = service_repository.latest_run("daily_digest")
+            self.assertIsNotNone(latest)
+            self.assertEqual(latest.output_summary, "Starting digest.\n\nDaily digest complete.")
+            self.assertEqual(len(memory_service.l1_store.items), 1)
+            assistant_messages = [item.content for item in memory_service.l1_store.items[0] if item.role == "assistant"]
+            self.assertEqual(assistant_messages, ["Starting digest.", "Daily digest complete."])
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)

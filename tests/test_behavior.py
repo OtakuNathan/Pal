@@ -212,6 +212,96 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("research.note", ids)
         self.assertNotIn("mcp.manager", ids)
 
+    def test_behavior_advice_uses_fts_relevance_without_mcp_vision_special_case(self) -> None:
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="mcp.vision",
+                module_id="mcp",
+                title="Understand technical diagram",
+                scenario_text=(
+                    "Analyze visual diagrams, screenshots, architecture drawings, technical images, "
+                    "UI screenshots, code screenshots, error messages, and design diagrams."
+                ),
+                prompt_hint=(
+                    "Consider vision tool for technical diagram analysis. "
+                    "Do NOT use for ordinary code repository analysis."
+                ),
+                source_kind=AFFORDANCE_SOURCE_DECLARED,
+                activation_terms=("analyze", "technical", "diagram", "screenshot", "image", "vision"),
+                capability_refs=("op_mcp_zai_vision_tool_understand_technical_diagram",),
+                activation_threshold=0.35,
+                priority=55,
+            )
+        )
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="code.research",
+                module_id="test",
+                title="Code research note",
+                scenario_text="Analyze code repository architecture flow implementation and write research notes.",
+                prompt_hint="Use code research workflow after repository analysis.",
+                activation_terms=("code", "repository", "architecture", "research", "flow"),
+                activation_threshold=0.25,
+                priority=100,
+            )
+        )
+
+        code_result = asyncio.run(
+            self.service.advise_async(
+                BehaviorAdviceRequest(
+                    scenario="Analyze the flux_foundry code repository, especially the flow architecture and design implementation.",
+                    top_k=10,
+                )
+            )
+        )
+        code_ids = {candidate.affordance_id for candidate in code_result.candidates}
+        self.assertIn("code.research", code_ids)
+        self.assertNotIn("mcp.vision", code_ids)
+
+        diagram_result = asyncio.run(
+            self.service.advise_async(BehaviorAdviceRequest(scenario="Please analyze this screenshot technical diagram.", top_k=10))
+        )
+        diagram_ids = {candidate.affordance_id for candidate in diagram_result.candidates}
+        self.assertIn("mcp.vision", diagram_ids)
+        self.assertNotIn("code.research", diagram_ids)
+
+    def test_behavior_fts_index_updates_and_declared_delete_removes_stale_hits(self) -> None:
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="declared.stale",
+                module_id="demo",
+                title="Old route",
+                scenario_text="obsolete frobnicate path",
+                prompt_hint="Old hint.",
+                source_kind=AFFORDANCE_SOURCE_DECLARED,
+                activation_terms=("obsolete", "frobnicate"),
+                activation_threshold=0.0,
+            )
+        )
+        old_result = asyncio.run(self.service.advise_async(BehaviorAdviceRequest(scenario="obsolete frobnicate path")))
+        self.assertEqual(old_result.candidates[0].affordance_id, "declared.stale")
+
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="declared.stale",
+                module_id="demo",
+                title="New route",
+                scenario_text="fresh replacement route",
+                prompt_hint="New hint.",
+                source_kind=AFFORDANCE_SOURCE_DECLARED,
+                activation_terms=("fresh", "replacement"),
+                activation_threshold=0.0,
+            )
+        )
+        after_update_old = asyncio.run(self.service.advise_async(BehaviorAdviceRequest(scenario="obsolete frobnicate path")))
+        after_update_new = asyncio.run(self.service.advise_async(BehaviorAdviceRequest(scenario="fresh replacement route")))
+        self.assertEqual(after_update_old.candidates, ())
+        self.assertEqual(after_update_new.candidates[0].affordance_id, "declared.stale")
+
+        self.service.unregister_declared_module("demo")
+        after_delete = asyncio.run(self.service.advise_async(BehaviorAdviceRequest(scenario="fresh replacement route")))
+        self.assertEqual(after_delete.candidates, ())
+
     def test_resident_affordance_budget_sorting_is_deterministic(self) -> None:
         service = BehaviorService(repository=self.repository, execution_runtime=self.runtime, resident_prompt_budget=3)
         for item in (
@@ -497,11 +587,16 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("op_behavior_advise", content)
         self.assertIn("Advisor Gate", content)
         self.assertIn("Casual chat", content)
+        self.assertIn("Direct capability task", content)
         self.assertIn("Code, system, design, debugging, configuration, project, or memory-related requests are not casual chat", content)
-        self.assertLess(content.index("Advisor Gate"), content.index("Primitive single-capability task"))
+        self.assertLess(content.index("Direct capability task"), content.index("Advisor Gate"))
+        self.assertIn("completed by exactly one capability", content)
+        self.assertIn("already known from current context or found with `op_exec_disc_search`", content)
+        self.assertIn("read/resolve the capability contract when needed", content)
+        self.assertIn("only be a step toward analysis, diagnosis, design, research, repair, or code understanding", content)
+        self.assertIn("Do not ask the advisor to re-decide an already clear single-capability route", content)
         self.assertIn("before reading files or taking action", content)
-        self.assertIn('"Look at/read/check the code" is NOT a primitive read', content)
-        self.assertIn("Do not use this shortcut for codebase analysis or system work", content)
+        self.assertIn('"Look at/read/check the code" is not a direct capability task', content)
         self.assertIn("op_exec_disc_search", content)
         self.assertIn("op_skill_inject", content)
         self.assertIn("op_behavior_affordance_submit", content)
@@ -537,6 +632,9 @@ class BehaviorSubsystemTests(unittest.TestCase):
         operating = system.split("## Operating Rules", 1)[1].split("## Behavior Routing", 1)[0]
         self.assertIn("Source-of-Truth Preference", operating)
         self.assertIn("Mutation and Side-Effect Boundary", operating)
+        self.assertIn("do not refuse merely because runtime state will change", operating)
+        self.assertIn("source code/config/policy changes are separate", operating)
+        self.assertIn("bypasses capability policy", operating)
         self.assertIn("Priority", operating)
         self.assertNotIn("op_behavior_advise", operating)
         self.assertNotIn("op_l3_recall_query", operating)

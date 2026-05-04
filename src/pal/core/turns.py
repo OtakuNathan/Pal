@@ -48,6 +48,7 @@ class TurnOutcome:
     turn_id: str
     final_reply: str
     commit_payload: L1CommitPayload
+    reply_texts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,7 @@ def channel_turn_program(
     # It never performs I/O directly; it only yields effects for PalCore to
     # interpret and feed back into the generator.
     observations: list[ToolObservation] = []
+    reply_texts: list[str] = []
     compact_note = ""
     while True:
         metadata = {"compact_note": compact_note}
@@ -192,7 +194,9 @@ def channel_turn_program(
         if outcome is not None and outcome.tool_calls:
             mid_text = str(outcome.text or "").strip()
             if mid_text:
-                yield MailboxReplyEffect(channel_envelope=channel_envelope, text=mid_text)
+                reply_result = yield MailboxReplyEffect(channel_envelope=channel_envelope, text=mid_text)
+                if reply_result.status == RuntimeStatus.QUEUED:
+                    reply_texts.append(reply_result.text or mid_text)
             for tool_call in outcome.tool_calls:
                 tool_result = yield ToolCallEffect(tool_call=tool_call)
                 _append_tool_observation(observations, tool_result.payload)
@@ -201,14 +205,17 @@ def channel_turn_program(
         reply_result = yield MailboxReplyEffect(channel_envelope=channel_envelope, text=final_reply)
         if reply_result.status != RuntimeStatus.QUEUED:
             final_reply = reply_result.text or final_reply
+        if final_reply.strip():
+            reply_texts.append(final_reply)
         return TurnOutcome(
             turn_id=channel_envelope.event.event_id,
             final_reply=final_reply,
             commit_payload=L1CommitPayload(
                 turn_id=channel_envelope.event.event_id,
-                transcript=_build_turn_transcript(channel_envelope, final_reply, observations=observations),
+                transcript=_build_turn_transcript(channel_envelope, final_reply, observations=observations, reply_texts=reply_texts),
                 tool_observations=list(observations),
             ),
+            reply_texts=tuple(reply_texts),
         )
 
 
@@ -244,15 +251,26 @@ def _render_tool_summary(observations: list[ToolObservation], *, max_summary_cha
     return "\n".join(parts)
 
 
-def _build_turn_transcript(channel_envelope: ChannelEnvelope, final_reply: str, observations: list[ToolObservation] | None = None) -> list[L1TranscriptMessage]:
+def _build_turn_transcript(
+    channel_envelope: ChannelEnvelope,
+    final_reply: str,
+    observations: list[ToolObservation] | None = None,
+    reply_texts: list[str] | tuple[str, ...] | None = None,
+) -> list[L1TranscriptMessage]:
     user_text = extract_text_from_payload(channel_envelope.event.payload)
     transcript: list[L1TranscriptMessage] = []
     if user_text:
         transcript.append(L1TranscriptMessage(role="user", content=user_text))
-    assistant_content = final_reply.strip()
     tool_summary = _render_tool_summary(observations or [])
-    if assistant_content:
-        transcript.append(L1TranscriptMessage(role="assistant", content=assistant_content, tool_trace=tool_summary or None))
+    replies = tuple(str(item).strip() for item in (reply_texts or (final_reply,)) if str(item).strip())
+    for index, assistant_content in enumerate(replies):
+        transcript.append(
+            L1TranscriptMessage(
+                role="assistant",
+                content=assistant_content,
+                tool_trace=(tool_summary or None) if index == len(replies) - 1 else None,
+            )
+        )
     return transcript
 
 
@@ -265,6 +283,7 @@ def service_turn_program(
     reply_envelope: ChannelEnvelope | None = None,
 ) -> TurnProgram:
     observations: list[ToolObservation] = []
+    reply_texts: list[str] = []
     compact_note = ""
     service_input = build_service_trigger_input(definition)
     while True:
@@ -306,6 +325,14 @@ def service_turn_program(
             compact_note = str(compact_result.payload.summary) if compact_result.payload is not None else ""
             continue
         if outcome is not None and outcome.tool_calls:
+            mid_text = str(outcome.text or "").strip()
+            if mid_text:
+                if reply_envelope is not None:
+                    reply_result = yield MailboxReplyEffect(channel_envelope=reply_envelope, text=mid_text)
+                    if reply_result.status == RuntimeStatus.QUEUED:
+                        reply_texts.append(reply_result.text or mid_text)
+                else:
+                    reply_texts.append(mid_text)
             for tool_call in outcome.tool_calls:
                 tool_result = yield ToolCallEffect(tool_call=tool_call)
                 _append_tool_observation(observations, tool_result.payload)
@@ -315,25 +342,39 @@ def service_turn_program(
             reply_result = yield MailboxReplyEffect(channel_envelope=reply_envelope, text=final_reply)
             if reply_result.status != RuntimeStatus.QUEUED:
                 final_reply = reply_result.text or final_reply
+        if final_reply.strip():
+            reply_texts.append(final_reply)
         return TurnOutcome(
             turn_id=str(trigger.metadata.get("turn_id") or trigger.service_id),
             final_reply=final_reply,
             commit_payload=L1CommitPayload(
                 turn_id=str(trigger.metadata.get("turn_id") or trigger.service_id),
-                transcript=_build_service_turn_transcript(service_input, final_reply, observations=observations),
+                transcript=_build_service_turn_transcript(service_input, final_reply, observations=observations, reply_texts=reply_texts),
                 tool_observations=list(observations),
             ),
+            reply_texts=tuple(reply_texts),
         )
 
 
-def _build_service_turn_transcript(service_input: str, final_reply: str, observations: list[ToolObservation] | None = None) -> list[L1TranscriptMessage]:
+def _build_service_turn_transcript(
+    service_input: str,
+    final_reply: str,
+    observations: list[ToolObservation] | None = None,
+    reply_texts: list[str] | tuple[str, ...] | None = None,
+) -> list[L1TranscriptMessage]:
     transcript: list[L1TranscriptMessage] = []
     if service_input.strip():
         transcript.append(L1TranscriptMessage(role="user", content=service_input.strip()))
-    assistant_content = final_reply.strip()
     tool_summary = _render_tool_summary(observations or [])
-    if assistant_content:
-        transcript.append(L1TranscriptMessage(role="assistant", content=assistant_content, tool_trace=tool_summary or None))
+    replies = tuple(str(item).strip() for item in (reply_texts or (final_reply,)) if str(item).strip())
+    for index, assistant_content in enumerate(replies):
+        transcript.append(
+            L1TranscriptMessage(
+                role="assistant",
+                content=assistant_content,
+                tool_trace=(tool_summary or None) if index == len(replies) - 1 else None,
+            )
+        )
     return transcript
 
 

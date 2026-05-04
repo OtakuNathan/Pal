@@ -31,6 +31,13 @@ class ServiceTriggerHandler(EventHandler):
                 self.runner.fail_run(service_run_id, error_text=str(exc))
             raise
         if self.runner is not None:
-            self.runner.complete_run(service_run_id, turn_id=outcome.turn_id, final_reply=outcome.final_reply)
+            self.runner.complete_run(service_run_id, turn_id=outcome.turn_id, final_reply=_settled_output_text(outcome))
         self.manager.mark_run_completed(event.payload.service_id)
         return []
+
+
+def _settled_output_text(outcome) -> str:
+    replies = tuple(str(item).strip() for item in getattr(outcome, "reply_texts", ()) if str(item).strip())
+    if replies:
+        return "\n\n".join(replies)
+    return str(getattr(outcome, "final_reply", "") or "")

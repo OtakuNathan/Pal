@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Sequence
@@ -171,6 +172,9 @@ class BehaviorService:
 
     def _rank_candidates(self, request: BehaviorAdviceRequest) -> list[BehaviorRouteCandidate]:
         candidates: list[BehaviorRouteCandidate] = []
+        top_k = max(0, int(request.top_k or 0))
+        if top_k <= 0:
+            return candidates
         repository = self.skill_repository or self.repository.skill_repository
         enabled_skills = {skill.skill_id for skill in repository.list_skills(active_only=True)}
         already_considered = {str(item).strip() for item in request.already_considered if str(item).strip()}
@@ -184,8 +188,10 @@ class BehaviorService:
             )
             if part
         )
-        query_tokens = _tokenize(query_text)
-        for affordance in self.repository.list_affordances(enabled_only=True):
+        candidate_limit = max(top_k * 6, 20)
+        retrieval_scores, _ = self.repository.collect_route_candidates(query_text, limit=candidate_limit)
+        retrieval_scores = _prune_weak_retrieval_scores(retrieval_scores)
+        for affordance in self.repository.list_affordances_by_ids(retrieval_scores.keys(), enabled_only=True):
             if affordance.affordance_id in already_considered:
                 continue
             if _would_recurse(affordance, already_considered):
@@ -193,22 +199,14 @@ class BehaviorService:
             skill_refs = tuple(skill_id for skill_id in affordance.skill_refs if skill_id in enabled_skills)
             if affordance.skill_refs and not skill_refs and not affordance.capability_refs and not affordance.memory_query_hints:
                 continue
-            lexical = _lexical_score(
-                query_tokens,
-                (
-                    affordance.title,
-                    affordance.scenario_text,
-                    affordance.prompt_hint,
-                    " ".join(affordance.activation_terms),
-                ),
-            )
-            if lexical <= 0.0:
+            relevance = _fts_relevance(retrieval_scores.get(affordance.affordance_id, 0.0))
+            if relevance <= 0.0:
                 continue
-            confidence = _confidence(lexical=lexical, source_kind=affordance.source_kind, priority=affordance.priority)
+            confidence = _confidence(relevance=relevance, source_kind=affordance.source_kind, priority=affordance.priority)
             if confidence < affordance.activation_threshold:
                 continue
             prompt_hint = affordance.prompt_hint.strip()
-            reason = _reason_for(affordance, lexical=lexical)
+            reason = _reason_for(affordance, relevance=relevance)
             if affordance.source_kind == AFFORDANCE_SOURCE_LEARNED:
                 prompt_hint = _weaken_learned_text(prompt_hint)
                 reason = _weaken_learned_text(reason)
@@ -232,7 +230,6 @@ class BehaviorService:
                 )
             )
         candidates.sort(key=_candidate_sort_key)
-        top_k = max(0, int(request.top_k or 0))
         return candidates[:top_k]
 
     def _availability(self, capability_refs: Sequence[str]) -> str:
@@ -354,29 +351,37 @@ def _tokenize(text: str) -> set[str]:
     return tokens
 
 
-def _lexical_score(query_tokens: set[str], fields: Iterable[str]) -> float:
-    haystack_tokens = _tokenize(" ".join(str(field or "") for field in fields))
-    if not query_tokens or not haystack_tokens:
+def _fts_relevance(score: float) -> float:
+    if score <= 0.0:
         return 0.0
-    overlap = len(query_tokens & haystack_tokens)
-    if overlap <= 0:
-        return 0.0
-    return min(1.0, overlap / max(1, min(len(query_tokens), len(haystack_tokens))))
+    if score >= 1.0:
+        return min(1.0, score / 10.0)
+    return min(1.0, 0.18 + math.log1p(score * 1_000_000.0) / 10.0)
 
 
-def _confidence(*, lexical: float, source_kind: str, priority: int) -> float:
+def _prune_weak_retrieval_scores(scores: dict[str, float]) -> dict[str, float]:
+    if len(scores) <= 1:
+        return scores
+    best = max(scores.values())
+    if best <= 0.0:
+        return {}
+    cutoff = best * 0.75
+    return {key: value for key, value in scores.items() if value >= cutoff}
+
+
+def _confidence(*, relevance: float, source_kind: str, priority: int) -> float:
     source_prior = SOURCE_PRIORS.get(source_kind, 0.5)
     priority_component = max(0.0, min(1.0, float(priority) / 100.0))
-    return min(1.0, lexical * 0.62 + source_prior * 0.28 + priority_component * 0.10)
+    return min(1.0, relevance * 0.62 + source_prior * 0.28 + priority_component * 0.10)
 
 
-def _reason_for(affordance: AffordanceDescriptor, *, lexical: float) -> str:
+def _reason_for(affordance: AffordanceDescriptor, *, relevance: float) -> str:
     source = affordance.source_kind
     if source == AFFORDANCE_SOURCE_INSTRUCTED:
-        return f"User-instructed affordance matched this scenario with lexical score {lexical:.2f}."
+        return f"User-instructed affordance matched this scenario with FTS relevance {relevance:.2f}."
     if source == AFFORDANCE_SOURCE_DECLARED:
-        return f"Declared affordance matched this scenario with lexical score {lexical:.2f}."
-    return f"Learned affordance may match this scenario with lexical score {lexical:.2f}."
+        return f"Declared affordance matched this scenario with FTS relevance {relevance:.2f}."
+    return f"Learned affordance may match this scenario with FTS relevance {relevance:.2f}."
 
 
 def _would_recurse(affordance: AffordanceDescriptor, already_considered: set[str]) -> bool:

@@ -1495,8 +1495,17 @@ class PalCore:
                 tool_calls=msg.get("tool_calls"),
                 tool_call_id=msg.get("tool_call_id"),
             ))
+        protocol_assistant_contents = [
+            str(msg.get("content", "")).strip()
+            for msg in continuation.tool_protocol_messages
+            if str(msg.get("role", "") or "").strip() == "assistant" and msg.get("tool_calls")
+        ]
         assistant_msgs = [m for m in original if m.role == "assistant"]
         for m in assistant_msgs:
+            content = str(m.content or "").strip()
+            if content and content in protocol_assistant_contents:
+                protocol_assistant_contents.remove(content)
+                continue
             new_transcript.append(L1TranscriptMessage(role=m.role, content=m.content))
         return TurnOutcome(
             turn_id=outcome.turn_id,
@@ -1506,6 +1515,7 @@ class PalCore:
                 transcript=new_transcript,
                 tool_observations=outcome.commit_payload.tool_observations,
             ),
+            reply_texts=outcome.reply_texts,
         )
 
     def _build_service_endpoint_config(self, definition: ServiceDefinition):
