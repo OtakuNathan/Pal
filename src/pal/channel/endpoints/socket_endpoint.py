@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,8 @@ from pal.channel.endpoints.socket_protocol import (
 )
 from pal.shared import EventKind, LLMStreamEventKind
 from pal.stream_events import NormalizedLLMStreamEvent
+
+logger = logging.getLogger(__name__)
 
 
 class SocketSessionClosed(ChannelDeliveryError):
@@ -73,6 +76,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         assert self.socket_path is not None
         await self._prepare_socket_path()
         self.server = await asyncio.start_unix_server(self._handle_client, path=str(self.socket_path))
+        logger.info("socket endpoint listening on %s", self.socket_path)
 
     async def stop_async(self) -> None:
         if self.server is not None:
@@ -119,6 +123,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         session = _SocketSession(session_id=session_id, writer=writer)
         session.writer_task = asyncio.create_task(self._writer_loop(session))
         self.sessions[session_id] = session
+        logger.info("socket session %s connected (%d active)", session_id, len(self.sessions))
         try:
             while True:
                 incoming = await read_socket_message(reader)
@@ -141,7 +146,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                     reply_target={"session_id": session_id, "request_id": request_id},
                 )
         except (asyncio.IncompleteReadError, ConnectionError, OSError, ValueError):
-            pass
+            logger.debug("socket session %s disconnected", session_id)
         finally:
             session.closed = True
             self.sessions.pop(session_id, None)
@@ -159,6 +164,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                 await session.writer.drain()
         except (asyncio.CancelledError, ConnectionError, OSError):
             session.closed = True
+            logger.debug("socket writer loop ended for session %s", session.session_id)
 
     def _resolve_event_kind(self, payload_type: str, text: str) -> str:
         if payload_type == "slash_command":
@@ -235,5 +241,6 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         session_id = str(response_handle.reply_target.get("session_id") or "")
         session = self.sessions.get(session_id)
         if session is None or session.closed:
+            logger.warning("socket session %s not found or closed (active: %s)", session_id, list(self.sessions.keys()))
             raise SocketSessionClosed()
         return session

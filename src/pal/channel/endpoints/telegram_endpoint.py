@@ -314,6 +314,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     self._last_poll_error_at = 0.0
                     self._reconnect_attempts = 0
                     self._reconnecting = False
+                    logger.info("telegram polling started successfully")
                     if self._control_commands_manifest:
                         await self._apply_control_catalog_async({"commands": list(self._control_commands_manifest)})
                 except Exception as exc:
@@ -351,6 +352,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                         await asyncio.sleep(0.5)
                 except asyncio.CancelledError:
                     raise
+                except Exception as exc:
+                    logger.exception("telegram monitoring loop crashed unexpectedly")
+                    self._last_poll_error = f"monitor_error: {exc}"
+                    self._last_poll_error_at = time.monotonic()
                 finally:
                     self._polling_running = False
                     await self._shutdown_application(app)
@@ -376,6 +381,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         index = min(self._reconnect_attempts, max(len(self._reconnect_delays) - 1, 0))
         delay = self._reconnect_delays[index] if self._reconnect_delays else 0.0
         self._reconnect_attempts += 1
+        logger.info("telegram reconnecting in %.1fs (attempt %d)", delay, self._reconnect_attempts)
         try:
             await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
         except asyncio.TimeoutError:
@@ -415,6 +421,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         self._last_poll_error = str(getattr(context, "error", "") or "telegram_error")
         if not self._last_poll_error_at:
             self._last_poll_error_at = time.monotonic()
+        logger.warning("telegram poll error: %s", self._last_poll_error)
 
     async def _on_update(self, update: Any, context: Any) -> None:
         _ = context
