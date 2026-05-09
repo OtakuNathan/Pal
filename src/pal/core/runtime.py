@@ -24,14 +24,13 @@ from pal.core.prompt_compiler import PromptCompiler
 from pal.core.tool_stagnation import ToolStagnationGuardProcess
 from pal.core.tool_surface import ToolSurface
 from pal.core.turn_executor import TurnExecutor
-from pal.core.turns import EffectRequest, EffectResult, TurnContinuation, TurnOutcome, L1CommitPayload, channel_turn_program, service_turn_program
+from pal.core.turns import EffectRequest, EffectResult, TurnContinuation, TurnOutcome, L1CommitPayload, channel_turn_program
 from pal.core.module_registry import ModuleHandle
 from pal.execution import CapabilityCall
 from pal.execution.contracts import CapabilityResult
 from pal.foundation import AttachmentSpec, EventEnvelope, utc_now
 from pal.failure import FailureSignal, FailureUserFeedback
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
-from pal.service import ServiceDefinition, ServiceTriggerEvent, build_service_trigger_input
 from pal.shared import EventKind, SourceKind
 from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus
 
@@ -223,14 +222,48 @@ class TurnManager:
 class MainLoop:
     queue: deque[EventEnvelope] = field(default_factory=deque)
     dispatcher: EventDispatcher = field(default_factory=EventDispatcher)
+    _wakeup_event: asyncio.Event | None = field(default=None, init=False, repr=False)
+    _wakeup_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
 
     def enqueue(self, envelope: EventEnvelope) -> None:
         self.queue.append(envelope)
+        self.notify_ready()
 
     def pop(self) -> EventEnvelope | None:
         if not self.queue:
             return None
         return self.queue.popleft()
+
+    def bind_async_loop(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._wakeup_loop is loop and self._wakeup_event is not None:
+            return
+        self._wakeup_loop = loop
+        self._wakeup_event = asyncio.Event()
+
+    def notify_ready(self) -> None:
+        event = self._wakeup_event
+        loop = self._wakeup_loop
+        if event is None or loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(event.set)
+
+    async def wait_for_ready_async(self, *, timeout: float | None = None) -> None:
+        self.bind_async_loop()
+        event = self._wakeup_event
+        if event is None:
+            return
+        if self.queue:
+            return
+        if event.is_set():
+            event.clear()
+            return
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return
+        finally:
+            event.clear()
 
     def drain_ready_sources(self, context: MainContext) -> list[EventEnvelope]:
         drained: list[EventEnvelope] = []
@@ -267,6 +300,7 @@ class MainLoop:
         for _ in range(max_iterations):
             envelope = self.run_once(context, state)
             if envelope is None:
+                self._cleanup_finished_turn_tasks(state)
                 self.drain_ready_sources(context)
                 if self.queue:
                     continue
@@ -279,18 +313,38 @@ class MainLoop:
         for _ in range(max_iterations):
             envelope = await self.run_once_async(context, state)
             if envelope is None:
-                pending = [task for task in state.turn_tasks.values() if task is not None and not task.done()]
+                pending = self._cleanup_finished_turn_tasks(state)
                 if not pending:
                     self.drain_ready_sources(context)
                     if self.queue:
                         continue
                     break
-                done, _ = await asyncio.wait(pending, timeout=0.05, return_when=asyncio.FIRST_COMPLETED)
-                if not done:
-                    continue
+                wake_task = asyncio.create_task(self.wait_for_ready_async())
+                try:
+                    await asyncio.wait([*pending, wake_task], return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    if not wake_task.done():
+                        wake_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await wake_task
                 continue
             processed.append(envelope)
         return processed
+
+    def _cleanup_finished_turn_tasks(self, state: CoreRuntimeState) -> list[asyncio.Task[Any]]:
+        pending: list[asyncio.Task[Any]] = []
+        for turn_id, task in list(state.turn_tasks.items()):
+            if task is None:
+                state.turn_tasks.pop(turn_id, None)
+                continue
+            if not task.done():
+                pending.append(task)
+                continue
+            if state.turn_tasks.get(turn_id) is task:
+                state.turn_tasks.pop(turn_id, None)
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                task.result()
+        return pending
 
 
 EventLoop = MainLoop
@@ -359,6 +413,47 @@ class PalCore:
 
     def receive_event(self, envelope: EventEnvelope) -> None:
         self.main_loop.enqueue(envelope)
+
+    def notify_ready(self) -> None:
+        self.main_loop.notify_ready()
+
+    def bind_async_wakeup_sources(self) -> None:
+        self.main_loop.bind_async_loop()
+        channel_runtime = self.context.port_registry.get("channel:channel")
+        if channel_runtime is not None and hasattr(channel_runtime, "on_ready"):
+            channel_runtime.on_ready = self.notify_ready
+        service_manager = self.context.port_registry.get("service:service_manager")
+        if service_manager is not None and hasattr(service_manager, "on_ready"):
+            service_manager.on_ready = self.notify_ready
+        minion_provider = self.context.port_registry.get("minion:minion")
+        if minion_provider is not None and hasattr(minion_provider, "event_notify"):
+            minion_provider.event_notify = self.notify_ready
+
+    async def wait_for_ready_async(self, *, timeout: float | None = None) -> None:
+        await self.main_loop.wait_for_ready_async(timeout=timeout)
+
+    def next_wakeup_timeout_seconds(self) -> float | None:
+        candidates: list[float] = []
+        service_manager = self.context.port_registry.get("service:service_manager")
+        seconds_until_next_due = getattr(service_manager, "seconds_until_next_due", None)
+        if callable(seconds_until_next_due):
+            service_timeout = seconds_until_next_due()
+            if service_timeout is not None:
+                candidates.append(float(service_timeout))
+        control_timeout = self._seconds_until_next_control_request_expiry()
+        if control_timeout is not None:
+            candidates.append(control_timeout)
+        return min(candidates) if candidates else None
+
+    def _seconds_until_next_control_request_expiry(self) -> float | None:
+        now = datetime.now(timezone.utc)
+        nearest: float | None = None
+        for scope_state in self.state.control_scopes.values():
+            for request in getattr(scope_state, "pending_requests", {}).values():
+                expires_at = _parse_utc_timestamp(getattr(request, "expires_at", ""))
+                delay = max(0.0, (expires_at - now).total_seconds())
+                nearest = delay if nearest is None else min(nearest, delay)
+        return nearest
 
     def drain_once(self) -> EventEnvelope | None:
         return asyncio.run(self.drain_once_async())
@@ -548,47 +643,18 @@ class PalCore:
         continuation = self.turn_manager.start(channel_envelope)
         return await self._run_turn_continuation_async(continuation)
 
-    async def process_service_trigger_async(
-        self,
-        trigger: ServiceTriggerEvent,
-        definition: ServiceDefinition,
-    ) -> TurnOutcome:
-        service_input = build_service_trigger_input(definition)
-        service_event = EventEnvelope(
-            event_kind=EventKind.SERVICE_TRIGGER,
-            source_kind=SourceKind.SERVICE,
-            payload={
-                "text": service_input,
-                "service_id": definition.service_id,
-                "trigger_kind": trigger.trigger_kind,
-                "metadata": dict(trigger.metadata or {}),
-            },
-            correlation_id=str(trigger.metadata.get("request_id") or trigger.service_id),
-        )
-        trigger_metadata = dict(trigger.metadata or {})
-        trigger_metadata.setdefault("turn_id", service_event.event_id)
-        trigger = ServiceTriggerEvent(
-            service_id=trigger.service_id,
-            trigger_kind=trigger.trigger_kind,
-            metadata=trigger_metadata,
-        )
-        synthetic_envelope = ChannelEnvelope(
-            event=service_event,
-            endpoint=self._build_service_endpoint_config(definition),
-            response_handle=self._build_service_response_handle(definition),
-        )
-        continuation = TurnContinuation(
-            turn_id=service_event.event_id,
-            channel_envelope=synthetic_envelope,
-            program=service_turn_program(
-                trigger,
-                definition,
-                core_mode=self.state.mode,
-                max_output_tokens=self.turn_manager._resolve_max_output_tokens(),
-                reply_envelope=self._resolve_service_reply_envelope(service_event, definition, trigger),
-            ),
-            correlation_id=service_event.correlation_id or service_event.event_id,
-        )
+    def turn_execution_options(self) -> dict[str, Any]:
+        return {
+            "core_mode": self.state.mode,
+            "max_output_tokens": self.turn_manager._resolve_max_output_tokens(),
+        }
+
+    def track_turn_task(self, continuation: TurnContinuation, task: asyncio.Task[Any]) -> None:
+        self.state.active_turns[continuation.turn_id] = continuation
+        self.state.turn_tasks[continuation.turn_id] = task
+        task.add_done_callback(lambda finished, current_turn_id=continuation.turn_id: self._on_turn_task_done(current_turn_id, finished))
+
+    async def run_turn_continuation_async(self, continuation: TurnContinuation) -> TurnOutcome:
         self.state.active_turns[continuation.turn_id] = continuation
         return await self._run_turn_continuation_async(continuation)
 
@@ -631,6 +697,7 @@ class PalCore:
             self.state.turn_tasks.pop(turn_id, None)
         with contextlib.suppress(asyncio.CancelledError, Exception):
             task.result()
+        self.notify_ready()
 
     async def handle_control_action_async(self, action: ControlAction) -> None:
         await self.expire_pending_control_requests_async()
@@ -666,8 +733,22 @@ class PalCore:
             if action.action_kind == "compact_memory":
                 await self._handle_compact_memory_async(action)
                 return
+            if action.action_kind == "interactive_open":
+                await self._handle_interactive_open_async(action)
+                return
+            if action.action_kind == "route_reply":
+                await self._handle_route_reply_async(action)
+                return
             if action.action_kind == "invoke_capability":
                 await self._handle_invoke_capability_async(action)
+                return
+            handled = await self.context.control_action_registry.handle(action)
+            if handled.handled:
+                message = handled.message.strip()
+                if message:
+                    if await self._resolve_interaction_action_async(action, message):
+                        return
+                    await self._reply_to_route_async(action.route, message)
                 return
             if action.action_kind == "invalid_command":
                 await self._reply_to_route_async(action.route, action.notes or "Invalid command.")
@@ -1002,7 +1083,6 @@ class PalCore:
             generate = getattr(llm_runtime, "generate", None)
             if not callable(generate):
                 return ""
-        from pal.llm.contracts import CanonicalLLMRequest, LLMFinishReason
         request = CanonicalLLMRequest(
             messages=[
                 {
@@ -1140,6 +1220,23 @@ class PalCore:
             f"Memory compacted. {entry_count} entries projected, {retired} retired to L3.",
         )
 
+    async def _handle_interactive_open_async(self, action: ControlAction) -> None:
+        route = action.route
+        if route is None:
+            return
+        spec = _interaction_spec_from_action(action, route)
+        if spec is None:
+            return
+        await self._interactive_to_route_async(route, str(action.args.get("kind") or "interactive_open"), spec)
+
+    async def _handle_route_reply_async(self, action: ControlAction) -> None:
+        route = action.route
+        if route is None:
+            return
+        text = str(action.args.get("text") or action.args.get("message") or action.notes or "").strip()
+        if text:
+            await self._reply_to_route_async(route, text)
+
     async def _handle_invoke_capability_async(self, action: ControlAction) -> None:
         capability_name = str(action.target_id or "").strip()
         if not capability_name:
@@ -1201,7 +1298,7 @@ class PalCore:
 
     async def _resolve_interaction_action_async(self, action: ControlAction, text: str) -> bool:
         route = action.route
-        if route is None or not self._is_interaction_action(action) or route.channel_kind != "telegram":
+        if route is None or not self._is_interaction_action(action):
             return False
         interaction_id = str(action.args.get("interaction_id") or "").strip()
         if not interaction_id:
@@ -1518,46 +1615,6 @@ class PalCore:
             reply_texts=outcome.reply_texts,
         )
 
-    def _build_service_endpoint_config(self, definition: ServiceDefinition):
-        from pal.channel.contracts import EndpointConfig
-
-        return EndpointConfig(
-            endpoint_id=f"service:{definition.service_id}",
-            channel_kind=SourceKind.SERVICE,
-            binding_key=definition.service_id,
-        )
-
-    def _build_service_response_handle(self, definition: ServiceDefinition):
-        from pal.channel.contracts import ResponseHandle
-
-        return ResponseHandle(endpoint_id=f"service:{definition.service_id}")
-
-    def _resolve_service_reply_envelope(
-        self,
-        service_event: EventEnvelope,
-        definition: ServiceDefinition,
-        trigger: ServiceTriggerEvent,
-    ) -> ChannelEnvelope | None:
-        out_channel_id = str(definition.out_channel_id or "").strip()
-        if not out_channel_id:
-            return None
-        channel_runtime = self.context.port_registry.get("channel:channel")
-        if channel_runtime is None:
-            return None
-        endpoint_runtime = channel_runtime.get_endpoint(out_channel_id)
-        if endpoint_runtime is None:
-            return None
-        reply_target = endpoint_runtime.derive_default_reply_target()
-        reply_target.update(dict(definition.out_reply_target or {}))
-        reply_target.update(dict(trigger.metadata.get("reply_target") or {}))
-        if endpoint_runtime.endpoint.channel_kind == "socket" and not reply_target:
-            return None
-        return ChannelEnvelope(
-            event=service_event,
-            endpoint=endpoint_runtime.endpoint,
-            response_handle=endpoint_runtime.build_response_handle(reply_target=reply_target),
-        )
-
     async def _call_port_async(self, port, async_name: str, sync_name: str, *args, **kwargs):
         async_method = getattr(port, async_name, None)
         if callable(async_method):
@@ -1787,6 +1844,68 @@ class PalCore:
 
     def _build_compaction_source_text(self, memory_service, *, target_input_budget: int) -> str:
         return self.turn_executor.build_compaction_source_text(memory_service, target_input_budget=target_input_budget)
+
+
+def _interaction_spec_from_action(action: ControlAction, route: ControlRoute) -> InteractionMessageSpec | None:
+    value = action.args.get("interaction") or action.args.get("interaction_spec") or action.args
+    if isinstance(value, InteractionMessageSpec):
+        if value.route is not None:
+            return value
+        return InteractionMessageSpec(
+            interaction_id=value.interaction_id,
+            interaction_kind=value.interaction_kind,
+            route=route,
+            text=value.text,
+            buttons=value.buttons,
+            expires_at=value.expires_at,
+        )
+    if not isinstance(value, dict):
+        return None
+    interaction_id = str(value.get("interaction_id") or action.target_id or f"interaction_{uuid4().hex[:8]}").strip()
+    interaction_kind = str(value.get("interaction_kind") or value.get("kind") or "interaction").strip()
+    if not interaction_id or not interaction_kind:
+        return None
+    return InteractionMessageSpec(
+        interaction_id=interaction_id,
+        interaction_kind=interaction_kind,
+        route=route,
+        text=str(value.get("text") or ""),
+        buttons=_interaction_buttons_from_payload(value.get("buttons")),
+        expires_at=str(value.get("expires_at") or "") or None,
+    )
+
+
+def _interaction_buttons_from_payload(value: Any) -> tuple[tuple[InteractionButtonSpec, ...], ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    rows: list[tuple[InteractionButtonSpec, ...]] = []
+    for raw_row in value:
+        if not isinstance(raw_row, (list, tuple)):
+            continue
+        buttons: list[InteractionButtonSpec] = []
+        for raw_button in raw_row:
+            if isinstance(raw_button, InteractionButtonSpec):
+                buttons.append(raw_button)
+                continue
+            if not isinstance(raw_button, dict):
+                continue
+            label = str(raw_button.get("label") or "").strip()
+            action_key = str(raw_button.get("action_key") or "").strip()
+            if not label or not action_key:
+                continue
+            action_args = raw_button.get("action_args")
+            buttons.append(
+                InteractionButtonSpec(
+                    label=label,
+                    action_key=action_key,
+                    action_args=dict(action_args) if isinstance(action_args, dict) else {},
+                )
+            )
+        if buttons:
+            rows.append(tuple(buttons))
+    return tuple(rows)
+
+
 def effect_result_to_observation(tool_result) -> "ToolObservation":
     from pal.core.turns import ToolObservation
 

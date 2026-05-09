@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-import asyncio
-import contextlib
-import inspect
-import os
-import socket
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-from pal.channel.endpoints.socket_protocol import pack_socket_message, read_socket_message
+from pal.foundation.sidecar import (
+    SidecarEndpoint,
+    SidecarRpcClient,
+    SidecarRpcError,
+    cleanup_sidecar_endpoint,
+    open_sidecar_connection,
+    run_blocking,
+    start_sidecar_server,
+)
 
 
 def mcp_runtime_dir(runtime_root: Path) -> Path:
@@ -18,11 +20,11 @@ def mcp_runtime_dir(runtime_root: Path) -> Path:
 
 
 def mcp_socket_path(runtime_root: Path) -> Path:
-    return mcp_runtime_dir(runtime_root) / "manager.sock"
+    return _mcp_endpoint(runtime_root).socket_path
 
 
 def mcp_port_path(runtime_root: Path) -> Path:
-    return mcp_runtime_dir(runtime_root) / "manager.port"
+    return _mcp_endpoint(runtime_root).port_path
 
 
 def mcp_config_root(runtime_root: Path) -> Path:
@@ -33,46 +35,34 @@ def mcp_log_path(runtime_root: Path) -> Path:
     return Path(runtime_root) / "data" / "mcp" / "manager.log"
 
 
-class McpManagerRpcError(RuntimeError):
-    def __init__(self, message: str, *, kind: str = "protocol", payload: dict[str, Any] | None = None) -> None:
-        super().__init__(message)
-        self.kind = kind
-        self.payload = dict(payload or {})
+class McpManagerRpcError(SidecarRpcError):
+    pass
 
 
 @dataclass
 class McpManagerClient:
     runtime_root: Path
     request_timeout_seconds: float = 300.0
+    _client: SidecarRpcClient = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._client = SidecarRpcClient(
+            endpoint=_mcp_endpoint(self.runtime_root),
+            request_timeout_seconds=self.request_timeout_seconds,
+        )
 
     @property
     def socket_path(self) -> Path:
         return mcp_socket_path(self.runtime_root)
 
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        request_id = str(uuid4())
-        reader, writer = await open_manager_connection(self.runtime_root)
         try:
-            writer.write(pack_socket_message({"type": "request", "id": request_id, "method": method, "params": dict(params or {})}))
-            await writer.drain()
-            response = await asyncio.wait_for(read_socket_message(reader), timeout=self.request_timeout_seconds)
-        finally:
-            writer.close()
-            await writer.wait_closed()
-        if str(response.get("id") or "") != request_id:
-            raise McpManagerRpcError("MCP manager returned mismatched request id", payload=response)
-        if not bool(response.get("ok")):
-            error = dict(response.get("error") or {})
-            raise McpManagerRpcError(
-                str(error.get("message") or "MCP manager request failed"),
-                kind=str(error.get("kind") or "protocol"),
-                payload=error,
-            )
-        result = response.get("result")
-        return dict(result or {})
+            return await self._client.request(method, params)
+        except SidecarRpcError as exc:
+            raise McpManagerRpcError(str(exc), kind=exc.kind, payload=exc.payload) from exc
 
     def request_sync(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return _run_blocking(self.request(method, params))
+        return run_blocking(self.request(method, params))
 
     async def health(self) -> dict[str, Any]:
         return await self.request("health")
@@ -135,68 +125,17 @@ class McpManagerClient:
         return self.request_sync("shutdown")
 
 
-def _run_blocking(awaitable):
-    if not inspect.isawaitable(awaitable):
-        return awaitable
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(awaitable)
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, awaitable).result()
-
-
 async def open_manager_connection(runtime_root: Path):
-    if hasattr(asyncio, "open_unix_connection"):
-        return await asyncio.open_unix_connection(str(mcp_socket_path(runtime_root)))
-    port_text = mcp_port_path(runtime_root).read_text(encoding="utf-8").strip()
-    return await asyncio.open_connection("127.0.0.1", int(port_text))
+    return await open_sidecar_connection(_mcp_endpoint(runtime_root))
 
 
 async def start_manager_server(runtime_root: Path, handler):
-    mcp_runtime_dir(runtime_root).mkdir(parents=True, exist_ok=True)
-    if hasattr(asyncio, "start_unix_server"):
-        path = mcp_socket_path(runtime_root)
-        await _prepare_unix_socket(path)
-        server = await asyncio.start_unix_server(handler, path=str(path))
-        return server, {"transport": "unix", "socket_path": str(path)}
-    port = _choose_loopback_port()
-    server = await asyncio.start_server(handler, host="127.0.0.1", port=port)
-    mcp_port_path(runtime_root).write_text(str(port), encoding="utf-8")
-    return server, {"transport": "tcp_loopback", "host": "127.0.0.1", "port": port}
+    return await start_sidecar_server(_mcp_endpoint(runtime_root), handler)
 
 
 async def cleanup_manager_endpoint(runtime_root: Path) -> None:
-    if hasattr(asyncio, "start_unix_server"):
-        path = mcp_socket_path(runtime_root)
-        if path.exists():
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(path)
-    else:
-        path = mcp_port_path(runtime_root)
-        if path.exists():
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(path)
+    await cleanup_sidecar_endpoint(_mcp_endpoint(runtime_root))
 
 
-async def _prepare_unix_socket(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        return
-    try:
-        reader, writer = await asyncio.open_unix_connection(str(path))
-    except (FileNotFoundError, ConnectionRefusedError, ConnectionError, OSError):
-        os.unlink(path)
-        return
-    writer.close()
-    with contextlib.suppress(Exception):
-        await writer.wait_closed()
-    raise RuntimeError(f"socket already in use: {path}")
-
-
-def _choose_loopback_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        sock.listen(1)
-        return int(sock.getsockname()[1])
+def _mcp_endpoint(runtime_root: Path) -> SidecarEndpoint:
+    return SidecarEndpoint(runtime_root=Path(runtime_root), name="mcp")

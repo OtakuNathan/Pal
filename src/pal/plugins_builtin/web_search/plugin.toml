@@ -2,3 +2,4 @@ plugin_id = "web_search"
 entrypoint = "pal.plugins_builtin.web_search.runtime"
 version = "0.1.0"
 enabled_by_default = true
+reload_modules = ["pal.web_search"]

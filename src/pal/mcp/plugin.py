@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
+from pal.foundation.sidecar import python_subprocess_env
 from pal.mcp.compiler import McpCompiledProjection, McpCompiler
 from pal.mcp.ipc import McpManagerClient, McpManagerRpcError, mcp_log_path
 from pal.mcp.model import McpDiscoverySnapshot
@@ -247,6 +248,7 @@ class McpManagerPluginProvider:
             [sys.executable, "-m", "pal.mcp.manager_main", "--runtime-root", str(self.runtime_root)],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=python_subprocess_env(),
         )
         for _ in range(150):
             if self.process.poll() is not None:

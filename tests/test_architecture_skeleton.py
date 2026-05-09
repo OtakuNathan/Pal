@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import importlib
 import shutil
 import sqlite3
@@ -31,6 +32,7 @@ from pal.core import (
     register_with_core as register_core_with_core,
 )
 from pal.core.runtime_config import RuntimeConfig
+from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution import CapabilityCall, CapabilityResult, ToolCallBudget, register_with_core as register_execution_with_core
 from pal.failure import (
     FAILURE_VERIFICATION_FAILED,
@@ -54,12 +56,12 @@ from pal.memory import (
 )
 from pal.plugins import PluginHost, register_with_core as register_plugins_with_core
 from pal.plugins.l3 import MockL3Plugin, register_with_core as register_l3_with_core
-from pal.service import ServiceDefinition, ServiceManager, ServiceRepository, ServiceRunner, ServiceTriggerEvent, register_with_core as register_service_with_core
+from pal.service import ServiceDefinition, ServiceManager, ServiceRepository, ServiceRunner, ServiceTriggerEvent, build_service_trigger_input, register_with_core as register_service_with_core
 from pal.service.scheduling import compute_next_service_run_at_utc, utc_now_dt
-from pal.shared import LLMStreamEventKind, MinionProgressEvent, PromptAssemblyContext, SINGLETON_TARGET
+from pal.shared import EventKind, LLMStreamEventKind, MinionProgressEvent, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, capability_action, capability_node
 from pal.stream_events import NormalizedLLMStreamEvent
 from pal.wizard import WizardService
-from pal.minion import TaskingService, register_with_core as register_tasking_with_core
+from pal.minion import TaskingService, register_with_core as register_minion_with_core
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -452,13 +454,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core = PalCore()
         register_core_with_core(core)
         register_execution_with_core(core.context)
-        register_tasking_with_core(core.context, TaskingService())
+        register_minion_with_core(core.context, TaskingService())
 
         core.publish_module_capabilities("core")
         core.publish_module_capabilities("execution")
-        core.publish_module_capabilities("tasking")
+        core.publish_module_capabilities("minion")
 
-        result = core.context.execution_runtime.execute(CapabilityCall(name="intro_module_tasking_show"))
+        result = core.context.execution_runtime.execute(CapabilityCall(name="intro_module_minion_show"))
 
         self.assertEqual(result.status, "ok")
         self.assertTrue(result.structured["mounted"])
@@ -519,6 +521,57 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("op_l3_recall_query::mock_l3", published)
         self.assertNotIn("operation_execution_discovery_search", published)
         self.assertNotIn("introspection_module_memory_show", published)
+
+    def test_operation_family_is_omitted_and_aliases_are_callable(self) -> None:
+        @capability_node(
+            namespace=OPERATION_NAMESPACE,
+            scope="demo",
+            kind="module",
+            source="test",
+            target_kind="module",
+        )
+        class DemoProvider:
+            @capability_action(
+                namespace=OPERATION_NAMESPACE,
+                scope="demo",
+                family="operation",
+                action_name="ping",
+                aliases=("demo.ping",),
+                args_schema={"type": "object", "properties": {}},
+            )
+            def ping(self, call: CapabilityCall) -> CapabilityResult:
+                _ = call
+                return CapabilityResult(status="ok", text="pong", llm_text="pong")
+
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+        core.context.register_module(
+            ModuleHandle(
+                module_id="demo",
+                tier=MODULE_TIER_DETACHABLE,
+                detachable=True,
+                introspection_provider=DemoProvider(),
+            )
+        )
+        core.publish_module_capabilities("demo")
+
+        published = core.context.capability_registry.descriptors
+        self.assertIn("op_demo_ping", published)
+        self.assertNotIn("op_demo_operation_ping", published)
+
+        direct = core.context.execution_runtime.execute(CapabilityCall(name="demo.ping"))
+        self.assertEqual(direct.status, "ok")
+        via_router = core.context.execution_runtime.execute(
+            CapabilityCall(name="op_exec_capability_call", args={"name": "demo.ping"})
+        )
+        self.assertEqual(via_router.status, "ok")
+
+        read = core.context.execution_runtime.execute(CapabilityCall(name="op_exec_disc_read", args={"name": "demo.ping"}))
+        self.assertIn("demo.ping", read.structured["capability"]["call_names"])
+        search = core.context.execution_runtime.execute(CapabilityCall(name="op_exec_disc_search", args={"query": "demo ping"}))
+        hit = next(item for item in search.structured["hits"] if item["name"] == "op_demo_ping")
+        self.assertIn("demo.ping", hit["call_names"])
 
     def test_execution_tool_failures_are_isolated(self) -> None:
         core = PalCore()
@@ -850,7 +903,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             register_identity_with_core(core.context, identity_service)
             register_control_with_core(core.context, ControlPlane())
-            register_tasking_with_core(core.context, tasking_service)
+            register_minion_with_core(core.context, tasking_service)
             register_service_with_core(core.context, service_manager)
             register_memory_with_core(core.context, memory_service)
 
@@ -957,17 +1010,19 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 touch=True,
             )
 
+            definition = ServiceDefinition(
+                service_id="daily_digest",
+                goal="Summarize repository updates",
+                method="Review recent changes and produce a concise digest.",
+                skill_refs=["git", "summary"],
+            )
+            register_service_with_core(core.context, ServiceManager())
             prompt = core.build_canonical_prompt(
                 PromptAssemblyContext(
                     core_mode="default",
                     turn_kind="service_trigger",
                     metadata={
-                        "service_definition": ServiceDefinition(
-                            service_id="daily_digest",
-                            goal="Summarize repository updates",
-                            method="Review recent changes and produce a concise digest.",
-                            skill_refs=["git", "summary"],
-                        )
+                        "service_input": build_service_trigger_input(definition),
                     },
                 )
             )
@@ -1157,7 +1212,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_main_loop_type_is_available(self) -> None:
         self.assertIs(MainLoop, importlib.import_module("pal.core").MainLoop)
 
-    def test_main_loop_drains_channel_service_and_tasking_sources(self) -> None:
+    def test_main_loop_drains_channel_service_and_minion_sources(self) -> None:
         core = PalCore()
         channel_runtime = ChannelRuntime()
         service_manager = ServiceManager()
@@ -1165,7 +1220,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         register_channel_with_core(core.context, channel_runtime)
         register_service_with_core(core.context, service_manager)
-        register_tasking_with_core(core.context, tasking_service)
+        register_minion_with_core(core.context, tasking_service)
         register_control_with_core(core.context, ControlPlane())
 
         channel_runtime.emit(
@@ -1249,28 +1304,32 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertTrue(observed.structured["degraded"])
 
     def test_detachable_module_detach_withdraws_capabilities_and_reattach_restores_them(self) -> None:
-        core = PalCore()
-        tasking_service = TaskingService()
-        register_tasking_with_core(core.context, tasking_service)
-        core.publish_module_capabilities("tasking")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_lifecycle_test_") as tmp:
+            core = PalCore()
+            tasking_service = TaskingService()
+            register_minion_with_core(core.context, tasking_service, runtime_root=Path(tmp))
+            core.publish_module_capabilities("minion")
+            try:
+                self.assertIn("intro_module_minion_show", core.context.capability_registry.descriptors)
+                self.assertIn("minion.manager", core.context.event_source_registry.sources)
+                self.assertNotIn("minion.prompt.default", core.context.prompt_fragment_registry.providers)
 
-        self.assertIn("intro_module_tasking_show", core.context.capability_registry.descriptors)
-        self.assertIn("tasking.minion", core.context.event_source_registry.sources)
-        self.assertNotIn("tasking.prompt.default", core.context.prompt_fragment_registry.providers)
+                detached = core.detach_module("minion")
+                self.assertEqual(detached, "ok")
+                self.assertNotIn("intro_module_minion_show", core.context.capability_registry.descriptors)
+                self.assertNotIn("minion.manager", core.context.event_source_registry.sources)
+                self.assertNotIn("minion.prompt.default", core.context.prompt_fragment_registry.providers)
 
-        detached = core.detach_module("tasking")
-        self.assertEqual(detached, "ok")
-        self.assertNotIn("intro_module_tasking_show", core.context.capability_registry.descriptors)
-        self.assertNotIn("tasking.minion", core.context.event_source_registry.sources)
-        self.assertNotIn("tasking.prompt.default", core.context.prompt_fragment_registry.providers)
-
-        reattached = core.reattach_module("tasking")
-        self.assertEqual(reattached, "ok")
-        self.assertIn("intro_module_tasking_show", core.context.capability_registry.descriptors)
-        self.assertIn("tasking.minion", core.context.event_source_registry.sources)
-        self.assertNotIn("tasking.prompt.default", core.context.prompt_fragment_registry.providers)
-        observed = core.context.execution_runtime.execute(CapabilityCall(name="intro_module_tasking_show"))
-        self.assertEqual(observed.status, "ok")
+                reattached = core.reattach_module("minion")
+                self.assertEqual(reattached, "ok")
+                self.assertIn("intro_module_minion_show", core.context.capability_registry.descriptors)
+                self.assertIn("minion.manager", core.context.event_source_registry.sources)
+                self.assertNotIn("minion.prompt.default", core.context.prompt_fragment_registry.providers)
+                observed = core.context.execution_runtime.execute(CapabilityCall(name="intro_module_minion_show"))
+                self.assertEqual(observed.status, "ok")
+            finally:
+                with contextlib.suppress(Exception):
+                    core.detach_module("minion")
 
     def test_memory_can_switch_active_l3_provider_via_registered_capability(self) -> None:
         core = PalCore()
@@ -1414,6 +1473,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("op_service_lifecycle_attach", core.context.capability_registry.descriptors)
         self.assertIn("op_service_lifecycle_detach", core.context.capability_registry.descriptors)
         self.assertIn("service.triggers", core.context.event_source_registry.sources)
+        self.assertIn(EventKind.SERVICE_TRIGGER, core.context.event_handler_registry.handlers)
+
+        self.assertEqual(core.detach_module("service"), RuntimeStatus.OK)
+        self.assertNotIn("service.triggers", core.context.event_source_registry.sources)
+        self.assertNotIn(EventKind.SERVICE_TRIGGER, core.context.event_handler_registry.handlers)
 
     def test_service_management_capabilities_create_update_and_destroy(self) -> None:
         runtime_root, database = self._create_database()

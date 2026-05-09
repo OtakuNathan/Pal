@@ -132,6 +132,7 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertEqual(endpoints[0].context_window, 200000)
 
     def test_seed_from_wizard_stores_api_key(self) -> None:
+        from pal.llm import LLMEndpointRepository, LiteLLMCredentialResolver
         from pal.llm.secret_store import EncryptedFileSecretStore, SecretRef
 
         collected = _make_collected()
@@ -141,6 +142,9 @@ class TestSeedFromWizard(unittest.TestCase):
         store = EncryptedFileSecretStore(str(secrets_path))
         key = store.get_secret(SecretRef(service="test-claude", account="api-key"))
         self.assertEqual(key, "sk-test-key-123")
+        endpoint = LLMEndpointRepository().get_primary_enabled()
+        self.assertIsNotNone(endpoint)
+        self.assertEqual(LiteLLMCredentialResolver(secret_store=store).resolve_api_key(endpoint), "sk-test-key-123")
 
     def test_seed_from_wizard_sets_active_endpoint(self) -> None:
         from pal.llm import RuntimeSettingRepository

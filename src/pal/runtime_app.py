@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 import signal
 import time
@@ -29,8 +30,10 @@ def _ensure_plugin_layout(runtime_root: Path, wizard: WizardService, registratio
                 if not target.exists():
                     shutil.move(str(item), str(target))
 
-    if not builtin_dir.exists() or not any(builtin_dir.glob("*/plugin.toml")):
-        wizard.provision_builtin_plugins(registration)
+    # Always sync source builtin manifests into runtime_root/plugins/_builtin.
+    # This makes newly added first-party plugins appear in existing runtimes
+    # without treating plugin-owned config directories as plugin bundles.
+    wizard.provision_builtin_plugins(registration)
 
 
 def open_runtime(runtime_root: Path) -> StubRuntimeHandle:
@@ -61,7 +64,6 @@ def open_runtime(runtime_root: Path) -> StubRuntimeHandle:
 @dataclass
 class PalRuntimeApp:
     handle: StubRuntimeHandle
-    idle_sleep_seconds: float = 0.02
     loop_iterations: int = 0
     last_tick_monotonic: float = 0.0
     last_tick_utc: str = ""
@@ -84,6 +86,7 @@ class PalRuntimeApp:
             except (NotImplementedError, RuntimeError, ValueError):
                 debug_signal = None
         await self.handle.channel_runtime.start_async()
+        self.handle.core.bind_async_wakeup_sources()
         publish_catalog = getattr(self.handle.core, "publish_control_catalog_async", None)
         if callable(publish_catalog):
             await publish_catalog()
@@ -93,7 +96,7 @@ class PalRuntimeApp:
                 processed = await self.handle.core.run_until_idle_async(max_iterations=128)
                 self.last_processed_count = len(processed)
                 if not processed:
-                    await asyncio.sleep(self.idle_sleep_seconds)
+                    await self._wait_for_runtime_wakeup(stop_event)
         finally:
             if debug_signal is not None:
                 try:
@@ -101,6 +104,20 @@ class PalRuntimeApp:
                 except (RuntimeError, ValueError):
                     pass
             await self.handle.stop_async()
+
+    async def _wait_for_runtime_wakeup(self, stop_event: asyncio.Event) -> None:
+        timeout = self.handle.core.next_wakeup_timeout_seconds()
+        wake_task = asyncio.create_task(self.handle.core.wait_for_ready_async(timeout=timeout))
+        stop_task = asyncio.create_task(stop_event.wait())
+        try:
+            done, pending = await asyncio.wait({wake_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+            _ = done
+            for task in pending:
+                task.cancel()
+        finally:
+            for task in (wake_task, stop_task):
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
 
     def _mark_loop_tick(self) -> None:
         self.loop_iterations += 1

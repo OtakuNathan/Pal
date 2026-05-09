@@ -11,7 +11,9 @@ from pal.minion.contracts import (
     TaskingServicePort,
     WorkOrderServicePort,
 )
+from pal.minion.ipc import MinionManagerClient, MinionManagerRpcError
 from pal.minion.introspection import (
+    MinionManagerProvider,
     MinionIntrospection,
     MinionSnapshot,
     TaskingIntrospectionProvider,
@@ -20,19 +22,36 @@ from pal.minion.introspection import (
     inspect_tasking,
     register_with_core,
 )
-from pal.minion.repository import TaskingRepositoryPort
+from pal.minion.manager import MinionManager
+from pal.minion.profiles import (
+    MinionProfile,
+    MinionProfileCapabilityProvider,
+    MinionProfileProvider,
+    MinionProfileRegistry,
+)
+from pal.minion.repository import MinionTaskingRepository, TaskingRepositoryPort
 from pal.minion.runtime import MinionRuntime
 from pal.minion.service import QueuedMinionEvent, TaskingService
-from pal.minion.source import MinionEventSource
+from pal.minion.source import MinionControlEventHandler, MinionEventSource
 
 __all__ = [
     "CheckpointEvent",
     "CheckpointServicePort",
     "LedgerServicePort",
     "MinionEventSource",
+    "MinionControlEventHandler",
     "MinionIPCHandlers",
     "MinionIntrospection",
+    "MinionManager",
+    "MinionManagerClient",
+    "MinionManagerProvider",
     "MinionManagerPort",
+    "MinionManagerRpcError",
+    "MinionProfile",
+    "MinionProfileCapabilityProvider",
+    "MinionProfileProvider",
+    "MinionProfileRegistry",
+    "MinionTaskingRepository",
     "MinionProgressEvent",
     "MinionRuntime",
     "MinionRuntimePort",

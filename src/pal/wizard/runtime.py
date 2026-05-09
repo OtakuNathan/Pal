@@ -163,6 +163,7 @@ class WizardService(WizardServicePort):
             ),
         )
         self.register(registration)
+        self.provision_builtin_plugins(registration)
         return registration
 
     def create_database(

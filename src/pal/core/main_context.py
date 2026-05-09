@@ -5,6 +5,7 @@ from typing import Any
 
 from pal.core.event_handler_registry import EventHandlerRegistry
 from pal.core.event_source_registry import EventSourceRegistry
+from pal.core.control_action_registry import ControlActionHandlerRegistry
 from pal.core.module_registry import ModuleHandle, ModuleRegistry
 from pal.core.prompt_fragment_registry import PromptFragmentRegistry
 from pal.core.turn_events import TurnEventBus
@@ -19,6 +20,7 @@ class MainContext:
     module_registry: ModuleRegistry = field(default_factory=ModuleRegistry)
     event_source_registry: EventSourceRegistry = field(default_factory=EventSourceRegistry)
     event_handler_registry: EventHandlerRegistry = field(default_factory=EventHandlerRegistry)
+    control_action_registry: ControlActionHandlerRegistry = field(default_factory=ControlActionHandlerRegistry)
     prompt_fragment_registry: PromptFragmentRegistry = field(default_factory=PromptFragmentRegistry)
     turn_event_bus: TurnEventBus = field(default_factory=TurnEventBus)
     introspection_registry: dict[str, IntrospectionPort] = field(default_factory=dict)
@@ -35,6 +37,8 @@ class MainContext:
             self.execution_runtime.hydrate_module_handle(handle)
         for port_name, port in handle.ports.items():
             self.port_registry[f"{handle.module_id}:{port_name}"] = port
+        for action_kind, handler in handle.control_action_handlers.items():
+            self.control_action_registry.register(handle.module_id, action_kind, handler)
 
     def require_port(self, key: str) -> Any:
         return self.port_registry[key]

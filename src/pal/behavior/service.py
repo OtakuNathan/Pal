@@ -55,6 +55,7 @@ class BehaviorService:
     semantic_router: Callable[..., Any] | None = None
     router_timeout_seconds: float = 2.0
     resident_prompt_budget: int = 5
+    declared_affordances: dict[str, tuple[AffordanceDescriptor, ...]] = field(default_factory=dict)
 
     async def advise_async(self, request: BehaviorAdviceRequest) -> BehaviorAdviceResult:
         deterministic = self._rank_candidates(request)
@@ -127,18 +128,22 @@ class BehaviorService:
         if not module_id:
             return
         self.repository.delete_declared_affordances_for_module(module_id)
-        for descriptor in _auto_affordances_from_handle(handle, module_id=module_id):
-            self.repository.upsert_affordance(descriptor)
+        declared_descriptors: list[AffordanceDescriptor] = list(_auto_affordances_from_handle(handle, module_id=module_id))
         resident_descriptors: list[AffordanceDescriptor] = []
         for blueprint in _collect_affordance_blueprints(provider):
             descriptor = _descriptor_from_affordance_blueprint(blueprint, module_id=module_id)
             if descriptor.visibility_mode == AFFORDANCE_VISIBILITY_RESIDENT:
                 resident_descriptors.append(descriptor)
             else:
-                self.repository.upsert_affordance(descriptor)
+                declared_descriptors.append(descriptor)
+        if declared_descriptors:
+            self.declared_affordances[module_id] = tuple(declared_descriptors)
+        else:
+            self.declared_affordances.pop(module_id, None)
         self._register_declared_resident_prompt_provider(module_id, tuple(resident_descriptors))
 
     def unregister_declared_module(self, module_id: str) -> None:
+        self.declared_affordances.pop(module_id, None)
         self.repository.delete_declared_affordances_for_module(module_id)
         self._unregister_declared_resident_prompt_provider(module_id)
 
@@ -190,8 +195,14 @@ class BehaviorService:
         )
         candidate_limit = max(top_k * 6, 20)
         retrieval_scores, _ = self.repository.collect_route_candidates(query_text, limit=candidate_limit)
+        retrieval_scores = _merge_scores(retrieval_scores, self._declared_route_scores(query_text))
         retrieval_scores = _prune_weak_retrieval_scores(retrieval_scores)
-        for affordance in self.repository.list_affordances_by_ids(retrieval_scores.keys(), enabled_only=True):
+        by_id = {item.affordance_id: item for item in self.repository.list_affordances_by_ids(retrieval_scores.keys(), enabled_only=True)}
+        by_id.update(self._declared_affordance_index())
+        for affordance_id in retrieval_scores.keys():
+            affordance = by_id.get(affordance_id)
+            if affordance is None or not affordance.enabled:
+                continue
             if affordance.affordance_id in already_considered:
                 continue
             if _would_recurse(affordance, already_considered):
@@ -231,6 +242,43 @@ class BehaviorService:
             )
         candidates.sort(key=_candidate_sort_key)
         return candidates[:top_k]
+
+    def _declared_affordance_index(self) -> dict[str, AffordanceDescriptor]:
+        by_id: dict[str, AffordanceDescriptor] = {}
+        for descriptors in self.declared_affordances.values():
+            for descriptor in descriptors:
+                by_id[descriptor.affordance_id] = descriptor
+        return by_id
+
+    def _declared_route_scores(self, query_text: str) -> dict[str, float]:
+        query_tokens = _tokenize(query_text)
+        if not query_tokens:
+            return {}
+        normalized_query = str(query_text or "").lower()
+        scores: dict[str, float] = {}
+        for affordance in self._declared_affordance_index().values():
+            if not affordance.enabled:
+                continue
+            candidate_text = " ".join(
+                (
+                    affordance.title,
+                    affordance.scenario_text,
+                    affordance.prompt_hint,
+                    " ".join(affordance.activation_terms),
+                    " ".join(affordance.capability_refs),
+                    " ".join(affordance.skill_refs),
+                    " ".join(affordance.memory_query_hints),
+                )
+            )
+            candidate_tokens = _tokenize(candidate_text)
+            overlap = query_tokens & candidate_tokens
+            activation_terms = {str(term).lower() for term in affordance.activation_terms if str(term).strip()}
+            activation_hits = query_tokens & activation_terms
+            phrase_hits = sum(1 for term in activation_terms if len(term) >= 3 and term in normalized_query)
+            score = float(len(overlap) + len(activation_hits) * 2 + phrase_hits * 3)
+            if score > 0.0:
+                scores[affordance.affordance_id] = score
+        return scores
 
     def _availability(self, capability_refs: Sequence[str]) -> str:
         refs = tuple(ref for ref in capability_refs if str(ref).strip())
@@ -367,6 +415,14 @@ def _prune_weak_retrieval_scores(scores: dict[str, float]) -> dict[str, float]:
         return {}
     cutoff = best * 0.75
     return {key: value for key, value in scores.items() if value >= cutoff}
+
+
+def _merge_scores(*score_maps: dict[str, float]) -> dict[str, float]:
+    merged: dict[str, float] = {}
+    for scores in score_maps:
+        for key, value in scores.items():
+            merged[key] = max(merged.get(key, 0.0), float(value))
+    return merged
 
 
 def _confidence(*, relevance: float, source_kind: str, priority: int) -> float:

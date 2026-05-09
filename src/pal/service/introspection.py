@@ -10,6 +10,7 @@ from pal.service.source import ServiceEventSource
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
+    EventKind,
     IntrospectionCall,
     IntrospectionResult,
     RuntimeStatus,
@@ -626,6 +627,7 @@ def register_with_core(
     runner: ServiceRunner | None = None,
 ) -> ModuleHandle:
     from pal.service.handler import ServiceTriggerHandler
+    from pal.service.prompt import ServicePromptFragmentProvider
 
     def refresh_capabilities() -> None:
         handle = context.module_registry.get("service")
@@ -638,18 +640,22 @@ def register_with_core(
 
     manager.on_change = refresh_capabilities
     provider = ServiceIntrospectionProvider(manager=manager, runner=runner, refresh_capabilities=refresh_capabilities)
+    prompt_provider = ServicePromptFragmentProvider(manager=manager)
     source = ServiceEventSource(manager=manager)
+    event_handler = ServiceTriggerHandler(manager=manager, runner=runner)
     handle = ModuleHandle(
         module_id="service",
         tier=MODULE_TIER_DETACHABLE,
         detachable=True,
         introspection_provider=provider,
-        prompt_fragment_providers=[],
+        prompt_fragment_providers=[prompt_provider],
         supports_lifecycle_capabilities=True,
         event_sources=[source],
+        event_handlers={EventKind.SERVICE_TRIGGER: [event_handler]},
         ports={"service_manager": manager, "service_runner": runner},
     )
     context.register_module(handle)
+    context.prompt_fragment_registry.register(prompt_provider)
     context.event_source_registry.attach("service", source)
-    context.event_handler_registry.register("service.trigger", ServiceTriggerHandler(manager=manager, runner=runner))
+    context.event_handler_registry.register(EventKind.SERVICE_TRIGGER, event_handler, module_id="service")
     return handle

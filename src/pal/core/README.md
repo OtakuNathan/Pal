@@ -33,7 +33,8 @@ Interaction rule:
 - `Execution` is the only official invocation plane
 - `Pal` should call capabilities through `PalCore -> Execution`
 - turn computations yield effect requests and are resumed by `PalCore`
-- `MainLoop` polls mailbox-backed sources rather than module-private queues
+- `MainLoop` drains mailbox-backed sources after async wakeups rather than
+  pulling module-private queues on an idle timer
 - modules may register ports, event sources, providers, and introspection
   surfaces with `PalCore`
 - `register_with_core(...)` is also the hydration seam for Capability Forest

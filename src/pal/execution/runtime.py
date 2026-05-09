@@ -140,77 +140,28 @@ class ExecutionRuntime(ExecutionRuntimePort):
         specs: list[dict[str, Any]] = []
         for name in sorted(self.compiled_capability_index.records):
             descriptor = self.compiled_capability_index.records[name]
-            specs.append(
-                {
-                    "name": descriptor.canonical_path or descriptor.name,
-                    "display_name": descriptor.display_name or descriptor.canonical_path or descriptor.name,
-                    "family": descriptor.family,
-                    "description": descriptor.description,
-                    "module_id": descriptor.module_id,
-                    "aliases": list(descriptor.aliases),
-                    "parameters_schema": dict(descriptor.parameters_schema or {"type": "object", "properties": {}}),
-                    "result_schema": dict(descriptor.result_schema or {"type": "object", "properties": {}}),
-                    "source": descriptor.source,
-                    "target_kind": descriptor.target_kind,
-                    "target_id": descriptor.target_id,
-                }
-            )
+            specs.append(_capability_spec_payload(descriptor))
         return specs
 
     def get_capability_spec(self, name: str) -> dict[str, Any] | None:
-        if name in self.compiled_capability_index.by_canonical:
-            record_ids = self.compiled_capability_index.by_canonical[name]
-            if record_ids:
-                descriptor = self.compiled_capability_index.records[record_ids[0]]
-                return {
-                    "canonical_path": descriptor.canonical_path or descriptor.name,
-                    "name": descriptor.canonical_path or descriptor.name,
-                    "display_name": descriptor.display_name or descriptor.canonical_path or descriptor.name,
-                    "family": descriptor.family,
-                    "description": descriptor.description,
-                    "module_id": descriptor.module_id,
-                    "aliases": list(descriptor.aliases),
-                    "parameters_schema": dict(descriptor.parameters_schema or {"type": "object", "properties": {}}),
-                    "result_schema": dict(descriptor.result_schema or {"type": "object", "properties": {}}),
-                    "source": descriptor.source,
-                    "target_kind": descriptor.target_kind,
-                    "target_id": descriptor.target_id,
-                }
-        alias_matches = self.compiled_capability_index.aliases.get(name, [])
-        if alias_matches:
-            descriptor = self.compiled_capability_index.records[alias_matches[0]]
-            return {
-                "canonical_path": descriptor.canonical_path or descriptor.name,
-                "name": descriptor.canonical_path or descriptor.name,
-                "display_name": descriptor.display_name or descriptor.canonical_path or descriptor.name,
-                "family": descriptor.family,
-                "description": descriptor.description,
-                "module_id": descriptor.module_id,
-                "aliases": list(descriptor.aliases),
-                "parameters_schema": dict(descriptor.parameters_schema or {"type": "object", "properties": {}}),
-                "result_schema": dict(descriptor.result_schema or {"type": "object", "properties": {}}),
-                "source": descriptor.source,
-                "target_kind": descriptor.target_kind,
-                "target_id": descriptor.target_id,
-            }
+        descriptor = self._resolve_descriptor(name)
+        if isinstance(descriptor, CapabilityResult):
+            descriptor = self._first_descriptor_match(name)
+        if descriptor is not None:
+            return _capability_spec_payload(descriptor)
         registered = self.capabilities.get(name)
         if registered is None:
             return None
-        descriptor = registered.descriptor
-        return {
-            "canonical_path": descriptor.canonical_path or descriptor.name,
-            "name": descriptor.canonical_path or descriptor.name,
-            "display_name": descriptor.display_name or descriptor.canonical_path or descriptor.name,
-            "family": descriptor.family,
-            "description": descriptor.description,
-            "module_id": descriptor.module_id,
-            "aliases": list(descriptor.aliases),
-            "parameters_schema": dict(descriptor.parameters_schema or {"type": "object", "properties": {}}),
-            "result_schema": dict(descriptor.result_schema or {"type": "object", "properties": {}}),
-            "source": descriptor.source,
-            "target_kind": descriptor.target_kind,
-            "target_id": descriptor.target_id,
-        }
+        return _capability_spec_payload(registered.descriptor)
+
+    def _first_descriptor_match(self, name: str) -> CapabilityDescriptor | None:
+        for index in (self.compiled_capability_index.by_canonical, self.compiled_capability_index.aliases):
+            record_ids = index.get(name, [])
+            for record_id in record_ids:
+                descriptor = self.compiled_capability_index.records.get(record_id)
+                if descriptor is not None:
+                    return descriptor
+        return None
 
     def hydrate_module_handle(self, handle: "ModuleHandle") -> None:
         provider = handle.introspection_provider
@@ -280,6 +231,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         allow_tools: bool = True,
         budget: ToolCallBudget | None = None,
+        turn_id: str | None = None,
     ) -> CanonicalToolResult:
         call_id = getattr(call, "call_id", None)
         try:
@@ -306,7 +258,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
                     status=result.status,
                 )
                 return self._apply_tool_budget(call, canonical_result, budget=budget)
-            capability_result = self.execute(CapabilityCall(name=call.name, args=dict(call.args)))
+            meta = {"turn_id": str(turn_id)} if str(turn_id or "").strip() else {}
+            capability_result = self.execute(CapabilityCall(name=call.name, args=dict(call.args), meta=meta))
             if capability_result.status == RuntimeStatus.ERROR and str(capability_result.text).startswith("unknown capability:"):
                 return CanonicalToolResult(
                     name=call.name,
@@ -347,7 +300,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         turn_id: str | None = None,
     ) -> CanonicalToolResult:
         if not allow_tools:
-            return self.execute_tool(call, allow_tools=allow_tools, budget=budget)
+            return self.execute_tool(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id)
         tool = self.tools.get(call.name)
         if tool is not None:
             async_invoke = getattr(tool, "ainvoke", None)
@@ -378,7 +331,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         executor = self.sync_executor
         return await loop.run_in_executor(
             executor,
-            lambda: self.execute_tool(call, allow_tools=allow_tools, budget=budget),
+            lambda: self.execute_tool(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id),
         )
 
     def _apply_tool_budget(
@@ -560,25 +513,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 )
         registered = self.capabilities.get(call.name)
         if registered is None:
-            alias_matches = self.compiled_capability_index.aliases.get(call.name, [])
-            if alias_matches:
-                if target_id == SINGLETON_TARGET:
-                    descriptors = [self.compiled_capability_index.records[record_id] for record_id in alias_matches]
-                    instance_targets = sorted(
-                        {
-                            descriptor.target_id
-                            for descriptor in descriptors
-                            if descriptor.target_id and descriptor.target_id != SINGLETON_TARGET
-                        }
-                    )
-                    if instance_targets:
-                        return CapabilityResult(
-                            status=RuntimeStatus.INVALID,
-                            text="target_id is required for this capability",
-                            structured={"canonical_path": call.name, "available_target_ids": instance_targets},
-                            llm_text="target_id is required for this capability",
-                        )
-                registered = self.capabilities.get(alias_matches[0])
+            resolved = self._resolve_descriptor(call.name, target_id=target_id)
+            if isinstance(resolved, CapabilityResult):
+                return resolved
+            if resolved is not None:
+                registered = self.capabilities.get(resolved.name)
         if registered is None:
             return CapabilityResult(
                 status=RuntimeStatus.ERROR,
@@ -586,6 +525,61 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 llm_text=f"unknown capability: {call.name}",
             )
         return registered.callable(call)
+
+    def _resolve_descriptor(self, name: str, *, target_id: str = SINGLETON_TARGET) -> CapabilityDescriptor | CapabilityResult | None:
+        candidates: list[CapabilityDescriptor] = []
+        if name in self.compiled_capability_index.by_canonical:
+            candidates.extend(
+                self.compiled_capability_index.records[record_id]
+                for record_id in self.compiled_capability_index.by_canonical[name]
+                if record_id in self.compiled_capability_index.records
+            )
+        if name in self.compiled_capability_index.aliases:
+            candidates.extend(
+                self.compiled_capability_index.records[record_id]
+                for record_id in self.compiled_capability_index.aliases[name]
+                if record_id in self.compiled_capability_index.records
+            )
+        if not candidates:
+            return None
+        unique: dict[str, CapabilityDescriptor] = {descriptor.name: descriptor for descriptor in candidates}
+        candidates = list(unique.values())
+        if target_id != SINGLETON_TARGET:
+            targeted = [descriptor for descriptor in candidates if (descriptor.target_id or SINGLETON_TARGET) == target_id]
+            if len(targeted) == 1:
+                return targeted[0]
+            if len(targeted) > 1:
+                return CapabilityResult(
+                    status=RuntimeStatus.INVALID,
+                    text="capability alias is ambiguous",
+                    structured={"name": name, "target_id": target_id, "matches": [item.name for item in targeted]},
+                    llm_text="capability alias is ambiguous",
+                )
+        singleton = [descriptor for descriptor in candidates if (descriptor.target_id or SINGLETON_TARGET) == SINGLETON_TARGET]
+        if len(singleton) == 1:
+            return singleton[0]
+        if len(singleton) > 1:
+            return CapabilityResult(
+                status=RuntimeStatus.INVALID,
+                text="capability alias is ambiguous",
+                structured={"name": name, "matches": [item.name for item in singleton]},
+                llm_text="capability alias is ambiguous",
+            )
+        instance_targets = sorted(
+            {
+                descriptor.target_id
+                for descriptor in candidates
+                if descriptor.target_id and descriptor.target_id != SINGLETON_TARGET
+            }
+        )
+        if instance_targets:
+            return CapabilityResult(
+                status=RuntimeStatus.INVALID,
+                text="target_id is required for this capability",
+                structured={"name": name, "available_target_ids": instance_targets},
+                llm_text="target_id is required for this capability",
+            )
+        return None
 
     def execute(self, call: CapabilityCall) -> CapabilityResult:
         try:
@@ -673,3 +667,28 @@ def _truncate_linewise(text: str, *, max_lines: int | None) -> tuple[str, bool]:
     kept = "\n".join(lines[:max_lines]).rstrip()
     suffix = f"\n\n[... truncated after {max_lines} lines, original: {len(lines)} lines]"
     return f"{kept}{suffix}".strip(), True
+
+
+def _capability_spec_payload(descriptor: CapabilityDescriptor) -> dict[str, Any]:
+    canonical = descriptor.canonical_path or descriptor.name
+    display = descriptor.display_name or canonical
+    call_names: list[str] = []
+    for value in (canonical, descriptor.name, display, *descriptor.aliases):
+        normalized = str(value or "").strip()
+        if normalized and normalized not in call_names:
+            call_names.append(normalized)
+    return {
+        "canonical_path": canonical,
+        "name": canonical,
+        "display_name": display,
+        "family": descriptor.family,
+        "description": descriptor.description,
+        "module_id": descriptor.module_id,
+        "call_names": call_names,
+        "aliases": list(descriptor.aliases),
+        "parameters_schema": dict(descriptor.parameters_schema or {"type": "object", "properties": {}}),
+        "result_schema": dict(descriptor.result_schema or {"type": "object", "properties": {}}),
+        "source": descriptor.source,
+        "target_kind": descriptor.target_kind,
+        "target_id": descriptor.target_id,
+    }

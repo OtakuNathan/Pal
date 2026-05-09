@@ -50,6 +50,7 @@ class ModuleLifecycle:
         self._restore_provider_refs(handle)
         self._restore_prompt_fragment_providers(handle)
         self._restore_event_sources(handle)
+        self._restore_event_handlers(handle)
         self.publish_module_capabilities(handle.module_id)
         return handle
 
@@ -65,6 +66,8 @@ class ModuleLifecycle:
             self.withdraw_module_capabilities(module_id)
             self.context.prompt_fragment_registry.unregister_module(module_id)
             self.context.event_source_registry.detach_module(module_id)
+            self.context.event_handler_registry.detach_module(module_id)
+            self.context.control_action_registry.unregister_module(module_id)
             for provider_id in list(handle.provider_refs):
                 self.context.execution_runtime.unregister_provider_ref(provider_id)
                 if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is not None:
@@ -87,6 +90,8 @@ class ModuleLifecycle:
             self._restore_provider_refs(handle)
             self._restore_prompt_fragment_providers(handle)
             self._restore_event_sources(handle)
+            self._restore_event_handlers(handle)
+            self._restore_control_action_handlers(handle)
             self.publish_module_capabilities(module_id)
         self.state.detached_modules.discard(module_id)
         return RuntimeStatus.OK
@@ -103,6 +108,15 @@ class ModuleLifecycle:
     def _restore_event_sources(self, handle) -> None:
         for source in handle.event_sources:
             self.context.event_source_registry.attach(handle.module_id, source)
+
+    def _restore_event_handlers(self, handle) -> None:
+        for event_kind, handlers in handle.event_handlers.items():
+            for handler in handlers:
+                self.context.event_handler_registry.register(event_kind, handler, module_id=handle.module_id)
+
+    def _restore_control_action_handlers(self, handle) -> None:
+        for action_kind, handler in handle.control_action_handlers.items():
+            self.context.control_action_registry.register(handle.module_id, action_kind, handler)
 
     def _restore_prompt_fragment_providers(self, handle) -> None:
         for provider in handle.prompt_fragment_providers:

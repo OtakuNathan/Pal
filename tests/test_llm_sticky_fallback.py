@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -60,7 +61,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                 self.assertEqual(runtime.active_endpoint_id, "working")
                 self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "working")
             finally:
-                handle.database.close()
+                asyncio.run(handle.stop_async())
 
     def test_set_active_endpoint_switches_runtime_preference(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -81,7 +82,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                 self.assertEqual(result.structured["endpoint_id"], "beta")
                 self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "beta")
             finally:
-                handle.database.close()
+                asyncio.run(handle.stop_async())
 
 
 if __name__ == "__main__":

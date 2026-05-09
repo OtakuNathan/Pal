@@ -1,0 +1,5 @@
+plugin_id = "minion"
+entrypoint = "pal.plugins_builtin.minion.runtime"
+version = "0.1.0"
+enabled_by_default = true
+reload_modules = ["pal.minion"]

@@ -136,7 +136,7 @@ flowchart LR
     CK --> LED["Ledger"]
     LED --> PAL["Pal Observation / Control"]
     PAL -->|continue| W
-    PAL -->|replace| W2["New minions"]
+    PAL -->|kill + spawn from checkpoint| W2["New minions"]
     PAL -->|terminate| STOP["minions Terminated"]
 ```
 
@@ -174,20 +174,33 @@ flowchart LR
 - allowed tools
 - constraints
 
+## Work Order Draft
+
+Work order draft 是正式 work order 之前的 planning artifact。它用于收住用户脑暴、模块边界、候选 milestones、acceptance criteria 和 workspace hints。
+
+Draft 不是进度事实，也不是 checkpoint。推荐路径是：
+
+- `Pal` 根据对话起草 draft
+- planner 只 review 这个 bounded draft
+- 用户或 `Pal` 确认后 promote 成 formal work order
+- spawn 时从 formal work order 生成 `TaskContextPack`
+
 ## Checkpoint
 
 `checkpoint` 是 continuity 的一等对象。
 
-它不是可有可无的日志，而是 minions continuity 的恢复点。
+它不是可有可无的日志，而是 milestone cursor 的事实记录。
 
 checkpoint 至少表达：
 
+- milestone index
+- status: completed / partial / blocked
 - progress summary
-- completed steps
-- next resume point
 - repo/workspace state summary
 - key artifacts
 - verification snapshot
+
+`status=completed` 推进 derived current milestone。`partial/blocked` 只记录现场，不推进 cursor。不要维护第二套 `next_resume_point`。
 
 ## Ledger
 
@@ -198,7 +211,7 @@ checkpoint 至少表达：
 - minions accepted
 - minions progress updates
 - checkpoint emission
-- minions replacement
+- minions kill / respawn
 - minions termination
 - final closeout
 
@@ -266,21 +279,34 @@ continuity 不绑定单个 minions 进程。
 
 ## Tasking Capability Surface
 
-`tasking` 必须至少注册这些 capability：
+当前 minion subsystem 暴露给 `Pal` 的 capability shape 是：
 
-- `tasking.plan.*`
-- `tasking.work_order.*`
-- `tasking.minions.observe`
-- `tasking.minions.checkpoint.read`
-- `tasking.minions.terminate`
-- `tasking.minions.replace`
-- `tasking.workspace.inspect`
+- `intro_task_search`
+- `intro_task_read`
+- `intro_work_order_search`
+- `intro_work_order_read`
+- `intro_work_order_draft_search`
+- `intro_work_order_draft_read`
+- `intro_minion_list`
+- `intro_minion_read`
+- `intro_minion_profile_list`
+- `intro_minion_profile_read`
+- `op_minion_draft_work_order`
+- `op_minion_promote_work_order_draft`
+- `op_minion_spawn`
+- `op_minion_kill`
+- `op_minion_finalize`
 
 其中：
 
-- `tasking.minions.observe` 允许 `Pal` 读取 minions 当前状态
-- `tasking.minions.terminate` 允许 `Pal` 杀死 minions
-- `tasking.minions.replace` 允许 `Pal` 基于 checkpoint 拉起新 minions
+- `intro_*` 允许 `Pal` 读取任务、work order、draft、profile 和 active runner 状态
+- `op_minion_spawn` 是唯一启动入口
+- `op_minion_kill` 是正常治理动作
+- 没有单独的 replace capability；替换就是 `kill` 后用 checkpoint continuity 重新 `spawn`
+
+这些 capability 暴露给 `Pal`，不暴露给 runner。runner 不能看到 `intro_*` 或 `op_minion_*`，也不能递归 spawn 新 runner。
+
+runner 的能力池可以从 `Pal` 当前 capability registry 继承后过滤，但 LLM-facing tool surface 应保持小：暴露 discovery/read/call 元工具，以及少量常驻干活工具（`op_exec_run`、`op_web_search_query`、`op_web_fetch_read`、只读 `op_l3_recall_query`）。discovery/read 必须只返回该 runner 已允许且未被黑名单过滤的 capability。
 
 ## minions Observation Contract
 
@@ -306,7 +332,7 @@ continuity 不绑定单个 minions 进程。
 - runaway / hung minions
 - approval 被拒绝
 - health check fail
-- maintenance replacement
+- maintenance kill / respawn
 
 终止后必须写 ledger，并保留：
 
@@ -342,11 +368,11 @@ continuity 不绑定单个 minions 进程。
 
 minions approval 请求必须进入 `Control`。
 
-minions 终止和替换虽然属于 tasking capability，但仍可能受 control governance 约束，尤其在：
+minions 终止和重新 spawn 虽然属于 tasking capability，但仍可能受 control governance 约束，尤其在：
 
 - 用户显式取消
 - 高风险 maintenance
-- destructive replacement
+- destructive workspace handoff
 
 ## Invariants
 
@@ -357,7 +383,7 @@ minions 终止和替换虽然属于 tasking capability，但仍可能受 control
 - `tasking` 默认使用 git-based approximate sandbox。
 - `Pal` 必须能观察 minions 状态。
 - `Pal` 必须能终止 minions。
-- 专业性强或 maintenance 级任务必须进入 `tasking / minions`。
+- 专业性强、可异步、可由 SPEC/work order/milestone 收束，且与用户即时互动弱的任务，可以由 advisor 建议进入 `minion`。
 
 ## Non-Goals
 

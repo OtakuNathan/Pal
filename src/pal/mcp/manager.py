@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pal.channel.endpoints.socket_protocol import pack_socket_message, read_socket_message
 from pal.foundation import utc_now
+from pal.foundation.sidecar import dispatch_sidecar_request, handle_sidecar_client
 from pal.mcp.config import McpServerFileConfig, load_mcp_server_file
 from pal.mcp.connector import AsyncStdioMcpConnector
 from pal.mcp.ipc import cleanup_manager_endpoint, mcp_config_root, start_manager_server
@@ -63,38 +63,15 @@ class McpManager:
                 self.logger.info("mcp manager stopped")
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        try:
-            while True:
-                try:
-                    request = await read_socket_message(reader)
-                except asyncio.IncompleteReadError:
-                    return
-                response = await self._dispatch(request)
-                writer.write(pack_socket_message(response))
-                await writer.drain()
-        except (ConnectionError, OSError, ValueError):
-            return
-        finally:
-            writer.close()
-            with contextlib.suppress(Exception):
-                await writer.wait_closed()
+        await handle_sidecar_client(reader, writer, self._dispatch)
 
     async def _dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
-        request_id = str(request.get("id") or "")
-        method = str(request.get("method") or "")
-        params = dict(request.get("params") or {})
-        try:
-            result = await self._call_method(method, params)
-            return {"type": "response", "id": request_id, "ok": True, "result": result}
-        except Exception as exc:
-            self.logger.exception("mcp manager request failed: %s", method)
-            kind = "protocol" if isinstance(exc, McpProtocolError) else "manager"
-            return {
-                "type": "response",
-                "id": request_id,
-                "ok": False,
-                "error": {"kind": kind, "message": f"{exc.__class__.__name__}: {exc}"},
-            }
+        return await dispatch_sidecar_request(
+            request,
+            self._call_method,
+            error_kind=lambda exc: "protocol" if isinstance(exc, McpProtocolError) else "manager",
+            logger=self.logger,
+        )
 
     async def _call_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if method == "health":

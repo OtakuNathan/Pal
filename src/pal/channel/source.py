@@ -17,10 +17,6 @@ class ChannelEventSource(EventSource):
         self.runtime.flush_outbox()
         return self.runtime.mailbox.has_pending()
 
-    def poll_timeout_ms(self, context) -> int | None:
-        _ = context
-        return 0 if self.runtime.mailbox.has_pending() or self.runtime.outbox else None
-
     def drain(self, context) -> list:
         _ = context
         self.runtime.flush_outbox()

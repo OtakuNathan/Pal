@@ -1,33 +1,269 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
+from uuid import uuid4
 
-from pal.core.events import EventSource
+from pal.control import ControlAction, ControlRoute, InteractionButtonSpec, InteractionMessageSpec
+from pal.core.events import EventHandler, EventSource
 from pal.foundation import EventEnvelope
-from pal.minion.service import TaskingService
+from pal.shared import EventKind, SourceKind
 
 
 @dataclass
 class MinionEventSource(EventSource):
-    service: TaskingService
-    source_id: str = "tasking.minion"
+    provider: object
+    source_id: str = "minion.manager"
+    drain_limit: int = 20
 
     def prepare(self, context) -> bool:
         _ = context
-        return self.service.minion_mailbox.has_pending()
-
-    def poll_timeout_ms(self, context) -> int | None:
-        _ = context
-        return 0 if self.service.minion_mailbox.has_pending() else None
+        has_pending = getattr(self.provider, "has_pending_events", None)
+        return bool(has_pending()) if callable(has_pending) else False
 
     def drain(self, context) -> list[EventEnvelope]:
         _ = context
-        events = [
-            EventEnvelope(
-                event_kind=item.event_name,
-                source_kind="minion",
-                payload=item.payload,
+        drain = getattr(self.provider, "drain_events_sync", None)
+        if not callable(drain):
+            return []
+        payload = drain(limit=self.drain_limit)
+        events = []
+        for item in list(payload.get("events") or []):
+            if not isinstance(item, dict):
+                continue
+            event_kind = _event_kind_for_minion_event(str(item.get("event_kind") or ""))
+            events.append(
+                EventEnvelope(
+                    event_kind=event_kind,
+                    source_kind=SourceKind.MINION,
+                    payload=_payload_for_event(event_kind, item),
+                )
             )
-            for item in self.service.minion_mailbox.drain()
-        ]
         return events
+
+
+@dataclass
+class MinionControlEventHandler(EventHandler):
+    def can_handle(self, event_kind: str) -> bool:
+        return event_kind in {
+            EventKind.APPROVAL_REQUEST,
+            EventKind.MINION_PROGRESS,
+            EventKind.MINION_CHECKPOINT,
+            EventKind.MINION_TERMINAL,
+        }
+
+    def handle(self, event: EventEnvelope, context) -> list[EventEnvelope]:
+        _ = context
+        payload = dict(event.payload or {}) if isinstance(event.payload, dict) else {}
+        route = _route_from_payload(payload.get("route"))
+        if route is None:
+            return []
+        if event.event_kind == EventKind.APPROVAL_REQUEST:
+            spec = _build_minion_approval_interaction(payload, route)
+            action = ControlAction(
+                action_kind="interactive_open",
+                target_scope="interaction",
+                target_id=str(payload.get("approval_id") or f"approval_{uuid4().hex[:8]}"),
+                route=route,
+                args={
+                    "kind": "approval_request",
+                    "interaction": _interaction_payload(spec),
+                },
+                notes="minion approval request",
+            )
+        elif event.event_kind == EventKind.MINION_PROGRESS:
+            # Progress is high-cardinality telemetry for the manager ledger, not a chat notification.
+            return []
+        elif event.event_kind in {EventKind.MINION_CHECKPOINT, EventKind.MINION_TERMINAL}:
+            text = _render_minion_event_notification(event.event_kind, payload)
+            if not text:
+                return []
+            action = ControlAction(
+                action_kind="route_reply",
+                target_scope="channel",
+                target_id=str(payload.get("run_id") or payload.get("minion_id") or ""),
+                route=route,
+                args={"text": text},
+                notes="minion event notification",
+            )
+        else:
+            return []
+        return [
+            EventEnvelope(
+                event_kind=EventKind.CONTROL_ACTION,
+                source_kind=SourceKind.CONTROL,
+                payload=action,
+                correlation_id=event.correlation_id,
+            )
+        ]
+
+
+def _event_kind_for_minion_event(event_kind: str) -> str:
+    if event_kind == "approval_requested":
+        return EventKind.APPROVAL_REQUEST
+    if event_kind == "terminal":
+        return EventKind.MINION_TERMINAL
+    if event_kind == "checkpoint":
+        return EventKind.MINION_CHECKPOINT
+    return EventKind.MINION_PROGRESS
+
+
+def _payload_for_event(event_kind: str, item: dict) -> dict:
+    payload = dict(item.get("payload") or {})
+    payload.setdefault("event_kind", item.get("event_kind") or "")
+    payload.setdefault("minion_id", item.get("minion_id") or "")
+    payload.setdefault("run_id", item.get("run_id") or "")
+    payload.setdefault("work_order_id", item.get("work_order_id") or "")
+    payload.setdefault("minion_profile", item.get("minion_profile") or "")
+    payload.setdefault("created_at", item.get("created_at") or "")
+    route = payload.get("route")
+    if not isinstance(route, dict):
+        route = dict((payload.get("metadata") or {}).get("control_route") or {})
+    if route:
+        payload["route"] = route
+    return payload
+
+
+def _build_minion_approval_interaction(payload: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec:
+    approval_id = str(payload.get("approval_id") or f"approval_{uuid4().hex[:8]}")
+    return InteractionMessageSpec(
+        interaction_id=approval_id,
+        interaction_kind="approval_request",
+        route=route,
+        text=_render_minion_approval_text(payload),
+        buttons=(
+            (
+                InteractionButtonSpec(
+                    label="Accept",
+                    action_key="control.action.dispatch",
+                    action_args=_minion_approval_action_payload(payload, "accept"),
+                ),
+                InteractionButtonSpec(
+                    label="Reject",
+                    action_key="control.action.dispatch",
+                    action_args=_minion_approval_action_payload(payload, "reject"),
+                ),
+                InteractionButtonSpec(
+                    label="Edit",
+                    action_key="control.action.dispatch",
+                    action_args=_minion_approval_action_payload(payload, "edit"),
+                ),
+            ),
+        ),
+    )
+
+
+def _interaction_payload(spec: InteractionMessageSpec) -> dict[str, Any]:
+    return {
+        "interaction_id": spec.interaction_id,
+        "interaction_kind": spec.interaction_kind,
+        "text": spec.text,
+        "buttons": [
+            [
+                {"label": button.label, "action_key": button.action_key, "action_args": dict(button.action_args)}
+                for button in row
+            ]
+            for row in spec.buttons
+        ],
+        "expires_at": spec.expires_at,
+    }
+
+
+def _minion_approval_action_payload(payload: dict[str, Any], decision: str) -> dict[str, Any]:
+    approval_id = str(payload.get("approval_id") or "")
+    return {
+        "action_kind": "minion_approval_decision",
+        "target_scope": "minion",
+        "target_id": approval_id,
+        "args": {
+            "approval_id": approval_id,
+            "run_id": str(payload.get("run_id") or ""),
+            "minion_id": str(payload.get("minion_id") or ""),
+            "decision": decision,
+        },
+    }
+
+
+def _render_minion_approval_text(payload: dict[str, Any]) -> str:
+    args_summary = payload.get("args_summary")
+    if not isinstance(args_summary, dict):
+        args_summary = {}
+    lines = [
+        "Minion approval request",
+        "",
+        f"Title: {payload.get('title') or 'High-risk operation'}",
+        f"Run: {payload.get('run_id') or '-'}",
+        f"Work order: {payload.get('work_order_id') or '-'}",
+        f"Requested action: {payload.get('requested_action') or payload.get('target') or '-'}",
+        f"Risk: {payload.get('risk') or 'high'}",
+    ]
+    impact = str(payload.get("impact") or "").strip()
+    if impact:
+        lines.append(f"Impact: {impact}")
+    target = str(payload.get("target") or "").strip()
+    if target:
+        lines.append(f"Target: {target}")
+    if args_summary:
+        rendered = ", ".join(f"{key}={value}" for key, value in sorted(args_summary.items()))
+        if rendered:
+            lines.append(f"Args: {rendered}")
+    return "\n".join(lines)
+
+
+def _render_minion_event_notification(event_kind: str, payload: dict[str, Any]) -> str:
+    profile = str(payload.get("minion_profile") or "minion")
+    run_id = str(payload.get("run_id") or "")
+    work_order_id = str(payload.get("work_order_id") or "")
+    if event_kind == EventKind.MINION_CHECKPOINT:
+        status = str(payload.get("status") or "checkpoint")
+        milestone = payload.get("milestone_index")
+        summary = str(payload.get("summary") or "").strip()
+        lines = [f"Minion checkpoint: {status}", f"Profile: {profile}"]
+        if run_id:
+            lines.append(f"Run: {run_id}")
+        if work_order_id:
+            lines.append(f"Work order: {work_order_id}")
+        if milestone is not None:
+            lines.append(f"Milestone: {milestone}")
+        if summary:
+            lines.append(f"Summary: {summary}")
+        return "\n".join(lines)
+    if event_kind == EventKind.MINION_PROGRESS:
+        phase = str(payload.get("phase") or payload.get("event_kind") or "progress")
+        summary = str(payload.get("summary") or "").strip()
+        lines = [f"Minion progress: {phase}", f"Profile: {profile}"]
+        if run_id:
+            lines.append(f"Run: {run_id}")
+        if work_order_id:
+            lines.append(f"Work order: {work_order_id}")
+        if summary and summary != phase:
+            lines.append(f"Summary: {summary}")
+        return "\n".join(lines)
+    if event_kind == EventKind.MINION_TERMINAL:
+        status = str(payload.get("status") or "terminal")
+        summary = str(payload.get("summary") or "").strip()
+        lines = [f"Minion finished: {status}", f"Profile: {profile}"]
+        if run_id:
+            lines.append(f"Run: {run_id}")
+        if work_order_id:
+            lines.append(f"Work order: {work_order_id}")
+        if summary:
+            lines.append(f"Summary: {summary}")
+        return "\n".join(lines)
+    return ""
+
+
+def _route_from_payload(payload: object) -> ControlRoute | None:
+    if not isinstance(payload, dict):
+        return None
+    endpoint_id = str(payload.get("endpoint_id") or "").strip()
+    channel_kind = str(payload.get("channel_kind") or "").strip()
+    if not endpoint_id or not channel_kind:
+        return None
+    return ControlRoute(
+        endpoint_id=endpoint_id,
+        channel_kind=channel_kind,
+        reply_target=dict(payload.get("reply_target") or {}),
+        control_scope_key=str(payload.get("control_scope_key") or ""),
+        correlation_id=str(payload.get("correlation_id") or "") or None,
+    )

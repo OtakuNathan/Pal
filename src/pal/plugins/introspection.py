@@ -64,7 +64,11 @@ class PluginsIntrospectionProvider:
         scope="module",
         family="management",
         action_name="attach",
-        description="Attach a plugin to the current runtime",
+        description=(
+            "Attach a plugin to the current runtime. First-party plugins that are disabled by default can be attached "
+            "temporarily; if the result is forbidden with reason=plugin_disabled, call op_plugin_mgmt_enable for that plugin_id."
+        ),
+        aliases=("attach plugin", "load enabled plugin"),
         args_schema={"type": "object", "properties": {"plugin_id": {"type": "string"}}, "required": ["plugin_id"]},
     )
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
@@ -98,7 +102,8 @@ class PluginsIntrospectionProvider:
         scope="module",
         family="management",
         action_name="enable",
-        description="Enable a plugin",
+        description="Enable and attach a plugin that is currently disabled, including disabled first-party plugins such as mcp.",
+        aliases=("enable plugin", "turn on plugin", "enable mcp plugin", "turn on mcp"),
         args_schema={"type": "object", "properties": {"plugin_id": {"type": "string"}}, "required": ["plugin_id"]},
     )
     def enable(self, call: IntrospectionCall) -> IntrospectionResult:

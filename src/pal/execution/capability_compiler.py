@@ -170,7 +170,7 @@ def _underscore_canonical_path(
     if bool(action_blueprint.metadata.get("omit_family_in_canonical")):
         return f"{namespace}_{canonical_module_id}_{action_blueprint.action_name}"
     family = _abbreviate_canonical_family(action_blueprint.family or "operation")
-    if family == canonical_module_id:
+    if family in {"operation", canonical_module_id}:
         return f"{namespace}_{canonical_module_id}_{action_blueprint.action_name}"
     return f"{namespace}_{canonical_module_id}_{family}_{action_blueprint.action_name}"
 

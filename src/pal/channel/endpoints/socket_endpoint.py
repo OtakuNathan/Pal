@@ -67,6 +67,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     socket_path: Path | None = None
     server: asyncio.base_events.Server | None = None
     sessions: dict[str, _SocketSession] = field(default_factory=dict)
+    _streamed_text_handles: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         if self.socket_path is None:
@@ -186,16 +187,14 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
         session = self._require_session(response_handle)
         request_id = str(response_handle.reply_target.get("request_id") or "")
-        already_streamed = getattr(response_handle, "_streamed_to_client", False)
-        if not already_streamed:
-            session.outbound.put_nowait({"type": "text_delta", "request_id": request_id, "text": text})
+        session.outbound.put_nowait({"type": "text_delta", "request_id": request_id, "text": text})
         session.outbound.put_nowait({"type": "done", "request_id": request_id, "finish_reason": "stop"})
 
     def send_stream_event(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
         session = self._require_session(response_handle)
         super().send_stream_event(response_handle, event)
         if event.text:
-            response_handle._streamed_to_client = True
+            self._streamed_text_handles.add(id(response_handle))
         session.outbound.put_nowait(_stream_payload(response_handle, event))
 
     def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
@@ -214,6 +213,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
 
     def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
         super().abort_stream(response_handle, reason=reason)
+        self._streamed_text_handles.discard(id(response_handle))
         with contextlib.suppress(SocketSessionClosed):
             session = self._require_session(response_handle)
             request_id = str(response_handle.reply_target.get("request_id") or "")
@@ -221,7 +221,12 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             session.outbound.put_nowait({"type": "llm_done", "request_id": request_id, "finish_reason": str(reason)})
 
     def prepare_final_reply(self, response_handle: ResponseHandle, text: str) -> str | None:
-        return super().prepare_final_reply(response_handle, text)
+        streamed_text = id(response_handle) in self._streamed_text_handles
+        prepared = super().prepare_final_reply(response_handle, text)
+        if streamed_text:
+            self._streamed_text_handles.discard(id(response_handle))
+            return None
+        return prepared
 
     def inspect_health(self) -> dict[str, Any]:
         return {

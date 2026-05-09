@@ -441,6 +441,8 @@ class LLMRuntime(LLMRuntimePort):
         endpoint = self.endpoint_resolver.primary(preferred_endpoint_id=preferred_endpoint_id or self.active_endpoint_id)
         if endpoint is not None and endpoint.max_output_tokens is not None:
             return endpoint.max_output_tokens
+        if endpoint is not None and endpoint.context_window is not None:
+            return self._max_output_tokens_from_context_window(endpoint.context_window)
         return None
 
     def _invoke_endpoints_with_retry(
@@ -844,6 +846,14 @@ class LLMRuntime(LLMRuntimePort):
                 int(context_window * float(getattr(self.config, "context_margin_factor", 0.05))),
             ),
         )
+
+    def _max_output_tokens_from_context_window(self, context_window: int) -> int:
+        cap = int(getattr(self.config, "default_max_output_tokens", 25_000) or 25_000)
+        floor = int(getattr(self.config, "fallback_max_output_tokens", 4096) or 4096)
+        margin = self._context_margin_tokens(int(context_window))
+        usable = max(512, int(context_window) - margin)
+        context_fraction = max(512, int(context_window) // 4)
+        return max(512, min(cap, max(floor, context_fraction), usable))
 
     def _chars_per_token(self) -> float:
         if self.config is None:

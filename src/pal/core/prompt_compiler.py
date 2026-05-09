@@ -144,18 +144,6 @@ class PromptCompiler:
                 )
 
         system_blocks.extend(self._build_runtime_overlay_blocks(assembly_context))
-        if assembly_context.turn_kind == "service_trigger":
-            system_blocks.append(
-                PromptIRBlock(
-                    block_id="runtime_overlay",
-                    title="Runtime Overlay",
-                    content=(
-                        "### Task Directive\n"
-                        "This is a scheduled service trigger. Execute the described task now and output the result directly.\n"
-                        "Do not create, configure, or describe services. Perform the action."
-                    ),
-                )
-            )
 
         ordered_system_blocks = self._order_system_blocks(system_blocks)
         ordered_user_blocks = self._order_user_context_blocks(user_context_blocks, turn_kind=assembly_context.turn_kind)
@@ -452,15 +440,6 @@ class PromptCompiler:
             service_input = assembly_context.metadata.get("service_input")
             if isinstance(service_input, str) and service_input.strip():
                 return service_input.strip()
-            service_definition = assembly_context.metadata.get("service_definition")
-            if service_definition is not None:
-                try:
-                    from pal.service import ServiceDefinition, build_service_trigger_input
-
-                    if isinstance(service_definition, ServiceDefinition):
-                        return build_service_trigger_input(service_definition).strip()
-                except Exception:
-                    pass
         return self._extract_user_message_text(assembly_context.event)
 
     def _extract_user_message_text(self, event) -> str:

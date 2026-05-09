@@ -16,7 +16,10 @@ class ControlEventHandler(EventHandler):
     control_plane: ControlPlane
 
     def can_handle(self, event_kind: str) -> bool:
-        return event_kind in {EventKind.SLASH_COMMAND, EventKind.INTERACTION_RESULT, EventKind.APPROVAL_REQUEST}
+        return event_kind in {
+            EventKind.SLASH_COMMAND,
+            EventKind.INTERACTION_RESULT,
+        }
 
     def handle(self, event: EventEnvelope, context) -> list[EventEnvelope] | None:
         _ = context

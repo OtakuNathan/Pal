@@ -14,7 +14,6 @@ from pal.failure.contracts import (
     VerificationResult,
 )
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolCall, CanonicalToolResult
-from pal.service import ServiceDefinition, ServiceTriggerEvent, build_service_trigger_input
 from pal.shared import EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus
 from pal.shared.payloads import extract_text_from_payload
 from pal.memory import L1TranscriptMessage
@@ -261,110 +260,6 @@ def _build_turn_transcript(
     transcript: list[L1TranscriptMessage] = []
     if user_text:
         transcript.append(L1TranscriptMessage(role="user", content=user_text))
-    tool_summary = _render_tool_summary(observations or [])
-    replies = tuple(str(item).strip() for item in (reply_texts or (final_reply,)) if str(item).strip())
-    for index, assistant_content in enumerate(replies):
-        transcript.append(
-            L1TranscriptMessage(
-                role="assistant",
-                content=assistant_content,
-                tool_trace=(tool_summary or None) if index == len(replies) - 1 else None,
-            )
-        )
-    return transcript
-
-
-def service_turn_program(
-    trigger: ServiceTriggerEvent,
-    definition: ServiceDefinition,
-    *,
-    core_mode: str = "default",
-    max_output_tokens: int = 1024,
-    reply_envelope: ChannelEnvelope | None = None,
-) -> TurnProgram:
-    observations: list[ToolObservation] = []
-    reply_texts: list[str] = []
-    compact_note = ""
-    service_input = build_service_trigger_input(definition)
-    while True:
-        metadata = {
-            "service_definition": definition,
-            "service_input": service_input,
-            "service_trigger": trigger,
-            "compact_note": compact_note,
-        }
-        assembly_context = PromptAssemblyContext(
-            core_mode=core_mode,
-            turn_kind="service_trigger",
-            metadata=metadata,
-        )
-        advice = yield LLMPreflightEffect(
-            assembly_context=assembly_context,
-            max_output_tokens=max_output_tokens,
-        )
-        compact_note = ""
-        if getattr(advice.payload, "status", "") == LLMPreflightStatus.COMPACT_REQUIRED:
-            compact_result = yield MemoryCompactEffect(
-                assembly_context=assembly_context,
-                target_input_budget=getattr(advice.payload, "target_input_budget", 0),
-                reserved_output_tokens=getattr(advice.payload, "reserved_output_tokens", 0),
-            )
-            compact_note = str(compact_result.payload.summary) if compact_result.payload is not None else ""
-            continue
-        outcome_result = yield LLMRequestEffect(
-            assembly_context=assembly_context,
-            max_output_tokens=max_output_tokens,
-        )
-        outcome = _as_llm_outcome(outcome_result.payload)
-        if outcome is not None and outcome.finish_reason == LLMFinishReason.COMPACT_REQUIRED:
-            compact_result = yield MemoryCompactEffect(
-                assembly_context=assembly_context,
-                target_input_budget=outcome.target_input_budget,
-                reserved_output_tokens=outcome.reserved_output_tokens,
-            )
-            compact_note = str(compact_result.payload.summary) if compact_result.payload is not None else ""
-            continue
-        if outcome is not None and outcome.tool_calls:
-            mid_text = str(outcome.text or "").strip()
-            if mid_text:
-                if reply_envelope is not None:
-                    reply_result = yield MailboxReplyEffect(channel_envelope=reply_envelope, text=mid_text)
-                    if reply_result.status == RuntimeStatus.QUEUED:
-                        reply_texts.append(reply_result.text or mid_text)
-                else:
-                    reply_texts.append(mid_text)
-            for tool_call in outcome.tool_calls:
-                tool_result = yield ToolCallEffect(tool_call=tool_call)
-                _append_tool_observation(observations, tool_result.payload)
-            continue
-        final_reply = str(outcome.text or "") if outcome is not None else ""
-        if reply_envelope is not None:
-            reply_result = yield MailboxReplyEffect(channel_envelope=reply_envelope, text=final_reply)
-            if reply_result.status != RuntimeStatus.QUEUED:
-                final_reply = reply_result.text or final_reply
-        if final_reply.strip():
-            reply_texts.append(final_reply)
-        return TurnOutcome(
-            turn_id=str(trigger.metadata.get("turn_id") or trigger.service_id),
-            final_reply=final_reply,
-            commit_payload=L1CommitPayload(
-                turn_id=str(trigger.metadata.get("turn_id") or trigger.service_id),
-                transcript=_build_service_turn_transcript(service_input, final_reply, observations=observations, reply_texts=reply_texts),
-                tool_observations=list(observations),
-            ),
-            reply_texts=tuple(reply_texts),
-        )
-
-
-def _build_service_turn_transcript(
-    service_input: str,
-    final_reply: str,
-    observations: list[ToolObservation] | None = None,
-    reply_texts: list[str] | tuple[str, ...] | None = None,
-) -> list[L1TranscriptMessage]:
-    transcript: list[L1TranscriptMessage] = []
-    if service_input.strip():
-        transcript.append(L1TranscriptMessage(role="user", content=service_input.strip()))
     tool_summary = _render_tool_summary(observations or [])
     replies = tuple(str(item).strip() for item in (reply_texts or (final_reply,)) if str(item).strip())
     for index, assistant_content in enumerate(replies):

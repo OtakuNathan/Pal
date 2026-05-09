@@ -11,9 +11,6 @@ class EventSource(Protocol):
     def prepare(self, context: "MainContext") -> bool:
         ...
 
-    def poll_timeout_ms(self, context: "MainContext") -> int | None:
-        ...
-
     def drain(self, context: "MainContext") -> list[EventEnvelope]:
         ...
 

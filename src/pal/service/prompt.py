@@ -13,14 +13,17 @@ class ServicePromptFragmentProvider(PromptFragmentProvider):
     module_id: str = "service"
 
     def build_prompt_fragments(self, context: PromptAssemblyContext) -> list[PromptFragment]:
-        _ = context
-        registered = sorted(self.manager.registered)
-        content = "Registered services: " + (", ".join(registered) if registered else "none")
+        _ = self.manager
+        if context.turn_kind != "service_trigger":
+            return []
         return [
             PromptFragment(
-                section="service",
-                title="Service Context",
-                content=content,
-                priority=40,
+                section="runtime",
+                title="Task Directive",
+                content=(
+                    "This is a scheduled service trigger. Execute the described task now and output the result directly.\n"
+                    "Do not create, configure, or describe services. Perform the action."
+                ),
+                priority=95,
             )
         ]

@@ -46,7 +46,11 @@ from pal.shared.prompting import (
 )
 from pal.shared.messages import (
     CheckpointEvent,
+    MinionApprovalDecision,
+    MinionApprovalRequest,
+    MinionEvent,
     MinionProgressEvent,
+    MinionRun,
     MinionTerminalEvent,
     ServiceTriggerEvent,
     TaskContextPack,
@@ -75,7 +79,11 @@ __all__ = [
     "LLMResponseMode",
     "LLMStreamEventKind",
     "MountedSubtreeHandle",
+    "MinionApprovalDecision",
+    "MinionApprovalRequest",
+    "MinionEvent",
     "MinionProgressEvent",
+    "MinionRun",
     "MinionTerminalEvent",
     "OPERATION_NAMESPACE",
     "IntrospectionPort",

@@ -18,17 +18,18 @@ Older design notes are historical references. These docs are the active baseline
 10. [pal_control_plane.md](pal_control_plane.md)
 11. [pal_introspection_contract.md](pal_introspection_contract.md)
 12. [pal_tasking_contract.md](pal_tasking_contract.md)
-13. [pal_service_contract.md](pal_service_contract.md)
-14. [pal_memory_contract.md](pal_memory_contract.md)
-15. [pal_failure_reporting_contract.md](pal_failure_reporting_contract.md)
-16. [pal_migration_map.md](pal_migration_map.md)
-17. [pal_web_search_contract.md](pal_web_search_contract.md)
-18. [pal_web_fetch_contract.md](pal_web_fetch_contract.md)
-19. [pal_tool_surface.md](pal_tool_surface.md)
-20. [pal_mcp_contract.md](pal_mcp_contract.md)
-21. [capability_forest_structure.md](capability_forest_structure.md)
-22. [turn_runtime_structure.md](turn_runtime_structure.md)
-23. [pal_approval_access_design.md](pal_approval_access_design.md)
+13. [pal_minion_v1.md](pal_minion_v1.md)
+14. [pal_service_contract.md](pal_service_contract.md)
+15. [pal_memory_contract.md](pal_memory_contract.md)
+16. [pal_failure_reporting_contract.md](pal_failure_reporting_contract.md)
+17. [pal_migration_map.md](pal_migration_map.md)
+18. [pal_web_search_contract.md](pal_web_search_contract.md)
+19. [pal_web_fetch_contract.md](pal_web_fetch_contract.md)
+20. [pal_tool_surface.md](pal_tool_surface.md)
+21. [pal_mcp_contract.md](pal_mcp_contract.md)
+22. [capability_forest_structure.md](capability_forest_structure.md)
+23. [turn_runtime_structure.md](turn_runtime_structure.md)
+24. [pal_approval_access_design.md](pal_approval_access_design.md)
 
 ## Document Map
 
@@ -44,6 +45,7 @@ Older design notes are historical references. These docs are the active baseline
 - `pal_control_plane.md`: explicit control, approval, and governance flows.
 - `pal_introspection_contract.md`: self-observation, diagnostics, self-maintenance, and extensibility.
 - `pal_tasking_contract.md`: tasking, minions, checkpoints, ledgers, and workspace governance.
+- `pal_minion_v1.md`: implemented minion sidecar boundary, approval flow, tasking store, checkpoint cursor, and capability surface.
 - `pal_service_contract.md`: services, schedules, service runs, and output-channel constraints.
 - `pal_memory_contract.md`: L1/L2/L3 memory and memory lifecycle.
 - `pal_failure_reporting_contract.md`: developer escalation after self-repair failure.

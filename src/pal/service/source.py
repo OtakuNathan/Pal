@@ -18,10 +18,6 @@ class ServiceEventSource(EventSource):
         self.manager.enqueue_due_triggers()
         return self.manager.trigger_mailbox.has_pending()
 
-    def poll_timeout_ms(self, context) -> int | None:
-        _ = context
-        return 0 if self.manager.trigger_mailbox.has_pending() else None
-
     def drain(self, context) -> list[EventEnvelope]:
         _ = context
         events = [

@@ -29,6 +29,7 @@ class PluginManifest:
     enabled_by_default: bool = True
     filesystem_path: str = ""
     subscribed_events: tuple[str, ...] = ()
+    reload_modules: tuple[str, ...] = ()
 
 
 @dataclass

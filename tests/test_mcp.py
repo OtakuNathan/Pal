@@ -371,6 +371,72 @@ class McpPluginSidecarTests(unittest.TestCase):
         missing = core.context.execution_runtime.execute(CapabilityCall(name="op_mcp_demo_tool_alpha", args={}))
         self.assertIn("unknown capability", missing.text)
 
+    def test_default_disabled_first_party_mcp_can_attach_temporarily_or_enable(self) -> None:
+        core, _skill_service = self._core_with_services()
+        builtin = self.root / "plugins" / "_builtin" / "mcp"
+        builtin.mkdir(parents=True)
+        (builtin / "plugin.toml").write_text(
+            "\n".join(
+                [
+                    'plugin_id = "mcp"',
+                    'entrypoint = "pal.plugins_builtin.mcp.runtime"',
+                    'version = "0.1.0"',
+                    "enabled_by_default = false",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        host = PluginHost(context=core.context, runtime_root=self.root)
+
+        host.rescan()
+        attached = host.attach("mcp")
+
+        self.assertEqual(attached["status"], RuntimeStatus.OK)
+        self.assertFalse(attached["enabled"])
+        self.assertTrue(attached["attached"])
+        self.assertTrue(attached["temporary_attach"])
+        self.assertIn("intro_module_mcp_show", core.context.capability_registry.descriptors)
+        self.assertIn("op_mcp_image_prepare", core.context.capability_registry.descriptors)
+
+        host.detach("mcp")
+
+        enabled = host.enable("mcp")
+        try:
+            self.assertEqual(enabled["status"], RuntimeStatus.OK)
+            mcp_record = next(item for item in host.list_plugins() if item["plugin_id"] == "mcp")
+            self.assertTrue(mcp_record["enabled"])
+            self.assertTrue(mcp_record["attached"])
+            self.assertIn("intro_module_mcp_show", core.context.capability_registry.descriptors)
+            self.assertIn("op_mcp_image_prepare", core.context.capability_registry.descriptors)
+        finally:
+            host.detach("mcp")
+
+    def test_explicitly_disabled_first_party_plugin_attach_points_to_enable(self) -> None:
+        core, _skill_service = self._core_with_services()
+        builtin = self.root / "plugins" / "_builtin" / "mcp"
+        builtin.mkdir(parents=True)
+        (builtin / "plugin.toml").write_text(
+            "\n".join(
+                [
+                    'plugin_id = "mcp"',
+                    'entrypoint = "pal.plugins_builtin.mcp.runtime"',
+                    'version = "0.1.0"',
+                    "enabled_by_default = true",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        host = PluginHost(context=core.context, runtime_root=self.root)
+
+        host.rescan()
+        self.assertEqual(host.enable("mcp")["status"], RuntimeStatus.OK)
+        self.assertEqual(host.disable("mcp")["status"], RuntimeStatus.OK)
+        attached = host.attach("mcp")
+
+        self.assertEqual(attached["status"], RuntimeStatus.FORBIDDEN)
+        self.assertEqual(attached["reason"], "plugin_disabled")
+        self.assertEqual(attached["next_action"], "op_plugin_mgmt_enable")
+
 
 if __name__ == "__main__":
     unittest.main()

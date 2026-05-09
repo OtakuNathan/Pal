@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -49,8 +50,13 @@ class ChannelRuntime(ChannelRuntimePort):
     attachment_outbox: deque[QueuedAttachment] = field(default_factory=deque)
     status_outbox: deque[QueuedStatus] = field(default_factory=deque)
     stream_outbox: deque[QueuedStreamEvent] = field(default_factory=deque)
+    on_ready: Callable[[], None] | None = None
+
+    def __post_init__(self) -> None:
+        self.mailbox.on_put = self._notify_ready
 
     def register_endpoint(self, endpoint: ChannelEndpointBase) -> None:
+        endpoint.on_ready = self._notify_ready
         self.endpoint_registry.register(endpoint)
 
     async def start_async(self) -> None:
@@ -145,6 +151,7 @@ class ChannelRuntime(ChannelRuntimePort):
                 text=text,
             )
         )
+        self._notify_ready()
         return reply_id
 
     def queue_stream_event(self, envelope: ChannelEnvelope, event: NormalizedLLMStreamEvent) -> str:
@@ -160,6 +167,7 @@ class ChannelRuntime(ChannelRuntimePort):
                 event=event,
             )
         )
+        self._notify_ready()
         return event_id
 
     def queue_attachment(self, envelope: ChannelEnvelope, attachment: AttachmentSpec) -> str:
@@ -175,6 +183,7 @@ class ChannelRuntime(ChannelRuntimePort):
                 attachment=attachment,
             )
         )
+        self._notify_ready()
         return attachment_id
 
     def abort_stream(self, response_handle, *, reason: str = "interrupted") -> None:
@@ -218,6 +227,7 @@ class ChannelRuntime(ChannelRuntimePort):
                 payload=dict(payload or {}),
             )
         )
+        self._notify_ready()
         return status_id
 
     def queue_endpoint_status(
@@ -310,3 +320,7 @@ class ChannelRuntime(ChannelRuntimePort):
                     payload={"reply_id": item.reply_id, "endpoint_id": item.endpoint.endpoint_id},
                 )
             )
+
+    def _notify_ready(self) -> None:
+        if self.on_ready is not None:
+            self.on_ready()

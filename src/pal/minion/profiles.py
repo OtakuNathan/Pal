@@ -1,0 +1,372 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from importlib import resources
+from pathlib import Path
+import tomllib
+from typing import Any, Protocol
+
+from pal.shared import TaskContextPack
+
+
+@dataclass(frozen=True)
+class MinionProfile:
+    profile_id: str
+    display_name: str
+    identity_fragment: str
+    profile_group: str = "general"
+    behavior_fragment: str = ""
+    output_contract_fragment: str = ""
+    capability_groups: tuple[str, ...] = ()
+    default_allowed_capabilities: tuple[str, ...] = ()
+    default_allowed_skills: tuple[str, ...] = ()
+    default_approval_policy: dict[str, Any] = field(default_factory=dict)
+    checkpoint_policy: dict[str, Any] = field(default_factory=dict)
+    workspace_policy: dict[str, Any] = field(default_factory=dict)
+    completion_policy: dict[str, Any] = field(default_factory=dict)
+    capability_policy: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "profile_id": self.profile_id,
+            "display_name": self.display_name,
+            "profile_group": self.profile_group,
+            "identity_fragment": self.identity_fragment,
+            "behavior_fragment": self.behavior_fragment,
+            "output_contract_fragment": self.output_contract_fragment,
+            "capability_groups": list(self.capability_groups),
+            "default_allowed_capabilities": list(self.default_allowed_capabilities),
+            "default_allowed_skills": list(self.default_allowed_skills),
+            "default_approval_policy": dict(self.default_approval_policy),
+            "approval_policy": dict(self.default_approval_policy),
+            "checkpoint_policy": dict(self.checkpoint_policy),
+            "workspace_policy": dict(self.workspace_policy),
+            "completion_policy": dict(self.completion_policy),
+            "capability_policy": dict(self.capability_policy),
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "MinionProfile":
+        if not isinstance(payload, dict):
+            raise ValueError("MinionProfile payload must be an object")
+        profile_id = str(payload.get("profile_id") or "").strip()
+        if not profile_id:
+            raise ValueError("MinionProfile.profile_id is required")
+        display_name = str(payload.get("display_name") or profile_id).strip()
+        return cls(
+            profile_id=profile_id,
+            display_name=display_name,
+            profile_group=str(payload.get("profile_group") or _dict(payload.get("metadata")).get("profile_group") or "general").strip() or "general",
+            identity_fragment=str(payload.get("identity_fragment") or ""),
+            behavior_fragment=str(payload.get("behavior_fragment") or ""),
+            output_contract_fragment=str(payload.get("output_contract_fragment") or ""),
+            capability_groups=tuple(_string_list(payload.get("capability_groups"))),
+            default_allowed_capabilities=tuple(
+                _string_list(payload.get("default_allowed_capabilities") or payload.get("allowed_capabilities"))
+            ),
+            default_allowed_skills=tuple(_string_list(payload.get("default_allowed_skills"))),
+            default_approval_policy=_dict(payload.get("default_approval_policy") or payload.get("approval_policy")),
+            checkpoint_policy=_dict(payload.get("checkpoint_policy")),
+            workspace_policy=_dict(payload.get("workspace_policy")),
+            completion_policy=_dict(payload.get("completion_policy")),
+            capability_policy=_dict(payload.get("capability_policy")),
+            metadata=_dict(payload.get("metadata")),
+        )
+
+
+class MinionProfileProvider(Protocol):
+    def declared_minion_profiles(self) -> list[MinionProfile | dict[str, Any]]:
+        ...
+
+
+class MinionProfileCapabilityProvider(Protocol):
+    def capabilities_for_minion_profile(self, profile: MinionProfile, pack: TaskContextPack) -> list[str]:
+        ...
+
+
+@dataclass
+class MinionProfileRegistry:
+    profile_providers: tuple[MinionProfileProvider, ...] = ()
+    capability_providers: tuple[MinionProfileCapabilityProvider, ...] = ()
+    ambient_capabilities: tuple[str, ...] = ()
+    runtime_root: Path | None = None
+    builtin_profiles: tuple[MinionProfile, ...] = field(default_factory=lambda: BUILTIN_MINION_PROFILES)
+
+    def list_profiles(self) -> list[MinionProfile]:
+        profiles: dict[str, MinionProfile] = {}
+        for profile in self.builtin_profiles:
+            profiles[profile.profile_id] = profile
+        for profile in self._runtime_profiles():
+            profiles[profile.profile_id] = profile
+        for provider in self.profile_providers:
+            declare = getattr(provider, "declared_minion_profiles", None)
+            if not callable(declare):
+                continue
+            for item in list(declare() or []):
+                profile = item if isinstance(item, MinionProfile) else MinionProfile.from_dict(dict(item or {}))
+                profiles[profile.profile_id] = profile
+        return [profiles[key] for key in sorted(profiles)]
+
+    def get(self, profile_id: str) -> MinionProfile | None:
+        normalized = str(profile_id or "generic").strip() or "generic"
+        for profile in self.list_profiles():
+            if profile.profile_id == normalized:
+                return profile
+        return None
+
+    def resolve_pack(self, pack: TaskContextPack, *, requested_profile: str = "") -> TaskContextPack:
+        profile_id = str(requested_profile or pack.minion_profile or "generic").strip() or "generic"
+        profile = self.get(profile_id)
+        if profile is None:
+            raise KeyError(f"unknown minion profile: {profile_id}")
+        capability_policy = dict(profile.capability_policy)
+        if pack.allowed_capabilities:
+            allowed_capabilities = list(pack.allowed_capabilities)
+        else:
+            base_capabilities = _expand_capabilities([*profile.capability_groups, *profile.default_allowed_capabilities])
+            if _should_inherit_ambient_capabilities(capability_policy) and self.ambient_capabilities:
+                allowed_capabilities = _dedupe([*self.ambient_capabilities, *base_capabilities])
+            else:
+                allowed_capabilities = base_capabilities
+        allowed_skills = list(pack.allowed_skills) or list(profile.default_allowed_skills)
+        approval_policy = dict(profile.default_approval_policy)
+        approval_policy.update(dict(pack.approval_policy))
+        checkpoint_policy = dict(profile.checkpoint_policy)
+        if isinstance(pack.workspace.get("checkpoint_policy"), dict):
+            checkpoint_policy.update(dict(pack.workspace.get("checkpoint_policy") or {}))
+        workspace_policy = dict(profile.workspace_policy)
+        if isinstance(pack.workspace.get("workspace_policy"), dict):
+            workspace_policy.update(dict(pack.workspace.get("workspace_policy") or {}))
+        completion_policy = dict(profile.completion_policy)
+        if isinstance(pack.workspace.get("completion_policy"), dict):
+            completion_policy.update(dict(pack.workspace.get("completion_policy") or {}))
+        hook_capabilities = self._hook_capabilities(profile, pack)
+        if hook_capabilities:
+            allowed_capabilities = _dedupe([*allowed_capabilities, *hook_capabilities])
+        allowed_capabilities = filter_minion_allowed_capabilities(
+            allowed_capabilities,
+            capability_policy=capability_policy,
+        )
+        resolved_profile = profile.to_dict()
+        resolved_profile["effective_allowed_capabilities"] = list(allowed_capabilities)
+        resolved_profile["effective_allowed_skills"] = list(allowed_skills)
+        resolved_profile["effective_approval_policy"] = dict(approval_policy)
+        resolved_profile["effective_checkpoint_policy"] = dict(checkpoint_policy)
+        resolved_profile["effective_workspace_policy"] = dict(workspace_policy)
+        resolved_profile["effective_completion_policy"] = dict(completion_policy)
+        resolved_profile["effective_capability_policy"] = dict(capability_policy)
+        workspace = dict(pack.workspace)
+        if checkpoint_policy:
+            workspace["checkpoint_policy"] = dict(checkpoint_policy)
+        if workspace_policy:
+            workspace["workspace_policy"] = dict(workspace_policy)
+        if completion_policy:
+            workspace["completion_policy"] = dict(completion_policy)
+        return TaskContextPack.from_dict(
+            {
+                **pack.to_dict(),
+                "minion_profile": profile.profile_id,
+                "resolved_profile": resolved_profile,
+                "allowed_capabilities": allowed_capabilities,
+                "allowed_skills": allowed_skills,
+                "approval_policy": approval_policy,
+                "workspace": workspace,
+            }
+        )
+
+    def _hook_capabilities(self, profile: MinionProfile, pack: TaskContextPack) -> list[str]:
+        result: list[str] = []
+        for provider in self.capability_providers:
+            hook = getattr(provider, "capabilities_for_minion_profile", None)
+            if not callable(hook):
+                continue
+            result.extend(_string_list(hook(profile, pack)))
+        return _dedupe(result)
+
+    def _runtime_profiles(self) -> list[MinionProfile]:
+        if self.runtime_root is None:
+            return []
+        profile_dir = Path(self.runtime_root) / "plugins" / "minion" / "profiles"
+        return _load_profiles_from_dir(profile_dir)
+
+
+CORE_MINION_CAPABILITIES = (
+    "op_exec_disc_search",
+    "op_exec_disc_read",
+    "op_exec_capability_call",
+    "op_l3_recall_query",
+)
+
+
+WORKSPACE_READ_CAPABILITIES = (
+    "op_workspace_tree",
+    "op_workspace_search",
+    "op_workspace_read",
+)
+
+
+CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
+    "core_minion_read": CORE_MINION_CAPABILITIES,
+    "memory_recall": ("op_l3_recall_query",),
+    "workspace_read": WORKSPACE_READ_CAPABILITIES,
+    "web_research": ("op_web_search_query", "op_web_fetch_read"),
+    "code_work": ("op_exec_run",),
+}
+
+
+DEFAULT_MINION_DENIED_CAPABILITIES = frozenset(
+    {
+        "op_behavior_advise",
+        "op_behavior_affordance_submit",
+        "op_channel_send_attachment",
+        "op_l3_commit_write",
+        "op_l3_correct_patch",
+        "op_l3_maintenance_refresh_indexes",
+        "op_minion_draft_work_order",
+        "op_minion_finalize",
+        "op_minion_kill",
+        "op_minion_promote_work_order_draft",
+        "op_minion_spawn",
+        "op_plugin_mgmt_disable",
+        "op_plugin_mgmt_enable",
+        "op_plugin_mgmt_rescan",
+        "op_skill_assimilate",
+        "op_skill_commit",
+        "op_skill_disable",
+        "op_skill_inject",
+        "op_skill_update",
+    }
+)
+
+
+DEFAULT_MINION_DENIED_PREFIXES = (
+    "intro_",
+    "op_channel_mgmt_",
+    "op_minion_",
+    "op_plugin_mgmt_",
+)
+
+
+DEFAULT_MINION_DENIED_FRAGMENTS = (
+    "_management_",
+    "_attach",
+    "_detach",
+    "_enable",
+    "_disable",
+    "_rescan",
+    "_restart",
+    "_shutdown",
+)
+
+
+def filter_minion_allowed_capabilities(
+    values: list[str] | tuple[str, ...],
+    *,
+    capability_policy: dict[str, Any] | None = None,
+) -> list[str]:
+    return [
+        value
+        for value in _dedupe(list(values))
+        if not is_minion_capability_denied(value, capability_policy=capability_policy)
+    ]
+
+
+def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] | None = None) -> bool:
+    capability = str(name or "").strip()
+    if not capability:
+        return True
+    policy = dict(capability_policy or {})
+    extra_denied = set(_string_list(policy.get("deny_capabilities")))
+    denied = DEFAULT_MINION_DENIED_CAPABILITIES | frozenset(extra_denied)
+    if capability in denied:
+        return True
+    if str(policy.get("risk") or "").strip().lower() == "read_only" and capability == "op_exec_run":
+        return True
+    prefixes = (*DEFAULT_MINION_DENIED_PREFIXES, *tuple(_string_list(policy.get("deny_prefixes"))))
+    if any(capability.startswith(prefix) for prefix in prefixes):
+        return True
+    fragments = (*DEFAULT_MINION_DENIED_FRAGMENTS, *tuple(_string_list(policy.get("deny_fragments"))))
+    return any(fragment and fragment in capability for fragment in fragments)
+
+
+def load_builtin_minion_profiles() -> tuple[MinionProfile, ...]:
+    root = resources.files("pal.minion").joinpath("profile_templates")
+    profiles: list[MinionProfile] = []
+    for item, profile_group in _iter_profile_template_files(root):
+        payload = tomllib.loads(item.read_text(encoding="utf-8"))
+        payload.setdefault("profile_group", profile_group)
+        profiles.append(MinionProfile.from_dict(payload))
+    return tuple(profiles)
+
+
+def _load_profiles_from_dir(profile_dir: Path) -> list[MinionProfile]:
+    if not profile_dir.exists():
+        return []
+    profiles: list[MinionProfile] = []
+    for path in sorted(profile_dir.rglob("*.toml")):
+        try:
+            payload = tomllib.loads(path.read_text(encoding="utf-8"))
+            relative_parent = path.parent.relative_to(profile_dir)
+            if str(relative_parent) != ".":
+                payload.setdefault("profile_group", str(relative_parent).replace("\\", "/"))
+            profile = MinionProfile.from_dict(payload)
+        except Exception:
+            continue
+        metadata = dict(profile.metadata)
+        metadata.setdefault("source_path", str(path))
+        profiles.append(MinionProfile.from_dict({**profile.to_dict(), "metadata": metadata}))
+    return profiles
+
+
+def _iter_profile_template_files(root: Any) -> list[tuple[Any, str]]:
+    result: list[tuple[Any, str]] = []
+
+    def visit(node: Any, group_parts: list[str]) -> None:
+        for item in sorted(node.iterdir(), key=lambda path: path.name):
+            if item.is_dir():
+                visit(item, [*group_parts, item.name])
+            elif item.name.endswith(".toml"):
+                result.append((item, "/".join(group_parts) or "general"))
+
+    visit(root, [])
+    return result
+
+
+def _expand_capabilities(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value in CAPABILITY_GROUPS:
+            result.extend(CAPABILITY_GROUPS[value])
+        else:
+            result.append(value)
+    return _dedupe(result)
+
+
+def _should_inherit_ambient_capabilities(capability_policy: dict[str, Any]) -> bool:
+    mode = str(capability_policy.get("mode") or "").strip().lower()
+    return mode in {"inherit", "inherit_filtered", "filtered_inherit"}
+
+
+def _dict(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _string_list(value: Any) -> list[str]:
+    return [str(item).strip() for item in list(value or []) if str(item).strip()]
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = str(value or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+BUILTIN_MINION_PROFILES = load_builtin_minion_profiles()

@@ -35,6 +35,48 @@ def _source_plugins_root() -> Path:
     return Path(__file__).resolve().parents[1] / "plugins_builtin"
 
 
+def _module_cache_prefixes(
+    entrypoint: str,
+    *,
+    plugin_id: str,
+    first_party: bool,
+    extra_prefixes: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    normalized = str(entrypoint or "").strip()
+    if not normalized:
+        base: tuple[str, ...] = ()
+    elif first_party:
+        builtin_prefix = f"pal.plugins_builtin.{plugin_id}"
+        if normalized == builtin_prefix or normalized.startswith(f"{builtin_prefix}."):
+            base = (builtin_prefix,)
+        else:
+            base = (normalized,)
+    else:
+        root = normalized.split(".", 1)[0]
+        if root and root != "pal":
+            base = (root,)
+        else:
+            base = (normalized,)
+    prefixes: list[str] = []
+    for prefix in [*base, *extra_prefixes]:
+        clean = str(prefix or "").strip()
+        if clean and clean not in prefixes:
+            prefixes.append(clean)
+    return tuple(prefixes)
+
+
+def _record_reload_prefixes(record: PluginRecord) -> tuple[str, ...]:
+    configured = record.config.get("reload_modules") if isinstance(record.config, dict) else ()
+    if not isinstance(configured, list | tuple):
+        return ()
+    prefixes: list[str] = []
+    for item in configured:
+        prefix = str(item or "").strip()
+        if prefix and prefix not in prefixes:
+            prefixes.append(prefix)
+    return tuple(prefixes)
+
+
 @dataclass
 class PluginHost:
     context: "MainContext"
@@ -145,15 +187,22 @@ class PluginHost:
     def attach(self, plugin_id: str) -> dict[str, Any]:
         if plugin_id in self.first_party_records:
             record = self.first_party_records[plugin_id]
-            if not record.enabled:
-                return {"status": RuntimeStatus.FORBIDDEN, "plugin_id": plugin_id}
-            return {"status": self._attach_first_party(plugin_id), "plugin_id": plugin_id}
+            if not record.enabled and plugin_id in self.first_party_disabled:
+                return _plugin_disabled_result(plugin_id)
+            status = self._attach_first_party(plugin_id, refresh=True)
+            return {
+                "status": status,
+                "plugin_id": plugin_id,
+                "enabled": bool(record.enabled),
+                "attached": status == RuntimeStatus.OK,
+                "temporary_attach": status == RuntimeStatus.OK and not bool(record.enabled),
+            }
         if plugin_id in self.third_party_handles:
-            return {"status": self._attach_community(plugin_id), "plugin_id": plugin_id}
+            return {"status": self._attach_community(plugin_id, refresh=True), "plugin_id": plugin_id}
         row = self.third_party_repository.set_attached(plugin_id, True)
         if row is None:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
-        status = self._load_and_attach_community(plugin_id)
+        status = self._load_and_attach_community(plugin_id, refresh=True)
         return {"status": status, "plugin_id": plugin_id}
 
     def detach(self, plugin_id: str) -> dict[str, Any]:
@@ -220,11 +269,13 @@ class PluginHost:
                     enabled=manifest.enabled_by_default,
                     attached=False,
                     last_load_status=PLUGIN_STATUS_DISCOVERED,
+                    config={"reload_modules": list(manifest.reload_modules)},
                 )
             else:
                 record.entrypoint = manifest.entrypoint
                 record.version = manifest.version
                 record.filesystem_path = manifest.filesystem_path
+                record.config["reload_modules"] = list(manifest.reload_modules)
             manifests.append(manifest)
         return manifests
 
@@ -272,6 +323,9 @@ class PluginHost:
             enabled_by_default=bool(payload.get("enabled_by_default", True)),
             filesystem_path=str(manifest_path.parent),
             subscribed_events=tuple(str(e) for e in subscribed) if isinstance(subscribed, list) else (),
+            reload_modules=tuple(str(e) for e in payload.get("reload_modules", []) if str(e).strip())
+            if isinstance(payload.get("reload_modules"), list)
+            else (),
         )
 
     # --- first-party lifecycle ---
@@ -306,10 +360,12 @@ class PluginHost:
         self.first_party_handles[plugin_id] = handle
         return RuntimeStatus.OK
 
-    def _attach_first_party(self, plugin_id: str) -> str:
+    def _attach_first_party(self, plugin_id: str, *, refresh: bool = False) -> str:
         record = self.first_party_records.get(plugin_id)
         if record is None:
             return RuntimeStatus.NOT_FOUND
+        if refresh:
+            self._forget_first_party_handle(plugin_id)
         if plugin_id not in self.first_party_handles:
             status = self._instantiate_first_party(plugin_id)
             if status != RuntimeStatus.OK:
@@ -339,11 +395,12 @@ class PluginHost:
 
     # --- community (third-party) lifecycle ---
 
-    def _load_and_attach_community(self, plugin_id: str) -> str:
-        status = self._instantiate_community(plugin_id)
-        if status != RuntimeStatus.OK:
-            return status
-        return self._attach_community(plugin_id)
+    def _load_and_attach_community(self, plugin_id: str, *, refresh: bool = False) -> str:
+        if not refresh:
+            status = self._instantiate_community(plugin_id)
+            if status != RuntimeStatus.OK:
+                return status
+        return self._attach_community(plugin_id, refresh=refresh)
 
     def _instantiate_community(self, plugin_id: str) -> str:
         if plugin_id in self.third_party_handles:
@@ -376,7 +433,9 @@ class PluginHost:
         self.third_party_handles[plugin_id] = handle
         return RuntimeStatus.OK
 
-    def _attach_community(self, plugin_id: str) -> str:
+    def _attach_community(self, plugin_id: str, *, refresh: bool = False) -> str:
+        if refresh:
+            self._forget_community_handle(plugin_id)
         if plugin_id not in self.third_party_handles:
             status = self._instantiate_community(plugin_id)
             if status != RuntimeStatus.OK:
@@ -404,6 +463,58 @@ class PluginHost:
         self.third_party_repository.set_load_status(plugin_id, status=PLUGIN_STATUS_DETACHED, error_text=None)
         return RuntimeStatus.OK
 
+    def _forget_first_party_handle(self, plugin_id: str) -> None:
+        record = self.first_party_records.get(plugin_id)
+        handle = self.first_party_handles.pop(plugin_id, None)
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                self._do_detach(handle)
+            self._forget_module_handle(handle)
+        if record is not None:
+            self._drop_plugin_import_cache(
+                record.entrypoint,
+                plugin_id=plugin_id,
+                first_party=True,
+                extra_prefixes=_record_reload_prefixes(record),
+            )
+
+    def _forget_community_handle(self, plugin_id: str) -> None:
+        handle = self.third_party_handles.pop(plugin_id, None)
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                self._do_detach(handle)
+            self._forget_module_handle(handle)
+        row = self.third_party_repository.get(plugin_id)
+        if row is not None:
+            self._drop_plugin_import_cache(row.entrypoint, plugin_id=plugin_id, first_party=False)
+
+    def _forget_module_handle(self, handle: ModuleHandle) -> None:
+        self.context.introspection_registry.pop(handle.module_id, None)
+        current = self.context.module_registry.get(handle.module_id)
+        if current is handle:
+            self.context.module_registry.modules.pop(handle.module_id, None)
+        for port_name in handle.ports:
+            self.context.port_registry.pop(f"{handle.module_id}:{port_name}", None)
+
+    def _drop_plugin_import_cache(
+        self,
+        entrypoint: str,
+        *,
+        plugin_id: str,
+        first_party: bool,
+        extra_prefixes: tuple[str, ...] = (),
+    ) -> None:
+        importlib.invalidate_caches()
+        prefixes = _module_cache_prefixes(
+            entrypoint,
+            plugin_id=plugin_id,
+            first_party=first_party,
+            extra_prefixes=extra_prefixes,
+        )
+        for module_name in list(sys.modules):
+            if any(module_name == prefix or module_name.startswith(f"{prefix}.") for prefix in prefixes):
+                sys.modules.pop(module_name, None)
+
     # --- shared attach/detach logic ---
 
     def _do_attach(self, handle: ModuleHandle) -> None:
@@ -416,6 +527,7 @@ class PluginHost:
             self._restore_provider_refs(handle)
             self._restore_prompt_fragment_providers(handle)
             self._restore_event_sources(handle)
+            self._restore_control_action_handlers(handle)
             self._publish_module_capabilities(handle.module_id)
         except Exception:
             self._rollback_failed_attach(handle)
@@ -435,6 +547,7 @@ class PluginHost:
         self._withdraw_module_capabilities(handle.module_id)
         self.context.prompt_fragment_registry.unregister_module(handle.module_id)
         self.context.event_source_registry.detach_module(handle.module_id)
+        self.context.control_action_registry.unregister_module(handle.module_id)
         for provider_id in list(handle.provider_refs):
             self.context.execution_runtime.unregister_provider_ref(provider_id)
             if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is not None:
@@ -460,6 +573,10 @@ class PluginHost:
             if key in signature.parameters:
                 kwargs[key] = value
         return factory(**kwargs)
+
+    def _restore_control_action_handlers(self, handle: ModuleHandle) -> None:
+        for action_kind, handler in handle.control_action_handlers.items():
+            self.context.control_action_registry.register(handle.module_id, action_kind, handler)
 
     # --- capability management ---
 
@@ -549,3 +666,15 @@ class PluginHost:
                 provider.detach(IntrospectionCall(name=f"{handle.module_id}.lifecycle.detach"))
         handle.mounted = False
         handle.degraded = True
+
+
+def _plugin_disabled_result(plugin_id: str) -> dict[str, Any]:
+    return {
+        "status": RuntimeStatus.FORBIDDEN,
+        "plugin_id": plugin_id,
+        "reason": "plugin_disabled",
+        "summary": f"plugin is disabled: {plugin_id}",
+        "next_action": "op_plugin_mgmt_enable",
+        "recoverable": True,
+        "hint": f"Call op_plugin_mgmt_enable with plugin_id={plugin_id} to enable and attach it.",
+    }

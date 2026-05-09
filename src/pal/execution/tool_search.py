@@ -46,14 +46,31 @@ def _read_name_arg(args: dict[str, object], *aliases: str) -> str:
 
 
 def _compact_capability_hit(spec: dict[str, object]) -> dict[str, object]:
+    call_names = _call_names_for_spec(spec)
     return {
         "name": spec["name"],
+        "canonical_path": spec.get("canonical_path") or spec["name"],
         "display_name": spec.get("display_name"),
         "description": spec.get("description"),
         "family": spec.get("family"),
         "module_id": spec.get("module_id"),
+        "call_names": call_names,
         "aliases": sorted(spec.get("aliases") or []),
     }
+
+
+def _call_names_for_spec(spec: dict[str, object]) -> list[str]:
+    names: list[str] = []
+    for item in (
+        spec.get("canonical_path"),
+        spec.get("name"),
+        spec.get("display_name"),
+        *(spec.get("aliases") or []),
+    ):
+        value = str(item or "").strip()
+        if value and value not in names:
+            names.append(value)
+    return names
 
 
 class ExecutionToolSearchMixin:
@@ -90,12 +107,12 @@ class ExecutionDiscoveryCapabilityMixin:
         scope="module",
         family="exec",
         action_name="capability_call",
-        description="Invoke any registered capability by canonical path. Use discovery_search to find available capabilities first.",
+        description="Invoke any registered capability by canonical path or alias. Use discovery_search to find available capabilities first.",
         aliases=("capability.call",),
         args_schema={
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Canonical path of the capability to invoke."},
+                "name": {"type": "string", "description": "Canonical path or alias of the capability to invoke."},
                 "args": {"type": "object", "description": "Arguments for the capability."},
             },
             "required": ["name"],
@@ -109,7 +126,7 @@ class ExecutionDiscoveryCapabilityMixin:
         if not name:
             return IntrospectionResult(status=RuntimeStatus.INVALID, text="name is required")
         capability_args = dict(call.args.get("args") or {})
-        result = self.runtime.execute(CapabilityCall(name=name, args=capability_args))
+        result = self.runtime.execute(CapabilityCall(name=name, args=capability_args, meta=dict(call.meta)))
         return IntrospectionResult(
             status=result.status,
             text=result.text,
@@ -131,6 +148,7 @@ class ExecutionDiscoveryCapabilityMixin:
                 "family": {"type": "string"},
                 "tags": {"type": "array", "items": {"type": "string"}},
                 "top_k": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1, "description": "Alias for top_k."},
             },
         },
         result_schema={"type": "object", "properties": {"hits": {"type": "array", "items": {"type": "object"}}}},
@@ -179,6 +197,7 @@ class ToolSearchTool:
                     "family": {"type": "string"},
                     "tags": {"type": "array", "items": {"type": "string"}},
                     "top_k": {"type": "integer", "minimum": 1},
+                    "limit": {"type": "integer", "minimum": 1, "description": "Alias for top_k."},
                 },
             }
         if self.result_schema is None:
@@ -193,9 +212,9 @@ class ToolSearchTool:
         query = str(args.get("query") or "").strip()
         family = str(args.get("family") or "").strip().lower()
         try:
-            top_k = max(1, int(args.get("top_k", 5)))
+            top_k = max(1, int(args.get("top_k", args.get("limit", 10))))
         except (TypeError, ValueError):
-            top_k = 5
+            top_k = 10
 
         ranked: list[tuple[int, dict[str, object]]] = []
         for spec in self.runtime.list_capability_specs():

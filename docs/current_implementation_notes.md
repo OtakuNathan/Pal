@@ -86,6 +86,52 @@ Current defaults:
 - MCP server request timeout: 300 seconds
 - Pal-to-manager IPC timeout: 300 seconds
 
+## Minion
+
+Minion is a detachable first-party builtin plugin. The plugin manifest is provisioned under `runtime_root/plugins/_builtin/minion`; plugin-owned runtime configuration lives under `runtime_root/plugins/minion`.
+
+Minion is a detachable first-party subsystem backed by a manager sidecar and the shared sidecar foundation.
+
+PalCore only sees:
+
+- a minion event source
+- minion capabilities
+- a control action handler for `minion_approval_decision`
+
+Minion owns tasks, work orders, milestones, checkpoints, ledger, and lesson candidates in its own repository. `op_minion_decision_send` is not exposed to the LLM surface; approval decisions arrive through Control interactions and are routed to the minion module handler.
+
+Current capability surface:
+
+- `intro_task_search`
+- `intro_task_read`
+- `intro_work_order_search`
+- `intro_work_order_read`
+- `intro_work_order_draft_search`
+- `intro_work_order_draft_read`
+- `intro_minion_list`
+- `intro_minion_read`
+- `intro_minion_profile_list`
+- `intro_minion_profile_read`
+- `op_minion_draft_work_order`
+- `op_minion_promote_work_order_draft`
+- `op_minion_spawn`
+- `op_minion_kill`
+- `op_minion_finalize`
+
+Work order drafts are minion-owned planning artifacts for user brainstorming and module-boundary discussion. They are searchable, but they are not progress truth. The route is draft -> planner review -> user/Pal confirmation -> formal work order. Promotion is explicit through `op_minion_promote_work_order_draft`; `op_minion_spawn` can also accept `draft_id` and let the minion subsystem promote before spawning through the same main entry.
+
+Checkpoint is the milestone cursor fact. Completed checkpoints advance the derived current milestone; partial or blocked checkpoints do not.
+
+Minion task execution is Git-backed by design. A task owns or resolves a task repo, each work order runs on its own branch, and each completed milestone should correspond to a commit on that branch. A completed checkpoint should carry the milestone index and commit SHA. User acceptance/finalization can later squash milestone commits and merge/apply them to the target branch.
+
+Minion profiles are declarative TOML templates plus optional runtime overrides in `runtime_root/plugins/minion/profiles/*.toml`. Builtin profiles use `capability_policy.mode = "inherit_filtered"`: spawn starts from Pal's current capability registry, adds profile defaults/provider hooks, then applies the minion deny policy. `core_minion_read` includes scoped discovery/read/call and read-only `op_l3_recall_query`; `web_research` ensures `op_web_search_query` and `op_web_fetch_read` are available when the slim runner runtime supports them.
+
+Runner capability exposure has a default deny policy. The runner can use task tools, report through events, and request approval, but it does not see `intro_*`, `op_minion_*`, memory-write, behavior/skill mutation, channel/plugin management, or lifecycle attach/detach/rescan style operations. This keeps recursive minion spawning and Pal state mutation out of the runner context.
+
+The internal allowed pool can be broad, but the LLM-facing tool surface stays small. Normal minion runs expose scoped discovery/read/call plus direct work tools when allowed: `op_exec_run`, `op_web_search_query`, `op_web_fetch_read`, and `op_l3_recall_query`. Discovery and read are backed by a scoped runtime view that returns only allowed and non-denied capabilities.
+
+The runner prompt requires `op_l3_recall_query` after a failed tool/capability call when recall is allowed, before retrying, debugging further, or reporting the milestone blocked.
+
 ## Capability Boundary
 
 Capability availability is runtime state.

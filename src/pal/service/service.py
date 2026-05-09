@@ -110,6 +110,10 @@ class ServiceManager(ServiceManagerPort):
     schedule_engine: ScheduleEngine = field(default_factory=ScheduleEngine)
     repository: ServiceRepositoryPort | None = None
     on_change: Callable[[], None] | None = None
+    on_ready: Callable[[], None] | None = None
+
+    def __post_init__(self) -> None:
+        self.trigger_mailbox.on_put = self._notify_ready
 
     def register(self, service: ServiceDefinition) -> None:
         self.registered[service.service_id] = service
@@ -117,12 +121,14 @@ class ServiceManager(ServiceManagerPort):
         if self.repository is not None:
             self.repository.upsert_definition(service, next_due_at_utc=next_due)
         self._notify_change()
+        self._notify_ready()
 
     def hydrate(self, service: ServiceDefinition, *, next_due_at_utc: str | None = None, persist: bool = False) -> None:
         self.registered[service.service_id] = service
         self.schedule_engine.next_due_by_service_id[service.service_id] = next_due_at_utc
         if persist and self.repository is not None:
             self.repository.upsert_definition(service, next_due_at_utc=next_due_at_utc)
+        self._notify_ready()
 
     def enqueue_trigger(self, trigger: ServiceTriggerEvent) -> None:
         self.trigger_mailbox.put(trigger)
@@ -144,7 +150,29 @@ class ServiceManager(ServiceManagerPort):
                 next_due_at_utc=next_due,
                 last_run_at_utc=(now_utc or utc_now_dt()).isoformat(),
             )
+        self._notify_ready()
         return next_due
+
+    def seconds_until_next_due(self, *, now_utc: datetime | None = None) -> float | None:
+        reference = now_utc or utc_now_dt()
+        nearest: float | None = None
+        for service_id, definition in self.registered.items():
+            if not definition.enabled:
+                continue
+            raw_due = self.schedule_engine.next_due_by_service_id.get(service_id)
+            if not raw_due:
+                continue
+            try:
+                due_at = datetime.fromisoformat(str(raw_due).replace("Z", "+00:00")).astimezone(timezone.utc)
+            except ValueError:
+                continue
+            delay = max(0.0, (due_at - reference).total_seconds())
+            nearest = delay if nearest is None else min(nearest, delay)
+        return nearest
+
+    def _notify_ready(self) -> None:
+        if self.on_ready is not None:
+            self.on_ready()
 
     def create_service(
         self,

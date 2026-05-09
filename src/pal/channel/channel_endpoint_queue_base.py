@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -38,6 +39,7 @@ class ChannelEndpointQueueBase(ABC):
     status_outbox: deque[QueuedStatus] = field(default_factory=deque)
     stream_outbox: deque[QueuedStreamEvent] = field(default_factory=deque)
     last_delivery_error: str = ""
+    on_ready: Callable[[], None] | None = None
     _stream_sessions: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     @abstractmethod
@@ -166,6 +168,7 @@ class ChannelEndpointQueueBase(ABC):
             response_handle=response_handle or self.build_response_handle(),
         )
         self.mailbox.put(normalized)
+        self._notify_ready()
         return normalized
 
     def accept_raw(
@@ -210,6 +213,7 @@ class ChannelEndpointQueueBase(ABC):
                 text=prepared,
             )
         )
+        self._notify_ready()
         return reply_id
 
     def queue_stream_event(
@@ -231,6 +235,7 @@ class ChannelEndpointQueueBase(ABC):
                 event=event,
             )
         )
+        self._notify_ready()
         return event_id
 
     def queue_status(
@@ -250,6 +255,7 @@ class ChannelEndpointQueueBase(ABC):
                 payload=dict(payload or {}),
             )
         )
+        self._notify_ready()
         return status_id
 
     def queue_attachment(
@@ -267,7 +273,12 @@ class ChannelEndpointQueueBase(ABC):
                 attachment=attachment,
             )
         )
+        self._notify_ready()
         return attachment_id
+
+    def _notify_ready(self) -> None:
+        if self.on_ready is not None:
+            self.on_ready()
 
     def has_pending(self) -> bool:
         return self.mailbox.has_pending()

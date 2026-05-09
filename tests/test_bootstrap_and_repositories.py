@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import sqlite3
 import sys
 import tempfile
+import time
+import tomllib
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from pal.bootstrap import compose_runtime
 from pal.channel import ChannelEndpointRepository
-from pal.channel.contracts import EndpointConfig
+from pal.channel.contracts import EndpointConfig, ResponseHandle
 from pal.channel.endpoints import SocketChannelEndpoint, TelegramChannelEndpoint
 from pal.channel.endpoints.socket_protocol import pack_socket_message, read_socket_message
 from pal.control import InteractionButtonSpec, InteractionMessageSpec
@@ -41,6 +45,14 @@ from pal.stream_events import NormalizedLLMStreamEvent
 from pal.wizard import WizardService
 from pal.web_fetch import BrowserServiceManager, WebFetchProviderRepository
 from pal.web_search import WebSearchItem, WebSearchProviderRepository
+
+
+class _OutboundQueue:
+    def __init__(self) -> None:
+        self.items: list[dict[str, object]] = []
+
+    def put_nowait(self, item: dict[str, object]) -> None:
+        self.items.append(item)
 
 
 class PalV2BootstrapTests(unittest.TestCase):
@@ -288,6 +300,123 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(secret, "sk-test")
         self.assertEqual(resolver.secret_ref_for_endpoint(endpoint), SecretRef(service="deepseek-prod", account="api-key"))
 
+    def test_litellm_credential_resolver_parses_service_account_ref(self) -> None:
+        repository = LLMEndpointRepository()
+        repository.ensure_defaults(
+            [
+                {
+                    "endpoint_id": "deepseek",
+                    "provider": "deepseek",
+                    "model_id": "deepseek/deepseek-chat",
+                    "api_mode": "openai_chat",
+                    "base_url": "https://api.deepseek.com/chat/completions",
+                    "credential_ref": "deepseek-prod:api-key",
+                    "priority": 0,
+                    "enabled": True,
+                }
+            ]
+        )
+        endpoint = repository.get_primary_enabled()
+        self.assertIsNotNone(endpoint)
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "sk-test")
+        resolver = LiteLLMCredentialResolver(secret_store=secret_store)
+
+        secret = resolver.resolve_api_key(endpoint)
+
+        assert endpoint is not None
+        self.assertEqual(secret, "sk-test")
+        self.assertEqual(resolver.secret_ref_for_endpoint(endpoint), SecretRef(service="deepseek-prod", account="api-key"))
+
+    def test_oauth_credential_resolver_uses_oauth_profile_ref(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="codex_oauth",
+            provider="openai_codex_oauth",
+            model_id="gpt-5.1-codex",
+            api_mode="openai_chat",
+            base_url="https://api.openai.com/v1/chat/completions",
+            auth_kind="oauth",
+            credential_ref="codex_oauth",
+            priority=0,
+            enabled=True,
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(
+            SecretRef(service="codex_oauth", account="oauth-profile"),
+            json.dumps(
+                {
+                    "access_token": "oauth-access-token",
+                    "refresh_token": "oauth-refresh-token",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                }
+            ),
+        )
+        resolver = LiteLLMCredentialResolver(secret_store=secret_store)
+
+        auth = resolver.resolve_auth(endpoint)
+
+        self.assertEqual(auth.kind, "oauth")
+        self.assertEqual(auth.secret_ref, SecretRef(service="codex_oauth", account="oauth-profile"))
+        self.assertEqual(auth.access_token, "oauth-access-token")
+        self.assertEqual(auth.profile["refresh_token"], "oauth-refresh-token")
+        self.assertEqual(resolver.resolve_api_key(endpoint), "oauth-access-token")
+
+    def test_litellm_invoker_maps_oauth_access_token_to_bearer_key(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="codex_oauth",
+            provider="openai_codex_oauth",
+            model_id="gpt-5.1-codex",
+            api_mode="openai_chat",
+            base_url="https://api.openai.com/v1/chat/completions",
+            auth_kind="oauth",
+            credential_ref="codex_oauth:oauth-profile",
+            priority=0,
+            enabled=True,
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(
+            SecretRef(service="codex_oauth", account="oauth-profile"),
+            json.dumps({"access_token": "oauth-access-token"}),
+        )
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=64,
+            ),
+        )
+
+        self.assertEqual(kwargs["api_key"], "oauth-access-token")
+        self.assertNotIn("oauth-access-token", str(invoker.last_payload_summary))
+
+    def test_oauth_profile_without_access_token_does_not_become_api_key(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="codex_oauth",
+            provider="openai_codex_oauth",
+            model_id="gpt-5.1-codex",
+            api_mode="openai_chat",
+            base_url="https://api.openai.com/v1/chat/completions",
+            auth_kind="oauth",
+            credential_ref="codex_oauth",
+            priority=0,
+            enabled=True,
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(
+            SecretRef(service="codex_oauth", account="oauth-profile"),
+            json.dumps({"refresh_token": "oauth-refresh-token"}),
+        )
+        resolver = LiteLLMCredentialResolver(secret_store=secret_store)
+
+        auth = resolver.resolve_auth(endpoint)
+
+        self.assertIsNone(auth.access_token)
+        self.assertIsNone(resolver.resolve_api_key(endpoint))
+
     def test_llm_runtime_preflight_reads_budget_from_database(self) -> None:
         repository = LLMEndpointRepository()
         settings_repository = RuntimeSettingRepository()
@@ -472,12 +601,16 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertIn("web_search", plugin_ids)
         self.assertIn("web_fetch", plugin_ids)
+        self.assertIn("mcp", plugin_ids)
         self.assertIsNotNone(handle.core.context.module_registry.get("web_search"))
         self.assertIsNotNone(handle.core.context.module_registry.get("web_fetch"))
+        self.assertIsNotNone(handle.core.context.module_registry.get("mcp"))
         self.assertIn("op_web_search_query", handle.core.context.capability_registry.descriptors)
         self.assertIn("op_web_fetch_read", handle.core.context.capability_registry.descriptors)
+        self.assertIn("op_mcp_image_prepare", handle.core.context.capability_registry.descriptors)
         self.assertIn("intro_module_web_search_show", handle.core.context.capability_registry.descriptors)
         self.assertIn("intro_module_web_fetch_show", handle.core.context.capability_registry.descriptors)
+        self.assertIn("intro_module_mcp_show", handle.core.context.capability_registry.descriptors)
         self.assertTrue(
             any(name.startswith("op_web_search_mgmt_set_config") for name in handle.core.context.capability_registry.descriptors)
         )
@@ -486,6 +619,50 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         self.assertIn("op_web_search_query", tool_names)
         self.assertIn("op_web_fetch_read", tool_names)
+
+    def test_compose_runtime_loads_minion_as_first_party_builtin_plugin(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        handle = compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+
+        records = handle.plugin_host.list_plugins()
+        minion_record = next(item for item in records if item["plugin_id"] == "minion")
+        self.assertEqual(minion_record["source"], "first_party")
+        self.assertTrue(minion_record["attached"])
+        self.assertIsNotNone(handle.core.context.module_registry.get("minion"))
+        self.assertIn("intro_module_minion_show", handle.core.context.capability_registry.descriptors)
+        self.assertIn("op_minion_spawn", handle.core.context.capability_registry.descriptors)
+        observed = handle.core.context.execution_runtime.execute(CapabilityCall(name="intro_module_minion_show"))
+        self.assertEqual(observed.status, "ok")
+        self.assertTrue(observed.structured["manager_running"])
+        search = handle.core.context.execution_runtime.execute(
+            CapabilityCall(name="op_exec_disc_search", args={"query": "dispatch minion"})
+        )
+        hit_names = [item["name"] for item in search.structured["hits"]]
+        self.assertIn("op_minion_spawn", hit_names)
+
+    def test_stub_runtime_provisions_builtin_plugins_for_fresh_compose(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="pal_stub_builtin_test_"))
+        wizard = WizardService()
+        provisioned = wizard.provision_stub_runtime(root)
+        try:
+            handle = compose_runtime(
+                wizard=wizard,
+                registration=provisioned.registration,
+                database=provisioned.database,
+            )
+            self.assertIn("op_minion_spawn", handle.core.context.capability_registry.descriptors)
+            search = handle.core.context.execution_runtime.execute(
+                CapabilityCall(name="op_exec_disc_search", args={"query": "minion"})
+            )
+            hit_names = [item["name"] for item in search.structured["hits"]]
+            self.assertIn("op_minion_spawn", hit_names)
+        finally:
+            provisioned.database.close()
+            shutil.rmtree(root, ignore_errors=True)
 
     def test_plugin_host_rescan_discovers_third_party_bundle_but_does_not_import_it(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -580,6 +757,161 @@ class PalV2BootstrapTests(unittest.TestCase):
         records = handle.plugin_host.list_plugins()
         demo_record = next(item for item in records if item["plugin_id"] == "demo_builtin")
         self.assertTrue(demo_record["attached"])
+
+    def test_plugin_attach_refreshes_import_cache_and_recompiles_capabilities(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        handle = compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        builtin_root = self.runtime_root / "builtin_reload_plugins"
+        plugin_root = builtin_root / "demo_reload"
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        (plugin_root / "plugin.toml").write_text(
+            "\n".join(
+                [
+                    'plugin_id = "demo_reload"',
+                    'entrypoint = "demo_reload.runtime"',
+                    'version = "0.1.0"',
+                    "enabled_by_default = true",
+                    'reload_modules = ["demo_reload.impl"]',
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (plugin_root / "__init__.py").write_text("", encoding="utf-8")
+
+        def write_impl(value: str) -> None:
+            (plugin_root / "impl.py").write_text(f"VALUE = '{value}'\n", encoding="utf-8")
+
+        def write_runtime() -> None:
+            (plugin_root / "runtime.py").write_text(
+                "\n".join(
+                    [
+                        "from __future__ import annotations",
+                        "from dataclasses import dataclass",
+                        "from demo_reload.impl import VALUE",
+                        "from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle",
+                        "from pal.execution import CapabilityCall, CapabilityResult",
+                        "from pal.shared import OPERATION_NAMESPACE, capability_action, capability_node",
+                        "",
+                        "@capability_node(namespace=OPERATION_NAMESPACE, scope='demo_reload', kind='module', source='test', target_kind='module')",
+                        "class DemoProvider:",
+                        "    @capability_action(namespace=OPERATION_NAMESPACE, scope='demo_reload', family='operation', action_name='ping', aliases=('demo_reload.ping',))",
+                        "    def ping(self, call: CapabilityCall) -> CapabilityResult:",
+                        "        _ = call",
+                        "        return CapabilityResult(status='ok', text=VALUE, llm_text=VALUE)",
+                        "",
+                        "@dataclass",
+                        "class DemoBundle:",
+                        "    plugin_id: str = 'demo_reload'",
+                        "    version: str = '0.1.0'",
+                        "    def register_with_core(self, context):",
+                        "        handle = ModuleHandle(module_id='demo_reload', tier=MODULE_TIER_DETACHABLE, detachable=True, introspection_provider=DemoProvider())",
+                        "        context.register_module(handle)",
+                        "        return handle",
+                        "",
+                        "def build_plugin():",
+                        "    return DemoBundle()",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+        write_impl("v1")
+        write_runtime()
+        handle.plugin_host.builtin_root = builtin_root
+        sys.path.insert(0, str(builtin_root))
+        try:
+            result = handle.core.context.execution_runtime.execute(
+                CapabilityCall(name="op_plugin_mgmt_rescan_and_attach_new_first_party")
+            )
+            self.assertEqual(result.status, "ok")
+            first = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload.ping"))
+            self.assertEqual(first.text, "v1")
+
+            detached = handle.core.context.execution_runtime.execute(
+                CapabilityCall(name="op_plugin_mgmt_detach", args={"plugin_id": "demo_reload"})
+            )
+            self.assertEqual(detached.status, "ok")
+
+            time.sleep(1.1)
+            write_impl("v2")
+            write_runtime()
+            attached = handle.core.context.execution_runtime.execute(
+                CapabilityCall(name="op_plugin_mgmt_attach", args={"plugin_id": "demo_reload"})
+            )
+            self.assertEqual(attached.status, "ok")
+            second = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload.ping"))
+            self.assertEqual(second.text, "v2")
+            self.assertIn("op_demo_reload_ping", handle.core.context.capability_registry.descriptors)
+            self.assertNotIn("op_demo_reload_operation_ping", handle.core.context.capability_registry.descriptors)
+        finally:
+            if str(builtin_root) in sys.path:
+                sys.path.remove(str(builtin_root))
+
+    def test_builtin_plugin_manifests_declare_owned_reload_modules(self) -> None:
+        builtin_root = Path(__file__).resolve().parents[1] / "src" / "pal" / "plugins_builtin"
+        expected = {
+            "mcp": "pal.mcp",
+            "minion": "pal.minion",
+            "sqlite_vec_l3": "pal.plugins.l3",
+            "web_fetch": "pal.web_fetch",
+            "web_search": "pal.web_search",
+        }
+
+        for plugin_id, prefix in expected.items():
+            payload = tomllib.loads((builtin_root / plugin_id / "plugin.toml").read_text(encoding="utf-8"))
+            self.assertIn(prefix, payload.get("reload_modules", []), plugin_id)
+
+    def test_builtin_plugins_detach_attach_refreshes_owned_module_caches(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        handle = compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        runtime = handle.core.context.execution_runtime
+        cap_registry = handle.core.context.capability_registry
+        expectations = {
+            "mcp": ("pal.mcp", "intro_module_mcp_show"),
+            "minion": ("pal.minion", "intro_module_minion_show"),
+            "sqlite_vec_l3": ("pal.plugins.l3", "intro_provider_l3_show::sqlite_vec_l3"),
+            "web_fetch": ("pal.web_fetch", "intro_module_web_fetch_show"),
+            "web_search": ("pal.web_search", "intro_module_web_search_show"),
+        }
+        owned_prefixes = tuple(prefix for prefix, _ in expectations.values())
+        wrapper_prefixes = tuple(f"pal.plugins_builtin.{plugin_id}" for plugin_id in expectations)
+        hot_reload_prefixes = (*owned_prefixes, *wrapper_prefixes)
+        original_modules = {
+            name: module
+            for name, module in sys.modules.items()
+            if any(name == prefix or name.startswith(f"{prefix}.") for prefix in hot_reload_prefixes)
+        }
+
+        try:
+            for plugin_id, (reload_prefix, capability_name) in expectations.items():
+                self.assertIn(capability_name, cap_registry.descriptors, plugin_id)
+                detached = runtime.execute(CapabilityCall(name="op_plugin_mgmt_detach", args={"plugin_id": plugin_id}))
+                self.assertEqual(detached.status, "ok", plugin_id)
+                self.assertNotIn(capability_name, cap_registry.descriptors, plugin_id)
+
+                probe_name = f"{reload_prefix}.__pal_hot_reload_probe__"
+                sys.modules[probe_name] = types.ModuleType(probe_name)
+                attached = runtime.execute(CapabilityCall(name="op_plugin_mgmt_attach", args={"plugin_id": plugin_id}))
+
+                self.assertEqual(attached.status, "ok", plugin_id)
+                self.assertNotIn(probe_name, sys.modules, plugin_id)
+                self.assertIn(capability_name, cap_registry.descriptors, plugin_id)
+                record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == plugin_id)
+                self.assertTrue(record["attached"], plugin_id)
+        finally:
+            asyncio.run(handle.stop_async())
+            for name in list(sys.modules):
+                if any(name == prefix or name.startswith(f"{prefix}.") for prefix in hot_reload_prefixes):
+                    sys.modules.pop(name, None)
+            sys.modules.update(original_modules)
 
     def test_plugins_module_publishes_management_capabilities_and_can_detach_first_party_plugin(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -1807,6 +2139,33 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(tracking_manager.shutdown_calls, 1)
 
 
+class PalV2SocketEndpointUnitTests(unittest.TestCase):
+    def test_streamed_text_final_reply_state_does_not_mutate_response_handle(self) -> None:
+        endpoint = SocketChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="socket_default",
+                channel_kind="socket",
+                binding_key="pal.sock",
+            )
+        )
+        outbound = _OutboundQueue()
+        endpoint.sessions["session-1"] = type("Session", (), {"outbound": outbound, "closed": False})()
+        response_handle = ResponseHandle(
+            endpoint_id="socket_default",
+            reply_target={"session_id": "session-1", "request_id": "req-1"},
+        )
+
+        endpoint.send_stream_event(
+            response_handle,
+            NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="pong"),
+        )
+        endpoint.queue_reply("pong", response_handle=response_handle)
+
+        self.assertEqual(outbound.items, [{"type": "text_delta", "request_id": "req-1", "text": "pong"}])
+        self.assertFalse(endpoint.outbox)
+        self.assertNotIn(id(response_handle), endpoint._streamed_text_handles)
+
+
 class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         if not hasattr(asyncio, "start_unix_server") or not hasattr(asyncio, "open_unix_connection"):
@@ -1867,6 +2226,56 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(first["type"], "text_delta")
             self.assertEqual(first["text"], "pong")
             self.assertEqual(second["type"], "done")
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def test_socket_endpoint_suppresses_final_reply_after_text_stream(self) -> None:
+        await self.endpoint.start_async()
+        reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        try:
+            writer.write(
+                pack_socket_message(
+                    {
+                        "type": "user_message",
+                        "request_id": "req-stream",
+                        "text": "ping",
+                    }
+                )
+            )
+            await writer.drain()
+            await asyncio.sleep(0.05)
+            envelopes = self.endpoint.poll()
+            self.assertEqual(len(envelopes), 1)
+            envelope = envelopes[0]
+
+            self.endpoint.queue_stream_event(
+                NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="po"),
+                response_handle=envelope.response_handle,
+            )
+            self.endpoint.queue_stream_event(
+                NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="ng"),
+                response_handle=envelope.response_handle,
+            )
+            self.endpoint.queue_stream_event(
+                NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason="stop"),
+                response_handle=envelope.response_handle,
+            )
+            self.assertEqual(self.endpoint.flush_stream_outbox(), [])
+
+            first = await read_socket_message(reader)
+            second = await read_socket_message(reader)
+            third = await read_socket_message(reader)
+            self.assertEqual(first["type"], "text_delta")
+            self.assertEqual(first["text"], "po")
+            self.assertEqual(second["type"], "text_delta")
+            self.assertEqual(second["text"], "ng")
+            self.assertEqual(third["type"], "llm_done")
+
+            self.endpoint.queue_reply("pong", response_handle=envelope.response_handle)
+            self.assertEqual(self.endpoint.flush_outbox(), [])
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(read_socket_message(reader), timeout=0.05)
         finally:
             writer.close()
             await writer.wait_closed()

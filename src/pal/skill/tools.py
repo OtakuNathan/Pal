@@ -24,8 +24,14 @@ SKILL_ASSIMILATE_ARGS_SCHEMA = {
 SKILL_COMMIT_ARGS_SCHEMA = {
     "type": "object",
     "properties": {
-        "candidate_id": {"type": "string"},
-        "candidate": {"type": "object"},
+        "candidate_id": {
+            "type": "string",
+            "description": "Pending skill candidate id to save. Prefer this when the user provides candidate_id; no candidate object is needed.",
+        },
+        "candidate": {
+            "type": "object",
+            "description": "Inline candidate object. Use only when no candidate_id is available.",
+        },
         "replace": {"type": "boolean", "default": False},
     },
 }
@@ -295,7 +301,7 @@ class SkillSearchTool:
     name: str = "op_skill_search"
     display_name: str = "Search skills"
     family: str = "skill"
-    description: str = "Search normalized Pal skills for the current scenario or explicit skill name. Does not return manuals."
+    description: str = "Search normalized Pal skills for the current scenario or explicit skill name. Does not return manuals; call op_skill_inject next to use a matched active skill."
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("skill", "search")
@@ -340,11 +346,22 @@ class SkillSearchTool:
         ranked.sort(key=lambda item: (-float(item["score"]), str(item["skill_id"])))
         hits = ranked[:top_k]
         structured = {"hits": hits, "count": len(hits)}
+        has_injectable_hit = any(bool(hit.get("injectable")) for hit in hits)
+        if has_injectable_hit:
+            structured["next_action"] = "To use a matched active skill, call op_skill_inject with its skill_id before answering from it."
+        llm_text = render_titled_structured_for_llm("Skill search", structured)
+        if has_injectable_hit:
+            llm_text = (
+                "Skill search found an injectable active skill. "
+                "If the user asked to use this skill, the next tool call MUST be op_skill_inject with the matched skill_id. "
+                "Search alone is not using the skill.\n"
+                f"{llm_text}"
+            )
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text=f"found {len(hits)} skill(s)",
             structured=structured,
-            llm_text=render_titled_structured_for_llm("Skill search", structured),
+            llm_text=llm_text,
         )
 
 

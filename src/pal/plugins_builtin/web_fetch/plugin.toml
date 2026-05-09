@@ -2,3 +2,4 @@ plugin_id = "web_fetch"
 entrypoint = "pal.plugins_builtin.web_fetch.runtime"
 version = "0.1.0"
 enabled_by_default = true
+reload_modules = ["pal.web_fetch"]

@@ -24,6 +24,8 @@ class ModuleHandle:
     introspection_provider: IntrospectionPort | None = None
     prompt_fragment_providers: list[PromptFragmentProvider] = field(default_factory=list)
     event_sources: list[Any] = field(default_factory=list)
+    event_handlers: dict[str, list[Any]] = field(default_factory=dict)
+    control_action_handlers: dict[str, Any] = field(default_factory=dict)
     provider_refs: list[str] = field(default_factory=list)
     supports_lifecycle_capabilities: bool = False
     ports: dict[str, Any] = field(default_factory=dict)

@@ -8,6 +8,7 @@ from pal.control.contracts import (
     ControlCommandInvocation,
     ControlCommandSpec,
     ControlEvent,
+    ControlRoute,
     InteractionResult,
     ControlPlanePort,
 )
@@ -112,15 +113,6 @@ class ControlPlane(ControlPlanePort):
         return "\n".join(lines).strip()
 
     def parse_event(self, event: ControlEvent) -> ControlAction | None:
-        if event.event_kind == EventKind.APPROVAL_REQUEST:
-            return ControlAction(
-                action_kind="approval_requested",
-                target_scope="approval",
-                target_id=str(event.payload.get("approval_id") or "") or None,
-                route=event.route,
-                args=dict(event.payload),
-                notes="approval scaffold only",
-            )
         if event.event_kind != EventKind.SLASH_COMMAND:
             return None
         invocation = self._parse_invocation(event)
@@ -293,6 +285,20 @@ class ControlPlane(ControlPlanePort):
                         route=result.route,
                         args={"reason": "interaction handler returned no action", "command_name": command_name},
                         notes=f"Control command /{command_name} did not produce an action.",
+                    ),
+                    result,
+                )
+            return _with_interaction_context(action, result)
+        if action_key == "control.action.dispatch":
+            action = _action_from_payload(result.action_args, route=result.route)
+            if action is None:
+                return _with_interaction_context(
+                    ControlAction(
+                        action_kind="invalid_command",
+                        target_scope="control",
+                        route=result.route,
+                        args={"reason": "invalid dispatched action"},
+                        notes="Unsupported interaction action.",
                     ),
                     result,
                 )
@@ -565,6 +571,22 @@ def _normalize_think_level(value: str) -> str | None:
     return _THINK_ALIASES.get(str(value or "").strip().lower())
 
 
+def _route_from_payload(payload: object) -> ControlRoute | None:
+    if not isinstance(payload, dict):
+        return None
+    endpoint_id = str(payload.get("endpoint_id") or "").strip()
+    channel_kind = str(payload.get("channel_kind") or "").strip()
+    if not endpoint_id or not channel_kind:
+        return None
+    return ControlRoute(
+        endpoint_id=endpoint_id,
+        channel_kind=channel_kind,
+        reply_target=dict(payload.get("reply_target") or {}),
+        control_scope_key=str(payload.get("control_scope_key") or ""),
+        correlation_id=str(payload.get("correlation_id") or "") or None,
+    )
+
+
 def _with_interaction_context(action: ControlAction, result: InteractionResult) -> ControlAction:
     args = dict(action.args)
     args["interaction_origin"] = "button"
@@ -578,4 +600,29 @@ def _with_interaction_context(action: ControlAction, result: InteractionResult) 
         args=args,
         route=action.route or result.route,
         notes=action.notes,
+    )
+
+
+def _action_from_payload(payload: dict, *, route: ControlRoute | None) -> ControlAction | None:
+    if not isinstance(payload, dict):
+        return None
+    action_kind = str(payload.get("action_kind") or "").strip()
+    target_scope = str(payload.get("target_scope") or "control").strip()
+    if not action_kind or not target_scope:
+        return None
+    args = payload.get("args")
+    if not isinstance(args, dict):
+        args = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"action_kind", "target_scope", "target_id", "requires_user_confirmation", "notes"}
+        }
+    return ControlAction(
+        action_kind=action_kind,
+        target_scope=target_scope,
+        target_id=str(payload.get("target_id") or "") or None,
+        requires_user_confirmation=bool(payload.get("requires_user_confirmation")),
+        args=dict(args),
+        route=route,
+        notes=str(payload.get("notes") or ""),
     )

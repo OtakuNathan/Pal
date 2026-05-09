@@ -401,6 +401,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         handle = _FakeHandle(module_id="declared_plugin", introspection_provider=DeclaredProvider())
         self.service.register_declared_module(handle)
 
+        self.assertIsNone(self.repository.get_affordance("declared.affordance"))
         before = asyncio.run(self.service.advise_async(BehaviorAdviceRequest(scenario="declared scenario")))
         self.assertEqual(before.candidates[0].affordance_id, "declared.affordance")
 
@@ -876,5 +877,6 @@ class BehaviorSubsystemTests(unittest.TestCase):
         advice = asyncio.run(self.service.advise_async(BehaviorAdviceRequest(scenario="show demo module state run demo operation", top_k=10)))
         refs = {ref for candidate in advice.candidates for ref in candidate.capability_refs}
 
+        self.assertIsNone(self.repository.get_affordance("declared.capability.demo.op_demo_run"))
         self.assertIn("intro_module_demo_show", refs)
         self.assertIn("op_demo_run", refs)
