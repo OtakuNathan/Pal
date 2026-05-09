@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import importlib
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase
@@ -104,6 +107,8 @@ class ChannelIntrospectionProvider:
     # rule from the Capability Forest constitution.
     runtime: ChannelRuntime
     repository: ChannelEndpointRepository
+    runtime_root: Path | None = None
+    endpoint_factories: Any = None
     module_id: str = "channel"
 
     def iter_endpoints(self) -> list[ChannelEndpointTarget]:
@@ -267,6 +272,63 @@ class ChannelIntrospectionProvider:
     )
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         return self._set_attached(call, attached=False)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="management",
+        action_name="reload_provider",
+        description=(
+            "Hot-reload the provider implementation for one channel endpoint. "
+            "The channel bus stays mounted; only the endpoint/provider instance is rebuilt."
+        ),
+        aliases=("channel.reload_endpoint", "reload channel provider"),
+        args_schema={
+            "type": "object",
+            "properties": {"target_id": {"type": "string"}},
+            "required": ["target_id"],
+        },
+    )
+    def reload_provider(self, call: IntrospectionCall) -> IntrospectionResult:
+        endpoint_id = str(call.args.get("target_id") or "").strip()
+        if not endpoint_id:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="target_id is required",
+                llm_text="target_id is required",
+            )
+        record = self.repository.get(endpoint_id)
+        if record is None:
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="channel endpoint not found",
+                llm_text="channel endpoint not found",
+            )
+        reload_modules = self._reload_modules_for_kind(str(record.channel_kind))
+        _drop_module_import_cache(reload_modules)
+        self.endpoint_factories = _fresh_endpoint_factories()
+        endpoint = self.endpoint_factories.create(record, runtime_root=self.runtime_root or Path.cwd())
+        if endpoint is None:
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="channel provider not found",
+                structured={"endpoint_id": endpoint_id, "channel_kind": record.channel_kind},
+                llm_text="channel provider not found",
+            )
+        self.runtime.replace_endpoint(endpoint)
+        payload = {
+            "endpoint_id": endpoint_id,
+            "channel_kind": record.channel_kind,
+            "reload_modules": list(reload_modules),
+            "attached": bool(endpoint.attached),
+            "enabled": bool(endpoint.enabled),
+        }
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="channel endpoint provider reloaded",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Channel endpoint provider reloaded", payload),
+        )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -482,9 +544,9 @@ class ChannelIntrospectionProvider:
         endpoint = self.runtime.get_endpoint(endpoint_id)
         if endpoint is not None:
             if enabled:
-                endpoint.enable()
+                self.runtime.enable_endpoint(endpoint_id)
             else:
-                endpoint.disable()
+                self.runtime.disable_endpoint(endpoint_id)
         try:
             record = self.repository.set_enabled(endpoint_id, enabled)
         except Exception:
@@ -514,9 +576,9 @@ class ChannelIntrospectionProvider:
         endpoint = self.runtime.get_endpoint(endpoint_id)
         if endpoint is not None:
             if attached:
-                endpoint.attach()
+                self.runtime.attach_endpoint(endpoint_id)
             else:
-                endpoint.detach()
+                self.runtime.detach_endpoint(endpoint_id)
         try:
             record = self.repository.set_attached(endpoint_id, attached)
         except Exception:
@@ -535,6 +597,15 @@ class ChannelIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Channel endpoint lifecycle updated", payload),
         )
 
+    def _reload_modules_for_kind(self, channel_kind: str) -> tuple[str, ...]:
+        factories = self.endpoint_factories
+        reload_modules_for_kind = getattr(factories, "reload_modules_for_kind", None)
+        if callable(reload_modules_for_kind):
+            modules = tuple(str(item) for item in reload_modules_for_kind(channel_kind) if str(item).strip())
+            if modules:
+                return modules
+        return _default_reload_modules_for_kind(channel_kind)
+
 
 def inspect_channel(provider: ChannelIntrospectionProvider) -> ChannelSnapshot:
     targets = provider.iter_endpoints()
@@ -543,6 +614,29 @@ def inspect_channel(provider: ChannelIntrospectionProvider) -> ChannelSnapshot:
         attached_count=sum(1 for item in targets if item.attached),
         enabled_count=sum(1 for item in targets if item.enabled),
     )
+
+
+def _fresh_endpoint_factories():
+    module = importlib.import_module("pal.channel.factory")
+    return module.build_default_factory_registry()
+
+
+def _default_reload_modules_for_kind(channel_kind: str) -> tuple[str, ...]:
+    if channel_kind == "socket":
+        return ("pal.channel.factory", "pal.channel.endpoints.socket_endpoint")
+    if channel_kind == "telegram":
+        return ("pal.channel.factory", "pal.channel.endpoints.telegram_endpoint")
+    return ("pal.channel.factory",)
+
+
+def _drop_module_import_cache(prefixes: tuple[str, ...]) -> None:
+    clean_prefixes = tuple(dict.fromkeys(str(prefix).strip() for prefix in prefixes if str(prefix).strip()))
+    if not clean_prefixes:
+        return
+    importlib.invalidate_caches()
+    for module_name in list(sys.modules):
+        if any(module_name == prefix or module_name.startswith(f"{prefix}.") for prefix in clean_prefixes):
+            sys.modules.pop(module_name, None)
 
 
 class TypingSubscriber:
@@ -564,8 +658,19 @@ class TypingSubscriber:
             )
 
 
-def register_with_core(context: MainContext, runtime: ChannelRuntime) -> ModuleHandle:
-    provider = ChannelIntrospectionProvider(runtime=runtime, repository=ChannelEndpointRepository())
+def register_with_core(
+    context: MainContext,
+    runtime: ChannelRuntime,
+    *,
+    runtime_root: Path | None = None,
+    endpoint_factories: Any = None,
+) -> ModuleHandle:
+    provider = ChannelIntrospectionProvider(
+        runtime=runtime,
+        repository=ChannelEndpointRepository(),
+        runtime_root=runtime_root,
+        endpoint_factories=endpoint_factories or _fresh_endpoint_factories(),
+    )
     source = ChannelEventSource(runtime=runtime)
     handle = ModuleHandle(
         module_id="channel",

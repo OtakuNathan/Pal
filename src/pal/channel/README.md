@@ -38,6 +38,7 @@ Interaction rule:
   - it lists endpoints
   - enables/disables them
   - attaches/detaches them
+  - reloads one endpoint provider implementation while keeping the channel bus mounted
   - polls each endpoint mailbox
   - flushes each endpoint outbox
 - endpoint nodes expose only their own introspection/configuration surface:
@@ -48,5 +49,7 @@ Interaction rule:
   - `backlog`
 - endpoint nodes do **not** expose `attach/detach`; those are channel-parent
   management actions
+- channel root is a core bus and is not hot-reloaded as a module; provider/endpoint
+  implementations are the hot-reload boundary
 - no channel operation surface is exposed to `Pal/LLM`
 - secrets/tokens are write-only; introspection never returns them

@@ -979,14 +979,18 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             )
         except Exception as exc:
             self._last_status_error = str(exc)
+            logger.exception("telegram control command menu update failed")
             return
-        with contextlib.suppress(Exception):
+
+        try:
             try:
                 from telegram import MenuButtonCommands
             except Exception:
                 MenuButtonCommands = _FallbackMenuButtonCommands
-
             await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        except Exception as exc:
+            self._last_status_error = str(exc)
+            logger.exception("telegram command menu button update failed")
 
     def _normalize_control_commands(self, payload: dict[str, Any]) -> list[dict[str, str]]:
         manifest: list[dict[str, str]] = []
@@ -1098,6 +1102,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
 @dataclass(frozen=True)
 class TelegramChannelEndpointFactory:
     channel_kind: str = "telegram"
+    reload_modules: tuple[str, ...] = ("pal.channel.factory", "pal.channel.endpoints.telegram_endpoint")
 
     def create(self, record: Any, *, runtime_root: Any) -> TelegramChannelEndpoint | None:
         metadata = dict(record.binding_metadata or {})

@@ -62,9 +62,22 @@ class _FakeSettingsRepository:
 class _FakeLLMRuntime:
     settings_repository: _FakeSettingsRepository
     think_level: str = DEFAULT_THINK_LEVEL
+    refresh_payload: dict[str, object] | None = None
+    refresh_calls: int = 0
 
     def refresh_runtime_settings(self) -> None:
         self.think_level = self.settings_repository.think_level
+
+    def refresh_llm_endpoints(self) -> dict[str, object]:
+        self.refresh_calls += 1
+        return self.refresh_payload or {
+            "enabled_count": 1,
+            "configured_active_endpoint_id": "stub",
+            "active_endpoint_id": "stub",
+            "primary_endpoint_id": "stub",
+            "added_endpoint_ids": [],
+            "removed_endpoint_ids": [],
+        }
 
 
 class _BlockingInterruptHandle:
@@ -189,6 +202,22 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertTrue(start.args["prompt_log_enabled"])
         self.assertEqual(end.action_kind, "set_log")
         self.assertFalse(end.args["prompt_log_enabled"])
+
+    def test_refresh_llm_endpoint_slash_command_bypasses_llm(self) -> None:
+        plane = ControlPlane()
+        action = plane.parse_event(
+            ControlEvent(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "/refresh_llm_endpoint"},
+            )
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.action_kind, "refresh_llm_endpoint")
+        self.assertEqual(action.target_scope, "runtime")
+        self.assertIn("/refresh_llm_endpoint", plane.render_panel_text())
 
     def test_invalid_log_subcommand_is_invalid_command(self) -> None:
         plane = ControlPlane()
@@ -378,6 +407,29 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         second_continuation = self.core.turn_manager.start(second)
         self.assertTrue(second_continuation.turn_settings_snapshot["prompt_log_enabled"])
 
+    async def test_refresh_llm_endpoint_control_action_updates_runtime_directly(self) -> None:
+        self.llm_runtime.refresh_payload = {
+            "enabled_count": 2,
+            "configured_active_endpoint_id": "old",
+            "active_endpoint_id": None,
+            "primary_endpoint_id": "new",
+            "added_endpoint_ids": ["new"],
+            "removed_endpoint_ids": ["old"],
+        }
+
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="refresh_llm_endpoint",
+                target_scope="runtime",
+                route=self.route,
+            )
+        )
+
+        self.assertEqual(self.llm_runtime.refresh_calls, 1)
+        self.assertIn("LLM endpoints refreshed.", self.endpoint.outbox[-1].text)
+        self.assertIn("Primary endpoint for future turns: new", self.endpoint.outbox[-1].text)
+        self.assertIn("Removed/disabled: old", self.endpoint.outbox[-1].text)
+
     async def test_show_log_reports_current_status(self) -> None:
         await self.core.handle_control_action_async(
             ControlAction(
@@ -500,6 +552,37 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queued[0].kind, "control_catalog")
         commands = list(queued[0].payload.get("commands") or [])
         self.assertTrue(any(item.get("command") == "control" for item in commands))
+        self.assertTrue(any(item.get("command") == "refresh_llm_endpoint" for item in commands))
+
+    async def test_channel_attach_replays_cached_control_catalog(self) -> None:
+        await self.core.publish_control_catalog_async(endpoint_id="socket_main")
+        self.endpoint.flush_status_outbox()
+        self.endpoint.sent_statuses.clear()
+
+        self.channel_runtime.detach_endpoint("socket_main")
+        self.channel_runtime.attach_endpoint("socket_main")
+        self.endpoint.flush_status_outbox()
+
+        catalog_statuses = [item for item in self.endpoint.sent_statuses if item[0] == "control_catalog"]
+        self.assertTrue(catalog_statuses)
+        commands = list(catalog_statuses[-1][1].get("commands") or [])
+        self.assertTrue(any(item.get("command") == "refresh_llm_endpoint" for item in commands))
+
+    async def test_channel_replace_replays_cached_control_catalog_when_started(self) -> None:
+        await self.channel_runtime.start_async()
+        await self.core.publish_control_catalog_async(endpoint_id="socket_main")
+        replacement = _StubEndpoint(
+            endpoint=EndpointConfig(endpoint_id="socket_main", channel_kind="socket", binding_key="runtime.sock")
+        )
+        replacement.sent_statuses = []
+
+        await self.channel_runtime.replace_endpoint_async(replacement)
+        replacement.flush_status_outbox()
+
+        catalog_statuses = [item for item in replacement.sent_statuses if item[0] == "control_catalog"]
+        self.assertTrue(catalog_statuses)
+        commands = list(catalog_statuses[-1][1].get("commands") or [])
+        self.assertTrue(any(item.get("command") == "refresh_llm_endpoint" for item in commands))
 
     async def test_reset_request_is_deduplicated_and_expires(self) -> None:
         action = ControlAction(

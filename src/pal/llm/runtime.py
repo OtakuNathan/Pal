@@ -142,12 +142,14 @@ class EndpointResolver:
         if self.endpoints:
             self.endpoints = tuple(self.endpoints)
             return
+        self.refresh()
+
+    def refresh(self) -> tuple[LLMEndpointModel, ...]:
         if self.repository is None:
-            self.endpoints = ()
-            return
-        # LLM endpoint topology is loaded once during bootstrap. Changes are
-        # picked up by restarting from wizard-owned provisioning.
-        self.endpoints = tuple(self.repository.list_enabled())
+            self.endpoints = tuple(self.endpoints)
+        else:
+            self.endpoints = tuple(self.repository.list_enabled())
+        return self.endpoints
 
     def primary(self, *, preferred_endpoint_id: str | None = None) -> LLMEndpointModel | None:
         enabled = self.enabled(preferred_endpoint_id=preferred_endpoint_id)
@@ -389,7 +391,29 @@ class LLMRuntime(LLMRuntimePort):
 
     def refresh_runtime_settings(self) -> None:
         self.think_level = self.settings_repository.get_think_level()
-        self.active_endpoint_id = self.settings_repository.get_active_llm_endpoint_id()
+        configured_active = self.settings_repository.get_active_llm_endpoint_id()
+        endpoint_ids = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
+        self.active_endpoint_id = configured_active if configured_active in endpoint_ids else None
+
+    def refresh_llm_endpoints(self) -> dict[str, Any]:
+        before = [endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints]
+        configured_active = self.settings_repository.get_active_llm_endpoint_id()
+        self.endpoint_resolver.refresh()
+        self.refresh_runtime_settings()
+        after = [endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints]
+        primary = self.endpoint_resolver.primary(preferred_endpoint_id=self.active_endpoint_id)
+        return {
+            "before_count": len(before),
+            "enabled_count": len(after),
+            "added_endpoint_ids": sorted(set(after) - set(before)),
+            "removed_endpoint_ids": sorted(set(before) - set(after)),
+            "configured_active_endpoint_id": configured_active,
+            "active_endpoint_id": self.active_endpoint_id,
+            "active_endpoint_available": bool(configured_active and configured_active == self.active_endpoint_id),
+            "primary_endpoint_id": primary.endpoint_id if primary is not None else None,
+            "primary_model_id": primary.model_id if primary is not None else None,
+            "enabled_endpoint_ids": after,
+        }
 
     def set_active_endpoint(self, endpoint_id: str) -> str:
         normalized = str(endpoint_id or "").strip()

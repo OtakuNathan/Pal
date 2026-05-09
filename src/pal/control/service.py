@@ -418,6 +418,18 @@ class ControlPlane(ControlPlanePort):
         )
         self.register_command(
             ControlCommandSpec(
+                name="refresh_llm_endpoint",
+                handler=self._handle_refresh_llm_endpoint,
+                aliases=("refresh_llm_endpoints", "llm_refresh"),
+                description="Refresh LLM endpoint topology from the local database for future turns.",
+                usage="/refresh_llm_endpoint",
+                show_in_panel=True,
+                panel_group="builtin",
+                panel_button=False,
+            )
+        )
+        self.register_command(
+            ControlCommandSpec(
                 name="reset",
                 handler=self._handle_reset,
                 description="Open memory reset confirmation for this scope.",
@@ -511,6 +523,13 @@ class ControlPlane(ControlPlanePort):
         return ControlAction(
             action_kind="compact_memory",
             target_scope="memory",
+            route=invocation.route,
+        )
+
+    def _handle_refresh_llm_endpoint(self, invocation: ControlCommandInvocation) -> ControlAction:
+        return ControlAction(
+            action_kind="refresh_llm_endpoint",
+            target_scope="runtime",
             route=invocation.route,
         )
 

@@ -733,6 +733,9 @@ class PalCore:
             if action.action_kind == "compact_memory":
                 await self._handle_compact_memory_async(action)
                 return
+            if action.action_kind == "refresh_llm_endpoint":
+                await self._handle_refresh_llm_endpoint_async(action)
+                return
             if action.action_kind == "interactive_open":
                 await self._handle_interactive_open_async(action)
                 return
@@ -845,6 +848,36 @@ class PalCore:
         if await self._resolve_interaction_action_async(action, message):
             return
         await self._reply_to_route_async(action.route, message)
+
+    async def _handle_refresh_llm_endpoint_async(self, action: ControlAction) -> None:
+        llm_runtime = self.context.require_port("llm:llm")
+        refresh = getattr(llm_runtime, "refresh_llm_endpoints", None)
+        if callable(refresh):
+            payload = refresh()
+        else:
+            settings_refresh = getattr(llm_runtime, "refresh_runtime_settings", None)
+            if callable(settings_refresh):
+                settings_refresh()
+            payload = {"enabled_count": None, "primary_endpoint_id": getattr(llm_runtime, "active_endpoint_id", None)}
+        enabled_count = payload.get("enabled_count")
+        primary = payload.get("primary_endpoint_id") or "-"
+        active = payload.get("active_endpoint_id") or "-"
+        configured = payload.get("configured_active_endpoint_id") or "-"
+        added = list(payload.get("added_endpoint_ids") or [])
+        removed = list(payload.get("removed_endpoint_ids") or [])
+        lines = [
+            "LLM endpoints refreshed.",
+            f"Enabled endpoints: {enabled_count if enabled_count is not None else '-'}",
+            f"Primary endpoint for future turns: {primary}",
+            f"Active endpoint setting: {configured}",
+        ]
+        if configured != active:
+            lines.append(f"Runtime active endpoint: {active}")
+        if added:
+            lines.append(f"Added: {', '.join(str(item) for item in added)}")
+        if removed:
+            lines.append(f"Removed/disabled: {', '.join(str(item) for item in removed)}")
+        await self._reply_to_route_async(action.route, "\n".join(lines))
 
     def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:
         normalized = str(turn_id or "").strip()

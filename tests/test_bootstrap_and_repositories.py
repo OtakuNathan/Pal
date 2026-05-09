@@ -272,6 +272,62 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual([item.endpoint_id for item in resolver.enabled()], ["first"])
 
+    def test_llm_runtime_refreshes_endpoint_topology_from_database(self) -> None:
+        repository = LLMEndpointRepository()
+        settings = RuntimeSettingRepository()
+        settings.ensure_defaults()
+        repository.ensure_defaults(
+            [
+                {
+                    "endpoint_id": "old",
+                    "provider": "stub",
+                    "model_id": "old-model",
+                    "api_mode": "openai_chat",
+                    "base_url": "stub://local/old",
+                    "credential_ref": "stub-old",
+                    "priority": 0,
+                    "enabled": True,
+                }
+            ]
+        )
+        settings.set_active_llm_endpoint_id("old")
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=repository),
+            settings_repository=settings,
+        )
+        self.assertEqual([item.endpoint_id for item in runtime.endpoint_resolver.enabled()], ["old"])
+        self.assertEqual(runtime.active_endpoint_id, "old")
+
+        repository.upsert(
+            endpoint_id="old",
+            provider="stub",
+            model_id="old-model",
+            api_mode="openai_chat",
+            base_url="stub://local/old",
+            credential_ref="stub-old",
+            priority=0,
+            enabled=False,
+        )
+        repository.upsert(
+            endpoint_id="new",
+            provider="stub",
+            model_id="new-model",
+            api_mode="openai_chat",
+            base_url="stub://local/new",
+            credential_ref="stub-new",
+            priority=0,
+            enabled=True,
+        )
+
+        payload = runtime.refresh_llm_endpoints()
+
+        self.assertEqual([item.endpoint_id for item in runtime.endpoint_resolver.enabled()], ["new"])
+        self.assertEqual(payload["added_endpoint_ids"], ["new"])
+        self.assertEqual(payload["removed_endpoint_ids"], ["old"])
+        self.assertEqual(payload["configured_active_endpoint_id"], "old")
+        self.assertIsNone(payload["active_endpoint_id"])
+        self.assertEqual(payload["primary_endpoint_id"], "new")
+
     def test_litellm_credential_resolver_uses_secret_store_ref(self) -> None:
         repository = LLMEndpointRepository()
         repository.ensure_defaults(
@@ -1891,6 +1947,48 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(endpoint.endpoint.channel_kind, "socket")
         self.assertEqual(Path(endpoint.endpoint.binding_key), self.registration.runtime.runtime_root / "pal.sock")
 
+    def test_channel_endpoint_provider_reload_rebuilds_provider_without_detaching_channel_bus(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        handle = compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        runtime = handle.core.context.execution_runtime
+        old_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+        self.assertIsNotNone(old_endpoint)
+        self.assertIn("channel", handle.core.context.module_registry.modules)
+        self.assertIn("op_channel_mgmt_reload_provider", handle.core.context.capability_registry.descriptors)
+
+        prefixes = ("pal.channel.factory", "pal.channel.endpoints.socket_endpoint")
+        original_modules = {
+            name: module
+            for name, module in sys.modules.items()
+            if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes)
+        }
+        probe_name = "pal.channel.endpoints.socket_endpoint.__pal_hot_reload_probe__"
+        try:
+            sys.modules[probe_name] = types.ModuleType(probe_name)
+
+            result = runtime.execute(
+                CapabilityCall(name="op_channel_mgmt_reload_provider", args={"target_id": "socket_default"})
+            )
+
+            self.assertEqual(result.status, "ok")
+            self.assertNotIn(probe_name, sys.modules)
+            self.assertIn("pal.channel.endpoints.socket_endpoint", result.structured["reload_modules"])
+            new_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+            self.assertIsNotNone(new_endpoint)
+            self.assertIsNot(new_endpoint, old_endpoint)
+            self.assertEqual(new_endpoint.endpoint.endpoint_id, "socket_default")
+            self.assertIn("channel", handle.core.context.module_registry.modules)
+            self.assertIn("op_channel_mgmt_reload_provider", handle.core.context.capability_registry.descriptors)
+        finally:
+            for name in list(sys.modules):
+                if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes):
+                    sys.modules.pop(name, None)
+            sys.modules.update(original_modules)
+
     def test_compose_runtime_registers_telegram_endpoint_via_factory_registry(self) -> None:
         self.wizard.seed_defaults(self.registration)
         ChannelEndpointRepository().upsert(
@@ -2555,6 +2653,10 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
                 "commands": [
                     {"command": "control", "description": "Show the control panel and command help."},
                     {"command": "think", "description": "Show or update the think level for future turns."},
+                    {
+                        "command": "refresh_llm_endpoint",
+                        "description": "Refresh LLM endpoint topology from the local database for future turns.",
+                    },
                 ]
             },
         )
@@ -2562,7 +2664,10 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.endpoint.flush_status_outbox()
         await asyncio.sleep(0.05)
 
-        self.assertTrue(any(kind == "commands" for kind, _ in self.fake_bot.actions))
+        command_actions = [payload for kind, payload in self.fake_bot.actions if kind == "commands"]
+        self.assertTrue(command_actions)
+        published_commands = [item["command"] for item in command_actions[-1]["commands"]]
+        self.assertIn("refresh_llm_endpoint", published_commands)
         self.assertTrue(any(kind == "menu_button" for kind, _ in self.fake_bot.actions))
 
     async def test_telegram_endpoint_interactive_update_and_resolve_reuse_same_message(self) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -51,6 +52,9 @@ class ChannelRuntime(ChannelRuntimePort):
     status_outbox: deque[QueuedStatus] = field(default_factory=deque)
     stream_outbox: deque[QueuedStreamEvent] = field(default_factory=deque)
     on_ready: Callable[[], None] | None = None
+    control_catalog_payload: dict[str, object] | None = None
+    _loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
+    _started: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.mailbox.on_put = self._notify_ready
@@ -60,6 +64,8 @@ class ChannelRuntime(ChannelRuntimePort):
         self.endpoint_registry.register(endpoint)
 
     async def start_async(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._started = True
         for endpoint in self.list_endpoints():
             starter = getattr(endpoint, "start_async", None)
             if callable(starter):
@@ -70,6 +76,38 @@ class ChannelRuntime(ChannelRuntimePort):
             stopper = getattr(endpoint, "stop_async", None)
             if callable(stopper):
                 await stopper()
+        self._started = False
+        self._loop = None
+
+    async def replace_endpoint_async(self, endpoint: ChannelEndpointBase) -> None:
+        old_endpoint = self.get_endpoint(endpoint.endpoint.endpoint_id)
+        if old_endpoint is not None and old_endpoint is not endpoint:
+            stopper = getattr(old_endpoint, "stop_async", None)
+            if callable(stopper):
+                await stopper()
+        self.register_endpoint(endpoint)
+        if self._started:
+            starter = getattr(endpoint, "start_async", None)
+            if callable(starter):
+                await starter()
+            self._queue_cached_control_catalog(endpoint)
+
+    def replace_endpoint(self, endpoint: ChannelEndpointBase, *, timeout_seconds: float = 10.0) -> None:
+        async def _replace() -> None:
+            await self.replace_endpoint_async(endpoint)
+
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop is loop:
+                raise RuntimeError("cannot synchronously reload a channel endpoint from the channel event loop")
+            future = asyncio.run_coroutine_threadsafe(_replace(), loop)
+            future.result(timeout=timeout_seconds)
+            return
+        asyncio.run(_replace())
 
     def get_endpoint(self, endpoint_id: str) -> ChannelEndpointBase | None:
         return self.endpoint_registry.get(endpoint_id)
@@ -82,6 +120,7 @@ class ChannelRuntime(ChannelRuntimePort):
         if endpoint is None:
             return False
         endpoint.enable()
+        self._queue_cached_control_catalog(endpoint)
         return True
 
     def disable_endpoint(self, endpoint_id: str) -> bool:
@@ -96,6 +135,7 @@ class ChannelRuntime(ChannelRuntimePort):
         if endpoint is None:
             return False
         endpoint.attach()
+        self._queue_cached_control_catalog(endpoint)
         return True
 
     def detach_endpoint(self, endpoint_id: str) -> bool:
@@ -238,6 +278,8 @@ class ChannelRuntime(ChannelRuntimePort):
         payload: dict[str, object] | None = None,
         reply_target: dict[str, object] | None = None,
     ) -> str | None:
+        if str(kind) == "control_catalog":
+            self.control_catalog_payload = dict(payload or {})
         endpoint = self.get_endpoint(endpoint_id)
         if endpoint is None:
             return None
@@ -246,6 +288,16 @@ class ChannelRuntime(ChannelRuntimePort):
             kind,
             response_handle=endpoint.build_response_handle(reply_target=target),
             payload=dict(payload or {}),
+        )
+
+    def _queue_cached_control_catalog(self, endpoint: ChannelEndpointBase) -> None:
+        payload = self.control_catalog_payload
+        if not payload or not endpoint.attached or not endpoint.enabled:
+            return
+        endpoint.queue_status(
+            "control_catalog",
+            response_handle=endpoint.build_response_handle(reply_target=endpoint.derive_default_reply_target()),
+            payload=dict(payload),
         )
 
     def flush_outbox(self) -> None:

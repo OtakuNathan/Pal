@@ -2504,6 +2504,55 @@ class MinionIntegrationTests(unittest.TestCase):
 
         self.assertEqual(derived, [])
 
+    def test_minion_completed_checkpoint_is_manager_telemetry_only(self) -> None:
+        event = EventEnvelope(
+            event_kind=EventKind.MINION_CHECKPOINT,
+            source_kind=SourceKind.MINION,
+            payload={
+                "status": "completed",
+                "summary": "final milestone done",
+                "minion_id": "m1",
+                "run_id": "r1",
+                "work_order_id": "wo1",
+                "minion_profile": "generic",
+                "route": {
+                    "endpoint_id": "telegram_main",
+                    "channel_kind": "telegram",
+                    "reply_target": {"chat_id": "42"},
+                },
+            },
+        )
+
+        derived = MinionControlEventHandler().handle(event, context=None)
+
+        self.assertEqual(derived, [])
+
+    def test_minion_partial_checkpoint_still_notifies_user(self) -> None:
+        event = EventEnvelope(
+            event_kind=EventKind.MINION_CHECKPOINT,
+            source_kind=SourceKind.MINION,
+            payload={
+                "status": "partial",
+                "summary": "draft ready, continuing",
+                "minion_id": "m1",
+                "run_id": "r1",
+                "work_order_id": "wo1",
+                "minion_profile": "generic",
+                "route": {
+                    "endpoint_id": "telegram_main",
+                    "channel_kind": "telegram",
+                    "reply_target": {"chat_id": "42"},
+                },
+            },
+        )
+
+        derived = MinionControlEventHandler().handle(event, context=None)
+
+        self.assertEqual(len(derived), 1)
+        action = derived[0].payload
+        self.assertEqual(action.action_kind, "route_reply")
+        self.assertIn("Minion checkpoint: partial", action.args["text"])
+
     def test_minion_terminal_event_keeps_control_route_for_user_notification(self) -> None:
         class Provider:
             def has_pending_events(self) -> bool:

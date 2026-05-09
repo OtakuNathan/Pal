@@ -6,13 +6,12 @@ from typing import Protocol
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase
 from pal.channel.contracts import EndpointConfig
-from pal.channel.endpoints.socket_endpoint import SocketChannelEndpoint
-from pal.channel.endpoints.telegram_endpoint import TelegramChannelEndpointFactory
 from pal.channel.models import ChannelEndpointModel
 
 
 class ChannelEndpointFactory(Protocol):
     channel_kind: str
+    reload_modules: tuple[str, ...]
 
     def create(
         self,
@@ -30,6 +29,12 @@ class ChannelEndpointFactoryRegistry:
     def register(self, factory: ChannelEndpointFactory) -> None:
         self.factories[factory.channel_kind] = factory
 
+    def reload_modules_for_kind(self, channel_kind: str) -> tuple[str, ...]:
+        factory = self.factories.get(channel_kind)
+        if factory is None:
+            return ()
+        return tuple(str(item) for item in getattr(factory, "reload_modules", ()) if str(item).strip())
+
     def create(
         self,
         record: ChannelEndpointModel,
@@ -45,6 +50,7 @@ class ChannelEndpointFactoryRegistry:
 @dataclass(frozen=True)
 class SocketChannelEndpointFactory:
     channel_kind: str = "socket"
+    reload_modules: tuple[str, ...] = ("pal.channel.factory", "pal.channel.endpoints.socket_endpoint")
 
     def create(
         self,
@@ -53,6 +59,8 @@ class SocketChannelEndpointFactory:
         runtime_root: Path,
     ) -> ChannelEndpointBase | None:
         _ = runtime_root
+        from pal.channel.endpoints.socket_endpoint import SocketChannelEndpoint
+
         endpoint = EndpointConfig(
             endpoint_id=record.endpoint_id,
             channel_kind=record.channel_kind,
@@ -67,6 +75,8 @@ class SocketChannelEndpointFactory:
 
 
 def build_default_factory_registry() -> ChannelEndpointFactoryRegistry:
+    from pal.channel.endpoints.telegram_endpoint import TelegramChannelEndpointFactory
+
     registry = ChannelEndpointFactoryRegistry()
     registry.register(SocketChannelEndpointFactory())
     registry.register(TelegramChannelEndpointFactory())

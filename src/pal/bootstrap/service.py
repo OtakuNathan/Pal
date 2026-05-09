@@ -136,7 +136,12 @@ def compose_runtime(
     register_artifact_with_core(core.context, artifact_service)
     register_skill_with_core(core.context, skill_service)
     register_behavior_with_core(core.context, behavior_service)
-    register_channel_with_core(core.context, channel_runtime)
+    register_channel_with_core(
+        core.context,
+        channel_runtime,
+        runtime_root=registration.runtime.runtime_root,
+        endpoint_factories=endpoint_factories,
+    )
     register_identity_with_core(core.context, identity_service)
     register_llm_with_core(core.context, llm_runtime)
     skill_service.llm_runtime = llm_runtime

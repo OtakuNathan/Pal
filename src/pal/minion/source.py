@@ -74,7 +74,21 @@ class MinionControlEventHandler(EventHandler):
         elif event.event_kind == EventKind.MINION_PROGRESS:
             # Progress is high-cardinality telemetry for the manager ledger, not a chat notification.
             return []
-        elif event.event_kind in {EventKind.MINION_CHECKPOINT, EventKind.MINION_TERMINAL}:
+        elif event.event_kind == EventKind.MINION_CHECKPOINT:
+            if not _should_notify_checkpoint(payload):
+                return []
+            text = _render_minion_event_notification(event.event_kind, payload)
+            if not text:
+                return []
+            action = ControlAction(
+                action_kind="route_reply",
+                target_scope="channel",
+                target_id=str(payload.get("run_id") or payload.get("minion_id") or ""),
+                route=route,
+                args={"text": text},
+                notes="minion event notification",
+            )
+        elif event.event_kind == EventKind.MINION_TERMINAL:
             text = _render_minion_event_notification(event.event_kind, payload)
             if not text:
                 return []
@@ -96,6 +110,13 @@ class MinionControlEventHandler(EventHandler):
                 correlation_id=event.correlation_id,
             )
         ]
+
+
+def _should_notify_checkpoint(payload: dict[str, Any]) -> bool:
+    if bool(payload.get("notify_user")):
+        return True
+    status = str(payload.get("status") or "").strip().lower()
+    return status == "partial"
 
 
 def _event_kind_for_minion_event(event_kind: str) -> str:
