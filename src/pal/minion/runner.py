@@ -567,15 +567,13 @@ class MinionRunner:
 
     def _terminal_payload(self, status: str, summary: Any) -> dict[str, Any]:
         summary_text = str(summary or "").strip()
-        lessons = _extract_lessons(summary_text)
-        task_lessons = list(lessons.get("task_lessons") or [])
-        if str(status) == "completed" and not task_lessons:
-            task_lessons.append(f"{self._current_milestone_title()}: {_preview_text(summary_text, limit=260)}")
+        lesson_payload = _extract_lessons_and_clean_summary(summary_text)
+        summary_text = str(lesson_payload.get("summary") or summary_text).strip()
         return {
             "status": str(status or "").strip() or "completed",
             "summary": summary_text,
-            "task_lessons": task_lessons,
-            "system_lessons": list(lessons.get("system_lessons") or []),
+            "task_lessons": list(lesson_payload.get("task_lessons") or []),
+            "system_lessons": list(lesson_payload.get("system_lessons") or []),
         }
 
     def _append_debug_log(self, section: str, payload: dict[str, Any]) -> None:
@@ -1162,7 +1160,8 @@ def _render_system_prompt(scaffold: dict[str, Any]) -> str:
         "If completion evidence cannot be produced, report blocked instead of completed.\n"
         "When completion policy requires git_commit, leave file changes in the workspace; do not run git commit yourself.\n"
         "If a tool/capability call fails and `op_l3_recall_query` is listed below, you MUST call `op_l3_recall_query` for relevant prior experience before retrying, debugging further, or reporting blocked.\n"
-        "When the current milestone is complete, stop with a concise milestone summary. Include useful Task lessons and System lessons when the run taught something reusable.\n\n"
+        "When the current milestone is complete, stop with a concise milestone summary. "
+        "If the run taught something genuinely reusable, include separate Task lessons or System lessons; Pal will ask the user before absorbing them.\n\n"
         f"Workspace policy:\n{json.dumps(scaffold.get('workspace_policy') or {}, ensure_ascii=False, sort_keys=True)}\n\n"
         f"Completion policy:\n{json.dumps(scaffold.get('completion_policy') or {}, ensure_ascii=False, sort_keys=True)}\n\n"
         f"Output contract:\n{scaffold.get('output_contract')}\n\n"
@@ -1184,7 +1183,64 @@ def _render_task_prompt(pack: TaskContextPack) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
+def _extract_lessons_and_clean_summary(text: str) -> dict[str, Any]:
+    raw = str(text or "").strip()
+    lessons = {"task_lessons": [], "system_lessons": []}
+    if not raw:
+        return {"summary": "", **lessons}
+    loaded = _try_extract_json(raw)
+    if isinstance(loaded, dict):
+        lessons["task_lessons"].extend(_string_items(loaded.get("task_lessons") or loaded.get("taskLessons") or loaded.get("task_lessons_to_remember")))
+        lessons["system_lessons"].extend(_string_items(loaded.get("system_lessons") or loaded.get("systemLessons") or loaded.get("system_lesson_candidates")))
+        summary = str(loaded.get("summary") or loaded.get("final_summary") or loaded.get("result") or raw).strip()
+        return {"summary": summary, **{key: _dedupe_nonempty(value) for key, value in lessons.items()}}
+
+    current: str | None = None
+    summary_lines: list[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip().strip("-* ")
+        heading = _lesson_heading_kind(stripped)
+        if heading == "task_lessons":
+            current = "task_lessons"
+            value = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
+        elif heading == "system_lessons":
+            current = "system_lessons"
+            value = stripped.split(":", 1)[1].strip() if ":" in stripped else ""
+        elif current and stripped:
+            value = stripped
+        else:
+            current = None
+            value = ""
+            summary_lines.append(line.rstrip())
+        if current and value and value.lower() not in {"none", "n/a"}:
+            lessons[current].append(value)
+    summary_text = "\n".join(summary_lines).strip()
+    return {"summary": summary_text, **{key: _dedupe_nonempty(value) for key, value in lessons.items()}}
+
+
+def _lesson_heading_kind(text: str) -> str:
+    normalized = str(text or "").strip().strip("#*_` ")
+    while normalized and not (normalized[0].isalnum() or normalized[0] == "_"):
+        normalized = normalized[1:].strip()
+    lowered = normalized.lower().replace("_", " ")
+    lowered = lowered.rstrip(":").strip()
+    if lowered in {"task lesson", "task lessons", "task wise lessons", "task-wise lessons"}:
+        return "task_lessons"
+    if lowered in {"system lesson", "system lessons", "system wise lessons", "system-wise lessons"}:
+        return "system_lessons"
+    if lowered.startswith(("task lesson:", "task lessons:", "task wise lessons:", "task-wise lessons:")):
+        return "task_lessons"
+    if lowered.startswith(("system lesson:", "system lessons:", "system wise lessons:", "system-wise lessons:")):
+        return "system_lessons"
+    return ""
+
+
 def _extract_lessons(text: str) -> dict[str, list[str]]:
+    payload = _extract_lessons_and_clean_summary(text)
+    return {
+        "task_lessons": list(payload.get("task_lessons") or []),
+        "system_lessons": list(payload.get("system_lessons") or []),
+    }
     raw = str(text or "").strip()
     lessons = {"task_lessons": [], "system_lessons": []}
     if not raw:

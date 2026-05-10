@@ -458,6 +458,58 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 if status:
                     self._update_work_order_status(db, work_order_id, status)
 
+    def absorb_lessons(
+        self,
+        work_order_id: str,
+        *,
+        task_lessons: list[str] | tuple[str, ...] | None = None,
+        system_lessons: list[str] | tuple[str, ...] | None = None,
+        minion_id: str = "",
+        run_id: str = "",
+        system_status: str = "accepted",
+    ) -> dict[str, Any]:
+        self.ensure_schema()
+        normalized_work_order_id = str(work_order_id or "").strip()
+        if not normalized_work_order_id:
+            return {"status": "invalid", "error": "work_order_id is required"}
+        task_items = _string_list(task_lessons or [])
+        system_items = _string_list(system_lessons or [])
+        if not task_items and not system_items:
+            return {"status": "ok", "task_lesson_count": 0, "system_lesson_count": 0}
+        created_at = utc_now()
+        with self._connect() as db:
+            work_order = self._fetch_one(db, "SELECT task_id FROM minion_work_orders WHERE work_order_id = ?", (normalized_work_order_id,))
+            if work_order is None:
+                return {"status": "not_found", "error": "work_order not found"}
+            task_id = str(work_order["task_id"] or "")
+            task_count = 0
+            system_count = 0
+            for lesson in task_items:
+                if self._lesson_exists(db, "minion_task_lessons", normalized_work_order_id, lesson):
+                    continue
+                db.execute(
+                    """
+                    INSERT INTO minion_task_lessons(lesson_id, task_id, work_order_id, lesson_text, minion_id, run_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (f"tls_{uuid4().hex[:16]}", task_id, normalized_work_order_id, lesson, minion_id, run_id, created_at),
+                )
+                task_count += 1
+            for lesson in system_items:
+                if self._lesson_exists(db, "minion_system_lesson_candidates", normalized_work_order_id, lesson):
+                    continue
+                db.execute(
+                    """
+                    INSERT INTO minion_system_lesson_candidates(
+                        candidate_id, task_id, work_order_id, lesson_text, status, minion_id, run_id, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (f"sls_{uuid4().hex[:16]}", task_id, normalized_work_order_id, lesson, system_status, minion_id, run_id, created_at),
+                )
+                system_count += 1
+        return {"status": "ok", "task_lesson_count": task_count, "system_lesson_count": system_count}
+
     def build_continuity(self, work_order_id: str) -> dict[str, Any]:
         snapshot = self.read_work_order(work_order_id)
         return {
@@ -744,26 +796,16 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         if status not in {"completed", "failed", "blocked", "killed"}:
             status = "completed"
         self._update_work_order_status(db, work_order_id, status)
-        work_order = self._fetch_one(db, "SELECT task_id FROM minion_work_orders WHERE work_order_id = ?", (work_order_id,))
-        task_id = str(work_order["task_id"]) if work_order else ""
-        for lesson in _string_list(payload.get("task_lessons")):
-            db.execute(
-                """
-                INSERT INTO minion_task_lessons(lesson_id, task_id, work_order_id, lesson_text, minion_id, run_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (f"tls_{uuid4().hex[:16]}", task_id, work_order_id, lesson, minion_id, run_id, created_at),
-            )
-        for lesson in _string_list(payload.get("system_lessons")):
-            db.execute(
-                """
-                INSERT INTO minion_system_lesson_candidates(
-                    candidate_id, task_id, work_order_id, lesson_text, status, minion_id, run_id, created_at
-                )
-                VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
-                """,
-                (f"sls_{uuid4().hex[:16]}", task_id, work_order_id, lesson, minion_id, run_id, created_at),
-            )
+
+    def _lesson_exists(self, db: sqlite3.Connection, table_name: str, work_order_id: str, lesson_text: str) -> bool:
+        if table_name not in {"minion_task_lessons", "minion_system_lesson_candidates"}:
+            return False
+        row = self._fetch_one(
+            db,
+            f"SELECT 1 FROM {table_name} WHERE work_order_id = ? AND lesson_text = ? LIMIT 1",
+            (str(work_order_id), str(lesson_text)),
+        )
+        return row is not None
 
     def _update_work_order_status(self, db: sqlite3.Connection, work_order_id: str, status: str) -> None:
         ended_at = utc_now() if status in {"completed", "failed", "blocked", "killed"} else ""

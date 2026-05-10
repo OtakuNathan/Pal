@@ -36,7 +36,9 @@ class _StubEndpoint(ChannelEndpointQueueBase):
         return dict(payload or {})
 
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
-        _ = (response_handle, text)
+        if not hasattr(self, "sent_replies"):
+            self.sent_replies = []
+        self.sent_replies.append((str(text), dict(response_handle.reply_target)))
 
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, object]) -> None:
         if not hasattr(self, "sent_statuses"):
@@ -218,6 +220,20 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(action.action_kind, "refresh_llm_endpoint")
         self.assertEqual(action.target_scope, "runtime")
         self.assertIn("/refresh_llm_endpoint", plane.render_panel_text())
+
+    def test_telegram_bot_mention_suffix_is_ignored_for_slash_commands(self) -> None:
+        plane = ControlPlane()
+        action = plane.parse_event(
+            ControlEvent(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "/refresh_llm_endpoint@PalDevBot"},
+            )
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.action_kind, "refresh_llm_endpoint")
 
     def test_invalid_log_subcommand_is_invalid_command(self) -> None:
         plane = ControlPlane()
@@ -429,6 +445,21 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("LLM endpoints refreshed.", self.endpoint.outbox[-1].text)
         self.assertIn("Primary endpoint for future turns: new", self.endpoint.outbox[-1].text)
         self.assertIn("Removed/disabled: old", self.endpoint.outbox[-1].text)
+
+    async def test_slash_command_with_telegram_bot_suffix_runs_end_to_end(self) -> None:
+        self.core.bind_async_wakeup_sources()
+        self.endpoint.accept_raw(
+            {"text": "/control@PalDevBot", "session_id": "sess-1", "request_id": "req-mention"},
+            event_kind=EventKind.USER_MESSAGE,
+            correlation_id="req-mention",
+            reply_target={"session_id": "sess-1", "request_id": "req-mention"},
+        )
+
+        processed = await self.core.run_until_idle_async(max_iterations=16)
+
+        self.assertIn(EventKind.SLASH_COMMAND, [item.event_kind for item in processed])
+        self.assertTrue(hasattr(self.endpoint, "sent_replies"))
+        self.assertIn("Pal Control Panel", self.endpoint.sent_replies[-1][0])
 
     async def test_show_log_reports_current_status(self) -> None:
         await self.core.handle_control_action_async(
@@ -743,6 +774,14 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(button.label == "Compact" and button.action_key == "control.compact.run" for button in flattened))
         self.assertTrue(any(button.label == "Interrupt" and button.action_key == "control.interrupt.run" for button in flattened))
         self.assertTrue(any(button.label == "Reset Memory" and button.action_key == "control.reset.open" for button in flattened))
+        self.assertTrue(
+            any(
+                button.label == "Refresh LLM"
+                and button.action_key == "control.command.run"
+                and button.action_args == {"command_name": "refresh_llm_endpoint"}
+                for button in flattened
+            )
+        )
         self.assertTrue(
             any(
                 button.label == "Ping Plugin"

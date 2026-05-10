@@ -425,7 +425,8 @@ class ControlPlane(ControlPlanePort):
                 usage="/refresh_llm_endpoint",
                 show_in_panel=True,
                 panel_group="builtin",
-                panel_button=False,
+                panel_button=True,
+                panel_label="Refresh LLM",
             )
         )
         self.register_command(
@@ -583,7 +584,11 @@ class ControlPlane(ControlPlanePort):
 
 def _normalize_command_name(value: str) -> str:
     text = str(value or "").strip().lower()
-    return text[1:] if text.startswith("/") else text
+    if text.startswith("/"):
+        text = text[1:]
+    if "@" in text:
+        text = text.split("@", 1)[0]
+    return text
 
 
 def _normalize_think_level(value: str) -> str | None:

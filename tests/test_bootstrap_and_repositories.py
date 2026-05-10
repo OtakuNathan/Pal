@@ -2727,6 +2727,42 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("ctl_panel_1", self.endpoint._interactive_messages)
 
+    async def test_telegram_endpoint_interactive_update_falls_back_to_new_message_when_edit_fails(self) -> None:
+        self.endpoint._interactive_messages["ctl_panel_stale"] = {
+            "chat_id": 42,
+            "message_id": 10,
+            "interaction_kind": "control_panel",
+            "expires_at_monotonic": None,
+            "actions": {},
+        }
+
+        async def _raise_edit_message_text(**kwargs):
+            _ = kwargs
+            raise RuntimeError("message is not modified")
+
+        self.fake_bot.edit_message_text = _raise_edit_message_text
+        spec = InteractionMessageSpec(
+            interaction_id="ctl_panel_stale",
+            interaction_kind="control_panel",
+            text="Pal Control Panel",
+            buttons=((InteractionButtonSpec(label="Think", action_key="control.think.open"),),),
+            expires_at=None,
+        )
+        self.endpoint.queue_status(
+            "interactive_update",
+            payload={"spec": spec},
+            response_handle=self.endpoint.build_response_handle(reply_target={"chat_id": "42"}),
+        )
+
+        self.endpoint.flush_status_outbox()
+        await asyncio.sleep(0.05)
+
+        messages = [payload for kind, payload in self.fake_bot.actions if kind == "message"]
+        self.assertTrue(messages)
+        self.assertEqual(messages[-1]["text"], "Pal Control Panel")
+        self.assertIn("ctl_panel_stale", self.endpoint._interactive_messages)
+        self.assertNotEqual(self.endpoint._interactive_messages["ctl_panel_stale"]["message_id"], 10)
+
     async def test_telegram_endpoint_prunes_expired_interactions(self) -> None:
         self.endpoint._interactive_messages["expired"] = {
             "chat_id": 42,

@@ -61,6 +61,22 @@ Other artifact tools remain discoverable.
 
 MCP-projected tools and prompt render capabilities are not resident by default.
 
+## Control And Channel
+
+Slash commands are runtime-private control ingress. They do not enter the LLM prompt, do not become conversational input, and do not write the raw command text into L1. The control plane parses them deterministically into `ControlAction` values.
+
+Telegram command text may arrive with a bot mention suffix, such as `/control@PalDevBot`. The command normalizer strips the leading slash and the optional `@BotName` suffix before lookup, so `/control`, `/control@PalDevBot`, and `/refresh_llm_endpoint@PalDevBot` resolve to the same registered commands.
+
+`/refresh_llm_endpoint` is a built-in control command. It bypasses LLM reasoning and asks PalCore to refresh LLM endpoint topology from the local database for future turns. It is exposed in:
+
+- the `/control` textual command list
+- the Telegram command catalog
+- the inline control panel as the `Refresh LLM` button
+
+The inline button uses the generic `control.command.run` interaction action, which dispatches the same command handler as the slash command. Refreshing LLM endpoints changes routing for future turns only; it is not a mid-turn model switch.
+
+Channel endpoints render platform-specific control UX. Telegram owns command menu publication, inline keyboard rendering, callback token mapping, and message editing. PalCore and Control receive typed interaction results, not Telegram callback payloads.
+
 ## MCP
 
 MCP is a first-party detachable plugin backed by a manager sidecar.
@@ -96,9 +112,11 @@ PalCore only sees:
 
 - a minion event source
 - minion capabilities
-- a control action handler for `minion_approval_decision`
+- control action handlers for `minion_approval_decision` and `minion_lesson_decision`
 
 Minion owns tasks, work orders, milestones, checkpoints, ledger, and lesson candidates in its own repository. `op_minion_decision_send` is not exposed to the LLM surface; approval decisions arrive through Control interactions and are routed to the minion module handler.
+
+The manager sidecar pushes events through the `subscribe_events` IPC stream. The Pal-side provider buffers pushed events and calls `core.notify_ready()`. The event source still drains the buffered events through the core loop, but delivery no longer depends on a user turn polling the manager.
 
 Current capability surface:
 
@@ -121,6 +139,10 @@ Current capability surface:
 Work order drafts are minion-owned planning artifacts for user brainstorming and module-boundary discussion. They are searchable, but they are not progress truth. The route is draft -> planner review -> user/Pal confirmation -> formal work order. Promotion is explicit through `op_minion_promote_work_order_draft`; `op_minion_spawn` can also accept `draft_id` and let the minion subsystem promote before spawning through the same main entry.
 
 Checkpoint is the milestone cursor fact. Completed checkpoints advance the derived current milestone; partial or blocked checkpoints do not.
+
+Progress and checkpoint events are manager/tasking telemetry. They are written to the minion ledger and checkpoint tables, but they are not direct chat notifications. Pal should answer progress questions by inspecting active runs and work order snapshots. Terminal events are the user-facing completion notification path.
+
+Terminal event summaries are cleaned before display: `Task Lesson` and `System Lesson` sections are extracted into structured fields and removed from the final completion text. When lessons are present, Pal opens a separate `minion_lesson_approval` interaction with `Accept`, `Reject`, and `Edit` buttons. Accept stores task lessons as tasking continuity, stores system lessons as accepted candidates, and attempts an L3 memory commit when `op_l3_commit_write` is available. Reject discards them. Edit pauses absorption and asks for revised lesson text.
 
 Minion task execution is Git-backed by design. A task owns or resolves a task repo, each work order runs on its own branch, and each completed milestone should correspond to a commit on that branch. A completed checkpoint should carry the milestone index and commit SHA. User acceptance/finalization can later squash milestone commits and merge/apply them to the target branch.
 

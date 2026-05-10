@@ -20,7 +20,7 @@ from pal.behavior import (
     BehaviorSkillModel,
     register_with_core as register_behavior_with_core,
 )
-from pal.control import ControlEvent, ControlPlane, ControlRoute, InteractionResult
+from pal.control import ControlAction, ControlEvent, ControlPlane, ControlRoute, InteractionResult
 from pal.core import PalCore
 from pal.channel.contracts import ChannelEnvelope, EndpointConfig, ResponseHandle
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
@@ -446,7 +446,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def test_checkpoint_is_milestone_cursor_and_lessons_stay_in_minion_store(self) -> None:
+    def test_checkpoint_is_milestone_cursor_and_lessons_wait_for_approval(self) -> None:
         pack = TaskContextPack(
             work_order_id="wo_cursor",
             goal="ship feature",
@@ -497,8 +497,21 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
         snapshot = self.repository.read_work_order("wo_cursor")
         self.assertEqual(snapshot["work_order"]["status"], "completed")
+        self.assertEqual(snapshot["task_lessons"], [])
+        self.assertEqual(snapshot["pending_system_lesson_candidates"], [])
+
+        absorbed = self.repository.absorb_lessons(
+            "wo_cursor",
+            task_lessons=["Use the existing milestone cursor."],
+            system_lessons=["Maybe promote this pattern later."],
+            minion_id="m1",
+            run_id="r1",
+        )
+
+        self.assertEqual(absorbed["status"], "ok")
+        snapshot = self.repository.read_work_order("wo_cursor")
         self.assertEqual(snapshot["task_lessons"][0]["lesson_text"], "Use the existing milestone cursor.")
-        self.assertEqual(snapshot["pending_system_lesson_candidates"][0]["status"], "pending")
+        self.assertEqual(snapshot["pending_system_lesson_candidates"], [])
 
     def test_one_task_cannot_have_two_active_work_orders(self) -> None:
         self.repository.prepare_pack_for_spawn(
@@ -928,6 +941,8 @@ class MinionManagerTests(unittest.TestCase):
             self.assertTrue(checkpoint["payload"]["commit_sha"])
             terminal = next(event for event in events if event["event_kind"] == "terminal")
             self.assertEqual(terminal["payload"]["status"], "completed")
+            self.assertNotIn("Task lessons", terminal["payload"]["summary"])
+            self.assertNotIn("System lessons", terminal["payload"]["summary"])
             self.assertIn("Use the confirmed tool result", terminal["payload"]["task_lessons"][0])
             self.assertIn("high-risk approval", terminal["payload"]["system_lessons"][0])
 
@@ -2200,6 +2215,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn(EventKind.APPROVAL_REQUEST, core.context.event_handler_registry.handlers)
                 self.assertIn(EventKind.MINION_PROGRESS, core.context.event_handler_registry.handlers)
                 self.assertIn("minion_approval_decision", core.context.control_action_registry.handlers)
+                self.assertIn("minion_lesson_decision", core.context.control_action_registry.handlers)
                 self.assertIn("op_minion_spawn", core.context.capability_registry.descriptors)
 
                 core.detach_module("minion")
@@ -2208,6 +2224,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertNotIn(EventKind.APPROVAL_REQUEST, core.context.event_handler_registry.handlers)
                 self.assertNotIn(EventKind.MINION_PROGRESS, core.context.event_handler_registry.handlers)
                 self.assertNotIn("minion_approval_decision", core.context.control_action_registry.handlers)
+                self.assertNotIn("minion_lesson_decision", core.context.control_action_registry.handlers)
                 self.assertNotIn("op_minion_spawn", core.context.capability_registry.descriptors)
             finally:
                 handle.shutdown_sync()
@@ -2231,6 +2248,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertTrue(status["ok"])
                 self.assertIn(EventKind.APPROVAL_REQUEST, core.context.event_handler_registry.handlers)
                 self.assertIn(EventKind.MINION_PROGRESS, core.context.event_handler_registry.handlers)
+                self.assertIn("minion_lesson_decision", core.context.control_action_registry.handlers)
             finally:
                 handle.shutdown_sync()
 
@@ -2527,7 +2545,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
         self.assertEqual(derived, [])
 
-    def test_minion_partial_checkpoint_still_notifies_user(self) -> None:
+    def test_minion_partial_checkpoint_is_manager_telemetry_only(self) -> None:
         event = EventEnvelope(
             event_kind=EventKind.MINION_CHECKPOINT,
             source_kind=SourceKind.MINION,
@@ -2548,10 +2566,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
         derived = MinionControlEventHandler().handle(event, context=None)
 
-        self.assertEqual(len(derived), 1)
-        action = derived[0].payload
-        self.assertEqual(action.action_kind, "route_reply")
-        self.assertIn("Minion checkpoint: partial", action.args["text"])
+        self.assertEqual(derived, [])
 
     def test_minion_terminal_event_keeps_control_route_for_user_notification(self) -> None:
         class Provider:
@@ -2596,6 +2611,40 @@ class MinionIntegrationTests(unittest.TestCase):
         self.assertEqual(action.route.reply_target["chat_id"], "42")
         self.assertIn("Minion finished: completed", action.args["text"])
 
+    def test_minion_terminal_lessons_open_approval_and_hide_from_final_summary(self) -> None:
+        event = EventEnvelope(
+            event_kind=EventKind.MINION_TERMINAL,
+            source_kind=SourceKind.MINION,
+            payload={
+                "status": "completed",
+                "summary": "Done.\n\nTask Lesson\nKeep final replies clean.",
+                "task_lessons": ["Keep final replies clean."],
+                "system_lessons": ["Ask before absorbing lessons."],
+                "minion_id": "m1",
+                "run_id": "r1",
+                "work_order_id": "wo1",
+                "minion_profile": "generic",
+                "route": {
+                    "endpoint_id": "telegram_main",
+                    "channel_kind": "telegram",
+                    "reply_target": {"chat_id": "42"},
+                },
+            },
+        )
+
+        derived = MinionControlEventHandler().handle(event, context=None)
+
+        self.assertEqual(len(derived), 2)
+        finished = derived[0].payload
+        approval = derived[1].payload
+        self.assertEqual(finished.action_kind, "route_reply")
+        self.assertNotIn("Task Lesson", finished.args["text"])
+        self.assertEqual(approval.action_kind, "interactive_open")
+        self.assertEqual(approval.args["interaction"]["interaction_kind"], "minion_lesson_approval")
+        buttons = approval.args["interaction"]["buttons"][0]
+        self.assertEqual([button["label"] for button in buttons], ["Accept", "Reject", "Edit"])
+        self.assertEqual(buttons[0]["action_args"]["action_kind"], "minion_lesson_decision")
+
     def test_control_plane_turns_minion_approval_button_into_decision_action(self) -> None:
         route = ControlRoute(endpoint_id="telegram_main", channel_kind="telegram", reply_target={"chat_id": "42"})
         action = ControlPlane().handle_interaction(
@@ -2618,3 +2667,69 @@ class MinionIntegrationTests(unittest.TestCase):
         self.assertEqual(action.action_kind, "minion_approval_decision")
         self.assertEqual(action.args["decision"], "accept")
         self.assertEqual(action.args["approval_id"], "ap1")
+
+    def test_minion_lesson_accept_button_absorbs_lessons_after_approval(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_lesson_accept_") as tmp:
+            repository = MinionTaskingRepository(runtime_root=Path(tmp))
+            repository.prepare_pack_for_spawn(
+                TaskContextPack(
+                    work_order_id="wo_lesson_accept",
+                    goal="learn",
+                    metadata={"task_id": "task_lesson_accept", "milestones": ["Done"]},
+                )
+            )
+            provider = MinionManagerProvider(runtime_root=Path(tmp))
+
+            message = asyncio.run(
+                provider.handle_control_action_async(
+                    ControlAction(
+                        action_kind="minion_lesson_decision",
+                        target_scope="minion",
+                        target_id="wo_lesson_accept",
+                        args={
+                            "decision": "accept",
+                            "work_order_id": "wo_lesson_accept",
+                            "task_lessons": ["Keep final replies clean."],
+                            "system_lessons": ["Ask before absorbing lessons."],
+                            "minion_id": "m1",
+                            "run_id": "r1",
+                        },
+                    )
+                )
+            )
+
+            snapshot = repository.read_work_order("wo_lesson_accept")
+            self.assertIn("accepted", message)
+            self.assertEqual(snapshot["task_lessons"][0]["lesson_text"], "Keep final replies clean.")
+            self.assertEqual(snapshot["pending_system_lesson_candidates"], [])
+
+    def test_minion_lesson_reject_button_does_not_absorb_lessons(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_lesson_reject_") as tmp:
+            repository = MinionTaskingRepository(runtime_root=Path(tmp))
+            repository.prepare_pack_for_spawn(
+                TaskContextPack(
+                    work_order_id="wo_lesson_reject",
+                    goal="learn",
+                    metadata={"task_id": "task_lesson_reject", "milestones": ["Done"]},
+                )
+            )
+            provider = MinionManagerProvider(runtime_root=Path(tmp))
+
+            message = asyncio.run(
+                provider.handle_control_action_async(
+                    ControlAction(
+                        action_kind="minion_lesson_decision",
+                        target_scope="minion",
+                        target_id="wo_lesson_reject",
+                        args={
+                            "decision": "reject",
+                            "work_order_id": "wo_lesson_reject",
+                            "task_lessons": ["Do not save me."],
+                        },
+                    )
+                )
+            )
+
+            snapshot = repository.read_work_order("wo_lesson_reject")
+            self.assertIn("discarded", message)
+            self.assertEqual(snapshot["task_lessons"], [])

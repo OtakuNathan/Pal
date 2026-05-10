@@ -521,3 +521,11 @@ plugin 节点负责：
 - **Hydration 是按当前运行时把设计图变成真实节点**
 - **Execution 把真实节点编译成“可搜索目录 + 可执行哈希表”**
 - **PalCore 只负责决定这些节点什么时候挂上、什么时候摘下**
+
+## Current Provider Contribution Rule
+
+Capabilities should enter Pal through module-owned forest hydration, not by ad-hoc calls to `ExecutionRuntime.register_capability()` from arbitrary runtime objects.
+
+The current implementation hydrates a module from its `ModuleHandle.introspection_provider`. If a module has endpoint/provider-specific capabilities, the preferred extension is for the module provider to contribute them as part of the mounted subtree, for example through a dynamic `build_mounted_subtree()` projection. A future generalized shape may add `ModuleHandle.capability_providers`, but the invariant stays the same: PalCore publishes and withdraws the module's whole capability surface, and Execution only compiles and dispatches it.
+
+For channel endpoints this means endpoint-specific capabilities can be projected by the channel module/provider, but endpoint code should not register global capabilities directly. That keeps attach/detach, hot replacement, search indexes, and teardown scoped to the owning module.

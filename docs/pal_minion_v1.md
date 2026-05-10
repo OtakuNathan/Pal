@@ -12,7 +12,7 @@ PalCore only sees:
 
 - a minion event source
 - minion capability providers
-- a registered control action handler
+- registered control action handlers
 
 Detach removes all three surfaces. Minion business state remains owned by the minion subsystem.
 
@@ -22,13 +22,23 @@ Minion runner emits `approval_requested`.
 
 `MinionEventSource` converts it into `EventKind.APPROVAL_REQUEST`.
 
-`ControlPlane` converts it into a generic `approval_requested` action.
+`MinionControlEventHandler` converts it into a generic `interactive_open` control action. PalCore sends that interaction through the current route. Telegram renders the inline keyboard. Channel-specific fallback belongs in channel endpoints, not in minion business logic.
 
-PalCore sends a generic `interactive_open` channel interaction. Telegram renders the inline keyboard. Channel-specific fallback belongs in channel endpoints, not in minion business logic.
-
-Button clicks produce `minion_approval_decision`. PalCore routes that action through `ControlActionHandlerRegistry`. The minion module handler calls manager RPC `send_decision` and records the ledger entry.
+Button clicks use `control.action.dispatch` and produce `minion_approval_decision`. PalCore routes that action through `ControlActionHandlerRegistry`. The minion module handler calls manager RPC `send_decision` and records the ledger entry.
 
 `op_minion_decision_send` is intentionally not exposed to the LLM capability surface.
+
+## Event Delivery And User Notifications
+
+The manager sidecar owns runner lifecycle and event publication. Pal subscribes to manager events over IPC. The provider buffers pushed events and calls `core.notify_ready()`, so completion can wake PalCore without waiting for the next user message.
+
+Event delivery is split by audience:
+
+- `progress` is high-cardinality telemetry for manager/tasking state. It is not a chat notification.
+- `checkpoint` is the milestone cursor fact. It is recorded in the tasking store and notifies no one directly.
+- `terminal` is the user-facing completion path. It sends the final route reply to the original control route when one exists.
+
+Pal should answer "what is it doing?" or "where is it now?" by reading minion active-run and work-order facts, not by relying on previously pushed chat text.
 
 ## Tasking Store
 
@@ -197,4 +207,12 @@ Terminal minion events may carry:
 - `task_lessons`
 - `system_lessons`
 
-Task lessons are stored as tasking continuity. System lessons are stored only as pending candidates. They are not written to L3 memory or committed as skills without a later confirmation flow.
+The runner may write lesson sections in its terminal summary, but the terminal payload extracts them into structured fields and strips them from the user-facing completion text.
+
+Lessons are never absorbed silently. If a terminal event carries lessons, Pal opens a `minion_lesson_approval` interaction with:
+
+- `Accept`
+- `Reject`
+- `Edit`
+
+Accept stores task lessons as tasking continuity and stores system lessons as accepted system candidates. It also attempts to commit accepted lessons to L3 memory when `op_l3_commit_write` is available in the current runtime. Reject discards the proposed lessons. Edit pauses absorption and asks for revised lesson text before saving.

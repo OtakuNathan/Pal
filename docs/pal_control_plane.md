@@ -1,5 +1,20 @@
 # Pal Control Plane
 
+## Current Implementation Alignment
+
+Slash commands are deterministic control-plane ingress. They bypass LLM reasoning, prompt assembly, and L1 transcript writes. The command parser accepts both direct command text and Telegram bot-addressed command text:
+
+- `/control`
+- `/control@PalDevBot`
+- `/refresh_llm_endpoint`
+- `/refresh_llm_endpoint@PalDevBot`
+
+The optional `@BotName` suffix is stripped before command lookup.
+
+`/refresh_llm_endpoint` is a built-in control command. It refreshes LLM endpoint topology from the local database for future turns. It is available in the textual `/control` list, the Telegram command catalog, and the inline control panel as `Refresh LLM`.
+
+Inline control buttons should use typed actions. Generic command buttons use `control.command.run` with `command_name`; arbitrary module-specific actions use `control.action.dispatch` and carry a typed `ControlAction` payload. Channel endpoints own platform-specific rendering such as Telegram inline keyboards and callback tokens.
+
 > 目标：定义 `control` 的职责、边界和交互契约。
 
 ## 目标

@@ -700,6 +700,8 @@ class MinionManagerProvider:
             return _capability_error("minion finalize failed", exc)
 
     async def handle_control_action_async(self, action: ControlAction) -> str:
+        if action.action_kind == "minion_lesson_decision":
+            return await self._handle_lesson_decision_async(action)
         if action.action_kind != "minion_approval_decision":
             return ""
         decision = str(action.args.get("decision") or "").strip().lower()
@@ -717,6 +719,70 @@ class MinionManagerProvider:
         if status == RuntimeStatus.OK:
             return f"Minion approval {decision or 'decision'} recorded."
         return str(result.get("error") or "Minion approval decision failed.")
+
+    async def _handle_lesson_decision_async(self, action: ControlAction) -> str:
+        decision = str(action.args.get("decision") or "").strip().lower()
+        work_order_id = str(action.args.get("work_order_id") or action.target_id or "").strip()
+        task_lessons = _string_list(action.args.get("task_lessons"))
+        system_lessons = _string_list(action.args.get("system_lessons"))
+        if decision == "reject":
+            return "Minion lessons discarded."
+        if decision == "edit":
+            return "Lesson absorption paused. Reply with the edited lesson text and Pal can save the revised version."
+        if decision != "accept":
+            return "Unsupported minion lesson decision."
+        result = await _to_thread(
+            self._repository().absorb_lessons,
+            work_order_id,
+            task_lessons=task_lessons,
+            system_lessons=system_lessons,
+            minion_id=str(action.args.get("minion_id") or ""),
+            run_id=str(action.args.get("run_id") or ""),
+        )
+        if str(result.get("status") or RuntimeStatus.OK) != RuntimeStatus.OK:
+            return str(result.get("error") or "Minion lesson absorption failed.")
+        l3_result = await _to_thread(self._commit_lessons_to_l3, work_order_id, task_lessons, system_lessons)
+        total = int(result.get("task_lesson_count") or 0) + int(result.get("system_lesson_count") or 0)
+        if l3_result:
+            return f"Minion lessons accepted ({total} stored; {l3_result})."
+        return f"Minion lessons accepted ({total} stored)."
+
+    def _commit_lessons_to_l3(self, work_order_id: str, task_lessons: list[str], system_lessons: list[str]) -> str:
+        if self.context is None:
+            return ""
+        runtime = getattr(self.context, "execution_runtime", None)
+        if runtime is None or "op_l3_commit_write" not in getattr(runtime, "capabilities", {}):
+            return ""
+        committed = 0
+        for lesson in task_lessons:
+            if self._commit_one_lesson_to_l3(runtime, lesson, scope="task", work_order_id=work_order_id):
+                committed += 1
+        for lesson in system_lessons:
+            if self._commit_one_lesson_to_l3(runtime, lesson, scope="system", work_order_id=work_order_id):
+                committed += 1
+        return f"{committed} memory records committed" if committed else ""
+
+    def _commit_one_lesson_to_l3(self, runtime: Any, lesson: str, *, scope: str, work_order_id: str) -> bool:
+        text = str(lesson or "").strip()
+        if not text:
+            return False
+        title = f"Minion {scope} lesson: {_preview_text(text, limit=72)}"
+        result = runtime.execute(
+            CapabilityCall(
+                name="op_l3_commit_write",
+                args={
+                    "kind": "case",
+                    "title": title,
+                    "summary": text,
+                    "search_text": text,
+                    "scope": scope,
+                    "task_id": work_order_id if scope == "task" else "",
+                    "topics": ["minion", "lesson"],
+                    "payload": {"source": "minion", "work_order_id": work_order_id},
+                },
+            )
+        )
+        return str(getattr(result, "status", "") or "") == RuntimeStatus.OK
 
     def has_pending_events(self) -> bool:
         with self._buffer_lock:
@@ -1012,7 +1078,10 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
             EventKind.MINION_CHECKPOINT: [event_handler],
             EventKind.MINION_TERMINAL: [event_handler],
         },
-        control_action_handlers={"minion_approval_decision": provider.handle_control_action_async},
+        control_action_handlers={
+            "minion_approval_decision": provider.handle_control_action_async,
+            "minion_lesson_decision": provider.handle_control_action_async,
+        },
         ports={"minion": provider},
         shutdown_sync=provider._stop_manager,
     )
@@ -1108,6 +1177,31 @@ def _prompt_log_enabled_for_turn(context: MainContext | None, turn_id: str) -> b
     return bool(getattr(state, "prompt_log_enabled", False))
 
 
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple)):
+        values = list(value)
+    else:
+        values = []
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = " ".join(str(item or "").split())
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _preview_text(text: str, *, limit: int) -> str:
+    value = " ".join(str(text or "").split())
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)].rstrip() + "..."
+
+
 def _event_dedupe_key(event: dict[str, Any]) -> str:
     try:
         return json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)
@@ -1197,5 +1291,5 @@ def _capability_error(text: str, exc: Exception) -> CapabilityResult:
     )
 
 
-async def _to_thread(fn, *args):
-    return await asyncio.to_thread(fn, *args)
+async def _to_thread(fn, *args, **kwargs):
+    return await asyncio.to_thread(fn, *args, **kwargs)

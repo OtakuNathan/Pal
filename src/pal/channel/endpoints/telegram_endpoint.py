@@ -810,9 +810,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         await self._prune_interactive_messages_async()
         existing = self._interactive_messages.get(spec.interaction_id)
         if allow_update and existing is not None:
-            await self._edit_interaction_message_async(existing, spec=spec)
-            self._remember_interaction_message(spec, existing)
-            return
+            if await self._edit_interaction_message_async(existing, spec=spec):
+                self._remember_interaction_message(spec, existing)
+                return
+            self._forget_interactive_message(spec.interaction_id)
         chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
         thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
         if chat_id is None:
@@ -850,21 +851,25 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         *,
         spec: InteractionMessageSpec,
         clear_keyboard: bool = False,
-    ) -> None:
+    ) -> bool:
         if self.application is None:
-            return
+            return False
         chat_id = _safe_int(target.get("chat_id"))
         message_id = _safe_int(target.get("message_id"))
         if chat_id is None or message_id is None:
-            return
+            return False
         kwargs: dict[str, Any] = {
             "chat_id": chat_id,
             "message_id": message_id,
             "text": spec.text,
             "reply_markup": None if clear_keyboard else self._build_interaction_markup(spec),
         }
-        with contextlib.suppress(Exception):
+        try:
             await self.application.bot.edit_message_text(**kwargs)
+        except Exception as exc:
+            self.last_delivery_error = str(exc)
+            return False
+        return True
 
     def _remember_interaction_message(self, spec: InteractionMessageSpec, target: dict[str, Any]) -> None:
         self._interactive_messages[spec.interaction_id] = {

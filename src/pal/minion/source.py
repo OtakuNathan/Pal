@@ -100,6 +100,32 @@ class MinionControlEventHandler(EventHandler):
                 args={"text": text},
                 notes="minion event notification",
             )
+            envelopes = [
+                EventEnvelope(
+                    event_kind=EventKind.CONTROL_ACTION,
+                    source_kind=SourceKind.CONTROL,
+                    payload=action,
+                    correlation_id=event.correlation_id,
+                )
+            ]
+            lesson_spec = _build_minion_lesson_interaction(payload, route)
+            if lesson_spec is not None:
+                envelopes.append(
+                    EventEnvelope(
+                        event_kind=EventKind.CONTROL_ACTION,
+                        source_kind=SourceKind.CONTROL,
+                        payload=ControlAction(
+                            action_kind="interactive_open",
+                            target_scope="interaction",
+                            target_id=lesson_spec.interaction_id,
+                            route=route,
+                            args={"kind": "minion_lesson_approval", "interaction": _interaction_payload(lesson_spec)},
+                            notes="minion lesson approval",
+                        ),
+                        correlation_id=event.correlation_id,
+                    )
+                )
+            return envelopes
         else:
             return []
         return [
@@ -113,10 +139,8 @@ class MinionControlEventHandler(EventHandler):
 
 
 def _should_notify_checkpoint(payload: dict[str, Any]) -> bool:
-    if bool(payload.get("notify_user")):
-        return True
-    status = str(payload.get("status") or "").strip().lower()
-    return status == "partial"
+    _ = payload
+    return False
 
 
 def _event_kind_for_minion_event(event_kind: str) -> str:
@@ -205,6 +229,76 @@ def _minion_approval_action_payload(payload: dict[str, Any], decision: str) -> d
     }
 
 
+def _build_minion_lesson_interaction(payload: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec | None:
+    task_lessons = _string_list(payload.get("task_lessons"))
+    system_lessons = _string_list(payload.get("system_lessons"))
+    if not task_lessons and not system_lessons:
+        return None
+    run_id = str(payload.get("run_id") or "")
+    work_order_id = str(payload.get("work_order_id") or "")
+    interaction_id = f"minion_lesson_{run_id or uuid4().hex[:12]}"
+    lines = [
+        "Minion proposed reusable lessons.",
+        "",
+        "Absorb these into Pal memory?",
+    ]
+    if task_lessons:
+        lines.append("")
+        lines.append("Task lessons:")
+        lines.extend(f"- {lesson}" for lesson in task_lessons)
+    if system_lessons:
+        lines.append("")
+        lines.append("System lessons:")
+        lines.extend(f"- {lesson}" for lesson in system_lessons)
+    base_args = {
+        "work_order_id": work_order_id,
+        "run_id": run_id,
+        "minion_id": str(payload.get("minion_id") or ""),
+        "task_lessons": task_lessons,
+        "system_lessons": system_lessons,
+    }
+    return InteractionMessageSpec(
+        interaction_id=interaction_id,
+        interaction_kind="minion_lesson_approval",
+        route=route,
+        text="\n".join(lines),
+        buttons=(
+            (
+                InteractionButtonSpec(
+                    label="Accept",
+                    action_key="control.action.dispatch",
+                    action_args={
+                        "action_kind": "minion_lesson_decision",
+                        "target_scope": "minion",
+                        "target_id": work_order_id,
+                        "args": {**base_args, "decision": "accept"},
+                    },
+                ),
+                InteractionButtonSpec(
+                    label="Reject",
+                    action_key="control.action.dispatch",
+                    action_args={
+                        "action_kind": "minion_lesson_decision",
+                        "target_scope": "minion",
+                        "target_id": work_order_id,
+                        "args": {**base_args, "decision": "reject"},
+                    },
+                ),
+                InteractionButtonSpec(
+                    label="Edit",
+                    action_key="control.action.dispatch",
+                    action_args={
+                        "action_kind": "minion_lesson_decision",
+                        "target_scope": "minion",
+                        "target_id": work_order_id,
+                        "args": {**base_args, "decision": "edit"},
+                    },
+                ),
+            ),
+        ),
+    )
+
+
 def _render_minion_approval_text(payload: dict[str, Any]) -> str:
     args_summary = payload.get("args_summary")
     if not isinstance(args_summary, dict):
@@ -262,7 +356,7 @@ def _render_minion_event_notification(event_kind: str, payload: dict[str, Any]) 
         return "\n".join(lines)
     if event_kind == EventKind.MINION_TERMINAL:
         status = str(payload.get("status") or "terminal")
-        summary = str(payload.get("summary") or "").strip()
+        summary = _strip_lesson_sections(str(payload.get("summary") or "")).strip()
         lines = [f"Minion finished: {status}", f"Profile: {profile}"]
         if run_id:
             lines.append(f"Run: {run_id}")
@@ -271,6 +365,60 @@ def _render_minion_event_notification(event_kind: str, payload: dict[str, Any]) 
         if summary:
             lines.append(f"Summary: {summary}")
         return "\n".join(lines)
+    return ""
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple)):
+        values = list(value)
+    else:
+        values = []
+    return _dedupe_nonempty([str(item) for item in values])
+
+
+def _dedupe_nonempty(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        item = " ".join(str(value or "").split())
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _strip_lesson_sections(text: str) -> str:
+    current_lesson_section = False
+    kept: list[str] = []
+    for line in str(text or "").splitlines():
+        stripped = line.strip().strip("-* ")
+        if _lesson_heading_kind(stripped):
+            current_lesson_section = True
+            continue
+        if current_lesson_section and stripped:
+            continue
+        current_lesson_section = False
+        kept.append(line.rstrip())
+    return "\n".join(kept).strip()
+
+
+def _lesson_heading_kind(text: str) -> str:
+    normalized = str(text or "").strip().strip("#*_` ")
+    while normalized and not (normalized[0].isalnum() or normalized[0] == "_"):
+        normalized = normalized[1:].strip()
+    lowered = normalized.lower().replace("_", " ")
+    lowered = lowered.rstrip(":").strip()
+    if lowered in {"task lesson", "task lessons", "task wise lessons", "task-wise lessons"}:
+        return "task_lessons"
+    if lowered in {"system lesson", "system lessons", "system wise lessons", "system-wise lessons"}:
+        return "system_lessons"
+    if lowered.startswith(("task lesson:", "task lessons:", "task wise lessons:", "task-wise lessons:")):
+        return "task_lessons"
+    if lowered.startswith(("system lesson:", "system lessons:", "system wise lessons:", "system-wise lessons:")):
+        return "system_lessons"
     return ""
 
 
