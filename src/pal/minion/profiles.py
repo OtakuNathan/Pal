@@ -150,7 +150,6 @@ class MinionProfileRegistry:
             capability_policy=capability_policy,
         )
         resolved_profile = profile.to_dict()
-        resolved_profile["effective_allowed_capabilities"] = list(allowed_capabilities)
         resolved_profile["effective_allowed_skills"] = list(allowed_skills)
         resolved_profile["effective_approval_policy"] = dict(approval_policy)
         resolved_profile["effective_checkpoint_policy"] = dict(checkpoint_policy)

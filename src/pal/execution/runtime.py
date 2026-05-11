@@ -49,6 +49,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     provider_registry: dict[str, Any] = field(default_factory=dict)
     l3_plugin_registry: L3PluginRegistry = field(default_factory=L3PluginRegistry)
     runtime_root: Path | None = None
+    lifecycle_controller: Any | None = None
     sync_executor_max_workers: int = 4
     sync_executor: ThreadPoolExecutor | None = None
     _interrupt_handles: dict[str, set[Any]] = field(default_factory=dict)
@@ -490,6 +491,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
         target_id = str(call.args.get("target_id") or SINGLETON_TARGET)
         bound = self.bound_action_index.get(call.name, target_id)
         if bound is not None:
+            lifecycle_result = self._maybe_handle_lifecycle_action(bound.descriptor)
+            if lifecycle_result is not None:
+                return lifecycle_result
             return bound.callable(call)
         matching = self.compiled_capability_index.by_canonical.get(call.name, [])
         if matching and target_id == SINGLETON_TARGET:
@@ -524,7 +528,46 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 text=f"unknown capability: {call.name}",
                 llm_text=f"unknown capability: {call.name}",
             )
+        lifecycle_result = self._maybe_handle_lifecycle_action(registered.descriptor)
+        if lifecycle_result is not None:
+            return lifecycle_result
         return registered.callable(call)
+
+    def _maybe_handle_lifecycle_action(self, descriptor: CapabilityDescriptor) -> CapabilityResult | None:
+        if not descriptor.detachable:
+            return None
+        metadata = dict(descriptor.metadata or {})
+        if metadata.get("namespace") != "operation":
+            return None
+        action = str(metadata.get("action") or "").strip()
+        if action not in {"attach", "detach"}:
+            return None
+        if descriptor.target_id and descriptor.target_id != SINGLETON_TARGET:
+            return None
+        controller = self.lifecycle_controller
+        if controller is None:
+            return None
+        module_id = str(descriptor.module_id or "").strip()
+        if not module_id:
+            return None
+        if action == "detach":
+            status = controller.detach_module(module_id)
+            verb = "detached"
+        else:
+            status = controller.reattach_module(module_id)
+            verb = "attached"
+        payload = {
+            "module_id": module_id,
+            "action": action,
+            "status": status,
+            "lifecycle_controller": "core",
+        }
+        return CapabilityResult(
+            status=status,
+            text=f"module {verb}: {module_id}",
+            structured=payload,
+            llm_text=f"Module {module_id} {verb} via core lifecycle.",
+        )
 
     def _resolve_descriptor(self, name: str, *, target_id: str = SINGLETON_TARGET) -> CapabilityDescriptor | CapabilityResult | None:
         candidates: list[CapabilityDescriptor] = []

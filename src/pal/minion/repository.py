@@ -1066,7 +1066,6 @@ def _merge_pack_overrides(base: TaskContextPack, overrides: dict[str, Any]) -> T
         "artifacts",
         "memory_pack",
         "allowed_capabilities",
-        "allowed_tools",
         "allowed_skills",
         "approval_policy",
         "minion_profile",

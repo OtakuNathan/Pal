@@ -59,6 +59,9 @@ class ModuleLifecycle:
         if owner is not None:
             result = owner.detach_module(module_id)
             if result.status == RuntimeStatus.OK:
+                handle = self.context.module_registry.get(module_id)
+                if handle is not None and handle.tier == MODULE_TIER_DETACHABLE:
+                    self._detach_detachable_runtime_entries(handle)
                 self.state.detached_modules.add(module_id)
             return result.status
         handle = self.context.module_registry.require(module_id)
@@ -69,15 +72,7 @@ class ModuleLifecycle:
             provider.detach(IntrospectionCall(name=f"{module_id}.lifecycle.detach"))
         handle.mounted = False
         if handle.tier == MODULE_TIER_DETACHABLE:
-            self.withdraw_module_capabilities(module_id)
-            self.context.prompt_fragment_registry.unregister_module(module_id)
-            self.context.event_source_registry.detach_module(module_id)
-            self.context.event_handler_registry.detach_module(module_id)
-            self.context.control_action_registry.unregister_module(module_id)
-            for provider_id in list(handle.provider_refs):
-                self.context.execution_runtime.unregister_provider_ref(provider_id)
-                if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is not None:
-                    self.context.execution_runtime.l3_plugin_registry.plugins.pop(provider_id, None)
+            self._detach_detachable_runtime_entries(handle)
         elif handle.tier == MODULE_TIER_MANAGED_ESSENTIAL:
             handle.degraded = True
         self.state.detached_modules.add(module_id)
@@ -117,6 +112,17 @@ class ModuleLifecycle:
             self.context.execution_runtime.register_provider_ref(provider_id, provider)
             if hasattr(provider, "provider_id") and self.context.execution_runtime.l3_plugin_registry.get(provider_id) is None:
                 self.context.execution_runtime.l3_plugin_registry.register(provider)
+
+    def _detach_detachable_runtime_entries(self, handle) -> None:
+        self.withdraw_module_capabilities(handle.module_id)
+        self.context.prompt_fragment_registry.unregister_module(handle.module_id)
+        self.context.event_source_registry.detach_module(handle.module_id)
+        self.context.event_handler_registry.detach_module(handle.module_id)
+        self.context.control_action_registry.unregister_module(handle.module_id)
+        for provider_id in list(handle.provider_refs):
+            self.context.execution_runtime.unregister_provider_ref(provider_id)
+            if self.context.execution_runtime.l3_plugin_registry.get(provider_id) is not None:
+                self.context.execution_runtime.l3_plugin_registry.plugins.pop(provider_id, None)
 
     def _restore_event_sources(self, handle) -> None:
         for source in handle.event_sources:

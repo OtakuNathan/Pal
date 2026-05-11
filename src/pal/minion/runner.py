@@ -614,7 +614,7 @@ class MinionRunner:
 
     @staticmethod
     def _short_summary(value: Any, *, limit: int = 500) -> str:
-        text = " ".join(str(value or "").strip().split())
+        text = _compact_preview_text(str(value or ""))
         if len(text) <= limit:
             return text
         return text[: limit - 3].rstrip() + "..."
@@ -1357,6 +1357,21 @@ def _extract_lessons_and_clean_summary(text: str) -> dict[str, Any]:
             lessons[current].append(value)
     summary_text = "\n".join(summary_lines).strip()
     return {"summary": summary_text, **{key: _dedupe_nonempty(value) for key, value in lessons.items()}}
+
+
+def _compact_preview_text(value: str) -> str:
+    lines: list[str] = []
+    blank_pending = False
+    for raw_line in str(value or "").strip().splitlines():
+        line = " ".join(raw_line.strip().split())
+        if not line:
+            blank_pending = bool(lines)
+            continue
+        if blank_pending:
+            lines.append("")
+            blank_pending = False
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def _lesson_heading_kind(text: str) -> str:

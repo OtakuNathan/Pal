@@ -147,14 +147,14 @@ class SidecarFoundationTests(unittest.TestCase):
 
 
 class MinionContractTests(unittest.TestCase):
-    def test_task_context_pack_json_roundtrip_and_legacy_allowed_tools(self) -> None:
+    def test_task_context_pack_json_roundtrip_uses_allowed_capabilities(self) -> None:
         pack = TaskContextPack.from_dict(
             {
                 "work_order_id": "wo_1",
                 "goal": "inspect repo",
                 "acceptance_criteria": ["report findings"],
                 "workspace": {"root": "/tmp/repo"},
-                "allowed_tools": ["tool.read"],
+                "allowed_capabilities": ["tool.read"],
                 "approval_policy": {"high_risk_capabilities": ["shell.exec"]},
                 "minion_profile": "coder",
                 "resolved_profile": {"profile_id": "coder", "display_name": "Coder Minion"},
@@ -166,7 +166,7 @@ class MinionContractTests(unittest.TestCase):
         self.assertEqual(restored.work_order_id, "wo_1")
         self.assertEqual(restored.instruction, "inspect repo")
         self.assertEqual(restored.allowed_capabilities, ["tool.read"])
-        self.assertEqual(restored.allowed_tools, ["tool.read"])
+        self.assertNotIn("allowed_tools", restored.to_dict())
         self.assertEqual(restored.approval_policy["high_risk_capabilities"], ["shell.exec"])
         self.assertEqual(restored.minion_profile, "coder")
         self.assertEqual(restored.resolved_profile["profile_id"], "coder")
@@ -177,11 +177,11 @@ class MinionContractTests(unittest.TestCase):
         self.assertEqual(restored.minion_profile, "generic")
         self.assertEqual(restored.resolved_profile, {})
 
-    def test_allowed_capabilities_are_visible_through_allowed_tools_alias(self) -> None:
-        restored = TaskContextPack.from_dict({"work_order_id": "wo_caps", "allowed_capabilities": ["op_exec_run"]})
+    def test_task_context_pack_ignores_removed_allowed_tools_field(self) -> None:
+        restored = TaskContextPack.from_dict({"work_order_id": "wo_caps", "allowed_tools": ["op_exec_run"]})
 
-        self.assertEqual(restored.allowed_capabilities, ["op_exec_run"])
-        self.assertEqual(restored.allowed_tools, ["op_exec_run"])
+        self.assertEqual(restored.allowed_capabilities, [])
+        self.assertNotIn("allowed_tools", restored.to_dict())
 
     def test_minion_max_output_tokens_prefers_explicit_work_order_metadata(self) -> None:
         runtime = SimpleNamespace(resolve_max_output_tokens=lambda: 16384)
@@ -2397,6 +2397,28 @@ class MinionIntegrationTests(unittest.TestCase):
             finally:
                 handle.shutdown_sync()
 
+    def test_public_minion_detach_capability_routes_through_core_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_public_detach_test_") as tmp:
+            core = PalCore()
+            register_execution_with_core(core.context)
+            handle = register_minion_with_core(core.context, runtime_root=Path(tmp))
+            core.publish_module_capabilities("minion")
+            try:
+                runtime = core.context.execution_runtime
+                self.assertIn("op_minion_detach", {spec["name"] for spec in runtime.list_capability_specs()})
+                self.assertIn("op_minion_spawn", runtime.compiled_capability_index.records)
+
+                result = runtime.execute(CapabilityCall(name="op_minion_detach"))
+
+                self.assertEqual(result.status, RuntimeStatus.OK)
+                self.assertEqual(result.structured["lifecycle_controller"], "core")
+                self.assertNotIn("op_minion_detach", {spec["name"] for spec in runtime.list_capability_specs()})
+                self.assertNotIn("op_minion_spawn", runtime.compiled_capability_index.records)
+                self.assertNotIn("op_minion_spawn", core.context.capability_registry.descriptors)
+                self.assertNotIn("minion.manager", core.context.event_source_registry.sources)
+            finally:
+                handle.shutdown_sync()
+
     def test_minion_lifecycle_reattach_starts_manager(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_attach_start_test_") as tmp:
             core = PalCore()
@@ -2794,7 +2816,76 @@ class MinionIntegrationTests(unittest.TestCase):
         self.assertEqual(action.action_kind, "route_reply")
         self.assertEqual(action.route.reply_target["chat_id"], "42")
         self.assertIn("Minion finished: completed", action.args["text"])
+        self.assertIn("[1] Review:", action.args["text"])
         self.assertIn("/tmp/minion/review.md", action.args["text"])
+
+    def test_minion_terminal_notification_preserves_summary_line_breaks(self) -> None:
+        event = EventEnvelope(
+            event_kind=EventKind.MINION_TERMINAL,
+            source_kind=SourceKind.MINION,
+            payload={
+                "status": "completed",
+                "run_id": "r1",
+                "work_order_id": "wo1",
+                "minion_profile": "generic",
+                "summary": "## Report\nMilestone: read docs\nResult: done\n\n- Item A\n- Item B",
+                "artifacts": [
+                    {
+                        "title": "Report",
+                        "path": "/tmp/minion/report.md",
+                        "relative_path": "report.md",
+                        "role": "primary",
+                    }
+                ],
+                "route": {
+                    "endpoint_id": "telegram_main",
+                    "channel_kind": "telegram",
+                    "reply_target": {"chat_id": "42"},
+                },
+            },
+        )
+
+        derived = MinionControlEventHandler().handle(event, context=None)
+
+        self.assertEqual(len(derived), 1)
+        text = derived[0].payload.args["text"]
+        self.assertIn("[1] Report:", text)
+        self.assertIn("Summary:\n## Report\nMilestone: read docs\nResult: done\n\n- Item A\n- Item B", text)
+        self.assertNotIn("Summary: ## Report Milestone", text)
+
+    def test_minion_terminal_notification_survives_telegram_markdown_rendering(self) -> None:
+        from pal.channel.endpoints.telegram_endpoint import _telegram_markdown
+
+        event = EventEnvelope(
+            event_kind=EventKind.MINION_TERMINAL,
+            source_kind=SourceKind.MINION,
+            payload={
+                "status": "completed",
+                "run_id": "r1",
+                "work_order_id": "wo1",
+                "minion_profile": "generic",
+                "summary": "## Report\nMilestone: read docs\nResult: done",
+                "artifacts": [
+                    {
+                        "title": "Report",
+                        "path": "/tmp/minion/report.md",
+                        "relative_path": "report.md",
+                        "role": "primary",
+                    }
+                ],
+                "route": {
+                    "endpoint_id": "telegram_main",
+                    "channel_kind": "telegram",
+                    "reply_target": {"chat_id": "42"},
+                },
+            },
+        )
+
+        derived = MinionControlEventHandler().handle(event, context=None)
+        rendered, _mode = _telegram_markdown(derived[0].payload.args["text"])
+
+        self.assertIn("\n\nSummary:", rendered)
+        self.assertNotIn("\n  Summary:", rendered)
 
     def test_minion_terminal_event_updates_observation_prompt_context(self) -> None:
         class Provider:

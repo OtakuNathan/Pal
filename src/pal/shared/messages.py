@@ -20,7 +20,6 @@ class TaskContextPack:
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     memory_pack: dict[str, Any] = field(default_factory=dict)
     allowed_capabilities: list[str] = field(default_factory=list)
-    allowed_tools: list[str] = field(default_factory=list)
     allowed_skills: list[str] = field(default_factory=list)
     approval_policy: dict[str, Any] = field(default_factory=dict)
     minion_profile: str = "generic"
@@ -31,10 +30,6 @@ class TaskContextPack:
     def __post_init__(self) -> None:
         if not self.instruction and self.goal:
             object.__setattr__(self, "instruction", self.goal)
-        if not self.allowed_capabilities and self.allowed_tools:
-            object.__setattr__(self, "allowed_capabilities", list(self.allowed_tools))
-        if self.allowed_capabilities and not self.allowed_tools:
-            object.__setattr__(self, "allowed_tools", list(self.allowed_capabilities))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -48,7 +43,6 @@ class TaskContextPack:
             "artifacts": [dict(item) for item in self.artifacts],
             "memory_pack": dict(self.memory_pack),
             "allowed_capabilities": list(self.allowed_capabilities),
-            "allowed_tools": list(self.allowed_tools),
             "allowed_skills": list(self.allowed_skills),
             "approval_policy": dict(self.approval_policy),
             "minion_profile": self.minion_profile or "generic",
@@ -65,11 +59,6 @@ class TaskContextPack:
         if not work_order_id:
             raise ValueError("TaskContextPack.work_order_id is required")
         allowed_capabilities = _string_list(payload.get("allowed_capabilities"))
-        allowed_tools = _string_list(payload.get("allowed_tools"))
-        if not allowed_capabilities:
-            allowed_capabilities = list(allowed_tools)
-        if not allowed_tools:
-            allowed_tools = list(allowed_capabilities)
         return cls(
             schema_version=int(payload.get("schema_version") or 1),
             pack_id=str(payload.get("pack_id") or f"tcp_{uuid4().hex[:16]}"),
@@ -81,7 +70,6 @@ class TaskContextPack:
             artifacts=[_dict(item) for item in list(payload.get("artifacts") or []) if isinstance(item, dict)],
             memory_pack=_dict(payload.get("memory_pack")),
             allowed_capabilities=allowed_capabilities,
-            allowed_tools=allowed_tools,
             allowed_skills=_string_list(payload.get("allowed_skills")),
             approval_policy=_dict(payload.get("approval_policy")),
             minion_profile=str(payload.get("minion_profile") or "generic"),

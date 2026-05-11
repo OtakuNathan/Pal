@@ -368,14 +368,17 @@ def _render_minion_event_notification(event_kind: str, payload: dict[str, Any]) 
             lines.append(f"Work order: {work_order_id}")
         if artifacts:
             lines.append("Artifacts:")
-            for artifact in artifacts[:3]:
+            for index, artifact in enumerate(artifacts[:3], start=1):
                 label = str(artifact.get("title") or artifact.get("relative_path") or "artifact").strip()
                 path = str(artifact.get("path") or artifact.get("relative_path") or "").strip()
-                lines.append(f"- {label}: {path}")
+                lines.append(f"[{index}] {label}: {path}")
             if len(artifacts) > 3:
-                lines.append(f"- ... {len(artifacts) - 3} more")
+                lines.append(f"[...] {len(artifacts) - 3} more")
         if summary:
-            lines.append(f"Summary: {summary}")
+            if artifacts:
+                lines.append("")
+            lines.append("Summary:")
+            lines.append(summary)
         return "\n".join(lines)
     return ""
 
@@ -416,10 +419,25 @@ def _record_minion_observation(provider: object | None, context: Any, payload: d
 
 
 def _preview_text(value: str, *, limit: int) -> str:
-    text = " ".join(str(value or "").split())
+    text = _compact_preview_text(str(value or ""))
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _compact_preview_text(value: str) -> str:
+    lines: list[str] = []
+    blank_pending = False
+    for raw_line in str(value or "").strip().splitlines():
+        line = " ".join(raw_line.strip().split())
+        if not line:
+            blank_pending = bool(lines)
+            continue
+        if blank_pending:
+            lines.append("")
+            blank_pending = False
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def _dedupe_nonempty(values: list[str]) -> list[str]:

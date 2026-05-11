@@ -384,6 +384,7 @@ class PalCore:
         self.prompt_compiler = PromptCompiler(self.context)
         self.tool_surface = ToolSurface(self.context)
         self.module_lifecycle = ModuleLifecycle(self.context, self.state)
+        self.context.execution_runtime.lifecycle_controller = self
         self.failure_orchestrator = FailureOrchestrator(
             self.context,
             call_port_async=self._call_port_async,
