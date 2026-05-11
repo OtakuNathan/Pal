@@ -36,7 +36,9 @@ Event delivery is split by audience:
 
 - `progress` is high-cardinality telemetry for manager/tasking state. It is not a chat notification.
 - `checkpoint` is the milestone cursor fact. It is recorded in the tasking store and notifies no one directly.
-- `terminal` is the user-facing completion path. It sends the final route reply to the original control route when one exists.
+- `terminal` is the user-facing completion path. It sends a short route reply to the original control route when one exists, and synchronizes a recent completion observation into Pal's prompt context.
+
+Terminal notifications should name the status, profile, work order, and up to a few artifact paths. Large plans, review reports, and writeups belong in minion artifact files, not in chat text.
 
 Pal should answer "what is it doing?" or "where is it now?" by reading minion active-run and work-order facts, not by relying on previously pushed chat text.
 
@@ -89,20 +91,43 @@ A checkpoint is the cursor fact. There is no separate resume cursor field.
 
 Pal must not infer work order progress from chat text, progress text, or terminal summaries. The fact source is the minion tasking store.
 
-## Git Task Environment
+## Workspace And Artifacts
 
-Minion work happens inside a task environment, and the task environment is a Git repository.
+Minion work happens inside a task environment. There are two workspace kinds:
+
+- `git_repo`: used by coder-style profiles that produce code changes.
+- `folder`: used by planner, reviewer, generic, and other one-shot profiles that only need a private output folder.
+
+All prepared workspaces expose:
+
+- `workspace_kind`
+- `run_dir`
+- `artifact_dir`
+
+Read-only profiles may still receive `repo_path` for source inspection, but their deliverables are written only under `artifact_dir`. This keeps planner/reviewer output from polluting the source repo.
+
+Coder work remains Git-backed:
 
 - A task owns or resolves a task repo.
 - A work order runs on its own branch in that repo.
 - A milestone completion is represented by one Git commit on the work order branch.
 - A completed checkpoint records the milestone index and the corresponding commit SHA.
+- Coder reports and test notes are written under `minion_outputs/{work_order_id}/` inside the task repo and are included in the commit when relevant.
 
 This keeps the minion ledger and workspace state aligned: the minion tasking store knows which milestone is complete, and Git can restore the files for that milestone.
 
 Spawn must read or initialize the task repo before starting a runner. For an existing work order, spawn must checkout or create the work order branch from the recorded base ref. A runner must not do task work on Pal's live branch unless that workspace was explicitly assigned as the task repo.
 
-When a runner finishes a milestone:
+Non-coder profiles get an isolated folder workspace:
+
+- `data/minion/workspaces/{run_id}_{profile}/work_order.json`
+- `data/minion/workspaces/{run_id}_{profile}/metadata.json`
+- `data/minion/workspaces/{run_id}_{profile}/logs/`
+- `data/minion/workspaces/{run_id}_{profile}/deliverables/`
+
+The runner exposes `op_minion_artifact_write` so minions can write structured deliverables under `artifact_dir`. The terminal and checkpoint payloads include `artifacts[]` and `primary_artifact`.
+
+When a Git-backed runner finishes a milestone:
 
 1. Stage the milestone's task-scoped changes.
 2. Commit them to the work order branch.
@@ -190,13 +215,17 @@ Denied by default:
 
 This prevents recursive spawn/kill/list/read behavior. A task runner does not need to know the minion control plane exists; Pal observes and manages that layer through the minion module capabilities.
 
+`op_minion_artifact_write` is the one internal exception to the `op_minion_*` deny rule. It is scoped to `workspace.artifact_dir` and cannot control the minion subsystem.
+
 ## Runner Loop
 
 The runner is a thin execution entity, not a forked Pal. It starts a slim runtime with LLM, execution, artifact metadata, read-only L3 recall, and allowed task tools such as shell/code execution and web search/fetch. It does not load channel endpoints, service triggers, control panel, or Pal user-facing routing.
 
 If `TaskContextPack.metadata.preferred_endpoint_id` is present, the runner forwards it as `CanonicalLLMRequest.metadata.preferred_endpoint_id` and uses that endpoint's budget when resolving max output tokens. Without that metadata, no preferred endpoint is passed; the slim runtime reads the current active LLM endpoint from `pal.sqlite3`.
 
-`TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `op_exec_disc_search`, `op_exec_disc_read`, `op_exec_capability_call`, `op_exec_run`, `op_web_search_query`, `op_web_fetch_read`, and `op_l3_recall_query` when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
+`TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `op_exec_disc_search`, `op_exec_disc_read`, `op_exec_capability_call`, `op_exec_run`, `op_minion_artifact_write`, `op_web_search_query`, `op_web_fetch_read`, and `op_l3_recall_query` when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
+
+When `op_minion_artifact_write` is available, the runner prompt asks the minion to write the primary deliverable to `artifact_dir` and keep the final summary short. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
 
 Tool calls are executed through the existing `ExecutionRuntime` path and must be present in `TaskContextPack.allowed_capabilities`.
 

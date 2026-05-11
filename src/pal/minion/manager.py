@@ -220,11 +220,15 @@ class MinionManager:
         if not pack.resolved_profile:
             pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
         pack = self.tasking_repository.prepare_pack_for_spawn(pack)
-        pack = prepare_task_workspace(self.runtime_root, pack)
-        self.tasking_repository.update_work_order_workspace(pack.work_order_id, dict(pack.workspace))
-        pack = self._with_runner_debug_log(pack)
         minion_id = f"minion_{uuid4().hex[:10]}"
         run_id = f"run_{uuid4().hex[:12]}"
+        metadata = dict(pack.metadata)
+        metadata["run_id"] = run_id
+        metadata["minion_id"] = minion_id
+        pack = TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
+        pack = prepare_task_workspace(self.runtime_root, pack, run_id=run_id)
+        self.tasking_repository.update_work_order_workspace(pack.work_order_id, dict(pack.workspace))
+        pack = self._with_runner_debug_log(pack)
         state = MinionRunState(minion_id=minion_id, run_id=run_id, pack=pack)
         async with self._lock:
             self.runs[run_id] = state

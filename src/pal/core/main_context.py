@@ -6,6 +6,7 @@ from typing import Any
 from pal.core.event_handler_registry import EventHandlerRegistry
 from pal.core.event_source_registry import EventSourceRegistry
 from pal.core.control_action_registry import ControlActionHandlerRegistry
+from pal.core.lifecycle_owner import ModuleLifecycleOwnerRegistry
 from pal.core.module_registry import ModuleHandle, ModuleRegistry
 from pal.core.prompt_fragment_registry import PromptFragmentRegistry
 from pal.core.turn_events import TurnEventBus
@@ -22,6 +23,7 @@ class MainContext:
     event_handler_registry: EventHandlerRegistry = field(default_factory=EventHandlerRegistry)
     control_action_registry: ControlActionHandlerRegistry = field(default_factory=ControlActionHandlerRegistry)
     prompt_fragment_registry: PromptFragmentRegistry = field(default_factory=PromptFragmentRegistry)
+    lifecycle_owner_registry: ModuleLifecycleOwnerRegistry = field(default_factory=ModuleLifecycleOwnerRegistry)
     turn_event_bus: TurnEventBus = field(default_factory=TurnEventBus)
     introspection_registry: dict[str, IntrospectionPort] = field(default_factory=dict)
     port_registry: dict[str, Any] = field(default_factory=dict)

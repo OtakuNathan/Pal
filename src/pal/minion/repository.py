@@ -451,8 +451,10 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             self._insert_ledger(db, work_order_id, event_kind, summary, payload, minion_id, run_id, created_at)
             if event_kind == "checkpoint":
                 self._insert_checkpoint(db, work_order_id, payload, minion_id, run_id, created_at)
+                self._record_payload_artifacts(db, work_order_id, payload)
             elif event_kind == "terminal":
                 self._record_terminal(db, work_order_id, payload, minion_id, run_id, created_at)
+                self._record_payload_artifacts(db, work_order_id, payload)
             elif event_kind in {"phase_started", "progress"}:
                 status = "running" if event_kind == "phase_started" else None
                 if status:
@@ -797,6 +799,26 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             status = "completed"
         self._update_work_order_status(db, work_order_id, status)
 
+    def _record_payload_artifacts(self, db: sqlite3.Connection, work_order_id: str, payload: dict[str, Any]) -> None:
+        artifacts = _artifact_list(payload.get("artifacts"))
+        primary = payload.get("primary_artifact")
+        if isinstance(primary, dict):
+            artifacts = _merge_artifacts([dict(primary), *artifacts])
+        if not artifacts:
+            return
+        row = self._fetch_one(db, "SELECT metadata_json FROM minion_work_orders WHERE work_order_id = ?", (str(work_order_id),))
+        if row is None:
+            return
+        metadata = _loads(row["metadata_json"])
+        existing = _artifact_list(metadata.get("artifacts"))
+        metadata["artifacts"] = _merge_artifacts([*existing, *artifacts])
+        if isinstance(primary, dict):
+            metadata["primary_artifact"] = dict(primary)
+        db.execute(
+            "UPDATE minion_work_orders SET metadata_json = ?, updated_at = ? WHERE work_order_id = ?",
+            (_json(metadata), utc_now(), str(work_order_id)),
+        )
+
     def _lesson_exists(self, db: sqlite3.Connection, table_name: str, work_order_id: str, lesson_text: str) -> bool:
         if table_name not in {"minion_task_lessons", "minion_system_lesson_candidates"}:
             return False
@@ -1104,6 +1126,26 @@ def _decode_json_fields(row: dict[str, Any]) -> dict[str, Any]:
         if key.endswith("_json"):
             decoded_key = key[:-5]
             result[decoded_key] = _loads(result.get(key))
+    return result
+
+
+def _artifact_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _merge_artifacts(values: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in values:
+        key = str(item.get("path") or item.get("relative_path") or item.get("sha256") or "").strip()
+        if not key:
+            key = json.dumps(item, ensure_ascii=False, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(dict(item))
     return result
 
 

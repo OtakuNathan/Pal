@@ -44,6 +44,8 @@ class MinionEventSource(EventSource):
 
 @dataclass
 class MinionControlEventHandler(EventHandler):
+    provider: object | None = None
+
     def can_handle(self, event_kind: str) -> bool:
         return event_kind in {
             EventKind.APPROVAL_REQUEST,
@@ -53,8 +55,9 @@ class MinionControlEventHandler(EventHandler):
         }
 
     def handle(self, event: EventEnvelope, context) -> list[EventEnvelope]:
-        _ = context
         payload = dict(event.payload or {}) if isinstance(event.payload, dict) else {}
+        if event.event_kind == EventKind.MINION_TERMINAL:
+            _record_minion_observation(self.provider, context, payload)
         route = _route_from_payload(payload.get("route"))
         if route is None:
             return []
@@ -356,12 +359,21 @@ def _render_minion_event_notification(event_kind: str, payload: dict[str, Any]) 
         return "\n".join(lines)
     if event_kind == EventKind.MINION_TERMINAL:
         status = str(payload.get("status") or "terminal")
-        summary = _strip_lesson_sections(str(payload.get("summary") or "")).strip()
+        summary = _preview_text(_strip_lesson_sections(str(payload.get("summary") or "")).strip(), limit=500)
+        artifacts = _artifact_list(payload.get("artifacts"))
         lines = [f"Minion finished: {status}", f"Profile: {profile}"]
         if run_id:
             lines.append(f"Run: {run_id}")
         if work_order_id:
             lines.append(f"Work order: {work_order_id}")
+        if artifacts:
+            lines.append("Artifacts:")
+            for artifact in artifacts[:3]:
+                label = str(artifact.get("title") or artifact.get("relative_path") or "artifact").strip()
+                path = str(artifact.get("path") or artifact.get("relative_path") or "").strip()
+                lines.append(f"- {label}: {path}")
+            if len(artifacts) > 3:
+                lines.append(f"- ... {len(artifacts) - 3} more")
         if summary:
             lines.append(f"Summary: {summary}")
         return "\n".join(lines)
@@ -376,6 +388,38 @@ def _string_list(value: Any) -> list[str]:
     else:
         values = []
     return _dedupe_nonempty([str(item) for item in values])
+
+
+def _artifact_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _record_minion_observation(provider: object | None, context: Any, payload: dict[str, Any]) -> None:
+    targets: list[Any] = []
+    if provider is not None:
+        targets.append(provider)
+    port_registry = getattr(context, "port_registry", None)
+    if isinstance(port_registry, dict):
+        port = port_registry.get("minion:minion")
+        if port is not None and port not in targets:
+            targets.append(port)
+    for target in targets:
+        record = getattr(target, "record_minion_observation", None)
+        if callable(record):
+            try:
+                record(payload)
+            except Exception:
+                continue
+            return
+
+
+def _preview_text(value: str, *, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def _dedupe_nonempty(values: list[str]) -> list[str]:

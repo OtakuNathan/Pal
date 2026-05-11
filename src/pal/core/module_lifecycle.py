@@ -55,6 +55,12 @@ class ModuleLifecycle:
         return handle
 
     def detach_module(self, module_id: str) -> str:
+        owner = self.context.lifecycle_owner_registry.resolve(module_id)
+        if owner is not None:
+            result = owner.detach_module(module_id)
+            if result.status == RuntimeStatus.OK:
+                self.state.detached_modules.add(module_id)
+            return result.status
         handle = self.context.module_registry.require(module_id)
         if handle.tier == MODULE_TIER_CORE_FOUNDATION or not handle.supports_lifecycle_capabilities:
             return RuntimeStatus.FORBIDDEN
@@ -78,6 +84,13 @@ class ModuleLifecycle:
         return RuntimeStatus.OK
 
     def reattach_module(self, module_id: str) -> str:
+        owner = self.context.lifecycle_owner_registry.resolve(module_id)
+        if owner is not None:
+            reloader = getattr(owner, "reload_module", None)
+            result = reloader(module_id) if callable(reloader) else owner.attach_module(module_id)
+            if result.status == RuntimeStatus.OK:
+                self.state.detached_modules.discard(module_id)
+            return result.status
         handle = self.context.module_registry.require(module_id)
         if handle.tier == MODULE_TIER_CORE_FOUNDATION or not handle.supports_lifecycle_capabilities:
             return RuntimeStatus.FORBIDDEN

@@ -58,11 +58,13 @@ from pal.minion.runner import (
     MinionRuntimeBundle,
     MinionScopedExecutionRuntime,
     _llm_tools_for_allowed,
+    _minion_llm_request_metadata,
     _render_system_prompt,
     _resolve_minion_max_output_tokens,
     build_slim_minion_runtime,
 )
 from pal.minion.introspection import _control_route_payload_for_turn, _prompt_log_enabled_for_turn
+from pal.minion.prompt import TaskingPromptFragmentProvider
 from pal.foundation import EventEnvelope
 from pal.shared import EventKind, LLMFinishReason, PromptAssemblyContext, RuntimeStatus, SourceKind, TaskContextPack
 
@@ -193,6 +195,19 @@ class MinionContractTests(unittest.TestCase):
 
         self.assertEqual(_resolve_minion_max_output_tokens(runtime, pack), 16384)
 
+    def test_minion_max_output_tokens_passes_preferred_endpoint_to_runtime(self) -> None:
+        calls = []
+
+        def resolve_max_output_tokens(*, preferred_endpoint_id=None):
+            calls.append(preferred_endpoint_id)
+            return 8192
+
+        runtime = SimpleNamespace(resolve_max_output_tokens=resolve_max_output_tokens)
+        pack = TaskContextPack(work_order_id="wo_tokens", goal="budget", metadata={"preferred_endpoint_id": "coder_fast"})
+
+        self.assertEqual(_resolve_minion_max_output_tokens(runtime, pack), 8192)
+        self.assertEqual(calls, ["coder_fast"])
+
     def test_minion_max_output_tokens_derives_from_context_window_when_needed(self) -> None:
         runtime = SimpleNamespace(
             resolve_endpoint_facts=lambda: {"context_window": 131072, "max_output_tokens": None},
@@ -207,6 +222,21 @@ class MinionContractTests(unittest.TestCase):
         pack = TaskContextPack(work_order_id="wo_tokens", goal="budget")
 
         self.assertEqual(_resolve_minion_max_output_tokens(runtime, pack), 25000)
+
+    def test_minion_llm_request_metadata_omits_preferred_endpoint_when_unspecified(self) -> None:
+        pack = TaskContextPack(work_order_id="wo_tokens", goal="budget")
+
+        metadata = _minion_llm_request_metadata(pack, "run_tokens")
+
+        self.assertNotIn("preferred_endpoint_id", metadata)
+        self.assertEqual(metadata["minion_run_id"], "run_tokens")
+
+    def test_minion_llm_request_metadata_includes_explicit_preferred_endpoint(self) -> None:
+        pack = TaskContextPack(work_order_id="wo_tokens", goal="budget", metadata={"preferred_endpoint_id": "planner_long"})
+
+        metadata = _minion_llm_request_metadata(pack, "run_tokens")
+
+        self.assertEqual(metadata["preferred_endpoint_id"], "planner_long")
 
     def test_invalid_task_context_pack_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -321,7 +351,7 @@ class MinionContractTests(unittest.TestCase):
             self.assertIn("op_web_search_query", pack.allowed_capabilities)
             self.assertIn("op_web_fetch_read", pack.allowed_capabilities)
             self.assertFalse(any(name.startswith("intro_") for name in pack.allowed_capabilities))
-            self.assertFalse(any(name.startswith("op_minion_") for name in pack.allowed_capabilities))
+            self.assertEqual([name for name in pack.allowed_capabilities if name.startswith("op_minion_")], ["op_minion_artifact_write"])
             self.assertEqual(pack.workspace["workspace_policy"]["mode"], "read_only_repo")
             self.assertEqual(pack.workspace["completion_policy"]["evidence"], "text_deliverable")
             self.assertEqual(pack.resolved_profile["profile_group"], "software_engineering")
@@ -490,6 +520,8 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 "payload": {
                     "status": "completed",
                     "summary": "done",
+                    "artifacts": [{"path": "/tmp/minion/design.md", "relative_path": "design.md", "role": "primary"}],
+                    "primary_artifact": {"path": "/tmp/minion/design.md", "relative_path": "design.md", "role": "primary"},
                     "task_lessons": ["Use the existing milestone cursor."],
                     "system_lessons": ["Maybe promote this pattern later."],
                 },
@@ -497,6 +529,8 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
         snapshot = self.repository.read_work_order("wo_cursor")
         self.assertEqual(snapshot["work_order"]["status"], "completed")
+        self.assertEqual(snapshot["work_order"]["metadata"]["artifacts"][0]["relative_path"], "design.md")
+        self.assertEqual(snapshot["work_order"]["metadata"]["primary_artifact"]["relative_path"], "design.md")
         self.assertEqual(snapshot["task_lessons"], [])
         self.assertEqual(snapshot["pending_system_lesson_candidates"], [])
 
@@ -727,11 +761,17 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             TaskContextPack(work_order_id="wo_plan_readonly", goal="plan", workspace={"source_repo": str(source)}),
             requested_profile="planner",
         )
-        planner_prepared = prepare_task_workspace(self.root, planner)
+        planner_prepared = prepare_task_workspace(self.root, planner, run_id="run_plan")
 
         self.assertEqual(Path(planner_prepared.workspace["repo_path"]), source)
         self.assertEqual(planner_prepared.workspace["workspace_policy"]["mode"], "read_only_repo")
+        self.assertEqual(planner_prepared.workspace["workspace_kind"], "folder")
+        self.assertTrue(Path(planner_prepared.workspace["run_dir"]).is_dir())
+        self.assertTrue(Path(planner_prepared.workspace["artifact_dir"]).is_dir())
+        self.assertTrue(str(planner_prepared.workspace["run_dir"]).endswith("run_plan_planner"))
+        self.assertTrue((Path(planner_prepared.workspace["run_dir"]) / "work_order.json").is_file())
         self.assertNotIn("work_order_branch", planner_prepared.workspace)
+        self.assertFalse((source / "deliverables").exists())
 
         planner_with_cwd = registry.resolve_pack(
             TaskContextPack(
@@ -746,6 +786,8 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(Path(planner_with_cwd_prepared.workspace["repo_path"]), source)
         self.assertEqual(Path(planner_with_cwd_prepared.workspace["source_repo"]), source)
         self.assertEqual(planner_with_cwd_prepared.workspace["workspace_policy"]["mode"], "read_only_repo")
+        self.assertEqual(planner_with_cwd_prepared.workspace["workspace_kind"], "folder")
+        self.assertTrue(Path(planner_with_cwd_prepared.workspace["artifact_dir"]).is_dir())
         self.assertNotIn("work_order_branch", planner_with_cwd_prepared.workspace)
 
         coder = registry.resolve_pack(
@@ -756,6 +798,9 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         self.assertEqual(coder_prepared.workspace["workspace_policy"]["mode"], "writable_git_branch")
         self.assertEqual(coder_prepared.workspace["completion_policy"]["evidence"], "git_commit")
+        self.assertEqual(coder_prepared.workspace["workspace_kind"], "git_repo")
+        self.assertTrue(Path(coder_prepared.workspace["artifact_dir"]).is_dir())
+        self.assertTrue(str(coder_prepared.workspace["artifact_dir"]).replace("\\", "/").endswith("minion_outputs/wo_code_writable"))
         self.assertIn("work_order_branch", coder_prepared.workspace)
         self.assertNotEqual(Path(coder_prepared.workspace["repo_path"]), source)
 
@@ -1366,6 +1411,64 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_minion_artifact_write_is_scoped_to_artifact_dir(self) -> None:
+        async def scenario() -> None:
+            artifact_dir = self.root / "artifact_dir"
+            produced: list[dict] = []
+
+            class FakeBase:
+                def list_capability_specs(self):
+                    return []
+
+                def get_capability_spec(self, name):
+                    _ = name
+                    return None
+
+                async def execute_tool_async(self, call, **kwargs):
+                    _ = call
+                    _ = kwargs
+                    raise AssertionError("artifact tool must not delegate to base runtime")
+
+            runtime = MinionScopedExecutionRuntime(
+                FakeBase(),
+                ["op_minion_artifact_write"],
+                {"artifact_dir": str(artifact_dir)},
+                produced_artifacts=produced,
+            )
+
+            specs = {spec["name"] for spec in runtime.list_capability_specs()}
+            self.assertIn("op_minion_artifact_write", specs)
+
+            result = await runtime.execute_tool_async(
+                CanonicalToolCall(
+                    name="op_minion_artifact_write",
+                    args={
+                        "relative_path": "plan.md",
+                        "content": "hello plan",
+                        "title": "Plan",
+                        "role": "primary",
+                        "mime_type": "text/markdown",
+                    },
+                ),
+                turn_id="r",
+            )
+
+            self.assertTrue(result.ok)
+            self.assertEqual((artifact_dir / "plan.md").read_text(encoding="utf-8"), "hello plan")
+            self.assertEqual(produced[0]["relative_path"], "plan.md")
+            self.assertEqual(produced[0]["role"], "primary")
+            self.assertTrue(produced[0]["sha256"])
+
+            escaped = await runtime.execute_tool_async(
+                CanonicalToolCall(name="op_minion_artifact_write", args={"relative_path": "../escape.md", "content": "no"}),
+                turn_id="r",
+            )
+            self.assertFalse(escaped.ok)
+            self.assertIn("escapes artifact_dir", escaped.text)
+            self.assertFalse((self.root / "escape.md").exists())
+
+        asyncio.run(scenario())
+
     def test_manager_summarizes_progress_state_for_read_run(self) -> None:
         manager = MinionManager(self.root)
         pack = TaskContextPack(
@@ -1639,6 +1742,68 @@ class MinionManagerTests(unittest.TestCase):
             checkpoint = next(event for event in events if event["event_kind"] == "checkpoint")
             self.assertEqual(checkpoint["payload"]["status"], "completed")
             self.assertTrue(checkpoint["payload"]["commit_sha"])
+            self.assertEqual(checkpoint["payload"]["primary_artifact"]["relative_path"], "milestone_0_generic.md")
+            terminal = next(event for event in events if event["event_kind"] == "terminal")
+            self.assertEqual(terminal["payload"]["primary_artifact"]["relative_path"], "milestone_0_generic.md")
+            self.assertLess(len(terminal["payload"]["summary"]), len("Planner report body") + 100)
+
+        asyncio.run(scenario())
+
+    def test_runner_persists_text_deliverable_for_folder_workspace(self) -> None:
+        async def scenario() -> None:
+            events = []
+            registry = MinionProfileRegistry(runtime_root=self.root)
+            pack = prepare_task_workspace(
+                self.root,
+                registry.resolve_pack(
+                    TaskContextPack(
+                        work_order_id="wo_folder_deliverable",
+                        goal="write report",
+                        continuity={"current_milestone": {"milestone_index": 0, "title": "report"}},
+                    ),
+                    requested_profile="generic",
+                ),
+                run_id="run_folder",
+            )
+
+            class FakeLLM:
+                async def agenerate(self, request):
+                    _ = request
+                    return CanonicalLLMOutcome(text="Long report body for the folder minion")
+
+            class FakeExecution:
+                def list_capability_specs(self):
+                    return []
+
+                def get_capability_spec(self, name):
+                    _ = name
+                    return None
+
+            async def write_event(event):
+                events.append(event)
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            code = await MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_folder",
+                run_id="r_folder",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=FakeLLM(), execution_runtime=FakeExecution()),
+            ).run()
+
+            self.assertEqual(code, 0)
+            output_file = Path(pack.workspace["artifact_dir"]) / "milestone_0_generic.md"
+            self.assertIn("Long report body", output_file.read_text(encoding="utf-8"))
+            checkpoint = next(event for event in events if event["event_kind"] == "checkpoint")
+            self.assertEqual(checkpoint["payload"]["status"], "completed")
+            self.assertEqual(checkpoint["payload"]["primary_artifact"]["path"], str(output_file))
+            terminal = next(event for event in events if event["event_kind"] == "terminal")
+            self.assertEqual(terminal["payload"]["artifacts"][0]["relative_path"], "milestone_0_generic.md")
 
         asyncio.run(scenario())
 
@@ -2171,6 +2336,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("milestones", spawn_spec["description"])
                 self.assertIn("acceptance_criteria", spawn_spec["description"])
                 self.assertIn("module_boundaries", spawn_spec["description"])
+                self.assertIn("preferred_endpoint_id", spawn_spec["description"])
                 pack_arg = spawn_spec["parameters_schema"]["properties"]["task_context_pack"]
                 self.assertIn("goal-only packet", pack_arg["description"])
                 self.assertIn("instruction", pack_arg["required"])
@@ -2179,6 +2345,8 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("milestones", pack_arg["properties"]["metadata"]["required"])
                 profile_arg = spawn_spec["parameters_schema"]["properties"]["minion_profile"]
                 self.assertIn("profile_id", profile_arg["description"])
+                endpoint_arg = spawn_spec["parameters_schema"]["properties"]["preferred_endpoint_id"]
+                self.assertIn("active endpoint", endpoint_arg["description"])
 
                 draft_spec = core.context.execution_runtime.get_capability_spec("op_minion_draft_work_order")
                 self.assertIsNotNone(draft_spec)
@@ -2311,6 +2479,7 @@ class MinionIntegrationTests(unittest.TestCase):
                         name="op_minion_spawn",
                         args={
                             "minion_profile": "coder",
+                            "preferred_endpoint_id": "coder_fast",
                             "task_context_pack": {"work_order_id": "wo_coder", "goal": "make a change"},
                         },
                     )
@@ -2326,6 +2495,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("op_exec_run", pack["allowed_capabilities"])
                 self.assertIn("op_fake_extra", pack["allowed_capabilities"])
                 self.assertEqual(pack["approval_policy"]["high_risk_capabilities"], ["op_exec_run"])
+                self.assertEqual(pack["metadata"]["preferred_endpoint_id"], "coder_fast")
             finally:
                 handle.shutdown_sync()
 
@@ -2586,6 +2756,20 @@ class MinionIntegrationTests(unittest.TestCase):
                             "payload": {
                                 "status": "completed",
                                 "summary": "done",
+                                "artifacts": [
+                                    {
+                                        "title": "Review",
+                                        "relative_path": "review.md",
+                                        "path": "/tmp/minion/review.md",
+                                        "role": "primary",
+                                    }
+                                ],
+                                "primary_artifact": {
+                                    "title": "Review",
+                                    "relative_path": "review.md",
+                                    "path": "/tmp/minion/review.md",
+                                    "role": "primary",
+                                },
                                 "metadata": {
                                     "control_route": {
                                         "endpoint_id": "telegram_main",
@@ -2610,6 +2794,60 @@ class MinionIntegrationTests(unittest.TestCase):
         self.assertEqual(action.action_kind, "route_reply")
         self.assertEqual(action.route.reply_target["chat_id"], "42")
         self.assertIn("Minion finished: completed", action.args["text"])
+        self.assertIn("/tmp/minion/review.md", action.args["text"])
+
+    def test_minion_terminal_event_updates_observation_prompt_context(self) -> None:
+        class Provider:
+            def __init__(self) -> None:
+                self.observations: list[dict] = []
+
+            def record_minion_observation(self, payload):
+                self.observations.append(dict(payload))
+
+            def recent_minion_observations(self, *, limit: int = 5):
+                _ = limit
+                return [
+                    {
+                        "run_id": "r1",
+                        "work_order_id": "wo1",
+                        "profile": "planner",
+                        "status": "completed",
+                        "completed_at": "2026-01-01T00:00:00Z",
+                        "summary": "done",
+                        "artifacts": [{"path": "/tmp/minion/plan.md", "relative_path": "plan.md"}],
+                    }
+                ]
+
+        provider = Provider()
+        event = EventEnvelope(
+            event_kind=EventKind.MINION_TERMINAL,
+            source_kind=SourceKind.MINION,
+            payload={
+                "status": "completed",
+                "summary": "done",
+                "minion_id": "m1",
+                "run_id": "r1",
+                "work_order_id": "wo1",
+                "minion_profile": "planner",
+                "artifacts": [{"path": "/tmp/minion/plan.md", "relative_path": "plan.md"}],
+                "route": {
+                    "endpoint_id": "telegram_main",
+                    "channel_kind": "telegram",
+                    "reply_target": {"chat_id": "42"},
+                },
+            },
+        )
+
+        derived = MinionControlEventHandler(provider=provider).handle(event, context=None)
+        self.assertEqual(len(derived), 1)
+        self.assertEqual(provider.observations[0]["work_order_id"], "wo1")
+
+        fragments = TaskingPromptFragmentProvider(manager=provider).build_prompt_fragments(
+            PromptAssemblyContext(turn_kind="channel")
+        )
+        self.assertEqual(fragments[0].title, "Recent Minion Completions")
+        self.assertIn("work_order=wo1", fragments[0].content)
+        self.assertIn("/tmp/minion/plan.md", fragments[0].content)
 
     def test_minion_terminal_lessons_open_approval_and_hide_from_final_summary(self) -> None:
         event = EventEnvelope(

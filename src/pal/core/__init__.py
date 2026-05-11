@@ -4,6 +4,7 @@ from pal.core.dispatcher import EventDispatcher
 from pal.core.event_handler_registry import EventHandlerRegistry
 from pal.core.event_source_registry import EventSourceRegistry
 from pal.core.introspection import CoreIntrospectionProvider, CoreSnapshot, inspect_core, register_with_core
+from pal.core.lifecycle_owner import ModuleLifecycleOwner, ModuleLifecycleOwnerRegistry, ModuleLifecycleOwnerResult
 from pal.core.mailbox import Mailbox
 from pal.core.main_context import MainContext
 from pal.core.module_registry import (
@@ -57,6 +58,9 @@ __all__ = [
     "Mailbox",
     "MailboxReplyEffect",
     "MainLoop",
+    "ModuleLifecycleOwner",
+    "ModuleLifecycleOwnerRegistry",
+    "ModuleLifecycleOwnerResult",
     "MODULE_TIER_CORE_FOUNDATION",
     "MODULE_TIER_DETACHABLE",
     "MODULE_TIER_MANAGED_ESSENTIAL",

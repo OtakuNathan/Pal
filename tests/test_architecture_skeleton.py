@@ -1312,7 +1312,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             try:
                 self.assertIn("intro_module_minion_show", core.context.capability_registry.descriptors)
                 self.assertIn("minion.manager", core.context.event_source_registry.sources)
-                self.assertNotIn("minion.prompt.default", core.context.prompt_fragment_registry.providers)
+                self.assertIn("minion.prompt.default", core.context.prompt_fragment_registry.providers)
 
                 detached = core.detach_module("minion")
                 self.assertEqual(detached, "ok")
@@ -1324,7 +1324,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 self.assertEqual(reattached, "ok")
                 self.assertIn("intro_module_minion_show", core.context.capability_registry.descriptors)
                 self.assertIn("minion.manager", core.context.event_source_registry.sources)
-                self.assertNotIn("minion.prompt.default", core.context.prompt_fragment_registry.providers)
+                self.assertIn("minion.prompt.default", core.context.prompt_fragment_registry.providers)
                 observed = core.context.execution_runtime.execute(CapabilityCall(name="intro_module_minion_show"))
                 self.assertEqual(observed.status, "ok")
             finally:
@@ -1810,10 +1810,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 CapabilityCall(name="op_channel_mgmt_attach", args={"target_id": "telegram_main"})
             )
             self.assertEqual(attached.status, "ok")
-            self.assertTrue(endpoint.attached)
-
-            accepted = endpoint.accept_raw({"text": "hello"}, event_kind="user.message")
-            self.assertIsNotNone(accepted)
+            active_endpoint = channel_runtime.get_endpoint("telegram_main")
+            self.assertIsNotNone(active_endpoint)
+            self.assertIsNot(active_endpoint, endpoint)
+            self.assertTrue(active_endpoint.attached)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)

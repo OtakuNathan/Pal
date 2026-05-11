@@ -196,6 +196,7 @@ CORE_MINION_CAPABILITIES = (
     "op_exec_disc_search",
     "op_exec_disc_read",
     "op_exec_capability_call",
+    "op_minion_artifact_write",
     "op_l3_recall_query",
 )
 
@@ -261,6 +262,13 @@ DEFAULT_MINION_DENIED_FRAGMENTS = (
 )
 
 
+MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
+    {
+        "op_minion_artifact_write",
+    }
+)
+
+
 def filter_minion_allowed_capabilities(
     values: list[str] | tuple[str, ...],
     *,
@@ -282,6 +290,8 @@ def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] 
     denied = DEFAULT_MINION_DENIED_CAPABILITIES | frozenset(extra_denied)
     if capability in denied:
         return True
+    if capability in MINION_INTERNAL_ALLOWED_CAPABILITIES:
+        return False
     if str(policy.get("risk") or "").strip().lower() == "read_only" and capability == "op_exec_run":
         return True
     prefixes = (*DEFAULT_MINION_DENIED_PREFIXES, *tuple(_string_list(policy.get("deny_prefixes"))))

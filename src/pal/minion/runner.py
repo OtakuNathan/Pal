@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import mimetypes
 import os
 import json
 import subprocess
@@ -54,6 +56,7 @@ class MinionRunner:
     read_decision: DecisionReader
     runtime_bundle: MinionRuntimeBundle | None = None
     blocked_summary: str = ""
+    produced_artifacts: list[dict[str, Any]] = field(default_factory=list)
 
     async def run(self) -> int:
         bundle: MinionRuntimeBundle | None = None
@@ -107,7 +110,12 @@ class MinionRunner:
 
     async def _llm_tool_loop(self, bundle: MinionRuntimeBundle) -> str:
         messages = self._initial_messages()
-        execution_runtime = MinionScopedExecutionRuntime(bundle.execution_runtime, self.pack.allowed_capabilities, dict(self.pack.workspace))
+        execution_runtime = MinionScopedExecutionRuntime(
+            bundle.execution_runtime,
+            self.pack.allowed_capabilities,
+            dict(self.pack.workspace),
+            produced_artifacts=self.produced_artifacts,
+        )
         tools = _llm_tools_for_allowed(execution_runtime, self.pack.allowed_capabilities)
         max_rounds = _optional_positive_int(self.pack.metadata.get("max_tool_rounds") if isinstance(self.pack.metadata, dict) else None)
         max_output_tokens = _resolve_minion_max_output_tokens(bundle.llm_runtime, self.pack)
@@ -396,7 +404,7 @@ class MinionRunner:
         base_payload = {
             "milestone_index": self._current_milestone_index(),
             "milestone_id": str(self._current_milestone().get("milestone_id") or ""),
-            "summary": final_text or "minion completed current milestone",
+            "summary": self._short_summary(final_text or "minion completed current milestone"),
         }
         if evidence == "git_commit":
             await self._persist_text_deliverable_if_needed(final_text)
@@ -409,6 +417,7 @@ class MinionRunner:
                         "commit_sha": str(checkpoint.get("commit_sha") or ""),
                         "git_commit": checkpoint,
                         "evidence": "git_commit",
+                        **self._artifact_payload(),
                     }
                 blocked_summary = str(
                     checkpoint.get("error")
@@ -420,6 +429,7 @@ class MinionRunner:
                     "status": "blocked",
                     "summary": blocked_summary,
                     "git_commit": checkpoint,
+                    **self._artifact_payload(),
                 }
             return {
                 **base_payload,
@@ -427,15 +437,18 @@ class MinionRunner:
                 "commit_sha": str(checkpoint.get("commit_sha") or ""),
                 "git_commit": checkpoint,
                 "evidence": "git_commit",
+                **self._artifact_payload(),
             }
-        if not str(final_text or "").strip():
+        await self._persist_text_deliverable_if_needed(final_text)
+        if not str(final_text or "").strip() and not self.produced_artifacts:
             return {
                 **base_payload,
                 "status": "blocked",
                 "summary": "milestone produced no text deliverable",
                 "evidence": evidence or "text_deliverable",
+                **self._artifact_payload(),
             }
-        return {**base_payload, "status": "completed", "evidence": evidence or "text_deliverable"}
+        return {**base_payload, "status": "completed", "evidence": evidence or "text_deliverable", **self._artifact_payload()}
 
     def _completion_evidence_present(self) -> bool:
         completion_policy = self._completion_policy()
@@ -455,32 +468,32 @@ class MinionRunner:
 
     async def _persist_text_deliverable_if_needed(self, final_text: str) -> None:
         text = str(final_text or "").strip()
-        if not text:
+        if not text or self.produced_artifacts:
             return
-        repo_path = str((self.pack.workspace or {}).get("repo_path") or "").strip()
-        if not repo_path:
+        if not str((self.pack.workspace or {}).get("artifact_dir") or "").strip():
             return
-        repo = Path(repo_path)
-        if not (repo / ".git").exists() or _repo_has_changes(repo):
-            return
-        output_dir = repo / "minion_outputs" / self._safe_path_part(self.pack.work_order_id)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        path = output_dir / f"milestone_{self._current_milestone_index()}_{self._safe_path_part(self.pack.minion_profile)}.md"
-        path.write_text(
-            "\n".join(
-                [
-                    f"# {self._current_milestone_title()}",
-                    "",
-                    f"- work_order_id: {self.pack.work_order_id}",
-                    f"- minion_id: {self.minion_id}",
-                    f"- run_id: {self.run_id}",
-                    "",
-                    text,
-                    "",
-                ]
-            ),
-            encoding="utf-8",
+        artifact = _write_minion_artifact(
+            self.pack.workspace,
+            {
+                "relative_path": f"milestone_{self._current_milestone_index()}_{self._safe_path_part(self.pack.minion_profile)}.md",
+                "title": self._current_milestone_title(),
+                "role": "primary",
+                "mime_type": "text/markdown",
+                "content": "\n".join(
+                    [
+                        f"# {self._current_milestone_title()}",
+                        "",
+                        f"- work_order_id: {self.pack.work_order_id}",
+                        f"- minion_id: {self.minion_id}",
+                        f"- run_id: {self.run_id}",
+                        "",
+                        text,
+                        "",
+                    ]
+                ),
+            },
         )
+        self._record_produced_artifact(artifact)
 
     @staticmethod
     def _safe_path_part(value: str) -> str:
@@ -568,13 +581,43 @@ class MinionRunner:
     def _terminal_payload(self, status: str, summary: Any) -> dict[str, Any]:
         summary_text = str(summary or "").strip()
         lesson_payload = _extract_lessons_and_clean_summary(summary_text)
-        summary_text = str(lesson_payload.get("summary") or summary_text).strip()
+        summary_text = self._short_summary(str(lesson_payload.get("summary") or summary_text).strip())
         return {
             "status": str(status or "").strip() or "completed",
             "summary": summary_text,
             "task_lessons": list(lesson_payload.get("task_lessons") or []),
             "system_lessons": list(lesson_payload.get("system_lessons") or []),
+            **self._artifact_payload(),
         }
+
+    def _artifact_payload(self) -> dict[str, Any]:
+        artifacts = [dict(item) for item in self.produced_artifacts]
+        payload: dict[str, Any] = {"artifacts": artifacts}
+        primary = next((item for item in artifacts if str(item.get("role") or "") == "primary"), None)
+        if primary is None and artifacts:
+            primary = artifacts[0]
+        if primary is not None:
+            payload["primary_artifact"] = dict(primary)
+        return payload
+
+    def _record_produced_artifact(self, artifact: dict[str, Any]) -> None:
+        path = str(artifact.get("path") or "").strip()
+        relative_path = str(artifact.get("relative_path") or "").strip()
+        if not path and not relative_path:
+            return
+        for existing in self.produced_artifacts:
+            if path and str(existing.get("path") or "") == path:
+                return
+            if relative_path and str(existing.get("relative_path") or "") == relative_path:
+                return
+        self.produced_artifacts.append(dict(artifact))
+
+    @staticmethod
+    def _short_summary(value: Any, *, limit: int = 500) -> str:
+        text = " ".join(str(value or "").strip().split())
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
 
     def _append_debug_log(self, section: str, payload: dict[str, Any]) -> None:
         config = dict((self.pack.metadata or {}).get("debug_log") or {})
@@ -720,6 +763,7 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_workspace_tree",
     "op_workspace_search",
     "op_workspace_read",
+    "op_minion_artifact_write",
     "op_web_search_query",
     "op_web_fetch_read",
     "op_l3_recall_query",
@@ -765,6 +809,21 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "required": ["path"],
         },
     },
+    "op_minion_artifact_write": {
+        "name": "op_minion_artifact_write",
+        "description": "Write a minion deliverable file under workspace.artifact_dir and register it as produced artifact evidence.",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "relative_path": {"type": "string", "description": "Artifact-dir-relative file path, for example plan.md."},
+                "content": {"type": "string", "description": "UTF-8 text content to write."},
+                "title": {"type": "string"},
+                "role": {"type": "string", "description": "Artifact role such as primary, evidence, notes, or tests."},
+                "mime_type": {"type": "string", "default": "text/markdown"},
+            },
+            "required": ["relative_path", "content"],
+        },
+    },
 }
 
 
@@ -784,6 +843,7 @@ class MinionScopedExecutionRuntime:
     base_runtime: Any
     allowed_capabilities: list[str]
     workspace: dict[str, Any] = field(default_factory=dict)
+    produced_artifacts: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.allowed_capabilities = filter_minion_allowed_capabilities(self.allowed_capabilities)
@@ -831,7 +891,12 @@ class MinionScopedExecutionRuntime:
                 ToolReadTool(runtime=self).invoke(dict(call.args)),
             )
         if call.name in WORKSPACE_TOOL_SPECS:
-            return _workspace_tool_result(call, self.workspace)
+            result = _workspace_tool_result(call, self.workspace)
+            if call.name == "op_minion_artifact_write" and result.ok:
+                artifact = dict((result.structured or {}).get("artifact") or result.structured or {})
+                if artifact:
+                    self.produced_artifacts.append(artifact)
+            return result
         return await self.base_runtime.execute_tool_async(call, allow_tools=allow_tools, turn_id=turn_id)
 
 
@@ -849,18 +914,23 @@ def _capability_result_to_tool_result(call: CanonicalToolCall, result: Capabilit
 
 def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult:
     try:
-        root = _workspace_root(workspace)
-        if call.name == "op_workspace_tree":
-            payload = _workspace_tree(root, call.args)
-            text = "\n".join(item["path"] for item in payload["items"])
-        elif call.name == "op_workspace_search":
-            payload = _workspace_search(root, call.args)
-            text = "\n".join(f"{item['path']}:{item['line_number']}: {item['line']}" for item in payload["matches"])
-        elif call.name == "op_workspace_read":
-            payload = _workspace_read(root, call.args)
-            text = payload["text"]
+        if call.name == "op_minion_artifact_write":
+            artifact = _write_minion_artifact(workspace, call.args)
+            payload = {"artifact": artifact}
+            text = f"Artifact written: {artifact['relative_path']}"
         else:
-            raise ValueError(f"unknown workspace tool: {call.name}")
+            root = _workspace_root(workspace)
+            if call.name == "op_workspace_tree":
+                payload = _workspace_tree(root, call.args)
+                text = "\n".join(item["path"] for item in payload["items"])
+            elif call.name == "op_workspace_search":
+                payload = _workspace_search(root, call.args)
+                text = "\n".join(f"{item['path']}:{item['line_number']}: {item['line']}" for item in payload["matches"])
+            elif call.name == "op_workspace_read":
+                payload = _workspace_read(root, call.args)
+                text = payload["text"]
+            else:
+                raise ValueError(f"unknown workspace tool: {call.name}")
         return CanonicalToolResult(
             name=call.name,
             ok=True,
@@ -891,6 +961,51 @@ def _workspace_root(workspace: dict[str, Any]) -> Path:
     if not root.exists() or not root.is_dir():
         raise ValueError(f"workspace.repo_path is not a directory: {root}")
     return root
+
+
+def _artifact_root(workspace: dict[str, Any]) -> Path:
+    artifact_dir = str((workspace or {}).get("artifact_dir") or "").strip()
+    if not artifact_dir:
+        raise ValueError("workspace.artifact_dir is not available")
+    root = Path(artifact_dir).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _artifact_path(root: Path, raw_path: Any) -> Path:
+    relative = str(raw_path or "").strip()
+    if not relative:
+        raise ValueError("relative_path is required")
+    if Path(relative).is_absolute():
+        raise ValueError("artifact path must be relative to artifact_dir")
+    candidate = (root / relative).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise ValueError("artifact path escapes artifact_dir")
+    if candidate == root:
+        raise ValueError("artifact path must name a file")
+    return candidate
+
+
+def _write_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    root = _artifact_root(workspace)
+    path = _artifact_path(root, args.get("relative_path"))
+    content = str(args.get("content") or "")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    relative_path = str(path.relative_to(root)).replace("\\", "/")
+    mime_type = str(args.get("mime_type") or mimetypes.guess_type(path.name)[0] or "text/plain").strip()
+    role = str(args.get("role") or "primary").strip() or "primary"
+    return {
+        "kind": "file",
+        "path": str(path),
+        "relative_path": relative_path,
+        "title": str(args.get("title") or path.stem).strip() or path.name,
+        "role": role,
+        "mime_type": mime_type,
+        "size_bytes": path.stat().st_size,
+        "sha256": digest,
+    }
 
 
 def _workspace_path(root: Path, raw_path: Any = "") -> Path:
@@ -1184,6 +1299,7 @@ def _render_system_prompt(scaffold: dict[str, Any]) -> str:
         "If capability evidence is required, use a relevant listed capability before completing the milestone.\n"
         "If completion evidence cannot be produced, report blocked instead of completed.\n"
         "When completion policy requires git_commit, leave file changes in the workspace; do not run git commit yourself.\n"
+        "When `op_minion_artifact_write` is available, write your primary deliverable to workspace.artifact_dir with that tool; keep the final chat summary short and point to the artifact.\n"
         "If a tool/capability call fails and `op_l3_recall_query` is listed below, you MUST call `op_l3_recall_query` for relevant prior experience before retrying, debugging further, or reporting blocked.\n"
         "When the current milestone is complete, stop with a concise milestone summary. "
         "If the run taught something genuinely reusable, include separate Task lessons or System lessons; Pal will ask the user before absorbing them.\n\n"

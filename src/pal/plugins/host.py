@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pal.core.lifecycle_owner import ModuleLifecycleOwnerResult, lifecycle_owner_not_found
 from pal.core.module_registry import ModuleHandle
 from pal.plugins.contracts import (
     FirstPartyPluginBundle,
@@ -87,6 +88,8 @@ class PluginHost:
     first_party_records: dict[str, PluginRecord] = field(default_factory=dict)
     first_party_handles: dict[str, ModuleHandle] = field(default_factory=dict)
     third_party_handles: dict[str, ModuleHandle] = field(default_factory=dict)
+    module_to_plugin: dict[str, str] = field(default_factory=dict)
+    owner_id: str = "plugins"
     first_party_disabled: set[str] = field(default_factory=set)
     scan_errors: list[str] = field(default_factory=list)
     last_scan_status: str = PLUGIN_STATUS_DISCOVERED
@@ -94,6 +97,7 @@ class PluginHost:
     def __post_init__(self) -> None:
         if self.builtin_root is None:
             self.builtin_root = self.runtime_root / "plugins" / "_builtin"
+        self.context.lifecycle_owner_registry.register_owner(self)
 
     def third_party_root(self) -> Path:
         return self.runtime_root / "plugins" / "community"
@@ -215,6 +219,28 @@ class PluginHost:
             return {"status": RuntimeStatus.NOT_FOUND, "plugin_id": plugin_id}
         self.third_party_repository.set_load_status(plugin_id, status=PLUGIN_STATUS_DETACHED, error_text=None)
         return {"status": RuntimeStatus.OK, "plugin_id": plugin_id, "attached": False}
+
+    # --- module lifecycle owner ---
+
+    def owns_module(self, module_id: str) -> bool:
+        return str(module_id or "").strip() in self.module_to_plugin
+
+    def detach_module(self, module_id: str) -> ModuleLifecycleOwnerResult:
+        plugin_id = self.module_to_plugin.get(str(module_id or "").strip())
+        if not plugin_id:
+            return lifecycle_owner_not_found(module_id, self.owner_id)
+        result = self.detach(plugin_id)
+        return self._owner_result(module_id, plugin_id, result, fresh_instance=False)
+
+    def attach_module(self, module_id: str) -> ModuleLifecycleOwnerResult:
+        plugin_id = self.module_to_plugin.get(str(module_id or "").strip())
+        if not plugin_id:
+            return lifecycle_owner_not_found(module_id, self.owner_id)
+        result = self.attach(plugin_id)
+        return self._owner_result(module_id, plugin_id, result, fresh_instance=result.get("status") == RuntimeStatus.OK)
+
+    def reload_module(self, module_id: str) -> ModuleLifecycleOwnerResult:
+        return self.attach_module(module_id)
 
     def enable(self, plugin_id: str) -> dict[str, Any]:
         if plugin_id in self.first_party_records:
@@ -354,7 +380,7 @@ class PluginHost:
             record.last_load_status = PLUGIN_STATUS_LOAD_FAILED
             record.last_error = f"{exc.__class__.__name__}: {exc}"
             return RuntimeStatus.ERROR
-        record.module_id = handle.module_id
+        self._bind_plugin_module(plugin_id, handle)
         record.last_load_status = "loaded"
         record.last_error = None
         self.first_party_handles[plugin_id] = handle
@@ -430,6 +456,7 @@ class PluginHost:
             )
             return RuntimeStatus.ERROR
         self.third_party_repository.set_load_status(plugin_id, status="loaded", error_text=None)
+        self._bind_plugin_module(plugin_id, handle)
         self.third_party_handles[plugin_id] = handle
         return RuntimeStatus.OK
 
@@ -488,6 +515,51 @@ class PluginHost:
         if row is not None:
             self._drop_plugin_import_cache(row.entrypoint, plugin_id=plugin_id, first_party=False)
 
+    def _bind_plugin_module(self, plugin_id: str, handle: ModuleHandle) -> None:
+        module_id = str(handle.module_id)
+        record = self.first_party_records.get(plugin_id)
+        previous_module_id = str(record.module_id) if record is not None and record.module_id else None
+        if previous_module_id and previous_module_id != module_id:
+            self.module_to_plugin.pop(previous_module_id, None)
+        for existing_module_id, existing_plugin_id in list(self.module_to_plugin.items()):
+            if existing_plugin_id == plugin_id and existing_module_id != module_id:
+                self.module_to_plugin.pop(existing_module_id, None)
+        self.module_to_plugin[module_id] = plugin_id
+        if record is not None:
+            record.module_id = module_id
+        self.context.lifecycle_owner_registry.bind_module(module_id, self.owner_id)
+
+    def _owner_result(
+        self,
+        module_id: str,
+        plugin_id: str,
+        result: dict[str, Any],
+        *,
+        fresh_instance: bool,
+    ) -> ModuleLifecycleOwnerResult:
+        status = str(result.get("status") or RuntimeStatus.ERROR)
+        return ModuleLifecycleOwnerResult(
+            status=status,
+            module_id=module_id,
+            owner_id=self.owner_id,
+            fresh_instance=fresh_instance and status == RuntimeStatus.OK,
+            reload_modules=self._reload_modules_for_plugin(plugin_id),
+            error=str(result.get("error") or result.get("last_error") or "") or None,
+            payload={"plugin_id": plugin_id, "plugin_result": dict(result)},
+        )
+
+    def _reload_modules_for_plugin(self, plugin_id: str) -> tuple[str, ...]:
+        record = self.first_party_records.get(plugin_id)
+        if record is not None:
+            return _record_reload_prefixes(record)
+        row = self.third_party_repository.get(plugin_id)
+        if row is None or not isinstance(row.config_blob, dict):
+            return ()
+        configured = row.config_blob.get("reload_modules")
+        if not isinstance(configured, list | tuple):
+            return ()
+        return tuple(dict.fromkeys(str(item).strip() for item in configured if str(item).strip()))
+
     def _forget_module_handle(self, handle: ModuleHandle) -> None:
         self.context.introspection_registry.pop(handle.module_id, None)
         current = self.context.module_registry.get(handle.module_id)
@@ -527,6 +599,7 @@ class PluginHost:
             self._restore_provider_refs(handle)
             self._restore_prompt_fragment_providers(handle)
             self._restore_event_sources(handle)
+            self._restore_event_handlers(handle)
             self._restore_control_action_handlers(handle)
             self._publish_module_capabilities(handle.module_id)
         except Exception:
@@ -547,6 +620,7 @@ class PluginHost:
         self._withdraw_module_capabilities(handle.module_id)
         self.context.prompt_fragment_registry.unregister_module(handle.module_id)
         self.context.event_source_registry.detach_module(handle.module_id)
+        self.context.event_handler_registry.detach_module(handle.module_id)
         self.context.control_action_registry.unregister_module(handle.module_id)
         for provider_id in list(handle.provider_refs):
             self.context.execution_runtime.unregister_provider_ref(provider_id)
@@ -626,6 +700,11 @@ class PluginHost:
     def _restore_event_sources(self, handle: ModuleHandle) -> None:
         for source in handle.event_sources:
             self.context.event_source_registry.attach(handle.module_id, source)
+
+    def _restore_event_handlers(self, handle: ModuleHandle) -> None:
+        for event_kind, handlers in handle.event_handlers.items():
+            for handler in handlers:
+                self.context.event_handler_registry.register(event_kind, handler, module_id=handle.module_id)
 
     def _register_behavior_declarations(self, handle: ModuleHandle) -> None:
         skill = self.context.port_registry.get("skill:skill")

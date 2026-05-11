@@ -328,6 +328,44 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNone(payload["active_endpoint_id"])
         self.assertEqual(payload["primary_endpoint_id"], "new")
 
+    def test_resolve_max_output_tokens_refreshes_active_endpoint_setting(self) -> None:
+        repository = LLMEndpointRepository()
+        settings = RuntimeSettingRepository()
+        settings.ensure_defaults()
+        repository.upsert(
+            endpoint_id="planner_long",
+            provider="stub",
+            model_id="planner-model",
+            api_mode="openai_chat",
+            base_url="stub://local/planner",
+            credential_ref="stub-planner",
+            priority=0,
+            enabled=True,
+            max_output_tokens=8192,
+        )
+        repository.upsert(
+            endpoint_id="coder_fast",
+            provider="stub",
+            model_id="coder-model",
+            api_mode="openai_chat",
+            base_url="stub://local/coder",
+            credential_ref="stub-coder",
+            priority=1,
+            enabled=True,
+            max_output_tokens=4096,
+        )
+        settings.set_active_llm_endpoint_id("planner_long")
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=repository),
+            settings_repository=settings,
+        )
+        self.assertEqual(runtime.resolve_max_output_tokens(), 8192)
+
+        settings.set_active_llm_endpoint_id("coder_fast")
+
+        self.assertEqual(runtime.resolve_max_output_tokens(), 4096)
+        self.assertEqual(runtime.resolve_max_output_tokens(preferred_endpoint_id="planner_long"), 8192)
+
     def test_litellm_credential_resolver_uses_secret_store_ref(self) -> None:
         repository = LLMEndpointRepository()
         repository.ensure_defaults(
@@ -966,6 +1004,62 @@ class PalV2BootstrapTests(unittest.TestCase):
             asyncio.run(handle.stop_async())
             for name in list(sys.modules):
                 if any(name == prefix or name.startswith(f"{prefix}.") for prefix in hot_reload_prefixes):
+                    sys.modules.pop(name, None)
+            sys.modules.update(original_modules)
+
+    def test_core_reattach_delegates_plugin_owned_module_to_refresh_attach(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        handle = compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        cap_registry = handle.core.context.capability_registry
+        prefixes = ("pal.minion", "pal.plugins_builtin.minion")
+        original_modules = {
+            name: module
+            for name, module in sys.modules.items()
+            if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes)
+        }
+        try:
+            old_handle = handle.core.context.module_registry.require("minion")
+            old_provider = old_handle.introspection_provider
+            old_source = handle.core.context.event_source_registry.sources["minion.manager"]
+            old_prompt = handle.core.context.prompt_fragment_registry.providers["minion.prompt.default"]
+            old_handler = handle.core.context.event_handler_registry.by_module["minion"][0][1]
+
+            detached = handle.core.detach_module("minion")
+
+            self.assertEqual(detached, "ok")
+            self.assertNotIn("intro_module_minion_show", cap_registry.descriptors)
+            self.assertNotIn("minion.manager", handle.core.context.event_source_registry.sources)
+            self.assertNotIn("minion.prompt.default", handle.core.context.prompt_fragment_registry.providers)
+            self.assertNotIn("minion", handle.core.context.event_handler_registry.by_module)
+            record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == "minion")
+            self.assertFalse(record["attached"])
+
+            probe_name = "pal.minion.__pal_hot_reload_probe__"
+            sys.modules[probe_name] = types.ModuleType(probe_name)
+
+            reattached = handle.core.reattach_module("minion")
+
+            self.assertEqual(reattached, "ok")
+            self.assertNotIn(probe_name, sys.modules)
+            self.assertIn("intro_module_minion_show", cap_registry.descriptors)
+            new_handle = handle.core.context.module_registry.require("minion")
+            new_source = handle.core.context.event_source_registry.sources["minion.manager"]
+            new_prompt = handle.core.context.prompt_fragment_registry.providers["minion.prompt.default"]
+            new_handler = handle.core.context.event_handler_registry.by_module["minion"][0][1]
+            self.assertIsNot(new_handle.introspection_provider, old_provider)
+            self.assertIsNot(new_source, old_source)
+            self.assertIsNot(new_prompt, old_prompt)
+            self.assertIsNot(new_handler, old_handler)
+            record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == "minion")
+            self.assertTrue(record["attached"])
+        finally:
+            asyncio.run(handle.stop_async())
+            for name in list(sys.modules):
+                if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes):
                     sys.modules.pop(name, None)
             sys.modules.update(original_modules)
 
@@ -1983,6 +2077,68 @@ class PalV2BootstrapTests(unittest.TestCase):
             self.assertEqual(new_endpoint.endpoint.endpoint_id, "socket_default")
             self.assertIn("channel", handle.core.context.module_registry.modules)
             self.assertIn("op_channel_mgmt_reload_provider", handle.core.context.capability_registry.descriptors)
+
+            detached = runtime.execute(
+                CapabilityCall(name="op_channel_mgmt_detach", args={"target_id": "socket_default"})
+            )
+            self.assertEqual(detached.status, "ok")
+            detached_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+            self.assertIsNotNone(detached_endpoint)
+            self.assertFalse(detached_endpoint.attached)
+
+            sys.modules[probe_name] = types.ModuleType(probe_name)
+            attached = runtime.execute(
+                CapabilityCall(name="op_channel_mgmt_attach", args={"target_id": "socket_default"})
+            )
+
+            self.assertEqual(attached.status, "ok")
+            self.assertNotIn(probe_name, sys.modules)
+            attached_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+            self.assertIsNotNone(attached_endpoint)
+            self.assertIsNot(attached_endpoint, detached_endpoint)
+            self.assertTrue(attached_endpoint.attached)
+            self.assertIn("pal.channel.endpoints.socket_endpoint", attached.structured["reload_modules"])
+        finally:
+            for name in list(sys.modules):
+                if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes):
+                    sys.modules.pop(name, None)
+            sys.modules.update(original_modules)
+
+    def test_core_lifecycle_owner_can_reload_channel_endpoint_provider(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        handle = compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        endpoint_module_id = "channel.endpoint:socket_default"
+        old_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+        self.assertIsNotNone(old_endpoint)
+        self.assertIsNotNone(handle.core.context.lifecycle_owner_registry.resolve(endpoint_module_id))
+        prefixes = ("pal.channel.factory", "pal.channel.endpoints.socket_endpoint")
+        original_modules = {
+            name: module
+            for name, module in sys.modules.items()
+            if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes)
+        }
+        probe_name = "pal.channel.endpoints.socket_endpoint.__pal_hot_reload_probe__"
+        try:
+            detached = handle.core.detach_module(endpoint_module_id)
+            self.assertEqual(detached, "ok")
+            detached_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+            self.assertIsNotNone(detached_endpoint)
+            self.assertFalse(detached_endpoint.attached)
+
+            sys.modules[probe_name] = types.ModuleType(probe_name)
+            reattached = handle.core.reattach_module(endpoint_module_id)
+
+            self.assertEqual(reattached, "ok")
+            self.assertNotIn(probe_name, sys.modules)
+            new_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+            self.assertIsNotNone(new_endpoint)
+            self.assertIsNot(new_endpoint, old_endpoint)
+            self.assertTrue(new_endpoint.attached)
+            self.assertIn("channel", handle.core.context.module_registry.modules)
         finally:
             for name in list(sys.modules):
                 if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes):
@@ -2009,7 +2165,9 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         endpoint = handle.channel_runtime.get_endpoint("telegram_main")
         self.assertIsNotNone(endpoint)
-        self.assertIsInstance(endpoint, TelegramChannelEndpoint)
+        from pal.channel.endpoints.telegram_endpoint import TelegramChannelEndpoint as FreshTelegramChannelEndpoint
+
+        self.assertIsInstance(endpoint, FreshTelegramChannelEndpoint)
         self.assertEqual(endpoint.endpoint.binding_key, "chat:123")
 
     def test_llm_capabilities_are_read_only_and_do_not_expose_credentials(self) -> None:

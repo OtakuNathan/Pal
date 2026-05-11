@@ -439,7 +439,27 @@ def _extract_json_object(text: str) -> dict[str, Any]:
 
 def _terminal_summary(events: list[dict[str, Any]]) -> str:
     terminal = next(event for event in events if event.get("event_kind") == "terminal")
-    return str((terminal.get("payload") or {}).get("summary") or "")
+    payload = dict(terminal.get("payload") or {})
+    artifact_text = _primary_artifact_text(payload)
+    return artifact_text or str(payload.get("summary") or "")
+
+
+def _primary_artifact(payload: dict[str, Any]) -> dict[str, Any]:
+    primary = payload.get("primary_artifact")
+    if isinstance(primary, dict) and primary.get("path"):
+        return dict(primary)
+    for artifact in list(payload.get("artifacts") or []):
+        if isinstance(artifact, dict) and artifact.get("path"):
+            return dict(artifact)
+    return {}
+
+
+def _primary_artifact_text(payload: dict[str, Any]) -> str:
+    artifact = _primary_artifact(payload)
+    path = Path(str(artifact.get("path") or ""))
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
 
 
 async def _append_event(events: list[dict[str, Any]], event: dict[str, Any]) -> None:
@@ -736,7 +756,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                 self.assertTrue(checkpoint["payload"]["commit_sha"])
                 terminal = next(event for event in events if event["event_kind"] == "terminal")
                 self.assertEqual(terminal["payload"]["status"], "completed")
-                self.assertTrue(terminal["payload"]["task_lessons"])
+                self.assertTrue(_primary_artifact(terminal["payload"]))
                 progress_phases = [event["payload"].get("phase") for event in events if event.get("event_kind") == "progress"]
                 self.assertIn("llm_round_started", progress_phases)
                 self.assertIn("tool_call_started", progress_phases)
@@ -932,7 +952,8 @@ class RealLLMIntegrationTests(unittest.TestCase):
                 self.assertEqual(detail["last_tool_call"]["target_name"], "op_exec_run")
                 self.assertGreaterEqual(detail["llm_round_count"], 1)
                 self.assertGreaterEqual(detail["tool_call_count"], 1)
-                self.assertTrue((detail["work_order_snapshot"].get("task_lessons") or []))
+                metadata = (detail["work_order_snapshot"].get("work_order") or {}).get("metadata") or {}
+                self.assertTrue(metadata.get("artifacts") or terminal["payload"].get("artifacts"))
                 progress_events = [event for event in detail["ledger"] if event.get("event_kind") == "progress"]
                 progress_phases = [event.get("payload", {}).get("phase") for event in progress_events]
                 self.assertIn("tool_call_started", progress_phases)
@@ -1101,7 +1122,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                 self.assertEqual(marker.read_text(encoding="utf-8"), "MINION_TEAM_OK")
                 self.assertEqual(checkpoint["payload"]["status"], "completed")
                 self.assertTrue(checkpoint["payload"]["commit_sha"])
-                self.assertTrue(coder_terminal["payload"]["task_lessons"])
+                self.assertTrue(_primary_artifact(coder_terminal["payload"]))
                 planner_progress = [event["payload"].get("phase") for event in planner_events if event.get("event_kind") == "progress"]
                 coder_progress = [event["payload"].get("phase") for event in coder_events if event.get("event_kind") == "progress"]
                 self.assertIn("milestone_finalizing", planner_progress)

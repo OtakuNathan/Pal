@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,8 +53,13 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
             "base_sha": base_sha,
             "work_order_branch": branch,
             "merge_target": merge_target,
+            "workspace_kind": "git_repo",
         }
     )
+    artifact_dir = repo_path / "minion_outputs" / _safe_ref(pack.work_order_id)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    workspace.setdefault("run_dir", str(artifact_dir))
+    workspace["artifact_dir"] = str(artifact_dir)
     workspace["workspace_policy"] = {"mode": "writable_git_branch"}
     workspace["completion_policy"] = {"evidence": "git_commit", "requires_capability_evidence": True}
     if source_repo:
@@ -61,7 +67,7 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
     return TaskContextPack.from_dict({**pack.to_dict(), "workspace": workspace})
 
 
-def prepare_task_workspace(runtime_root: Path, pack: TaskContextPack) -> TaskContextPack:
+def prepare_task_workspace(runtime_root: Path, pack: TaskContextPack, *, run_id: str = "") -> TaskContextPack:
     workspace = _normalize_workspace_paths(pack.workspace)
     workspace_policy = _policy_from_pack(pack, "workspace_policy")
     completion_policy = _policy_from_pack(pack, "completion_policy")
@@ -91,12 +97,12 @@ def prepare_task_workspace(runtime_root: Path, pack: TaskContextPack) -> TaskCon
         workspace["workspace_policy"] = {**workspace_policy, "mode": "read_only_repo"}
         if completion_policy:
             workspace["completion_policy"] = dict(completion_policy)
-        return TaskContextPack.from_dict({**pack.to_dict(), "workspace": workspace})
+        return _with_folder_workspace(runtime_root, pack, workspace, run_id=run_id)
     if workspace_policy:
         workspace["workspace_policy"] = dict(workspace_policy)
     if completion_policy:
         workspace["completion_policy"] = dict(completion_policy)
-    return TaskContextPack.from_dict({**pack.to_dict(), "workspace": workspace})
+    return _with_folder_workspace(runtime_root, pack, workspace, run_id=run_id)
 
 
 def commit_milestone(repo_path: Path, *, work_order_id: str, milestone_index: int, title: str = "") -> dict[str, Any]:
@@ -226,6 +232,47 @@ def _normalize_workspace_paths(workspace: dict[str, Any]) -> dict[str, Any]:
         normalized.setdefault("repo_path", cwd)
         normalized.setdefault("source_repo", cwd)
     return normalized
+
+
+def _with_folder_workspace(runtime_root: Path, pack: TaskContextPack, workspace: dict[str, Any], *, run_id: str = "") -> TaskContextPack:
+    prepared_workspace = dict(workspace)
+    profile = _safe_ref(pack.minion_profile or "generic")
+    run_part = _safe_ref(run_id or str(pack.metadata.get("run_id") or "") or pack.work_order_id)
+    run_dir = Path(str(prepared_workspace.get("run_dir") or runtime_root / "data" / "minion" / "workspaces" / f"{run_part}_{profile}"))
+    artifact_dir = Path(str(prepared_workspace.get("artifact_dir") or run_dir / "deliverables"))
+    log_dir = Path(str(prepared_workspace.get("log_dir") or run_dir / "logs"))
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    prepared_workspace.update(
+        {
+            "workspace_kind": "folder",
+            "run_dir": str(run_dir),
+            "artifact_dir": str(artifact_dir),
+            "log_dir": str(log_dir),
+        }
+    )
+    prepared = TaskContextPack.from_dict({**pack.to_dict(), "workspace": prepared_workspace})
+    _write_folder_workspace_metadata(run_dir, prepared)
+    return prepared
+
+
+def _write_folder_workspace_metadata(run_dir: Path, pack: TaskContextPack) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "work_order.json").write_text(
+        json.dumps(pack.to_dict(), ensure_ascii=False, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
+    metadata = {
+        "work_order_id": pack.work_order_id,
+        "minion_profile": pack.minion_profile,
+        "workspace": dict(pack.workspace),
+        "artifacts": list(pack.artifacts),
+        "metadata": dict(pack.metadata),
+    }
+    (run_dir / "metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _same_local_path(source: str, repo_path: Path) -> bool:

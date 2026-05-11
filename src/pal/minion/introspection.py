@@ -16,9 +16,11 @@ from pal.behavior.decorators import affordance
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.control import ControlAction
 from pal.execution.contracts import CapabilityCall, CapabilityResult
+from pal.foundation import utc_now
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
 from pal.minion.ipc import MinionManagerClient, minion_log_path, open_manager_connection, python_subprocess_env
 from pal.minion.profiles import MinionProfileRegistry
+from pal.minion.prompt import TaskingPromptFragmentProvider
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.source import MinionControlEventHandler, MinionEventSource
 from pal.shared import (
@@ -215,6 +217,7 @@ class MinionManagerProvider:
     _event_subscription_thread: threading.Thread | None = None
     _event_subscription_active: bool = False
     event_notify: Any | None = None
+    recent_observations: list[dict[str, Any]] = field(default_factory=list)
     client: MinionManagerClient = field(init=False)
 
     def __post_init__(self) -> None:
@@ -807,6 +810,24 @@ class MinionManagerProvider:
             remaining = len(self._buffered_events)
         return {"events": drained, "remaining": remaining}
 
+    def record_minion_observation(self, payload: dict[str, Any]) -> None:
+        observation = _minion_observation_from_terminal(payload)
+        if not observation:
+            return
+        with self._buffer_lock:
+            key = str(observation.get("run_id") or observation.get("work_order_id") or "")
+            self.recent_observations = [
+                item
+                for item in self.recent_observations
+                if str(item.get("run_id") or item.get("work_order_id") or "") != key
+            ]
+            self.recent_observations.insert(0, observation)
+            del self.recent_observations[10:]
+
+    def recent_minion_observations(self, *, limit: int = 5) -> list[dict[str, Any]]:
+        with self._buffer_lock:
+            return [dict(item) for item in self.recent_observations[: max(1, min(int(limit or 5), 10))]]
+
     def _ensure_manager_started(self) -> None:
         if self.process is not None and self.process.poll() is None:
             try:
@@ -1076,6 +1097,27 @@ def inspect_minion(provider: MinionManagerProvider) -> MinionSnapshot:
     )
 
 
+def _minion_observation_from_terminal(payload: dict[str, Any]) -> dict[str, Any]:
+    status = str(payload.get("status") or "").strip()
+    work_order_id = str(payload.get("work_order_id") or "").strip()
+    run_id = str(payload.get("run_id") or "").strip()
+    if not status or not (work_order_id or run_id):
+        return {}
+    artifacts = [dict(item) for item in list(payload.get("artifacts") or []) if isinstance(item, dict)]
+    primary = payload.get("primary_artifact")
+    return {
+        "status": status,
+        "summary": _preview_text(str(payload.get("summary") or ""), limit=500),
+        "run_id": run_id,
+        "work_order_id": work_order_id,
+        "minion_id": str(payload.get("minion_id") or ""),
+        "profile": str(payload.get("minion_profile") or "minion"),
+        "completed_at": str(payload.get("created_at") or utc_now()),
+        "artifacts": artifacts,
+        "primary_artifact": dict(primary) if isinstance(primary, dict) else (artifacts[0] if artifacts else {}),
+    }
+
+
 def register_with_core(context: MainContext, service: object | None = None, *, runtime_root: Path | None = None) -> ModuleHandle:
     _ = service
     resolved_root = Path(runtime_root or context.execution_runtime.runtime_root or Path.cwd() / ".pal-minion")
@@ -1083,13 +1125,14 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
     provider.event_notify = lambda: getattr(context.port_registry.get("core:core"), "notify_ready", lambda: None)()
     event_provider = _LegacyTaskingEventProvider(service) if hasattr(service, "minion_mailbox") else provider
     source = MinionEventSource(provider=event_provider)
-    event_handler = MinionControlEventHandler()
+    event_handler = MinionControlEventHandler(provider=provider)
+    prompt_provider = TaskingPromptFragmentProvider(manager=provider)
     handle = ModuleHandle(
         module_id="minion",
         tier=MODULE_TIER_DETACHABLE,
         detachable=True,
         introspection_provider=provider,
-        prompt_fragment_providers=[],
+        prompt_fragment_providers=[prompt_provider],
         supports_lifecycle_capabilities=True,
         event_sources=[source],
         event_handlers={
@@ -1111,6 +1154,7 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
     context.event_handler_registry.register(EventKind.MINION_PROGRESS, event_handler, module_id="minion")
     context.event_handler_registry.register(EventKind.MINION_CHECKPOINT, event_handler, module_id="minion")
     context.event_handler_registry.register(EventKind.MINION_TERMINAL, event_handler, module_id="minion")
+    context.prompt_fragment_registry.register(prompt_provider)
     return handle
 
 
