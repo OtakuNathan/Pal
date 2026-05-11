@@ -19,6 +19,31 @@ class ToolSurface:
         with open(_CONFIG_PATH, "rb") as f:
             return tomllib.load(f)
 
+    def reload_config(self) -> dict[str, Any]:
+        self._config = self._load_config()
+        singletons = [
+            str(item).strip()
+            for item in list(self._config.get("singletons", {}).get("capabilities", []) or [])
+            if str(item).strip()
+        ]
+        dynamic = [
+            str(item.get("canonical_path") or "").strip()
+            for item in list(self._config.get("dynamic", []) or [])
+            if isinstance(item, dict) and str(item.get("canonical_path") or "").strip()
+        ]
+        resident = [
+            str(contract["function"]["name"])
+            for contract in self.build_llm_tool_contracts()
+            if isinstance(contract.get("function"), dict) and contract["function"].get("name")
+        ]
+        return {
+            "config_path": str(_CONFIG_PATH),
+            "singleton_count": len(singletons),
+            "dynamic_count": len(dynamic),
+            "resident_tool_count": len(resident),
+            "resident_tool_names": resident,
+        }
+
     def build_llm_tool_contracts(self) -> list[dict[str, object]]:
         return self.build_tool_contracts_from_descriptors(self.select_llm_descriptors())
 

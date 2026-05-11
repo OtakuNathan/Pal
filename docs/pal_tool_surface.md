@@ -13,6 +13,8 @@ The resident surface is data-driven:
 
 Changing the direct LLM tool set should normally be a TOML edit, not a Python code change.
 
+At runtime, `/refresh_tool_surface` reloads this TOML into the active PalCore instance for future turns.
+
 ## Current Resident Surface
 
 As of the current implementation, resident tools are intentionally small:
@@ -26,19 +28,12 @@ As of the current implementation, resident tools are intentionally small:
 
 These keep the model able to inspect and invoke any registered capability without making every capability resident.
 
-### Behavior And Skill
+### Behavior
 
 - `op_behavior_advise`
 - `op_behavior_affordance_submit`
-- `op_skill_assimilate`
-- `op_skill_commit`
-- `op_skill_update`
-- `op_skill_disable`
-- `op_skill_search`
-- `op_skill_read`
-- `op_skill_inject`
 
-Behavior advice is routing. Skill search/read/inject is procedure loading. Neither surface executes arbitrary side effects by itself.
+Behavior advice is resident routing. Skill is intentionally not resident; skill tools remain discoverable and invocable through execution discovery when the user explicitly asks to learn/use a reusable procedure, or when behavior advice returns a skill ref.
 
 ### Artifact
 
@@ -72,6 +67,13 @@ Examples:
 - `op_artifact_content_search`
 - `op_artifact_transcribe`
 - `op_channel_send_attachment`
+- `op_skill_assimilate`
+- `op_skill_commit`
+- `op_skill_update`
+- `op_skill_disable`
+- `op_skill_search`
+- `op_skill_read`
+- `op_skill_inject`
 - MCP-projected tools such as `op_mcp_<server>_tool_<tool>`
 - MCP prompt render capabilities such as `op_mcp_<server>_prompt_<prompt>_render`
 

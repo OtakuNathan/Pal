@@ -75,6 +75,8 @@ Telegram command text may arrive with a bot mention suffix, such as `/control@Pa
 
 The inline button uses the generic `control.command.run` interaction action, which dispatches the same command handler as the slash command. Refreshing LLM endpoints changes routing for future turns only; it is not a mid-turn model switch.
 
+`/refresh_tool_surface` is a built-in control command. It bypasses LLM reasoning and asks PalCore to reload `src/pal/core/tool_surface.toml` for future turns. It is exposed in the same places as `/refresh_llm_endpoint`, with the inline control panel label `Refresh Tools`.
+
 Channel endpoints render platform-specific control UX. Telegram owns command menu publication, inline keyboard rendering, callback token mapping, and message editing. PalCore and Control receive typed interaction results, not Telegram callback payloads.
 
 ## MCP

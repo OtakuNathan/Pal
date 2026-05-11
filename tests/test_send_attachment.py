@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from pal.channel import ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.endpoints.socket_endpoint import SocketChannelEndpoint
-from pal.channel.endpoints.telegram_endpoint import TelegramChannelEndpoint
+from pal.channel.endpoints.telegram_endpoint import TelegramChannelEndpoint, _telegram_markdown
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import AttachmentSpec, EventEnvelope
@@ -41,6 +41,10 @@ class _AttachmentEndpoint(ChannelEndpointQueueBase):
 class _FakeTelegramBot:
     def __init__(self) -> None:
         self.documents: list[dict[str, object]] = []
+        self.messages: list[dict[str, object]] = []
+
+    async def send_message(self, **kwargs) -> None:
+        self.messages.append(dict(kwargs))
 
     async def send_document(self, **kwargs) -> None:
         document = kwargs.get("document")
@@ -166,6 +170,43 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.documents[0]["message_thread_id"], 7)
         self.assertEqual(bot.documents[0]["filename"], "report.txt")
         self.assertEqual(bot.documents[0]["caption"], "Report")
+
+    async def test_telegram_reply_requeues_when_application_is_not_running(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key="chat:42")
+        )
+        handle = ResponseHandle(endpoint_id="telegram_main", reply_target={"chat_id": "42"})
+        endpoint.queue_reply("hello", response_handle=handle)
+
+        emitted = endpoint.flush_outbox()
+
+        self.assertEqual(len(endpoint.outbox), 1)
+        self.assertEqual(emitted[0].event_kind, EventKind.REPLY_FAILED)
+        self.assertIn("not running", emitted[0].payload["reason"])
+
+        bot = _FakeTelegramBot()
+        endpoint.application = SimpleNamespace(bot=bot)
+        endpoint.flush_outbox()
+        await asyncio.sleep(0.05)
+
+        self.assertFalse(endpoint.outbox)
+        self.assertEqual(str(bot.messages[0]["text"]).strip(), "hello")
+
+    def test_telegram_markdown_flattens_gfm_tables_to_readable_lists(self) -> None:
+        rendered, mode = _telegram_markdown(
+            "# Pal Report\n\n"
+            "| Item | Status | Detail |\n"
+            "|------|--------|--------|\n"
+            "| **Core** | OK | default |\n"
+            "| MCP | OK | 8 tools |\n"
+        )
+
+        self.assertEqual(mode, "MarkdownV2")
+        self.assertNotIn("```", rendered)
+        self.assertNotIn("\\| Item", rendered)
+        self.assertIn("Status:", rendered)
+        self.assertIn("Detail:", rendered)
+        self.assertIn("Core", rendered)
 
     def test_send_attachment_is_discoverable_but_not_resident_llm_tool(self) -> None:
         core, _, _ = self._build_core_with_channel()

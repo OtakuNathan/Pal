@@ -14,10 +14,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pal.bootstrap import compose_runtime
-from pal.channel import ChannelEndpointRepository
+from pal.channel import ChannelEndpointRepository, ChannelRuntime
 from pal.channel.contracts import EndpointConfig, ResponseHandle
 from pal.channel.endpoints import SocketChannelEndpoint, TelegramChannelEndpoint
 from pal.channel.endpoints.socket_protocol import pack_socket_message, read_socket_message
+from pal.channel.introspection import ChannelIntrospectionProvider
 from pal.control import InteractionButtonSpec, InteractionMessageSpec
 from pal.execution import CapabilityCall
 from pal.core.runtime_config import RuntimeConfig
@@ -2169,6 +2170,40 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertIsInstance(endpoint, FreshTelegramChannelEndpoint)
         self.assertEqual(endpoint.endpoint.binding_key, "chat:123")
+
+    def test_channel_provider_reload_preserves_runtime_telegram_auth_state(self) -> None:
+        repository = ChannelEndpointRepository()
+        repository.upsert(
+            endpoint_id="telegram_main",
+            channel_kind="telegram",
+            binding_key="chat:123",
+            binding_metadata={},
+        )
+        runtime = ChannelRuntime()
+        old_endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key="chat:123"),
+            runtime_root=self.runtime_root,
+            bot_token="runtime-only-token",
+        )
+        old_endpoint.paired = True
+        old_endpoint._authorized = True
+        runtime.register_endpoint(old_endpoint)
+        provider = ChannelIntrospectionProvider(
+            runtime=runtime,
+            repository=repository,
+            runtime_root=self.runtime_root,
+        )
+
+        result = provider._reload_endpoint_provider("telegram_main", attached=True)
+
+        self.assertEqual(result.status, "ok")
+        new_endpoint = runtime.get_endpoint("telegram_main")
+        self.assertIsNotNone(new_endpoint)
+        assert new_endpoint is not None
+        self.assertIsNot(new_endpoint, old_endpoint)
+        self.assertEqual(getattr(new_endpoint, "bot_token", ""), "runtime-only-token")
+        self.assertTrue(getattr(new_endpoint, "_authorized", False))
+        self.assertTrue(new_endpoint.paired)
 
     def test_llm_capabilities_are_read_only_and_do_not_expose_credentials(self) -> None:
         self.wizard.seed_defaults(self.registration)

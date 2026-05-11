@@ -737,6 +737,9 @@ class PalCore:
             if action.action_kind == "refresh_llm_endpoint":
                 await self._handle_refresh_llm_endpoint_async(action)
                 return
+            if action.action_kind == "refresh_tool_surface":
+                await self._handle_refresh_tool_surface_async(action)
+                return
             if action.action_kind == "interactive_open":
                 await self._handle_interactive_open_async(action)
                 return
@@ -878,6 +881,30 @@ class PalCore:
             lines.append(f"Added: {', '.join(str(item) for item in added)}")
         if removed:
             lines.append(f"Removed/disabled: {', '.join(str(item) for item in removed)}")
+        await self._reply_to_route_async(action.route, "\n".join(lines))
+
+    async def _handle_refresh_tool_surface_async(self, action: ControlAction) -> None:
+        refresh = getattr(self.tool_surface, "reload_config", None)
+        if not callable(refresh):
+            await self._reply_to_route_async(action.route, "Tool surface refresh is unavailable.")
+            return
+        try:
+            payload = refresh()
+        except Exception as exc:
+            await self._reply_to_route_async(action.route, f"Tool surface refresh failed: {exc}")
+            return
+
+        resident_names = [str(item) for item in list(payload.get("resident_tool_names") or []) if str(item).strip()]
+        preview = ", ".join(resident_names[:12]) if resident_names else "-"
+        if len(resident_names) > 12:
+            preview = f"{preview}, ..."
+        lines = [
+            "Tool surface refreshed.",
+            f"Resident tools for future turns: {payload.get('resident_tool_count', len(resident_names))}",
+            f"Singleton config entries: {payload.get('singleton_count', '-')}",
+            f"Dynamic config entries: {payload.get('dynamic_count', '-')}",
+            f"Tools: {preview}",
+        ]
         await self._reply_to_route_async(action.route, "\n".join(lines))
 
     def artifact_scope_for_turn(self, turn_id: str | None) -> str | None:

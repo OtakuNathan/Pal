@@ -278,6 +278,30 @@ Run the workflow.
         descriptors = core.context.capability_registry.descriptors
         self.assertEqual(descriptors["op_skill_inject"].module_id, "skill")
 
+    def test_skill_prompt_stays_registered_but_skill_tools_are_not_resident_llm_tools(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        register_skill_with_core(core.context, self.service)
+        core.publish_module_capabilities("execution")
+        core.publish_module_capabilities("skill")
+
+        self.assertIn("skill.prompt.default", core.context.prompt_fragment_registry.providers)
+
+        tool_names = {
+            contract["function"]["name"]
+            for contract in core.tool_surface.build_llm_tool_contracts()
+        }
+        self.assertNotIn("op_skill_assimilate", tool_names)
+        self.assertNotIn("op_skill_commit", tool_names)
+        self.assertNotIn("op_skill_search", tool_names)
+        self.assertNotIn("op_skill_read", tool_names)
+        self.assertNotIn("op_skill_inject", tool_names)
+
+        published = set(core.context.execution_runtime.compiled_capability_index.by_canonical)
+        self.assertIn("op_skill_search", published)
+        self.assertIn("op_skill_inject", published)
+
     def test_invalid_sanitizer_json_returns_structured_failure(self) -> None:
         service = SkillService(
             repository=self.skill_repository,
