@@ -142,6 +142,8 @@ The minion module exposes:
 
 `op_minion_spawn` may also accept `draft_id`. In that case the minion subsystem promotes the draft into a formal work order first, then spawns from the resolved work order. This keeps the LLM-facing entry point small while keeping draft promotion explicit and testable.
 
+`op_minion_spawn` may accept optional `preferred_endpoint_id`. Pal should set it only when the user explicitly asks for a specific model or LLM endpoint for that minion, after resolving the request to an enabled endpoint id. If omitted, the runner follows the normal Pal active endpoint setting from the runtime database.
+
 Natural-language minion control should resolve facts first. For requests like "what is it doing?", "replace it", "continue this task", or "merge the completed work", Pal should inspect active runs and work order snapshots, then call the relevant operation. Pal must not infer current worker, progress, or milestone completion from conversation text.
 
 ## Spawn Continuity
@@ -191,6 +193,8 @@ This prevents recursive spawn/kill/list/read behavior. A task runner does not ne
 ## Runner Loop
 
 The runner is a thin execution entity, not a forked Pal. It starts a slim runtime with LLM, execution, artifact metadata, read-only L3 recall, and allowed task tools such as shell/code execution and web search/fetch. It does not load channel endpoints, service triggers, control panel, or Pal user-facing routing.
+
+If `TaskContextPack.metadata.preferred_endpoint_id` is present, the runner forwards it as `CanonicalLLMRequest.metadata.preferred_endpoint_id` and uses that endpoint's budget when resolving max output tokens. Without that metadata, no preferred endpoint is passed; the slim runtime reads the current active LLM endpoint from `pal.sqlite3`.
 
 `TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `op_exec_disc_search`, `op_exec_disc_read`, `op_exec_capability_call`, `op_exec_run`, `op_web_search_query`, `op_web_fetch_read`, and `op_l3_recall_query` when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
 

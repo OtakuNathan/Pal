@@ -132,7 +132,7 @@ class MinionRunner:
                 messages=list(messages),
                 max_output_tokens=max_output_tokens,
                 tools=list(tools),
-                metadata={"response_mode_hint": "operational", "minion_run_id": self.run_id, "max_output_tokens_source": "minion"},
+                metadata=_minion_llm_request_metadata(self.pack, self.run_id),
             )
             self._append_debug_log(
                 "llm_request",
@@ -1073,10 +1073,11 @@ def _resolve_minion_max_output_tokens(llm_runtime: Any, pack: TaskContextPack) -
     explicit = _optional_positive_int(metadata.get("max_output_tokens"))
     if explicit is not None:
         return explicit
-    resolved = _runtime_max_output_tokens(llm_runtime)
+    preferred_endpoint_id = _preferred_endpoint_id_from_pack(pack)
+    resolved = _runtime_max_output_tokens(llm_runtime, preferred_endpoint_id=preferred_endpoint_id)
     if resolved is not None:
         return resolved
-    facts = _runtime_endpoint_facts(llm_runtime)
+    facts = _runtime_endpoint_facts(llm_runtime, preferred_endpoint_id=preferred_endpoint_id)
     fact_max = _optional_positive_int(facts.get("max_output_tokens")) if facts else None
     if fact_max is not None:
         return fact_max
@@ -1087,21 +1088,45 @@ def _resolve_minion_max_output_tokens(llm_runtime: Any, pack: TaskContextPack) -
     return _optional_positive_int(getattr(config, "fallback_max_output_tokens", None)) or 4096
 
 
-def _runtime_max_output_tokens(llm_runtime: Any) -> int | None:
+def _minion_llm_request_metadata(pack: TaskContextPack, run_id: str) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "response_mode_hint": "operational",
+        "minion_run_id": str(run_id or ""),
+        "max_output_tokens_source": "minion",
+    }
+    preferred_endpoint_id = _preferred_endpoint_id_from_pack(pack)
+    if preferred_endpoint_id:
+        metadata["preferred_endpoint_id"] = preferred_endpoint_id
+    return metadata
+
+
+def _preferred_endpoint_id_from_pack(pack: TaskContextPack) -> str | None:
+    metadata = pack.metadata if isinstance(pack.metadata, dict) else {}
+    value = str(metadata.get("preferred_endpoint_id") or "").strip()
+    return value or None
+
+
+def _runtime_max_output_tokens(llm_runtime: Any, *, preferred_endpoint_id: str | None = None) -> int | None:
     resolver = getattr(llm_runtime, "resolve_max_output_tokens", None)
     if not callable(resolver):
         return None
     with contextlib.suppress(Exception):
-        return _optional_positive_int(resolver())
+        try:
+            return _optional_positive_int(resolver(preferred_endpoint_id=preferred_endpoint_id))
+        except TypeError:
+            return _optional_positive_int(resolver())
     return None
 
 
-def _runtime_endpoint_facts(llm_runtime: Any) -> dict[str, Any]:
+def _runtime_endpoint_facts(llm_runtime: Any, *, preferred_endpoint_id: str | None = None) -> dict[str, Any]:
     resolver = getattr(llm_runtime, "resolve_endpoint_facts", None)
     if not callable(resolver):
         return {}
     with contextlib.suppress(Exception):
-        facts = resolver()
+        try:
+            facts = resolver(preferred_endpoint_id=preferred_endpoint_id)
+        except TypeError:
+            facts = resolver()
         return dict(facts) if isinstance(facts, dict) else {}
     return {}
 

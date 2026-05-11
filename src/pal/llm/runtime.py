@@ -462,6 +462,7 @@ class LLMRuntime(LLMRuntimePort):
         }
 
     def resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None) -> int | None:
+        self.refresh_runtime_settings()
         endpoint = self.endpoint_resolver.primary(preferred_endpoint_id=preferred_endpoint_id or self.active_endpoint_id)
         if endpoint is not None and endpoint.max_output_tokens is not None:
             return endpoint.max_output_tokens

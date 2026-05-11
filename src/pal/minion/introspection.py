@@ -448,6 +448,9 @@ class MinionManagerProvider:
             "task_context_pack directly, it must be a complete handoff with task_title, goal, instruction, source_summary, "
             "conversation_summary, module_boundaries, milestones, acceptance_criteria, workspace, artifacts, and minion_profile. "
             "For repo work, workspace should include repo_path; cwd with type=local_repo is accepted and normalized but repo_path is preferred. "
+            "If the user explicitly asks for a specific LLM model or endpoint for this minion, resolve it to an enabled llm endpoint_id "
+            "and pass preferred_endpoint_id. If the user does not specify one, omit preferred_endpoint_id so the minion uses the current "
+            "Pal active endpoint at request time. "
             "Use empty arrays or objects only when that section is truly not applicable. If those facts are missing, call "
             "op_minion_draft_work_order first instead of launching the runner. "
             "Before choosing minion_profile, call intro_minion_profile_list and intro_minion_profile_read unless the user already named "
@@ -500,6 +503,7 @@ class MinionManagerProvider:
                                 "conversation_summary": {"type": "string"},
                                 "module_boundaries": {},
                                 "milestones": {"type": "array"},
+                                "preferred_endpoint_id": {"type": "string"},
                             },
                             "required": [
                                 "task_title",
@@ -529,6 +533,13 @@ class MinionManagerProvider:
                     "type": "string",
                     "description": "Registered minion profile_id. Discover with intro_minion_profile_list/read before use.",
                 },
+                "preferred_endpoint_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional enabled LLM endpoint_id to use for this minion. Fill only when the user explicitly names a model "
+                        "or endpoint for the minion; otherwise omit it so the runner follows Pal's active endpoint setting."
+                    ),
+                },
                 "draft_id": {"type": "string", "description": "Reviewed work-order draft to promote and spawn."},
                 "work_order_id": {"type": "string", "description": "Existing stored work order to hydrate and spawn."},
                 "goal": {
@@ -549,6 +560,7 @@ class MinionManagerProvider:
             pack = _pack_from_args(call.args, repository=repository)
             pack = self._inject_control_route(pack, call)
             pack = self._inject_debug_log_request(pack, call)
+            pack = self._inject_preferred_endpoint(pack, call)
             pack = self._profile_registry().resolve_pack(
                 pack,
                 requested_profile=str(call.args.get("minion_profile") or ""),
@@ -1041,6 +1053,14 @@ class MinionManagerProvider:
         if not _prompt_log_enabled_for_turn(self.context, str(call.meta.get("turn_id") or "")):
             return pack
         metadata["minion_debug_log_enabled"] = True
+        return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
+
+    def _inject_preferred_endpoint(self, pack: TaskContextPack, call: CapabilityCall) -> TaskContextPack:
+        preferred_endpoint_id = str(call.args.get("preferred_endpoint_id") or "").strip()
+        if not preferred_endpoint_id:
+            return pack
+        metadata = dict(pack.metadata)
+        metadata["preferred_endpoint_id"] = preferred_endpoint_id
         return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
 
 
