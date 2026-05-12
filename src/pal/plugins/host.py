@@ -78,6 +78,20 @@ def _record_reload_prefixes(record: PluginRecord) -> tuple[str, ...]:
     return tuple(prefixes)
 
 
+def _module_loaded_from(module_name: str, root: Path) -> bool:
+    module = sys.modules.get(module_name)
+    if module is None:
+        return False
+    raw_file = getattr(module, "__file__", None)
+    if not raw_file:
+        return False
+    try:
+        module_path = Path(str(raw_file)).resolve()
+        return module_path == root or module_path.is_relative_to(root)
+    except Exception:
+        return False
+
+
 @dataclass
 class PluginHost:
     context: "MainContext"
@@ -513,7 +527,12 @@ class PluginHost:
             self._forget_module_handle(handle)
         row = self.third_party_repository.get(plugin_id)
         if row is not None:
-            self._drop_plugin_import_cache(row.entrypoint, plugin_id=plugin_id, first_party=False)
+            self._drop_plugin_import_cache(
+                row.entrypoint,
+                plugin_id=plugin_id,
+                first_party=False,
+                plugin_dir=Path(row.filesystem_path) if row.filesystem_path else None,
+            )
 
     def _bind_plugin_module(self, plugin_id: str, handle: ModuleHandle) -> None:
         module_id = str(handle.module_id)
@@ -575,6 +594,7 @@ class PluginHost:
         plugin_id: str,
         first_party: bool,
         extra_prefixes: tuple[str, ...] = (),
+        plugin_dir: Path | None = None,
     ) -> None:
         importlib.invalidate_caches()
         prefixes = _module_cache_prefixes(
@@ -583,8 +603,12 @@ class PluginHost:
             first_party=first_party,
             extra_prefixes=extra_prefixes,
         )
+        root = plugin_dir.resolve() if plugin_dir is not None else None
         for module_name in list(sys.modules):
             if any(module_name == prefix or module_name.startswith(f"{prefix}.") for prefix in prefixes):
+                sys.modules.pop(module_name, None)
+                continue
+            if root is not None and _module_loaded_from(module_name, root):
                 sys.modules.pop(module_name, None)
 
     # --- shared attach/detach logic ---

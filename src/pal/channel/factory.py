@@ -50,7 +50,11 @@ class ChannelEndpointFactoryRegistry:
 @dataclass(frozen=True)
 class SocketChannelEndpointFactory:
     channel_kind: str = "socket"
-    reload_modules: tuple[str, ...] = ("pal.channel.factory", "pal.channel.endpoints.socket_endpoint")
+    reload_modules: tuple[str, ...] = (
+        "pal.channel.factory",
+        "pal.channel.endpoints.socket_endpoint",
+        "pal.channel.endpoints.socket_protocol",
+    )
 
     def create(
         self,
