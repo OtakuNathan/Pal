@@ -29,6 +29,7 @@ from pal.behavior.contracts import (
 )
 from pal.behavior.decorators import AffordanceBlueprint
 from pal.behavior.repository import BehaviorRepository
+from pal.foundation import HeatStateRegistry
 from pal.foundation.persistence import utc_now
 from pal.skill.repository import SkillRepository
 
@@ -56,21 +57,24 @@ class BehaviorService:
     router_timeout_seconds: float = 2.0
     resident_prompt_budget: int = 5
     declared_affordances: dict[str, tuple[AffordanceDescriptor, ...]] = field(default_factory=dict)
+    affordance_heat: HeatStateRegistry = field(default_factory=HeatStateRegistry)
 
     async def advise_async(self, request: BehaviorAdviceRequest) -> BehaviorAdviceResult:
         deterministic = self._rank_candidates(request)
         if self.semantic_router is None or not deterministic:
-            return BehaviorAdviceResult(candidates=tuple(deterministic))
+            return self._record_affordance_heat(BehaviorAdviceResult(candidates=tuple(deterministic)))
         try:
             routed = self.semantic_router(request=request, candidates=tuple(deterministic))
             if inspect.isawaitable(routed):
                 routed = await asyncio.wait_for(routed, timeout=self.router_timeout_seconds)
-            return self._normalize_router_result(routed, deterministic)
+            return self._record_affordance_heat(self._normalize_router_result(routed, deterministic))
         except Exception as exc:
-            return BehaviorAdviceResult(
-                candidates=tuple(deterministic),
-                fallback_used=True,
-                router_error=f"{exc.__class__.__name__}: {exc}",
+            return self._record_affordance_heat(
+                BehaviorAdviceResult(
+                    candidates=tuple(deterministic),
+                    fallback_used=True,
+                    router_error=f"{exc.__class__.__name__}: {exc}",
+                )
             )
 
     def submit_affordance(self, payload: dict[str, Any]) -> AffordanceDescriptor:
@@ -127,6 +131,7 @@ class BehaviorService:
         module_id = str(getattr(handle, "module_id", "") or getattr(provider, "module_id", "") or "")
         if not module_id:
             return
+        self._forget_declared_affordance_heat(module_id)
         self.repository.delete_declared_affordances_for_module(module_id)
         declared_descriptors: list[AffordanceDescriptor] = list(_auto_affordances_from_handle(handle, module_id=module_id))
         resident_descriptors: list[AffordanceDescriptor] = []
@@ -143,6 +148,7 @@ class BehaviorService:
         self._register_declared_resident_prompt_provider(module_id, tuple(resident_descriptors))
 
     def unregister_declared_module(self, module_id: str) -> None:
+        self._forget_declared_affordance_heat(module_id)
         self.declared_affordances.pop(module_id, None)
         self.repository.delete_declared_affordances_for_module(module_id)
         self._unregister_declared_resident_prompt_provider(module_id)
@@ -156,6 +162,21 @@ class BehaviorService:
         affordances.sort(key=_resident_sort_key)
         max_items = self.resident_prompt_budget if limit is None else max(0, int(limit))
         return tuple(affordances[:max_items])
+
+    def hot_affordance_ids(self) -> tuple[str, ...]:
+        return self.affordance_heat.hot_keys()
+
+    def hot_affordances(self, *, limit: int | None = None) -> tuple[AffordanceDescriptor, ...]:
+        ids = list(self.hot_affordance_ids())
+        if not ids:
+            return ()
+        by_id = {item.affordance_id: item for item in self.repository.list_affordances_by_ids(ids, enabled_only=True)}
+        by_id.update(self._declared_affordance_index())
+        max_items = len(ids) if limit is None else max(0, int(limit))
+        return tuple(by_id[affordance_id] for affordance_id in ids[:max_items] if affordance_id in by_id)
+
+    def tick_affordance_heat(self) -> tuple[str, ...]:
+        return tuple(transition.key for transition in self.affordance_heat.tick() if transition.expired)
 
     def _register_declared_resident_prompt_provider(self, module_id: str, affordances: tuple[AffordanceDescriptor, ...]) -> None:
         registry = self.prompt_fragment_registry
@@ -174,6 +195,15 @@ class BehaviorService:
         from pal.behavior.prompt import declared_resident_affordance_provider_id
 
         registry.unregister(declared_resident_affordance_provider_id(module_id))
+
+    def _record_affordance_heat(self, result: BehaviorAdviceResult) -> BehaviorAdviceResult:
+        for candidate in result.candidates:
+            self.affordance_heat.promote_to_hot(candidate.affordance_id)
+        return result
+
+    def _forget_declared_affordance_heat(self, module_id: str) -> None:
+        for descriptor in self.declared_affordances.get(str(module_id), ()):
+            self.affordance_heat.remove(descriptor.affordance_id)
 
     def _rank_candidates(self, request: BehaviorAdviceRequest) -> list[BehaviorRouteCandidate]:
         candidates: list[BehaviorRouteCandidate] = []

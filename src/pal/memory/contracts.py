@@ -2,16 +2,21 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum, StrEnum
+from enum import StrEnum
 from typing import Any, Protocol
+
+from pal.foundation import (
+    DEFAULT_GHOST_TTL,
+    DEFAULT_HOT_TTL,
+    MAX_RENEWAL_COUNT,
+    HeatLevel,
+    HeatState,
+)
 
 
 # -- L2 Heat State Machine --
-
-class L2HeatLevel(Enum):
-    DORMANT = "DORMANT"
-    HOT = "HOT"
-    GHOST = "GHOST"
+L2HeatLevel = HeatLevel
+L2HeatState = HeatState
 
 
 class L3RecallView(StrEnum):
@@ -19,20 +24,8 @@ class L3RecallView(StrEnum):
     ORIGIN = "origin"
 
 
-DEFAULT_HOT_TTL = 5
-DEFAULT_GHOST_TTL = 3
-MAX_RENEWAL_COUNT = 3
 VECTOR_DEDUP_THRESHOLD = 0.85
 RECALL_PROMOTION_THRESHOLD = 0.3
-
-
-@dataclass(frozen=True)
-class L2HeatState:
-    entry_id: str
-    heat_level: L2HeatLevel = L2HeatLevel.DORMANT
-    hot_ttl: int = 0
-    ghost_ttl: int = 0
-    renewal_count: int = 0
 
 
 @dataclass(frozen=True)

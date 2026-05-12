@@ -913,9 +913,22 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         fallback_sql: str,
     ) -> list[dict[str, Any]]:
         normalized = str(query or "").strip()
-        if not normalized:
-            return []
         resolved_limit = max(1, min(int(limit or 10), 50))
+        if not normalized:
+            rows = [
+                {"id": str(row[0]), "score": float(row[1])}
+                for row in db.execute(fallback_sql, ("%%", resolved_limit)).fetchall()
+            ]
+            ordered: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for row in rows:
+                if row["id"] in seen:
+                    continue
+                seen.add(row["id"])
+                ordered.append(row)
+                if len(ordered) >= resolved_limit:
+                    break
+            return ordered
         rows: list[dict[str, Any]] = []
         for fts_query in _compile_fts_queries(normalized):
             try:

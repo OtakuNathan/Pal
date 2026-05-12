@@ -1,5 +1,6 @@
 .DS_Store
 CLAUDE.md
+AGENTS.md
 .idea/
 .venv/
 __pycache__/

@@ -278,6 +278,31 @@ Run the workflow.
         descriptors = core.context.capability_registry.descriptors
         self.assertEqual(descriptors["op_skill_inject"].module_id, "skill")
 
+    def test_skill_module_declares_internal_plugin_development_skill(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        register_skill_with_core(core.context, self.service)
+        core.publish_module_capabilities("skill")
+
+        skill = self.skill_repository.get_skill("pal.plugin.development")
+
+        self.assertIsNotNone(skill)
+        assert skill is not None
+        self.assertEqual(skill.module_id, "skill")
+        self.assertTrue(skill.active)
+        self.assertIn("build_plugin", skill.manual_text)
+        self.assertIn("op_plugin_mgmt_attach", skill.capability_refs)
+
+        search = SkillSearchTool(service=self.service).invoke({"query": "create plugin capability extension", "top_k": 3})
+        self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.plugin.development")
+        self.assertTrue(search.structured["hits"][0]["injectable"])
+
+        injected = SkillInjectTool(service=self.service).invoke({"skill_id": "pal.plugin.development"})
+        self.assertEqual(injected.status, "ok")
+        self.assertIn("Pal Plugin Development", injected.structured["title"])
+        self.assertIn("ModuleHandle", injected.structured["manual_text"])
+
     def test_skill_prompt_stays_registered_but_skill_tools_are_not_resident_llm_tools(self) -> None:
         core = PalCore()
         register_core_with_core(core)

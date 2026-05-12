@@ -1,5 +1,16 @@
 from pal.foundation.artifact import ArtifactIngestor, StoredArtifact
 from pal.foundation.attachment import AttachmentSpec
+from pal.foundation.heat import (
+    DEFAULT_GHOST_TTL,
+    DEFAULT_HOT_TTL,
+    MAX_RENEWAL_COUNT,
+    HeatLevel,
+    HeatPolicy,
+    HeatState,
+    HeatStateMachine,
+    HeatStateRegistry,
+    HeatTransition,
+)
 from pal.foundation.io import EventEnvelope
 from pal.foundation.persistence import (
     BaseModel,
@@ -8,6 +19,7 @@ from pal.foundation.persistence import (
     RepositoryBase,
     utc_now,
 )
+from pal.foundation.ttl import BoundedTTLBuffer, TTLEntry
 from pal.foundation.sidecar import (
     SidecarEndpoint,
     SidecarRpcClient,
@@ -27,7 +39,17 @@ __all__ = [
     "ArtifactIngestor",
     "AttachmentSpec",
     "BaseModel",
+    "BoundedTTLBuffer",
+    "DEFAULT_GHOST_TTL",
+    "DEFAULT_HOT_TTL",
     "EventEnvelope",
+    "HeatLevel",
+    "HeatPolicy",
+    "HeatState",
+    "HeatStateMachine",
+    "HeatStateRegistry",
+    "HeatTransition",
+    "MAX_RENEWAL_COUNT",
     "PalV2Database",
     "RawSQLHookRegistry",
     "RepositoryBase",
@@ -35,6 +57,7 @@ __all__ = [
     "SidecarRpcClient",
     "SidecarRpcError",
     "StoredArtifact",
+    "TTLEntry",
     "cleanup_sidecar_endpoint",
     "dispatch_sidecar_request",
     "handle_sidecar_client",

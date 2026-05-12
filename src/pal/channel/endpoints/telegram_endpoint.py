@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
-from pal.channel.contracts import EndpointConfig, ResponseHandle
+from pal.channel.contracts import ChannelDeliveryError, EndpointConfig, ResponseHandle
 from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec, InteractionResult
 from pal.foundation.artifact import ArtifactIngestor
 from pal.foundation import AttachmentSpec, EventEnvelope
@@ -285,6 +285,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         self._typing_tasks.clear()
 
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
+        if self.application is None:
+            raise ChannelDeliveryError("telegram application not running", permanent=False)
         loop = asyncio.get_running_loop()
         loop.create_task(self._send_reply_async(response_handle, text))
 

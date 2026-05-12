@@ -431,10 +431,15 @@ def _extract_json_object(text: str) -> dict[str, Any]:
             lines = lines[:-1]
         raw = "\n".join(lines).strip()
     start = raw.find("{")
-    end = raw.rfind("}")
-    if start < 0 or end < start:
+    if start < 0:
         raise AssertionError(f"LLM output did not contain a JSON object: {text[:1000]}")
-    return json.loads(raw[start : end + 1])
+    try:
+        parsed, _end = json.JSONDecoder().raw_decode(raw[start:])
+    except json.JSONDecodeError as exc:
+        raise AssertionError(f"LLM output did not contain a valid JSON object: {text[:1000]}") from exc
+    if not isinstance(parsed, dict):
+        raise AssertionError(f"LLM output JSON was not an object: {text[:1000]}")
+    return parsed
 
 
 def _terminal_summary(events: list[dict[str, Any]]) -> str:

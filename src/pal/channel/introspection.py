@@ -610,6 +610,7 @@ class ChannelIntrospectionProvider:
                 llm_text="channel endpoint not found",
             )
         reload_modules = self._reload_modules_for_kind(str(record.channel_kind))
+        old_endpoint = self.runtime.get_endpoint(endpoint_id)
         _drop_module_import_cache(reload_modules)
         self.endpoint_factories = _fresh_endpoint_factories()
         endpoint = self.endpoint_factories.create(record, runtime_root=self.runtime_root or Path.cwd())
@@ -622,6 +623,7 @@ class ChannelIntrospectionProvider:
             )
         if attached is not None:
             endpoint.attached = attached
+        _preserve_runtime_endpoint_state(old_endpoint, endpoint)
         self.runtime.replace_endpoint(endpoint)
         payload = {
             "endpoint_id": endpoint_id,
@@ -698,6 +700,29 @@ def _default_reload_modules_for_kind(channel_kind: str) -> tuple[str, ...]:
     if channel_kind == "telegram":
         return ("pal.channel.factory", "pal.channel.endpoints.telegram_endpoint")
     return ("pal.channel.factory",)
+
+
+def _preserve_runtime_endpoint_state(old_endpoint: ChannelEndpointBase | None, new_endpoint: ChannelEndpointBase) -> None:
+    if old_endpoint is None or old_endpoint is new_endpoint:
+        return
+    if getattr(old_endpoint, "paired", False):
+        new_endpoint.paired = True
+    pairing_metadata = dict(getattr(old_endpoint, "pairing_metadata", {}) or {})
+    if pairing_metadata:
+        new_endpoint.pairing_metadata.update(pairing_metadata)
+    old_token = str(getattr(old_endpoint, "bot_token", "") or "").strip()
+    new_token = str(getattr(new_endpoint, "bot_token", "") or "").strip()
+    if old_token and hasattr(new_endpoint, "bot_token") and not new_token:
+        setattr(new_endpoint, "bot_token", old_token)
+    if hasattr(old_endpoint, "_authorized") and hasattr(new_endpoint, "_authorized"):
+        setattr(
+            new_endpoint,
+            "_authorized",
+            bool(getattr(old_endpoint, "_authorized", False)) or bool(getattr(new_endpoint, "_authorized", False)),
+        )
+    control_commands = list(getattr(old_endpoint, "_control_commands_manifest", []) or [])
+    if control_commands and hasattr(new_endpoint, "_control_commands_manifest"):
+        setattr(new_endpoint, "_control_commands_manifest", control_commands)
 
 
 def _drop_module_import_cache(prefixes: tuple[str, ...]) -> None:

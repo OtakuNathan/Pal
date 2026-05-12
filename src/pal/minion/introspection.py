@@ -16,7 +16,7 @@ from pal.behavior.decorators import affordance
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.control import ControlAction
 from pal.execution.contracts import CapabilityCall, CapabilityResult
-from pal.foundation import utc_now
+from pal.foundation import BoundedTTLBuffer, utc_now
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
 from pal.minion.ipc import MinionManagerClient, minion_log_path, open_manager_connection, python_subprocess_env
 from pal.minion.profiles import MinionProfileRegistry
@@ -38,6 +38,9 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
+
+
+MINION_OBSERVATION_TTL_SECONDS = 6 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -217,7 +220,9 @@ class MinionManagerProvider:
     _event_subscription_thread: threading.Thread | None = None
     _event_subscription_active: bool = False
     event_notify: Any | None = None
-    recent_observations: list[dict[str, Any]] = field(default_factory=list)
+    recent_observations: BoundedTTLBuffer[dict[str, Any]] = field(
+        default_factory=lambda: BoundedTTLBuffer(capacity=10, ttl_seconds=MINION_OBSERVATION_TTL_SECONDS)
+    )
     client: MinionManagerClient = field(init=False)
 
     def __post_init__(self) -> None:
@@ -816,17 +821,11 @@ class MinionManagerProvider:
             return
         with self._buffer_lock:
             key = str(observation.get("run_id") or observation.get("work_order_id") or "")
-            self.recent_observations = [
-                item
-                for item in self.recent_observations
-                if str(item.get("run_id") or item.get("work_order_id") or "") != key
-            ]
-            self.recent_observations.insert(0, observation)
-            del self.recent_observations[10:]
+            self.recent_observations.upsert(key, observation)
 
     def recent_minion_observations(self, *, limit: int = 5) -> list[dict[str, Any]]:
         with self._buffer_lock:
-            return [dict(item) for item in self.recent_observations[: max(1, min(int(limit or 5), 10))]]
+            return [dict(item) for item in self.recent_observations.values(limit=max(1, min(int(limit or 5), 10)))]
 
     def _ensure_manager_started(self) -> None:
         if self.process is not None and self.process.poll() is None:

@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import os
+import platform
+import plistlib
+import re
 import shutil
+import shlex
 import subprocess
 import sys
 from pathlib import Path
 
+from pal.wizard.dependencies import WizardDependencyCheck, collect_dependency_checks
 from pal.wizard.prompts import ask, ask_yes_no, run_interactive_wizard
 from pal.wizard.runtime import DEFAULT_DB_FILENAME, DEFAULT_PAL_ENTRYPOINT, WizardService
 
@@ -22,13 +28,18 @@ _BANNER = r"""
 """
 
 _SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
+_LAUNCHD_USER_DIR = Path.home() / "Library" / "LaunchAgents"
+
+
+def _resolve_pal_command() -> list[str]:
+    pal_bin = shutil.which("pal")
+    if pal_bin:
+        return [pal_bin]
+    return [sys.executable, "-m", "pal.main"]
 
 
 def _resolve_pal_bin() -> str:
-    pal_bin = shutil.which("pal")
-    if pal_bin:
-        return pal_bin
-    return sys.executable + " -m pal.main"
+    return shlex.join(_resolve_pal_command())
 
 
 def _generate_service_content(
@@ -125,10 +136,10 @@ def _register_and_start_service(service_name: str, service_path: Path) -> bool:
         return False
 
 
-def _prompt_service_setup(runtime_root: Path) -> str | None:
+def _prompt_systemd_service_setup(runtime_root: Path) -> str | None:
     """Ask user if they want to register a systemd service. Returns service name or None."""
     print(f"\n{'=' * 50}")
-    print("  Service Registration")
+    print("  Service Registration (systemd)")
     print(f"{'=' * 50}\n")
 
     pal_bin = _resolve_pal_bin()
@@ -167,6 +178,180 @@ def _prompt_service_setup(runtime_root: Path) -> str | None:
         print(f"  Service file written to {service_path} but could not be activated.")
         print("  Activate manually: systemctl --user enable --now " + service_name)
         return service_name
+
+
+def _launchd_domain() -> str:
+    getuid = getattr(os, "getuid", None)
+    uid = getuid() if callable(getuid) else ""
+    return f"gui/{uid}" if uid != "" else "gui/$UID"
+
+
+def _sanitize_launchd_label_part(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip()).strip(".-")
+    return text or "pal"
+
+
+def _pick_launchd_label(runtime_root: Path) -> str:
+    default_label = "com.pal.runtime"
+    default_path = _LAUNCHD_USER_DIR / f"{default_label}.plist"
+    runtime_path = runtime_root.as_posix()
+    if not default_path.exists():
+        return default_label
+    try:
+        if runtime_path in default_path.read_text(encoding="utf-8"):
+            return default_label
+    except OSError:
+        pass
+
+    stem = _sanitize_launchd_label_part(runtime_root.name)
+    if stem in {"pal", "runtime"}:
+        stem = "pal2"
+    candidate = f"com.pal.{stem}"
+    candidate_path = _LAUNCHD_USER_DIR / f"{candidate}.plist"
+    if not candidate_path.exists():
+        return candidate
+    try:
+        if runtime_path in candidate_path.read_text(encoding="utf-8"):
+            return candidate
+    except OSError:
+        pass
+
+    override = ask(
+        f"  LaunchAgent {candidate}.plist already exists. Choose a different label",
+        f"{candidate}-2",
+    )
+    override = _sanitize_launchd_label_part(override)
+    return override if override.startswith("com.") else f"com.pal.{override}"
+
+
+def _generate_launchd_plist(
+    *,
+    label: str,
+    pal_command: list[str],
+    runtime_root: Path,
+) -> dict[str, object]:
+    runtime_path = runtime_root.as_posix()
+    return {
+        "Label": label,
+        "ProgramArguments": [*pal_command, "run", "--runtime-root", runtime_path],
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "WorkingDirectory": runtime_path,
+        "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
+        "StandardOutPath": (runtime_root / "pal.log").as_posix(),
+        "StandardErrorPath": (runtime_root / "pal.log").as_posix(),
+    }
+
+
+def _register_and_start_launchd(label: str, plist_path: Path) -> bool:
+    domain = _launchd_domain()
+    service_target = f"{domain}/{label}"
+    try:
+        subprocess.run(
+            ["launchctl", "bootout", service_target],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["launchctl", "bootstrap", domain, plist_path.as_posix()],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["launchctl", "kickstart", "-k", service_target],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"  Failed to register LaunchAgent: {e.stderr.strip()}")
+        return False
+    except FileNotFoundError:
+        print("  launchctl not found. Skipping LaunchAgent registration.")
+        return False
+
+
+def _prompt_launchd_service_setup(runtime_root: Path) -> str | None:
+    print(f"\n{'=' * 50}")
+    print("  Service Registration (launchd)")
+    print(f"{'=' * 50}\n")
+
+    pal_command = _resolve_pal_command()
+    label = _pick_launchd_label(runtime_root)
+    plist_path = _LAUNCHD_USER_DIR / f"{label}.plist"
+    plist_payload = _generate_launchd_plist(label=label, pal_command=pal_command, runtime_root=runtime_root)
+
+    print(f"  Pal command: {' '.join(pal_command)}")
+    print(f"  Label:       {label}")
+    print(f"  Runtime:     {runtime_root}")
+    print(f"  Plist:       {plist_path}")
+    if plist_path.exists():
+        print(f"  (File exists at {plist_path})")
+
+    print()
+    print("  LaunchAgent ProgramArguments:")
+    for item in plist_payload["ProgramArguments"]:
+        print(f"    {item}")
+    print()
+
+    if not ask_yes_no("  Register and start this LaunchAgent?", default=True):
+        return None
+
+    _LAUNCHD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    with plist_path.open("wb") as f:
+        plistlib.dump(plist_payload, f, sort_keys=True)
+
+    if _register_and_start_launchd(label, plist_path):
+        print(f"  LaunchAgent {label} registered and started.")
+        return label
+    print(f"  LaunchAgent plist written to {plist_path} but could not be activated.")
+    print(f"  Activate manually: launchctl bootstrap {_launchd_domain()} {plist_path}")
+    return label
+
+
+def _prompt_service_setup(runtime_root: Path) -> str | None:
+    system = platform.system().lower()
+    if system == "linux":
+        return _prompt_systemd_service_setup(runtime_root)
+    if system == "darwin":
+        return _prompt_launchd_service_setup(runtime_root)
+    print(f"\n{'=' * 50}")
+    print("  Service Registration")
+    print(f"{'=' * 50}\n")
+    print(f"  Automatic service registration is not supported on {platform.system() or 'this platform'}.")
+    print(f"  Run manually: pal run --runtime-root {runtime_root}")
+    return None
+
+
+def _render_dependency_check(check: WizardDependencyCheck) -> str:
+    marker = {
+        "ok": "OK",
+        "info": "INFO",
+        "warn": "WARN",
+        "missing": "MISS",
+        "error": "ERR",
+    }.get(check.status, check.status.upper())
+    suffix = " required" if check.required else " optional"
+    lines = [f"  [{marker}] {check.title} ({suffix})", f"       {check.detail}"]
+    if check.fix:
+        lines.append(f"       Fix: {check.fix}")
+    return "\n".join(lines)
+
+
+def run_dependency_doctor() -> int:
+    print("\n=== Pal Setup Doctor ===\n")
+    checks = collect_dependency_checks()
+    for check in checks:
+        print(_render_dependency_check(check))
+    blocking = [check for check in checks if check.blocking]
+    warnings = [check for check in checks if check.status == "warn"]
+    print()
+    print(f"  Blocking: {len(blocking)}")
+    print(f"  Warnings: {len(warnings)}")
+    return 0 if not blocking else 2
 
 
 def run_setup_wizard() -> int:

@@ -4,7 +4,7 @@ Covers:
 - multiline_input helper
 - seed_from_wizard integration (identity, endpoints, channel, secrets, settings)
 - re-run / upsert on existing database
-- systemd service generation and conflict avoidance
+- systemd / launchd service generation and conflict avoidance
 """
 
 from __future__ import annotations
@@ -316,6 +316,163 @@ class TestServiceGeneration(unittest.TestCase):
         finally:
             cli_mod._SYSTEMD_USER_DIR = original
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_generate_launchd_plist(self) -> None:
+        from pal.wizard.cli import _generate_launchd_plist
+
+        payload = _generate_launchd_plist(
+            label="com.pal.test",
+            pal_command=["/usr/local/bin/pal"],
+            runtime_root=Path("/Users/test/.pal"),
+        )
+
+        self.assertEqual(payload["Label"], "com.pal.test")
+        self.assertEqual(
+            payload["ProgramArguments"],
+            ["/usr/local/bin/pal", "run", "--runtime-root", "/Users/test/.pal"],
+        )
+        self.assertEqual(payload["RunAtLoad"], True)
+        self.assertEqual(payload["KeepAlive"], {"SuccessfulExit": False})
+        self.assertEqual(payload["WorkingDirectory"], "/Users/test/.pal")
+        self.assertEqual(payload["EnvironmentVariables"], {"PYTHONUNBUFFERED": "1"})
+        self.assertEqual(payload["StandardOutPath"], "/Users/test/.pal/pal.log")
+        self.assertEqual(payload["StandardErrorPath"], "/Users/test/.pal/pal.log")
+
+    def test_pick_launchd_label_no_conflict(self) -> None:
+        from pal.wizard import cli as cli_mod
+
+        tmp = Path(tempfile.mkdtemp(prefix="pal_launchd_test_"))
+        original = cli_mod._LAUNCHD_USER_DIR
+        cli_mod._LAUNCHD_USER_DIR = tmp
+        try:
+            result = cli_mod._pick_launchd_label(Path("/Users/test/.pal"))
+            self.assertEqual(result, "com.pal.runtime")
+        finally:
+            cli_mod._LAUNCHD_USER_DIR = original
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_pick_launchd_label_same_runtime_reuses(self) -> None:
+        from pal.wizard import cli as cli_mod
+
+        tmp = Path(tempfile.mkdtemp(prefix="pal_launchd_test_"))
+        original = cli_mod._LAUNCHD_USER_DIR
+        cli_mod._LAUNCHD_USER_DIR = tmp
+        try:
+            (tmp / "com.pal.runtime.plist").write_text(
+                "<string>/Users/test/.pal</string>", encoding="utf-8"
+            )
+            result = cli_mod._pick_launchd_label(Path("/Users/test/.pal"))
+            self.assertEqual(result, "com.pal.runtime")
+        finally:
+            cli_mod._LAUNCHD_USER_DIR = original
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_pick_launchd_label_conflict_uses_runtime_name(self) -> None:
+        from pal.wizard import cli as cli_mod
+
+        tmp = Path(tempfile.mkdtemp(prefix="pal_launchd_test_"))
+        original = cli_mod._LAUNCHD_USER_DIR
+        cli_mod._LAUNCHD_USER_DIR = tmp
+        try:
+            (tmp / "com.pal.runtime.plist").write_text(
+                "<string>/Users/other/.pal</string>", encoding="utf-8"
+            )
+            result = cli_mod._pick_launchd_label(Path("/Users/test/work-pal"))
+            self.assertEqual(result, "com.pal.work-pal")
+        finally:
+            cli_mod._LAUNCHD_USER_DIR = original
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_register_and_start_launchd_runs_launchctl_sequence(self) -> None:
+        from pal.wizard import cli as cli_mod
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kwargs: object) -> object:
+            calls.append(cmd)
+            return object()
+
+        with patch.object(cli_mod, "_launchd_domain", return_value="gui/501"):
+            with patch("subprocess.run", side_effect=fake_run):
+                ok = cli_mod._register_and_start_launchd(
+                    "com.pal.test",
+                    Path("/Users/test/Library/LaunchAgents/com.pal.test.plist"),
+                )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            calls,
+            [
+                ["launchctl", "bootout", "gui/501/com.pal.test"],
+                [
+                    "launchctl",
+                    "bootstrap",
+                    "gui/501",
+                    "/Users/test/Library/LaunchAgents/com.pal.test.plist",
+                ],
+                ["launchctl", "kickstart", "-k", "gui/501/com.pal.test"],
+            ],
+        )
+
+
+class TestDependencyDoctor(unittest.TestCase):
+    def test_dependency_check_blocking_only_for_required_missing_or_error(self) -> None:
+        from pal.wizard.dependencies import WizardDependencyCheck
+
+        self.assertTrue(WizardDependencyCheck("required", "Required", "missing", "missing", required=True).blocking)
+        self.assertTrue(WizardDependencyCheck("required", "Required", "error", "error", required=True).blocking)
+        self.assertFalse(WizardDependencyCheck("optional", "Optional", "warn", "warn", required=False).blocking)
+        self.assertFalse(WizardDependencyCheck("ok", "OK", "ok", "ok", required=True).blocking)
+
+    def test_dependency_report_counts_blocking_and_warnings(self) -> None:
+        from pal.wizard import dependencies as dep_mod
+        from pal.wizard.dependencies import WizardDependencyCheck
+
+        checks = (
+            WizardDependencyCheck("python", "Python", "ok", "ok"),
+            WizardDependencyCheck("package", "Package", "missing", "missing", required=True),
+            WizardDependencyCheck("ollama", "Ollama", "warn", "warn", required=False),
+        )
+        with patch.object(dep_mod, "collect_dependency_checks", return_value=checks):
+            report = dep_mod.dependency_report()
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["blocking_count"], 1)
+        self.assertEqual(report["warning_count"], 1)
+
+    def test_dependency_doctor_exit_code_reflects_blocking_checks(self) -> None:
+        from pal.wizard import cli as cli_mod
+        from pal.wizard.dependencies import WizardDependencyCheck
+
+        checks = (
+            WizardDependencyCheck("ok", "OK", "ok", "ok"),
+            WizardDependencyCheck("missing", "Missing", "missing", "missing", required=True, fix="install"),
+        )
+        with patch.object(cli_mod, "collect_dependency_checks", return_value=checks):
+            with patch("sys.stdout", new=StringIO()):
+                exit_code = cli_mod.run_dependency_doctor()
+
+        self.assertEqual(exit_code, 2)
+
+    def test_service_manager_check_supports_launchd(self) -> None:
+        from pal.wizard import dependencies as dep_mod
+
+        with patch.object(dep_mod.platform, "system", return_value="Darwin"):
+            with patch.object(dep_mod.shutil, "which", return_value="/bin/launchctl"):
+                check = dep_mod._check_service_manager()
+
+        self.assertEqual(check.status, "ok")
+        self.assertIn("LaunchAgent", check.detail)
+
+    def test_service_manager_check_warns_when_launchctl_missing(self) -> None:
+        from pal.wizard import dependencies as dep_mod
+
+        with patch.object(dep_mod.platform, "system", return_value="Darwin"):
+            with patch.object(dep_mod.shutil, "which", return_value=None):
+                check = dep_mod._check_service_manager()
+
+        self.assertEqual(check.status, "warn")
+        self.assertFalse(check.required)
 
 
 if __name__ == "__main__":

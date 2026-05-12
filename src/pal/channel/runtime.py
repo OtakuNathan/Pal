@@ -103,7 +103,8 @@ class ChannelRuntime(ChannelRuntimePort):
             except RuntimeError:
                 running_loop = None
             if running_loop is loop:
-                raise RuntimeError("cannot synchronously reload a channel endpoint from the channel event loop")
+                loop.create_task(_replace())
+                return
             future = asyncio.run_coroutine_threadsafe(_replace(), loop)
             future.result(timeout=timeout_seconds)
             return

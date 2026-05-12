@@ -25,7 +25,7 @@ from pal.core import PalCore
 from pal.channel.contracts import ChannelEnvelope, EndpointConfig, ResponseHandle
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution import CapabilityCall, CapabilityDescriptor, CapabilityResult, register_with_core as register_execution_with_core
-from pal.foundation import PalV2Database
+from pal.foundation import BoundedTTLBuffer, PalV2Database
 from pal.foundation.sidecar import (
     SidecarEndpoint,
     SidecarRpcClient,
@@ -571,6 +571,53 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         self.assertEqual(tasks["items"][0]["task"]["task_id"], "task_telegram")
         self.assertEqual(work_orders["items"][0]["work_order_id"], "wo_search")
+
+    def test_empty_tasking_search_lists_recent_records(self) -> None:
+        self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_recent",
+                goal="summarize recent minion state",
+                metadata={"task_id": "task_recent", "task_title": "Recent minion state"},
+            )
+        )
+        draft = self.repository.create_work_order_draft(
+            {
+                "title": "Recent draft",
+                "goal": "List recent work order drafts",
+                "task_id": "task_recent_draft",
+            }
+        )
+
+        task_ids = {item["task"]["task_id"] for item in self.repository.search_tasks("", limit=10)["items"]}
+        work_order_ids = {item["work_order_id"] for item in self.repository.search_work_orders("", limit=10)["items"]}
+        draft_ids = {item["draft_id"] for item in self.repository.search_work_order_drafts("", limit=10)["items"]}
+
+        self.assertIn("task_recent", task_ids)
+        self.assertIn("wo_recent", work_order_ids)
+        self.assertIn(draft["draft"]["draft_id"], draft_ids)
+
+    def test_minion_recent_observation_buffer_expires_by_ttl(self) -> None:
+        now = [0.0]
+        provider = MinionManagerProvider(runtime_root=self.root)
+        provider.recent_observations = BoundedTTLBuffer(
+            capacity=10,
+            ttl_seconds=10,
+            clock=lambda: now[0],
+        )
+
+        provider.record_minion_observation(
+            {
+                "status": "completed",
+                "summary": "done",
+                "run_id": "run_recent",
+                "work_order_id": "wo_recent",
+                "minion_profile": "reviewer",
+            }
+        )
+        self.assertEqual(provider.recent_minion_observations()[0]["run_id"], "run_recent")
+
+        now[0] = 11.0
+        self.assertEqual(provider.recent_minion_observations(), [])
 
     def test_work_order_draft_is_stored_searchable_without_creating_work_order(self) -> None:
         draft = self.repository.create_work_order_draft(

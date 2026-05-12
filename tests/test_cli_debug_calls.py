@@ -6,10 +6,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.main import _run_async
+from pal.main import _build_parser, _run_async
 
 
 class PalV2CliDebugCallsTests(unittest.TestCase):
+    def test_setup_accepts_wizard_aliases(self) -> None:
+        parser = _build_parser()
+
+        self.assertEqual(parser.parse_args(["setup"]).command, "setup")
+        self.assertEqual(parser.parse_args(["wizard"]).command, "setup")
+        self.assertEqual(parser.parse_args(["wizzard"]).command, "setup")
+        self.assertTrue(parser.parse_args(["setup", "--check"]).check)
+        self.assertEqual(parser.parse_args(["doctor"]).command, "doctor")
+
     def test_tool_call_executes_canonical_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_root = Path(tmpdir)

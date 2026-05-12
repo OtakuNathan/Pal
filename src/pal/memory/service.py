@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from pal.foundation import utc_now
+from pal.foundation import HeatPolicy, HeatStateMachine, utc_now
 from pal.memory.contracts import (
     DEFAULT_GHOST_TTL,
     DEFAULT_HOT_TTL,
@@ -90,6 +90,15 @@ class InMemoryL2Store(L2Store):
     capacity: int = L2_WORKING_SET_CAPACITY
     top_of_mind_limit: int = TOP_OF_MIND_LIMIT
     heat_registry: dict[str, L2HeatState] = field(default_factory=dict)
+    heat_machine: HeatStateMachine = field(
+        default_factory=lambda: HeatStateMachine(
+            HeatPolicy(
+                hot_ttl=DEFAULT_HOT_TTL,
+                ghost_ttl=DEFAULT_GHOST_TTL,
+                max_renewal_count=MAX_RENEWAL_COUNT,
+            )
+        )
+    )
 
     def list_entries(self) -> list[L2Entry]:
         return sorted(
@@ -124,47 +133,37 @@ class InMemoryL2Store(L2Store):
         if _is_summary_entry_by_id(entry_id):
             return
         current = self.heat_registry.get(entry_id)
-        if current is None or current.heat_level == L2HeatLevel.DORMANT:
-            state = L2HeatState(entry_id=entry_id, heat_level=L2HeatLevel.HOT, hot_ttl=DEFAULT_HOT_TTL, ghost_ttl=0, renewal_count=0)
-            self.heat_registry[entry_id] = state
+        transition = self.heat_machine.promote_to_hot(entry_id, current)
+        if transition.state is not None:
+            self.heat_registry[entry_id] = transition.state
+        else:
+            self.heat_registry.pop(entry_id, None)
+        if transition.event == "hot_promoted":
             print(f"[memory] memory_hot_promoted entry_id={entry_id} source={source}")
-        elif current.heat_level == L2HeatLevel.HOT:
-            state = L2HeatState(entry_id=entry_id, heat_level=L2HeatLevel.HOT, hot_ttl=DEFAULT_HOT_TTL, ghost_ttl=0, renewal_count=current.renewal_count)
-            self.heat_registry[entry_id] = state
+        elif transition.event == "hot_refreshed":
             print(f"[memory] memory_hot_refreshed entry_id={entry_id} remaining_ttl={DEFAULT_HOT_TTL}")
-        elif current.heat_level == L2HeatLevel.GHOST:
-            if current.renewal_count >= MAX_RENEWAL_COUNT:
-                print(f"[memory] memory_ghost_force_dormant entry_id={entry_id} renewal_count={current.renewal_count}")
-                return
-            new_count = current.renewal_count + 1
-            state = L2HeatState(entry_id=entry_id, heat_level=L2HeatLevel.HOT, hot_ttl=DEFAULT_HOT_TTL, ghost_ttl=0, renewal_count=new_count)
-            self.heat_registry[entry_id] = state
-            print(f"[memory] memory_ghost_reactivated entry_id={entry_id} renewal_count={new_count}")
+        elif transition.event == "ghost_force_dormant":
+            print(f"[memory] memory_ghost_force_dormant entry_id={entry_id} renewal_count={current.renewal_count if current else 0}")
+        elif transition.event == "ghost_reactivated":
+            print(f"[memory] memory_ghost_reactivated entry_id={entry_id} renewal_count={transition.state.renewal_count if transition.state else 0}")
 
     def tick_heat(self) -> list[str]:
         expired: list[str] = []
         for entry_id in list(self.heat_registry):
-            state = self.heat_registry[entry_id]
-            if state.heat_level == L2HeatLevel.HOT:
-                new_ttl = state.hot_ttl - 1
-                if new_ttl <= 0:
-                    if state.renewal_count >= MAX_RENEWAL_COUNT:
-                        del self.heat_registry[entry_id]
-                        expired.append(entry_id)
-                        print(f"[memory] memory_ghost_force_dormant entry_id={entry_id} renewal_count={state.renewal_count}")
-                    else:
-                        self.heat_registry[entry_id] = L2HeatState(entry_id=entry_id, heat_level=L2HeatLevel.GHOST, hot_ttl=0, ghost_ttl=DEFAULT_GHOST_TTL, renewal_count=state.renewal_count)
-                        print(f"[memory] memory_hot_to_ghost entry_id={entry_id} renewal_count={state.renewal_count}")
-                else:
-                    self.heat_registry[entry_id] = L2HeatState(entry_id=entry_id, heat_level=L2HeatLevel.HOT, hot_ttl=new_ttl, ghost_ttl=0, renewal_count=state.renewal_count)
-            elif state.heat_level == L2HeatLevel.GHOST:
-                new_ttl = state.ghost_ttl - 1
-                if new_ttl <= 0:
-                    del self.heat_registry[entry_id]
-                    expired.append(entry_id)
-                    print(f"[memory] memory_ghost_to_dormant entry_id={entry_id}")
-                else:
-                    self.heat_registry[entry_id] = L2HeatState(entry_id=entry_id, heat_level=L2HeatLevel.GHOST, hot_ttl=0, ghost_ttl=new_ttl, renewal_count=state.renewal_count)
+            current = self.heat_registry[entry_id]
+            transition = self.heat_machine.tick(current)
+            if transition.state is None:
+                del self.heat_registry[entry_id]
+            else:
+                self.heat_registry[entry_id] = transition.state
+            if transition.expired:
+                expired.append(entry_id)
+            if transition.event == "ghost_force_dormant":
+                print(f"[memory] memory_ghost_force_dormant entry_id={entry_id} renewal_count={current.renewal_count}")
+            elif transition.event == "hot_to_ghost":
+                print(f"[memory] memory_hot_to_ghost entry_id={entry_id} renewal_count={transition.state.renewal_count if transition.state else 0}")
+            elif transition.event == "ghost_to_dormant":
+                print(f"[memory] memory_ghost_to_dormant entry_id={entry_id}")
         return expired
 
     def upsert_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = False) -> list[L2Entry]:

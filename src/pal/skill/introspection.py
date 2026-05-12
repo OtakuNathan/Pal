@@ -15,6 +15,8 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.skill.builtin_skills import builtin_declared_skills
+from pal.skill.contracts import SkillDescriptor
 from pal.skill.service import SkillService
 from pal.skill.tools import (
     SKILL_ASSIMILATE_ARGS_SCHEMA,
@@ -56,6 +58,9 @@ if TYPE_CHECKING:
 class SkillIntrospectionProvider:
     service: SkillService
     module_id: str = "skill"
+
+    def declared_skills(self) -> tuple[SkillDescriptor, ...]:
+        return builtin_declared_skills(module_id=self.module_id)
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,

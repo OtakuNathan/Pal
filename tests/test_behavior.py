@@ -33,7 +33,7 @@ from pal.behavior.prompt import BehaviorPromptFragmentProvider
 from pal.channel import ChannelEnvelope, ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityDescriptor
-from pal.foundation import EventEnvelope, PalV2Database
+from pal.foundation import EventEnvelope, HeatLevel, HeatPolicy, HeatStateMachine, HeatStateRegistry, PalV2Database
 from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
 from pal.memory import L2Entry, MemoryPack, MemoryService, register_with_core as register_memory_with_core
 from pal.memory.models import MemoryCaseModel
@@ -264,6 +264,35 @@ class BehaviorSubsystemTests(unittest.TestCase):
         diagram_ids = {candidate.affordance_id for candidate in diagram_result.candidates}
         self.assertIn("mcp.vision", diagram_ids)
         self.assertNotIn("code.research", diagram_ids)
+
+    def test_affordance_heat_uses_shared_heat_state_machine(self) -> None:
+        service = BehaviorService(
+            repository=self.repository,
+            execution_runtime=self.runtime,
+            affordance_heat=HeatStateRegistry(machine=HeatStateMachine(HeatPolicy(hot_ttl=1, ghost_ttl=1))),
+        )
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="hot.route",
+                module_id="test",
+                title="Hot route",
+                scenario_text="stabilize telegram routing",
+                prompt_hint="Use the hot route.",
+                activation_terms=("stabilize", "telegram", "routing"),
+                activation_threshold=0.0,
+            )
+        )
+
+        result = asyncio.run(service.advise_async(BehaviorAdviceRequest(scenario="stabilize telegram routing")))
+
+        self.assertEqual(result.candidates[0].affordance_id, "hot.route")
+        self.assertEqual(service.hot_affordance_ids(), ("hot.route",))
+        self.assertEqual(service.hot_affordances()[0].affordance_id, "hot.route")
+
+        self.assertEqual(service.tick_affordance_heat(), ())
+        self.assertEqual(service.affordance_heat.get("hot.route").heat_level, HeatLevel.GHOST)
+        self.assertEqual(service.tick_affordance_heat(), ("hot.route",))
+        self.assertIsNone(service.affordance_heat.get("hot.route"))
 
     def test_behavior_fts_index_updates_and_declared_delete_removes_stale_hits(self) -> None:
         self.repository.upsert_affordance(
