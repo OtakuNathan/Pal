@@ -130,3 +130,7 @@ These are the lines that don't get crossed:
 - **Secrets are write-only** — never returned through introspection
 - **Slash commands are runtime-private** — never exposed to the LLM
 - **Capability names use canonical namespace-first form** — always explicit, always stable
+
+## License
+
+Pal is currently source-available with all rights reserved unless a separate license is granted; see [LICENSE](./LICENSE).
