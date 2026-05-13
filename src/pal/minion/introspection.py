@@ -74,27 +74,27 @@ class MinionIntrospection(Protocol):
 )
 @capability_node(
     namespace=INTROSPECTION_NAMESPACE,
-    scope="task",
+    scope="minion_task",
+    path_module_id="minion_task",
     kind="module",
     source="builtin:minion",
     target_kind="task",
-    path_module_id="task",
 )
 @capability_node(
     namespace=INTROSPECTION_NAMESPACE,
-    scope="work_order",
+    scope="minion_work_order",
+    path_module_id="minion_work_order",
     kind="module",
     source="builtin:minion",
     target_kind="work_order",
-    path_module_id="work_order",
 )
 @capability_node(
     namespace=INTROSPECTION_NAMESPACE,
-    scope="work_order_draft",
+    scope="minion_work_order_draft",
+    path_module_id="minion_work_order_draft",
     kind="module",
     source="builtin:minion",
     target_kind="work_order_draft",
-    path_module_id="work_order_draft",
 )
 @capability_node(
     namespace=OPERATION_NAMESPACE,
@@ -144,15 +144,15 @@ class MinionIntrospection(Protocol):
     capability_refs=(
         "op_minion_draft_work_order",
         "op_minion_promote_work_order_draft",
-        "intro_work_order_draft_search",
-        "intro_work_order_draft_read",
+        "intro_minion_work_order_draft_search",
+        "intro_minion_work_order_draft_read",
         "intro_minion_profile_list",
         "intro_minion_profile_read",
         "op_minion_spawn",
         "intro_minion_list",
         "intro_minion_read",
-        "intro_work_order_search",
-        "intro_work_order_read",
+        "intro_minion_work_order_search",
+        "intro_minion_work_order_read",
     ),
     priority=90,
     activation_threshold=0.35,
@@ -167,7 +167,7 @@ class MinionIntrospection(Protocol):
     ),
     prompt_hint=(
         "For minion progress/control requests, inspect minion and work-order facts first. Use intro_minion_list/read "
-        "and intro_work_order_search/read; do not infer progress or current worker from chat. If the user says to replace it, "
+        "and intro_minion_work_order_search/read; do not infer progress or current worker from chat. If the user says to replace it, "
         "resolve the active run and work order, kill the old run, then respawn from the work-order continuity. "
         "A task may have only one active work order. Finalize only after reading the work-order fact snapshot."
     ),
@@ -194,8 +194,8 @@ class MinionIntrospection(Protocol):
     capability_refs=(
         "intro_minion_list",
         "intro_minion_read",
-        "intro_work_order_search",
-        "intro_work_order_read",
+        "intro_minion_work_order_search",
+        "intro_minion_work_order_read",
         "op_minion_kill",
         "op_minion_spawn",
         "op_minion_finalize",
@@ -258,7 +258,7 @@ class MinionManagerProvider:
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
-        scope="task",
+        scope="minion_task",
         action_name="search",
         description="Search minion tasks by natural language",
         args_schema={
@@ -278,7 +278,7 @@ class MinionManagerProvider:
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
-        scope="task",
+        scope="minion_task",
         action_name="read",
         description="Read a minion task fact snapshot",
         args_schema={"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]},
@@ -289,7 +289,7 @@ class MinionManagerProvider:
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
-        scope="work_order",
+        scope="minion_work_order",
         action_name="search",
         description="Search minion work orders by natural language",
         args_schema={
@@ -309,7 +309,7 @@ class MinionManagerProvider:
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
-        scope="work_order_draft",
+        scope="minion_work_order_draft",
         action_name="search",
         description="Search minion work order drafts by natural language",
         args_schema={
@@ -329,7 +329,7 @@ class MinionManagerProvider:
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
-        scope="work_order_draft",
+        scope="minion_work_order_draft",
         action_name="read",
         description="Read a minion work order draft and its candidate work order packet",
         args_schema={
@@ -344,7 +344,7 @@ class MinionManagerProvider:
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
-        scope="work_order",
+        scope="minion_work_order",
         action_name="read",
         description="Read a minion work order fact snapshot including milestones and current worker",
         args_schema={

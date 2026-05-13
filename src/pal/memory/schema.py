@@ -53,16 +53,6 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
 )
 """
 
-MEMORIES_FTS_TRIGRAM_SQL = """
-CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts_trigram USING fts5(
-    document_id UNINDEXED,
-    title,
-    summary,
-    search_text,
-    tokenize = 'trigram'
-)
-"""
-
 
 @dataclass(frozen=True)
 class SQLiteVecStatus:
@@ -75,7 +65,6 @@ def ensure_memory_schema() -> SQLiteVecStatus:
     _ensure_schema_migrations(db.connection())
     db.execute_sql(MEMORY_DOCUMENT_PROJECTION_SQL)
     db.execute_sql(MEMORIES_FTS_SQL)
-    db.execute_sql(MEMORIES_FTS_TRIGRAM_SQL)
     return ensure_sqlite_vec_loaded()
 
 

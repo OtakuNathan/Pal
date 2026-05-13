@@ -3,9 +3,9 @@ from pal.service.contracts import (
     ServiceDefinition,
     ServiceManagerPort,
     ServiceRunnerPort,
-    ServiceTriggerEvent,
+    ProactiveTriggerEvent,
 )
-from pal.service.input_builder import build_service_trigger_input
+from pal.service.input_builder import build_proactive_trigger_input
 from pal.service.introspection import ServiceIntrospectionProvider, ServiceSnapshot, inspect_service, register_with_core
 from pal.service.models import ServiceDefinitionModel, ServiceRunModel
 from pal.service.repository import ServiceRepository, ServiceRepositoryPort, StoredServiceDefinition, StoredServiceRun
@@ -31,8 +31,8 @@ __all__ = [
     "ServiceSnapshot",
     "StoredServiceDefinition",
     "StoredServiceRun",
-    "ServiceTriggerEvent",
-    "build_service_trigger_input",
+    "ProactiveTriggerEvent",
+    "build_proactive_trigger_input",
     "build_service_turn_continuation",
     "compute_next_service_run_at_utc",
     "inspect_service",

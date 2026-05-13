@@ -306,7 +306,7 @@ class PromptCompiler:
                 "memory_working_memory",
             }
         ]
-        if turn_kind == "service_trigger":
+        if turn_kind == "proactive_trigger":
             return []
         return [*l1_blocks, *summary_blocks, *working_memory_blocks, *trailing_blocks]
 
@@ -436,17 +436,17 @@ class PromptCompiler:
         }
 
     def _extract_primary_input_text(self, assembly_context: PromptAssemblyContext) -> str:
-        if assembly_context.turn_kind == "service_trigger":
-            service_input = assembly_context.metadata.get("service_input")
-            if isinstance(service_input, str) and service_input.strip():
-                return service_input.strip()
+        if assembly_context.turn_kind == "proactive_trigger":
+            proactive_input = assembly_context.metadata.get("proactive_input")
+            if isinstance(proactive_input, str) and proactive_input.strip():
+                return proactive_input.strip()
         return self._extract_user_message_text(assembly_context.event)
 
     def _extract_user_message_text(self, event) -> str:
         return extract_text_from_payload(getattr(event, "payload", None))
 
     def _ensure_memory_pack(self, assembly_context: PromptAssemblyContext) -> PromptAssemblyContext:
-        if assembly_context.turn_kind in {"failure", "service_trigger"}:
+        if assembly_context.turn_kind in {"failure", "proactive_trigger"}:
             return assembly_context
         if "memory_pack" in assembly_context.metadata:
             return assembly_context

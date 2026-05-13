@@ -175,9 +175,10 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     section="memory_system",
                     title="Active Route Guidance",
                     content=(
-                        "These are active current-task route instructions, not durable facts. "
-                        "Apply each relevant item when it matches the situation; do not ignore it as background context. "
-                        "They do not override the user's current explicit instruction, live/source truth, safety, approval, or capability availability.\n"
+                        "These are active current-task route candidates, not durable facts or mandatory commands. "
+                        "Evaluate each item against the user's current request and apply only matching, specific guidance. "
+                        "If items conflict, prefer the user's explicit instruction, live/source truth, safety, approval, "
+                        "capability availability, and narrower domain-specific routes over broad delegation hints.\n"
                         + "\n".join(guidance_lines)
                     ),
                     priority=57,
@@ -202,7 +203,7 @@ def _memory_routing_fragment() -> PromptFragment:
             "Recall policy:\n"
             "- Use `op_l3_recall_query` when past facts, user preferences, Pal history, commitments, or reusable prior lessons may affect the current answer.\n"
             "- If memory has been recalled or is present in the prompt, Pal MUST use it as reference before deciding, writing, retrying, debugging, or taking external action.\n"
-            "- If relevant memory or active route guidance is present, Pal MUST account for it in the next action instead of acting as if it was absent.\n"
+            "- If relevant memory or active route guidance is present, Pal MUST account for it by evaluating relevance before the next action; route guidance is not a mandate to choose an unrelated route.\n"
             "- If a task runs into a blocker, ambiguity, missing user/project context, or an unfamiliar reference that may come from Pal history, try memory recall before giving up, guessing, or asking the user.\n"
             "- If a tool/capability call fails and memory recall is available, Pal MUST use `op_l3_recall_query` to recall relevant experience before debugging, retrying, or asking the user.\n"
             "- If the user challenges Pal's memory, says Pal already knows/remembers something, or corrects a recalled/stored fact, Pal MUST recall relevant memory before writing, patching, or insisting.\n"

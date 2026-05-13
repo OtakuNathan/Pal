@@ -11,7 +11,7 @@ from pal.shared import EventKind, SourceKind
 @dataclass
 class ServiceEventSource(EventSource):
     manager: ServiceManager
-    source_id: str = f"{SourceKind.SERVICE}.triggers"
+    source_id: str = f"{SourceKind.PROACTIVE}.triggers"
 
     def prepare(self, context) -> bool:
         _ = context
@@ -22,8 +22,8 @@ class ServiceEventSource(EventSource):
         _ = context
         events = [
             EventEnvelope(
-                event_kind=EventKind.SERVICE_TRIGGER,
-                source_kind=SourceKind.SERVICE,
+                event_kind=EventKind.PROACTIVE_TRIGGER,
+                source_kind=SourceKind.PROACTIVE,
                 payload=trigger,
             )
             for trigger in self.manager.trigger_mailbox.drain()

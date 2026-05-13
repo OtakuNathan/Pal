@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from pal.foundation import utc_now
 from pal.shared import TaskContextPack
+from pal.shared.text_search import compile_jieba_fts_queries, jieba_fts_text
 
 
 ACTIVE_WORK_ORDER_STATUSES = ("active", "running", "blocked", "approval_pending")
@@ -869,7 +870,12 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             return
         db.execute(
             "INSERT INTO minion_tasks_fts(task_id, title, goal, summary) VALUES (?, ?, ?, ?)",
-            (row["task_id"], row["title"], row["goal"], row["summary"]),
+            (
+                row["task_id"],
+                jieba_fts_text(row["title"]),
+                jieba_fts_text(row["goal"]),
+                jieba_fts_text(row["summary"]),
+            ),
         )
 
     def _sync_work_order_fts(self, db: sqlite3.Connection, work_order_id: str) -> None:
@@ -879,7 +885,13 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             return
         db.execute(
             "INSERT INTO minion_work_orders_fts(work_order_id, task_id, title, goal, instruction) VALUES (?, ?, ?, ?, ?)",
-            (row["work_order_id"], row["task_id"], row["title"], row["goal"], row["instruction"]),
+            (
+                row["work_order_id"],
+                row["task_id"],
+                jieba_fts_text(row["title"]),
+                jieba_fts_text(row["goal"]),
+                jieba_fts_text(row["instruction"]),
+            ),
         )
 
     def _sync_work_order_draft_fts(self, db: sqlite3.Connection, draft_id: str) -> None:
@@ -895,10 +907,10 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             """,
             (
                 row["draft_id"],
-                row["title"],
-                row["goal"],
-                row["source_summary"],
-                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                jieba_fts_text(row["title"]),
+                jieba_fts_text(row["goal"]),
+                jieba_fts_text(row["source_summary"]),
+                jieba_fts_text(json.dumps(payload, ensure_ascii=False, sort_keys=True)),
             ),
         )
 
@@ -930,7 +942,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                     break
             return ordered
         rows: list[dict[str, Any]] = []
-        for fts_query in _compile_fts_queries(normalized):
+        for fts_query, query_weight in _compile_fts_queries(normalized):
             try:
                 cursor = db.execute(
                     f"""
@@ -944,7 +956,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 )
             except sqlite3.OperationalError:
                 continue
-            rows.extend({"id": str(row[0]), "score": float(row[1])} for row in cursor.fetchall())
+            rows.extend({"id": str(row[0]), "score": float(row[1]) * float(query_weight)} for row in cursor.fetchall())
             if rows:
                 break
         if not rows:
@@ -1202,28 +1214,5 @@ def _coerce_text_list(value: Any) -> list[str]:
     return _string_list(value)
 
 
-def _compile_fts_queries(text: str) -> list[str]:
-    normalized = str(text or "").strip()
-    if not normalized:
-        return []
-    queries = [_quote_fts_term(normalized)]
-    terms = [_sanitize_query_term(part) for part in normalized.split()]
-    terms = [term for term in terms if term]
-    if len(terms) > 1:
-        queries.append(" OR ".join(_quote_fts_term(term) for term in dict.fromkeys(terms)))
-    result: list[str] = []
-    seen: set[str] = set()
-    for query in queries:
-        if query and query not in seen:
-            seen.add(query)
-            result.append(query)
-    return result
-
-
-def _quote_fts_term(term: str) -> str:
-    escaped = str(term or "").replace('"', '""').strip()
-    return f'"{escaped}"' if escaped else ""
-
-
-def _sanitize_query_term(term: str) -> str:
-    return str(term or "").strip().strip(".,!?;:'\"()[]{}<>`~!@#$%^&*-_=+|\\/，。！？；：（）【】《》")
+def _compile_fts_queries(text: str) -> list[tuple[str, float]]:
+    return compile_jieba_fts_queries(text)

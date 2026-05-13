@@ -266,7 +266,7 @@ class MemoryService(MemoryServicePort):
         return await asyncio.to_thread(self.commit_l1, request)
 
     def build_pack(self, request: MemoryPackRequest) -> MemoryPack:
-        if request.turn_kind == "service_trigger":
+        if request.turn_kind == "proactive_trigger":
             return MemoryPack(metadata={"turn_kind": request.turn_kind})
         current_summary = self.l2_store.get_entry(SUMMARY_ENTRY_ID)
         hot_entries = self.l2_store.list_hot_entries()

@@ -11,7 +11,7 @@ from pal.service.contracts import (
     ServiceDefinition,
     ServiceManagerPort,
     ServiceRunnerPort,
-    ServiceTriggerEvent,
+    ProactiveTriggerEvent,
 )
 from pal.service.repository import ServiceRepositoryPort
 from pal.service.scheduling import compute_next_service_run_at_utc, utc_now_dt
@@ -37,9 +37,9 @@ class ScheduleEngine(ScheduleEnginePort):
         self.next_due_by_service_id[definition.service_id] = next_due
         return next_due
 
-    def collect_due(self, definitions: dict[str, ServiceDefinition], *, now_utc: datetime | None = None) -> list[ServiceTriggerEvent]:
+    def collect_due(self, definitions: dict[str, ServiceDefinition], *, now_utc: datetime | None = None) -> list[ProactiveTriggerEvent]:
         reference = now_utc or utc_now_dt()
-        due: list[ServiceTriggerEvent] = []
+        due: list[ProactiveTriggerEvent] = []
         for service_id, definition in sorted(definitions.items()):
             next_due = self.next_due_by_service_id.get(service_id)
             if not definition.enabled or not next_due:
@@ -51,8 +51,8 @@ class ScheduleEngine(ScheduleEnginePort):
             if due_at > reference:
                 continue
             due.append(
-                ServiceTriggerEvent(
-                    service_id=service_id,
+                ProactiveTriggerEvent(
+                    proactive_id=service_id,
                     trigger_kind="scheduled",
                     metadata={"scheduled_for": next_due},
                 )
@@ -68,14 +68,14 @@ class ScheduleEngine(ScheduleEnginePort):
 
 @dataclass
 class ServiceRunner(ServiceRunnerPort):
-    triggered: list[ServiceTriggerEvent] = field(default_factory=list)
+    triggered: list[ProactiveTriggerEvent] = field(default_factory=list)
     results: list[dict[str, Any]] = field(default_factory=list)
     repository: ServiceRepositoryPort | None = None
 
-    def run(self, trigger: ServiceTriggerEvent) -> None:
+    def run(self, trigger: ProactiveTriggerEvent) -> None:
         self.triggered.append(trigger)
 
-    def begin_run(self, trigger: ServiceTriggerEvent) -> str | None:
+    def begin_run(self, trigger: ProactiveTriggerEvent) -> str | None:
         self.run(trigger)
         if self.repository is None:
             return None
@@ -106,7 +106,7 @@ class ServiceRunner(ServiceRunnerPort):
 @dataclass
 class ServiceManager(ServiceManagerPort):
     registered: dict[str, ServiceDefinition] = field(default_factory=dict)
-    trigger_mailbox: Mailbox[ServiceTriggerEvent] = field(default_factory=Mailbox)
+    trigger_mailbox: Mailbox[ProactiveTriggerEvent] = field(default_factory=Mailbox)
     schedule_engine: ScheduleEngine = field(default_factory=ScheduleEngine)
     repository: ServiceRepositoryPort | None = None
     on_change: Callable[[], None] | None = None
@@ -130,10 +130,10 @@ class ServiceManager(ServiceManagerPort):
             self.repository.upsert_definition(service, next_due_at_utc=next_due_at_utc)
         self._notify_ready()
 
-    def enqueue_trigger(self, trigger: ServiceTriggerEvent) -> None:
+    def enqueue_trigger(self, trigger: ProactiveTriggerEvent) -> None:
         self.trigger_mailbox.put(trigger)
 
-    def enqueue_due_triggers(self, *, now_utc: datetime | None = None) -> tuple[ServiceTriggerEvent, ...]:
+    def enqueue_due_triggers(self, *, now_utc: datetime | None = None) -> tuple[ProactiveTriggerEvent, ...]:
         due = self.schedule_engine.collect_due(self.registered, now_utc=now_utc)
         for trigger in due:
             self.trigger_mailbox.put(trigger)
@@ -280,7 +280,7 @@ class ServiceManager(ServiceManagerPort):
         return updated
 
     @property
-    def pending_triggers(self) -> tuple[ServiceTriggerEvent, ...]:
+    def pending_triggers(self) -> tuple[ProactiveTriggerEvent, ...]:
         return self.trigger_mailbox.peek_all()
 
     def _notify_change(self) -> None:

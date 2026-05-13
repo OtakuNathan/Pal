@@ -7,7 +7,7 @@ class EventKind(StrEnum):
     USER_MESSAGE = "user.message"
     REPLY_DELIVERED = "reply.delivered"
     REPLY_FAILED = "reply.failed"
-    SERVICE_TRIGGER = "service.trigger"
+    PROACTIVE_TRIGGER = "proactive.trigger"
     MINION_PROGRESS = "minion.progress"
     MINION_TERMINAL = "minion.terminal"
     MINION_CHECKPOINT = "minion.checkpoint"
@@ -19,7 +19,7 @@ class EventKind(StrEnum):
 
 class SourceKind(StrEnum):
     CHANNEL = "channel"
-    SERVICE = "service"
+    PROACTIVE = "proactive"
     MINION = "minion"
     CONTROL = "control"
 

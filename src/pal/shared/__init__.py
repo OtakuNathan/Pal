@@ -52,7 +52,7 @@ from pal.shared.messages import (
     MinionProgressEvent,
     MinionRun,
     MinionTerminalEvent,
-    ServiceTriggerEvent,
+    ProactiveTriggerEvent,
     TaskContextPack,
 )
 from pal.shared.payloads import extract_text_from_payload
@@ -97,7 +97,7 @@ __all__ = [
     "RUNTIME_ONLY_SURFACES",
     "RuntimeStatus",
     "SINGLETON_TARGET",
-    "ServiceTriggerEvent",
+    "ProactiveTriggerEvent",
     "SourceKind",
     "capability_action",
     "capability_node",

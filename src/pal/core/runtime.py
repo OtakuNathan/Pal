@@ -423,7 +423,7 @@ class PalCore:
         channel_runtime = self.context.port_registry.get("channel:channel")
         if channel_runtime is not None and hasattr(channel_runtime, "on_ready"):
             channel_runtime.on_ready = self.notify_ready
-        service_manager = self.context.port_registry.get("service:service_manager")
+        service_manager = self.context.port_registry.get("proactive:service_manager")
         if service_manager is not None and hasattr(service_manager, "on_ready"):
             service_manager.on_ready = self.notify_ready
         minion_provider = self.context.port_registry.get("minion:minion")
@@ -435,7 +435,7 @@ class PalCore:
 
     def next_wakeup_timeout_seconds(self) -> float | None:
         candidates: list[float] = []
-        service_manager = self.context.port_registry.get("service:service_manager")
+        service_manager = self.context.port_registry.get("proactive:service_manager")
         seconds_until_next_due = getattr(service_manager, "seconds_until_next_due", None)
         if callable(seconds_until_next_due):
             service_timeout = seconds_until_next_due()

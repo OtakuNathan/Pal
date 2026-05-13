@@ -1,7 +1,7 @@
-# service
+# proactive
 
 Owns:
-- service definition and service-run semantics
+- proactive task definition and run semantics
 - schedule boundary
 - future output delivery target selection
 
@@ -13,7 +13,7 @@ Does not own:
 
 Exposes:
 - `ServiceDefinition`
-- `ServiceTriggerEvent`
+- `ProactiveTriggerEvent`
 - `ServiceManager`
 - `ScheduleEngine`
 - `ServiceEventSource`

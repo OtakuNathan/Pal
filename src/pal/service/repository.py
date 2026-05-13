@@ -7,7 +7,7 @@ from uuid import uuid4
 from pal.foundation import utc_now
 from pal.service.contracts import ServiceDefinition
 from pal.service.models import ServiceDefinitionModel, ServiceRunModel
-from pal.shared import ServiceTriggerEvent
+from pal.shared import ProactiveTriggerEvent
 
 class ServiceRepositoryPort(Protocol):
     def upsert_definition(self, definition: ServiceDefinition, *, next_due_at_utc: str | None = None) -> object:
@@ -25,7 +25,7 @@ class ServiceRepositoryPort(Protocol):
     ) -> object | None:
         ...
 
-    def begin_run(self, trigger: ServiceTriggerEvent) -> str:
+    def begin_run(self, trigger: ProactiveTriggerEvent) -> str:
         ...
 
     def complete_run(self, service_run_id: str, *, turn_id: str, final_reply: str) -> None:
@@ -126,12 +126,12 @@ class ServiceRepository(ServiceRepositoryPort):
         instance.save()
         return instance
 
-    def begin_run(self, trigger: ServiceTriggerEvent) -> str:
+    def begin_run(self, trigger: ProactiveTriggerEvent) -> str:
         run_id = str(uuid4())
         now = utc_now()
         ServiceRunModel.create(
             service_run_id=run_id,
-            service_id=trigger.service_id,
+            service_id=trigger.proactive_id,
             trigger_kind=trigger.trigger_kind,
             status="running",
             trigger_metadata=dict(trigger.metadata or {}),

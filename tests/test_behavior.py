@@ -212,6 +212,25 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("research.note", ids)
         self.assertNotIn("mcp.manager", ids)
 
+    def test_behavior_advice_uses_jieba_terms_for_chinese_routes(self) -> None:
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="reply.style.zh",
+                module_id="test",
+                title="中文回复风格",
+                scenario_text="用户要求使用简洁中文回复",
+                prompt_hint="优先用简洁中文回复。",
+                source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+                activation_terms=("简洁中文回复",),
+                activation_threshold=0.2,
+            )
+        )
+
+        result = asyncio.run(self.service.advise_async(BehaviorAdviceRequest(scenario="请用简洁中文回复", top_k=5)))
+
+        self.assertGreaterEqual(len(result.candidates), 1)
+        self.assertEqual(result.candidates[0].affordance_id, "reply.style.zh")
+
     def test_behavior_advice_uses_fts_relevance_without_mcp_vision_special_case(self) -> None:
         self.repository.upsert_affordance(
             AffordanceDescriptor(
@@ -573,6 +592,41 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertNotIn("source_kind", async_result.llm_text)
         self.assertNotIn("metadata", async_result.llm_text)
 
+    def test_semantic_router_cannot_drop_deterministic_candidates(self) -> None:
+        def biased_router(**kwargs):
+            candidates = tuple(kwargs["candidates"])
+            return tuple(candidate for candidate in candidates if candidate.affordance_id == "minion.route")
+
+        service = BehaviorService(repository=self.repository, execution_runtime=self.runtime, semantic_router=biased_router)
+        service.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="proactive.route",
+                module_id="test",
+                title="Proactive schedule route",
+                scenario_text="scheduled recurring daily push notifications",
+                prompt_hint="Use Proactive for scheduled recurring push work.",
+                activation_terms=("schedule", "daily", "push"),
+                activation_threshold=0.0,
+            )
+        )
+        service.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="minion.route",
+                module_id="test",
+                title="Minion route",
+                scenario_text="schedule daily push delegated to minion",
+                prompt_hint="Consider Minion for delegated work.",
+                activation_terms=("schedule", "daily", "push", "delegate", "minion"),
+                activation_threshold=0.0,
+            )
+        )
+
+        result = asyncio.run(service.advise_async(BehaviorAdviceRequest(scenario="schedule daily push", top_k=5)))
+        ids = [candidate.affordance_id for candidate in result.candidates]
+
+        self.assertIn("minion.route", ids)
+        self.assertIn("proactive.route", ids)
+
     def test_skill_inject_returns_manual_without_executing_capability(self) -> None:
         self.repository.upsert_skill(
             SkillDescriptor(
@@ -735,8 +789,9 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertGreaterEqual(len(generate_requests), 2)
         followup_system = generate_requests[1].messages[0]["content"]
         self.assertIn("## Active Route Guidance", followup_system)
-        self.assertIn("active current-task route instructions", followup_system)
-        self.assertIn("do not ignore it as background context", followup_system)
+        self.assertIn("active current-task route candidates", followup_system)
+        self.assertIn("not durable facts or mandatory commands", followup_system)
+        self.assertIn("narrower domain-specific routes over broad delegation hints", followup_system)
         self.assertIn("Commit guidance", followup_system)
         self.assertNotIn("Route metadata", followup_system)
         self.assertNotIn("confidence=", followup_system)
@@ -793,7 +848,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertNotIn("Commit guidance", by_title["Relevant Experience"])
         self.assertIn("Commit guidance", by_title["Active Route Guidance"])
         self.assertIn("not durable facts", by_title["Active Route Guidance"])
-        self.assertIn("do not ignore it as background context", by_title["Active Route Guidance"])
+        self.assertIn("not durable facts or mandatory commands", by_title["Active Route Guidance"])
+        self.assertIn("narrower domain-specific routes over broad delegation hints", by_title["Active Route Guidance"])
         self.assertNotIn("origin available", by_title["Remembered Facts"])
         self.assertNotIn("origin available", by_title["Relevant Experience"])
         self.assertNotIn("origin available", by_title["Active Route Guidance"])
@@ -810,6 +866,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("approved repair lessons", routing)
         self.assertIn("If memory has been recalled or is present in the prompt", routing)
         self.assertIn("If relevant memory or active route guidance is present", routing)
+        self.assertIn("route guidance is not a mandate to choose an unrelated route", routing)
         self.assertIn("blocker, ambiguity, missing user/project context", routing)
         self.assertIn("If a tool/capability call fails", routing)
         self.assertIn("MUST use `op_l3_recall_query`", routing)

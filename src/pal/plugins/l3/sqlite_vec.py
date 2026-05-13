@@ -788,8 +788,7 @@ class SQLiteVecL3Plugin:
                 "candidate_sources": {
                     "vector": len(vector_candidates),
                     "topic": len(topic_candidates),
-                    "fts_word": lexical_source_counts.get("fts_word", 0),
-                    "fts_trigram": lexical_source_counts.get("fts_trigram", 0),
+                    "fts_jieba": lexical_source_counts.get("fts_jieba", 0),
                     "like": lexical_source_counts.get("like", 0),
                 },
                 "retrieval_mode": self._derive_retrieval_mode(

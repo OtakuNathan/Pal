@@ -19,6 +19,7 @@ from pal.memory.models import (
 from pal.memory.schema import ensure_memory_schema, ensure_sqlite_vec_loaded
 
 from pal.memory.contracts import L3ProviderPort, L3ProviderResolver
+from pal.shared.text_search import compile_jieba_fts_queries, jieba_fts_text, normalize_search_text
 
 
 @dataclass
@@ -193,20 +194,15 @@ class MemoryDurableRepository:
 
     def ensure_fts_indexes_synced(self) -> None:
         projection_count = self._count_projection_rows()
-        if (
-            self._count_fts_rows("memories_fts") == projection_count
-            and self._count_fts_rows("memories_fts_trigram") == projection_count
-        ):
+        if self._count_fts_rows("memories_fts") == projection_count:
             return
         self.rebuild_fts_indexes()
 
     def rebuild_fts_indexes(self) -> None:
         db = MemoryFactModel._meta.database
         db.execute_sql("DELETE FROM memories_fts")
-        db.execute_sql("DELETE FROM memories_fts_trigram")
         for row in self.list_projection_rows():
             self._insert_fts_row("memories_fts", row)
-            self._insert_fts_row("memories_fts_trigram", row)
 
     def _count_projection_rows(self) -> int:
         db = MemoryFactModel._meta.database
@@ -224,11 +220,9 @@ class MemoryDurableRepository:
         row = self.get_document(document_id)
         db = MemoryFactModel._meta.database
         db.execute_sql("DELETE FROM memories_fts WHERE document_id = ?", (document_id,))
-        db.execute_sql("DELETE FROM memories_fts_trigram WHERE document_id = ?", (document_id,))
         if row is None:
             return
         self._insert_fts_row("memories_fts", row)
-        self._insert_fts_row("memories_fts_trigram", row)
 
     def _insert_fts_row(self, table_name: str, row: dict[str, Any]) -> None:
         db = MemoryFactModel._meta.database
@@ -236,9 +230,9 @@ class MemoryDurableRepository:
             f"INSERT INTO {table_name}(document_id, title, summary, search_text) VALUES (?, ?, ?, ?)",
             (
                 str(row.get("document_id") or ""),
-                str(row.get("title") or ""),
-                str(row.get("summary") or ""),
-                str(row.get("search_text") or ""),
+                jieba_fts_text(row.get("title")),
+                jieba_fts_text(row.get("summary")),
+                jieba_fts_text(row.get("search_text")),
             ),
         )
 
@@ -459,36 +453,34 @@ class MemoryDurableRepository:
 
     def collect_lexical_candidates(self, text: str, *, limit: int) -> tuple[dict[str, float], dict[str, int]]:
         normalized = _normalize_query_text(text)
-        empty_sources = {"fts_word": 0, "fts_trigram": 0, "like": 0}
+        empty_sources = {"fts_jieba": 0, "like": 0}
         if not normalized:
             return {}, empty_sources
 
         query_limit = max(limit * 2, 12)
         compiled_queries = _compile_fts_queries(normalized)
-        word_scores = self._run_fts_queries("memories_fts", compiled_queries, limit=query_limit)
-        trigram_scores = self._run_fts_queries("memories_fts_trigram", compiled_queries, limit=query_limit)
+        fts_scores = self._run_fts_queries("memories_fts", compiled_queries, limit=query_limit)
         like_scores: dict[str, float] = {}
-        if len(normalized) < 3 or (not word_scores and not trigram_scores):
+        if len(normalized) < 3 or not fts_scores:
             like_scores = self._run_like_candidates(normalized, limit=query_limit)
 
         combined: dict[str, float] = {}
-        for source_scores in (word_scores, trigram_scores, like_scores):
+        for source_scores in (fts_scores, like_scores):
             for document_id, score in source_scores.items():
                 combined[document_id] = max(combined.get(document_id, 0.0), score)
 
         ordered = sorted(combined.items(), key=lambda item: (-item[1], item[0]))[:limit]
         return dict(ordered), {
-            "fts_word": len(word_scores),
-            "fts_trigram": len(trigram_scores),
+            "fts_jieba": len(fts_scores),
             "like": len(like_scores),
         }
 
-    def _run_fts_queries(self, table_name: str, queries: list[str], *, limit: int) -> dict[str, float]:
+    def _run_fts_queries(self, table_name: str, queries: list[tuple[str, float]], *, limit: int) -> dict[str, float]:
         if not queries:
             return {}
         db = MemoryFactModel._meta.database
         scores: dict[str, float] = {}
-        for query_text in queries:
+        for query_text, query_weight in queries:
             try:
                 cursor = db.execute_sql(
                     f"""
@@ -504,7 +496,7 @@ class MemoryDurableRepository:
                 continue
             for document_id, score in cursor.fetchall():
                 normalized_document_id = str(document_id)
-                scores[normalized_document_id] = max(scores.get(normalized_document_id, 0.0), float(score))
+                scores[normalized_document_id] = max(scores.get(normalized_document_id, 0.0), float(score) * float(query_weight))
         return scores
 
     def _run_like_candidates(self, text: str, *, limit: int) -> dict[str, float]:
@@ -801,36 +793,11 @@ def normalize_topic(topic: str) -> str:
 
 
 def _normalize_query_text(text: str) -> str:
-    return " ".join(part.strip() for part in str(text or "").splitlines() if part.strip()).strip()
+    return normalize_search_text(text)
 
 
-def _compile_fts_queries(text: str) -> list[str]:
-    normalized = _normalize_query_text(text)
-    if not normalized:
-        return []
-    queries: list[str] = [_quote_fts_term(normalized)]
-    terms = [_sanitize_query_term(part) for part in normalized.split()]
-    terms = [term for term in terms if term]
-    if len(terms) > 1:
-        queries.append(" OR ".join(_quote_fts_term(term) for term in dict.fromkeys(terms)))
-    unique_queries: list[str] = []
-    seen: set[str] = set()
-    for query in queries:
-        compiled = str(query or "").strip()
-        if not compiled or compiled in seen:
-            continue
-        seen.add(compiled)
-        unique_queries.append(compiled)
-    return unique_queries
-
-
-def _quote_fts_term(term: str) -> str:
-    escaped = str(term or "").replace('"', '""').strip()
-    return f'"{escaped}"' if escaped else ""
-
-
-def _sanitize_query_term(term: str) -> str:
-    return str(term or "").strip().strip(".,!?;:'\"()[]{}<>`~!@#$%^&*-_=+|\\/，。！？；：（）【】《》、")
+def _compile_fts_queries(text: str) -> list[tuple[str, float]]:
+    return compile_jieba_fts_queries(text)
 
 
 def serialize_vector(vector: list[float]) -> bytes:

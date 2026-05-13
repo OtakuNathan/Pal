@@ -31,6 +31,7 @@ from pal.behavior.decorators import AffordanceBlueprint
 from pal.behavior.repository import BehaviorRepository
 from pal.foundation import HeatStateRegistry
 from pal.foundation.persistence import utc_now
+from pal.shared.text_search import jieba_search_terms
 from pal.skill.repository import SkillRepository
 
 
@@ -333,11 +334,15 @@ class BehaviorService:
         deterministic: list[BehaviorRouteCandidate],
     ) -> BehaviorAdviceResult:
         if isinstance(routed, BehaviorAdviceResult):
-            return routed
+            return BehaviorAdviceResult(
+                candidates=_merge_routed_candidates(routed.candidates, deterministic),
+                fallback_used=routed.fallback_used,
+                router_error=routed.router_error,
+            )
         if routed is None:
             return BehaviorAdviceResult(candidates=tuple(deterministic))
         if isinstance(routed, Sequence) and not isinstance(routed, (str, bytes, bytearray)):
-            candidates = tuple(item for item in routed if isinstance(item, BehaviorRouteCandidate))
+            candidates = _merge_routed_candidates(routed, deterministic)
             if candidates:
                 return BehaviorAdviceResult(candidates=candidates)
         return BehaviorAdviceResult(candidates=tuple(deterministic))
@@ -419,14 +424,7 @@ def _auto_affordances_from_handle(handle: Any, *, module_id: str) -> tuple[Affor
 
 
 def _tokenize(text: str) -> set[str]:
-    tokens: set[str] = set()
-    for token in re.findall(r"[A-Za-z0-9_\-.]+|[一-鿿]+", str(text).lower()):
-        if not token:
-            continue
-        tokens.add(token)
-        if re.fullmatch(r"[一-鿿]+", token):
-            tokens.update(token[index : index + 2] for index in range(max(0, len(token) - 1)))
-    return tokens
+    return set(jieba_search_terms(str(text or "").lower()))
 
 
 def _fts_relevance(score: float) -> float:
@@ -453,6 +451,29 @@ def _merge_scores(*score_maps: dict[str, float]) -> dict[str, float]:
         for key, value in scores.items():
             merged[key] = max(merged.get(key, 0.0), float(value))
     return merged
+
+
+def _merge_routed_candidates(
+    routed: Sequence[Any],
+    deterministic: list[BehaviorRouteCandidate],
+) -> tuple[BehaviorRouteCandidate, ...]:
+    deterministic_by_id = {candidate.affordance_id: candidate for candidate in deterministic}
+    candidates: list[BehaviorRouteCandidate] = []
+    seen: set[str] = set()
+    for item in routed:
+        if not isinstance(item, BehaviorRouteCandidate):
+            continue
+        affordance_id = item.affordance_id
+        if affordance_id not in deterministic_by_id or affordance_id in seen:
+            continue
+        seen.add(affordance_id)
+        candidates.append(item)
+    for candidate in deterministic:
+        if candidate.affordance_id in seen:
+            continue
+        seen.add(candidate.affordance_id)
+        candidates.append(candidate)
+    return tuple(candidates)
 
 
 def _confidence(*, relevance: float, source_kind: str, priority: int) -> float:

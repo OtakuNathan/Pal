@@ -109,7 +109,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(handle.service_manager)
         self.assertIsNotNone(handle.service_repository)
         self.assertIsNotNone(handle.service_runner)
-        self.assertIn("service", handle.core.context.module_registry.modules)
+        self.assertIn("proactive", handle.core.context.module_registry.modules)
 
     def test_service_repository_round_trips_definition_and_run(self) -> None:
         repository = ServiceRepository()
@@ -1394,9 +1394,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(recall.hits[0]["document_id"], result.document_id)
         self.assertEqual(recall.metadata["retrieval_mode"], "lexical")
         self.assertTrue(recall.metadata["degraded"])
-        self.assertGreaterEqual(recall.metadata["candidate_sources"]["fts_word"], 1)
+        self.assertGreaterEqual(recall.metadata["candidate_sources"]["fts_jieba"], 1)
 
-    def test_sqlite_vec_l3_recall_supports_cjk_trigram_and_short_like_fallback(self) -> None:
+    def test_sqlite_vec_l3_recall_supports_cjk_jieba_and_short_like_fallback(self) -> None:
         class BrokenEmbedder(HashingEmbedder):
             def embed_query(self, text: str) -> list[float]:
                 raise RuntimeError("query-embed-disabled")
@@ -1417,11 +1417,11 @@ class PalV2BootstrapTests(unittest.TestCase):
             )
         )
 
-        trigram_hit = provider.recall(MemoryQuery(queries=["简洁中文回复"], limit=4))
+        jieba_hit = provider.recall(MemoryQuery(queries=["简洁中文回复"], limit=4))
         short_hit = provider.recall(MemoryQuery(queries=["简洁"], limit=4))
 
-        self.assertEqual(trigram_hit.hits[0]["title"], "回复风格")
-        self.assertGreaterEqual(trigram_hit.metadata["candidate_sources"]["fts_trigram"], 1)
+        self.assertEqual(jieba_hit.hits[0]["title"], "回复风格")
+        self.assertGreaterEqual(jieba_hit.metadata["candidate_sources"]["fts_jieba"], 1)
         self.assertEqual(short_hit.hits[0]["title"], "回复风格")
         self.assertGreaterEqual(short_hit.metadata["candidate_sources"]["like"], 1)
 
@@ -1483,7 +1483,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 str(alpha_id): 100.0,
                 str(beta_id): 60.0,
             },
-            {"fts_word": 2, "fts_trigram": 0, "like": 0},
+            {"fts_jieba": 2, "like": 0},
         )
         provider.repository.list_topic_candidates = lambda *args, **kwargs: {str(beta_id): 1.0}  # type: ignore[method-assign]
         provider._vector_candidates = lambda *args, **kwargs: {  # type: ignore[method-assign]

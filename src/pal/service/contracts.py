@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from pal.shared import ServiceTriggerEvent
+from pal.shared import ProactiveTriggerEvent
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,7 @@ class ScheduleEnginePort(Protocol):
 
 
 class ServiceRunnerPort(Protocol):
-    def run(self, trigger: ServiceTriggerEvent) -> None:
+    def run(self, trigger: ProactiveTriggerEvent) -> None:
         ...
 
 

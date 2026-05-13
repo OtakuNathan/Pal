@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Iterable
@@ -11,6 +10,7 @@ from pal.behavior.contracts import AFFORDANCE_SOURCE_DECLARED, AffordanceDescrip
 from pal.behavior.models import BehaviorAffordanceModel
 from pal.behavior.schema import ensure_behavior_schema
 from pal.foundation.persistence import utc_now
+from pal.shared.text_search import compile_jieba_fts_queries, jieba_fts_text, normalize_search_text
 from pal.skill.contracts import SkillDescriptor
 from pal.skill.repository import SkillRepository
 
@@ -124,10 +124,7 @@ class BehaviorRepository:
     def ensure_fts_indexes_synced(self) -> None:
         ensure_behavior_schema()
         affordance_count = BehaviorAffordanceModel.select().count()
-        if (
-            self._count_fts_rows("behavior_affordances_fts") == affordance_count
-            and self._count_fts_rows("behavior_affordances_fts_trigram") == affordance_count
-        ):
+        if self._count_fts_rows("behavior_affordances_fts") == affordance_count:
             return
         self.rebuild_fts_indexes()
 
@@ -135,10 +132,8 @@ class BehaviorRepository:
         ensure_behavior_schema()
         db = BehaviorAffordanceModel._meta.database
         db.execute_sql("DELETE FROM behavior_affordances_fts")
-        db.execute_sql("DELETE FROM behavior_affordances_fts_trigram")
         for affordance in self.list_affordances():
             self._insert_fts_row("behavior_affordances_fts", affordance)
-            self._insert_fts_row("behavior_affordances_fts_trigram", affordance)
 
     def sync_fts_row(self, affordance_id: str) -> None:
         ensure_behavior_schema()
@@ -147,36 +142,32 @@ class BehaviorRepository:
             return
         db = BehaviorAffordanceModel._meta.database
         db.execute_sql("DELETE FROM behavior_affordances_fts WHERE affordance_id = ?", (normalized,))
-        db.execute_sql("DELETE FROM behavior_affordances_fts_trigram WHERE affordance_id = ?", (normalized,))
         affordance = self.get_affordance(normalized)
         if affordance is None:
             return
         self._insert_fts_row("behavior_affordances_fts", affordance)
-        self._insert_fts_row("behavior_affordances_fts_trigram", affordance)
 
     def collect_route_candidates(self, text: str, *, limit: int) -> tuple[dict[str, float], dict[str, int]]:
         normalized = _normalize_query_text(text)
-        empty_sources = {"fts_word": 0, "fts_trigram": 0, "like": 0}
+        empty_sources = {"fts_jieba": 0, "like": 0}
         if not normalized or limit <= 0:
             return {}, empty_sources
 
         query_limit = max(int(limit) * 2, 12)
         compiled_queries = _compile_fts_queries(normalized)
-        word_scores = self._run_fts_queries("behavior_affordances_fts", compiled_queries, limit=query_limit)
-        trigram_scores = self._run_fts_queries("behavior_affordances_fts_trigram", compiled_queries, limit=query_limit)
+        fts_scores = self._run_fts_queries("behavior_affordances_fts", compiled_queries, limit=query_limit)
         like_scores: dict[str, float] = {}
-        if len(normalized) < 3 or (not word_scores and not trigram_scores):
+        if len(normalized) < 3 or not fts_scores:
             like_scores = self._run_like_candidates(normalized, limit=query_limit)
 
         combined: dict[str, float] = {}
-        for source_scores in (word_scores, trigram_scores, like_scores):
+        for source_scores in (fts_scores, like_scores):
             for affordance_id, score in source_scores.items():
                 combined[affordance_id] = max(combined.get(affordance_id, 0.0), score)
 
         ordered = sorted(combined.items(), key=lambda item: (-item[1], item[0]))[:limit]
         return dict(ordered), {
-            "fts_word": len(word_scores),
-            "fts_trigram": len(trigram_scores),
+            "fts_jieba": len(fts_scores),
             "like": len(like_scores),
         }
 
@@ -198,10 +189,10 @@ class BehaviorRepository:
             """,
             (
                 affordance.affordance_id,
-                affordance.title,
-                affordance.scenario_text,
-                affordance.prompt_hint,
-                " ".join(affordance.activation_terms),
+                jieba_fts_text(affordance.title),
+                jieba_fts_text(affordance.scenario_text),
+                jieba_fts_text(affordance.prompt_hint),
+                jieba_fts_text(" ".join(affordance.activation_terms)),
             ),
         )
 
@@ -282,46 +273,8 @@ def _affordance_from_model(row: BehaviorAffordanceModel) -> AffordanceDescriptor
 
 
 def _normalize_query_text(text: str) -> str:
-    return " ".join(part.strip() for part in str(text or "").splitlines() if part.strip()).strip()
+    return normalize_search_text(text)
 
 
 def _compile_fts_queries(text: str) -> list[tuple[str, float]]:
-    normalized = _normalize_query_text(text)
-    if not normalized:
-        return []
-    queries: list[tuple[str, float]] = [(_quote_fts_term(normalized), 3.0)]
-    base_terms = [_sanitize_query_term(part) for part in re.findall(r"[A-Za-z0-9_.-]+|[\u4e00-\u9fff]+", normalized)]
-    base_terms = [term for term in base_terms if term]
-    for window_size, weight in ((3, 2.4), (2, 1.8)):
-        for index in range(max(0, len(base_terms) - window_size + 1)):
-            phrase = " ".join(base_terms[index : index + window_size])
-            if phrase:
-                queries.append((_quote_fts_term(phrase), weight))
-
-    terms: list[str] = []
-    for term in base_terms:
-        terms.append(term)
-        if re.fullmatch(r"[\u4e00-\u9fff]+", term):
-            terms.extend(term[index : index + 2] for index in range(max(0, len(term) - 1)))
-            terms.extend(term[index : index + 3] for index in range(max(0, len(term) - 2)))
-    terms = [term for term in terms if term]
-    if len(terms) > 1:
-        queries.append((" OR ".join(_quote_fts_term(term) for term in dict.fromkeys(terms)), 0.10))
-    unique_queries: list[tuple[str, float]] = []
-    seen: set[str] = set()
-    for query, weight in queries:
-        compiled = str(query or "").strip()
-        if not compiled or compiled in seen:
-            continue
-        seen.add(compiled)
-        unique_queries.append((compiled, weight))
-    return unique_queries
-
-
-def _quote_fts_term(term: str) -> str:
-    escaped = str(term or "").replace('"', '""').strip()
-    return f'"{escaped}"' if escaped else ""
-
-
-def _sanitize_query_term(term: str) -> str:
-    return str(term or "").strip().strip(".,!?;:'\"()[]{}<>`~!@#$%^&*-_=+|\\/，。！？；：（）【】《》、")
+    return compile_jieba_fts_queries(text)

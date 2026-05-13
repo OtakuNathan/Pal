@@ -56,7 +56,7 @@ from pal.memory import (
 )
 from pal.plugins import PluginHost, register_with_core as register_plugins_with_core
 from pal.plugins.l3 import MockL3Plugin, register_with_core as register_l3_with_core
-from pal.service import ServiceDefinition, ServiceManager, ServiceRepository, ServiceRunner, ServiceTriggerEvent, build_service_trigger_input, register_with_core as register_service_with_core
+from pal.service import ServiceDefinition, ServiceManager, ServiceRepository, ServiceRunner, ProactiveTriggerEvent, build_proactive_trigger_input, register_with_core as register_service_with_core
 from pal.service.scheduling import compute_next_service_run_at_utc, utc_now_dt
 from pal.shared import EventKind, LLMStreamEventKind, MinionProgressEvent, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, capability_action, capability_node
 from pal.stream_events import NormalizedLLMStreamEvent
@@ -971,7 +971,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("Working Memory", prompt.messages[0]["content"])
             self.assertIn("Timezone Preference", prompt.messages[0]["content"])
             self.assertNotIn("Issued work orders", prompt.messages[0]["content"])
-            self.assertNotIn("Registered services", prompt.messages[0]["content"])
+            self.assertNotIn("Registered proactive tasks", prompt.messages[0]["content"])
             self.assertNotIn("Active L3", prompt.messages[0]["content"])
             self.assertNotIn("Available L3", prompt.messages[0]["content"])
             self.assertNotIn("candidate_state", prompt.messages[0]["content"])
@@ -979,7 +979,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
 
-    def test_pal_core_builds_service_trigger_prompt_as_single_user_input(self) -> None:
+    def test_pal_core_builds_proactive_trigger_prompt_as_single_user_input(self) -> None:
         runtime_root, database = self._create_database()
         try:
             core = PalCore()
@@ -1020,16 +1020,16 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             prompt = core.build_canonical_prompt(
                 PromptAssemblyContext(
                     core_mode="default",
-                    turn_kind="service_trigger",
+                    turn_kind="proactive_trigger",
                     metadata={
-                        "service_input": build_service_trigger_input(definition),
+                        "proactive_input": build_proactive_trigger_input(definition),
                     },
                 )
             )
 
             self.assertEqual(prompt.messages[0]["role"], "system")
             self.assertEqual(prompt.messages[-1]["role"], "user")
-            self.assertIn("[Service Trigger]", prompt.messages[-1]["content"])
+            self.assertIn("[Proactive Trigger]", prompt.messages[-1]["content"])
             self.assertIn("Goal: Summarize repository updates", prompt.messages[-1]["content"])
             self.assertIn("Method: Review recent changes and produce a concise digest.", prompt.messages[-1]["content"])
             self.assertEqual(len(prompt.messages), 2)
@@ -1039,7 +1039,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
 
-    def test_service_trigger_executes_turn_and_commits_transcript_to_l1(self) -> None:
+    def test_proactive_trigger_executes_turn_and_commits_transcript_to_l1(self) -> None:
         runtime_root, database = self._create_database()
         try:
             core = PalCore()
@@ -1063,14 +1063,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 [CanonicalLLMOutcome(text="Daily digest complete.", tool_calls=[], finish_reason="stop")]
             )
 
-            service_manager.enqueue_trigger(ServiceTriggerEvent(service_id="daily_digest", trigger_kind="manual"))
+            service_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="manual"))
             processed = core.run_until_idle()
 
-            self.assertIn("service.trigger", [item.event_kind for item in processed])
+            self.assertIn("proactive.trigger", [item.event_kind for item in processed])
             self.assertEqual(len(memory_service.l1_store.items), 1)
             transcript = memory_service.l1_store.items[0]
             self.assertEqual(transcript[0].role, "user")
-            self.assertIn("[Service Trigger]", transcript[0].content)
+            self.assertIn("[Proactive Trigger]", transcript[0].content)
             self.assertIn("Goal: Summarize repository updates", transcript[0].content)
             self.assertEqual(transcript[1].role, "assistant")
             self.assertEqual(transcript[1].content, "Daily digest complete.")
@@ -1078,7 +1078,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
 
-    def test_service_trigger_delivers_reply_to_persisted_output_target(self) -> None:
+    def test_proactive_trigger_delivers_reply_to_persisted_output_target(self) -> None:
         runtime_root, database = self._create_database()
         try:
             core = PalCore()
@@ -1107,7 +1107,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 [CanonicalLLMOutcome(text="Daily digest complete.", tool_calls=[], finish_reason="stop")]
             )
 
-            service_manager.enqueue_trigger(ServiceTriggerEvent(service_id="daily_digest", trigger_kind="scheduled"))
+            service_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="scheduled"))
             core.run_until_idle()
 
             self.assertEqual(endpoint.sent, [("telegram_main", "Daily digest complete.")])
@@ -1115,7 +1115,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
 
-    def test_service_trigger_delivers_and_settles_all_turn_replies(self) -> None:
+    def test_proactive_trigger_delivers_and_settles_all_turn_replies(self) -> None:
         runtime_root, database = self._create_database()
         try:
             core = PalCore()
@@ -1154,7 +1154,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 ]
             )
 
-            service_manager.enqueue_trigger(ServiceTriggerEvent(service_id="daily_digest", trigger_kind="scheduled"))
+            service_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="scheduled"))
             core.run_until_idle()
 
             self.assertEqual(
@@ -1191,7 +1191,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         due = manager.enqueue_due_triggers(now_utc=reference + timedelta(minutes=2))
 
         self.assertEqual(len(due), 1)
-        self.assertEqual(due[0].service_id, "heartbeat")
+        self.assertEqual(due[0].proactive_id, "heartbeat")
         self.assertEqual(due[0].trigger_kind, "scheduled")
         self.assertIn("scheduled_for", due[0].metadata)
         self.assertEqual(len(manager.pending_triggers), 1)
@@ -1234,7 +1234,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 response_handle=ResponseHandle(endpoint_id="stdio"),
             )
         )
-        service_manager.enqueue_trigger(ServiceTriggerEvent(service_id="svc-1", trigger_kind="manual"))
+        service_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="svc-1", trigger_kind="manual"))
         tasking_service.enqueue_minion_progress(
             MinionProgressEvent(work_order_id="wo-1", summary="started")
         )
@@ -1243,7 +1243,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         processed_kinds = [item.event_kind for item in processed]
         self.assertIn("slash_command", processed_kinds)
-        self.assertIn("service.trigger", processed_kinds)
+        self.assertIn("proactive.trigger", processed_kinds)
         self.assertIn("minion.progress", processed_kinds)
         self.assertIn("control.action", processed_kinds)
 
@@ -1459,38 +1459,38 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core = PalCore()
         manager = ServiceManager()
         register_service_with_core(core.context, manager)
-        core.publish_module_capabilities("service")
+        core.publish_module_capabilities("proactive")
 
-        self.assertIn("intro_module_service_show", core.context.capability_registry.descriptors)
-        self.assertIn("intro_module_service_list", core.context.capability_registry.descriptors)
-        self.assertIn("op_service_mgmt_create", core.context.capability_registry.descriptors)
-        self.assertIn("op_service_mgmt_destroy", core.context.capability_registry.descriptors)
-        self.assertIn("op_service_mgmt_enable", core.context.capability_registry.descriptors)
-        self.assertIn("op_service_mgmt_disable", core.context.capability_registry.descriptors)
-        self.assertIn("op_service_mgmt_set_output_channel", core.context.capability_registry.descriptors)
-        self.assertIn("op_service_mgmt_set_output_target", core.context.capability_registry.descriptors)
-        self.assertIn("op_service_mgmt_update_schedule", core.context.capability_registry.descriptors)
-        self.assertIn("op_service_lifecycle_attach", core.context.capability_registry.descriptors)
-        self.assertIn("op_service_lifecycle_detach", core.context.capability_registry.descriptors)
-        self.assertIn("service.triggers", core.context.event_source_registry.sources)
-        self.assertIn(EventKind.SERVICE_TRIGGER, core.context.event_handler_registry.handlers)
+        self.assertIn("intro_module_proactive_show", core.context.capability_registry.descriptors)
+        self.assertIn("intro_module_proactive_list", core.context.capability_registry.descriptors)
+        self.assertIn("op_proactive_mgmt_create", core.context.capability_registry.descriptors)
+        self.assertIn("op_proactive_mgmt_destroy", core.context.capability_registry.descriptors)
+        self.assertIn("op_proactive_mgmt_enable", core.context.capability_registry.descriptors)
+        self.assertIn("op_proactive_mgmt_disable", core.context.capability_registry.descriptors)
+        self.assertIn("op_proactive_mgmt_set_output_channel", core.context.capability_registry.descriptors)
+        self.assertIn("op_proactive_mgmt_set_output_target", core.context.capability_registry.descriptors)
+        self.assertIn("op_proactive_mgmt_update_schedule", core.context.capability_registry.descriptors)
+        self.assertIn("op_proactive_lifecycle_attach", core.context.capability_registry.descriptors)
+        self.assertIn("op_proactive_lifecycle_detach", core.context.capability_registry.descriptors)
+        self.assertIn("proactive.triggers", core.context.event_source_registry.sources)
+        self.assertIn(EventKind.PROACTIVE_TRIGGER, core.context.event_handler_registry.handlers)
 
-        self.assertEqual(core.detach_module("service"), RuntimeStatus.OK)
-        self.assertNotIn("service.triggers", core.context.event_source_registry.sources)
-        self.assertNotIn(EventKind.SERVICE_TRIGGER, core.context.event_handler_registry.handlers)
+        self.assertEqual(core.detach_module("proactive"), RuntimeStatus.OK)
+        self.assertNotIn("proactive.triggers", core.context.event_source_registry.sources)
+        self.assertNotIn(EventKind.PROACTIVE_TRIGGER, core.context.event_handler_registry.handlers)
 
     def test_service_management_capabilities_create_update_and_destroy(self) -> None:
         runtime_root, database = self._create_database()
         try:
             core = PalCore()
             register_service_with_core(core.context, ServiceManager())
-            core.publish_module_capabilities("service")
+            core.publish_module_capabilities("proactive")
 
             created = core.context.execution_runtime.execute(
                 CapabilityCall(
-                    name="op_service_mgmt_create",
+                    name="op_proactive_mgmt_create",
                     args={
-                        "service_id": "daily_digest",
+                        "proactive_id": "daily_digest",
                         "goal": "Summarize repository updates",
                         "method": "Review recent changes and produce a concise digest.",
                         "skill_refs": ["git", "summary"],
@@ -1502,16 +1502,16 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
             self.assertEqual(created.status, "ok")
 
-            listed = core.context.execution_runtime.execute(CapabilityCall(name="intro_module_service_list"))
+            listed = core.context.execution_runtime.execute(CapabilityCall(name="intro_module_proactive_list"))
             self.assertEqual(listed.status, "ok")
             self.assertEqual(len(listed.structured["items"]), 1)
-            self.assertEqual(listed.structured["items"][0]["service_id"], "daily_digest")
+            self.assertEqual(listed.structured["items"][0]["proactive_id"], "daily_digest")
             self.assertEqual(listed.structured["items"][0]["out_channel_id"], "socket_default")
             self.assertEqual(listed.structured["items"][0]["out_reply_target"], {"session_id": "session-1", "request_id": "req-1"})
 
             changed_channel = core.context.execution_runtime.execute(
                 CapabilityCall(
-                    name="op_service_mgmt_set_output_channel",
+                    name="op_proactive_mgmt_set_output_channel",
                     args={"target_id": "daily_digest", "out_channel_id": "telegram_main"},
                 )
             )
@@ -1521,7 +1521,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             changed_target = core.context.execution_runtime.execute(
                 CapabilityCall(
-                    name="op_service_mgmt_set_output_target",
+                    name="op_proactive_mgmt_set_output_target",
                     args={"target_id": "daily_digest", "out_reply_target": {"chat_id": "12345", "thread_id": "7"}},
                 )
             )
@@ -1530,7 +1530,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             rescheduled = core.context.execution_runtime.execute(
                 CapabilityCall(
-                    name="op_service_mgmt_update_schedule",
+                    name="op_proactive_mgmt_update_schedule",
                     args={
                         "target_id": "daily_digest",
                         "schedule": {"cadence": "daily", "hour": 10, "minute": 15, "timezone": "Asia/Shanghai"},
@@ -1541,22 +1541,22 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("next_due_at", rescheduled.structured)
 
             disabled = core.context.execution_runtime.execute(
-                CapabilityCall(name="op_service_mgmt_disable", args={"target_id": "daily_digest"})
+                CapabilityCall(name="op_proactive_mgmt_disable", args={"target_id": "daily_digest"})
             )
             self.assertEqual(disabled.status, "ok")
             self.assertFalse(disabled.structured["enabled"])
 
             enabled = core.context.execution_runtime.execute(
-                CapabilityCall(name="op_service_mgmt_enable", args={"target_id": "daily_digest"})
+                CapabilityCall(name="op_proactive_mgmt_enable", args={"target_id": "daily_digest"})
             )
             self.assertEqual(enabled.status, "ok")
             self.assertTrue(enabled.structured["enabled"])
 
             destroyed = core.context.execution_runtime.execute(
-                CapabilityCall(name="op_service_mgmt_destroy", args={"target_id": "daily_digest"})
+                CapabilityCall(name="op_proactive_mgmt_destroy", args={"target_id": "daily_digest"})
             )
             self.assertEqual(destroyed.status, "ok")
-            after_destroy = core.context.execution_runtime.execute(CapabilityCall(name="intro_module_service_list"))
+            after_destroy = core.context.execution_runtime.execute(CapabilityCall(name="intro_module_proactive_list"))
             self.assertEqual(after_destroy.structured["items"], [])
         finally:
             database.close()
@@ -1569,7 +1569,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             manager = ServiceManager(repository=importlib.import_module("pal.service").ServiceRepository())
             runner = importlib.import_module("pal.service").ServiceRunner(repository=manager.repository)
             register_service_with_core(core.context, manager, runner)
-            core.publish_module_capabilities("service")
+            core.publish_module_capabilities("proactive")
 
             manager.create_service(
                 service_id="daily_digest",
@@ -1578,33 +1578,33 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 out_channel_id="socket_default",
                 schedule={"cadence": "daily", "hour": 9, "minute": 0, "timezone": "Asia/Shanghai"},
             )
-            run_id = runner.begin_run(ServiceTriggerEvent(service_id="daily_digest", trigger_kind="manual"))
+            run_id = runner.begin_run(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="manual"))
             runner.complete_run(run_id, turn_id="turn-123", final_reply="Digest sent.")
 
-            self.assertIn("intro_service_show::daily_digest", core.context.capability_registry.descriptors)
-            self.assertIn("intro_service_last_run::daily_digest", core.context.capability_registry.descriptors)
-            self.assertIn("intro_service_list_runs::daily_digest", core.context.capability_registry.descriptors)
+            self.assertIn("intro_proactive_show::daily_digest", core.context.capability_registry.descriptors)
+            self.assertIn("intro_proactive_last_run::daily_digest", core.context.capability_registry.descriptors)
+            self.assertIn("intro_proactive_list_runs::daily_digest", core.context.capability_registry.descriptors)
 
             shown = core.context.execution_runtime.execute(
-                CapabilityCall(name="intro_service_show", args={"target_id": "daily_digest"})
+                CapabilityCall(name="intro_proactive_show", args={"target_id": "daily_digest"})
             )
             self.assertEqual(shown.status, "ok")
-            self.assertEqual(shown.structured["service_id"], "daily_digest")
+            self.assertEqual(shown.structured["proactive_id"], "daily_digest")
             self.assertEqual(shown.structured["out_channel_id"], "socket_default")
 
             latest = core.context.execution_runtime.execute(
-                CapabilityCall(name="intro_service_last_run", args={"target_id": "daily_digest"})
+                CapabilityCall(name="intro_proactive_last_run", args={"target_id": "daily_digest"})
             )
             self.assertEqual(latest.status, "ok")
             self.assertEqual(latest.structured["run"]["turn_id"], "turn-123")
             self.assertEqual(latest.structured["run"]["output_summary"], "Digest sent.")
 
             history = core.context.execution_runtime.execute(
-                CapabilityCall(name="intro_service_list_runs", args={"target_id": "daily_digest", "limit": 5})
+                CapabilityCall(name="intro_proactive_list_runs", args={"target_id": "daily_digest", "limit": 5})
             )
             self.assertEqual(history.status, "ok")
             self.assertEqual(len(history.structured["items"]), 1)
-            self.assertEqual(history.structured["items"][0]["service_run_id"], run_id)
+            self.assertEqual(history.structured["items"][0]["proactive_run_id"], run_id)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)

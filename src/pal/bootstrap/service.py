@@ -31,6 +31,7 @@ from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.memory import L3ProviderSelector, MemoryService, register_with_core as register_memory_with_core
 from pal.plugins import PluginHost, register_with_core as register_plugins_with_core
 from pal.service import ServiceManager, ServiceRepository, ServiceRunner, register_with_core as register_service_with_core
+from pal.shared.text_search import warmup_jieba
 from pal.skill import SkillRepository, SkillService, register_with_core as register_skill_with_core
 from pal.wizard import PalRegistration, WizardService
 
@@ -81,6 +82,7 @@ def compose_runtime(
 ) -> StubRuntimeHandle:
     # Bootstrap only wires the in-process runtime graph. Any first-run
     # provisioning and database-file ownership live in wizard.
+    warmup_jieba()
     identity_service = IdentityService(repository=IdentityRepository())
     llm_repository = LLMEndpointRepository()
     runtime_settings_repository = RuntimeSettingRepository()
@@ -161,7 +163,7 @@ def compose_runtime(
         service_manager.hydrate(stored.definition, next_due_at_utc=stored.next_due_at_utc)
     plugin_host.bootstrap()
 
-    for module_id in ("core", "execution", "artifact", "skill", "behavior", "channel", "identity", "llm", "memory", "plugins", "service", "control", "failure"):
+    for module_id in ("core", "execution", "artifact", "skill", "behavior", "channel", "identity", "llm", "memory", "plugins", "proactive", "control", "failure"):
         core.publish_module_capabilities(module_id)
 
     return StubRuntimeHandle(

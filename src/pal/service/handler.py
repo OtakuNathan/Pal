@@ -7,7 +7,7 @@ from pal.core.events import EventHandler
 from pal.foundation import EventEnvelope
 from pal.service.service import ServiceManager, ServiceRunner
 from pal.service.turns import build_service_turn_continuation, settled_output_text
-from pal.shared import EventKind, ServiceTriggerEvent
+from pal.shared import EventKind, ProactiveTriggerEvent
 
 
 @dataclass
@@ -17,12 +17,12 @@ class ServiceTriggerHandler(EventHandler):
     tasks: set[asyncio.Task] = field(default_factory=set)
 
     def can_handle(self, event_kind: str) -> bool:
-        return event_kind == EventKind.SERVICE_TRIGGER
+        return event_kind == EventKind.PROACTIVE_TRIGGER
 
     def handle(self, event: EventEnvelope, context) -> list[EventEnvelope] | None:
-        if not isinstance(event.payload, ServiceTriggerEvent):
+        if not isinstance(event.payload, ProactiveTriggerEvent):
             return []
-        definition = self.manager.registered.get(event.payload.service_id)
+        definition = self.manager.registered.get(event.payload.proactive_id)
         if definition is None:
             return []
         core = context.require_port("core:core")
@@ -40,7 +40,7 @@ class ServiceTriggerHandler(EventHandler):
         core.track_turn_task(continuation, task)
         return []
 
-    async def _run_trigger_async(self, core, trigger: ServiceTriggerEvent, continuation) -> None:
+    async def _run_trigger_async(self, core, trigger: ProactiveTriggerEvent, continuation) -> None:
         service_run_id = self.runner.begin_run(trigger) if self.runner is not None else None
         try:
             outcome = await core.run_turn_continuation_async(continuation)
@@ -53,9 +53,9 @@ class ServiceTriggerHandler(EventHandler):
             core.turn_manager.cleanup_interrupted(continuation.turn_id, reason="failed")
             core.state.diagnostics.append(
                 {
-                    "kind": "service.trigger.failed",
+                    "kind": "proactive.trigger.failed",
                     "turn_id": continuation.turn_id,
-                    "service_id": trigger.service_id,
+                    "proactive_id": trigger.proactive_id,
                     "error": f"{exc.__class__.__name__}: {exc}",
                 }
             )
@@ -64,4 +64,4 @@ class ServiceTriggerHandler(EventHandler):
             return
         if self.runner is not None:
             self.runner.complete_run(service_run_id, turn_id=outcome.turn_id, final_reply=settled_output_text(outcome))
-        self.manager.mark_run_completed(trigger.service_id)
+        self.manager.mark_run_completed(trigger.proactive_id)

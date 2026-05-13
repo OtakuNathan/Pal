@@ -363,8 +363,8 @@ class MinionContractTests(unittest.TestCase):
                 work_order_id="wo_policy",
                 goal="do work",
                 allowed_capabilities=[
-                    "intro_task_read",
-                    "intro_work_order_read",
+                    "intro_minion_task_read",
+                    "intro_minion_work_order_read",
                     "op_l3_commit_write",
                     "op_l3_correct_patch",
                     "op_behavior_affordance_submit",
@@ -394,7 +394,7 @@ class MinionContractTests(unittest.TestCase):
                 "op_l3_recall_query",
                 "op_web_search_query",
                 "op_web_fetch_read",
-                "intro_task_read",
+                "intro_minion_task_read",
                 "op_minion_spawn",
                 "op_l3_commit_write",
                 "op_l3_correct_patch",
@@ -410,7 +410,7 @@ class MinionContractTests(unittest.TestCase):
         self.assertIn("op_l3_recall_query", pack.allowed_capabilities)
         self.assertIn("op_web_search_query", pack.allowed_capabilities)
         self.assertIn("op_web_fetch_read", pack.allowed_capabilities)
-        self.assertNotIn("intro_task_read", pack.allowed_capabilities)
+        self.assertNotIn("intro_minion_task_read", pack.allowed_capabilities)
         self.assertNotIn("op_minion_spawn", pack.allowed_capabilities)
         self.assertNotIn("op_l3_commit_write", pack.allowed_capabilities)
         self.assertNotIn("op_l3_correct_patch", pack.allowed_capabilities)
@@ -1981,7 +1981,7 @@ class MinionManagerTests(unittest.TestCase):
                             "op_web_search_query",
                             "op_web_fetch_read",
                             "op_l3_recall_query",
-                            "intro_task_read",
+                            "intro_minion_task_read",
                             "op_minion_spawn",
                             "op_l3_commit_write",
                             "op_l3_correct_patch",
@@ -2002,7 +2002,7 @@ class MinionManagerTests(unittest.TestCase):
                 "op_web_search_query",
                 "op_web_fetch_read",
                 "op_l3_recall_query",
-                "intro_task_read",
+                "intro_minion_task_read",
                 "op_minion_spawn",
                 "op_l3_commit_write",
                 "op_l3_correct_patch",
@@ -2029,7 +2029,7 @@ class MinionManagerTests(unittest.TestCase):
             self.assertIn("op_web_search_query", hit_names)
             self.assertIn("op_web_fetch_read", hit_names)
             self.assertIn("op_l3_recall_query", hit_names)
-            self.assertNotIn("intro_task_read", hit_names)
+            self.assertNotIn("intro_minion_task_read", hit_names)
             self.assertNotIn("op_minion_spawn", hit_names)
             self.assertNotIn("op_l3_commit_write", hit_names)
             self.assertNotIn("op_l3_correct_patch", hit_names)
@@ -2165,12 +2165,12 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("intro_module_minion_show", names)
                 self.assertIn("intro_minion_list", names)
                 self.assertIn("intro_minion_read", names)
-                self.assertIn("intro_task_search", names)
-                self.assertIn("intro_task_read", names)
-                self.assertIn("intro_work_order_search", names)
-                self.assertIn("intro_work_order_read", names)
-                self.assertIn("intro_work_order_draft_search", names)
-                self.assertIn("intro_work_order_draft_read", names)
+                self.assertIn("intro_minion_task_search", names)
+                self.assertIn("intro_minion_task_read", names)
+                self.assertIn("intro_minion_work_order_search", names)
+                self.assertIn("intro_minion_work_order_read", names)
+                self.assertIn("intro_minion_work_order_draft_search", names)
+                self.assertIn("intro_minion_work_order_draft_read", names)
                 self.assertIn("intro_minion_profile_list", names)
                 self.assertIn("intro_minion_profile_read", names)
                 self.assertIn("op_minion_draft_work_order", names)
@@ -2215,11 +2215,11 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIsNone(behavior_repository.get_affordance("declared.minion.natural_language_takeover"))
                 self.assertIn("op_minion_draft_work_order", candidate.capability_refs)
                 self.assertIn("op_minion_promote_work_order_draft", candidate.capability_refs)
-                self.assertIn("intro_work_order_draft_read", candidate.capability_refs)
+                self.assertIn("intro_minion_work_order_draft_read", candidate.capability_refs)
                 self.assertIn("intro_minion_profile_list", candidate.capability_refs)
                 self.assertIn("intro_minion_profile_read", candidate.capability_refs)
                 self.assertIn("op_minion_spawn", candidate.capability_refs)
-                self.assertIn("intro_work_order_read", candidate.capability_refs)
+                self.assertIn("intro_minion_work_order_read", candidate.capability_refs)
                 self.assertIn("draft", candidate.prompt_hint.lower())
                 self.assertIn("planner", candidate.prompt_hint.lower())
                 self.assertIn("profile", candidate.prompt_hint.lower())
@@ -2279,10 +2279,10 @@ class MinionIntegrationTests(unittest.TestCase):
                 draft_id = created.structured["draft"]["draft_id"]
 
                 searched = core.context.execution_runtime.execute(
-                    CapabilityCall(name="intro_work_order_draft_search", args={"query": "replace active minions"})
+                    CapabilityCall(name="intro_minion_work_order_draft_search", args={"query": "replace active minions"})
                 )
                 read = core.context.execution_runtime.execute(
-                    CapabilityCall(name="intro_work_order_draft_read", args={"draft_id": draft_id})
+                    CapabilityCall(name="intro_minion_work_order_draft_read", args={"draft_id": draft_id})
                 )
 
                 self.assertEqual(searched.status, "ok")
@@ -2315,7 +2315,7 @@ class MinionIntegrationTests(unittest.TestCase):
                     CapabilityCall(name="op_minion_promote_work_order_draft", args={"draft_id": draft_id})
                 )
                 read = core.context.execution_runtime.execute(
-                    CapabilityCall(name="intro_work_order_read", args={"work_order_id": "wo_draft_promotion"})
+                    CapabilityCall(name="intro_minion_work_order_read", args={"work_order_id": "wo_draft_promotion"})
                 )
 
                 self.assertEqual(promoted.status, "ok")

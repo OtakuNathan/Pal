@@ -21,58 +21,58 @@ from pal.foundation import EventEnvelope
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolResult
 from pal.memory import L1TranscriptMessage
 from pal.service.contracts import ServiceDefinition
-from pal.service.input_builder import build_service_trigger_input
-from pal.shared import EventKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus, ServiceTriggerEvent, SourceKind
+from pal.service.input_builder import build_proactive_trigger_input
+from pal.shared import EventKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus, ProactiveTriggerEvent, SourceKind
 
 
 def build_service_turn_continuation(
     context,
-    trigger: ServiceTriggerEvent,
+    trigger: ProactiveTriggerEvent,
     definition: ServiceDefinition,
     *,
     core_mode: str = "default",
     max_output_tokens: int = 1024,
 ) -> TurnContinuation:
-    service_input = build_service_trigger_input(definition)
-    service_event = EventEnvelope(
-        event_kind=EventKind.SERVICE_TRIGGER,
-        source_kind=SourceKind.SERVICE,
+    proactive_input = build_proactive_trigger_input(definition)
+    proactive_event = EventEnvelope(
+        event_kind=EventKind.PROACTIVE_TRIGGER,
+        source_kind=SourceKind.PROACTIVE,
         payload={
-            "text": service_input,
-            "service_id": definition.service_id,
+            "text": proactive_input,
+            "proactive_id": definition.service_id,
             "trigger_kind": trigger.trigger_kind,
             "metadata": dict(trigger.metadata or {}),
         },
-        correlation_id=str(trigger.metadata.get("request_id") or trigger.service_id),
+        correlation_id=str(trigger.metadata.get("request_id") or trigger.proactive_id),
     )
     trigger_metadata = dict(trigger.metadata or {})
-    trigger_metadata.setdefault("turn_id", service_event.event_id)
-    resolved_trigger = ServiceTriggerEvent(
-        service_id=trigger.service_id,
+    trigger_metadata.setdefault("turn_id", proactive_event.event_id)
+    resolved_trigger = ProactiveTriggerEvent(
+        proactive_id=trigger.proactive_id,
         trigger_kind=trigger.trigger_kind,
         metadata=trigger_metadata,
     )
     synthetic_envelope = ChannelEnvelope(
-        event=service_event,
+        event=proactive_event,
         endpoint=_build_service_endpoint_config(definition),
         response_handle=_build_service_response_handle(definition),
     )
     return TurnContinuation(
-        turn_id=service_event.event_id,
+        turn_id=proactive_event.event_id,
         channel_envelope=synthetic_envelope,
         program=service_turn_program(
             resolved_trigger,
             definition,
             core_mode=core_mode,
             max_output_tokens=max_output_tokens,
-            reply_envelope=_resolve_service_reply_envelope(context, service_event, definition, resolved_trigger),
+            reply_envelope=_resolve_service_reply_envelope(context, proactive_event, definition, resolved_trigger),
         ),
-        correlation_id=service_event.correlation_id or service_event.event_id,
+        correlation_id=proactive_event.correlation_id or proactive_event.event_id,
     )
 
 
 def service_turn_program(
-    trigger: ServiceTriggerEvent,
+    trigger: ProactiveTriggerEvent,
     definition: ServiceDefinition,
     *,
     core_mode: str = "default",
@@ -82,17 +82,17 @@ def service_turn_program(
     observations: list[ToolObservation] = []
     reply_texts: list[str] = []
     compact_note = ""
-    service_input = build_service_trigger_input(definition)
+    proactive_input = build_proactive_trigger_input(definition)
     while True:
         metadata = {
             "service_definition": definition,
-            "service_input": service_input,
-            "service_trigger": trigger,
+            "proactive_input": proactive_input,
+            "proactive_trigger": trigger,
             "compact_note": compact_note,
         }
         assembly_context = PromptAssemblyContext(
             core_mode=core_mode,
-            turn_kind="service_trigger",
+            turn_kind="proactive_trigger",
             metadata=metadata,
         )
         advice = yield LLMPreflightEffect(
@@ -142,11 +142,11 @@ def service_turn_program(
         if final_reply.strip():
             reply_texts.append(final_reply)
         return TurnOutcome(
-            turn_id=str(trigger.metadata.get("turn_id") or trigger.service_id),
+            turn_id=str(trigger.metadata.get("turn_id") or trigger.proactive_id),
             final_reply=final_reply,
             commit_payload=L1CommitPayload(
-                turn_id=str(trigger.metadata.get("turn_id") or trigger.service_id),
-                transcript=_build_service_turn_transcript(service_input, final_reply, observations=observations, reply_texts=reply_texts),
+                turn_id=str(trigger.metadata.get("turn_id") or trigger.proactive_id),
+                transcript=_build_service_turn_transcript(proactive_input, final_reply, observations=observations, reply_texts=reply_texts),
                 tool_observations=list(observations),
             ),
             reply_texts=tuple(reply_texts),
@@ -184,21 +184,21 @@ def _build_service_turn_transcript(
 
 def _build_service_endpoint_config(definition: ServiceDefinition) -> EndpointConfig:
     return EndpointConfig(
-        endpoint_id=f"service:{definition.service_id}",
-        channel_kind=SourceKind.SERVICE,
+        endpoint_id=f"proactive:{definition.service_id}",
+        channel_kind=SourceKind.PROACTIVE,
         binding_key=definition.service_id,
     )
 
 
 def _build_service_response_handle(definition: ServiceDefinition) -> ResponseHandle:
-    return ResponseHandle(endpoint_id=f"service:{definition.service_id}")
+    return ResponseHandle(endpoint_id=f"proactive:{definition.service_id}")
 
 
 def _resolve_service_reply_envelope(
     context,
     service_event: EventEnvelope,
     definition: ServiceDefinition,
-    trigger: ServiceTriggerEvent,
+    trigger: ProactiveTriggerEvent,
 ) -> ChannelEnvelope | None:
     out_channel_id = str(definition.out_channel_id or "").strip()
     if not out_channel_id:

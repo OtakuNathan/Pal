@@ -62,7 +62,7 @@ def build_runtime_debug_snapshot(
         "asyncio": _asyncio_snapshot(),
         "core": _core_snapshot(core),
         "channel": _channel_snapshot(channel_runtime),
-        "service": _service_snapshot(service_manager, service_repository),
+        "proactive": _service_snapshot(service_manager, service_repository),
     }
 
 
@@ -270,7 +270,7 @@ def _service_snapshot(service_manager: Any, service_repository: Any) -> dict[str
         )
         services.append(
             {
-                "service_id": str(service_id),
+                "proactive_id": str(service_id),
                 "enabled": bool(getattr(definition, "enabled", False)),
                 "next_due_at_utc": _redact(next_due.get(service_id)),
                 "latest_run": _service_run_snapshot(latest),
@@ -280,7 +280,7 @@ def _service_snapshot(service_manager: Any, service_repository: Any) -> dict[str
         "available": True,
         "registered_count": len(registered),
         "trigger_mailbox_size": _safe_len(getattr(trigger_mailbox, "peek_all", lambda: [])()),
-        "services": services,
+        "proactive_tasks": services,
     }
 
 
@@ -288,8 +288,8 @@ def _service_run_snapshot(run: Any) -> dict[str, Any] | None:
     if run is None:
         return None
     return {
-        "service_run_id": str(getattr(run, "service_run_id", "") or ""),
-        "service_id": str(getattr(run, "service_id", "") or ""),
+        "proactive_run_id": str(getattr(run, "service_run_id", "") or ""),
+        "proactive_id": str(getattr(run, "service_id", "") or ""),
         "trigger_kind": str(getattr(run, "trigger_kind", "") or ""),
         "status": str(getattr(run, "status", "") or ""),
         "turn_id": str(getattr(run, "turn_id", "") or ""),

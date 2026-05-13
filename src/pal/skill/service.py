@@ -21,6 +21,7 @@ from pal.behavior.repository import BehaviorRepository
 from pal.foundation.persistence import database_proxy, utc_now
 from pal.llm.contracts import CanonicalLLMRequest
 from pal.shared import LLMFinishReason
+from pal.shared.text_search import jieba_search_terms
 from pal.skill.contracts import (
     SKILL_INJECT_MANUAL_CHAR_BUDGET,
     SKILL_SOURCE_DECLARED,
@@ -631,7 +632,7 @@ def _string_tuple(value: object) -> tuple[str, ...]:
 
 
 def _tokenize(text: str) -> set[str]:
-    return {token for token in re.findall(r"[A-Za-z0-9_\-.]+|[\u4e00-\u9fff]+", str(text).lower()) if token}
+    return set(jieba_search_terms(str(text or "").lower()))
 
 
 def _token_tuple(text: str) -> tuple[str, ...]:

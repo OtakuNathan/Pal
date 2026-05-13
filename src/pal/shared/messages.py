@@ -275,8 +275,8 @@ class MinionRun:
 
 
 @dataclass(frozen=True)
-class ServiceTriggerEvent:
-    service_id: str
+class ProactiveTriggerEvent:
+    proactive_id: str
     trigger_kind: str
     metadata: dict[str, Any] = field(default_factory=dict)
 

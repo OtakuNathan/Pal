@@ -43,6 +43,10 @@ class BehaviorPromptFragmentProvider:
                     "- Execute only through capability calls.\n"
                     "- Respect capability policy, approval requirements, availability, and verification.\n"
                     "- Prefer the simplest viable action path.\n\n"
+                    "Route map:\n"
+                    "- Future, scheduled, recurring, reminder, timer, periodic check, or proactive push work -> Proactive route. Use `op_proactive_mgmt_create` for new proactive tasks and reminders, then configure schedule/output as needed.\n"
+                    "- One-shot delegated implementation, research, review, or bounded async worker handoff -> Minion route.\n"
+                    "- Immediate answer or immediate single capability action -> direct Pal/capability route.\n\n"
                     "If the user teaches a future behavior rule, submit an affordance with `op_behavior_affordance_submit`."
                 ),
                 priority=70,

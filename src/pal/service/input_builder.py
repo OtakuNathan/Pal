@@ -3,8 +3,8 @@ from __future__ import annotations
 from pal.service.contracts import ServiceDefinition
 
 
-def build_service_trigger_input(definition: ServiceDefinition) -> str:
-    lines = ["[Service Trigger]", f"Goal: {definition.goal.strip()}"]
+def build_proactive_trigger_input(definition: ServiceDefinition) -> str:
+    lines = ["[Proactive Trigger]", f"Goal: {definition.goal.strip()}"]
     method = definition.method.strip()
     if method:
         lines.append(f"Method: {method}")
