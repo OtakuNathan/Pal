@@ -15,9 +15,13 @@ dependencies = [
     "peewee>=3.17,<4",
     "playwright>=1.48,<2",
     "python-telegram-bot>=20.7,<22",
-    "sentence-transformers>=3.0,<4",
     "sqlite-vec>=0.1.6,<1",
     "telegramify-markdown>=0.4,<1",
+]
+
+[project.optional-dependencies]
+local-embeddings = [
+    "sentence-transformers>=3.0,<4",
 ]
 
 [project.scripts]

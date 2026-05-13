@@ -37,6 +37,15 @@ class LiteLLMCredentialResolver:
         if self.secret_store is None:
             self.secret_store = KeyringSecretStore()
 
+    def refresh(self) -> None:
+        self._cache.clear()
+        secret_store_refresh = getattr(self.secret_store, "refresh", None)
+        if callable(secret_store_refresh):
+            secret_store_refresh()
+
+    def clear_cache(self) -> None:
+        self._cache.clear()
+
     def resolve_api_key(self, endpoint: LLMEndpointModel) -> str | None:
         if endpoint.auth_kind == "local_provider_auth":
             return None

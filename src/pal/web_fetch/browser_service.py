@@ -327,9 +327,7 @@ class BrowserServiceManager:
             self.process = None
 
     async def shutdown_async(self) -> None:
-        import asyncio
-
-        await asyncio.to_thread(self.stop_sync)
+        self.stop_sync()
 
     def _ensure_started(self, *, settings: dict[str, Any] | None = None) -> None:
         if self._process_running():

@@ -1441,11 +1441,13 @@ class PalCore:
             buttons=(
                 (
                     InteractionButtonSpec(label=_label("off"), action_key="control.think.set", action_args={"think_level": "off"}),
+                    InteractionButtonSpec(label=_label("minimal"), action_key="control.think.set", action_args={"think_level": "minimal"}),
                     InteractionButtonSpec(label=_label("low"), action_key="control.think.set", action_args={"think_level": "low"}),
                 ),
                 (
                     InteractionButtonSpec(label=_label("balanced"), action_key="control.think.set", action_args={"think_level": "balanced"}),
                     InteractionButtonSpec(label=_label("deep"), action_key="control.think.set", action_args={"think_level": "deep"}),
+                    InteractionButtonSpec(label=_label("xhigh"), action_key="control.think.set", action_args={"think_level": "xhigh"}),
                 ),
                 (InteractionButtonSpec(label="Back", action_key="control.panel.back"),),
             ),

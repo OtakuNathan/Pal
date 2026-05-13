@@ -115,7 +115,7 @@ class MinionIntrospection(Protocol):
         "Consider Minion when the task is professional, async-friendly, and can be bounded by SPEC/work order/milestones. "
         "Pal remains responsible for user interaction, fact checks, progress reporting, and confirmation. "
         "Before spawning, inspect registered profiles with intro_minion_profile_list/read unless the user already named a valid profile; "
-        "use only registered profile_id values and do not invent role names. "
+        "use only registered canonical_profile_id values and do not invent role names. "
         "For brainstorming or early module-boundary discussion, capture a work-order draft first and let a planner review it; "
         "do not let planner invent boundaries from chat history. Do not use Minion for casual chat, simple Q&A, one-call capabilities, "
         "memory/preference correction, or tasks needing continuous user interaction."
@@ -370,7 +370,7 @@ class MinionManagerProvider:
             "runtime_profile_dir": str(Path(self.runtime_root) / "plugins" / "minion" / "profiles"),
             "runtime_profile_pattern": "runtime_root/plugins/minion/profiles/**/*.toml",
             "profile_source_order": ["builtin package TOML", "runtime TOML", "mounted provider declarations"],
-            "usage": "Use these registered profile_id values as op_minion_spawn.minion_profile; do not invent profile ids.",
+            "usage": "Use registered canonical_profile_id values as op_minion_spawn.minion_profile; do not invent profile ids.",
         }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -539,7 +539,7 @@ class MinionManagerProvider:
                 },
                 "minion_profile": {
                     "type": "string",
-                    "description": "Registered minion profile_id. Discover with intro_minion_profile_list/read before use.",
+                    "description": "Registered minion canonical_profile_id, such as software_engineering.planner. Discover with intro_minion_profile_list/read before use.",
                 },
                 "preferred_endpoint_id": {
                     "type": "string",
@@ -622,7 +622,7 @@ class MinionManagerProvider:
                 "proposed_work_order_id": {"type": "string"},
                 "minion_profile": {
                     "type": "string",
-                    "description": "Registered minion profile_id. Discover with intro_minion_profile_list/read before use.",
+                    "description": "Registered minion canonical_profile_id, such as software_engineering.planner. Discover with intro_minion_profile_list/read before use.",
                 },
                 "metadata": {"type": "object"},
             },
@@ -845,6 +845,7 @@ class MinionManagerProvider:
         )
         for _ in range(150):
             if self.process.poll() is not None:
+                self._stop_process_only()
                 raise RuntimeError("minion manager exited during startup")
             try:
                 self.last_health = self.client.health_sync()
@@ -857,11 +858,11 @@ class MinionManagerProvider:
 
     def _stop_manager(self) -> None:
         self._stop_event_subscription()
-        self._stop_active_runs_sync()
-        with contextlib.suppress(Exception):
-            self.client.shutdown_sync()
         process = self.process
-        if process is not None:
+        if process is not None and process.poll() is None:
+            self._stop_active_runs_sync()
+            with contextlib.suppress(Exception):
+                self.client.shutdown_sync()
             with contextlib.suppress(Exception):
                 process.wait(timeout=2.0)
         self._stop_process_only()
@@ -918,6 +919,8 @@ class MinionManagerProvider:
         thread = self._event_subscription_thread
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
             thread.join(timeout=1.0)
+        if thread is not None and not thread.is_alive():
+            self._event_subscription_thread = None
 
     def _run_event_subscription_thread(self) -> None:
         while not self._event_subscription_stop.is_set():

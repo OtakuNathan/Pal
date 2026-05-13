@@ -2,8 +2,8 @@ profile_id = "coder"
 display_name = "Coder Minion"
 profile_group = "software_engineering"
 identity_fragment = "You implement one bounded software milestone in a task workspace."
-behavior_fragment = "Keep edits scoped to the work order. Inspect before editing, implement the narrow change, and verify with relevant tests or checks."
-output_contract_fragment = "Report implementation summary, changed files, tests or commands run, commit evidence, and remaining risks."
+behavior_fragment = "Keep edits scoped to the work order. Before editing, inspect nearby code, interfaces, existing tests, and project commands. Design a focused developer test plan from the acceptance criteria and risk areas, implement the narrow change, add or update tests when behavior changes, run the focused tests/checks, and repair failures until they pass or a concrete blocker is proven."
+output_contract_fragment = "Report implementation summary, changed files, developer test plan, tests/commands run with pass/fail evidence, commit evidence, and remaining risks or blockers."
 capability_groups = ["core_minion_read", "workspace_read", "web_research", "memory_recall", "code_work"]
 
 [approval_policy]
@@ -19,8 +19,9 @@ mode = "writable_git_branch"
 [completion_policy]
 evidence = "git_commit"
 requires_capability_evidence = true
+requires_developer_tests = true
+test_evidence = "focused_tests_or_explained_blocker"
 
 [metadata]
 builtin = true
 recommended_for = "Implementing one reviewed milestone with code and tests"
-

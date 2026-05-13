@@ -133,7 +133,7 @@ class ControlPlaneTests(unittest.TestCase):
         rendered = plane.render_panel_text()
 
         self.assertIn("/control", rendered)
-        self.assertIn("/think [off|low|balanced|deep]", rendered)
+        self.assertIn("/think [off|minimal|low|balanced|deep|xhigh]", rendered)
         self.assertIn("/log [start|end]", rendered)
         self.assertIn("/ping", rendered)
 

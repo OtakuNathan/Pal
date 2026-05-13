@@ -17,7 +17,7 @@ from pal.core import PalCore
 from pal.core.runtime_config import RuntimeConfig
 from pal.execution import CapabilityCall, CapabilityResult, register_with_core as register_execution_with_core
 from pal.foundation import PalV2Database, utc_now
-from pal.llm import EndpointResolver, LLMEndpointRepository, LLMRuntime, LiteLLMCredentialResolver, LiteLLMEndpointInvoker, RuntimeSettingRepository
+from pal.llm import EndpointResolver, LLMEndpointRepository, LLMRuntime, LiteLLMCredentialResolver, RuntimeSettingRepository, build_default_endpoint_invoker
 from pal.llm.contracts import CanonicalLLMRequest, CanonicalToolCall, CanonicalToolResult
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.memory import L3ProviderSelector, MemoryService, register_with_core as register_memory_with_core
@@ -681,9 +681,10 @@ def build_slim_minion_runtime(runtime_root: Path) -> MinionRuntimeBundle:
     llm_runtime = LLMRuntime(
         endpoint_resolver=EndpointResolver(repository=llm_repository),
         settings_repository=settings,
-        endpoint_invoker=LiteLLMEndpointInvoker(
+        endpoint_invoker=build_default_endpoint_invoker(
             credentials=LiteLLMCredentialResolver(secret_store=EncryptedFileSecretStore(secrets_path=str(Path(runtime_root) / "secrets.json"))),
             artifact_manager=artifact_service,
+            runtime_root=runtime_root,
         ),
         config=config,
     )
@@ -1290,6 +1291,14 @@ def _repo_head(repo_path: Path) -> str:
 
 
 def _render_system_prompt(scaffold: dict[str, Any]) -> str:
+    completion_policy = scaffold.get("completion_policy") or {}
+    testing_guidance = ""
+    if isinstance(completion_policy, dict) and bool(completion_policy.get("requires_developer_tests")):
+        testing_guidance = (
+            "Completion requires developer test evidence: before completing, state the focused test plan, "
+            "run the relevant tests/checks available through listed capabilities, fix failures you caused, "
+            "and report blocked instead of completed if tests cannot be run or cannot pass with concrete evidence.\n"
+        )
     return (
         f"{scaffold.get('identity')}\n\n"
         f"{scaffold.get('behavior')}\n\n"
@@ -1297,6 +1306,7 @@ def _render_system_prompt(scaffold: dict[str, Any]) -> str:
         "Use only the listed capabilities. Report by milestone, never by percentage or ETA.\n"
         "Use `op_l3_recall_query` when prior Pal experience, project lessons, or user preferences may materially improve the result.\n"
         "If capability evidence is required, use a relevant listed capability before completing the milestone.\n"
+        f"{testing_guidance}"
         "If completion evidence cannot be produced, report blocked instead of completed.\n"
         "When completion policy requires git_commit, leave file changes in the workspace; do not run git commit yourself.\n"
         "When `op_minion_artifact_write` is available, write your primary deliverable to workspace.artifact_dir with that tool; keep the final chat summary short and point to the artifact.\n"

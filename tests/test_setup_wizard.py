@@ -24,6 +24,7 @@ from pal.wizard.prompts import (
     WizardIdentity,
     WizardLLMEndpoint,
     multiline_input,
+    run_llm_endpoint_preflight,
 )
 
 
@@ -257,7 +258,69 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertEqual(endpoints[1].endpoint_id, "deepseek-fallback")
 
 
+class TestLLMPreflight(unittest.TestCase):
+    def test_preflight_passes_text_and_tool_probe(self) -> None:
+        from pal.llm import CanonicalLLMOutcome, CanonicalToolCall
+
+        class FakeInvoker:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def invoke(self, endpoint, request):
+                self.calls.append((endpoint, request))
+                if request.tools:
+                    return CanonicalLLMOutcome(tool_calls=[CanonicalToolCall(name="pal_preflight_probe", args={"ok": True})])
+                return CanonicalLLMOutcome(text="PAL_PREFLIGHT_OK")
+
+        invoker = FakeInvoker()
+        result = run_llm_endpoint_preflight(_make_collected().endpoints[0], timeout_seconds=7, invoker=invoker)
+
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(result.text_ok)
+        self.assertTrue(result.tool_ok)
+        self.assertEqual(len(invoker.calls), 2)
+        self.assertEqual(invoker.calls[0][0].provider, "anthropic")
+        self.assertEqual(invoker.calls[0][1].metadata["timeout_seconds"], 7)
+        self.assertEqual(invoker.calls[1][1].tools[0]["function"]["name"], "pal_preflight_probe")
+
+    def test_preflight_errors_when_text_call_fails(self) -> None:
+        class FailingInvoker:
+            def invoke(self, endpoint, request):
+                raise RuntimeError("bad key")
+
+        result = run_llm_endpoint_preflight(_make_collected().endpoints[0], invoker=FailingInvoker())
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("bad key", result.detail)
+
+    def test_preflight_warns_when_tool_probe_returns_text(self) -> None:
+        from pal.llm import CanonicalLLMOutcome
+
+        class TextOnlyInvoker:
+            def invoke(self, endpoint, request):
+                return CanonicalLLMOutcome(text="PAL_PREFLIGHT_OK")
+
+        result = run_llm_endpoint_preflight(_make_collected().endpoints[0], invoker=TextOnlyInvoker())
+
+        self.assertEqual(result.status, "warn")
+        self.assertTrue(result.text_ok)
+        self.assertFalse(result.tool_ok)
+
+
 class TestServiceGeneration(unittest.TestCase):
+    def test_resolve_pal_command_prefers_invoked_console_script(self) -> None:
+        from pal.wizard import cli as cli_mod
+
+        tmp = Path(tempfile.mkdtemp(prefix="pal_bin_test_"))
+        pal_script = tmp / "pal"
+        pal_script.write_text("#!/bin/sh\n", encoding="utf-8")
+        try:
+            with patch.object(cli_mod.sys, "argv", [str(pal_script), "setup"]):
+                with patch.object(cli_mod.shutil, "which", return_value="/usr/local/bin/pal"):
+                    self.assertEqual(cli_mod._resolve_pal_command(), [str(pal_script)])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_generate_service_content_no_debug(self) -> None:
         from pal.wizard.cli import _generate_service_content
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import socket
 import sqlite3
 import sys
 import tempfile
@@ -27,6 +28,7 @@ from pal.llm import (
     CanonicalLLMRequest,
     CanonicalLLMOutcome,
     DEFAULT_THINK_LEVEL,
+    EncryptedFileSecretStore,
     EndpointResolver,
     InMemorySecretStore,
     LLMEndpointRepository,
@@ -37,6 +39,7 @@ from pal.llm import (
     RuntimeSettingRepository,
     SecretRef,
 )
+from pal.llm.adapters import LLMProviderAdapter, LLMProviderRegistry, build_default_provider_registry
 from pal.memory import HashingEmbedder, L3CommitRequest, L3CorrectRequest, L3ProviderSelector, MemoryPackRequest, MemoryQuery, MemoryService
 from pal.plugins.l3 import SQLiteVecL3Plugin
 from pal.plugins import PluginBundleRepository
@@ -46,6 +49,32 @@ from pal.stream_events import NormalizedLLMStreamEvent
 from pal.wizard import WizardService
 from pal.web_fetch import BrowserServiceManager, WebFetchProviderRepository
 from pal.web_search import WebSearchItem, WebSearchProviderRepository
+
+
+def _unix_socket_bind_available() -> bool:
+    if not hasattr(socket, "AF_UNIX"):
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="pal_socket_probe_") as root:
+            socket_path = Path(root) / "probe.sock"
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.bind(str(socket_path))
+        return True
+    except OSError:
+        return False
+
+
+def _tcp_loopback_bind_available() -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+        return True
+    except OSError:
+        return False
+
+
+def _local_sidecar_bind_available() -> bool:
+    return _unix_socket_bind_available() or _tcp_loopback_bind_available()
 
 
 class _OutboundQueue:
@@ -328,6 +357,46 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(payload["configured_active_endpoint_id"], "old")
         self.assertIsNone(payload["active_endpoint_id"])
         self.assertEqual(payload["primary_endpoint_id"], "new")
+        self.assertTrue(payload["credentials_refreshed"])
+        self.assertTrue(payload["provider_adapters_refreshed"])
+
+    def test_refresh_llm_endpoints_clears_cached_credentials(self) -> None:
+        repository = LLMEndpointRepository()
+        settings = RuntimeSettingRepository()
+        endpoint = repository.upsert(
+            endpoint_id="codex_proxy",
+            provider="openai",
+            model_id="openai/gpt-5.4",
+            api_mode="openai_chat",
+            base_url="http://127.0.0.1:8765/v1",
+            auth_kind="api_key_ref",
+            credential_ref="codex_proxy:api-key",
+            priority=0,
+            enabled=True,
+        )
+        settings.set_active_llm_endpoint_id("codex_proxy")
+        secret_store = InMemorySecretStore()
+        secret_ref = SecretRef(service="codex_proxy", account="api-key")
+        secret_store.set_secret(secret_ref, "old-token")
+        resolver = LiteLLMCredentialResolver(secret_store=secret_store)
+        invoker = LiteLLMEndpointInvoker(credentials=resolver)
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=repository),
+            settings_repository=settings,
+            endpoint_invoker=invoker,
+        )
+
+        self.assertEqual(resolver.resolve_api_key(endpoint), "old-token")
+        secret_store.set_secret(secret_ref, "new-token")
+        self.assertEqual(resolver.resolve_api_key(endpoint), "old-token")
+
+        payload = runtime.refresh_llm_endpoints()
+
+        refreshed_endpoint = runtime.endpoint_resolver.primary(preferred_endpoint_id="codex_proxy")
+        assert refreshed_endpoint is not None
+        self.assertTrue(payload["credentials_refreshed"])
+        self.assertTrue(payload["provider_adapters_refreshed"])
+        self.assertEqual(resolver.resolve_api_key(refreshed_endpoint), "new-token")
 
     def test_resolve_max_output_tokens_refreshes_active_endpoint_setting(self) -> None:
         repository = LLMEndpointRepository()
@@ -486,7 +555,343 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         self.assertEqual(kwargs["api_key"], "oauth-access-token")
+        self.assertEqual(kwargs["api_base"], "https://api.openai.com/v1")
         self.assertNotIn("oauth-access-token", str(invoker.last_payload_summary))
+
+    def test_litellm_invoker_supplies_dummy_key_for_local_openai_endpoint(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="codex_proxy",
+            provider="openai",
+            model_id="gpt-5.4",
+            api_mode="openai_chat",
+            base_url="http://127.0.0.1:8765/v1",
+            auth_kind="local_provider_auth",
+            credential_ref="",
+            priority=0,
+            enabled=True,
+        )
+        invoker = LiteLLMEndpointInvoker()
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=64),
+        )
+
+        self.assertEqual(kwargs["api_key"], "local-provider-auth")
+        self.assertEqual(kwargs["api_base"], "http://127.0.0.1:8765/v1")
+
+    def test_litellm_invoker_forwards_generation_controls_for_codex_proxy(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="codex_proxy",
+            provider="codex_proxy",
+            model_id="hosted_vllm/gpt-5.4",
+            api_mode="openai_chat",
+            base_url="http://127.0.0.1:8765/v1",
+            auth_kind="api_key_ref",
+            credential_ref="codex_proxy:api-key",
+            priority=0,
+            enabled=True,
+            capabilities_blob={"codex_proxy": True},
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="codex_proxy", account="api-key"), "proxy-token")
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=64,
+                temperature=0.7,
+                metadata={"think_level": "xhigh"},
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "probe",
+                            "description": "Probe.",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+            ),
+        )
+
+        self.assertEqual(kwargs["api_key"], "proxy-token")
+        self.assertEqual(kwargs["model"], "hosted_vllm/gpt-5.4")
+        self.assertIn("tools", kwargs)
+        self.assertEqual(kwargs["temperature"], 0.7)
+        self.assertEqual(kwargs["tool_choice"], "auto")
+        self.assertEqual(kwargs["reasoning_effort"], "xhigh")
+        self.assertNotIn("extra_body", kwargs)
+
+    def test_litellm_invoker_maps_glm_think_level_to_thinking_body(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="glm-5",
+            provider="zhipu",
+            model_id="glm-5.1",
+            api_mode="openai_chat",
+            base_url="https://api.z.ai/api/coding/paas/v4",
+            auth_kind="api_key_ref",
+            credential_ref="glm-prod:api-key",
+            priority=0,
+            enabled=True,
+            supports_reasoning=True,
+            capabilities_blob={"supports_thinking": True},
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=64,
+                metadata={"think_level": "xhigh"},
+            ),
+        )
+
+        self.assertEqual(kwargs["model"], "zai/glm-5.1")
+        self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "enabled"}})
+        self.assertNotIn("reasoning_effort", kwargs)
+
+    def test_litellm_invoker_maps_glm_off_to_disabled_thinking_body(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="glm-5-off",
+            provider="zhipu",
+            model_id="glm-5.1",
+            api_mode="openai_chat",
+            base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+            auth_kind="api_key_ref",
+            credential_ref="glm-prod:api-key",
+            priority=0,
+            enabled=True,
+            supports_reasoning=True,
+            capabilities_blob={"supports_thinking": True},
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=64,
+                metadata={"think_level": "off"},
+            ),
+        )
+
+        self.assertEqual(kwargs["model"], "zai/glm-5.1")
+        self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "disabled"}})
+
+    def test_llm_provider_registry_can_register_runtime_provider(self) -> None:
+        class DemoProvider(LLMProviderAdapter):
+            provider_names = frozenset({"demo_provider"})
+            litellm_provider = "hosted_vllm"
+
+            def apply_request(self, request: CanonicalLLMRequest, draft) -> None:  # type: ignore[no-untyped-def]
+                draft.extra["seed"] = 7
+
+        registry = LLMProviderRegistry()
+        registry.register(DemoProvider)
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="demo",
+            provider="demo_provider",
+            model_id="demo-model",
+            api_mode="openai_chat",
+            base_url="http://127.0.0.1:8765/v1",
+            auth_kind="local_provider_auth",
+            credential_ref="",
+            priority=0,
+            enabled=True,
+        )
+
+        adapter = registry.resolve(endpoint)
+        draft = adapter.new_draft([{"role": "user", "content": "hello"}])
+        adapter.apply_request(CanonicalLLMRequest(messages=[], max_output_tokens=16), draft)
+        kwargs = draft.to_kwargs()
+
+        self.assertEqual(kwargs["model"], "hosted_vllm/demo-model")
+        self.assertEqual(kwargs["seed"], 7)
+
+    def test_llm_provider_registry_can_unregister_runtime_provider(self) -> None:
+        class DemoProvider(LLMProviderAdapter):
+            provider_names = frozenset({"demo_unregister"})
+            litellm_provider = "hosted_vllm"
+
+        registry = LLMProviderRegistry()
+        registry.register(DemoProvider)
+        registry.unregister(DemoProvider)
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="demo_unregister",
+            provider="demo_unregister",
+            model_id="demo-model",
+            api_mode="openai_chat",
+            base_url="http://127.0.0.1:8765/v1",
+            auth_kind="local_provider_auth",
+            credential_ref="",
+            priority=0,
+            enabled=True,
+        )
+
+        adapter = registry.resolve(endpoint)
+
+        self.assertEqual(adapter.litellm_model(), "openai/demo-model")
+
+    def test_llm_provider_registry_restores_builtin_mapping_after_runtime_adapter_removed(self) -> None:
+        adapters_dir = self.runtime_root / "llm" / "adapters"
+        adapters_dir.mkdir(parents=True, exist_ok=True)
+        adapter_path = adapters_dir / "override_openai.py"
+        adapter_path.write_text(
+            "\n".join(
+                [
+                    "from pal.llm import LLMProviderAdapter",
+                    "",
+                    "class RuntimeOpenAIOverride(LLMProviderAdapter):",
+                    "    provider_names = frozenset({'openai'})",
+                    "    litellm_provider = 'hosted_vllm'",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        registry = build_default_provider_registry(load_entry_points=False)
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="openai_restore",
+            provider="openai",
+            model_id="demo-model",
+            api_mode="openai_chat",
+            base_url="https://api.openai.com/v1",
+            auth_kind="api_key_ref",
+            credential_ref="",
+            priority=0,
+            enabled=True,
+        )
+
+        registry.load_runtime_adapters(self.runtime_root)
+        self.assertEqual(registry.resolve(endpoint).litellm_model(), "hosted_vllm/demo-model")
+
+        adapter_path.unlink()
+        registry.load_runtime_adapters(self.runtime_root)
+
+        self.assertEqual(registry.resolve(endpoint).litellm_model(), "openai/demo-model")
+
+    def test_litellm_invoker_uses_injected_provider_registry(self) -> None:
+        class DemoProvider(LLMProviderAdapter):
+            provider_names = frozenset({"demo_injected"})
+            litellm_provider = "hosted_vllm"
+
+            def apply_request(self, request: CanonicalLLMRequest, draft) -> None:  # type: ignore[no-untyped-def]
+                _ = request
+                draft.extra["seed"] = 11
+
+        registry = build_default_provider_registry(load_entry_points=False)
+        registry.register(DemoProvider)
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="demo_injected",
+            provider="demo_injected",
+            model_id="demo-model",
+            api_mode="openai_chat",
+            base_url="http://127.0.0.1:8765/v1",
+            auth_kind="local_provider_auth",
+            credential_ref="",
+            priority=0,
+            enabled=True,
+        )
+        invoker = LiteLLMEndpointInvoker(provider_registry=registry)
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=16),
+        )
+
+        self.assertEqual(kwargs["model"], "hosted_vllm/demo-model")
+        self.assertEqual(kwargs["seed"], 11)
+
+    def test_refresh_llm_endpoints_reloads_runtime_root_provider_adapters(self) -> None:
+        adapters_dir = self.runtime_root / "llm" / "adapters"
+        adapters_dir.mkdir(parents=True, exist_ok=True)
+        adapter_path = adapters_dir / "runtime_demo.py"
+
+        def write_adapter(seed: int) -> None:
+            adapter_path.write_text(
+                "\n".join(
+                    [
+                        "from __future__ import annotations",
+                        "from pal.llm import CanonicalLLMRequest, LLMProviderAdapter, LiteLLMCompletionDraft",
+                        "",
+                        "class RuntimeDemoProvider(LLMProviderAdapter):",
+                        "    provider_names = frozenset({'runtime_demo'})",
+                        "    litellm_provider = 'hosted_vllm'",
+                        "",
+                        "    def apply_request(self, request: CanonicalLLMRequest, draft: LiteLLMCompletionDraft) -> None:",
+                        "        _ = request",
+                        f"        draft.extra['seed'] = {seed}",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+        write_adapter(1)
+        repository = LLMEndpointRepository()
+        settings = RuntimeSettingRepository()
+        endpoint = repository.upsert(
+            endpoint_id="runtime_demo",
+            provider="runtime_demo",
+            model_id="demo-model",
+            api_mode="openai_chat",
+            base_url="http://127.0.0.1:8765/v1",
+            auth_kind="local_provider_auth",
+            credential_ref="",
+            priority=0,
+            enabled=True,
+        )
+        invoker = LiteLLMEndpointInvoker(runtime_root=self.runtime_root)
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=repository),
+            settings_repository=settings,
+            endpoint_invoker=invoker,
+        )
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=16),
+        )
+        self.assertEqual(kwargs["seed"], 1)
+
+        write_adapter(2)
+        payload = runtime.refresh_llm_endpoints()
+        refreshed_endpoint = runtime.endpoint_resolver.primary()
+        assert refreshed_endpoint is not None
+        kwargs, _ = invoker._build_completion_kwargs(
+            refreshed_endpoint,
+            CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=16),
+        )
+
+        self.assertTrue(payload["provider_adapters_refreshed"])
+        self.assertEqual(payload["provider_adapter_load_errors"], [])
+        self.assertEqual(kwargs["model"], "hosted_vllm/demo-model")
+        self.assertEqual(kwargs["seed"], 2)
+
+    def test_encrypted_file_secret_store_reloads_when_file_changes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_secret_reload_test_") as tmp:
+            secrets_path = Path(tmp) / "secrets.json"
+            first = EncryptedFileSecretStore(secrets_path)
+            ref = SecretRef(service="codex_proxy", account="api-key")
+            self.assertIsNone(first.get_secret(ref))
+
+            second = EncryptedFileSecretStore(secrets_path)
+            second.set_secret(ref, "proxy-token")
+
+            self.assertEqual(first.get_secret(ref), "proxy-token")
 
     def test_oauth_profile_without_access_token_does_not_become_api_key(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
@@ -716,6 +1121,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("op_web_fetch_read", tool_names)
 
     def test_compose_runtime_loads_minion_as_first_party_builtin_plugin(self) -> None:
+        if not _local_sidecar_bind_available():
+            self.skipTest("local socket binding is unavailable in this test sandbox")
         self.wizard.seed_defaults(self.registration)
         handle = compose_runtime(
             wizard=self.wizard,
@@ -2461,6 +2868,8 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         if not hasattr(asyncio, "start_unix_server") or not hasattr(asyncio, "open_unix_connection"):
             self.skipTest("Unix socket asyncio APIs are unavailable on this platform")
+        if not _unix_socket_bind_available():
+            self.skipTest("Unix socket binding is unavailable in this test sandbox")
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_socket_test_"))
         self.socket_path = self.runtime_root / "pal.sock"
         self.endpoint = SocketChannelEndpoint(

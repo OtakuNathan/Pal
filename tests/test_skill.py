@@ -7,7 +7,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.behavior import AffordanceDescriptor, BehaviorAffordanceModel, BehaviorRepository, BehaviorSkillModel
+from pal.behavior import (
+    AffordanceDescriptor,
+    BehaviorAdviceRequest,
+    BehaviorAffordanceModel,
+    BehaviorRepository,
+    BehaviorService,
+    BehaviorSkillModel,
+    register_with_core as register_behavior_with_core,
+)
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import PalV2Database
@@ -302,6 +310,61 @@ Run the workflow.
         self.assertEqual(injected.status, "ok")
         self.assertIn("Pal Plugin Development", injected.structured["title"])
         self.assertIn("ModuleHandle", injected.structured["manual_text"])
+
+    def test_skill_module_declares_internal_llm_adapter_endpoint_skill(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        register_skill_with_core(core.context, self.service)
+        core.publish_module_capabilities("skill")
+
+        skill = self.skill_repository.get_skill("pal.llm.adapter_endpoint.development")
+
+        self.assertIsNotNone(skill)
+        assert skill is not None
+        self.assertEqual(skill.module_id, "skill")
+        self.assertTrue(skill.active)
+        self.assertIn("<runtime_root>/llm/adapters/", skill.manual_text)
+        self.assertIn("must not execute `/refresh_llm_endpoints`", skill.manual_text)
+        self.assertIn("Please run `/refresh_llm_endpoints`", skill.manual_text)
+        self.assertTrue(skill.metadata["requires_user_refresh"])
+
+        search = SkillSearchTool(service=self.service).invoke({"query": "add llm adapter endpoint provider", "top_k": 3})
+        self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.llm.adapter_endpoint.development")
+        self.assertTrue(search.structured["hits"][0]["injectable"])
+
+        injected = SkillInjectTool(service=self.service).invoke({"skill_id": "pal.llm.adapter_endpoint.development"})
+        self.assertEqual(injected.status, "ok")
+        self.assertIn("Pal LLM Adapter and Endpoint Development", injected.structured["title"])
+        self.assertIn("user-controlled", injected.structured["manual_text"])
+
+    def test_skill_module_declares_discoverable_affordances_for_internal_development_skills(self) -> None:
+        core = PalCore()
+        behavior_service = BehaviorService(repository=self.behavior_repository)
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        register_skill_with_core(core.context, self.service)
+        register_behavior_with_core(core.context, behavior_service)
+        core.publish_module_capabilities("skill")
+
+        plugin_advice = asyncio.run(
+            behavior_service.advise_async(BehaviorAdviceRequest(scenario="create pal plugin capability with build_plugin", top_k=5))
+        )
+        llm_advice = asyncio.run(
+            behavior_service.advise_async(BehaviorAdviceRequest(scenario="add llm adapter endpoint provider", top_k=5))
+        )
+
+        plugin = next(candidate for candidate in plugin_advice.candidates if candidate.affordance_id == "declared.skill.pal_plugin_development")
+        llm = next(candidate for candidate in llm_advice.candidates if candidate.affordance_id == "declared.skill.pal_llm_adapter_endpoint_development")
+
+        self.assertEqual(plugin.skill_refs, ("pal.plugin.development",))
+        self.assertEqual(llm.skill_refs, ("pal.llm.adapter_endpoint.development",))
+        self.assertEqual(plugin.visibility_mode, "discoverable")
+        self.assertEqual(llm.visibility_mode, "discoverable")
+        self.assertFalse(plugin.metadata["resident"])
+        self.assertFalse(llm.metadata["resident"])
+        self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_plugin_development"))
+        self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_llm_adapter_endpoint_development"))
 
     def test_skill_prompt_stays_registered_but_skill_tools_are_not_resident_llm_tools(self) -> None:
         core = PalCore()

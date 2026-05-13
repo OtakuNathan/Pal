@@ -119,13 +119,15 @@ class McpManagerPluginProvider:
             self.last_error = ""
         except Exception as exc:
             self.last_error = f"{exc.__class__.__name__}: {exc}"
-            raise
+            self.projection = None
+            self.last_health = {"healthy": False, "startup_error": self.last_error}
         payload = self._status_payload()
+        text = "mcp manager attached" if not self.last_error else "mcp manager attached without sidecar"
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="mcp manager attached",
+            text=text,
             structured=payload,
-            llm_text=render_titled_structured_for_llm("MCP manager attached", payload),
+            llm_text=render_titled_structured_for_llm(text, payload),
         )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="module", family="management", action_name="detach", description="Detach MCP manager")
@@ -261,10 +263,10 @@ class McpManagerPluginProvider:
         raise RuntimeError("mcp manager failed to start")
 
     def _stop_manager(self) -> None:
-        with contextlib.suppress(Exception):
-            self.client.shutdown_sync()
         process = self.process
-        if process is not None:
+        if process is not None and process.poll() is None:
+            with contextlib.suppress(Exception):
+                self.client.shutdown_sync()
             with contextlib.suppress(Exception):
                 process.wait(timeout=2.0)
         self._stop_process_only()

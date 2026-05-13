@@ -3,6 +3,9 @@ CLAUDE.md
 AGENTS.md
 .idea/
 .venv/
+.venv312/
+.uv-cache/
+.uv-python/
 __pycache__/
 *.pyc
 .pytest_cache/

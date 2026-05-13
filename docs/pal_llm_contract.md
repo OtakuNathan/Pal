@@ -91,6 +91,25 @@ See [artifact_manager.md](artifact_manager.md).
 - model capability metadata 仍然由 `Pal` 本地注册表维护
 - `LiteLLM` 只负责把 canonical request 变成 provider call
 
+### Provider Adapter Registry
+
+LLM provider differences live behind the `llm` module's provider adapter
+registry. Runtime adapters consume `CanonicalLLMRequest` plus endpoint metadata,
+then produce LiteLLM completion kwargs. This registry is an `llm` subsystem
+extension point, not a plugin contribution surface: Pal plugins provide skills,
+capabilities, prompt fragments, and provider refs, but they do not register LLM
+transport adapters.
+
+Runtime adapter source lives under `$PAL_RUNTIME_ROOT/llm/adapters`. Pal loads
+single-file adapters such as `zai_custom.py` and directory adapters with an
+`adapter.py` entrypoint, such as `my_provider/adapter.py`. Each module must
+export one or more `LLMProviderAdapter` subclasses, either by defining them in
+the module or by setting `ADAPTER` / `ADAPTERS`.
+
+External LLM adapter packages may also expose adapter classes through the
+`pal.llm_provider_adapters` Python entry point group. Refreshing LLM endpoints
+reloads both runtime-root adapter source and this entry point group.
+
 ## 运行模型
 
 ```mermaid

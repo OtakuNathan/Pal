@@ -13,6 +13,20 @@ from pal.llm.codex_app_server import (
     is_chatgpt_auth_tokens_refresh_request,
     redact_codex_auth_message,
 )
+from pal.llm.codex_proxy import CodexAppServerBridge, CodexCompletion, CodexProxyError, CodexToolCall
+from pal.llm.adapters import (
+    LEGACY_RUNTIME_PROVIDER_ADAPTER_DIR,
+    LLM_PROVIDER_ADAPTER_ENTRY_POINT_GROUP,
+    LLMProviderAdapter,
+    LLMProviderRegistry,
+    LiteLLMCompletionDraft,
+    RUNTIME_PROVIDER_ADAPTER_DIR,
+    build_default_provider_registry,
+    build_runtime_provider_registry,
+    register_llm_provider_adapter,
+    resolve_endpoint_adapter,
+    unregister_llm_provider_adapter,
+)
 from pal.llm.credentials import LiteLLMCredentialResolver, ResolvedLLMAuth, default_env_var_for_endpoint
 from pal.llm.introspection import (
     LLMActiveSnapshot,
@@ -27,11 +41,14 @@ from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 from pal.llm.repository import DEFAULT_THINK_LEVEL, LLMEndpointRepository, RuntimeSettingRepository
 from pal.llm.secret_store import EncryptedFileSecretStore, InMemorySecretStore, KeyringSecretStore, SecretRef, SecretStorePort
 from pal.llm.runtime import (
+    CodexAppServerEndpointInvoker,
     EndpointResolver,
     LLMEndpointInvocationError,
     LLMEndpointInvokerPort,
     LiteLLMEndpointInvoker,
     LLMRuntime,
+    RoutingLLMEndpointInvoker,
+    build_default_endpoint_invoker,
 )
 from pal.stream_events import NormalizedLLMStreamEvent
 
@@ -42,8 +59,16 @@ __all__ = [
     "CanonicalToolResult",
     "CodexAppServerAuthMessages",
     "CodexAppServerClientInfo",
+    "CodexAppServerBridge",
+    "CodexAppServerEndpointInvoker",
+    "CodexCompletion",
+    "CodexProxyError",
+    "CodexToolCall",
     "EndpointResolver",
     "DEFAULT_THINK_LEVEL",
+    "LEGACY_RUNTIME_PROVIDER_ADAPTER_DIR",
+    "LLM_PROVIDER_ADAPTER_ENTRY_POINT_GROUP",
+    "RUNTIME_PROVIDER_ADAPTER_DIR",
     "LiteLLMCredentialResolver",
     "ResolvedLLMAuth",
     "default_env_var_for_endpoint",
@@ -53,6 +78,10 @@ __all__ = [
     "LLMEndpointInvocationError",
     "LLMEndpointInvokerPort",
     "LiteLLMEndpointInvoker",
+    "RoutingLLMEndpointInvoker",
+    "LLMProviderAdapter",
+    "LLMProviderRegistry",
+    "LiteLLMCompletionDraft",
     "LLMActiveSnapshot",
     "LLMEndpointSnapshot",
     "LLMPreflightAdvice",
@@ -69,8 +98,14 @@ __all__ = [
     "RuntimeSettingRepository",
     "SecretRef",
     "SecretStorePort",
+    "register_llm_provider_adapter",
+    "build_default_provider_registry",
+    "build_default_endpoint_invoker",
+    "build_runtime_provider_registry",
     "inspect_llm",
     "is_chatgpt_auth_tokens_refresh_request",
     "redact_codex_auth_message",
     "register_with_core",
+    "resolve_endpoint_adapter",
+    "unregister_llm_provider_adapter",
 ]

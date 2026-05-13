@@ -32,6 +32,17 @@ _LAUNCHD_USER_DIR = Path.home() / "Library" / "LaunchAgents"
 
 
 def _resolve_pal_command() -> list[str]:
+    invoked = Path(sys.argv[0])
+    if invoked.name == "pal":
+        if invoked.is_absolute() and invoked.exists():
+            return [str(invoked)]
+        if invoked.parent != Path("."):
+            relative_invoked = (Path.cwd() / invoked).resolve()
+            if relative_invoked.exists():
+                return [str(relative_invoked)]
+        invoked_on_path = shutil.which(str(invoked))
+        if invoked_on_path:
+            return [invoked_on_path]
     pal_bin = shutil.which("pal")
     if pal_bin:
         return [pal_bin]

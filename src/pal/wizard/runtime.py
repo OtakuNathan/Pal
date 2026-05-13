@@ -279,7 +279,7 @@ class WizardService(WizardServicePort):
                 # Try to infer from base_url
                 if "deepseek" in ep.base_url:
                     provider = "deepseek"
-                elif "zhipu" in ep.base_url:
+                elif "zhipu" in ep.base_url or "z.ai" in ep.base_url or "bigmodel.cn" in ep.base_url:
                     provider = "zhipu"
                 elif "moonshot" in ep.base_url or "kimi" in ep.base_url:
                     provider = "moonshot"

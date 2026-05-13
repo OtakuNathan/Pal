@@ -138,12 +138,18 @@ class EncryptedFileSecretStore:
         self._path = Path(str(secrets_path))
         self._fernet: object | None = None
         self._cache: dict[tuple[str, str], str] = {}
+        self._loaded_mtime_ns: int | None = None
         self._load()
 
     # -- public API (SecretStorePort) ----------------------------------------
 
     def get_secret(self, ref: SecretRef) -> str | None:
+        self._refresh_if_changed()
         return self._cache.get((ref.service, ref.account))
+
+    def refresh(self) -> None:
+        self._cache.clear()
+        self._load()
 
     def set_secret(self, ref: SecretRef, secret: str) -> None:
         self._cache[(ref.service, ref.account)] = secret
@@ -167,6 +173,7 @@ class EncryptedFileSecretStore:
         import json
 
         if not self._path.exists():
+            self._loaded_mtime_ns = None
             return
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
@@ -198,6 +205,8 @@ class EncryptedFileSecretStore:
                 dirty = True
         if dirty:
             self._flush()
+        else:
+            self._mark_loaded()
 
     def _flush(self) -> None:
         import json
@@ -213,3 +222,20 @@ class EncryptedFileSecretStore:
             }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        self._mark_loaded()
+
+    def _mark_loaded(self) -> None:
+        try:
+            self._loaded_mtime_ns = self._path.stat().st_mtime_ns
+        except OSError:
+            self._loaded_mtime_ns = None
+
+    def _refresh_if_changed(self) -> None:
+        try:
+            current_mtime_ns = self._path.stat().st_mtime_ns
+        except OSError:
+            current_mtime_ns = None
+        if current_mtime_ns == self._loaded_mtime_ns:
+            return
+        self._cache.clear()
+        self._load()

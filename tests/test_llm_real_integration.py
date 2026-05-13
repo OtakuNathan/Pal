@@ -1012,6 +1012,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                         metadata={"allow_text_only_completion": True, "max_tool_rounds": 2, "max_output_tokens": 1000},
                         resolved_profile={
                             "profile_id": "planner",
+                            "canonical_profile_id": "software_engineering.planner",
                             "display_name": "Planner Minion",
                             "identity_fragment": "You are a strict planner minion.",
                             "behavior_fragment": "Produce bounded work orders. Do not do implementation.",
@@ -1051,6 +1052,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                         metadata={"allow_text_only_completion": True, "max_tool_rounds": 2, "max_output_tokens": 1000},
                         resolved_profile={
                             "profile_id": "reviewer",
+                            "canonical_profile_id": "software_engineering.reviewer",
                             "display_name": "Reviewer Minion",
                             "identity_fragment": "You are a strict reviewer minion.",
                             "behavior_fragment": "Check boundedness, acceptance criteria, and executable handoff clarity.",

@@ -4,10 +4,22 @@ import asyncio
 import json
 import random
 import re
+import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable, Protocol
 
+from pal.llm.adapters import LLMProviderRegistry, build_runtime_provider_registry, _think_level_to_completion_reasoning_effort
+from pal.llm.codex_proxy import (
+    DEFAULT_CODEX_PROXY_MAX_CONCURRENCY,
+    CodexAppServerBridge,
+    CodexCompletion,
+    CodexProxyError,
+    _messages_to_codex_input,
+    _openai_tools_to_dynamic_tools,
+    _strip_openai_prefix,
+)
 from pal.llm.credentials import LiteLLMCredentialResolver
 
 from pal.llm.contracts import (
@@ -191,7 +203,28 @@ class LiteLLMEndpointInvoker:
 
     credentials: LiteLLMCredentialResolver = field(default_factory=LiteLLMCredentialResolver)
     artifact_manager: Any = None
+    runtime_root: str | Path | None = None
+    provider_registry: LLMProviderRegistry = field(default_factory=build_runtime_provider_registry)
     last_payload_summary: dict[str, Any] = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        if self.runtime_root is not None:
+            self.provider_registry.load_runtime_adapters(self.runtime_root)
+
+    def refresh_credentials(self) -> bool:
+        refresh = getattr(self.credentials, "refresh", None)
+        if callable(refresh):
+            refresh()
+            return True
+        clear_cache = getattr(self.credentials, "clear_cache", None)
+        if callable(clear_cache):
+            clear_cache()
+            return True
+        return False
+
+    def refresh_provider_registry(self) -> bool:
+        self.provider_registry.refresh_external_sources(runtime_root=self.runtime_root)
+        return True
 
     def invoke(
         self,
@@ -297,31 +330,34 @@ class LiteLLMEndpointInvoker:
             supports_vision=bool(endpoint.supports_vision),
             image_url_format=image_url_format,
         )
+        adapter = self.provider_registry.resolve(endpoint)
         self.last_payload_summary = _summarize_provider_payload(endpoint, messages, image_url_format=image_url_format)
-        kwargs: dict[str, Any] = {
-            "model": _litellm_model(endpoint.model_id, endpoint.api_mode),
-            "messages": messages,
-            "timeout": 120,
-        }
+        draft = adapter.new_draft(messages)
+        timeout_seconds = request.metadata.get("timeout_seconds")
+        if timeout_seconds is not None:
+            try:
+                draft.timeout = max(1, min(int(timeout_seconds), 120))
+            except (TypeError, ValueError):
+                pass
         if endpoint.base_url and not str(endpoint.base_url).startswith("stub://"):
-            kwargs["api_base"] = endpoint.base_url
+            draft.api_base = _litellm_api_base(str(endpoint.base_url))
         api_key = self.credentials.resolve_api_key(endpoint)
         if api_key:
-            kwargs["api_key"] = api_key
+            draft.api_key = api_key
+        elif endpoint.auth_kind == "local_provider_auth" and endpoint.api_mode == "openai_chat":
+            # The OpenAI SDK requires a non-empty key even for local
+            # OpenAI-compatible endpoints that ignore Authorization.
+            draft.api_key = "local-provider-auth"
         if request.temperature is not None:
-            kwargs["temperature"] = request.temperature
+            draft.temperature = request.temperature
         if request.max_output_tokens is not None:
-            kwargs["max_tokens"] = request.max_output_tokens
+            draft.max_tokens = request.max_output_tokens
         tools = _coerce_tools_for_litellm(request.tools, tool_name_aliases=tool_name_aliases)
         if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
-        thinking_effort = _think_level_to_effort(request.metadata.get("think_level"))
-        if endpoint.api_mode == "anthropic_messages" and thinking_effort:
-            thinking = _anthropic_thinking_param(thinking_effort, request.max_output_tokens)
-            if thinking:
-                kwargs["thinking"] = thinking
-        return kwargs, tool_name_aliases
+            draft.tools = tools
+            draft.tool_choice = "auto"
+        adapter.apply_request(request, draft)
+        return draft.to_kwargs(), tool_name_aliases
 
     def _iter_litellm_stream(
         self,
@@ -357,6 +393,235 @@ class LiteLLMEndpointInvoker:
 
 
 @dataclass
+class CodexAppServerEndpointInvoker:
+    """Native Codex app-server invoker that returns Pal canonical outcomes."""
+
+    bridge: CodexAppServerBridge | None = None
+    artifact_manager: Any = None
+    max_concurrency: int = DEFAULT_CODEX_PROXY_MAX_CONCURRENCY
+    _semaphore: threading.BoundedSemaphore = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.bridge is None:
+            self.bridge = CodexAppServerBridge()
+        self._semaphore = threading.BoundedSemaphore(max(1, int(self.max_concurrency)))
+
+    @staticmethod
+    def supports_endpoint(endpoint: LLMEndpointModel) -> bool:
+        capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
+        provider = str(getattr(endpoint, "provider", "") or "").strip().lower()
+        adapter = str(capabilities.get("adapter") or capabilities.get("llm_adapter") or "").strip().lower()
+        base_url = str(getattr(endpoint, "base_url", "") or "").strip().lower()
+        return bool(
+            provider in {"codex", "codex_app_server"}
+            or adapter in {"codex", "codex_app_server", "codex_native"}
+            or capabilities.get("codex_app_server")
+            or capabilities.get("official_codex_app_server")
+            or capabilities.get("codex_native")
+            or base_url.startswith("codex://")
+        )
+
+    def invoke(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
+        model, developer_instructions, input_items, dynamic_tools, effort = _codex_app_server_request_parts(
+            endpoint,
+            request,
+            artifact_manager=self.artifact_manager,
+        )
+        bridge = self._require_bridge()
+        with self._semaphore:
+            try:
+                completion = bridge.invoke_turn(
+                    model=model,
+                    developer_instructions=developer_instructions,
+                    input_items=input_items,
+                    dynamic_tools=dynamic_tools,
+                    effort=effort,
+                )
+            except CodexProxyError as exc:
+                if not _should_retry_codex_final_answer_without_tools(exc, request, dynamic_tools):
+                    raise
+                completion = bridge.invoke_turn(
+                    model=model,
+                    developer_instructions=_codex_final_answer_instructions(developer_instructions),
+                    input_items=input_items,
+                    dynamic_tools=[],
+                    effort=effort,
+                )
+            if _codex_completion_repeats_prior_tool_call(completion, request):
+                completion = bridge.invoke_turn(
+                    model=model,
+                    developer_instructions=_codex_final_answer_instructions(developer_instructions),
+                    input_items=input_items,
+                    dynamic_tools=[],
+                    effort=effort,
+                )
+        return _codex_completion_to_outcome(completion, endpoint=endpoint)
+
+    def invoke_stream(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> Iterable[NormalizedLLMStreamEvent]:
+        outcome = self.invoke(endpoint, request)
+        for tool_call in outcome.tool_calls:
+            yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TOOL_CALL, tool_call=tool_call)
+        if outcome.tool_calls:
+            yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.TOOL_CALLS)
+            return
+        if outcome.text:
+            yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=outcome.text)
+        yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=outcome.finish_reason)
+
+    def _require_bridge(self) -> CodexAppServerBridge:
+        if self.bridge is None:
+            self.bridge = CodexAppServerBridge()
+        return self.bridge
+
+
+@dataclass
+class RoutingLLMEndpointInvoker:
+    """Route native providers before falling back to LiteLLM."""
+
+    litellm_invoker: LiteLLMEndpointInvoker = field(default_factory=LiteLLMEndpointInvoker)
+    codex_invoker: CodexAppServerEndpointInvoker = field(default_factory=CodexAppServerEndpointInvoker)
+
+    @property
+    def provider_registry(self) -> LLMProviderRegistry:
+        return self.litellm_invoker.provider_registry
+
+    def refresh_credentials(self) -> bool:
+        return bool(self.litellm_invoker.refresh_credentials())
+
+    def refresh_provider_registry(self) -> bool:
+        return bool(self.litellm_invoker.refresh_provider_registry())
+
+    def invoke(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
+        return self._select(endpoint).invoke(endpoint, request)
+
+    def invoke_stream(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> Iterable[NormalizedLLMStreamEvent]:
+        yield from self._select(endpoint).invoke_stream(endpoint, request)
+
+    def _select(self, endpoint: LLMEndpointModel) -> LLMEndpointInvokerPort:
+        if self.codex_invoker.supports_endpoint(endpoint):
+            return self.codex_invoker
+        return self.litellm_invoker
+
+
+def build_default_endpoint_invoker(
+    *,
+    credentials: LiteLLMCredentialResolver | None = None,
+    artifact_manager: Any = None,
+    runtime_root: str | Path | None = None,
+) -> RoutingLLMEndpointInvoker:
+    return RoutingLLMEndpointInvoker(
+        litellm_invoker=LiteLLMEndpointInvoker(
+            credentials=credentials or LiteLLMCredentialResolver(),
+            artifact_manager=artifact_manager,
+            runtime_root=runtime_root,
+        ),
+        codex_invoker=CodexAppServerEndpointInvoker(artifact_manager=artifact_manager),
+    )
+
+
+def _codex_app_server_request_parts(
+    endpoint: LLMEndpointModel,
+    request: CanonicalLLMRequest,
+    *,
+    artifact_manager: Any = None,
+) -> tuple[str, str, list[dict[str, Any]], list[dict[str, Any]], str | None]:
+    model = _strip_openai_prefix(str(request.model_hint or endpoint.model_id or ""))
+    developer_instructions, input_items = _messages_to_codex_input(list(request.messages or []), artifact_manager=artifact_manager)
+    dynamic_tools = _openai_tools_to_dynamic_tools(request.tools)
+    effort = _think_level_to_completion_reasoning_effort(request.metadata.get("think_level"))
+    return model, developer_instructions, input_items, dynamic_tools, effort
+
+
+def _should_retry_codex_final_answer_without_tools(
+    exc: CodexProxyError,
+    request: CanonicalLLMRequest,
+    dynamic_tools: list[dict[str, Any]],
+) -> bool:
+    if not dynamic_tools:
+        return False
+    if "timed out" not in str(exc).lower():
+        return False
+    return any(str(message.get("role") or "").strip() == "tool" for message in list(request.messages or []))
+
+
+def _codex_final_answer_instructions(developer_instructions: str) -> str:
+    return "\n\n".join(
+        part
+        for part in (
+            str(developer_instructions or "").strip(),
+            (
+                "Pal has already executed the available tools and included their results in the conversation. "
+                "Produce the final user-facing answer now. Do not request another tool."
+            ),
+        )
+        if part
+    )
+
+
+def _codex_completion_repeats_prior_tool_call(
+    completion: CodexCompletion,
+    request: CanonicalLLMRequest,
+) -> bool:
+    if completion.tool_call is None:
+        return False
+    if not any(str(message.get("role") or "").strip() == "tool" for message in list(request.messages or [])):
+        return False
+    current_name = str(completion.tool_call.name or "").strip()
+    current_args = _coerce_tool_args(completion.tool_call.arguments)
+    if not current_name:
+        return False
+    for message in list(request.messages or []):
+        if str(message.get("role") or "").strip() != "assistant":
+            continue
+        for prior_call in list(message.get("tool_calls") or []):
+            function = (prior_call or {}).get("function") or {}
+            prior_name = str(function.get("name") or "").strip()
+            if prior_name != current_name:
+                continue
+            if _coerce_tool_args(function.get("arguments")) == current_args:
+                return True
+    return False
+
+
+def _codex_completion_to_outcome(completion: CodexCompletion, *, endpoint: LLMEndpointModel) -> CanonicalLLMOutcome:
+    if completion.tool_call is not None:
+        return CanonicalLLMOutcome(
+            text="",
+            reasoning_text="",
+            tool_calls=[
+                CanonicalToolCall(
+                    name=str(completion.tool_call.name or "").strip(),
+                    args=_coerce_tool_args(completion.tool_call.arguments),
+                    call_id=str(completion.tool_call.call_id or "").strip() or None,
+                )
+            ],
+            finish_reason=LLMFinishReason.TOOL_CALLS,
+            preferred_endpoint_id=endpoint.endpoint_id,
+            preferred_model_id=endpoint.model_id,
+        )
+    return CanonicalLLMOutcome(
+        text=str(completion.text or "").strip(),
+        reasoning_text="",
+        tool_calls=[],
+        finish_reason=LLMFinishReason.STOP,
+        preferred_endpoint_id=endpoint.endpoint_id,
+        preferred_model_id=endpoint.model_id,
+    )
+
+
+def _coerce_tool_args(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        try:
+            loaded = json.loads(raw)
+        except Exception:
+            loaded = {}
+        return dict(loaded or {}) if isinstance(loaded, dict) else {}
+    return {}
+
+
+@dataclass
 class LLMRuntime(LLMRuntimePort):
     endpoint_resolver: EndpointResolver
     settings_repository: RuntimeSettingRepository
@@ -372,7 +637,7 @@ class LLMRuntime(LLMRuntimePort):
 
     def __post_init__(self) -> None:
         if self.endpoint_invoker is None:
-            self.endpoint_invoker = LiteLLMEndpointInvoker()
+            self.endpoint_invoker = build_default_endpoint_invoker()
         self.refresh_runtime_settings()
         if self.config is not None:
             self.endpoint_retry_attempts = self.config.llm_endpoint_retry_attempts
@@ -398,10 +663,14 @@ class LLMRuntime(LLMRuntimePort):
     def refresh_llm_endpoints(self) -> dict[str, Any]:
         before = [endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints]
         configured_active = self.settings_repository.get_active_llm_endpoint_id()
+        credentials_refreshed = self._refresh_endpoint_credentials()
+        provider_adapters_refreshed = self._refresh_provider_adapters()
         self.endpoint_resolver.refresh()
         self.refresh_runtime_settings()
         after = [endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints]
         primary = self.endpoint_resolver.primary(preferred_endpoint_id=self.active_endpoint_id)
+        provider_registry = getattr(self.endpoint_invoker, "provider_registry", None)
+        provider_adapter_load_errors = list(getattr(provider_registry, "load_errors", []) or [])
         return {
             "before_count": len(before),
             "enabled_count": len(after),
@@ -413,7 +682,40 @@ class LLMRuntime(LLMRuntimePort):
             "primary_endpoint_id": primary.endpoint_id if primary is not None else None,
             "primary_model_id": primary.model_id if primary is not None else None,
             "enabled_endpoint_ids": after,
+            "credentials_refreshed": credentials_refreshed,
+            "provider_adapters_refreshed": provider_adapters_refreshed,
+            "provider_adapter_load_errors": provider_adapter_load_errors,
         }
+
+    def _refresh_endpoint_credentials(self) -> bool:
+        refresh = getattr(self.endpoint_invoker, "refresh_credentials", None)
+        if callable(refresh):
+            return bool(refresh())
+        credentials = getattr(self.endpoint_invoker, "credentials", None)
+        if credentials is None:
+            return False
+        credential_refresh = getattr(credentials, "refresh", None)
+        if callable(credential_refresh):
+            credential_refresh()
+            return True
+        clear_cache = getattr(credentials, "clear_cache", None)
+        if callable(clear_cache):
+            clear_cache()
+            return True
+        return False
+
+    def _refresh_provider_adapters(self) -> bool:
+        refresh = getattr(self.endpoint_invoker, "refresh_provider_registry", None)
+        if callable(refresh):
+            return bool(refresh())
+        provider_registry = getattr(self.endpoint_invoker, "provider_registry", None)
+        if provider_registry is None:
+            return False
+        load_entry_points = getattr(provider_registry, "load_entry_points", None)
+        if callable(load_entry_points):
+            load_entry_points()
+            return True
+        return False
 
     def set_active_endpoint(self, endpoint_id: str) -> str:
         normalized = str(endpoint_id or "").strip()
@@ -937,35 +1239,12 @@ def _coerce_response_mode(value: Any) -> str | None:
     return text
 
 
-def _litellm_model(model_id: str, api_mode: str) -> str:
-    if "/" in model_id:
-        return model_id
-    if api_mode == "anthropic_messages":
-        return f"anthropic/{model_id}"
-    return f"openai/{model_id}"
-
-
-def _think_level_to_effort(value: Any) -> str | None:
-    text = str(value or "").strip().lower()
-    mapping = {
-        "off": None,
-        "low": "low",
-        "balanced": "medium",
-        "medium": "medium",
-        "deep": "high",
-        "high": "high",
-    }
-    return mapping.get(text, "medium" if text else None)
-
-
-def _anthropic_thinking_param(effort: str | None, max_output_tokens: int | None) -> dict[str, Any] | None:
-    if effort is None:
-        return None
-    budget_map = {"low": 1024, "medium": 8192, "high": 32768}
-    budget = budget_map.get(effort, 8192)
-    if max_output_tokens is not None and budget >= max_output_tokens:
-        budget = max(1024, max_output_tokens // 2)
-    return {"type": "enabled", "budget_tokens": budget}
+def _litellm_api_base(base_url: str) -> str:
+    url = str(base_url or "").strip().rstrip("/")
+    for suffix in ("/chat/completions", "/chat", "/v1/messages", "/messages"):
+        if url.endswith(suffix):
+            return url[: -len(suffix)].rstrip("/")
+    return url
 
 
 def _build_tool_name_aliases(tools: list[dict[str, Any]]) -> dict[str, str]:

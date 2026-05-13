@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from pal.behavior.decorators import affordance
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.contracts import CapabilityCall
 from pal.shared import (
@@ -15,7 +16,11 @@ from pal.shared import (
     capability_node,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
-from pal.skill.builtin_skills import builtin_declared_skills
+from pal.skill.builtin_skills import (
+    PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID,
+    PAL_PLUGIN_DEVELOPMENT_SKILL_ID,
+    builtin_declared_skills,
+)
 from pal.skill.contracts import SkillDescriptor
 from pal.skill.service import SkillService
 from pal.skill.tools import (
@@ -53,6 +58,66 @@ if TYPE_CHECKING:
     kind="module",
     source="builtin:skill",
     target_kind="module",
+)
+@affordance(
+    affordance_id="declared.skill.pal_plugin_development",
+    title="Pal plugin development skill",
+    scenario_text=(
+        "The user wants to create, repair, review, or hot-refresh a Pal plugin, "
+        "plugin capability, build_plugin entrypoint, ModuleHandle surface, or plugin lifecycle."
+    ),
+    prompt_hint=(
+        "If this route is selected, inject skill `pal.plugin.development` before designing, "
+        "writing, repairing, or attaching Pal plugin code."
+    ),
+    activation_terms=(
+        "pal plugin",
+        "plugin development",
+        "create plugin",
+        "repair plugin",
+        "hot refresh plugin",
+        "build_plugin",
+        "ModuleHandle",
+        "capability extension",
+        "插件开发",
+        "写插件",
+        "修插件",
+    ),
+    skill_refs=(PAL_PLUGIN_DEVELOPMENT_SKILL_ID,),
+    priority=35,
+    activation_threshold=0.2,
+    metadata={"skill_trigger": True, "resident": False},
+)
+@affordance(
+    affordance_id="declared.skill.pal_llm_adapter_endpoint_development",
+    title="Pal LLM adapter endpoint development skill",
+    scenario_text=(
+        "The user wants to add, repair, test, or validate an LLM provider adapter, LiteLLM "
+        "serialization adapter, runtime-root adapter source, or matching llm_endpoints row."
+    ),
+    prompt_hint=(
+        "If this route is selected, inject skill `pal.llm.adapter_endpoint.development` before "
+        "creating adapter code or endpoint metadata. Do not refresh/load the running runtime unless the user explicitly asks."
+    ),
+    activation_terms=(
+        "llm adapter",
+        "llm endpoint",
+        "provider adapter",
+        "endpoint adapter",
+        "runtime adapter",
+        "litellm adapter",
+        "new model provider",
+        "add llm provider",
+        "llm/adapters",
+        "llm_endpoints",
+        "适配器",
+        "模型 endpoint",
+        "模型端点",
+    ),
+    skill_refs=(PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID,),
+    priority=35,
+    activation_threshold=0.2,
+    metadata={"skill_trigger": True, "resident": False, "requires_user_refresh": True},
 )
 @dataclass
 class SkillIntrospectionProvider:

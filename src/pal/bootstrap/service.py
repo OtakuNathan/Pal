@@ -23,8 +23,8 @@ from pal.llm import (
     LLMEndpointRepository,
     LLMRuntime,
     LiteLLMCredentialResolver,
-    LiteLLMEndpointInvoker,
     RuntimeSettingRepository,
+    build_default_endpoint_invoker,
     register_with_core as register_llm_with_core,
 )
 from pal.llm.secret_store import EncryptedFileSecretStore
@@ -102,7 +102,11 @@ def compose_runtime(
     llm_runtime = LLMRuntime(
         endpoint_resolver=EndpointResolver(repository=llm_repository),
         settings_repository=runtime_settings_repository,
-        endpoint_invoker=LiteLLMEndpointInvoker(credentials=credential_resolver, artifact_manager=artifact_service),
+        endpoint_invoker=build_default_endpoint_invoker(
+            credentials=credential_resolver,
+            artifact_manager=artifact_service,
+            runtime_root=registration.runtime.runtime_root,
+        ),
         config=config,
     )
     memory_service = MemoryService(

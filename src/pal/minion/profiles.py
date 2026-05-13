@@ -27,9 +27,15 @@ class MinionProfile:
     capability_policy: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def canonical_profile_id(self) -> str:
+        return canonical_profile_id(self.profile_group, self.profile_id)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "profile_id": self.profile_id,
+            "canonical_profile_id": self.canonical_profile_id,
+            "minion_profile": self.canonical_profile_id,
             "display_name": self.display_name,
             "profile_group": self.profile_group,
             "identity_fragment": self.identity_fragment,
@@ -95,26 +101,34 @@ class MinionProfileRegistry:
     builtin_profiles: tuple[MinionProfile, ...] = field(default_factory=lambda: BUILTIN_MINION_PROFILES)
 
     def list_profiles(self) -> list[MinionProfile]:
-        profiles: dict[str, MinionProfile] = {}
+        profiles: dict[tuple[str, str], MinionProfile] = {}
         for profile in self.builtin_profiles:
-            profiles[profile.profile_id] = profile
+            profiles[_profile_key(profile)] = profile
         for profile in self._runtime_profiles():
-            profiles[profile.profile_id] = profile
+            profiles[_profile_key(profile)] = profile
         for provider in self.profile_providers:
             declare = getattr(provider, "declared_minion_profiles", None)
             if not callable(declare):
                 continue
             for item in list(declare() or []):
                 profile = item if isinstance(item, MinionProfile) else MinionProfile.from_dict(dict(item or {}))
-                profiles[profile.profile_id] = profile
+                profiles[_profile_key(profile)] = profile
         return [profiles[key] for key in sorted(profiles)]
 
     def get(self, profile_id: str) -> MinionProfile | None:
         normalized = str(profile_id or "generic").strip() or "generic"
-        for profile in self.list_profiles():
-            if profile.profile_id == normalized:
+        profiles = self.list_profiles()
+        for profile in profiles:
+            if profile.canonical_profile_id == normalized:
                 return profile
-        return None
+        if "." in normalized:
+            scope, role = normalized.rsplit(".", 1)
+            key = (_profile_scope(scope), role.strip())
+            for profile in profiles:
+                if _profile_key(profile) == key:
+                    return profile
+        matches = [profile for profile in profiles if profile.profile_id == normalized]
+        return matches[0] if len(matches) == 1 else None
 
     def resolve_pack(self, pack: TaskContextPack, *, requested_profile: str = "") -> TaskContextPack:
         profile_id = str(requested_profile or pack.minion_profile or "generic").strip() or "generic"
@@ -166,7 +180,7 @@ class MinionProfileRegistry:
         return TaskContextPack.from_dict(
             {
                 **pack.to_dict(),
-                "minion_profile": profile.profile_id,
+                "minion_profile": profile.canonical_profile_id,
                 "resolved_profile": resolved_profile,
                 "allowed_capabilities": allowed_capabilities,
                 "allowed_skills": allowed_skills,
@@ -356,6 +370,20 @@ def _expand_capabilities(values: list[str]) -> list[str]:
 def _should_inherit_ambient_capabilities(capability_policy: dict[str, Any]) -> bool:
     mode = str(capability_policy.get("mode") or "").strip().lower()
     return mode in {"inherit", "inherit_filtered", "filtered_inherit"}
+
+
+def canonical_profile_id(profile_group: str, profile_id: str) -> str:
+    role = str(profile_id or "generic").strip() or "generic"
+    scope = _profile_scope(profile_group)
+    return role if scope == "general" else f"{scope}.{role}"
+
+
+def _profile_key(profile: MinionProfile) -> tuple[str, str]:
+    return (_profile_scope(profile.profile_group), str(profile.profile_id or "generic").strip() or "generic")
+
+
+def _profile_scope(profile_group: str) -> str:
+    return str(profile_group or "general").strip().replace("/", ".") or "general"
 
 
 def _dict(value: Any) -> dict[str, Any]:

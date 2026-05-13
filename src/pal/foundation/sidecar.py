@@ -124,8 +124,17 @@ def run_blocking(awaitable):
 
 
 async def open_sidecar_connection(endpoint: SidecarEndpoint):
+    if endpoint.port_path.exists():
+        port_text = endpoint.port_path.read_text(encoding="utf-8").strip()
+        return await asyncio.open_connection("127.0.0.1", int(port_text))
     if hasattr(asyncio, "open_unix_connection"):
-        return await asyncio.open_unix_connection(str(endpoint.socket_path))
+        try:
+            return await asyncio.open_unix_connection(str(endpoint.socket_path))
+        except (FileNotFoundError, ConnectionRefusedError, ConnectionError, OSError):
+            if not endpoint.port_path.exists():
+                raise
+            port_text = endpoint.port_path.read_text(encoding="utf-8").strip()
+            return await asyncio.open_connection("127.0.0.1", int(port_text))
     port_text = endpoint.port_path.read_text(encoding="utf-8").strip()
     return await asyncio.open_connection("127.0.0.1", int(port_text))
 
@@ -134,9 +143,18 @@ async def start_sidecar_server(endpoint: SidecarEndpoint, handler):
     endpoint.runtime_dir.mkdir(parents=True, exist_ok=True)
     if hasattr(asyncio, "start_unix_server"):
         path = endpoint.socket_path
-        await prepare_unix_socket(path)
-        server = await asyncio.start_unix_server(handler, path=str(path))
-        return server, {"transport": "unix", "socket_path": str(path)}
+        try:
+            await prepare_unix_socket(path)
+            server = await asyncio.start_unix_server(handler, path=str(path))
+            return server, {"transport": "unix", "socket_path": str(path)}
+        except (PermissionError, OSError):
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+            return await _start_tcp_sidecar_server(endpoint, handler)
+    return await _start_tcp_sidecar_server(endpoint, handler)
+
+
+async def _start_tcp_sidecar_server(endpoint: SidecarEndpoint, handler):
     port = choose_loopback_port()
     server = await asyncio.start_server(handler, host="127.0.0.1", port=port)
     endpoint.port_path.write_text(str(port), encoding="utf-8")
@@ -149,11 +167,10 @@ async def cleanup_sidecar_endpoint(endpoint: SidecarEndpoint) -> None:
         if path.exists():
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(path)
-    else:
-        path = endpoint.port_path
-        if path.exists():
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(path)
+    path = endpoint.port_path
+    if path.exists():
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
 
 
 async def prepare_unix_socket(path: Path) -> None:

@@ -16,11 +16,15 @@ from pal.shared import EventKind
 
 _THINK_ALIASES = {
     "off": "off",
+    "minimal": "minimal",
     "low": "low",
     "balanced": "balanced",
     "deep": "deep",
+    "xhigh": "xhigh",
     "medium": "balanced",
     "high": "deep",
+    "max": "xhigh",
+    "maximum": "xhigh",
 }
 
 
@@ -187,7 +191,7 @@ class ControlPlane(ControlPlanePort):
                     target_scope="control",
                     route=result.route,
                     args={"reason": "invalid think level"},
-                    notes="Valid think levels: off, low, balanced, deep.",
+                    notes="Valid think levels: off, minimal, low, balanced, deep, xhigh.",
                 )
                 return _with_interaction_context(action, result)
             action = ControlAction(
@@ -369,7 +373,7 @@ class ControlPlane(ControlPlanePort):
                 name="think",
                 handler=self._handle_think,
                 description="Show or update the think level for future turns.",
-                usage="/think [off|low|balanced|deep]",
+                usage="/think [off|minimal|low|balanced|deep|xhigh]",
                 show_in_panel=True,
                 panel_group="builtin",
                 panel_button=True,
@@ -491,7 +495,7 @@ class ControlPlane(ControlPlanePort):
                     "command_name": invocation.command_name,
                     "reason": "invalid think level",
                 },
-                notes="Valid think levels: off, low, balanced, deep.",
+                notes="Valid think levels: off, minimal, low, balanced, deep, xhigh.",
             )
         return ControlAction(
             action_kind="set_think",

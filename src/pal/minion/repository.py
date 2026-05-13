@@ -86,7 +86,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                     goal TEXT NOT NULL DEFAULT '',
                     source_summary TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'draft',
-                    minion_profile TEXT NOT NULL DEFAULT 'planner',
+                    minion_profile TEXT NOT NULL DEFAULT 'software_engineering.planner',
                     task_id TEXT NOT NULL DEFAULT '',
                     proposed_work_order_id TEXT NOT NULL DEFAULT '',
                     payload_json TEXT NOT NULL DEFAULT '{}',
@@ -327,7 +327,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         source_summary = str(payload.get("source_summary") or payload.get("conversation_summary") or "").strip()
         task_id = str(payload.get("task_id") or f"task_{_safe_id(title or goal)}").strip()
         proposed_work_order_id = str(payload.get("proposed_work_order_id") or payload.get("work_order_id") or f"wo_{_safe_id(title or goal)}").strip()
-        minion_profile = str(payload.get("minion_profile") or "planner").strip() or "planner"
+        minion_profile = str(payload.get("minion_profile") or "software_engineering.planner").strip() or "software_engineering.planner"
         acceptance = _coerce_text_list(payload.get("acceptance_criteria"))
         milestones = _coerce_milestones(payload.get("milestones"), acceptance, goal)
         workspace = _loads_or_dict(payload.get("workspace"))
@@ -368,7 +368,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             "work_order_candidate": candidate,
             "planner_review": {
                 "draft_id": draft_id,
-                "minion_profile": "planner",
+                "minion_profile": "software_engineering.planner",
                 "instruction": (
                     "Review this work-order draft. Tighten module boundaries, milestones, acceptance criteria, "
                     "and risks. Do not invent new scope from chat history; use only this draft and explicit facts."

@@ -4,6 +4,7 @@ from pal.skill.contracts import SkillApplicabilitySTAR, SkillDescriptor
 
 
 PAL_PLUGIN_DEVELOPMENT_SKILL_ID = "pal.plugin.development"
+PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID = "pal.llm.adapter_endpoint.development"
 
 
 PAL_PLUGIN_DEVELOPMENT_MANUAL = """# Pal Plugin Development
@@ -194,6 +195,104 @@ Before calling the plugin done:
 """
 
 
+PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_MANUAL = """# Pal LLM Adapter and Endpoint Development
+
+Use this skill when Pal needs to add, review, repair, or explain an LLM provider adapter and its matching `llm_endpoints` row.
+
+## Boundary
+
+LLM provider adapters belong to the `llm` subsystem, not the plugin system. Do not create a Pal plugin for LLM transport behavior. Do not register adapters through `PluginHost`, `PluginBuildContext.services`, capability providers, prompt fragments, or global side effects outside `pal.llm`.
+
+The production refresh/load step is user-controlled. You may prepare files, propose endpoint rows, and run isolated tests, but you must not execute `/refresh_llm_endpoints`, call `refresh_llm_endpoints`, set the active endpoint, or otherwise load the adapter into the running Pal runtime without explicit user direction. Final handoff must tell the user that refresh is required and list exactly what to refresh.
+
+## Runtime Adapter Location
+
+Put runtime-root adapter source under:
+
+```text
+<runtime_root>/llm/adapters/
+```
+
+Supported layouts:
+
+```text
+<runtime_root>/llm/adapters/my_provider.py
+<runtime_root>/llm/adapters/my_provider/adapter.py
+```
+
+Each adapter module should define one or more `LLMProviderAdapter` subclasses. Explicit exports are allowed:
+
+```python
+ADAPTER = MyProviderAdapter
+ADAPTERS = (MyProviderAdapter, OtherProviderAdapter)
+```
+
+## Adapter Contract
+
+Keep adapter code small and deterministic. It should translate Pal's canonical request and endpoint metadata into LiteLLM kwargs, not perform network calls, mutate databases, read secrets, or import PalCore internals.
+
+Minimal adapter:
+
+```python
+from pal.llm import CanonicalLLMRequest, LLMProviderAdapter, LiteLLMCompletionDraft
+
+
+class MyProviderAdapter(LLMProviderAdapter):
+    provider_names = frozenset({"my_provider"})
+    adapter_names = frozenset({"my_provider"})
+    litellm_provider = "openai"
+    model_provider_aliases = frozenset({"openai"})
+
+    def apply_request(self, request: CanonicalLLMRequest, draft: LiteLLMCompletionDraft) -> None:
+        if request.metadata.get("think_level") == "off":
+            draft.extra_body["thinking"] = {"type": "disabled"}
+```
+
+Use `provider_names` for endpoint `provider` matching. Use `adapter_names` when an endpoint sets `capabilities_blob.adapter` or `capabilities_blob.llm_adapter`. Use `litellm_provider` and `model_provider_aliases` to normalize `model_id` into the provider prefix LiteLLM expects.
+
+## Endpoint Row
+
+Create or update endpoint metadata only after checking the existing endpoint list. Required fields include:
+
+- `endpoint_id`: stable unique ID, such as `my_provider_gpt_5`.
+- `provider`: must match the adapter `provider_names` unless `capabilities_blob.adapter` selects the adapter.
+- `model_id`: model name or LiteLLM-prefixed model, such as `my-model` or `openai/my-model`.
+- `api_mode`: normally `openai_chat`; use `anthropic_messages` only for Anthropic-shaped endpoints.
+- `base_url`: provider base URL, without credentials.
+- `auth_kind`: `api_key_ref`, `oauth`, or `local_provider_auth`.
+- `credential_ref`: secret reference such as `my_provider:api-key`; never store the key in the adapter.
+- capability flags: `supports_tools`, `supports_streaming`, `supports_reasoning`, `supports_vision`, and optional `capabilities_blob`.
+
+Prefer preparing a clear endpoint patch or SQL preview when no dedicated endpoint-management capability exists. Mutating the production database or secrets requires explicit user approval.
+
+## Verification Workflow
+
+Before asking the user to refresh:
+
+1. Inspect the current `pal.llm.adapters.LLMProviderAdapter` contract and existing endpoint shape.
+2. Write adapter source in the runtime-root adapter directory.
+3. Compile the adapter file with `python -m py_compile <adapter_file>`.
+4. Load it only in an isolated registry or subprocess, not the live Pal runtime.
+5. Build a representative `LiteLLMEndpointInvoker(...)._build_completion_kwargs(...)` payload with a fake or test endpoint.
+6. Assert model prefix, `api_base`, auth behavior, tools, `tool_choice`, `temperature`, max tokens, reasoning/thinking fields, and vendor-specific `extra_body`.
+7. Confirm the adapter does not import plugin, channel, control, service, or PalCore internals.
+8. If endpoint metadata changes are needed, verify them against a temporary database or produce an exact patch for user approval.
+9. Do not switch the active endpoint during development.
+
+## Handoff
+
+When the adapter and endpoint are ready, report:
+
+- adapter file path and endpoint ID
+- tests or smoke checks run
+- endpoint/database/secret changes made or still pending
+- any load errors found in isolated checks
+- a clear statement: "I did not refresh the running Pal runtime. Please run `/refresh_llm_endpoints` when you want to load this adapter."
+
+If the user explicitly asks you to refresh, then use the normal LLM refresh path and report `provider_adapter_load_errors` if present.
+"""
+
+
 def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescriptor, ...]:
     return (
         SkillDescriptor(
@@ -237,5 +336,47 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
             source_format="internal_skill",
             source_refs=("pal.skill.builtin_skills",),
             metadata={"internal": True},
+        ),
+        SkillDescriptor(
+            skill_id=PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID,
+            module_id=module_id,
+            title="Pal LLM Adapter and Endpoint Development",
+            summary="Develop and validate runtime-root LLM provider adapters and matching endpoint rows safely.",
+            manual_text=PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_MANUAL,
+            activation_terms=(
+                "llm adapter",
+                "llm endpoint",
+                "provider adapter",
+                "endpoint adapter",
+                "runtime adapter",
+                "litellm adapter",
+                "new model provider",
+                "add llm provider",
+                "pal.llm_provider_adapters",
+                "llm/adapters",
+                "refresh_llm_endpoints",
+            ),
+            capability_refs=(
+                "intro_module_llm_list",
+                "intro_endpoint_llm_show",
+                "op_module_llm_set_active_endpoint",
+            ),
+            applicability_star=SkillApplicabilitySTAR(
+                situation="Pal needs to integrate a new LLM provider or repair endpoint-specific request serialization.",
+                task="Create or update a runtime-root LLM adapter and matching endpoint metadata without destabilizing PalCore.",
+                action="Use the adapter contract, endpoint checklist, isolated tests, and user-controlled refresh handoff.",
+                result="The adapter and endpoint are ready to load, with tests completed and production refresh left to the user.",
+            ),
+            use_when=(
+                "Use when the user asks Pal to add an LLM adapter, add an LLM endpoint, fix provider-specific LiteLLM "
+                "serialization, or prepare a new model provider integration."
+            ),
+            avoid_when=(
+                "Avoid for Pal plugins, channel endpoints such as Telegram/socket, or ordinary endpoint switching that "
+                "does not require adapter code."
+            ),
+            source_format="internal_skill",
+            source_refs=("pal.skill.builtin_skills", "docs/pal_llm_contract.md"),
+            metadata={"internal": True, "requires_user_refresh": True},
         ),
     )

@@ -183,6 +183,14 @@ class WizardCollectedData:
     active_endpoint_id: str
 
 
+@dataclass(frozen=True)
+class WizardLLMPreflightResult:
+    status: str
+    detail: str
+    text_ok: bool = False
+    tool_ok: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Prompt steps
 # ---------------------------------------------------------------------------
@@ -242,9 +250,9 @@ def _prompt_one_endpoint(index: int) -> WizardLLMEndpoint | None:
     model_id = ask("  Model ID", label)
 
     if api_mode == "openai_chat":
-        default_url = "https://api.openai.com/v1/chat/completions"
+        default_url = "https://api.openai.com/v1"
     else:
-        default_url = "https://api.anthropic.com/v1/messages"
+        default_url = "https://api.anthropic.com/v1"
     base_url = ask("  Base URL", default_url)
 
     api_key = ask_password("  API key (hidden, blank to skip)")
@@ -291,7 +299,7 @@ def _prompt_one_endpoint(index: int) -> WizardLLMEndpoint | None:
         supports_tools = ask_yes_no("  Supports tool calling", True)
         supports_streaming = ask_yes_no("  Supports streaming", True)
 
-    return WizardLLMEndpoint(
+    endpoint = WizardLLMEndpoint(
         endpoint_id=label,
         model_id=model_id,
         api_mode=api_mode,
@@ -305,6 +313,147 @@ def _prompt_one_endpoint(index: int) -> WizardLLMEndpoint | None:
         supports_vision=supports_vision,
         priority=0,
     )
+
+    if ask_yes_no("  Run live LLM preflight now", True):
+        result = run_llm_endpoint_preflight(endpoint)
+        _print_llm_preflight_result(result)
+        if result.status == "error":
+            if not ask_yes_no("  Keep this endpoint anyway", False):
+                return None
+        elif result.status == "warn":
+            if not ask_yes_no("  Keep this endpoint with warnings", True):
+                return None
+
+    return endpoint
+
+
+def _print_llm_preflight_result(result: WizardLLMPreflightResult) -> None:
+    marker = {"ok": "OK", "warn": "WARN", "error": "ERR"}.get(result.status, result.status.upper())
+    print(f"  [{marker}] LLM preflight: {result.detail}")
+
+
+def run_llm_endpoint_preflight(
+    endpoint: WizardLLMEndpoint,
+    *,
+    timeout_seconds: int = 20,
+    invoker: object | None = None,
+) -> WizardLLMPreflightResult:
+    try:
+        from pal.llm import CanonicalLLMRequest, LiteLLMCredentialResolver, LiteLLMEndpointInvoker
+        from pal.llm.models import LLMEndpointModel
+        from pal.llm.secret_store import InMemorySecretStore, SecretRef
+    except Exception as exc:
+        return WizardLLMPreflightResult(status="error", detail=f"could not load LLM runtime: {exc}")
+
+    secret_store = InMemorySecretStore()
+    credential_ref = f"{endpoint.endpoint_id}:api-key"
+    if endpoint.api_key:
+        secret_store.set_secret(SecretRef(service=endpoint.endpoint_id, account="api-key"), endpoint.api_key)
+    model = LLMEndpointModel(
+        endpoint_id=endpoint.endpoint_id,
+        provider=_infer_endpoint_provider(endpoint),
+        model_id=endpoint.model_id,
+        display_name=endpoint.endpoint_id,
+        api_mode=endpoint.api_mode,
+        base_url=endpoint.base_url,
+        credential_ref=credential_ref,
+        context_window=endpoint.context_window,
+        max_output_tokens=endpoint.max_output_tokens,
+        supports_reasoning=endpoint.supports_reasoning,
+        supports_tools=endpoint.supports_tools,
+        supports_streaming=endpoint.supports_streaming,
+        supports_vision=endpoint.supports_vision,
+        input_modalities_blob=["text", "image"] if endpoint.supports_vision else ["text"],
+        output_modalities_blob=["text"],
+        priority=endpoint.priority,
+        enabled=True,
+        capabilities_blob={},
+        notes="Setup preflight endpoint.",
+    )
+    active_invoker = invoker or LiteLLMEndpointInvoker(credentials=LiteLLMCredentialResolver(secret_store=secret_store))
+    metadata = {"timeout_seconds": timeout_seconds}
+
+    try:
+        text_outcome = active_invoker.invoke(
+            model,
+            CanonicalLLMRequest(
+                messages=[
+                    {"role": "system", "content": "You validate Pal LLM endpoint setup."},
+                    {"role": "user", "content": "Reply with exactly PAL_PREFLIGHT_OK."},
+                ],
+                max_output_tokens=16,
+                temperature=0,
+                metadata=metadata,
+            ),
+        )
+    except Exception as exc:
+        return WizardLLMPreflightResult(status="error", detail=f"text call failed: {exc}")
+
+    text = str(getattr(text_outcome, "text", "") or "").strip()
+    if not text and not getattr(text_outcome, "tool_calls", None):
+        return WizardLLMPreflightResult(status="error", detail="text call returned no content")
+
+    if not endpoint.supports_tools:
+        return WizardLLMPreflightResult(
+            status="warn",
+            detail="text call succeeded, but this endpoint is configured without tool support",
+            text_ok=True,
+        )
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "pal_preflight_probe",
+                "description": "Validate that this endpoint can emit a tool call.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "required": ["ok"],
+                },
+            },
+        }
+    ]
+    try:
+        tool_outcome = active_invoker.invoke(
+            model,
+            CanonicalLLMRequest(
+                messages=[
+                    {"role": "system", "content": "You validate Pal LLM tool calling setup."},
+                    {"role": "user", "content": "Call pal_preflight_probe with ok=true. Do not answer in prose."},
+                ],
+                max_output_tokens=64,
+                temperature=0,
+                tools=tools,
+                metadata=metadata,
+            ),
+        )
+    except Exception as exc:
+        return WizardLLMPreflightResult(status="warn", detail=f"text call succeeded, tool probe failed: {exc}", text_ok=True)
+
+    tool_ok = any(str(call.name) == "pal_preflight_probe" for call in list(getattr(tool_outcome, "tool_calls", None) or []))
+    if not tool_ok:
+        return WizardLLMPreflightResult(
+            status="warn",
+            detail="text call succeeded, but tool probe returned no tool call",
+            text_ok=True,
+        )
+    return WizardLLMPreflightResult(status="ok", detail="text and tool calls succeeded", text_ok=True, tool_ok=True)
+
+
+def _infer_endpoint_provider(endpoint: WizardLLMEndpoint) -> str:
+    if "anthropic" in endpoint.api_mode:
+        return "anthropic"
+    if "openai" in endpoint.api_mode or endpoint.api_mode == "openai_chat":
+        base_url = endpoint.base_url.lower()
+        if "deepseek" in base_url:
+            return "deepseek"
+        if "zhipu" in base_url or "z.ai" in base_url or "bigmodel.cn" in base_url:
+            return "zhipu"
+        if "moonshot" in base_url or "kimi" in base_url:
+            return "moonshot"
+        return "openai"
+    return endpoint.endpoint_id
 
 
 def prompt_llm_endpoints() -> tuple[list[WizardLLMEndpoint], str]:
