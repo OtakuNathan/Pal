@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -23,6 +24,7 @@ from pal.wizard.prompts import (
     WizardCollectedData,
     WizardIdentity,
     WizardLLMEndpoint,
+    build_codex_wizard_endpoints,
     multiline_input,
     run_llm_endpoint_preflight,
 )
@@ -257,6 +259,42 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertEqual(endpoints[0].endpoint_id, "test-claude")
         self.assertEqual(endpoints[1].endpoint_id, "deepseek-fallback")
 
+    def test_seed_from_wizard_writes_codex_app_server_endpoint(self) -> None:
+        from pal.llm import LLMEndpointRepository
+
+        collected = _make_collected()
+        collected.endpoints = build_codex_wizard_endpoints(("gpt-5.5",))
+        collected.active_endpoint_id = "codex_gpt_5_5"
+        self.wizard.seed_from_wizard(self.registration, collected)
+
+        endpoint = LLMEndpointRepository().get_primary_enabled()
+        self.assertIsNotNone(endpoint)
+        self.assertEqual(endpoint.endpoint_id, "codex_gpt_5_5")
+        self.assertEqual(endpoint.provider, "codex_app_server")
+        self.assertEqual(endpoint.model_id, "gpt-5.5")
+        self.assertEqual(endpoint.api_mode, "openai_chat")
+        self.assertEqual(endpoint.base_url, "codex://app-server")
+        self.assertEqual(endpoint.auth_kind, "local_provider_auth")
+        self.assertEqual(endpoint.credential_ref, "")
+        self.assertTrue(endpoint.supports_reasoning)
+        self.assertTrue(endpoint.supports_tools)
+        self.assertTrue(endpoint.supports_streaming)
+        self.assertTrue(endpoint.supports_vision)
+        self.assertTrue(endpoint.capabilities_blob["official_codex_app_server"])
+
+
+class TestCodexWizardEndpoints(unittest.TestCase):
+    def test_build_codex_wizard_endpoints_sanitizes_ids(self) -> None:
+        endpoints = build_codex_wizard_endpoints(("gpt-5.5", "gpt-5.3-codex-spark"))
+
+        self.assertEqual([ep.endpoint_id for ep in endpoints], ["codex_gpt_5_5", "codex_gpt_5_3_codex_spark"])
+        self.assertEqual([ep.priority for ep in endpoints], [0, 1])
+        self.assertEqual(endpoints[0].provider, "codex_app_server")
+        self.assertEqual(endpoints[0].auth_kind, "local_provider_auth")
+        self.assertEqual(endpoints[0].credential_ref, "")
+        self.assertEqual(endpoints[0].base_url, "codex://app-server")
+        self.assertTrue(endpoints[0].capabilities_blob["codex_app_server"])
+
 
 class TestLLMPreflight(unittest.TestCase):
     def test_preflight_passes_text_and_tool_probe(self) -> None:
@@ -306,6 +344,26 @@ class TestLLMPreflight(unittest.TestCase):
         self.assertTrue(result.text_ok)
         self.assertFalse(result.tool_ok)
 
+    def test_preflight_preserves_codex_endpoint_metadata(self) -> None:
+        from pal.llm import CanonicalLLMOutcome
+
+        class FakeInvoker:
+            def __init__(self) -> None:
+                self.endpoints = []
+
+            def invoke(self, endpoint, request):
+                self.endpoints.append(endpoint)
+                return CanonicalLLMOutcome(text="PAL_PREFLIGHT_OK")
+
+        invoker = FakeInvoker()
+        result = run_llm_endpoint_preflight(build_codex_wizard_endpoints(("gpt-5.5",))[0], invoker=invoker)
+
+        self.assertEqual(result.status, "warn")
+        self.assertEqual(invoker.endpoints[0].provider, "codex_app_server")
+        self.assertEqual(invoker.endpoints[0].auth_kind, "local_provider_auth")
+        self.assertEqual(invoker.endpoints[0].credential_ref, "")
+        self.assertTrue(invoker.endpoints[0].capabilities_blob["official_codex_app_server"])
+
 
 class TestServiceGeneration(unittest.TestCase):
     def test_resolve_pal_command_prefers_invoked_console_script(self) -> None:
@@ -333,6 +391,28 @@ class TestServiceGeneration(unittest.TestCase):
         self.assertIn("Restart=on-failure", content)
         self.assertIn("StandardOutput=append:/home/test/.pal/pal.log", content)
         self.assertIn("WantedBy=default.target", content)
+
+    def test_generate_service_content_includes_proxy_environment(self) -> None:
+        from pal.wizard.cli import _generate_service_content
+
+        content = _generate_service_content(
+            pal_bin="/usr/local/bin/pal",
+            runtime_root=Path("/home/test/.pal"),
+            environment={"PYTHONUNBUFFERED": "1", "https_proxy": "http://127.0.0.1:8118"},
+        )
+
+        self.assertIn('Environment="PYTHONUNBUFFERED=1"', content)
+        self.assertIn('Environment="https_proxy=http://127.0.0.1:8118"', content)
+
+    def test_runtime_service_environment_carries_proxy_vars(self) -> None:
+        from pal.wizard.cli import _runtime_service_environment
+
+        with patch.dict(os.environ, {"https_proxy": "http://127.0.0.1:8118", "NO_PROXY": "localhost"}, clear=True):
+            environment = _runtime_service_environment()
+
+        self.assertEqual(environment["PYTHONUNBUFFERED"], "1")
+        self.assertEqual(environment["https_proxy"], "http://127.0.0.1:8118")
+        self.assertEqual(environment["NO_PROXY"], "localhost")
 
     def test_pick_service_name_no_conflict(self) -> None:
         from pal.wizard import cli as cli_mod
@@ -400,6 +480,21 @@ class TestServiceGeneration(unittest.TestCase):
         self.assertEqual(payload["EnvironmentVariables"], {"PYTHONUNBUFFERED": "1"})
         self.assertEqual(payload["StandardOutPath"], "/Users/test/.pal/pal.log")
         self.assertEqual(payload["StandardErrorPath"], "/Users/test/.pal/pal.log")
+
+    def test_generate_launchd_plist_includes_proxy_environment(self) -> None:
+        from pal.wizard.cli import _generate_launchd_plist
+
+        payload = _generate_launchd_plist(
+            label="com.pal.test",
+            pal_command=["/usr/local/bin/pal"],
+            runtime_root=Path("/Users/test/.pal"),
+            environment={"PYTHONUNBUFFERED": "1", "HTTPS_PROXY": "http://127.0.0.1:8118"},
+        )
+
+        self.assertEqual(
+            payload["EnvironmentVariables"],
+            {"PYTHONUNBUFFERED": "1", "HTTPS_PROXY": "http://127.0.0.1:8118"},
+        )
 
     def test_pick_launchd_label_no_conflict(self) -> None:
         from pal.wizard import cli as cli_mod
@@ -536,6 +631,25 @@ class TestDependencyDoctor(unittest.TestCase):
 
         self.assertEqual(check.status, "warn")
         self.assertFalse(check.required)
+
+    def test_codex_cli_check_is_optional(self) -> None:
+        from pal.wizard import dependencies as dep_mod
+
+        with patch.object(dep_mod.shutil, "which", return_value=None):
+            check = dep_mod._check_codex_cli()
+
+        self.assertEqual(check.status, "warn")
+        self.assertFalse(check.required)
+
+    def test_jieba_package_check_is_required(self) -> None:
+        from pal.wizard import dependencies as dep_mod
+
+        with patch.object(dep_mod.importlib.util, "find_spec", return_value=None):
+            check = dep_mod._check_python_package("jieba", "jieba", "Chinese FTS tokenization")
+
+        self.assertEqual(check.check_id, "python.package.jieba")
+        self.assertEqual(check.status, "missing")
+        self.assertTrue(check.required)
 
 
 if __name__ == "__main__":

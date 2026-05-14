@@ -177,6 +177,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     content=(
                         "These are active current-task route candidates, not durable facts or mandatory commands. "
                         "Evaluate each item against the user's current request and apply only matching, specific guidance. "
+                        "Do not inject a skill merely because a skill_ref is listed; use direct capabilities without skill injection when they fully satisfy the request. "
                         "If items conflict, prefer the user's explicit instruction, live/source truth, safety, approval, "
                         "capability availability, and narrower domain-specific routes over broad delegation hints.\n"
                         + "\n".join(guidance_lines)

@@ -63,6 +63,11 @@ async def send_message(socket_path: Path, text: str) -> SocketClientTranscript:
                 print(f"\n[tool] {tool_name}", file=sys.stderr, flush=True)
                 continue
             if payload_type == "llm_done":
+                finish_reason = str(payload.get("finish_reason") or "")
+                if finish_reason and finish_reason != "tool_calls":
+                    transcript.finish_reason = finish_reason
+                    print(flush=True)
+                    return transcript
                 continue
             if payload_type == "llm_error":
                 chunk = str(payload.get("error_text") or payload.get("text") or "unknown error")

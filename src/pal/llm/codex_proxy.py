@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from collections.abc import Iterable
@@ -51,6 +51,25 @@ class CodexCompletion:
     model: str
     text: str = ""
     tool_call: CodexToolCall | None = None
+
+
+@dataclass(frozen=True)
+class _PendingCodexToolRequest:
+    request_id: Any
+    thread_id: str | None
+    turn_id: str | None
+    call_id: str
+    tool_name: str
+    arguments: Any
+
+
+@dataclass
+class _ActiveCodexTurn:
+    model: str
+    thread_id: str
+    turn_id: str
+    text_parts: list[str] = field(default_factory=list)
+    agent_message_completed: bool = False
 
 
 def _chat_completion_id() -> str:
@@ -105,6 +124,15 @@ def _codex_effort_from_payload(payload: dict[str, Any]) -> str | None:
     if text in _CODEX_REASONING_EFFORTS:
         return text
     return None
+
+
+def _codex_app_server_config_effort(effort: str | None) -> str:
+    normalized = str(effort or "").strip().lower()
+    if normalized in {"high", "xhigh"}:
+        return normalized
+    if normalized in {"none", "minimal", "low"}:
+        return "low"
+    return "medium"
 
 
 def _turn_start_params(
@@ -213,6 +241,30 @@ def _content_text_and_images(content: Any, *, artifact_manager: Any = None) -> t
 
 def _tool_result_name(message: dict[str, Any]) -> str:
     return str(message.get("name") or message.get("tool_call_id") or "tool")
+
+
+def _tool_result_content_for_call(messages: list[dict[str, Any]], call_id: str) -> str | None:
+    expected = str(call_id or "").strip()
+    if not expected:
+        return None
+    normalized_expected = expected.casefold()
+    for message in reversed(list(messages or [])):
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "").strip() != "tool":
+            continue
+        actual = str(message.get("tool_call_id") or "").strip()
+        if actual != expected and actual.casefold() != normalized_expected:
+            continue
+        return _message_content_text(message.get("content"))
+    return None
+
+
+def _dynamic_tool_response_from_text(text: str, *, success: bool = True) -> dict[str, Any]:
+    return {
+        "contentItems": [{"type": "inputText", "text": str(text or "")}],
+        "success": bool(success),
+    }
 
 
 def _messages_to_codex_turn(messages: list[dict[str, Any]]) -> tuple[str, str]:
@@ -412,13 +464,29 @@ def _codex_env(codex_bin: str) -> dict[str, str]:
 @dataclass
 class CodexAppServerBridge:
     codex_bin: str = ""
-    timeout_seconds: int = 120
+    timeout_seconds: int = 45
     cwd: str | None = None
+    default_effort: str = "medium"
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    _proc: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
+    _seq: int = field(default=0, init=False, repr=False)
+    _initialized: bool = field(default=False, init=False, repr=False)
+    _process_effort: str | None = field(default=None, init=False, repr=False)
+    _active_turn: _ActiveCodexTurn | None = field(default=None, init=False, repr=False)
+    _pending_tool_request: _PendingCodexToolRequest | None = field(default=None, init=False, repr=False)
 
-    def _start_process(self) -> subprocess.Popen[str]:
+    def _start_process(self, *, effort: str | None = None) -> subprocess.Popen[str]:
         codex_bin = self.codex_bin or _default_codex_command()
+        command = [
+            codex_bin,
+            "app-server",
+            "-c",
+            f'model_reasoning_effort="{_codex_app_server_config_effort(effort or self.default_effort)}"',
+            "--listen",
+            "stdio://",
+        ]
         proc = subprocess.Popen(
-            [codex_bin, "app-server", "--listen", "stdio://"],
+            command,
             cwd=self.cwd or None,
             env=_codex_env(codex_bin),
             stdin=subprocess.PIPE,
@@ -432,7 +500,8 @@ class CodexAppServerBridge:
 
     def invoke(self, payload: dict[str, Any]) -> CodexCompletion:
         model = _strip_openai_prefix(str(payload.get("model") or ""))
-        developer_instructions, input_items = _messages_to_codex_input(list(payload.get("messages") or []))
+        messages = list(payload.get("messages") or [])
+        developer_instructions, input_items = _messages_to_codex_input(messages)
         dynamic_tools = _openai_tools_to_dynamic_tools(payload.get("tools"))
         effort = _codex_effort_from_payload(payload)
         return self.invoke_turn(
@@ -441,6 +510,7 @@ class CodexAppServerBridge:
             input_items=input_items,
             dynamic_tools=dynamic_tools,
             effort=effort,
+            messages=messages,
         )
 
     def invoke_turn(
@@ -452,20 +522,34 @@ class CodexAppServerBridge:
         effort: str | None,
         input_text: str = "",
         input_items: list[dict[str, Any]] | None = None,
+        messages: list[dict[str, Any]] | None = None,
     ) -> CodexCompletion:
-        proc = self._start_process()
-        try:
-            return self._invoke_process(
-                proc,
-                model=model,
-                developer_instructions=developer_instructions,
-                input_text=input_text,
-                input_items=input_items,
-                dynamic_tools=dynamic_tools,
-                effort=effort,
-            )
-        finally:
-            self._stop_process(proc)
+        with self._lock:
+            proc = self._ensure_process(effort=effort)
+            try:
+                if self._pending_tool_request is not None:
+                    if not self._resume_pending_tool_request(proc, messages or []):
+                        pending = self._pending_tool_request
+                        raise CodexProxyError(
+                            "Codex app-server is waiting for a Pal tool result "
+                            f"for call_id={pending.call_id!r}"
+                        )
+                    if self._active_turn is None:
+                        raise CodexProxyError("Codex app-server lost active turn after tool response")
+                    deadline = time.time() + max(1, int(self.timeout_seconds))
+                    return self._continue_process_turn(proc, self._active_turn, deadline=deadline)
+                return self._invoke_process(
+                    proc,
+                    model=model,
+                    developer_instructions=developer_instructions,
+                    input_text=input_text,
+                    input_items=input_items,
+                    dynamic_tools=dynamic_tools,
+                    effort=effort,
+                )
+            except Exception:
+                self._reset_process()
+                raise
 
     def iter_stream(self, payload: dict[str, Any]) -> Iterable[dict[str, Any]]:
         model = _strip_openai_prefix(str(payload.get("model") or ""))
@@ -490,19 +574,108 @@ class CodexAppServerBridge:
         input_text: str = "",
         input_items: list[dict[str, Any]] | None = None,
     ) -> Iterable[dict[str, Any]]:
-        proc = self._start_process()
-        try:
-            yield from self._iter_process_stream(
-                proc,
-                model=model,
-                developer_instructions=developer_instructions,
-                input_text=input_text,
-                input_items=input_items,
-                dynamic_tools=dynamic_tools,
-                effort=effort,
-            )
-        finally:
+        with self._lock:
+            proc = self._ensure_process(effort=effort)
+            try:
+                yield from self._iter_process_stream(
+                    proc,
+                    model=model,
+                    developer_instructions=developer_instructions,
+                    input_text=input_text,
+                    input_items=input_items,
+                    dynamic_tools=dynamic_tools,
+                    effort=effort,
+                )
+            except GeneratorExit:
+                self._reset_process()
+                raise
+            except Exception:
+                self._reset_process()
+                raise
+
+    def close(self) -> None:
+        with self._lock:
+            self._reset_process()
+
+    def _ensure_process(self, *, effort: str | None = None) -> subprocess.Popen[str]:
+        process_effort = _codex_app_server_config_effort(effort or self.default_effort)
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            if self._process_effort != process_effort:
+                self._reset_process()
+            else:
+                if not self._initialized:
+                    self._initialize_process(proc)
+                    self._initialized = True
+                return proc
+
+        self._reset_process()
+        proc = self._start_process(effort=process_effort)
+        self._proc = proc
+        self._seq = 0
+        self._initialized = False
+        self._process_effort = process_effort
+        self._initialize_process(proc)
+        self._initialized = True
+        return proc
+
+    def _reset_process(self) -> None:
+        proc = self._proc
+        self._proc = None
+        self._seq = 0
+        self._initialized = False
+        self._process_effort = None
+        self._active_turn = None
+        self._pending_tool_request = None
+        if proc is not None:
             self._stop_process(proc)
+
+    def _send_request(self, proc: subprocess.Popen[str], method: str, params: dict[str, Any] | None = None) -> int:
+        self._seq += 1
+        request_id = self._seq
+        message: dict[str, Any] = {"method": method, "id": request_id}
+        if params is not None:
+            message["params"] = params
+        self._write_message(proc, message)
+        _debug_log(f"codex send id={request_id} method={method}")
+        return request_id
+
+    def _write_notification(self, proc: subprocess.Popen[str], method: str, params: dict[str, Any] | None = None) -> None:
+        message: dict[str, Any] = {"method": method}
+        if params is not None:
+            message["params"] = params
+        self._write_message(proc, message)
+        _debug_log(f"codex send notification method={method}")
+
+    @staticmethod
+    def _write_message(proc: subprocess.Popen[str], message: dict[str, Any]) -> None:
+        if proc.stdin is None:
+            raise CodexProxyError("Codex app-server stdin is not available")
+        try:
+            proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError) as exc:
+            raise CodexProxyError("failed writing to Codex app-server") from exc
+
+    def _initialize_process(self, proc: subprocess.Popen[str]) -> None:
+        deadline = time.time() + max(1, int(self.timeout_seconds))
+        initialize_id = self._send_request(
+            proc,
+            "initialize",
+            {
+                "clientInfo": {"name": "pal-codex-proxy", "title": "Pal Codex Proxy", "version": "0.1.0"},
+                "capabilities": {"experimentalApi": True},
+            },
+        )
+        self._write_notification(proc, "initialized", {})
+        while time.time() < deadline:
+            item = self._read_message(proc, deadline=deadline)
+            _debug_log(f"codex init recv id={item.get('id')} method={item.get('method')}")
+            if item.get("error"):
+                raise CodexProxyError(str(item["error"]))
+            if item.get("id") == initialize_id:
+                return
+        raise CodexProxyError("timed out initializing Codex app-server")
 
     def _invoke_process(
         self,
@@ -515,29 +688,6 @@ class CodexAppServerBridge:
         dynamic_tools: list[dict[str, Any]],
         effort: str | None,
     ) -> CodexCompletion:
-        assert proc.stdin is not None
-        seq = 0
-
-        def send(method: str, params: dict[str, Any] | None = None) -> int:
-            nonlocal seq
-            seq += 1
-            message: dict[str, Any] = {"method": method, "id": seq}
-            if params is not None:
-                message["params"] = params
-            proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
-            proc.stdin.flush()
-            _debug_log(f"codex send id={seq} method={method}")
-            return seq
-
-        initialize_id = send(
-            "initialize",
-            {
-                "clientInfo": {"name": "pal-codex-proxy", "title": "Pal Codex Proxy", "version": "0.1.0"},
-                "capabilities": {"experimentalApi": True},
-            },
-        )
-        proc.stdin.write(json.dumps({"method": "initialized", "params": {}}) + "\n")
-        proc.stdin.flush()
         thread_params: dict[str, Any] = {
             "ephemeral": True,
             "developerInstructions": developer_instructions,
@@ -545,49 +695,148 @@ class CodexAppServerBridge:
         }
         if dynamic_tools:
             thread_params["dynamicTools"] = dynamic_tools
-        thread_id_request: int | None = None
+        thread_id_request = self._send_request(proc, "thread/start", thread_params)
+        turn_id_request: int | None = None
+        thread_id: str | None = None
+        turn_id: str | None = None
         deadline = time.time() + max(1, int(self.timeout_seconds))
-        text_parts: list[str] = []
 
         while time.time() < deadline:
             item = self._read_message(proc, deadline=deadline)
             _debug_log(f"codex recv id={item.get('id')} method={item.get('method')}")
             if item.get("error"):
                 raise CodexProxyError(str(item["error"]))
-            if item.get("id") == initialize_id:
-                thread_id_request = send("thread/start", thread_params)
-                continue
-            if thread_id_request is not None and item.get("id") == thread_id_request:
+            if item.get("id") == thread_id_request:
                 thread_id = ((item.get("result") or {}).get("thread") or {}).get("id")
                 if not thread_id:
                     raise CodexProxyError(f"thread/start returned no thread id: {item}")
-                send(
+                turn_id_request = self._send_request(
+                    proc,
                     "turn/start",
                     _turn_start_params(thread_id=thread_id, input_text=input_text, input_items=input_items, model=model, effort=effort),
                 )
                 continue
+            if turn_id_request is not None and item.get("id") == turn_id_request:
+                turn_id = ((item.get("result") or {}).get("turn") or {}).get("id")
+                if not thread_id or not turn_id:
+                    raise CodexProxyError(f"turn/start returned no turn id: {item}")
+                active = _ActiveCodexTurn(model=model, thread_id=thread_id, turn_id=turn_id)
+                self._active_turn = active
+                return self._continue_process_turn(proc, active, deadline=deadline)
+            if "method" in item and "id" in item:
+                self._respond_to_unsupported_server_request(proc, item)
+        raise CodexProxyError("timed out waiting for Codex app-server response")
+
+    def _continue_process_turn(
+        self,
+        proc: subprocess.Popen[str],
+        active: _ActiveCodexTurn,
+        *,
+        deadline: float,
+    ) -> CodexCompletion:
+        while time.time() < deadline:
+            item = self._read_message(proc, deadline=deadline)
+            _debug_log(f"codex recv id={item.get('id')} method={item.get('method')}")
+            if item.get("error"):
+                raise CodexProxyError(str(item["error"]))
             method = str(item.get("method") or "")
             params = item.get("params") or {}
+            if method and not self._matches_current_turn(params, thread_id=active.thread_id, turn_id=active.turn_id):
+                continue
             if method == "item/tool/call":
-                return CodexCompletion(
-                    model=model,
-                    tool_call=CodexToolCall(
-                        call_id=str(params.get("callId") or f"call_{int(time.time())}"),
-                        name=str(params.get("tool") or ""),
-                        arguments=params.get("arguments"),
-                    ),
-                )
+                return self._capture_tool_call(item, params, active)
+            if "id" in item:
+                if method:
+                    self._respond_to_unsupported_server_request(proc, item)
+                continue
             if method == "item/agentMessage/delta":
-                text_parts.append(str(params.get("delta") or params.get("text") or ""))
+                active.text_parts.append(str(params.get("delta") or params.get("text") or ""))
             elif method == "item/completed":
                 completed_item = params.get("item") or {}
                 if completed_item.get("type") == "agentMessage":
+                    active.agent_message_completed = True
                     completed_text = str(completed_item.get("text") or "")
                     if completed_text:
-                        text_parts = [completed_text]
+                        active.text_parts = [completed_text]
+            elif method == "thread/status/changed":
+                status = params.get("status") or {}
+                if status.get("type") == "idle" and active.agent_message_completed:
+                    return self._finish_active_turn(active)
             elif method == "turn/completed":
-                return CodexCompletion(model=model, text="".join(text_parts).strip())
+                return self._finish_active_turn(active)
         raise CodexProxyError("timed out waiting for Codex app-server response")
+
+    def _capture_tool_call(
+        self,
+        item: dict[str, Any],
+        params: dict[str, Any],
+        active: _ActiveCodexTurn,
+    ) -> CodexCompletion:
+        call_id = str(params.get("callId") or f"call_{int(time.time())}")
+        tool_name = str(params.get("tool") or "")
+        request_id = item.get("id")
+        active.text_parts = []
+        active.agent_message_completed = False
+        if request_id is not None:
+            self._pending_tool_request = _PendingCodexToolRequest(
+                request_id=request_id,
+                thread_id=str(params.get("threadId") or active.thread_id),
+                turn_id=str(params.get("turnId") or active.turn_id),
+                call_id=call_id,
+                tool_name=tool_name,
+                arguments=params.get("arguments"),
+            )
+            self._active_turn = active
+        return CodexCompletion(
+            model=active.model,
+            tool_call=CodexToolCall(
+                call_id=call_id,
+                name=tool_name,
+                arguments=params.get("arguments"),
+            ),
+        )
+
+    def _finish_active_turn(self, active: _ActiveCodexTurn) -> CodexCompletion:
+        text = "".join(active.text_parts).strip()
+        self._active_turn = None
+        self._pending_tool_request = None
+        return CodexCompletion(model=active.model, text=text)
+
+    def _resume_pending_tool_request(self, proc: subprocess.Popen[str], messages: list[dict[str, Any]]) -> bool:
+        pending = self._pending_tool_request
+        if pending is None:
+            return False
+        content = _tool_result_content_for_call(messages, pending.call_id)
+        if content is None:
+            return False
+        self._write_message(
+            proc,
+            {
+                "id": pending.request_id,
+                "result": _dynamic_tool_response_from_text(content),
+            },
+        )
+        _debug_log(f"codex dynamic tool response id={pending.request_id} call_id={pending.call_id}")
+        self._pending_tool_request = None
+        if self._active_turn is not None:
+            self._active_turn.text_parts = []
+            self._active_turn.agent_message_completed = False
+        return True
+
+    def _respond_to_unsupported_server_request(
+        self,
+        proc: subprocess.Popen[str],
+        item: dict[str, Any],
+    ) -> None:
+        request_id = item.get("id")
+        method = str(item.get("method") or "")
+        if request_id is None or not method:
+            return
+        if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
+            result: dict[str, Any] = {"decision": "decline"}
+        else:
+            result = {}
+        self._write_message(proc, {"id": request_id, "result": result})
 
     def _iter_process_stream(
         self,
@@ -600,29 +849,6 @@ class CodexAppServerBridge:
         dynamic_tools: list[dict[str, Any]],
         effort: str | None,
     ) -> Iterable[dict[str, Any]]:
-        assert proc.stdin is not None
-        seq = 0
-
-        def send(method: str, params: dict[str, Any] | None = None) -> int:
-            nonlocal seq
-            seq += 1
-            message: dict[str, Any] = {"method": method, "id": seq}
-            if params is not None:
-                message["params"] = params
-            proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
-            proc.stdin.flush()
-            _debug_log(f"codex stream send id={seq} method={method}")
-            return seq
-
-        initialize_id = send(
-            "initialize",
-            {
-                "clientInfo": {"name": "pal-codex-proxy", "title": "Pal Codex Proxy", "version": "0.1.0"},
-                "capabilities": {"experimentalApi": True},
-            },
-        )
-        proc.stdin.write(json.dumps({"method": "initialized", "params": {}}) + "\n")
-        proc.stdin.flush()
         thread_params: dict[str, Any] = {
             "ephemeral": True,
             "developerInstructions": developer_instructions,
@@ -630,7 +856,12 @@ class CodexAppServerBridge:
         }
         if dynamic_tools:
             thread_params["dynamicTools"] = dynamic_tools
-        thread_id_request: int | None = None
+        thread_id_request = self._send_request(proc, "thread/start", thread_params)
+        turn_id_request: int | None = None
+        thread_id: str | None = None
+        turn_id: str | None = None
+        turn_started = False
+        agent_message_completed = False
         deadline = time.time() + max(1, int(self.timeout_seconds))
         text_parts: list[str] = []
 
@@ -639,26 +870,35 @@ class CodexAppServerBridge:
             _debug_log(f"codex stream recv id={item.get('id')} method={item.get('method')}")
             if item.get("error"):
                 raise CodexProxyError(str(item["error"]))
-            if item.get("id") == initialize_id:
-                thread_id_request = send("thread/start", thread_params)
-                continue
-            if thread_id_request is not None and item.get("id") == thread_id_request:
+            if item.get("id") == thread_id_request:
                 thread_id = ((item.get("result") or {}).get("thread") or {}).get("id")
                 if not thread_id:
                     raise CodexProxyError(f"thread/start returned no thread id: {item}")
-                send(
+                turn_id_request = self._send_request(
+                    proc,
                     "turn/start",
                     _turn_start_params(thread_id=thread_id, input_text=input_text, input_items=input_items, model=model, effort=effort),
                 )
                 continue
+            if turn_id_request is not None and item.get("id") == turn_id_request:
+                turn_id = ((item.get("result") or {}).get("turn") or {}).get("id")
+                turn_started = True
+                continue
+            if "id" in item:
+                continue
+            if not turn_started:
+                continue
             method = str(item.get("method") or "")
             params = item.get("params") or {}
+            if not self._matches_current_turn(params, thread_id=thread_id, turn_id=turn_id):
+                continue
             if method == "item/tool/call":
                 tool_call = CodexToolCall(
                     call_id=str(params.get("callId") or f"call_{int(time.time())}"),
                     name=str(params.get("tool") or ""),
                     arguments=params.get("arguments"),
                 )
+                self._drain_ready_messages(proc)
                 yield _stream_tool_call_payload(model, tool_call)
                 yield _stream_done_payload(model, "tool_calls")
                 return
@@ -670,8 +910,18 @@ class CodexAppServerBridge:
                 completed_item = params.get("item") or {}
                 completed_text = str(completed_item.get("text") or "")
                 if completed_item.get("type") == "agentMessage":
+                    agent_message_completed = True
                     if completed_text:
                         text_parts = [completed_text]
+            elif method == "thread/status/changed":
+                status = params.get("status") or {}
+                if status.get("type") == "idle" and agent_message_completed:
+                    text = "".join(text_parts).strip()
+                    if text:
+                        yield _stream_delta_payload(model, role="assistant")
+                        yield _stream_delta_payload(model, content=text)
+                    yield _stream_done_payload(model, "stop")
+                    return
             elif method == "turn/completed":
                 text = "".join(text_parts).strip()
                 if text:
@@ -680,6 +930,43 @@ class CodexAppServerBridge:
                 yield _stream_done_payload(model, "stop")
                 return
         raise CodexProxyError("timed out waiting for Codex app-server stream")
+
+    def _drain_ready_messages(self, proc: subprocess.Popen[str], *, seconds: float = 0.05) -> None:
+        stdout = getattr(proc, "stdout", None)
+        if stdout is None:
+            return
+        streams = [stdout]
+        stderr = getattr(proc, "stderr", None)
+        if stderr is not None:
+            streams.append(stderr)
+        deadline = time.time() + max(0.0, seconds)
+        while time.time() < deadline:
+            try:
+                ready, _, _ = select.select(streams, [], [], max(0.0, deadline - time.time()))
+            except (OSError, ValueError):
+                return
+            if not ready:
+                return
+            if stderr is not None and stderr in ready:
+                line = stderr.readline()
+                if line:
+                    _debug_log(f"codex stderr: {line.rstrip()[:1000]}")
+                continue
+            if stdout in ready:
+                line = stdout.readline()
+                if not line:
+                    return
+                _debug_log(f"codex drained method={_safe_json_method(line)}")
+
+    @staticmethod
+    def _matches_current_turn(params: dict[str, Any], *, thread_id: str | None, turn_id: str | None) -> bool:
+        event_thread_id = params.get("threadId")
+        if thread_id is not None and event_thread_id is not None and event_thread_id != thread_id:
+            return False
+        event_turn_id = params.get("turnId")
+        if turn_id is not None and event_turn_id is not None and event_turn_id != turn_id:
+            return False
+        return True
 
     def _read_message(self, proc: subprocess.Popen[str], *, deadline: float) -> dict[str, Any]:
         assert proc.stdout is not None
@@ -761,6 +1048,14 @@ def _log(message: str) -> None:
 def _debug_log(message: str) -> None:
     if os.environ.get("PAL_CODEX_PROXY_DEBUG") == "1":
         _log(message)
+
+
+def _safe_json_method(line: str) -> str:
+    try:
+        item = json.loads(line)
+    except json.JSONDecodeError:
+        return "<invalid>"
+    return str(item.get("method") or item.get("id") or "<unknown>")
 
 
 def _make_handler(
@@ -869,5 +1164,6 @@ def run_codex_proxy_cli(
     except KeyboardInterrupt:
         pass
     finally:
+        bridge.close()
         server.server_close()
     return 0

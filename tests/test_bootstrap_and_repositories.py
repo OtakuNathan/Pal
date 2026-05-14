@@ -2863,6 +2863,64 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
         self.assertFalse(endpoint.outbox)
         self.assertNotIn(id(response_handle), endpoint._streamed_text_handles)
 
+    def test_streamed_text_final_reply_suppresses_equivalent_response_handle_copy(self) -> None:
+        endpoint = SocketChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="socket_default",
+                channel_kind="socket",
+                binding_key="pal.sock",
+            )
+        )
+        outbound = _OutboundQueue()
+        endpoint.sessions["session-1"] = type("Session", (), {"outbound": outbound, "closed": False})()
+        stream_handle = ResponseHandle(
+            endpoint_id="socket_default",
+            reply_target={"session_id": "session-1", "request_id": "req-1"},
+        )
+        final_handle = ResponseHandle(
+            endpoint_id="socket_default",
+            reply_target={"session_id": "session-1", "request_id": "req-1"},
+        )
+
+        endpoint.send_stream_event(
+            stream_handle,
+            NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="pong"),
+        )
+        endpoint.queue_reply("pong", response_handle=final_handle)
+
+        self.assertEqual(outbound.items, [{"type": "text_delta", "request_id": "req-1", "text": "pong"}])
+        self.assertFalse(endpoint.outbox)
+        self.assertFalse(endpoint._streamed_text_keys)
+        self.assertFalse(endpoint._stream_handle_ids_by_key)
+
+    def test_queued_streamed_text_suppresses_final_reply_before_flush(self) -> None:
+        endpoint = SocketChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="socket_default",
+                channel_kind="socket",
+                binding_key="pal.sock",
+            )
+        )
+        outbound = _OutboundQueue()
+        endpoint.sessions["session-1"] = type("Session", (), {"outbound": outbound, "closed": False})()
+        stream_handle = ResponseHandle(
+            endpoint_id="socket_default",
+            reply_target={"session_id": "session-1", "request_id": "req-1"},
+        )
+        final_handle = ResponseHandle(
+            endpoint_id="socket_default",
+            reply_target={"session_id": "session-1", "request_id": "req-1"},
+        )
+
+        endpoint.queue_stream_event(
+            NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="pong"),
+            response_handle=stream_handle,
+        )
+        endpoint.queue_reply("pong", response_handle=final_handle)
+
+        self.assertEqual(len(endpoint.stream_outbox), 1)
+        self.assertFalse(endpoint.outbox)
+
 
 class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:

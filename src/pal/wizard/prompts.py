@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import getpass
 import json
+import re
+import shutil
 import time
 import urllib.error
 import urllib.request
@@ -44,6 +46,15 @@ _KNOWN_ANTHROPIC_MODELS: dict[str, dict[str, Any]] = {
         "supports_tools": True,
     },
 }
+
+DEFAULT_CODEX_WIZARD_MODELS = (
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.3-codex",
+    "gpt-5.3-codex-spark",
+)
+DEFAULT_CODEX_CONTEXT_WINDOW = 200_000
+DEFAULT_CODEX_MAX_OUTPUT_TOKENS = 32_768
 
 
 def _models_url_from_base(base_url: str, model_id: str) -> str:
@@ -163,6 +174,11 @@ class WizardLLMEndpoint:
     supports_streaming: bool
     supports_vision: bool
     priority: int
+    provider: str | None = None
+    auth_kind: str = "api_key_ref"
+    credential_ref: str | None = None
+    capabilities_blob: dict[str, Any] = field(default_factory=dict)
+    notes: str | None = None
 
 
 @dataclass
@@ -327,6 +343,86 @@ def _prompt_one_endpoint(index: int) -> WizardLLMEndpoint | None:
     return endpoint
 
 
+def _parse_codex_model_list(raw: str) -> tuple[str, ...]:
+    items: list[str] = []
+    seen: set[str] = set()
+    for chunk in str(raw or "").replace("\n", ",").split(","):
+        model = chunk.strip()
+        if not model or model in seen:
+            continue
+        seen.add(model)
+        items.append(model)
+    return tuple(items)
+
+
+def _codex_endpoint_id(model_id: str) -> str:
+    suffix = re.sub(r"[^a-zA-Z0-9]+", "_", str(model_id or "").strip()).strip("_").lower()
+    return f"codex_{suffix or 'model'}"
+
+
+def build_codex_wizard_endpoints(
+    model_ids: tuple[str, ...] = DEFAULT_CODEX_WIZARD_MODELS,
+) -> list[WizardLLMEndpoint]:
+    endpoints: list[WizardLLMEndpoint] = []
+    for priority, model_id in enumerate(model_ids):
+        endpoints.append(
+            WizardLLMEndpoint(
+                endpoint_id=_codex_endpoint_id(model_id),
+                model_id=model_id,
+                api_mode="openai_chat",
+                base_url="codex://app-server",
+                api_key=None,
+                context_window=DEFAULT_CODEX_CONTEXT_WINDOW,
+                max_output_tokens=DEFAULT_CODEX_MAX_OUTPUT_TOKENS,
+                supports_reasoning=True,
+                supports_tools=True,
+                supports_streaming=True,
+                supports_vision=True,
+                priority=priority,
+                provider="codex_app_server",
+                auth_kind="local_provider_auth",
+                credential_ref="",
+                capabilities_blob={
+                    "official_codex_app_server": True,
+                    "codex_app_server": True,
+                    "native_tool_bridge": True,
+                },
+                notes="Configured by setup wizard. Uses local Codex CLI app-server authentication.",
+            )
+        )
+    return endpoints
+
+
+def _prompt_codex_endpoints(index: int) -> list[WizardLLMEndpoint]:
+    print(f"\n  Codex endpoint group #{index}:")
+    codex_bin = shutil.which("codex")
+    if codex_bin:
+        print(f"  Codex CLI: {codex_bin}")
+    else:
+        print("  Codex CLI: not found on PATH; Pal will still try the usual nvm codex location at runtime.")
+
+    default_models = ",".join(DEFAULT_CODEX_WIZARD_MODELS)
+    raw_models = ask("  Models", default_models)
+    model_ids = _parse_codex_model_list(raw_models) or DEFAULT_CODEX_WIZARD_MODELS
+    endpoints = build_codex_wizard_endpoints(model_ids)
+
+    print("  Will configure:")
+    for endpoint in endpoints:
+        print(f"    {endpoint.endpoint_id}: {endpoint.model_id}")
+
+    if ask_yes_no("  Run live Codex preflight now (starts Codex app-server)", False):
+        result = run_llm_endpoint_preflight(endpoints[0], timeout_seconds=60)
+        _print_llm_preflight_result(result)
+        if result.status == "error":
+            if not ask_yes_no("  Keep these endpoints anyway", False):
+                return []
+        elif result.status == "warn":
+            if not ask_yes_no("  Keep these endpoints with warnings", True):
+                return []
+
+    return endpoints
+
+
 def _print_llm_preflight_result(result: WizardLLMPreflightResult) -> None:
     marker = {"ok": "OK", "warn": "WARN", "error": "ERR"}.get(result.status, result.status.upper())
     print(f"  [{marker}] LLM preflight: {result.detail}")
@@ -339,14 +435,14 @@ def run_llm_endpoint_preflight(
     invoker: object | None = None,
 ) -> WizardLLMPreflightResult:
     try:
-        from pal.llm import CanonicalLLMRequest, LiteLLMCredentialResolver, LiteLLMEndpointInvoker
+        from pal.llm import CanonicalLLMRequest, LiteLLMCredentialResolver, build_default_endpoint_invoker
         from pal.llm.models import LLMEndpointModel
         from pal.llm.secret_store import InMemorySecretStore, SecretRef
     except Exception as exc:
         return WizardLLMPreflightResult(status="error", detail=f"could not load LLM runtime: {exc}")
 
     secret_store = InMemorySecretStore()
-    credential_ref = f"{endpoint.endpoint_id}:api-key"
+    credential_ref = endpoint.credential_ref if endpoint.credential_ref is not None else f"{endpoint.endpoint_id}:api-key"
     if endpoint.api_key:
         secret_store.set_secret(SecretRef(service=endpoint.endpoint_id, account="api-key"), endpoint.api_key)
     model = LLMEndpointModel(
@@ -356,6 +452,7 @@ def run_llm_endpoint_preflight(
         display_name=endpoint.endpoint_id,
         api_mode=endpoint.api_mode,
         base_url=endpoint.base_url,
+        auth_kind=endpoint.auth_kind,
         credential_ref=credential_ref,
         context_window=endpoint.context_window,
         max_output_tokens=endpoint.max_output_tokens,
@@ -367,10 +464,10 @@ def run_llm_endpoint_preflight(
         output_modalities_blob=["text"],
         priority=endpoint.priority,
         enabled=True,
-        capabilities_blob={},
+        capabilities_blob=dict(endpoint.capabilities_blob or {}),
         notes="Setup preflight endpoint.",
     )
-    active_invoker = invoker or LiteLLMEndpointInvoker(credentials=LiteLLMCredentialResolver(secret_store=secret_store))
+    active_invoker = invoker or build_default_endpoint_invoker(credentials=LiteLLMCredentialResolver(secret_store=secret_store))
     metadata = {"timeout_seconds": timeout_seconds}
 
     try:
@@ -442,6 +539,10 @@ def run_llm_endpoint_preflight(
 
 
 def _infer_endpoint_provider(endpoint: WizardLLMEndpoint) -> str:
+    if endpoint.provider:
+        return endpoint.provider
+    if str(endpoint.base_url or "").strip().lower().startswith("codex://"):
+        return "codex_app_server"
     if "anthropic" in endpoint.api_mode:
         return "anthropic"
     if "openai" in endpoint.api_mode or endpoint.api_mode == "openai_chat":
@@ -458,20 +559,42 @@ def _infer_endpoint_provider(endpoint: WizardLLMEndpoint) -> str:
 
 def prompt_llm_endpoints() -> tuple[list[WizardLLMEndpoint], str]:
     _print_step(2, 4, "LLM Endpoints")
-    print("(OpenAI and Anthropic are API formats, not model names.)")
-    print("(Any model with a compatible API works.)\n")
+    print("(Codex uses your local Codex CLI subscription login.)")
+    print("(OpenAI and Anthropic are API formats; compatible providers also work.)\n")
 
     endpoints: list[WizardLLMEndpoint] = []
     idx = 1
     while True:
-        ep = _prompt_one_endpoint(idx)
-        if ep is None:
+        default_choice = "1" if not endpoints else "3"
+        source_choice = ask(
+            "  Endpoint source:\n"
+            "    1) Codex CLI subscription\n"
+            "    2) API-compatible endpoint\n"
+            "    3) Done",
+            default_choice,
+        ).strip()
+        if source_choice == "3":
             if not endpoints:
                 print("  At least one endpoint is required.")
                 continue
             break
-        endpoints.append(ep)
-        idx += 1
+        if source_choice == "1":
+            codex_endpoints = _prompt_codex_endpoints(idx)
+            if not codex_endpoints:
+                if not endpoints:
+                    print("  At least one endpoint is required.")
+                    continue
+            endpoints.extend(codex_endpoints)
+            idx += 1
+        else:
+            ep = _prompt_one_endpoint(idx)
+            if ep is None:
+                if not endpoints:
+                    print("  At least one endpoint is required.")
+                    continue
+                break
+            endpoints.append(ep)
+            idx += 1
         if not ask_yes_no("  Add another endpoint?", True):
             break
 
@@ -553,7 +676,8 @@ def prompt_review(data: WizardCollectedData, runtime_root: Path) -> bool:
     print()
     for i, ep in enumerate(data.endpoints, 1):
         active_marker = " [active]" if ep.endpoint_id == data.active_endpoint_id else ""
-        print(f"  Endpoint {i}: {ep.endpoint_id} ({ep.model_id}){active_marker}")
+        provider_label = ep.provider or ep.api_mode
+        print(f"  Endpoint {i}: {ep.endpoint_id} ({ep.model_id}, {provider_label}){active_marker}")
         print(f"    URL: {ep.base_url}")
         print(f"    Context: {ep.context_window or '?'} | Reasoning: {'yes' if ep.supports_reasoning else 'no'} | Vision: {'yes' if ep.supports_vision else 'no'}")
 

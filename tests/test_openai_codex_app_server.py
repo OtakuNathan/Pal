@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import io
+import json
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from pal.llm.contracts import CanonicalLLMRequest
 from pal.llm.codex_app_server import (
@@ -17,8 +19,10 @@ from pal.llm.codex_proxy import (
     CodexProxyError,
     CodexToolCall,
     _completion_payload,
+    _codex_app_server_config_effort,
     _codex_effort_from_payload,
     _codex_env,
+    _dynamic_tool_response_from_text,
     _messages_to_codex_input,
     _messages_to_codex_turn,
     _models_payload,
@@ -29,6 +33,7 @@ from pal.llm.codex_proxy import (
     _stream_done_payload,
     _stream_tool_call_payload,
     _strip_openai_prefix,
+    _tool_result_content_for_call,
     _turn_start_params,
 )
 from pal.llm.runtime import CodexAppServerEndpointInvoker
@@ -179,6 +184,21 @@ class OpenAICodexProxyMappingTests(unittest.TestCase):
         self.assertEqual(_codex_effort_from_payload({"reasoning": {"effort": "minimal"}}), "minimal")
         self.assertIsNone(_codex_effort_from_payload({"reasoning_effort": "invalid"}))
 
+    def test_codex_app_server_config_effort_avoids_user_xhigh_default(self) -> None:
+        self.assertEqual(_codex_app_server_config_effort(None), "medium")
+        self.assertEqual(_codex_app_server_config_effort("balanced"), "medium")
+        self.assertEqual(_codex_app_server_config_effort("minimal"), "low")
+        self.assertEqual(_codex_app_server_config_effort("xhigh"), "xhigh")
+
+    def test_codex_bridge_starts_app_server_with_effort_config_override(self) -> None:
+        fake_proc = SimpleNamespace(pid=1234)
+        with patch("pal.llm.codex_proxy.subprocess.Popen", return_value=fake_proc) as popen:
+            proc = CodexAppServerBridge(codex_bin="/tmp/codex")._start_process(effort="low")
+
+        self.assertIs(proc, fake_proc)
+        command = popen.call_args.args[0]
+        self.assertEqual(command[:4], ["/tmp/codex", "app-server", "-c", 'model_reasoning_effort="low"'])
+
     def test_turn_start_params_include_codex_effort_when_present(self) -> None:
         params = _turn_start_params(thread_id="thread_1", input_text="hello", model="gpt-5.5", effort="xhigh")
 
@@ -314,6 +334,13 @@ class OpenAICodexProxyMappingTests(unittest.TestCase):
         self.assertEqual(payload["choices"][0]["delta"], {})
         self.assertEqual(payload["choices"][0]["finish_reason"], "tool_calls")
 
+    def test_tool_result_lookup_matches_codex_call_id_case_insensitively(self) -> None:
+        messages = [
+            {"role": "tool", "tool_call_id": "call_GTjAz4Ll9bpCoPclMFlgcZ1z", "content": "tool result"},
+        ]
+
+        self.assertEqual(_tool_result_content_for_call(messages, "call_gtjaz4ll9bpcopclmflgcz1z"), "tool result")
+
     def test_codex_bridge_waits_for_tool_call_after_agent_message_completed(self) -> None:
         class _FakeProc:
             stdin = io.StringIO()
@@ -323,8 +350,8 @@ class OpenAICodexProxyMappingTests(unittest.TestCase):
                 super().__init__(timeout_seconds=5)
                 self.items = iter(
                     [
-                        {"id": 1, "result": {}},
-                        {"id": 2, "result": {"thread": {"id": "thread_1"}}},
+                        {"id": 1, "result": {"thread": {"id": "thread_1"}}},
+                        {"id": 2, "result": {"turn": {"id": "turn_1"}}},
                         {"method": "item/agentMessage/delta", "params": {"delta": "I will check."}},
                         {"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "I will check."}}},
                         {"method": "item/tool/call", "params": {"callId": "call_1", "tool": "pal_probe", "arguments": {"ok": True}}},
@@ -349,6 +376,335 @@ class OpenAICodexProxyMappingTests(unittest.TestCase):
         self.assertIsNotNone(completion.tool_call)
         assert completion.tool_call is not None
         self.assertEqual(completion.tool_call.name, "pal_probe")
+
+    def test_codex_bridge_reuses_initialized_app_server_process(self) -> None:
+        class _FakeProc:
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+                self.pid = 1234
+                self.stdout = None
+                self.stderr = None
+                self.terminated = False
+
+            def poll(self):
+                return 0 if self.terminated else None
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                _ = timeout
+                return 0
+
+            def kill(self) -> None:
+                self.terminated = True
+
+        class _ScriptedBridge(CodexAppServerBridge):
+            def __init__(self) -> None:
+                super().__init__(timeout_seconds=5)
+                self.proc = _FakeProc()
+                self.starts = 0
+                self.efforts = []
+                self.items = iter(
+                    [
+                        {"id": 1, "result": {}},
+                        {"id": 2, "result": {"thread": {"id": "thread_1"}}},
+                        {"id": 3, "result": {"turn": {"id": "turn_1"}}},
+                        {
+                            "method": "item/tool/call",
+                            "params": {
+                                "threadId": "thread_1",
+                                "turnId": "turn_1",
+                                "callId": "call_1",
+                                "tool": "pal_probe",
+                                "arguments": {"ok": True},
+                            },
+                        },
+                        {"id": 4, "result": {"thread": {"id": "thread_2"}}},
+                        {"id": 5, "result": {"turn": {"id": "turn_2"}}},
+                        {
+                            "method": "item/agentMessage/delta",
+                            "params": {"threadId": "thread_2", "turnId": "turn_2", "delta": "DONE"},
+                        },
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": "thread_2",
+                                "turnId": "turn_2",
+                                "item": {"type": "agentMessage", "text": "DONE"},
+                            },
+                        },
+                        {
+                            "method": "thread/status/changed",
+                            "params": {"threadId": "thread_2", "status": {"type": "idle"}},
+                        },
+                    ]
+                )
+
+            def _start_process(self, *, effort=None):
+                self.efforts.append(effort)
+                self.starts += 1
+                return self.proc
+
+            def _read_message(self, _proc, *, deadline):
+                _ = deadline
+                return next(self.items)
+
+        bridge = _ScriptedBridge()
+        first = bridge.invoke_turn(
+            model="gpt-5.4",
+            developer_instructions="policy",
+            input_text="hello",
+            input_items=None,
+            dynamic_tools=[],
+            effort=None,
+        )
+        second = bridge.invoke_turn(
+            model="gpt-5.5",
+            developer_instructions="policy",
+            input_text="hello again",
+            input_items=None,
+            dynamic_tools=[],
+            effort=None,
+        )
+
+        self.assertIsNotNone(first.tool_call)
+        self.assertEqual(second.text, "DONE")
+        self.assertEqual(bridge.starts, 1)
+        self.assertEqual(bridge.efforts, ["medium"])
+        written = bridge.proc.stdin.getvalue()
+        self.assertEqual(written.count('"method": "initialize"'), 1)
+        self.assertEqual(written.count('"method": "thread/start"'), 2)
+        self.assertEqual(written.count('"method": "turn/start"'), 2)
+
+    def test_codex_bridge_resumes_same_turn_with_dynamic_tool_result(self) -> None:
+        class _FakeProc:
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+                self.pid = 1234
+                self.stdout = None
+                self.stderr = None
+                self.terminated = False
+
+            def poll(self):
+                return 0 if self.terminated else None
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                _ = timeout
+                return 0
+
+            def kill(self) -> None:
+                self.terminated = True
+
+        class _ScriptedBridge(CodexAppServerBridge):
+            def __init__(self) -> None:
+                super().__init__(timeout_seconds=5)
+                self.proc = _FakeProc()
+                self.items = iter(
+                    [
+                        {"id": 1, "result": {}},
+                        {"id": 2, "result": {"thread": {"id": "thread_1"}}},
+                        {"id": 3, "result": {"turn": {"id": "turn_1"}}},
+                        {
+                            "id": "srv_1",
+                            "method": "item/tool/call",
+                            "params": {
+                                "threadId": "thread_1",
+                                "turnId": "turn_1",
+                                "callId": "call_1",
+                                "tool": "pal_probe",
+                                "arguments": {"ok": True},
+                            },
+                        },
+                        {
+                            "method": "item/agentMessage/delta",
+                            "params": {"threadId": "thread_1", "turnId": "turn_1", "delta": "DONE"},
+                        },
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": "thread_1",
+                                "turnId": "turn_1",
+                                "item": {"type": "agentMessage", "text": "DONE"},
+                            },
+                        },
+                        {
+                            "method": "thread/status/changed",
+                            "params": {"threadId": "thread_1", "status": {"type": "idle"}},
+                        },
+                    ]
+                )
+
+            def _start_process(self, *, effort=None):
+                _ = effort
+                return self.proc
+
+            def _read_message(self, _proc, *, deadline):
+                _ = deadline
+                return next(self.items)
+
+        bridge = _ScriptedBridge()
+        first = bridge.invoke_turn(
+            model="gpt-5.4",
+            developer_instructions="policy",
+            input_text="hello",
+            input_items=None,
+            dynamic_tools=[{"name": "pal_probe", "description": "Probe", "inputSchema": {"type": "object"}}],
+            effort=None,
+        )
+        second = bridge.invoke_turn(
+            model="gpt-5.4",
+            developer_instructions="policy",
+            input_text="ignored",
+            input_items=None,
+            dynamic_tools=[],
+            effort=None,
+            messages=[
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "pal_probe", "arguments": "{\"ok\": true}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "probe result"},
+            ],
+        )
+
+        self.assertIsNotNone(first.tool_call)
+        self.assertEqual(second.text, "DONE")
+        written = bridge.proc.stdin.getvalue()
+        self.assertEqual(written.count('"method": "thread/start"'), 1)
+        self.assertEqual(written.count('"method": "turn/start"'), 1)
+        self.assertIn('"id": "srv_1"', written)
+        self.assertIn(json.dumps(_dynamic_tool_response_from_text("probe result"), ensure_ascii=False), written)
+
+    def test_codex_bridge_resumes_same_turn_with_multiple_dynamic_tool_results(self) -> None:
+        class _FakeProc:
+            def __init__(self) -> None:
+                self.stdin = io.StringIO()
+                self.pid = 1234
+                self.stdout = None
+                self.stderr = None
+                self.terminated = False
+
+            def poll(self):
+                return 0 if self.terminated else None
+
+            def terminate(self) -> None:
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                _ = timeout
+                return 0
+
+            def kill(self) -> None:
+                self.terminated = True
+
+        class _ScriptedBridge(CodexAppServerBridge):
+            def __init__(self) -> None:
+                super().__init__(timeout_seconds=5)
+                self.proc = _FakeProc()
+                self.items = iter(
+                    [
+                        {"id": 1, "result": {}},
+                        {"id": 2, "result": {"thread": {"id": "thread_1"}}},
+                        {"id": 3, "result": {"turn": {"id": "turn_1"}}},
+                        {
+                            "id": "srv_1",
+                            "method": "item/tool/call",
+                            "params": {
+                                "threadId": "thread_1",
+                                "turnId": "turn_1",
+                                "callId": "call_MixedOne",
+                                "tool": "pal_probe",
+                                "arguments": {"step": 1},
+                            },
+                        },
+                        {
+                            "id": "srv_2",
+                            "method": "item/tool/call",
+                            "params": {
+                                "threadId": "thread_1",
+                                "turnId": "turn_1",
+                                "callId": "call_MixedTwo",
+                                "tool": "pal_probe",
+                                "arguments": {"step": 2},
+                            },
+                        },
+                        {
+                            "method": "item/agentMessage/delta",
+                            "params": {"threadId": "thread_1", "turnId": "turn_1", "delta": "DONE"},
+                        },
+                        {
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": "thread_1",
+                                "turnId": "turn_1",
+                                "item": {"type": "agentMessage", "text": "DONE"},
+                            },
+                        },
+                        {
+                            "method": "thread/status/changed",
+                            "params": {"threadId": "thread_1", "status": {"type": "idle"}},
+                        },
+                    ]
+                )
+
+            def _start_process(self, *, effort=None):
+                _ = effort
+                return self.proc
+
+            def _read_message(self, _proc, *, deadline):
+                _ = deadline
+                return next(self.items)
+
+        bridge = _ScriptedBridge()
+        first = bridge.invoke_turn(
+            model="gpt-5.4",
+            developer_instructions="policy",
+            input_text="hello",
+            input_items=None,
+            dynamic_tools=[{"name": "pal_probe", "description": "Probe", "inputSchema": {"type": "object"}}],
+            effort=None,
+        )
+        second = bridge.invoke_turn(
+            model="gpt-5.4",
+            developer_instructions="policy",
+            input_text="ignored",
+            input_items=None,
+            dynamic_tools=[],
+            effort=None,
+            messages=[{"role": "tool", "tool_call_id": "call_mixedone", "content": "first result"}],
+        )
+        third = bridge.invoke_turn(
+            model="gpt-5.4",
+            developer_instructions="policy",
+            input_text="ignored",
+            input_items=None,
+            dynamic_tools=[],
+            effort=None,
+            messages=[{"role": "tool", "tool_call_id": "CALL_MIXEDTWO", "content": "second result"}],
+        )
+
+        self.assertIsNotNone(first.tool_call)
+        self.assertIsNotNone(second.tool_call)
+        assert second.tool_call is not None
+        self.assertEqual(second.tool_call.call_id, "call_MixedTwo")
+        self.assertEqual(third.text, "DONE")
+        written = bridge.proc.stdin.getvalue()
+        self.assertEqual(written.count('"method": "thread/start"'), 1)
+        self.assertEqual(written.count('"method": "turn/start"'), 1)
+        self.assertIn('"id": "srv_1"', written)
+        self.assertIn('"id": "srv_2"', written)
+        self.assertIn(json.dumps(_dynamic_tool_response_from_text("first result"), ensure_ascii=False), written)
+        self.assertIn(json.dumps(_dynamic_tool_response_from_text("second result"), ensure_ascii=False), written)
 
     def test_native_codex_invoker_returns_canonical_tool_call(self) -> None:
         class _FakeBridge:

@@ -68,6 +68,8 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     server: asyncio.base_events.Server | None = None
     sessions: dict[str, _SocketSession] = field(default_factory=dict)
     _streamed_text_handles: set[int] = field(default_factory=set)
+    _streamed_text_keys: set[tuple[str, str, str]] = field(default_factory=set)
+    _stream_handle_ids_by_key: dict[tuple[str, str, str], int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.socket_path is None:
@@ -190,11 +192,20 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         session.outbound.put_nowait({"type": "text_delta", "request_id": request_id, "text": text})
         session.outbound.put_nowait({"type": "done", "request_id": request_id, "finish_reason": "stop"})
 
+    def queue_stream_event(
+        self,
+        event: NormalizedLLMStreamEvent,
+        *,
+        response_handle: ResponseHandle | None = None,
+    ) -> str:
+        handle = response_handle or self.build_response_handle()
+        self._mark_stream_event_queued(handle, event)
+        return super().queue_stream_event(event, response_handle=handle)
+
     def send_stream_event(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
         session = self._require_session(response_handle)
         super().send_stream_event(response_handle, event)
-        if event.text:
-            self._streamed_text_handles.add(id(response_handle))
+        self._mark_stream_event_queued(response_handle, event)
         session.outbound.put_nowait(_stream_payload(response_handle, event))
 
     def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
@@ -214,6 +225,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
         super().abort_stream(response_handle, reason=reason)
         self._streamed_text_handles.discard(id(response_handle))
+        self._clear_stream_tracking(response_handle)
         with contextlib.suppress(SocketSessionClosed):
             session = self._require_session(response_handle)
             request_id = str(response_handle.reply_target.get("request_id") or "")
@@ -221,12 +233,45 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
             session.outbound.put_nowait({"type": "llm_done", "request_id": request_id, "finish_reason": str(reason)})
 
     def prepare_final_reply(self, response_handle: ResponseHandle, text: str) -> str | None:
-        streamed_text = id(response_handle) in self._streamed_text_handles
+        stream_key = self._stream_key(response_handle)
+        prior_handle_id = self._stream_handle_ids_by_key.pop(stream_key, None)
+        if prior_handle_id is not None and prior_handle_id != id(response_handle):
+            self._stream_sessions.pop(prior_handle_id, None)
+            self._streamed_text_handles.discard(prior_handle_id)
+        streamed_text = (
+            id(response_handle) in self._streamed_text_handles
+            or stream_key in self._streamed_text_keys
+        )
         prepared = super().prepare_final_reply(response_handle, text)
+        self._streamed_text_keys.discard(stream_key)
         if streamed_text:
             self._streamed_text_handles.discard(id(response_handle))
             return None
         return prepared
+
+    def _clear_stream_tracking(self, response_handle: ResponseHandle) -> None:
+        stream_key = self._stream_key(response_handle)
+        prior_handle_id = self._stream_handle_ids_by_key.pop(stream_key, None)
+        if prior_handle_id is not None:
+            self._stream_sessions.pop(prior_handle_id, None)
+            self._streamed_text_handles.discard(prior_handle_id)
+        self._streamed_text_keys.discard(stream_key)
+
+    @staticmethod
+    def _stream_key(response_handle: ResponseHandle) -> tuple[str, str, str]:
+        reply_target = response_handle.reply_target or {}
+        return (
+            str(response_handle.endpoint_id or ""),
+            str(reply_target.get("session_id") or ""),
+            str(reply_target.get("request_id") or ""),
+        )
+
+    def _mark_stream_event_queued(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
+        stream_key = self._stream_key(response_handle)
+        self._stream_handle_ids_by_key[stream_key] = id(response_handle)
+        if event.text:
+            self._streamed_text_handles.add(id(response_handle))
+            self._streamed_text_keys.add(stream_key)
 
     def inspect_health(self) -> dict[str, Any]:
         return {

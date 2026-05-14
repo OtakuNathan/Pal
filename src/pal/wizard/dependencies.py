@@ -48,12 +48,14 @@ class WizardDependencyCheck:
 def collect_dependency_checks() -> tuple[WizardDependencyCheck, ...]:
     checks: list[WizardDependencyCheck] = [
         _check_python_version(),
+        _check_python_package("jieba", "jieba", "Chinese FTS tokenization"),
         _check_python_package("litellm", "litellm", "LLM endpoint calls"),
         _check_python_package("playwright", "playwright", "rendered web fetch"),
         _check_python_package("python-telegram-bot", "telegram", "Telegram channel"),
         _check_python_package("sqlite-vec", "sqlite_vec", "vector memory backend", required=False),
         _check_playwright_chromium(),
         _check_git(),
+        _check_codex_cli(),
         _check_ollama_embedding(),
         _check_service_manager(),
     ]
@@ -187,6 +189,26 @@ def _check_git() -> WizardDependencyCheck:
         detail="git is not on PATH. Coder minion repo workflows will be limited.",
         required=False,
         fix="Install git and make sure it is on PATH.",
+    )
+
+
+def _check_codex_cli() -> WizardDependencyCheck:
+    codex = shutil.which("codex")
+    if codex:
+        return WizardDependencyCheck(
+            check_id="tool.codex",
+            title="Codex CLI",
+            status=CHECK_STATUS_OK,
+            detail=f"codex found at {codex}; Codex-backed LLM endpoints can use the local app server.",
+            required=False,
+        )
+    return WizardDependencyCheck(
+        check_id="tool.codex",
+        title="Codex CLI",
+        status=CHECK_STATUS_WARN,
+        detail="codex is not on PATH. API-key LLM endpoints still work, but Codex-backed endpoints are unavailable.",
+        required=False,
+        fix="Install and sign in to the Codex CLI if you plan to use Codex-backed endpoints.",
     )
 
 

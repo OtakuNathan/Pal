@@ -272,19 +272,24 @@ class TurnExecutor:
             if 0 <= pending_index < len(continuation.pending_tool_call_batch):
                 execution_call = continuation.pending_tool_call_batch[pending_index]
         tool_budget = self._build_tool_call_budget(continuation, execution_call=execution_call)
+        self._log_tool_call_start(continuation, execution_call)
         self.context.turn_event_bus.emit("turn.tool_call_before", {
             "turn_id": continuation.turn_id,
             "tool_name": execution_call.name,
         })
-        tool_result = await self._call_port_async(
-            self.context.execution_runtime,
-            "execute_tool_async",
-            "execute_tool",
-            execution_call,
-            allow_tools=not continuation.finalization_only,
-            budget=tool_budget,
-            turn_id=continuation.turn_id,
-        )
+        try:
+            tool_result = await self._call_port_async(
+                self.context.execution_runtime,
+                "execute_tool_async",
+                "execute_tool",
+                execution_call,
+                allow_tools=not continuation.finalization_only,
+                budget=tool_budget,
+                turn_id=continuation.turn_id,
+            )
+        except Exception as exc:
+            self._log_tool_call_exception(continuation, execution_call, exc)
+            raise
         if self._should_enter_failure_flow_for_tool_result(tool_result):
             failure_result = await self._handle_failure_async(
                 FailureSignal(
@@ -312,6 +317,7 @@ class TurnExecutor:
                 call_id=getattr(execution_call, "call_id", None),
                 llm_text=self._render_failure_feedback_text(failure_result.user_feedback),
             )
+        self._log_tool_call_result(continuation, execution_call, tool_result)
         continuation.tool_observations.append(
             ToolObservation(
                 tool_name=tool_result.name,
@@ -379,6 +385,63 @@ class TurnExecutor:
                     }
                 )
 
+    def _log_tool_call_start(self, continuation, tool_call: Any) -> None:
+        print(
+            " ".join(
+                [
+                    "[tool call]",
+                    f"turn_id={getattr(continuation, 'turn_id', '')}",
+                    f"name={getattr(tool_call, 'name', '')}",
+                    f"call_id={str(getattr(tool_call, 'call_id', '') or '')}",
+                    f"args={self._log_preview(getattr(tool_call, 'args', {}), max_chars=1200)}",
+                ]
+            ),
+            flush=True,
+        )
+
+    def _log_tool_call_result(self, continuation, tool_call: Any, tool_result: CanonicalToolResult) -> None:
+        print(
+            " ".join(
+                [
+                    "[tool result]",
+                    f"turn_id={getattr(continuation, 'turn_id', '')}",
+                    f"name={getattr(tool_call, 'name', '')}",
+                    f"call_id={str(getattr(tool_call, 'call_id', '') or '')}",
+                    f"ok={bool(getattr(tool_result, 'ok', False))}",
+                    f"status={str(getattr(tool_result, 'status', '') or '')}",
+                    f"text={self._log_preview(getattr(tool_result, 'text', '') or getattr(tool_result, 'llm_text', ''), max_chars=1200)}",
+                ]
+            ),
+            flush=True,
+        )
+
+    def _log_tool_call_exception(self, continuation, tool_call: Any, exc: Exception) -> None:
+        print(
+            " ".join(
+                [
+                    "[tool result]",
+                    f"turn_id={getattr(continuation, 'turn_id', '')}",
+                    f"name={getattr(tool_call, 'name', '')}",
+                    f"call_id={str(getattr(tool_call, 'call_id', '') or '')}",
+                    "ok=False",
+                    f"exception={type(exc).__name__}",
+                    f"text={self._log_preview(str(exc), max_chars=1200)}",
+                ]
+            ),
+            flush=True,
+        )
+
+    @staticmethod
+    def _log_preview(value: Any, *, max_chars: int) -> str:
+        try:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            text = str(value)
+        text = " ".join(str(text).split())
+        if len(text) <= max_chars:
+            return text
+        return f"{text[:max_chars].rstrip()}...[truncated {len(text)} chars]"
+
     @staticmethod
     def _behavior_advice_l2_entries(tool_result: CanonicalToolResult) -> list[L2Entry]:
         structured = tool_result.structured if isinstance(tool_result.structured, dict) else {}
@@ -432,9 +495,9 @@ class TurnExecutor:
         if hint:
             parts.append(f"Hint: {hint}")
         if skill_refs:
-            parts.append(f"Skill refs: {', '.join(skill_refs)}. Call `op_skill_inject` only if this route is selected.")
+            parts.append(f"Skill refs: {', '.join(skill_refs)}. MUST NOT call `op_skill_inject` solely because listed; call it only when workflow/domain rules are needed.")
         if capability_refs:
-            parts.append(f"Capability refs: {', '.join(capability_refs)}. Resolve current inventory before use.")
+            parts.append(f"Capability refs: {', '.join(capability_refs)}. Resolve current inventory before use; if one directly completes the request, use it without injecting a skill.")
         if memory_query_hints:
             parts.append(f"Memory query hints: {', '.join(memory_query_hints)}. They do not trigger recall by themselves; when recall is required, use them as query seeds.")
         return " ".join(parts).strip()

@@ -290,17 +290,7 @@ class BehaviorService:
         for affordance in self._declared_affordance_index().values():
             if not affordance.enabled:
                 continue
-            candidate_text = " ".join(
-                (
-                    affordance.title,
-                    affordance.scenario_text,
-                    affordance.prompt_hint,
-                    " ".join(affordance.activation_terms),
-                    " ".join(affordance.capability_refs),
-                    " ".join(affordance.skill_refs),
-                    " ".join(affordance.memory_query_hints),
-                )
-            )
+            candidate_text = _declared_route_score_text(affordance)
             candidate_tokens = _tokenize(candidate_text)
             overlap = query_tokens & candidate_tokens
             activation_terms = {str(term).lower() for term in affordance.activation_terms if str(term).strip()}
@@ -410,7 +400,7 @@ def _auto_affordances_from_handle(handle: Any, *, module_id: str) -> tuple[Affor
                 activation_kind=AFFORDANCE_ACTIVATION_DELIBERATIVE,
                 activation_mode=AFFORDANCE_MODE_SUGGEST,
                 source_kind=AFFORDANCE_SOURCE_DECLARED,
-                activation_terms=_token_tuple(" ".join((name, canonical, display, description, family, namespace))),
+                activation_terms=_token_tuple(" ".join((name, canonical, display, family, namespace))),
                 capability_refs=(name,),
                 priority=45 if namespace == "introspection" else 55,
                 activation_threshold=0.35,
@@ -421,6 +411,30 @@ def _auto_affordances_from_handle(handle: Any, *, module_id: str) -> tuple[Affor
             )
         )
     return tuple(generated)
+
+
+def _declared_route_score_text(affordance: AffordanceDescriptor) -> str:
+    if bool(affordance.metadata.get("auto_generated")):
+        return " ".join(
+            (
+                affordance.title,
+                " ".join(affordance.activation_terms),
+                " ".join(affordance.capability_refs),
+                " ".join(affordance.skill_refs),
+                " ".join(affordance.memory_query_hints),
+            )
+        )
+    return " ".join(
+        (
+            affordance.title,
+            affordance.scenario_text,
+            affordance.prompt_hint,
+            " ".join(affordance.activation_terms),
+            " ".join(affordance.capability_refs),
+            " ".join(affordance.skill_refs),
+            " ".join(affordance.memory_query_hints),
+        )
+    )
 
 
 def _tokenize(text: str) -> set[str]:

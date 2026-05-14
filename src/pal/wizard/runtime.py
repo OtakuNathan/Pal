@@ -271,20 +271,31 @@ class WizardService(WizardServicePort):
         secret_store = EncryptedFileSecretStore(str(secrets_path))
 
         for ep in data.endpoints:
-            provider = ep.endpoint_id
-            # Determine provider from api_mode
-            if "anthropic" in ep.api_mode:
+            provider = str(getattr(ep, "provider", "") or "").strip()
+            base_url = str(ep.base_url or "")
+            if provider:
+                pass
+            elif base_url.lower().startswith("codex://"):
+                provider = "codex_app_server"
+            elif "anthropic" in ep.api_mode:
                 provider = "anthropic"
             elif "openai" in ep.api_mode or ep.api_mode == "openai_chat":
                 # Try to infer from base_url
-                if "deepseek" in ep.base_url:
+                if "deepseek" in base_url:
                     provider = "deepseek"
-                elif "zhipu" in ep.base_url or "z.ai" in ep.base_url or "bigmodel.cn" in ep.base_url:
+                elif "zhipu" in base_url or "z.ai" in base_url or "bigmodel.cn" in base_url:
                     provider = "zhipu"
-                elif "moonshot" in ep.base_url or "kimi" in ep.base_url:
+                elif "moonshot" in base_url or "kimi" in base_url:
                     provider = "moonshot"
                 else:
                     provider = "openai"
+            else:
+                provider = ep.endpoint_id
+
+            auth_kind = str(getattr(ep, "auth_kind", "") or "api_key_ref")
+            credential_ref = getattr(ep, "credential_ref", None)
+            if credential_ref is None:
+                credential_ref = f"{ep.endpoint_id}:api-key" if auth_kind == "api_key_ref" else ""
 
             # Store API key in secret store
             if ep.api_key:
@@ -293,15 +304,14 @@ class WizardService(WizardServicePort):
                     ep.api_key,
                 )
 
-            credential_ref = f"{ep.endpoint_id}:api-key"
-
             payload = {
                 "endpoint_id": ep.endpoint_id,
                 "provider": provider,
                 "model_id": ep.model_id,
                 "display_name": ep.endpoint_id,
                 "api_mode": ep.api_mode,
-                "base_url": ep.base_url,
+                "base_url": base_url,
+                "auth_kind": auth_kind,
                 "credential_ref": credential_ref,
                 "context_window": ep.context_window or 8192,
                 "max_output_tokens": ep.max_output_tokens or 4096,
@@ -315,8 +325,8 @@ class WizardService(WizardServicePort):
                 "output_modalities_blob": ["text"],
                 "priority": ep.priority,
                 "enabled": True,
-                "capabilities_blob": {},
-                "notes": f"Configured via setup wizard.",
+                "capabilities_blob": dict(getattr(ep, "capabilities_blob", None) or {}),
+                "notes": getattr(ep, "notes", None) or "Configured via setup wizard.",
             }
             llm_repo.upsert(**payload)
 

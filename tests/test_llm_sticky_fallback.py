@@ -31,6 +31,8 @@ def _fake_endpoint(endpoint_id: str, model_id: str):
         endpoint_id=endpoint_id,
         model_id=model_id,
         provider="openai",
+        base_url="",
+        capabilities_blob={},
         supports_streaming=False,
         max_output_tokens=1024,
         context_window=8192,
@@ -60,6 +62,60 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                 self.assertEqual(invoker.calls, ["broken", "broken", "working", "working"])
                 self.assertEqual(runtime.active_endpoint_id, "working")
                 self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "working")
+            finally:
+                asyncio.run(handle.stop_async())
+
+    def test_codex_app_server_connection_failure_skips_same_failure_domain(self) -> None:
+        class _Invoker:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def invoke(self, endpoint, request):
+                _ = request
+                self.calls.append(endpoint.endpoint_id)
+                if str(endpoint.provider) == "codex_app_server":
+                    raise TimeoutError("timed out waiting for codex app-server output")
+                return CanonicalLLMOutcome(text=f"ok:{endpoint.endpoint_id}")
+
+            def invoke_stream(self, endpoint, request):
+                raise NotImplementedError
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handle = open_runtime(Path(tmpdir))
+            try:
+                codex_a = SimpleNamespace(
+                    endpoint_id="codex_a",
+                    model_id="gpt-5.4",
+                    provider="codex_app_server",
+                    base_url="codex://app-server",
+                    capabilities_blob={"official_codex_app_server": True},
+                    supports_streaming=False,
+                    max_output_tokens=1024,
+                    context_window=8192,
+                )
+                codex_b = SimpleNamespace(
+                    endpoint_id="codex_b",
+                    model_id="gpt-5.3-codex-spark",
+                    provider="codex_app_server",
+                    base_url="codex://app-server",
+                    capabilities_blob={"official_codex_app_server": True},
+                    supports_streaming=False,
+                    max_output_tokens=1024,
+                    context_window=8192,
+                )
+                glm = _fake_endpoint("glm", "glm-5.1")
+                glm.provider = "zhipu"
+                invoker = _Invoker()
+                runtime = LLMRuntime(
+                    endpoint_resolver=EndpointResolver(endpoints=(codex_a, codex_b, glm)),
+                    settings_repository=RuntimeSettingRepository(),
+                    endpoint_invoker=invoker,
+                )
+
+                outcome = runtime.generate(CanonicalLLMRequest(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64))
+
+                self.assertEqual(outcome.text, "ok:glm")
+                self.assertEqual(invoker.calls, ["codex_a", "glm"])
             finally:
                 asyncio.run(handle.stop_async())
 

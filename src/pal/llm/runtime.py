@@ -110,6 +110,21 @@ def _classify_retry_error(exc: Exception) -> str:
     return "unknown"
 
 
+def _endpoint_connection_failure_domain(endpoint: LLMEndpointModel) -> tuple[str, str] | None:
+    provider = str(getattr(endpoint, "provider", "") or "").strip().lower()
+    base_url = str(getattr(endpoint, "base_url", "") or "").strip().lower()
+    capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
+    if (
+        provider in {"codex", "codex_app_server"}
+        or base_url.startswith("codex://")
+        or capabilities.get("codex_app_server")
+        or capabilities.get("official_codex_app_server")
+        or capabilities.get("codex_native")
+    ):
+        return ("codex_app_server", base_url or "codex://app-server")
+    return None
+
+
 def _compute_retry_delay(
     attempt: int,
     *,
@@ -436,6 +451,7 @@ class CodexAppServerEndpointInvoker:
                     input_items=input_items,
                     dynamic_tools=dynamic_tools,
                     effort=effort,
+                    messages=list(request.messages or []),
                 )
             except CodexProxyError as exc:
                 if not _should_retry_codex_final_answer_without_tools(exc, request, dynamic_tools):
@@ -446,6 +462,7 @@ class CodexAppServerEndpointInvoker:
                     input_items=input_items,
                     dynamic_tools=[],
                     effort=effort,
+                    messages=list(request.messages or []),
                 )
             if _codex_completion_repeats_prior_tool_call(completion, request):
                 completion = bridge.invoke_turn(
@@ -454,6 +471,7 @@ class CodexAppServerEndpointInvoker:
                     input_items=input_items,
                     dynamic_tools=[],
                     effort=effort,
+                    messages=list(request.messages or []),
                 )
         return _codex_completion_to_outcome(completion, endpoint=endpoint)
 
@@ -790,7 +808,11 @@ class LLMRuntime(LLMRuntimePort):
 
         last_error: Exception | None = None
         had_stale_connection = False
+        failed_connection_domains: set[tuple[str, str]] = set()
         for endpoint in enabled:
+            endpoint_domain = _endpoint_connection_failure_domain(endpoint)
+            if endpoint_domain is not None and endpoint_domain in failed_connection_domains:
+                continue
             if had_stale_connection:
                 time.sleep(self._retry_stale_settle_ms / 1000.0)
                 had_stale_connection = False
@@ -836,9 +858,13 @@ class LLMRuntime(LLMRuntimePort):
                     last_error = exc
                     error_kind = _classify_retry_error(exc)
                     if error_kind == "stale_connection":
+                        if endpoint_domain is not None:
+                            failed_connection_domains.add(endpoint_domain)
                         had_stale_connection = True
                         break
                     if error_kind == "connection":
+                        if endpoint_domain is not None:
+                            failed_connection_domains.add(endpoint_domain)
                         break
                     if attempt < max(1, self.endpoint_retry_attempts) - 1:
                         delay = _compute_retry_delay(

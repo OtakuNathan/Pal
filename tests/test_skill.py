@@ -20,6 +20,7 @@ from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import PalV2Database
 from pal.llm import CanonicalLLMOutcome
+from pal.minion import register_with_core as register_minion_with_core
 from pal.skill import (
     SKILL_STATUS_ACTIVE,
     SKILL_STATUS_DISABLED,
@@ -365,6 +366,33 @@ Run the workflow.
         self.assertFalse(llm.metadata["resident"])
         self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_plugin_development"))
         self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_llm_adapter_endpoint_development"))
+
+    def test_internal_development_skill_routes_are_not_pruned_by_minion_spawn(self) -> None:
+        core = PalCore()
+        behavior_service = BehaviorService(repository=self.behavior_repository)
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        register_skill_with_core(core.context, self.service)
+        register_behavior_with_core(core.context, behavior_service)
+        register_minion_with_core(core.context, runtime_root=self.root)
+        for module_id in ("execution", "skill", "behavior", "minion"):
+            core.publish_module_capabilities(module_id)
+
+        plugin_advice = asyncio.run(
+            behavior_service.advise_async(
+                BehaviorAdviceRequest(scenario="我要写一个 Pal plugin，新增 capability", top_k=5)
+            )
+        )
+        llm_advice = asyncio.run(
+            behavior_service.advise_async(
+                BehaviorAdviceRequest(scenario="加一个 LLM adapter endpoint provider", top_k=5)
+            )
+        )
+
+        self.assertEqual(plugin_advice.candidates[0].affordance_id, "declared.skill.pal_plugin_development")
+        self.assertEqual(plugin_advice.candidates[0].skill_refs, ("pal.plugin.development",))
+        self.assertEqual(llm_advice.candidates[0].affordance_id, "declared.skill.pal_llm_adapter_endpoint_development")
+        self.assertEqual(llm_advice.candidates[0].skill_refs, ("pal.llm.adapter_endpoint.development",))
 
     def test_skill_prompt_stays_registered_but_skill_tools_are_not_resident_llm_tools(self) -> None:
         core = PalCore()

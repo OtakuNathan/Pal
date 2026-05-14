@@ -29,6 +29,16 @@ _BANNER = r"""
 
 _SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
 _LAUNCHD_USER_DIR = Path.home() / "Library" / "LaunchAgents"
+_SERVICE_ENV_PASSTHROUGH = (
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+)
 
 
 def _resolve_pal_command() -> list[str]:
@@ -53,12 +63,33 @@ def _resolve_pal_bin() -> str:
     return shlex.join(_resolve_pal_command())
 
 
+def _runtime_service_environment() -> dict[str, str]:
+    environment: dict[str, str] = {"PYTHONUNBUFFERED": "1"}
+    for key in _SERVICE_ENV_PASSTHROUGH:
+        value = os.environ.get(key)
+        if value:
+            environment[key] = value
+    return environment
+
+
+def _format_systemd_environment_value(key: str, value: str) -> str:
+    escaped = f"{key}={value}".replace("\\", "\\\\").replace('"', '\\"')
+    return f'Environment="{escaped}"'
+
+
 def _generate_service_content(
     *,
     pal_bin: str,
     runtime_root: Path,
+    environment: dict[str, str] | None = None,
 ) -> str:
     runtime_path = runtime_root.as_posix()
+    service_environment = environment or {"PYTHONUNBUFFERED": "1"}
+    environment_lines = "\n".join(
+        _format_systemd_environment_value(key, value)
+        for key, value in service_environment.items()
+        if value
+    )
     return (
         "[Unit]\n"
         "Description=Pal Agent Runtime\n"
@@ -70,7 +101,7 @@ def _generate_service_content(
         f"ExecStart={pal_bin} run --runtime-root {runtime_path}\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
-        "Environment=PYTHONUNBUFFERED=1\n"
+        f"{environment_lines}\n"
         f"StandardOutput=append:{runtime_path}/pal.log\n"
         f"StandardError=append:{runtime_path}/pal.log\n"
         "\n"
@@ -167,6 +198,7 @@ def _prompt_systemd_service_setup(runtime_root: Path) -> str | None:
     content = _generate_service_content(
         pal_bin=pal_bin,
         runtime_root=runtime_root,
+        environment=_runtime_service_environment(),
     )
 
     print()
@@ -240,6 +272,7 @@ def _generate_launchd_plist(
     label: str,
     pal_command: list[str],
     runtime_root: Path,
+    environment: dict[str, str] | None = None,
 ) -> dict[str, object]:
     runtime_path = runtime_root.as_posix()
     return {
@@ -248,7 +281,7 @@ def _generate_launchd_plist(
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
         "WorkingDirectory": runtime_path,
-        "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
+        "EnvironmentVariables": dict(environment or {"PYTHONUNBUFFERED": "1"}),
         "StandardOutPath": (runtime_root / "pal.log").as_posix(),
         "StandardErrorPath": (runtime_root / "pal.log").as_posix(),
     }
@@ -293,7 +326,12 @@ def _prompt_launchd_service_setup(runtime_root: Path) -> str | None:
     pal_command = _resolve_pal_command()
     label = _pick_launchd_label(runtime_root)
     plist_path = _LAUNCHD_USER_DIR / f"{label}.plist"
-    plist_payload = _generate_launchd_plist(label=label, pal_command=pal_command, runtime_root=runtime_root)
+    plist_payload = _generate_launchd_plist(
+        label=label,
+        pal_command=pal_command,
+        runtime_root=runtime_root,
+        environment=_runtime_service_environment(),
+    )
 
     print(f"  Pal command: {' '.join(pal_command)}")
     print(f"  Label:       {label}")
