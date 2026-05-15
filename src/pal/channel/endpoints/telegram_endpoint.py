@@ -229,7 +229,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _last_poll_error: str = ""
     _last_status_error: str = ""
     _last_poll_error_at: float = 0.0
-    _poll_error_stale_threshold_seconds: float = 90.0
+    _poll_error_stale_threshold_seconds: float = 10.0
+    _poll_monitor_interval_seconds: float = 0.5
     _reconnect_delays: tuple[float, ...] = (1.0, 3.0, 10.0, 30.0)
     _reconnect_attempts: int = 0
     _reconnecting: bool = False
@@ -387,8 +388,9 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     await app.start()
                     await app.updater.start_polling(
                         timeout=self.poll_timeout_seconds,
-                        drop_pending_updates=True,
+                        drop_pending_updates=first_attempt,
                         allowed_updates=list(self.allowed_updates),
+                        error_callback=self._on_polling_error,
                     )
                     self._authorized = True
                     self._polling_running = True
@@ -431,7 +433,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                                 )
                                 self._polling_running = False
                                 break
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(self._poll_monitor_interval_seconds)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -484,7 +486,14 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         from telegram import Update
 
         builder = ApplicationBuilder().token(self.bot_token).concurrent_updates(True)
-        builder = builder.read_timeout(30).write_timeout(30).connect_timeout(10).pool_timeout(30)
+        builder = builder.connection_pool_size(32).read_timeout(30).write_timeout(30).connect_timeout(10).pool_timeout(30)
+        builder = (
+            builder.get_updates_connection_pool_size(4)
+            .get_updates_read_timeout(float(self.poll_timeout_seconds) + 10.0)
+            .get_updates_write_timeout(30)
+            .get_updates_connect_timeout(10)
+            .get_updates_pool_timeout(30)
+        )
         if self.proxy_url:
             builder = builder.proxy(self.proxy_url).get_updates_proxy(self.proxy_url)
         if self.base_url != "https://api.telegram.org":
@@ -504,6 +513,12 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         if not self._last_poll_error_at:
             self._last_poll_error_at = time.monotonic()
         logger.warning("telegram poll error: %s", self._last_poll_error)
+
+    def _on_polling_error(self, exc: Exception) -> None:
+        self._last_poll_error = str(exc) or type(exc).__name__
+        if not self._last_poll_error_at:
+            self._last_poll_error_at = time.monotonic()
+        logger.warning("telegram polling network error: %s", self._last_poll_error)
 
     async def _on_update(self, update: Any, context: Any) -> None:
         _ = context
@@ -1213,6 +1228,7 @@ class TelegramChannelEndpointFactory:
             allowed_updates=tuple(metadata.get("allowed_updates") or ("message", "edited_message", "callback_query")),
             binding=TelegramBinding.parse(record.binding_key or ""),
         )
+        runtime_endpoint._poll_error_stale_threshold_seconds = float(metadata.get("poll_error_stale_threshold_seconds") or 10.0)
         runtime_endpoint.enabled = bool(record.enabled)
         runtime_endpoint.attached = record.detached_at is None
         runtime_endpoint.paired = bool(record.binding_key)

@@ -3125,12 +3125,15 @@ class _FakeTelegramBot:
 class _FakeTelegramUpdater:
     def __init__(self) -> None:
         self.running = False
+        self.start_kwargs: list[dict[str, object]] = []
+        self.stop_count = 0
 
     async def start_polling(self, **kwargs):
-        _ = kwargs
+        self.start_kwargs.append(dict(kwargs))
         self.running = True
 
     async def stop(self):
+        self.stop_count += 1
         self.running = False
 
 
@@ -3242,6 +3245,28 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         await self.endpoint._on_update(update, None)
 
         self.assertEqual(self.endpoint.poll(), [])
+
+    async def test_telegram_endpoint_uses_separate_get_updates_connection_pool(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_pool",
+                channel_kind="telegram",
+                binding_key="user:42",
+                send_policy={},
+            ),
+            runtime_root=self.runtime_root,
+            bot_token="token-123",
+            poll_timeout_seconds=30,
+        )
+
+        app = endpoint._build_application()
+        get_updates_request, bot_request = app.bot._request
+
+        self.assertIsNot(get_updates_request, bot_request)
+        self.assertEqual(get_updates_request._client_kwargs["limits"].max_connections, 4)
+        self.assertEqual(get_updates_request._client_kwargs["timeout"].read, 40.0)
+        self.assertEqual(get_updates_request._client_kwargs["timeout"].pool, 30)
+        self.assertEqual(bot_request._client_kwargs["limits"].max_connections, 32)
 
     async def test_telegram_endpoint_accepts_matching_binding_and_queues_statuses(self) -> None:
         update = _FakeTelegramUpdate(
@@ -3501,5 +3526,79 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(health["polling_running"])
             self.assertEqual(health["reconnect_attempts"], 0)
             self.assertEqual(health["last_poll_error"], "")
+        finally:
+            await endpoint.stop_async()
+
+    async def test_telegram_endpoint_reconnects_after_persistent_poll_error_without_dropping_updates(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_poll_retry",
+                channel_kind="telegram",
+                binding_key="user:42",
+                send_policy={},
+            ),
+            runtime_root=self.runtime_root,
+            bot_token="token-123",
+        )
+        endpoint._reconnect_delays = (0.01, 0.01)
+        endpoint._poll_error_stale_threshold_seconds = 0.01
+        endpoint._poll_monitor_interval_seconds = 0.01
+        apps = [
+            _FakeTelegramApp(self.fake_bot),
+            _FakeTelegramApp(self.fake_bot),
+        ]
+
+        def build_app():
+            return apps.pop(0)
+
+        endpoint._build_application = build_app  # type: ignore[method-assign]
+        await endpoint.start_async()
+        first_app = endpoint.application
+        self.assertIsNotNone(first_app)
+        self.assertEqual(first_app.updater.start_kwargs[-1]["drop_pending_updates"], True)
+
+        class _ErrorContext:
+            error = RuntimeError("telegram network down")
+
+        await endpoint._on_error(None, _ErrorContext())
+
+        try:
+            for _ in range(20):
+                await asyncio.sleep(0.01)
+                if endpoint.application is not first_app and endpoint.inspect_health()["polling_running"]:
+                    break
+
+            self.assertIsNot(endpoint.application, first_app)
+            self.assertGreaterEqual(first_app.updater.stop_count, 1)
+            self.assertTrue(endpoint.inspect_health()["polling_running"])
+            self.assertEqual(endpoint.application.updater.start_kwargs[-1]["drop_pending_updates"], False)
+        finally:
+            await endpoint.stop_async()
+
+    async def test_telegram_endpoint_polling_error_callback_updates_health(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_poll_error",
+                channel_kind="telegram",
+                binding_key="user:42",
+                send_policy={},
+            ),
+            runtime_root=self.runtime_root,
+            bot_token="token-123",
+        )
+        app = _FakeTelegramApp(self.fake_bot)
+        endpoint._build_application = lambda: app  # type: ignore[method-assign]
+        await endpoint.start_async()
+        try:
+            callback = app.updater.start_kwargs[-1]["error_callback"]
+            self.assertIs(callback.__self__, endpoint)
+            self.assertIs(callback.__func__, endpoint._on_polling_error.__func__)
+
+            callback(RuntimeError("telegram pool exhausted"))
+
+            health = endpoint.inspect_health()
+            self.assertFalse(health["healthy"])
+            self.assertEqual(health["reason"], "polling_error")
+            self.assertEqual(health["last_poll_error"], "telegram pool exhausted")
         finally:
             await endpoint.stop_async()

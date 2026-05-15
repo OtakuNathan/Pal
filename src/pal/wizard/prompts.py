@@ -11,6 +11,7 @@ import getpass
 import json
 import re
 import shutil
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -113,15 +114,26 @@ def query_model_metadata(
 # Input helpers
 # ---------------------------------------------------------------------------
 
+def _read_line(prompt_text: str) -> str:
+    if sys.stdin.isatty():
+        try:
+            from prompt_toolkit import prompt as tty_prompt
+
+            return tty_prompt(prompt_text)
+        except Exception:
+            pass
+    return input(prompt_text)
+
+
 def ask(prompt: str, default: str = "") -> str:
     suffix = f" [{default}]: " if default else ": "
-    raw = input(prompt + suffix).strip()
+    raw = _read_line(prompt + suffix).strip()
     return raw if raw else default
 
 
 def ask_yes_no(prompt: str, default: bool = True) -> bool:
     suffix = " [Y/n]: " if default else " [y/N]: "
-    raw = input(prompt + suffix).strip().lower()
+    raw = _read_line(prompt + suffix).strip().lower()
     if not raw:
         return default
     return raw in ("y", "yes")
@@ -132,12 +144,24 @@ def ask_password(prompt: str) -> str | None:
     return raw if raw else None
 
 
+def normalize_telegram_binding_key(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if re.match(r"^(user|chat|chat_user):", raw):
+        return raw
+    if re.fullmatch(r"-?\d+", raw):
+        scope = "chat" if raw.startswith("-") else "user"
+        return f"{scope}:{raw}"
+    return f"user:{raw}"
+
+
 def multiline_input(prompt: str, sentinel: str = ".") -> str:
     print(f"{prompt} (enter '{sentinel}' on its own line to finish)")
     lines: list[str] = []
     while True:
         try:
-            line = input("> ")
+            line = _read_line("> ")
         except EOFError:
             break
         if line.strip() == sentinel:
@@ -639,8 +663,12 @@ def prompt_channel(runtime_root: Path) -> WizardChannel:
     )
 
     if choice.strip() == "2":
-        bot_token = ask("  Bot token", "")
-        binding_key = ask("  Binding key (e.g. chat:12345)", "user:me")
+        bot_token = ""
+        while not bot_token:
+            bot_token = ask("  Bot token", "").strip()
+            if not bot_token:
+                print("  Bot token is required for Telegram.")
+        binding_key = normalize_telegram_binding_key(ask("  Binding key (e.g. user:12345 or chat:-10012345)", "user:me"))
         return WizardChannel(
             endpoint_id="telegram_main",
             channel_kind="telegram",

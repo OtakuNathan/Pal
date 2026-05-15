@@ -14,6 +14,7 @@ dependencies = [
     "msgpack>=1.0,<2",
     "peewee>=3.17,<4",
     "playwright>=1.48,<2",
+    "prompt-toolkit>=3.0,<4",
     "python-telegram-bot>=20.7,<22",
     "sqlite-vec>=0.1.6,<1",
     "telegramify-markdown>=0.4,<1",
@@ -38,6 +39,8 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
+"pal.core" = ["tool_surface.toml"]
+"pal.mcp" = ["templates/*.toml"]
 "pal.minion" = ["profile_templates/*.toml", "profile_templates/**/*.toml"]
 "pal.plugins_builtin.mcp" = ["plugin.toml"]
 "pal.plugins_builtin.minion" = ["plugin.toml"]

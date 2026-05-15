@@ -10,7 +10,7 @@ from pal.execution import CapabilityCall
 from pal.llm import CanonicalToolCall
 from pal.runtime_app import build_runtime_app
 from pal.runtime_app import open_runtime
-from pal.socket_client import default_socket_path, send_message
+from pal.socket_client import default_socket_path, run_tty, send_message
 from pal.web_fetch import run_browser_service_cli
 
 
@@ -33,6 +33,9 @@ def _build_parser() -> argparse.ArgumentParser:
     client_parser = subparsers.add_parser("client", help="Send one message to a running Pal instance")
     client_parser.add_argument("--runtime-root", type=Path, required=True)
     client_parser.add_argument("--message", required=True)
+
+    tty_parser = subparsers.add_parser("tty", help="Open an interactive socket TTY session")
+    tty_parser.add_argument("--runtime-root", type=Path, required=True)
 
     # -- tool-call -----------------------------------------------------------
     tool_call_parser = subparsers.add_parser(
@@ -131,6 +134,9 @@ async def _run_async(args: argparse.Namespace) -> int:
         return 0
     if args.command == "client":
         await send_message(default_socket_path(args.runtime_root), args.message)
+        return 0
+    if args.command == "tty":
+        await run_tty(default_socket_path(args.runtime_root))
         return 0
     if args.command == "tool-call":
         handle = open_runtime(args.runtime_root)

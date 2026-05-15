@@ -26,6 +26,7 @@ from pal.wizard.prompts import (
     WizardLLMEndpoint,
     build_codex_wizard_endpoints,
     multiline_input,
+    normalize_telegram_binding_key,
     run_llm_endpoint_preflight,
 )
 
@@ -89,6 +90,17 @@ class TestMultilineInput(unittest.TestCase):
         mock_input.side_effect = EOFError
         result = multiline_input("Test")
         self.assertEqual(result, "")
+
+
+class TestTelegramWizardInput(unittest.TestCase):
+    def test_numeric_user_binding_is_normalized(self) -> None:
+        self.assertEqual(normalize_telegram_binding_key("8620024896"), "user:8620024896")
+
+    def test_negative_numeric_chat_binding_is_normalized(self) -> None:
+        self.assertEqual(normalize_telegram_binding_key("-10012345"), "chat:-10012345")
+
+    def test_scoped_binding_is_preserved(self) -> None:
+        self.assertEqual(normalize_telegram_binding_key("chat:12345"), "chat:12345")
 
 
 class TestSeedFromWizard(unittest.TestCase):

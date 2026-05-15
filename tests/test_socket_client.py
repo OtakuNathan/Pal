@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from pal.socket_client import send_message
+from pal.socket_client import run_tty, send_message
 
 
 class _FakeWriter:
@@ -79,3 +79,38 @@ class PalV2SocketClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([tool["name"] for tool in transcript.tool_calls], ["op_probe"])
         self.assertEqual(transcript.text_parts, ["done"])
         self.assertEqual(transcript.finish_reason, "stop")
+
+    async def test_tty_reuses_socket_for_multiple_turns(self) -> None:
+        writer = _FakeWriter()
+        events = iter(
+            [
+                {"type": "text_delta", "request_id": "req-1", "text": "one"},
+                {"type": "done", "request_id": "req-1", "finish_reason": "stop"},
+                {"type": "text_delta", "request_id": "req-2", "text": "two"},
+                {"type": "done", "request_id": "req-2", "finish_reason": "stop"},
+            ]
+        )
+        ids = iter(["req-1", "req-2"])
+        inputs = iter(["hello", "/status", "/exit"])
+
+        async def fake_open_unix_connection(_path: str):
+            return object(), writer
+
+        async def fake_read_socket_message(_reader):
+            return next(events)
+
+        def fake_input(_prompt: str) -> str:
+            return next(inputs)
+
+        with patch("pal.socket_client.uuid4", side_effect=lambda: next(ids)):
+            with patch("pal.socket_client.asyncio.open_unix_connection", side_effect=fake_open_unix_connection):
+                with patch("pal.socket_client.read_socket_message", side_effect=fake_read_socket_message):
+                    await run_tty(Path("/tmp/pal.sock"), input_fn=fake_input)
+
+        self.assertIn(b"req-1", writer.written)
+        self.assertIn(b"hello", writer.written)
+        self.assertIn(b"user_message", writer.written)
+        self.assertIn(b"req-2", writer.written)
+        self.assertIn(b"/status", writer.written)
+        self.assertIn(b"slash_command", writer.written)
+        self.assertTrue(writer.closed)
