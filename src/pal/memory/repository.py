@@ -224,6 +224,51 @@ class MemoryDurableRepository:
             return
         self._insert_fts_row("memories_fts", row)
 
+    def delete_document(self, document_id: str) -> dict[str, Any] | None:
+        normalized = str(document_id or "").strip()
+        if not normalized:
+            return None
+        existing = self.get_document(normalized)
+        if existing is None:
+            return None
+        kind, _, raw_id = normalized.partition(":")
+        db = MemoryFactModel._meta.database
+        embedding_ids = [
+            str(row.embedding_id)
+            for row in MemoryEmbeddingModel.select(MemoryEmbeddingModel.embedding_id).where(
+                MemoryEmbeddingModel.document_id == normalized
+            )
+        ]
+        vector_rowids = [rowid for embedding_id in embedding_ids if (rowid := self._get_vector_rowid(embedding_id)) is not None]
+        with db.atomic():
+            db.execute_sql("DELETE FROM memories_fts WHERE document_id = ?", (normalized,))
+            MemoryTopicModel.delete().where(MemoryTopicModel.document_id == normalized).execute()
+            if vector_rowids:
+                self._delete_vec_index_rows(vector_rowids)
+            if embedding_ids:
+                MemoryEmbeddingVecModel.delete().where(MemoryEmbeddingVecModel.embedding_id.in_(embedding_ids)).execute()
+            MemoryEmbeddingModel.delete().where(MemoryEmbeddingModel.document_id == normalized).execute()
+            if kind == "fact":
+                MemoryFactModel.delete().where(MemoryFactModel.fact_id == raw_id).execute()
+            elif kind == "case":
+                MemoryCaseModel.delete().where(MemoryCaseModel.case_id == raw_id).execute()
+            else:
+                return None
+        return existing
+
+    def _delete_vec_index_rows(self, rowids: list[int]) -> None:
+        if not rowids:
+            return
+        db = MemoryEmbeddingVecModel._meta.database
+        cursor = db.execute_sql("SELECT name FROM sqlite_master WHERE sql LIKE '%USING vec0%'")
+        table_names = [str(row[0]) for row in cursor.fetchall()]
+        for table_name in table_names:
+            try:
+                for rowid in rowids:
+                    db.execute_sql(f"DELETE FROM {table_name} WHERE rowid = ?", (int(rowid),))
+            except sqlite3.OperationalError:
+                continue
+
     def _insert_fts_row(self, table_name: str, row: dict[str, Any]) -> None:
         db = MemoryFactModel._meta.database
         db.execute_sql(

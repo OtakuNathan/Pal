@@ -161,14 +161,14 @@ class OledTurnStateSubscriberTests(unittest.TestCase):
     def test_thinking_to_working_on_tool_call(self) -> None:
         sub, sent = self._make_subscriber()
         sub.state = "thinking"
-        sub(TURN_TOOL_CALL_BEFORE, {"turn_id": "t1", "tool_name": "shell.exec"})
+        sub(TURN_TOOL_CALL_BEFORE, {"turn_id": "t1", "tool_name": "shell_exec"})
         self.assertEqual(sub.state, "working")
         self.assertIn("working", sent)
 
     def test_working_to_thinking_on_tool_result(self) -> None:
         sub, sent = self._make_subscriber()
         sub.state = "working"
-        sub(TURN_TOOL_CALL_AFTER, {"turn_id": "t1", "tool_name": "shell.exec", "ok": True})
+        sub(TURN_TOOL_CALL_AFTER, {"turn_id": "t1", "tool_name": "shell_exec", "ok": True})
         self.assertEqual(sub.state, "thinking")
         self.assertIn("thinking", sent)
 
@@ -191,10 +191,10 @@ class OledTurnStateSubscriberTests(unittest.TestCase):
         sub, sent = self._make_subscriber()
         sub.state = "sleeping"
         sub(TURN_START, {"turn_id": "t1"})
-        sub(TURN_TOOL_CALL_BEFORE, {"turn_id": "t1", "tool_name": "shell.exec"})
-        sub(TURN_TOOL_CALL_AFTER, {"turn_id": "t1", "tool_name": "shell.exec", "ok": True})
-        sub(TURN_TOOL_CALL_BEFORE, {"turn_id": "t1", "tool_name": "tool.read"})
-        sub(TURN_TOOL_CALL_AFTER, {"turn_id": "t1", "tool_name": "tool.read", "ok": True})
+        sub(TURN_TOOL_CALL_BEFORE, {"turn_id": "t1", "tool_name": "shell_exec"})
+        sub(TURN_TOOL_CALL_AFTER, {"turn_id": "t1", "tool_name": "shell_exec", "ok": True})
+        sub(TURN_TOOL_CALL_BEFORE, {"turn_id": "t1", "tool_name": "tool_read"})
+        sub(TURN_TOOL_CALL_AFTER, {"turn_id": "t1", "tool_name": "tool_read", "ok": True})
         sub(TURN_END, {"turn_id": "t1", "status": "success"})
         self.assertEqual(sub.state, "standby")
         self.assertEqual(sent, ["shock", "thinking", "working", "thinking", "working", "thinking", "standby"])

@@ -22,27 +22,22 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class LLMListItem:
+class LLMModelListItem:
+    model_id: str
     endpoint_id: str
     display_name: str | None
     provider: str
     api_mode: str
-    model_id: str
     priority: int
-    enabled: bool
-    supports_reasoning: bool
-    supports_tools: bool
-    supports_streaming: bool
-    supports_vision: bool
 
 
 @dataclass(frozen=True)
-class LLMEndpointSnapshot:
+class LLMModelSnapshot:
+    model_id: str
     endpoint_id: str
     display_name: str | None
     provider: str
     api_mode: str
-    model_id: str
     context_window: int | None
     max_output_tokens: int | None
     supports_reasoning: bool
@@ -54,12 +49,22 @@ class LLMEndpointSnapshot:
 
 
 @dataclass(frozen=True)
-class LLMActiveSnapshot:
-    has_primary_endpoint: bool
-    endpoint_id: str | None
-    model_id: str | None
-    provider: str | None
+class LLMActiveModelSnapshot:
+    has_active_model: bool
     active_endpoint_id: str | None
+    model_id: str | None
+    endpoint_id: str | None
+    display_name: str | None
+    provider: str | None
+    api_mode: str | None
+    context_window: int | None
+    max_output_tokens: int | None
+    supports_reasoning: bool | None
+    supports_tools: bool | None
+    supports_streaming: bool | None
+    supports_vision: bool | None
+    priority: int | None
+    enabled: bool | None
 
 
 @dataclass(frozen=True)
@@ -74,16 +79,6 @@ class LLMThinkLevelSnapshot:
     kind="module",
     source="builtin:llm",
     target_kind="module",
-)
-@capability_node(
-    namespace=INTROSPECTION_NAMESPACE,
-    scope="endpoint",
-    kind="endpoint",
-    source="builtin:llm",
-    target_kind="endpoint",
-    iterable_resolver="iter_endpoints",
-    target_id_resolver="resolve_endpoint_id",
-    target_label_resolver="resolve_endpoint_label",
 )
 @capability_node(
     namespace=INTROSPECTION_NAMESPACE,
@@ -103,57 +98,83 @@ class LLMIntrospectionProvider:
         except Exception:
             return []
 
-    def resolve_endpoint_id(self, endpoint: LLMEndpointModel) -> str:
-        return endpoint.endpoint_id
-
-    def resolve_endpoint_label(self, endpoint: LLMEndpointModel) -> str:
-        return endpoint.endpoint_id
-
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="list",
-        description="List enabled llm endpoints ordered by priority",
+        description="List enabled llm models ordered by priority. Use model_id with llm show.",
     )
     def list_endpoints(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = [
-            LLMListItem(
-                endpoint_id=endpoint.endpoint_id,
-                display_name=endpoint.display_name,
-                provider=endpoint.provider,
-                api_mode=endpoint.api_mode,
+            LLMModelListItem(
                 model_id=endpoint.model_id,
-                priority=endpoint.priority,
-                enabled=endpoint.enabled,
-                supports_reasoning=endpoint.supports_reasoning,
-                supports_tools=endpoint.supports_tools,
-                supports_streaming=endpoint.supports_streaming,
-                supports_vision=endpoint.supports_vision,
+                endpoint_id=endpoint.endpoint_id,
+                display_name=getattr(endpoint, "display_name", None),
+                provider=endpoint.provider,
+                api_mode=str(getattr(endpoint, "api_mode", "") or ""),
+                priority=int(getattr(endpoint, "priority", 0) or 0),
             ).__dict__
             for endpoint in self.iter_endpoints()
         ]
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="llm endpoints",
+            text="llm models",
             structured={"items": payload},
-            llm_text=render_titled_structured_for_llm("LLM endpoints", {"items": payload}),
+            llm_text=render_titled_structured_for_llm("LLM models", {"items": payload}),
         )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="active",
-        description="Show the current primary llm endpoint and active model",
+        description="Show the current active llm model metadata",
     )
     def active(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         snapshot = inspect_llm(self)
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="llm active endpoint",
+            text="llm active model",
             structured=snapshot.__dict__,
-            llm_text=render_titled_structured_for_llm("LLM active endpoint", snapshot.__dict__),
+            llm_text=render_titled_structured_for_llm("LLM active model", snapshot.__dict__),
+        )
+
+    @capability_action(
+        namespace=INTROSPECTION_NAMESPACE,
+        scope="module",
+        action_name="show",
+        description="Show public metadata for one enabled llm model by model_id",
+        args_schema={
+            "type": "object",
+            "properties": {
+                "model_id": {"type": "string"},
+            },
+            "required": ["model_id"],
+        },
+    )
+    def show_model(self, call: IntrospectionCall) -> IntrospectionResult:
+        model_id = str(call.args.get("model_id") or "").strip()
+        if not model_id:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="model_id is required",
+                llm_text="model_id is required",
+            )
+        endpoint = self._find_endpoint_by_model_id(model_id)
+        if endpoint is None:
+            return IntrospectionResult(
+                status=RuntimeStatus.NOT_FOUND,
+                text="llm model not found",
+                structured={"model_id": model_id},
+                llm_text="llm model not found",
+            )
+        snapshot = _model_snapshot(endpoint)
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="llm model metadata",
+            structured=snapshot.__dict__,
+            llm_text=render_titled_structured_for_llm("LLM model metadata", snapshot.__dict__),
         )
 
     @capability_action(
@@ -212,55 +233,69 @@ class LLMIntrospectionProvider:
             status=RuntimeStatus.OK,
             text="llm active endpoint updated",
             structured=snapshot.__dict__,
-            llm_text=render_titled_structured_for_llm("LLM active endpoint", snapshot.__dict__),
+            llm_text=render_titled_structured_for_llm("LLM active model", snapshot.__dict__),
         )
 
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="endpoint",
-        action_name="show",
-        description="Show llm endpoint public metadata",
+    def _find_endpoint_by_model_id(self, model_id: str) -> LLMEndpointModel | None:
+        return next((endpoint for endpoint in self.iter_endpoints() if endpoint.model_id == model_id), None)
+
+
+def _model_snapshot(endpoint: LLMEndpointModel) -> LLMModelSnapshot:
+    return LLMModelSnapshot(
+        model_id=endpoint.model_id,
+        endpoint_id=endpoint.endpoint_id,
+        display_name=getattr(endpoint, "display_name", None),
+        provider=endpoint.provider,
+        api_mode=str(getattr(endpoint, "api_mode", "") or ""),
+        context_window=getattr(endpoint, "context_window", None),
+        max_output_tokens=getattr(endpoint, "max_output_tokens", None),
+        supports_reasoning=bool(getattr(endpoint, "supports_reasoning", False)),
+        supports_tools=bool(getattr(endpoint, "supports_tools", False)),
+        supports_streaming=bool(getattr(endpoint, "supports_streaming", False)),
+        supports_vision=bool(getattr(endpoint, "supports_vision", False)),
+        priority=int(getattr(endpoint, "priority", 0) or 0),
+        enabled=bool(getattr(endpoint, "enabled", True)),
     )
-    def show_endpoint(self, call: IntrospectionCall) -> IntrospectionResult:
-        endpoint = call.meta.get("resolved_target")
-        if not isinstance(endpoint, LLMEndpointModel):
-            return IntrospectionResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="llm endpoint not found",
-                llm_text="llm endpoint not found",
-            )
-        snapshot = LLMEndpointSnapshot(
-            endpoint_id=endpoint.endpoint_id,
-            display_name=endpoint.display_name,
-            provider=endpoint.provider,
-            api_mode=endpoint.api_mode,
-            model_id=endpoint.model_id,
-            context_window=endpoint.context_window,
-            max_output_tokens=endpoint.max_output_tokens,
-            supports_reasoning=endpoint.supports_reasoning,
-            supports_tools=endpoint.supports_tools,
-            supports_streaming=endpoint.supports_streaming,
-            supports_vision=endpoint.supports_vision,
-            priority=endpoint.priority,
-            enabled=endpoint.enabled,
-        )
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="llm endpoint metadata",
-            structured=snapshot.__dict__,
-            llm_text=render_titled_structured_for_llm("LLM endpoint metadata", snapshot.__dict__),
-        )
 
 
-def inspect_llm(provider: LLMIntrospectionProvider) -> LLMActiveSnapshot:
+def inspect_llm(provider: LLMIntrospectionProvider) -> LLMActiveModelSnapshot:
     provider.runtime.refresh_runtime_settings()
     active = provider.runtime.endpoint_resolver.primary(preferred_endpoint_id=provider.runtime.active_endpoint_id)
-    return LLMActiveSnapshot(
-        has_primary_endpoint=active is not None,
-        endpoint_id=active.endpoint_id if active is not None else None,
-        model_id=active.model_id if active is not None else None,
-        provider=active.provider if active is not None else None,
-        active_endpoint_id=provider.runtime.active_endpoint_id,
+    if active is None:
+        return LLMActiveModelSnapshot(
+            has_active_model=False,
+            active_endpoint_id=provider.runtime.active_endpoint_id,
+            model_id=None,
+            endpoint_id=None,
+            display_name=None,
+            provider=None,
+            api_mode=None,
+            context_window=None,
+            max_output_tokens=None,
+            supports_reasoning=None,
+            supports_tools=None,
+            supports_streaming=None,
+            supports_vision=None,
+            priority=None,
+            enabled=None,
+        )
+    snapshot = _model_snapshot(active)
+    return LLMActiveModelSnapshot(
+        has_active_model=True,
+        active_endpoint_id=active.endpoint_id,
+        model_id=active.model_id,
+        endpoint_id=snapshot.endpoint_id,
+        display_name=snapshot.display_name,
+        provider=active.provider,
+        api_mode=snapshot.api_mode,
+        context_window=snapshot.context_window,
+        max_output_tokens=snapshot.max_output_tokens,
+        supports_reasoning=snapshot.supports_reasoning,
+        supports_tools=snapshot.supports_tools,
+        supports_streaming=snapshot.supports_streaming,
+        supports_vision=snapshot.supports_vision,
+        priority=snapshot.priority,
+        enabled=snapshot.enabled,
     )
 
 

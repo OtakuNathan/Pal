@@ -141,7 +141,7 @@ class ToolSurface:
                 seen.add(key)
                 selected.append(descriptor)
 
-        include("op_exec_disc_read")
+        include("op_tool_read")
 
         if signal.subsystem == "memory":
             include("intro_module_memory_show")
@@ -154,9 +154,8 @@ class ToolSurface:
             except KeyError:
                 active_provider_id = ""
             if active_provider_id:
-                include("intro_provider_l3_show", target_id=active_provider_id)
-                include("intro_provider_l3_inventory", target_id=active_provider_id)
-                include("op_l3_maintenance_refresh_indexes", target_id=active_provider_id)
+                include("intro_provider_memory_show", target_id=active_provider_id)
+                include("intro_provider_memory_inventory", target_id=active_provider_id)
         elif signal.subsystem in {"plugin", "plugins"}:
             include("intro_module_plugins_show")
             include("intro_module_plugins_list")

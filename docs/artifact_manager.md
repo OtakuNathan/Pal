@@ -93,7 +93,7 @@ Artifact capabilities:
 - `op_artifact_read`: read text-like representations by `artifact_id`.
 - `op_artifact_search`: search artifact objects by filename, kind, time, caption, or summary.
 - `op_artifact_select`: mark one artifact as chosen and refresh TTL.
-- `op_artifact_content_search`: search existing text-like representations inside one known artifact. It does not inspect image pixels, run OCR, or create audio transcripts.
+- `op_artifact_grep`: search existing text-like representations inside one known artifact. It does not inspect image pixels, run OCR, or create audio transcripts.
 - `op_artifact_transcribe`: request transcript generation; V1 returns `needs_transcription` without an ASR provider.
 
 Resident LLM tools currently include only:

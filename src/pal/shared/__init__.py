@@ -44,6 +44,7 @@ from pal.shared.prompting import (
     PromptIRBlock,
     PromptFragmentProvider,
 )
+from pal.shared.prompt_rendering import render_system_reminder, render_xml_block
 from pal.shared.messages import (
     CheckpointEvent,
     MinionApprovalDecision,
@@ -94,6 +95,8 @@ __all__ = [
     "PromptIR",
     "PromptIRBlock",
     "PromptFragmentProvider",
+    "render_system_reminder",
+    "render_xml_block",
     "RUNTIME_ONLY_SURFACES",
     "RuntimeStatus",
     "SINGLETON_TARGET",

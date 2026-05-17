@@ -15,7 +15,7 @@ from pal.core.module_registry import (
     ModuleRegistry,
 )
 from pal.core.prompt_fragment_registry import PromptFragmentRegistry
-from pal.core.runtime import EventLoop, MainLoop, PalCore, TurnRunner
+from pal.core.runtime import EventLoop, MainLoop, PalCore
 from pal.core.tool_stagnation import (
     ToolExecutionRecord,
     ToolStagnationGuardProcess,
@@ -78,7 +78,6 @@ __all__ = [
     "TurnContinuation",
     "TurnEventHandler",
     "TurnOutcome",
-    "TurnRunner",
     "canonical_result_fingerprint",
     "canonical_tool_signature_hash",
     "failure_turn_program",

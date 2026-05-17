@@ -7,8 +7,8 @@ from pal.shared import ProactiveTriggerEvent
 
 
 @dataclass(frozen=True)
-class ServiceDefinition:
-    service_id: str
+class ProactiveDefinition:
+    proactive_id: str
     goal: str
     method: str = ""
     skill_refs: list[str] = field(default_factory=list)
@@ -18,15 +18,15 @@ class ServiceDefinition:
     enabled: bool = True
 
 class ScheduleEnginePort(Protocol):
-    def next_due_at(self, service_id: str) -> str | None:
+    def next_due_at(self, proactive_id: str) -> str | None:
         ...
 
 
-class ServiceRunnerPort(Protocol):
+class ProactiveRunnerPort(Protocol):
     def run(self, trigger: ProactiveTriggerEvent) -> None:
         ...
 
 
-class ServiceManagerPort(Protocol):
-    def register(self, service: ServiceDefinition) -> None:
+class ProactiveManagerPort(Protocol):
+    def register(self, definition: ProactiveDefinition) -> None:
         ...

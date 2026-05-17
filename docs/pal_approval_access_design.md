@@ -191,7 +191,7 @@ op_fs_stat(path)
 
 The safety value comes from the structured boundary, not from whether the implementation uses Python stdlib or shell internally.
 
-`shell.exec` remains the general escape hatch and should default to stronger approval.
+`shell_exec` remains the general escape hatch and should default to stronger approval.
 
 ## Interaction Lifecycle Reuse
 

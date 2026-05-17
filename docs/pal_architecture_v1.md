@@ -42,12 +42,12 @@ flowchart TD
     subgraph EXT["Governed External Families"]
         L3["L3 Provider"]
         TASK["Tasking Plugin Family"]
-        SVC["Service Plugin Family"]
+        PRO["Proactive Plugin Family"]
     end
 
     MEM --> L3
     EX --> TASK
-    EX --> SVC
+    EX --> PRO
 ```
 
 ### Foundation
@@ -110,7 +110,7 @@ Foundation 是系统最低层：
 7. `Control` 是独立治理平面，不直接承担开放式推理。
 8. `L1/L2` 属于 runtime memory，纯驻留 RAM，重启即丢失。
 9. `L3` 是外挂、可插拔、searchable durable memory engine。
-10. `Task`、`Service`、`L3` 都是外挂，但受治理。
+10. `Task`、`Proactive`、`L3` 都是外挂，但受治理。
 11. 用户与 `Pal` 在所有 channel 上的交互必须进入同一个 FIFO 治理队列。
 12. `page_fault` 机制被 `L1/L2/L3` 分级记忆完全取代。
 13. 所有子系统都必须提供 introspection surface。
@@ -263,7 +263,7 @@ flowchart LR
 - 对 `L1/L2` 做 durable shadow persistence
 - 继续保留 `page_fault` 型静默回忆机制
 - 让 `Skill` 成为执行层或人格注入层
-- 让 `Pal Core` 直接拥有 task、service、worker、memory durable state
+- 让 `Pal Core` 直接拥有 task、proactive、worker、memory durable state
 
 ## 后续文档
 
@@ -274,7 +274,7 @@ flowchart LR
 - `pal_execution_contract.md`
 - `pal_introspection_contract.md`
 - `pal_tasking_contract.md`
-- `pal_service_contract.md`
+- `pal_proactive_contract.md`
 - `pal_control_plane.md`
 - `pal_memory_contract.md`
 - `pal_failure_reporting_contract.md`

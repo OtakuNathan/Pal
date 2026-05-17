@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -7,9 +8,13 @@ from pal.llm.repository import RuntimeSettingRepository
 from pal.web_fetch.browser_service import BrowserServiceManager, plain_http_fetch, playwright_python_available
 from pal.web_fetch.contracts import (
     ACTIVE_WEB_FETCH_PROVIDER_SETTING_KEY,
+    DEFAULT_WEB_FETCH_USER_AGENT,
+    WebFetchDocument,
     WebFetchProviderPort,
     WebFetchRequest,
     WebFetchResult,
+    WebScreenshotRequest,
+    WebScreenshotResult,
 )
 from pal.web_fetch.models import WebFetchProviderModel
 from pal.web_fetch.repository import WebFetchProviderRepository
@@ -20,11 +25,25 @@ class PlaywrightFetchProvider(WebFetchProviderPort):
     browser_manager: BrowserServiceManager
     provider_kind: str = "playwright_fetch"
 
-    def read(self, record: WebFetchProviderModel, request: WebFetchRequest) -> dict[str, str]:
+    def read(self, record: WebFetchProviderModel, request: WebFetchRequest) -> WebFetchDocument | dict[str, object]:
         return self.browser_manager.fetch(
             request.url,
             timeout_ms=request.timeout_ms,
             max_chars=request.max_chars,
+            max_raw_chars=request.max_raw_chars,
+            max_links=request.max_links,
+            user_agent=request.user_agent,
+            settings=dict(record.settings_blob or {}),
+        )
+
+    def screenshot(self, record: WebFetchProviderModel, request: WebScreenshotRequest) -> dict[str, object]:
+        return self.browser_manager.screenshot(
+            request.url,
+            timeout_ms=request.timeout_ms,
+            full_page=request.full_page,
+            viewport_width=request.viewport_width,
+            viewport_height=request.viewport_height,
+            user_agent=request.user_agent,
             settings=dict(record.settings_blob or {}),
         )
 
@@ -33,9 +52,16 @@ class PlaywrightFetchProvider(WebFetchProviderPort):
 class PlainHTTPFetchProvider(WebFetchProviderPort):
     provider_kind: str = "plain_http_fetch"
 
-    def read(self, record: WebFetchProviderModel, request: WebFetchRequest) -> dict[str, str]:
+    def read(self, record: WebFetchProviderModel, request: WebFetchRequest) -> WebFetchDocument | dict[str, object]:
         _ = record
-        return plain_http_fetch(request.url, timeout_ms=request.timeout_ms, max_chars=request.max_chars)
+        return plain_http_fetch(
+            request.url,
+            timeout_ms=request.timeout_ms,
+            max_chars=request.max_chars,
+            max_raw_chars=request.max_raw_chars,
+            max_links=request.max_links,
+            user_agent=request.user_agent,
+        )
 
 
 @dataclass
@@ -148,21 +174,70 @@ class WebFetchService:
                 last_error = "provider runtime unavailable"
                 continue
             try:
-                result = provider.read(record, request)
+                result = self._coerce_document(provider.read(record, request), request=request)
             except Exception as exc:
                 self.last_errors[record.provider_id] = str(exc)
                 last_error = str(exc)
                 continue
             self.last_errors[record.provider_id] = ""
             return WebFetchResult(
-                requested_url=str(result.get("requested_url") or request.url),
-                final_url=str(result.get("final_url") or request.url),
-                title=str(result.get("title") or ""),
-                text=str(result.get("text") or ""),
+                requested_url=result.requested_url or request.url,
+                final_url=result.final_url or request.url,
+                title=result.title,
+                text=result.text,
+                raw_content=result.raw_content,
+                raw_content_truncated=result.raw_content_truncated,
                 configured_provider_id=configured_provider_id,
                 effective_provider_id=record.provider_id,
                 fetch_mode="browser" if record.provider_kind == "playwright_fetch" else "http",
                 fallback_used=index > 0,
+                status_code=result.status_code,
+                content_type=result.content_type,
+                content_length=result.content_length,
+                text_truncated=result.text_truncated,
+                links=result.links,
+                metadata=result.metadata,
+                response_headers=result.response_headers,
+                user_agent=request.user_agent or DEFAULT_WEB_FETCH_USER_AGENT,
+            )
+        raise RuntimeError(last_error)
+
+    def screenshot(self, request: WebScreenshotRequest) -> WebScreenshotResult:
+        configured_provider_id = self.configured_active_provider_id()
+        candidates = self._provider_candidates(configured_provider_id)
+        if not candidates:
+            raise RuntimeError("no enabled web fetch provider available")
+        last_error = "web screenshot failed"
+        for index, record in enumerate(candidates):
+            if record.provider_kind != "playwright_fetch":
+                continue
+            provider = self.providers.get(record.provider_kind)
+            screenshot = getattr(provider, "screenshot", None)
+            if not callable(screenshot):
+                self.last_errors[record.provider_id] = "provider runtime cannot capture screenshots"
+                last_error = "provider runtime cannot capture screenshots"
+                continue
+            try:
+                payload = screenshot(record, request)
+                result = self._coerce_screenshot(payload, request=request)
+            except Exception as exc:
+                self.last_errors[record.provider_id] = str(exc)
+                last_error = str(exc)
+                continue
+            self.last_errors[record.provider_id] = ""
+            return WebScreenshotResult(
+                requested_url=result.requested_url or request.url,
+                final_url=result.final_url or request.url,
+                title=result.title,
+                png_bytes=result.png_bytes,
+                configured_provider_id=configured_provider_id,
+                effective_provider_id=record.provider_id,
+                fallback_used=index > 0,
+                status_code=result.status_code,
+                full_page=result.full_page,
+                viewport_width=result.viewport_width,
+                viewport_height=result.viewport_height,
+                user_agent=request.user_agent or DEFAULT_WEB_FETCH_USER_AGENT,
             )
         raise RuntimeError(last_error)
 
@@ -188,3 +263,30 @@ class WebFetchService:
                 continue
             ordered.append(item)
         return ordered
+
+    def _coerce_document(self, result: WebFetchDocument | dict[str, Any], *, request: WebFetchRequest) -> WebFetchDocument:
+        if isinstance(result, WebFetchDocument):
+            return result
+        if not isinstance(result, dict):
+            raise RuntimeError("web fetch provider returned invalid payload")
+        return WebFetchDocument.from_mapping(result, requested_url=request.url)
+
+    def _coerce_screenshot(self, result: WebScreenshotResult | dict[str, Any], *, request: WebScreenshotRequest) -> WebScreenshotResult:
+        if isinstance(result, WebScreenshotResult):
+            return result
+        if not isinstance(result, dict):
+            raise RuntimeError("web screenshot provider returned invalid payload")
+        encoded = str(result.get("png_base64") or "")
+        if not encoded:
+            raise RuntimeError("web screenshot provider returned empty image")
+        return WebScreenshotResult(
+            requested_url=str(result.get("requested_url") or request.url),
+            final_url=str(result.get("final_url") or request.url),
+            title=str(result.get("title") or ""),
+            png_bytes=base64.b64decode(encoded.encode("ascii")),
+            status_code=int(result["status_code"]) if result.get("status_code") is not None else None,
+            full_page=bool(result.get("full_page", request.full_page)),
+            viewport_width=int(result.get("viewport_width") or request.viewport_width),
+            viewport_height=int(result.get("viewport_height") or request.viewport_height),
+            user_agent=request.user_agent or DEFAULT_WEB_FETCH_USER_AGENT,
+        )

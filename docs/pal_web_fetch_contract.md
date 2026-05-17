@@ -10,7 +10,7 @@
 
 它负责：
 
-- 抓取网页并提取文本内容
+- 抓取网页并保留页面元信息，再提取文本内容
 - 支持 Playwright 浏览器渲染（处理 JS 页面）和纯 HTTP 抓取
 - 多 provider fallback
 - provider 健康检查与状态报告
@@ -48,8 +48,25 @@ fetch provider 是一个可替换后端。
 ```python
 class WebFetchProviderPort(Protocol):
     provider_kind: str
-    def read(self, record, request: WebFetchRequest) -> dict[str, str]: ...
+    def read(self, record, request: WebFetchRequest) -> WebFetchDocument | dict[str, object]: ...
 ```
+
+`dict` 返回仅用于兼容旧 provider；新 provider 应返回 `WebFetchDocument`。
+
+### WebFetchDocument
+
+`web_fetch` 内部保留 typed document，而不是只保留正文字符串：
+
+- `requested_url` / `final_url`
+- `status_code`
+- `content_type` / `content_length`
+- `title` / `text` / `text_truncated`
+- `raw_content` / `raw_content_truncated`（内部保留，capability 默认不把全文输出给 LLM）
+- `links`
+- `metadata`（例如 `description`、`canonical_url`、`language`）
+- `response_headers`（只保留安全排错字段）
+
+LLM-facing 的 `op_web_read` 仍然返回紧凑文本，但 structured payload 会带上这些字段，并用 `raw_content_available` / `raw_content_truncated` 标明是否保留了原始内容，方便引用、排错和后续处理。
 
 ### BrowserServiceManager
 
@@ -94,7 +111,7 @@ Playwright 的进程管理器。负责：
 | `intro_module_web_fetch_show` | 模块概览 |
 | `intro_module_web_fetch_list_providers` | 列出所有 provider |
 | `intro_module_web_fetch_active_provider` | 当前活跃 provider |
-| `op_web_fetch_read` | 抓取网页内容 |
+| `op_web_read` | 抓取网页内容 |
 | `op_web_fetch_mgmt_set_active_provider` | 切换活跃 provider |
 
 ### Provider 实例级能力
@@ -112,6 +129,10 @@ Playwright 的进程管理器。负责：
 ## 代理支持
 
 Playwright provider 自动读取环境变量 `https_proxy` / `http_proxy`，通过 `--proxy-server` 传递给 Chromium。
+
+## User-Agent
+
+默认 `User-Agent` 使用桌面 Chrome 风格字符串，而不是 `Pal` 自定义标识。`WebFetchRequest.user_agent` 可以覆盖默认值；Playwright 和纯 HTTP provider 都必须使用同一请求级 UA。
 
 ## 插件集成
 
@@ -131,7 +152,7 @@ Playwright provider 自动读取环境变量 `https_proxy` / `http_proxy`，通�
 - `web_fetch` 提供 fallback-capable provider family。
 - 抓取失败时自动尝试下一个 provider。
 - Browser service 是独立子进程，崩溃不影响 Pal 主进程。
-- 抓取结果经过文本提取和截断后才返回给 LLM。
+- 抓取结果以 `WebFetchDocument` 保留页面元信息；返回给 LLM 的正文经过文本提取和截断。
 
 ## Non-Goals
 

@@ -19,7 +19,7 @@ Older design notes are historical references. These docs are the active baseline
 11. [pal_introspection_contract.md](pal_introspection_contract.md)
 12. [pal_tasking_contract.md](pal_tasking_contract.md)
 13. [pal_minion_v1.md](pal_minion_v1.md)
-14. [pal_service_contract.md](pal_service_contract.md)
+14. [pal_proactive_contract.md](pal_proactive_contract.md)
 15. [pal_memory_contract.md](pal_memory_contract.md)
 16. [pal_failure_reporting_contract.md](pal_failure_reporting_contract.md)
 17. [pal_migration_map.md](pal_migration_map.md)
@@ -46,7 +46,7 @@ Older design notes are historical references. These docs are the active baseline
 - `pal_introspection_contract.md`: self-observation, diagnostics, self-maintenance, and extensibility.
 - `pal_tasking_contract.md`: tasking, minions, checkpoints, ledgers, and workspace governance.
 - `pal_minion_v1.md`: implemented minion sidecar boundary, approval flow, tasking store, checkpoint cursor, and capability surface.
-- `pal_service_contract.md`: services, schedules, service runs, and output-channel constraints.
+- `pal_proactive_contract.md`: proactive tasks, schedules, run history, and output-channel constraints.
 - `pal_memory_contract.md`: L1/L2/L3 memory and memory lifecycle.
 - `pal_failure_reporting_contract.md`: developer escalation after self-repair failure.
 - `pal_migration_map.md`: current code migration map.

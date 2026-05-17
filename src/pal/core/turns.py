@@ -4,7 +4,7 @@ from collections.abc import Generator
 from dataclasses import dataclass, field
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from pal.channel import ChannelEnvelope
@@ -111,6 +111,20 @@ class MailboxReplyStreamEffect(EffectRequest):
 TurnProgram = Generator[EffectRequest, EffectResult, TurnOutcome]
 
 
+@dataclass(frozen=True)
+class AgentLoopFrame:
+    retry_note: str = ""
+    observations: tuple[ToolObservation, ...] = ()
+    reply_texts: tuple[str, ...] = ()
+
+
+BuildAgentContext = Callable[[AgentLoopFrame], PromptAssemblyContext]
+RenderAgentFinalText = Callable[[CanonicalLLMOutcome | None], str]
+BuildAgentCommitPayload = Callable[[str, list[ToolObservation], list[str]], L1CommitPayload]
+BuildMailboxEffect = Callable[[str], MailboxReplyEffect | None]
+BuildRetryNote = Callable[[CanonicalLLMOutcome | None, list[ToolObservation], int], str]
+
+
 @dataclass
 class TurnContinuation:
     turn_id: str
@@ -151,35 +165,75 @@ def channel_turn_program(
     core_mode: str = "default",
     max_output_tokens: int = 1024,
 ) -> TurnProgram:
-    # This program expresses the control flow of a single user-facing turn.
-    # It never performs I/O directly; it only yields effects for PalCore to
-    # interpret and feed back into the generator.
-    observations: list[ToolObservation] = []
-    reply_texts: list[str] = []
-    compact_note = ""
-    while True:
-        metadata = {"compact_note": compact_note}
-        assembly_context = PromptAssemblyContext(
+    def build_context(frame: AgentLoopFrame) -> PromptAssemblyContext:
+        metadata = {}
+        if frame.retry_note:
+            metadata["retry_note"] = frame.retry_note
+        return PromptAssemblyContext(
             event=channel_envelope.event,
             core_mode=core_mode,
             metadata=metadata,
         )
+
+    def build_commit_payload(final_reply: str, observations: list[ToolObservation], reply_texts: list[str]) -> L1CommitPayload:
+        return L1CommitPayload(
+            turn_id=channel_envelope.event.event_id,
+            transcript=_build_turn_transcript(channel_envelope, final_reply, observations=observations, reply_texts=reply_texts),
+            tool_observations=list(observations),
+        )
+
+    return (
+        yield from agent_turn_program(
+            turn_id=channel_envelope.event.event_id,
+            build_assembly_context=build_context,
+            render_final_text=lambda outcome: render_final_reply(channel_envelope, outcome) if outcome is not None else "",
+            build_commit_payload=build_commit_payload,
+            max_output_tokens=max_output_tokens,
+            emit_mid_text=lambda text: MailboxReplyEffect(channel_envelope=channel_envelope, text=text),
+            emit_final_text=lambda text: MailboxReplyEffect(channel_envelope=channel_envelope, text=text),
+        )
+    )
+
+
+def agent_turn_program(
+    *,
+    turn_id: str,
+    build_assembly_context: BuildAgentContext,
+    render_final_text: RenderAgentFinalText,
+    build_commit_payload: BuildAgentCommitPayload,
+    max_output_tokens: int = 1024,
+    emit_mid_text: BuildMailboxEffect | None = None,
+    emit_final_text: BuildMailboxEffect | None = None,
+    tools_override: list[dict[str, Any]] | None = None,
+    build_retry_note: BuildRetryNote | None = None,
+) -> TurnProgram:
+    observations: list[ToolObservation] = []
+    reply_texts: list[str] = []
+    retry_note = ""
+    retry_count = 0
+    while True:
+        frame = AgentLoopFrame(
+            retry_note=retry_note,
+            observations=tuple(observations),
+            reply_texts=tuple(reply_texts),
+        )
+        assembly_context = build_assembly_context(frame)
+        retry_note = ""
         advice = yield LLMPreflightEffect(
             assembly_context=assembly_context,
             max_output_tokens=max_output_tokens,
         )
-        compact_note = ""
         if getattr(advice.payload, "status", "") == LLMPreflightStatus.COMPACT_REQUIRED:
             compact_result = yield MemoryCompactEffect(
                 assembly_context=assembly_context,
                 target_input_budget=getattr(advice.payload, "target_input_budget", 0),
                 reserved_output_tokens=getattr(advice.payload, "reserved_output_tokens", 0),
             )
-            compact_note = str(compact_result.payload.summary) if compact_result.payload is not None else ""
             continue
         outcome_result = yield LLMRequestEffect(
             assembly_context=assembly_context,
             max_output_tokens=max_output_tokens,
+            tools_override=tools_override,
         )
         outcome = _as_llm_outcome(outcome_result.payload)
         if outcome is not None and outcome.finish_reason == LLMFinishReason.COMPACT_REQUIRED:
@@ -188,32 +242,43 @@ def channel_turn_program(
                 target_input_budget=outcome.target_input_budget,
                 reserved_output_tokens=outcome.reserved_output_tokens,
             )
-            compact_note = str(compact_result.payload.summary) if compact_result.payload is not None else ""
             continue
         if outcome is not None and outcome.tool_calls:
+            retry_count = 0
             mid_text = str(outcome.text or "").strip()
             if mid_text:
-                reply_result = yield MailboxReplyEffect(channel_envelope=channel_envelope, text=mid_text)
-                if reply_result.status == RuntimeStatus.QUEUED:
-                    reply_texts.append(reply_result.text or mid_text)
+                rendered = mid_text if emit_mid_text is None else ""
+                effect = emit_mid_text(mid_text) if emit_mid_text is not None else None
+                if effect is not None:
+                    reply_result = yield effect
+                    if reply_result.status == RuntimeStatus.QUEUED:
+                        rendered = reply_result.text or mid_text
+                if rendered.strip():
+                    reply_texts.append(rendered)
             for tool_call in outcome.tool_calls:
                 tool_result = yield ToolCallEffect(tool_call=tool_call)
                 _append_tool_observation(observations, tool_result.payload)
             continue
-        final_reply = render_final_reply(channel_envelope, outcome) if outcome is not None else ""
-        reply_result = yield MailboxReplyEffect(channel_envelope=channel_envelope, text=final_reply)
-        if reply_result.status != RuntimeStatus.QUEUED:
-            final_reply = reply_result.text or final_reply
+        if build_retry_note is not None:
+            note = build_retry_note(outcome, observations, retry_count)
+            if str(note or "").strip():
+                retry_note = str(note).strip()
+                retry_count += 1
+                continue
+        final_reply = render_final_text(outcome)
+        effect = emit_final_text(final_reply) if emit_final_text is not None else None
+        if effect is not None:
+            reply_result = yield effect
+            if reply_result.status != RuntimeStatus.QUEUED:
+                final_reply = reply_result.text or final_reply
+            elif reply_result.text:
+                final_reply = reply_result.text
         if final_reply.strip():
             reply_texts.append(final_reply)
         return TurnOutcome(
-            turn_id=channel_envelope.event.event_id,
+            turn_id=turn_id,
             final_reply=final_reply,
-            commit_payload=L1CommitPayload(
-                turn_id=channel_envelope.event.event_id,
-                transcript=_build_turn_transcript(channel_envelope, final_reply, observations=observations, reply_texts=reply_texts),
-                tool_observations=list(observations),
-            ),
+            commit_payload=build_commit_payload(final_reply, observations, reply_texts),
             reply_texts=tuple(reply_texts),
         )
 

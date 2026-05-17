@@ -224,15 +224,16 @@ class AnthropicMessagesProvider(LLMProviderAdapter):
         )
 
 
-class CodexProxyProvider(LLMProviderAdapter):
-    provider_names = frozenset({"codex_proxy"})
-    adapter_names = frozenset({"codex", "codex_proxy"})
+class CodexBridgeProvider(LLMProviderAdapter):
+    provider_names = frozenset({"codex_bridge"})
+    adapter_names = frozenset({"codex", "codex_bridge"})
     litellm_provider = "hosted_vllm"
     model_provider_aliases = frozenset({"openai", "hosted_vllm", "lm_studio", "llamafile"})
 
     @classmethod
     def matches_endpoint(cls, endpoint: LLMEndpointModel) -> bool:
-        return bool(_capabilities(endpoint).get("codex_proxy"))
+        capabilities = _capabilities(endpoint)
+        return bool(capabilities.get("codex_bridge"))
 
     def apply_request(self, request: CanonicalLLMRequest, draft: LiteLLMCompletionDraft) -> None:
         draft.reasoning_effort = _think_level_to_completion_reasoning_effort(request.metadata.get("think_level"))
@@ -262,7 +263,7 @@ class ZaiGLMProvider(LLMProviderAdapter):
 
 def build_default_provider_registry(*, load_entry_points: bool = False) -> LLMProviderRegistry:
     registry = LLMProviderRegistry()
-    registry.register(CodexProxyProvider)
+    registry.register(CodexBridgeProvider)
     registry.register(ZaiGLMProvider)
     registry.register(AnthropicMessagesProvider)
     registry.register(OpenAIChatProvider)

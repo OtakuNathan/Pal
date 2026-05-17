@@ -12,8 +12,8 @@ Does not own:
 - memory truth
 
 Exposes:
-- `ServiceDefinition`
+- `ProactiveDefinition`
 - `ProactiveTriggerEvent`
-- `ServiceManager`
+- `ProactiveManager`
 - `ScheduleEngine`
-- `ServiceEventSource`
+- `ProactiveEventSource`

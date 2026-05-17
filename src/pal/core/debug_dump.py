@@ -53,8 +53,8 @@ def build_runtime_debug_snapshot(
 ) -> dict[str, Any]:
     core = getattr(handle, "core", None)
     channel_runtime = getattr(handle, "channel_runtime", None)
-    service_manager = getattr(handle, "service_manager", None)
-    service_repository = getattr(handle, "service_repository", None)
+    proactive_manager = getattr(handle, "proactive_manager", None)
+    proactive_repository = getattr(handle, "proactive_repository", None)
     return {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "monotonic": time.monotonic(),
@@ -62,7 +62,7 @@ def build_runtime_debug_snapshot(
         "asyncio": _asyncio_snapshot(),
         "core": _core_snapshot(core),
         "channel": _channel_snapshot(channel_runtime),
-        "proactive": _service_snapshot(service_manager, service_repository),
+        "proactive": _proactive_snapshot(proactive_manager, proactive_repository),
     }
 
 
@@ -254,42 +254,42 @@ def _endpoint_snapshot(endpoint: Any) -> dict[str, Any]:
     }
 
 
-def _service_snapshot(service_manager: Any, service_repository: Any) -> dict[str, Any]:
-    if service_manager is None:
+def _proactive_snapshot(proactive_manager: Any, proactive_repository: Any) -> dict[str, Any]:
+    if proactive_manager is None:
         return {"available": False}
-    registered = getattr(service_manager, "registered", {}) or {}
-    trigger_mailbox = getattr(service_manager, "trigger_mailbox", None)
-    schedule_engine = getattr(service_manager, "schedule_engine", None)
-    next_due = getattr(schedule_engine, "next_due_by_service_id", {}) or {}
-    services = []
-    for service_id, definition in sorted(registered.items()):
+    registered = getattr(proactive_manager, "registered", {}) or {}
+    trigger_mailbox = getattr(proactive_manager, "trigger_mailbox", None)
+    schedule_engine = getattr(proactive_manager, "schedule_engine", None)
+    next_due = getattr(schedule_engine, "next_due_by_proactive_id", {}) or {}
+    proactive_tasks = []
+    for proactive_id, definition in sorted(registered.items()):
         latest = _safe_call(
-            getattr(service_repository, "latest_run", None),
-            str(service_id),
+            getattr(proactive_repository, "latest_run", None),
+            str(proactive_id),
             default=None,
         )
-        services.append(
+        proactive_tasks.append(
             {
-                "proactive_id": str(service_id),
+                "proactive_id": str(proactive_id),
                 "enabled": bool(getattr(definition, "enabled", False)),
-                "next_due_at_utc": _redact(next_due.get(service_id)),
-                "latest_run": _service_run_snapshot(latest),
+                "next_due_at_utc": _redact(next_due.get(proactive_id)),
+                "latest_run": _proactive_run_snapshot(latest),
             }
         )
     return {
         "available": True,
         "registered_count": len(registered),
         "trigger_mailbox_size": _safe_len(getattr(trigger_mailbox, "peek_all", lambda: [])()),
-        "proactive_tasks": services,
+        "proactive_tasks": proactive_tasks,
     }
 
 
-def _service_run_snapshot(run: Any) -> dict[str, Any] | None:
+def _proactive_run_snapshot(run: Any) -> dict[str, Any] | None:
     if run is None:
         return None
     return {
-        "proactive_run_id": str(getattr(run, "service_run_id", "") or ""),
-        "proactive_id": str(getattr(run, "service_id", "") or ""),
+        "proactive_run_id": str(getattr(run, "proactive_run_id", "") or ""),
+        "proactive_id": str(getattr(run, "proactive_id", "") or ""),
         "trigger_kind": str(getattr(run, "trigger_kind", "") or ""),
         "status": str(getattr(run, "status", "") or ""),
         "turn_id": str(getattr(run, "turn_id", "") or ""),

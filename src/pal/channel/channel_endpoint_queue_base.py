@@ -62,9 +62,14 @@ class ChannelEndpointQueueBase(ABC):
         return {}
 
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, Any]) -> None:
-        _ = response_handle
-        _ = kind
-        _ = payload
+        if kind not in {"interactive_open", "interactive_update", "interactive_resolve", "interactive_expire"}:
+            return
+        spec = payload.get("spec")
+        text = str(payload.get("text") or "").strip()
+        if not text and spec is not None:
+            text = str(getattr(spec, "text", "") or "").strip()
+        if text:
+            self.send_reply(response_handle, text)
 
     def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
         _ = response_handle

@@ -7,13 +7,13 @@ from pal.llm.contracts import (
     CanonicalToolResult,
     LLMRuntimePort,
 )
-from pal.llm.codex_app_server import (
-    CodexAppServerAuthMessages,
-    CodexAppServerClientInfo,
+from pal.llm.codex_auth_protocol import (
+    CodexAuthMessages,
+    CodexClientInfo,
     is_chatgpt_auth_tokens_refresh_request,
     redact_codex_auth_message,
 )
-from pal.llm.codex_proxy import CodexAppServerBridge, CodexCompletion, CodexProxyError, CodexToolCall
+from pal.llm.codex_openai_bridge import CodexCliBridge, CodexCompletion, CodexBridgeError, CodexToolCall
 from pal.llm.adapters import (
     LEGACY_RUNTIME_PROVIDER_ADAPTER_DIR,
     LLM_PROVIDER_ADAPTER_ENTRY_POINT_GROUP,
@@ -29,10 +29,10 @@ from pal.llm.adapters import (
 )
 from pal.llm.credentials import LiteLLMCredentialResolver, ResolvedLLMAuth, default_env_var_for_endpoint
 from pal.llm.introspection import (
-    LLMActiveSnapshot,
-    LLMEndpointSnapshot,
+    LLMActiveModelSnapshot,
     LLMIntrospectionProvider,
-    LLMListItem,
+    LLMModelListItem,
+    LLMModelSnapshot,
     LLMThinkLevelSnapshot,
     inspect_llm,
     register_with_core,
@@ -41,7 +41,7 @@ from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 from pal.llm.repository import DEFAULT_THINK_LEVEL, LLMEndpointRepository, RuntimeSettingRepository
 from pal.llm.secret_store import EncryptedFileSecretStore, InMemorySecretStore, KeyringSecretStore, SecretRef, SecretStorePort
 from pal.llm.runtime import (
-    CodexAppServerEndpointInvoker,
+    CodexCliEndpointInvoker,
     EndpointResolver,
     LLMEndpointInvocationError,
     LLMEndpointInvokerPort,
@@ -57,12 +57,12 @@ __all__ = [
     "CanonicalLLMRequest",
     "CanonicalToolCall",
     "CanonicalToolResult",
-    "CodexAppServerAuthMessages",
-    "CodexAppServerClientInfo",
-    "CodexAppServerBridge",
-    "CodexAppServerEndpointInvoker",
+    "CodexAuthMessages",
+    "CodexClientInfo",
+    "CodexCliBridge",
+    "CodexCliEndpointInvoker",
     "CodexCompletion",
-    "CodexProxyError",
+    "CodexBridgeError",
     "CodexToolCall",
     "EndpointResolver",
     "DEFAULT_THINK_LEVEL",
@@ -82,14 +82,14 @@ __all__ = [
     "LLMProviderAdapter",
     "LLMProviderRegistry",
     "LiteLLMCompletionDraft",
-    "LLMActiveSnapshot",
-    "LLMEndpointSnapshot",
+    "LLMActiveModelSnapshot",
     "LLMPreflightAdvice",
     "LLMPreflightRequest",
     "LLMIntrospectionProvider",
     "LLMEndpointModel",
     "LLMEndpointRepository",
-    "LLMListItem",
+    "LLMModelListItem",
+    "LLMModelSnapshot",
     "LLMRuntime",
     "LLMRuntimePort",
     "NormalizedLLMStreamEvent",

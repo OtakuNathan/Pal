@@ -13,6 +13,21 @@ from pal.execution.contracts import CapabilityResult
 from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResult, RuntimeStatus, capability_action
 
 
+SHELL_EXEC_DESCRIPTION = (
+    "Execute a shell command in the local runtime and return stdout, stderr, and exit status. "
+    "IMPORTANT: Prefer dedicated Pal capabilities for reading, writing, searching, inspecting, or editing files. "
+    "Avoid using this tool to run find, grep, cat, head, tail, sed, awk, or echo unless the user explicitly asks "
+    "for a shell command, no dedicated capability is available, or you have verified the dedicated capability is insufficient. "
+    "In minion workspaces, do not use shell for git add/commit or other checkpoint mutations; the runner owns checkpoint commits."
+)
+
+SHELL_EXEC_CMD_DESCRIPTION = (
+    "Shell command to execute. Prefer dedicated Pal capabilities over shell commands for file read/write/search/edit tasks; "
+    "avoid find/grep/cat/head/tail/sed/awk/echo unless explicitly requested or no suitable dedicated capability is available. "
+    "In minion workspaces, do not run git add/commit/reset/checkout/clean/merge/rebase/push for checkpointing."
+)
+
+
 def _truncate(text: str, limit: int) -> tuple[str, bool]:
     if len(text) <= limit:
         return text, False
@@ -84,10 +99,10 @@ class _TrackedShellProcess:
 
 @dataclass
 class ShellExecTool:
-    name: str = "shell.exec"
+    name: str = "shell_exec"
     display_name: str = "Shell Exec"
     family: str = "system"
-    description: str = "Execute a shell command in the local runtime and return stdout, stderr, and exit status."
+    description: str = SHELL_EXEC_DESCRIPTION
     tags: tuple[str, ...] = ("shell", "system", "exec")
     keywords: tuple[str, ...] = ("command", "terminal", "bash", "zsh", "pwsh", "powershell", "run")
     args_schema: dict[str, object] = None  # type: ignore[assignment]   
@@ -101,7 +116,7 @@ class ShellExecTool:
             self.args_schema = {
                 "type": "object",
                 "properties": {
-                    "cmd": {"type": "string", "description": "Shell command to execute."},
+                    "cmd": {"type": "string", "description": SHELL_EXEC_CMD_DESCRIPTION},
                     "cwd": {"type": "string", "description": "Optional working directory."},
                     "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional timeout in milliseconds."},
                     "output_limit": {
@@ -302,13 +317,13 @@ class ShellExecCapabilityMixin:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         family="exec",
-        action_name="run",
-        description="Execute a shell command in the local runtime.",
-        aliases=("shell.exec",),
+        action_name="shell",
+        description=SHELL_EXEC_DESCRIPTION,
+        aliases=("shell_exec", "op_exec_run"),
         args_schema={
             "type": "object",
             "properties": {
-                "cmd": {"type": "string", "description": "Shell command to execute."},
+                "cmd": {"type": "string", "description": SHELL_EXEC_CMD_DESCRIPTION},
                 "cwd": {"type": "string", "description": "Optional working directory."},
                 "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional timeout in milliseconds."},
                 "output_limit": {
@@ -332,10 +347,9 @@ class ShellExecCapabilityMixin:
                 "timeout_ms": {"type": "integer"},
             },
         },
-        metadata={"llm_exposed": True},
     )
-    def run(self, call: IntrospectionCall) -> IntrospectionResult:
-        result = self.runtime.execute_tool(type("ToolCall", (), {"name": "shell.exec", "args": dict(call.args)})())
+    def shell(self, call: IntrospectionCall) -> IntrospectionResult:
+        result = self.runtime.execute_tool(type("ToolCall", (), {"name": "shell_exec", "args": dict(call.args)})())
         return IntrospectionResult(
             status=RuntimeStatus.OK if result.ok else RuntimeStatus.ERROR,
             text=result.text,

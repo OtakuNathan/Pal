@@ -20,7 +20,6 @@ Does not own:
 
 Exposes:
 - `PalCore`
-- `TurnRunner`
 - `TurnManager`
 - `MainLoop`
 - `EventDispatcher`

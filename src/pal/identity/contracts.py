@@ -22,14 +22,6 @@ class PalPreferencesProfile:
     preferences_blob: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class PalStateProfile:
-    persona_id: str
-    status: str
-    top_of_mind_refs: list[str] = field(default_factory=list)
-    last_active_at: str | None = None
-
-
 class IdentityServicePort(Protocol):
     def ensure_defaults(self) -> None:
         ...
@@ -38,9 +30,6 @@ class IdentityServicePort(Protocol):
         ...
 
     def get_preferences(self) -> PalPreferencesProfile | None:
-        ...
-
-    def get_state(self) -> PalStateProfile | None:
         ...
 
     def update_preferences(self, *, timezone: str | None = None) -> PalPreferencesProfile:

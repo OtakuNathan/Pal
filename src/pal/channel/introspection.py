@@ -183,7 +183,7 @@ class ChannelIntrospectionProvider:
         family="channel",
         action_name="send_attachment",
         description="Send a local file attachment back to the channel that started the current turn.",
-        aliases=("send.attachment", "channel.send_attachment"),
+        aliases=("send_attachment", "channel_send_attachment"),
         args_schema={
             "type": "object",
             "properties": {
@@ -204,7 +204,6 @@ class ChannelIntrospectionProvider:
                 "reason": {"type": "string"},
             },
         },
-        metadata={"llm_exposed": True},
     )
     def send_attachment(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -284,7 +283,7 @@ class ChannelIntrospectionProvider:
             "Hot-reload the provider implementation for one channel endpoint. "
             "The channel bus stays mounted; only the endpoint/provider instance is rebuilt."
         ),
-        aliases=("channel.reload_endpoint", "reload channel provider"),
+        aliases=("channel_reload_endpoint", "reload_channel_provider"),
         args_schema={
             "type": "object",
             "properties": {"target_id": {"type": "string"}},

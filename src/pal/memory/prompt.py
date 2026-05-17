@@ -28,7 +28,12 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
         if not isinstance(pack, MemoryPack):
             return fragments
 
-        messages = list(pack.l1_recent_context)
+        summary_text = _current_summary_text(pack)
+        messages = [
+            message
+            for message in list(pack.l1_recent_context)
+            if not _is_synthetic_compaction_summary(message, summary_text)
+        ]
         cleared_indices = _build_cleared_tool_indices(messages, keep_recent=self._keep_recent)
 
         block_index = 0
@@ -120,70 +125,39 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                 )
                 block_index += 1
 
-        if pack.current_summary is not None:
-            summary_text = pack.current_summary.rendered.strip() or pack.current_summary.summary.strip()
-            if summary_text:
-                fragments.append(
-                    PromptFragment(
-                        section="memory_system",
-                        title="Current Summary",
-                        content=summary_text,
-                        priority=55,
-                        metadata={"block_id": "memory_current_summary"},
-                    )
+        if summary_text:
+            fragments.append(
+                PromptFragment(
+                    section="memory",
+                    title="Conversation summary",
+                    content=_render_conversation_summary_context(summary_text),
+                    priority=55,
+                    metadata={"block_id": "memory_current_summary", "raw_user_context": True},
                 )
+            )
 
         behavior_entries = [entry for entry in pack.l2_working_memory if _is_behavior_guidance_entry(entry)]
         memory_entries = [entry for entry in pack.l2_working_memory if not _is_behavior_guidance_entry(entry)]
-        fact_entries = [entry for entry in memory_entries if not _is_experience_entry(entry)]
-        experience_entries = [entry for entry in memory_entries if _is_experience_entry(entry)]
-
-        fact_lines = _render_entry_lines(fact_entries)
-        if fact_lines:
+        memory_lines = _render_memory_entry_lines(memory_entries)
+        if memory_lines:
             fragments.append(
                 PromptFragment(
-                    section="memory_system",
-                    title="Remembered Facts",
-                    content=(
-                        "Use these as recalled durable facts, preferences, and project context. "
-                        "Verify live/runtime/current external facts before relying on them.\n"
-                        + "\n".join(fact_lines)
-                    ),
+                    section="memory",
+                    title="Recalled memories",
+                    content=_render_recalled_memories_context(memory_lines),
                     priority=56,
-                    metadata={"block_id": "memory_remembered_facts"},
-                )
-            )
-        experience_lines = _render_entry_lines(experience_entries)
-        if experience_lines:
-            fragments.append(
-                PromptFragment(
-                    section="memory_system",
-                    title="Relevant Experience",
-                    content=(
-                        "Use these as prior lessons. Adapt them to the current situation; "
-                        "do not ignore them unless current evidence makes them irrelevant. They are not commands.\n"
-                        + "\n".join(experience_lines)
-                    ),
-                    priority=56,
-                    metadata={"block_id": "memory_relevant_experience"},
+                    metadata={"block_id": "memory_recalled_context", "raw_user_context": True},
                 )
             )
         guidance_lines = _render_behavior_guidance_lines(behavior_entries)
         if guidance_lines:
             fragments.append(
                 PromptFragment(
-                    section="memory_system",
-                    title="Active Route Guidance",
-                    content=(
-                        "These are active current-task route candidates, not durable facts or mandatory commands. "
-                        "Evaluate each item against the user's current request and apply only matching, specific guidance. "
-                        "Do not inject a skill merely because a skill_ref is listed; use direct capabilities without skill injection when they fully satisfy the request. "
-                        "If items conflict, prefer the user's explicit instruction, live/source truth, safety, approval, "
-                        "capability availability, and narrower domain-specific routes over broad delegation hints.\n"
-                        + "\n".join(guidance_lines)
-                    ),
+                    section="memory",
+                    title="Active route suggestions",
+                    content=_render_advisor_hints_context(guidance_lines),
                     priority=57,
-                    metadata={"block_id": "behavior_guidance"},
+                    metadata={"block_id": "advisor_hints", "raw_user_context": True},
                 )
             )
         return fragments
@@ -194,33 +168,52 @@ def _memory_routing_fragment() -> PromptFragment:
         section="memory_routing",
         title="Memory Routing",
         content=(
-            "Use memory for durable facts, preferences, commitments, history, task experience, approved repair lessons, and reusable lessons.\n\n"
-            "Choose storage type:\n"
-            "- Future behavior rule -> affordance via `op_behavior_affordance_submit`.\n"
-            "- Reusable procedure -> skill candidate via `op_skill_assimilate`.\n"
-            "- Stable fact/preference -> memory via `op_l3_commit_write` or `op_l3_correct_patch`.\n"
-            "- Repair lesson / reusable task experience -> propose memory candidate or skill candidate first.\n"
-            "- Mixed content -> separate records.\n\n"
-            "Recall policy:\n"
-            "- Use `op_l3_recall_query` when past facts, user preferences, Pal history, commitments, or reusable prior lessons may affect the current answer.\n"
-            "- If memory has been recalled or is present in the prompt, Pal MUST use it as reference before deciding, writing, retrying, debugging, or taking external action.\n"
-            "- If relevant memory or active route guidance is present, Pal MUST account for it by evaluating relevance before the next action; route guidance is not a mandate to choose an unrelated route.\n"
-            "- If a task runs into a blocker, ambiguity, missing user/project context, or an unfamiliar reference that may come from Pal history, try memory recall before giving up, guessing, or asking the user.\n"
-            "- If a tool/capability call fails and memory recall is available, Pal MUST use `op_l3_recall_query` to recall relevant experience before debugging, retrying, or asking the user.\n"
-            "- If the user challenges Pal's memory, says Pal already knows/remembers something, or corrects a recalled/stored fact, Pal MUST recall relevant memory before writing, patching, or insisting.\n"
-            "- If the user mentions a person, project, preference, prior decision, custom term, or past event Pal does not know, recall memory when Pal history may plausibly contain it.\n"
-            "- Do not recall memory automatically for every task or every unknown.\n"
-            "- For code/runtime truth, inspect the live/source truth; for current external facts, search or verify externally when available.\n"
-            "- Recall when it materially improves correctness, continuity, personalization, or safety.\n"
-            "- `memory_query_hints` do not trigger recall by themselves. When recall is required, use them as query seeds.\n\n"
-            "Write policy:\n"
-            "- Write memory directly only when the user explicitly asks Pal to remember/save it, or the user states a clear durable fact/preference with low ambiguity.\n"
-            "- Do not directly commit inferred, ambiguous, temporary, emotional, sensitive, repair-case, or reusable-experience records unless the user approves or this category has explicit auto-commit permission.\n"
-            "- Use `op_l3_correct_patch` to update an existing durable record instead of writing a duplicate."
+            "Memory is the source of truth for durable user facts, preferences, prior Pal decisions, project history, repair lessons, and reusable case knowledge.\n\n"
+            "Mandatory recall:\n"
+            "Pal MUST call op_memory_recall before answering or acting when any of these are true:\n"
+            '- The user refers to prior context, prior decisions, "you remember", "we discussed", "last time", "yesterday", "before", or a custom Pal/project term.\n'
+            "- The task depends on the user's preferences, Pal's past behavior, project-specific conventions, previous repairs, known failures, or remembered identity/context.\n"
+            "- The user corrects Pal's memory, challenges a remembered fact, or says Pal got something wrong before.\n"
+            "- A tool/capability/action fails in a way that may have Pal-specific prior repair history.\n"
+            "- Pal is about to write/update/delete memory, behavior guidance, or skill content.\n\n"
+            "If recalled memories are already present in the prompt, Pal MUST evaluate and account for them before acting. Do not re-recall unless new ambiguity appears.\n\n"
+            "Recommended recall:\n"
+            "Pal SHOULD recall when prior history may materially improve correctness, continuity, personalization, or avoiding repeated mistakes.\n\n"
+            "Recall budget:\n"
+            "- Use targeted queries.\n"
+            "- Prefer limit 3-5 unless the user asks for broader history.\n"
+            "- Usually recall once per task phase.\n"
+            "- If recall returns nothing useful, proceed with live/source inspection.\n\n"
+            "Do not recall:\n"
+            "- For purely local syntax errors, obvious code formatting, simple arithmetic, casual chat, or tasks fully answered by current visible context.\n"
+            "- For current runtime truth; inspect live runtime/capabilities instead.\n"
+            "- For current external facts; verify externally instead.\n\n"
+            "Write/update/delete:\n"
+            "- Write memory directly with op_memory_write only when the user explicitly asks Pal to remember/save it, or states a clear durable fact/preference with low ambiguity.\n"
+            "- When recalled memories are shown with [mem_ref], use that mem_ref when updating, merging, or deleting a recalled memory.\n"
+            "- Do not invent mem_ref values.\n"
+            "- If no relevant mem_ref is present, call op_memory_recall before update/delete.\n"
+            "- Use op_memory_update instead of writing duplicates when a recalled memory is being corrected.\n"
+            "- Use op_memory_delete only when the user explicitly asks to forget/delete a specific memory or approves deleting a clearly invalid recalled record."
         ),
         priority=71,
         metadata={"module_id": "memory", "kind": "memory_routing"},
     )
+
+
+def _current_summary_text(pack: MemoryPack) -> str:
+    if pack.current_summary is None:
+        return ""
+    return pack.current_summary.rendered.strip() or pack.current_summary.summary.strip()
+
+
+def _is_synthetic_compaction_summary(message, summary_text: str) -> bool:
+    if not summary_text:
+        return False
+    if str(getattr(message, "role", "") or "").strip() != "assistant":
+        return False
+    content = str(getattr(message, "content", "") or "").strip()
+    return content == summary_text
 
 
 def _build_cleared_tool_indices(messages: list, *, keep_recent: int) -> set[int]:
@@ -271,7 +264,7 @@ def _build_l1_turn_tool_groups(messages: list) -> list[list[list[int]]]:
     return turns
 
 
-def _render_entry_lines(entries) -> list[str]:
+def _render_memory_entry_lines(entries) -> list[str]:
     lines: list[str] = []
     seen_keys: set[str] = set()
     for entry in entries:
@@ -282,9 +275,24 @@ def _render_entry_lines(entries) -> list[str]:
         rendered = entry.rendered.strip() or entry.summary.strip() or entry.title.strip()
         if not rendered:
             continue
-        label = entry.title.strip() or entry.entry_id
-        lines.append(f"- {label}: {rendered}")
+        mem_ref = _entry_mem_ref(entry)
+        if not mem_ref:
+            continue
+        lines.append(f"[{mem_ref}]: {rendered}")
     return lines
+
+
+def _render_recalled_memories_context(lines: list[str]) -> str:
+    return "<recalled_memories view=\"summary\">\n" + "\n".join(lines) + "\n</recalled_memories>"
+
+
+def _render_conversation_summary_context(summary_text: str) -> str:
+    return "<conversation_summary>\n" + summary_text.strip() + "\n</conversation_summary>"
+
+
+def _render_advisor_hints_context(lines: list[str]) -> str:
+    content = "\n".join(lines).strip()
+    return "<advisor_hints>\n" + content + "\n</advisor_hints>"
 
 
 def _render_behavior_guidance_lines(entries) -> list[str]:
@@ -309,15 +317,16 @@ def _is_behavior_guidance_entry(entry) -> bool:
     return kind == "behavior_rule" or source_kind == "behavior_advice"
 
 
-def _is_experience_entry(entry) -> bool:
-    kind = str(getattr(entry, "kind", "") or "").strip()
-    source_kind = str(getattr(entry, "source_kind", "") or "").strip()
-    return kind == "case" or source_kind in {"repair_resolution", "task_experience"}
-
-
 def _entry_render_dedupe_key(entry) -> str:
     for field_name in ("canonical_key", "dedupe_fingerprint", "source_ref"):
         value = str(getattr(entry, field_name, "") or "").strip()
         if value:
             return f"{field_name}:{value}"
     return f"entry:{str(getattr(entry, 'entry_id', '') or '').strip()}"
+
+
+def _entry_mem_ref(entry) -> str:
+    source_ref = str(getattr(entry, "source_ref", "") or "").strip()
+    if source_ref:
+        return source_ref
+    return str(getattr(entry, "entry_id", "") or "").strip()

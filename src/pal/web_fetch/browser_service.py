@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import base64
 import secrets
 import socket
 import subprocess
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+from pal.web_fetch.contracts import DEFAULT_WEB_FETCH_USER_AGENT, WebFetchDocument, WebFetchLink
 
 
 def playwright_python_available() -> bool:
@@ -35,14 +38,35 @@ class _HTMLTextParser(HTMLParser):
         super().__init__()
         self.title_parts: list[str] = []
         self.text_parts: list[str] = []
+        self.links: list[dict[str, str]] = []
+        self.metadata: dict[str, str] = {}
         self._in_title = False
         self._skip_depth = 0
+        self._anchor_stack: list[int] = []
 
     def handle_starttag(self, tag: str, attrs) -> None:
-        _ = attrs
+        attr_map = {str(key).lower(): str(value or "") for key, value in list(attrs or [])}
         lowered = tag.lower()
         if lowered == "title":
             self._in_title = True
+        if lowered == "a" and attr_map.get("href"):
+            self.links.append(
+                {
+                    "href": attr_map["href"].strip(),
+                    "text": "",
+                    "rel": attr_map.get("rel", "").strip(),
+                }
+            )
+            self._anchor_stack.append(len(self.links) - 1)
+        if lowered == "link" and "canonical" in attr_map.get("rel", "").lower() and attr_map.get("href"):
+            self.metadata["canonical_url"] = attr_map["href"].strip()
+        if lowered == "html" and attr_map.get("lang"):
+            self.metadata["language"] = attr_map["lang"].strip()
+        if lowered == "meta":
+            name = (attr_map.get("name") or attr_map.get("property") or "").lower()
+            content = attr_map.get("content", "").strip()
+            if content and name in {"description", "og:description", "og:title"}:
+                self.metadata[name.replace("og:", "open_graph_")] = content
         if lowered in {"script", "style", "noscript"}:
             self._skip_depth += 1
 
@@ -50,6 +74,8 @@ class _HTMLTextParser(HTMLParser):
         lowered = tag.lower()
         if lowered == "title":
             self._in_title = False
+        if lowered == "a" and self._anchor_stack:
+            self._anchor_stack.pop()
         if lowered in {"script", "style", "noscript"} and self._skip_depth > 0:
             self._skip_depth -= 1
 
@@ -61,15 +87,32 @@ class _HTMLTextParser(HTMLParser):
             return
         if self._in_title:
             self.title_parts.append(text)
+        if self._anchor_stack:
+            index = self._anchor_stack[-1]
+            existing = self.links[index].get("text", "")
+            self.links[index]["text"] = f"{existing} {text}".strip()
         self.text_parts.append(text)
 
 
-def plain_http_fetch(url: str, *, timeout_ms: int = 15000, max_chars: int = 12000) -> dict[str, str]:
-    request = Request(str(url), headers={"User-Agent": "PalV2/0.1"})
+def plain_http_fetch(
+    url: str,
+    *,
+    timeout_ms: int = 15000,
+    max_chars: int = 12000,
+    max_raw_chars: int = 50000,
+    max_links: int = 80,
+    user_agent: str = DEFAULT_WEB_FETCH_USER_AGENT,
+) -> WebFetchDocument:
+    request = Request(str(url), headers={"User-Agent": str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT)})
     with urlopen(request, timeout=max(timeout_ms, 1000) / 1000.0) as response:  # noqa: S310
         final_url = response.geturl()
         content_type = str(response.headers.get("Content-Type") or "")
-        body = response.read().decode(_coerce_charset(content_type), errors="replace")
+        headers = _headers_to_dict(response.headers)
+        raw = response.read()
+        body = raw.decode(_coerce_charset(content_type), errors="replace")
+        raw_content_truncated = len(body) > max_raw_chars
+        raw_content = body[:max_raw_chars].rstrip() if raw_content_truncated else body
+        status_code = int(getattr(response, "status", 0) or 0) or None
     parser = _HTMLTextParser()
     if "html" in content_type.lower():
         parser.feed(body)
@@ -78,14 +121,67 @@ def plain_http_fetch(url: str, *, timeout_ms: int = 15000, max_chars: int = 1200
     else:
         title = ""
         text = body.strip()
-    if len(text) > max_chars:
+    text_truncated = len(text) > max_chars
+    if text_truncated:
         text = text[:max_chars].rstrip()
-    return {
-        "requested_url": str(url),
-        "final_url": str(final_url or url),
-        "title": title,
-        "text": text,
+    links = tuple(
+        WebFetchLink(href=item["href"], text=item.get("text", ""), rel=item.get("rel", ""))
+        for item in _dedupe_links(parser.links)[: max(0, int(max_links))]
+    )
+    return WebFetchDocument(
+        requested_url=str(url),
+        final_url=str(final_url or url),
+        title=title,
+        text=text,
+        raw_content=raw_content,
+        raw_content_truncated=raw_content_truncated,
+        status_code=status_code,
+        content_type=content_type,
+        content_length=len(raw),
+        text_truncated=text_truncated,
+        links=links,
+        metadata=parser.metadata,
+        response_headers=_safe_response_headers(headers),
+    )
+
+
+def _headers_to_dict(headers: Any) -> dict[str, str]:
+    items = getattr(headers, "items", None)
+    if callable(items):
+        return {str(key): str(value) for key, value in items()}
+    return {}
+
+
+def _safe_response_headers(headers: dict[str, str]) -> dict[str, str]:
+    allowed = {
+        "cache-control",
+        "content-language",
+        "content-length",
+        "content-type",
+        "etag",
+        "last-modified",
+        "location",
+        "server",
     }
+    return {key.lower(): value for key, value in headers.items() if key.lower() in allowed}
+
+
+def _dedupe_links(links: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    result: list[dict[str, str]] = []
+    for link in links:
+        href = str(link.get("href") or "").strip()
+        if not href or href in seen:
+            continue
+        seen.add(href)
+        result.append(
+            {
+                "href": href,
+                "text": " ".join(str(link.get("text") or "").split()),
+                "rel": " ".join(str(link.get("rel") or "").split()),
+            }
+        )
+    return result
 
 
 class _BrowserFetchWorker:
@@ -95,19 +191,72 @@ class _BrowserFetchWorker:
         self.in_flight = 0
         self._lock = threading.Lock()
 
-    def fetch(self, url: str, *, timeout_ms: int, max_chars: int) -> dict[str, str]:
+    def fetch(
+        self,
+        url: str,
+        *,
+        timeout_ms: int,
+        max_chars: int,
+        max_raw_chars: int,
+        max_links: int,
+        user_agent: str,
+    ) -> WebFetchDocument:
         with self.semaphore:
             with self._lock:
                 self.in_flight += 1
                 self.last_activity_at = time.monotonic()
             try:
-                return self._fetch_playwright(url, timeout_ms=timeout_ms, max_chars=max_chars)
+                return self._fetch_playwright(
+                    url,
+                    timeout_ms=timeout_ms,
+                    max_chars=max_chars,
+                    max_raw_chars=max_raw_chars,
+                    max_links=max_links,
+                    user_agent=user_agent,
+                )
             finally:
                 with self._lock:
                     self.in_flight = max(0, self.in_flight - 1)
                     self.last_activity_at = time.monotonic()
 
-    def _fetch_playwright(self, url: str, *, timeout_ms: int, max_chars: int) -> dict[str, str]:
+    def screenshot(
+        self,
+        url: str,
+        *,
+        timeout_ms: int,
+        full_page: bool,
+        viewport_width: int,
+        viewport_height: int,
+        user_agent: str,
+    ) -> dict[str, Any]:
+        with self.semaphore:
+            with self._lock:
+                self.in_flight += 1
+                self.last_activity_at = time.monotonic()
+            try:
+                return self._screenshot_playwright(
+                    url,
+                    timeout_ms=timeout_ms,
+                    full_page=full_page,
+                    viewport_width=viewport_width,
+                    viewport_height=viewport_height,
+                    user_agent=user_agent,
+                )
+            finally:
+                with self._lock:
+                    self.in_flight = max(0, self.in_flight - 1)
+                    self.last_activity_at = time.monotonic()
+
+    def _fetch_playwright(
+        self,
+        url: str,
+        *,
+        timeout_ms: int,
+        max_chars: int,
+        max_raw_chars: int,
+        max_links: int,
+        user_agent: str,
+    ) -> WebFetchDocument:
         try:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # pragma: no cover - env dependent
@@ -119,24 +268,136 @@ class _BrowserFetchWorker:
             if proxy_url:
                 launch_opts["proxy"] = {"server": proxy_url}
             browser = playwright.chromium.launch(**launch_opts)
-            context = browser.new_context()
+            context = browser.new_context(user_agent=str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT))
             page = context.new_page()
             try:
-                page.goto(str(url), wait_until="domcontentloaded", timeout=max(1000, int(timeout_ms)))
+                response = page.goto(str(url), wait_until="domcontentloaded", timeout=max(1000, int(timeout_ms)))
                 try:
                     page.wait_for_load_state("networkidle", timeout=min(max(1000, int(timeout_ms)), 5000))
                 except Exception:
                     pass
                 title = str(page.title() or "").strip()
                 final_url = str(page.url or url)
-                text = str(page.evaluate("() => document.body ? document.body.innerText : ''") or "").strip()
-                if len(text) > max_chars:
+                extracted = page.evaluate(
+                    """
+                    (maxLinks) => {
+                      const metadata = {};
+                      const canonical = document.querySelector('link[rel~="canonical"]');
+                      if (canonical && canonical.href) metadata.canonical_url = canonical.href;
+                      if (document.documentElement && document.documentElement.lang) {
+                        metadata.language = document.documentElement.lang;
+                      }
+                      for (const selector of [
+                        ['description', 'meta[name="description"]'],
+                        ['open_graph_description', 'meta[property="og:description"]'],
+                        ['open_graph_title', 'meta[property="og:title"]']
+                      ]) {
+                        const node = document.querySelector(selector[1]);
+                        if (node && node.content) metadata[selector[0]] = node.content;
+                      }
+                      const links = Array.from(document.querySelectorAll('a[href]'))
+                        .slice(0, maxLinks)
+                        .map((a) => ({
+                          href: a.href || '',
+                          text: (a.innerText || a.textContent || '').trim(),
+                          rel: a.rel || ''
+                        }));
+                      return {
+                        text: document.body ? document.body.innerText || '' : '',
+                        content_type: document.contentType || '',
+                        metadata,
+                        links
+                      };
+                    }
+                    """,
+                    max(0, int(max_links)),
+                )
+                if not isinstance(extracted, dict):
+                    extracted = {}
+                text = str(extracted.get("text") or "").strip()
+                text_truncated = len(text) > max_chars
+                if text_truncated:
                     text = text[:max_chars].rstrip()
+                raw_content = str(page.content() or "")
+                raw_content_truncated = len(raw_content) > max_raw_chars
+                if raw_content_truncated:
+                    raw_content = raw_content[:max_raw_chars].rstrip()
+                headers = _safe_response_headers(dict(getattr(response, "headers", {}) or {})) if response is not None else {}
+                links = tuple(
+                    WebFetchLink(
+                        href=str(item.get("href") or ""),
+                        text=str(item.get("text") or ""),
+                        rel=str(item.get("rel") or ""),
+                    )
+                    for item in _dedupe_links(
+                        [item for item in list(extracted.get("links") or []) if isinstance(item, dict)]
+                    )[: max(0, int(max_links))]
+                )
+                status_code = int(response.status) if response is not None else None
+                return WebFetchDocument(
+                    requested_url=str(url),
+                    final_url=final_url,
+                    title=title,
+                    text=text,
+                    raw_content=raw_content,
+                    raw_content_truncated=raw_content_truncated,
+                    status_code=status_code,
+                    content_type=str(extracted.get("content_type") or headers.get("content-type") or ""),
+                    content_length=None,
+                    text_truncated=text_truncated,
+                    links=links,
+                    metadata={str(key): str(value) for key, value in dict(extracted.get("metadata") or {}).items()},
+                    response_headers=headers,
+                )
+            finally:
+                context.close()
+                browser.close()
+
+    def _screenshot_playwright(
+        self,
+        url: str,
+        *,
+        timeout_ms: int,
+        full_page: bool,
+        viewport_width: int,
+        viewport_height: int,
+        user_agent: str,
+    ) -> dict[str, Any]:
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as exc:  # pragma: no cover - env dependent
+            raise RuntimeError(f"playwright unavailable: {exc}") from exc
+
+        with sync_playwright() as playwright:
+            launch_opts: dict[str, Any] = {"headless": True}
+            proxy_url = os.environ.get("https_proxy") or os.environ.get("http_proxy") or ""
+            if proxy_url:
+                launch_opts["proxy"] = {"server": proxy_url}
+            browser = playwright.chromium.launch(**launch_opts)
+            context = browser.new_context(
+                user_agent=str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT),
+                viewport={
+                    "width": max(320, int(viewport_width)),
+                    "height": max(320, int(viewport_height)),
+                },
+            )
+            page = context.new_page()
+            try:
+                response = page.goto(str(url), wait_until="domcontentloaded", timeout=max(1000, int(timeout_ms)))
+                try:
+                    page.wait_for_load_state("networkidle", timeout=min(max(1000, int(timeout_ms)), 5000))
+                except Exception:
+                    pass
+                png = page.screenshot(type="png", full_page=bool(full_page))
                 return {
                     "requested_url": str(url),
-                    "final_url": final_url,
-                    "title": title,
-                    "text": text,
+                    "final_url": str(page.url or url),
+                    "title": str(page.title() or "").strip(),
+                    "status_code": int(response.status) if response is not None else None,
+                    "png_base64": base64.b64encode(png).decode("ascii"),
+                    "full_page": bool(full_page),
+                    "viewport_width": max(320, int(viewport_width)),
+                    "viewport_height": max(320, int(viewport_height)),
                 }
             finally:
                 context.close()
@@ -209,23 +470,41 @@ def run_browser_service_cli(
                 _json_response(self, 200, {"ok": True})
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
-            if self.path != "/fetch":
+            if self.path not in {"/fetch", "/screenshot"}:
                 _json_response(self, 404, {"ok": False, "error": "not_found"})
                 return
             url = str(payload.get("url") or "").strip()
             if not url:
                 _json_response(self, 400, {"ok": False, "error": "url is required"})
                 return
+            if self.path == "/screenshot":
+                try:
+                    result = worker.screenshot(
+                        url,
+                        timeout_ms=max(1000, int(payload.get("timeout_ms") or 15000)),
+                        full_page=bool(payload.get("full_page", False)),
+                        viewport_width=max(320, int(payload.get("viewport_width") or 1280)),
+                        viewport_height=max(320, int(payload.get("viewport_height") or 900)),
+                        user_agent=str(payload.get("user_agent") or DEFAULT_WEB_FETCH_USER_AGENT),
+                    )
+                except Exception as exc:
+                    _json_response(self, 500, {"ok": False, "error": str(exc)})
+                    return
+                _json_response(self, 200, {"ok": True, "result": result})
+                return
             try:
                 result = worker.fetch(
                     url,
                     timeout_ms=max(1000, int(payload.get("timeout_ms") or 15000)),
                     max_chars=max(1000, int(payload.get("max_chars") or 12000)),
+                    max_raw_chars=max(0, int(payload.get("max_raw_chars") or 50000)),
+                    max_links=max(0, int(payload.get("max_links") or 80)),
+                    user_agent=str(payload.get("user_agent") or DEFAULT_WEB_FETCH_USER_AGENT),
                 )
             except Exception as exc:
                 _json_response(self, 500, {"ok": False, "error": str(exc)})
                 return
-            _json_response(self, 200, {"ok": True, "result": result})
+            _json_response(self, 200, {"ok": True, "result": result.to_dict()})
 
     server = ThreadingHTTPServer((host, int(port)), BrowserHandler)
 
@@ -254,12 +533,29 @@ class BrowserServiceManager:
     token: str = ""
     last_error: str = ""
 
-    def fetch(self, url: str, *, timeout_ms: int, max_chars: int, settings: dict[str, Any] | None = None) -> dict[str, str]:
+    def fetch(
+        self,
+        url: str,
+        *,
+        timeout_ms: int,
+        max_chars: int,
+        max_raw_chars: int = 50000,
+        max_links: int = 80,
+        user_agent: str = DEFAULT_WEB_FETCH_USER_AGENT,
+        settings: dict[str, Any] | None = None,
+    ) -> WebFetchDocument:
         self._ensure_started(settings=settings)
         payload = self._request_json(
             "POST",
             "/fetch",
-            {"url": url, "timeout_ms": timeout_ms, "max_chars": max_chars},
+            {
+                "url": url,
+                "timeout_ms": timeout_ms,
+                "max_chars": max_chars,
+                "max_raw_chars": max_raw_chars,
+                "max_links": max_links,
+                "user_agent": str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT),
+            },
             timeout_seconds=max(timeout_ms, 1000) / 1000.0 + 5.0,
         )
         if not bool(payload.get("ok")):
@@ -268,12 +564,40 @@ class BrowserServiceManager:
         if not isinstance(result, dict):
             raise RuntimeError("browser fetch returned invalid payload")
         self.last_error = ""
-        return {
-            "requested_url": str(result.get("requested_url") or url),
-            "final_url": str(result.get("final_url") or url),
-            "title": str(result.get("title") or ""),
-            "text": str(result.get("text") or ""),
-        }
+        return WebFetchDocument.from_mapping(result, requested_url=url)
+
+    def screenshot(
+        self,
+        url: str,
+        *,
+        timeout_ms: int,
+        full_page: bool,
+        viewport_width: int,
+        viewport_height: int,
+        user_agent: str = DEFAULT_WEB_FETCH_USER_AGENT,
+        settings: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_started(settings=settings)
+        payload = self._request_json(
+            "POST",
+            "/screenshot",
+            {
+                "url": url,
+                "timeout_ms": timeout_ms,
+                "full_page": bool(full_page),
+                "viewport_width": max(320, int(viewport_width)),
+                "viewport_height": max(320, int(viewport_height)),
+                "user_agent": str(user_agent or DEFAULT_WEB_FETCH_USER_AGENT),
+            },
+            timeout_seconds=max(timeout_ms, 1000) / 1000.0 + 5.0,
+        )
+        if not bool(payload.get("ok")):
+            raise RuntimeError(str(payload.get("error") or "browser screenshot failed"))
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("browser screenshot returned invalid payload")
+        self.last_error = ""
+        return result
 
     def health(self, *, settings: dict[str, Any] | None = None) -> dict[str, Any]:
         running = self._process_running()

@@ -18,7 +18,7 @@ def resolve_timezone_name(value: str | None, *, fallback: str = "UTC") -> str:
         return fallback
 
 
-def normalize_service_schedule(
+def normalize_proactive_schedule(
     schedule: dict[str, Any] | None,
     *,
     default_timezone: str = "UTC",
@@ -52,12 +52,12 @@ def normalize_service_schedule(
     return normalized
 
 
-def compute_next_service_run_at_utc(
+def compute_next_proactive_run_at_utc(
     schedule: dict[str, Any] | None,
     *,
     now_utc: datetime | None = None,
 ) -> str | None:
-    normalized = normalize_service_schedule(schedule, now_utc=now_utc)
+    normalized = normalize_proactive_schedule(schedule, now_utc=now_utc)
     cadence = str(normalized.get("cadence") or "manual")
     reference = now_utc or utc_now_dt()
     if cadence == "manual":

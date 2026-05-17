@@ -5,7 +5,7 @@ from typing import Any
 
 
 @dataclass(frozen=True)
-class CodexAppServerClientInfo:
+class CodexClientInfo:
     name: str = "pal"
     title: str = "Pal"
     version: str = "0.1.0"
@@ -15,8 +15,8 @@ class CodexAppServerClientInfo:
 
 
 @dataclass
-class CodexAppServerAuthMessages:
-    client_info: CodexAppServerClientInfo = field(default_factory=CodexAppServerClientInfo)
+class CodexAuthMessages:
+    client_info: CodexClientInfo = field(default_factory=CodexClientInfo)
     experimental_api: bool = False
 
     def initialize_request(self, request_id: int = 0) -> dict[str, Any]:

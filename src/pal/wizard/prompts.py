@@ -394,7 +394,7 @@ def build_codex_wizard_endpoints(
                 endpoint_id=_codex_endpoint_id(model_id),
                 model_id=model_id,
                 api_mode="openai_chat",
-                base_url="codex://app-server",
+                base_url="codex://cli",
                 api_key=None,
                 context_window=DEFAULT_CODEX_CONTEXT_WINDOW,
                 max_output_tokens=DEFAULT_CODEX_MAX_OUTPUT_TOKENS,
@@ -403,15 +403,15 @@ def build_codex_wizard_endpoints(
                 supports_streaming=True,
                 supports_vision=True,
                 priority=priority,
-                provider="codex_app_server",
+                provider="codex_cli",
                 auth_kind="local_provider_auth",
                 credential_ref="",
                 capabilities_blob={
-                    "official_codex_app_server": True,
-                    "codex_app_server": True,
+                    "official_codex_cli": True,
+                    "codex_cli": True,
                     "native_tool_bridge": True,
                 },
-                notes="Configured by setup wizard. Uses local Codex CLI app-server authentication.",
+                notes="Configured by setup wizard. Uses local Codex CLI authentication.",
             )
         )
     return endpoints
@@ -566,7 +566,7 @@ def _infer_endpoint_provider(endpoint: WizardLLMEndpoint) -> str:
     if endpoint.provider:
         return endpoint.provider
     if str(endpoint.base_url or "").strip().lower().startswith("codex://"):
-        return "codex_app_server"
+        return "codex_cli"
     if "anthropic" in endpoint.api_mode:
         return "anthropic"
     if "openai" in endpoint.api_mode or endpoint.api_mode == "openai_chat":

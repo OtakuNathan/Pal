@@ -6,6 +6,7 @@ import hashlib
 import mimetypes
 import os
 import json
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,16 +16,45 @@ from uuid import uuid4
 from pal.artifact import ArtifactManager, ArtifactRepository, register_with_core as register_artifact_with_core
 from pal.core import PalCore
 from pal.core.runtime_config import RuntimeConfig
+from pal.core.turns import (
+    AgentLoopFrame,
+    EffectResult,
+    L1CommitPayload,
+    LLMPreflightEffect,
+    LLMRequestEffect,
+    MemoryCompactEffect,
+    ToolCallEffect,
+    TurnOutcome,
+    agent_turn_program,
+)
 from pal.execution import CapabilityCall, CapabilityResult, register_with_core as register_execution_with_core
 from pal.foundation import PalV2Database, utc_now
 from pal.llm import EndpointResolver, LLMEndpointRepository, LLMRuntime, LiteLLMCredentialResolver, RuntimeSettingRepository, build_default_endpoint_invoker
-from pal.llm.contracts import CanonicalLLMRequest, CanonicalToolCall, CanonicalToolResult
+from pal.llm.contracts import (
+    CanonicalLLMOutcome,
+    CanonicalLLMRequest,
+    CanonicalToolCall,
+    CanonicalToolResult,
+    LLMPreflightAdvice,
+    LLMPreflightRequest,
+)
 from pal.llm.secret_store import EncryptedFileSecretStore
-from pal.memory import L3ProviderSelector, MemoryService, register_with_core as register_memory_with_core
+from pal.memory import (
+    L1TranscriptMessage,
+    L3CommitRequest,
+    L3ProviderSelector,
+    MemoryCommitRequest,
+    MemoryCompactRequest,
+    MemoryPackRequest,
+    MemoryService,
+    register_with_core as register_memory_with_core,
+)
 from pal.minion.git_env import commit_milestone
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
-from pal.plugins.l3 import SQLiteVecL3Plugin, register_with_core as register_l3_with_core
-from pal.shared import LLMFinishReason, RuntimeStatus, TaskContextPack
+from pal.minion.work_order import build_planner_work_order, prompt_view_from_metadata
+from pal.plugins.l3 import MockL3Plugin, SQLiteVecL3Plugin, register_with_core as register_l3_with_core
+from pal.shared import LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus, TaskContextPack
+from pal.shared.prompt_rendering import render_system_reminder, render_xml_block
 from pal.execution.tool_search import ToolReadTool, ToolSearchTool
 from pal.web_fetch import BrowserServiceManager, WebFetchProviderRepository, WebFetchService, register_with_core as register_web_fetch_with_core
 from pal.web_search import WebSearchProviderRepository, WebSearchService, register_with_core as register_web_search_with_core
@@ -47,6 +77,19 @@ class MinionRuntimeBundle:
 
 
 @dataclass
+class MinionAgentLoopState:
+    execution_runtime: "MinionScopedExecutionRuntime"
+    memory_service: MemoryService
+    memory_l3: MockL3Plugin
+    tool_protocol_messages: list[dict[str, Any]] = field(default_factory=list)
+    pending_assistant_tool_text: str = ""
+    pending_tool_call_batch: list[CanonicalToolCall] = field(default_factory=list)
+    pending_tool_results: list[CanonicalToolResult] = field(default_factory=list)
+    llm_round_count: int = 0
+    tool_call_count: int = 0
+
+
+@dataclass
 class MinionRunner:
     runtime_root: Path
     pack: TaskContextPack
@@ -57,6 +100,8 @@ class MinionRunner:
     runtime_bundle: MinionRuntimeBundle | None = None
     blocked_summary: str = ""
     produced_artifacts: list[dict[str, Any]] = field(default_factory=list)
+    memory_candidates: list[dict[str, Any]] = field(default_factory=list)
+    auto_accept_approvals: bool = False
 
     async def run(self) -> int:
         bundle: MinionRuntimeBundle | None = None
@@ -70,15 +115,41 @@ class MinionRunner:
         )
         try:
             bundle = self.runtime_bundle or build_slim_minion_runtime(self.runtime_root)
-            await self._emit("phase_started", {"phase": "accepted", "summary": "minion accepted task context", "prompt_scaffold": self._prompt_scaffold()})
+            await self._emit(
+                "phase_started",
+                {
+                    "phase": "accepted",
+                    "summary": "minion accepted task context",
+                    "prompt_scaffold_summary": _prompt_scaffold_summary(self._prompt_scaffold()),
+                },
+            )
             await self._emit("phase_started", {"phase": "milestone_started", "summary": self._current_milestone_title()})
-            final_text = await self._llm_tool_loop(bundle)
+            final_text = await self._run_agent_loop(bundle)
+            clarification_round = 0
+            while not self.blocked_summary:
+                ask_user_question = _extract_ask_user_question_payload(final_text)
+                if not ask_user_question:
+                    break
+                if clarification_round >= self._max_clarification_rounds():
+                    self.blocked_summary = "planner asked too many clarification rounds"
+                    break
+                clarification = await self._request_clarification(ask_user_question)
+                if not clarification:
+                    self.blocked_summary = _ask_user_question_summary(ask_user_question)
+                    break
+                self._apply_clarification_response(clarification)
+                clarification_round += 1
+                await self._emit_progress("clarification_applied", round=clarification_round)
+                final_text = await self._run_agent_loop(bundle)
             if self.blocked_summary:
+                blocked_checkpoint = {
+                    "status": "blocked",
+                    "milestone_index": self._current_milestone_index(),
+                    "summary": self.blocked_summary,
+                    **self._artifact_payload(),
+                }
                 terminal_payload = self._terminal_payload("blocked", self.blocked_summary)
-                await self._emit(
-                    "checkpoint",
-                    {"status": "blocked", "milestone_index": self._current_milestone_index(), "summary": self.blocked_summary},
-                )
+                await self._emit("checkpoint", blocked_checkpoint)
                 await self._emit("terminal", terminal_payload)
                 return 0
             checkpoint_payload = await self._complete_current_milestone(final_text)
@@ -108,178 +179,462 @@ class MinionRunner:
                 await bundle.close()
             self._append_debug_log("runner_stopped", {"blocked_summary": self.blocked_summary})
 
-    async def _llm_tool_loop(self, bundle: MinionRuntimeBundle) -> str:
-        messages = self._initial_messages()
+    async def _run_agent_loop(self, bundle: MinionRuntimeBundle) -> str:
+        memory_l3 = MockL3Plugin(provider_id=f"minion_run_{self.run_id}_l3")
+        memory_service = MemoryService(
+            l3_selector=L3ProviderSelector(
+                resolver=lambda provider_id: memory_l3,
+                active_provider_id=memory_l3.provider_id,
+            )
+        )
+        memory_l3.service = memory_service
         execution_runtime = MinionScopedExecutionRuntime(
             bundle.execution_runtime,
             self.pack.allowed_capabilities,
             dict(self.pack.workspace),
             produced_artifacts=self.produced_artifacts,
+            memory_l3=memory_l3,
         )
-        tools = _llm_tools_for_allowed(execution_runtime, self.pack.allowed_capabilities)
-        max_rounds = _optional_positive_int(self.pack.metadata.get("max_tool_rounds") if isinstance(self.pack.metadata, dict) else None)
+        state = MinionAgentLoopState(
+            execution_runtime=execution_runtime,
+            memory_service=memory_service,
+            memory_l3=memory_l3,
+        )
         max_output_tokens = _resolve_minion_max_output_tokens(bundle.llm_runtime, self.pack)
-        final_text = ""
-        tool_call_count = 0
-        nudged_for_tool = False
-        rounds = 0
+
+        def build_context(frame: AgentLoopFrame):
+            metadata = {
+                "retry_note": frame.retry_note,
+                "task_context_pack": self.pack,
+            }
+            return _minion_prompt_context(self.pack, metadata=metadata)
+
+        def build_commit_payload(final_reply: str, observations: list[Any], reply_texts: list[str]) -> L1CommitPayload:
+            _ = reply_texts
+            transcript = [
+                L1TranscriptMessage(role="user", content=_render_task_prompt(self.pack)),
+                L1TranscriptMessage(role="assistant", content=final_reply or "minion completed"),
+            ]
+            return L1CommitPayload(turn_id=self.run_id, transcript=transcript, tool_observations=list(observations))
+
+        program = agent_turn_program(
+            turn_id=self.run_id,
+            build_assembly_context=build_context,
+            render_final_text=lambda outcome: str(getattr(outcome, "text", "") or "") if outcome is not None else "",
+            build_commit_payload=build_commit_payload,
+            max_output_tokens=max_output_tokens,
+            build_retry_note=self._build_minion_retry_note,
+        )
+        current: EffectResult | None = None
         while True:
-            if max_rounds is not None and rounds >= max_rounds:
-                if self._completion_evidence_present():
-                    return final_text or "milestone produced completion evidence"
-                self.blocked_summary = f"minion reached explicit max_tool_rounds={max_rounds} before completing the current milestone"
-                return final_text
-            rounds += 1
-            await self._emit_progress(
-                "llm_round_started",
-                round=rounds,
-                tool_call_count=tool_call_count,
-                tool_count=len(tools),
-            )
-            request = CanonicalLLMRequest(
-                messages=list(messages),
-                max_output_tokens=max_output_tokens,
-                tools=list(tools),
-                metadata=_minion_llm_request_metadata(self.pack, self.run_id),
-            )
-            self._append_debug_log(
-                "llm_request",
-                {
-                    "round": rounds,
-                    "messages": request.messages,
-                    "tools": request.tools,
-                    "metadata": request.metadata,
-                },
-            )
-            outcome = await self._await_with_progress_heartbeat(
-                bundle.llm_runtime.agenerate(request),
-                phase="llm_round_waiting",
-                round=rounds,
-                tool_call_count=tool_call_count,
-            )
-            final_text = str(getattr(outcome, "text", "") or "").strip()
-            finish_reason = str(getattr(outcome, "finish_reason", "") or "").strip()
-            self._append_debug_log(
-                "llm_outcome",
-                {
-                    "round": rounds,
-                    "finish_reason": finish_reason,
-                    "response_mode": str(getattr(outcome, "response_mode", "") or ""),
-                    "tool_calls": [_tool_call_summary(item) for item in list(getattr(outcome, "tool_calls", []) or [])],
-                    "reasoning_text": str(getattr(outcome, "reasoning_text", "") or ""),
-                    "text": final_text,
-                },
-            )
-            if finish_reason == LLMFinishReason.ERROR:
-                self.blocked_summary = final_text or "LLM generation failed"
-                return final_text
-            if finish_reason == LLMFinishReason.COMPACT_REQUIRED:
-                self.blocked_summary = "minion LLM context requires compaction before continuing"
-                return final_text
-            tool_calls = [self._ensure_tool_call_identity(item) for item in list(getattr(outcome, "tool_calls", []) or [])]
-            await self._emit_progress(
-                "llm_round_completed",
-                round=rounds,
-                finish_reason=finish_reason,
-                tool_call_count=tool_call_count,
-                tool_calls=[_tool_call_summary(item) for item in tool_calls],
-                text_preview=_preview_text(final_text),
-            )
-            if not tool_calls:
-                if tools and tool_call_count == 0 and not nudged_for_tool and self._requires_first_tool_call():
-                    nudged_for_tool = True
-                    messages.append({"role": "assistant", "content": final_text})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "You have not used any capability yet. This milestone requires executable evidence. "
-                                "Use one listed capability now to inspect, research, read, write, or verify the task before completing."
-                            ),
-                        }
-                    )
-                    continue
-                await self._emit_progress("milestone_finalizing", round=rounds, tool_call_count=tool_call_count)
-                return final_text
-            messages.append(_assistant_tool_message(final_text, tool_calls))
-            for index, tool_call in enumerate(tool_calls):
-                target_name = _effective_capability_name(tool_call)
-                await self._emit_progress(
-                    "tool_call_started",
-                    round=rounds,
-                    tool_call_index=index,
-                    tool_name=tool_call.name,
-                    target_name=target_name,
-                    args_preview=_json_preview(tool_call.args),
-                )
-                try:
-                    self._append_debug_log(
-                        "tool_call_started",
-                        {
-                            "round": rounds,
-                            "tool_call_index": index,
-                            "tool_name": tool_call.name,
-                            "target_name": target_name,
-                            "args": dict(tool_call.args),
-                        },
-                    )
-                    result = await self._await_with_progress_heartbeat(
-                        self._execute_allowed_tool(execution_runtime, tool_call),
-                        phase="tool_call_waiting",
-                        round=rounds,
-                        tool_call_index=index,
-                        tool_name=tool_call.name,
-                        target_name=target_name,
-                    )
-                except Exception as exc:
-                    self._append_debug_log(
-                        "tool_call_failed",
-                        {
-                            "round": rounds,
-                            "tool_call_index": index,
-                            "tool_name": tool_call.name,
-                            "target_name": target_name,
-                            "error_type": exc.__class__.__name__,
-                            "error": str(exc),
-                        },
-                    )
+            try:
+                yielded = program.send(current) if current is not None else next(program)
+            except StopIteration as completed:
+                outcome = completed.value
+                if not isinstance(outcome, TurnOutcome):
+                    raise RuntimeError("minion agent loop ended without a turn outcome")
+                if not self.blocked_summary:
                     await self._emit_progress(
-                        "tool_call_failed",
-                        round=rounds,
-                        tool_call_index=index,
-                        tool_name=tool_call.name,
-                        target_name=target_name,
-                        error_type=exc.__class__.__name__,
-                        error=_preview_text(str(exc), limit=500),
+                        "milestone_finalizing",
+                        round=state.llm_round_count,
+                        tool_call_count=state.tool_call_count,
                     )
-                    raise
-                tool_call_count += 1
-                self._append_debug_log(
-                    "tool_call_completed",
-                    {
-                        "round": rounds,
-                        "tool_call_index": index,
-                        "tool_name": tool_call.name,
-                        "target_name": target_name,
-                        "ok": bool(result.ok),
-                        "status": str(result.status or ""),
-                        "text": _tool_result_text(result),
-                        "structured": dict(result.structured or {}),
-                    },
+                await self._commit_minion_l1(state, outcome.commit_payload.transcript)
+                self.memory_candidates = _memory_candidates_from_l3(state.memory_l3)
+                return outcome.final_reply
+            current = await self._execute_minion_agent_effect(bundle, state, yielded, max_output_tokens=max_output_tokens)
+
+    def _build_minion_retry_note(self, outcome: Any, observations: list[Any], retry_count: int) -> str:
+        if self.blocked_summary:
+            return ""
+        if str(getattr(outcome, "finish_reason", "") or "") == LLMFinishReason.ERROR:
+            return ""
+        if retry_count > 0:
+            return ""
+        tools_available = bool(self.pack.allowed_capabilities)
+        if not tools_available:
+            return ""
+        if observations and self._needs_git_completion_retry():
+            return (
+                "The milestone is not complete yet: no runner-owned git completion evidence exists. "
+                "Use the listed file/workspace capabilities now to make and verify the required change. "
+                "Do not stop with a report-only response. If completion is truly impossible, report a concrete blocker "
+                "that explains which required input, permission, file, or contract is missing."
+            )
+        if observations:
+            return ""
+        if not self._requires_first_tool_call():
+            return ""
+        _ = outcome
+        return (
+            "You have not used any capability yet. This milestone requires executable evidence. "
+            "Use one listed capability now to inspect, research, read, write, or verify the task before completing."
+        )
+
+    def _needs_git_completion_retry(self) -> bool:
+        completion_policy = self._completion_policy()
+        if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
+            return False
+        metadata = self.pack.metadata if isinstance(self.pack.metadata, dict) else {}
+        if bool(metadata.get("allow_text_only_completion") or completion_policy.get("allow_artifact_evidence")):
+            return False
+        return not self._completion_evidence_present()
+
+    async def _execute_minion_agent_effect(
+        self,
+        bundle: MinionRuntimeBundle,
+        state: MinionAgentLoopState,
+        effect: Any,
+        *,
+        max_output_tokens: int,
+    ) -> EffectResult:
+        if isinstance(effect, LLMPreflightEffect):
+            return await self._handle_minion_preflight(bundle, state, effect, max_output_tokens=max_output_tokens)
+        if isinstance(effect, MemoryCompactEffect):
+            return await self._handle_minion_memory_compact(bundle, state, effect)
+        if isinstance(effect, LLMRequestEffect):
+            return await self._handle_minion_llm_request(bundle, state, effect, max_output_tokens=max_output_tokens)
+        if isinstance(effect, ToolCallEffect):
+            return await self._handle_minion_tool_call(state, effect)
+        return EffectResult(status=RuntimeStatus.UNSUPPORTED, text=f"unsupported minion effect: {getattr(effect, 'kind', '')}")
+
+    async def _handle_minion_preflight(
+        self,
+        bundle: MinionRuntimeBundle,
+        state: MinionAgentLoopState,
+        effect: LLMPreflightEffect,
+        *,
+        max_output_tokens: int,
+    ) -> EffectResult:
+        request = LLMPreflightRequest(
+            messages=self._minion_prompt_messages(state, effect.assembly_context),
+            max_output_tokens=max_output_tokens,
+            metadata=_minion_llm_request_metadata(self.pack, self.run_id),
+        )
+        preflight = getattr(bundle.llm_runtime, "apreflight", None)
+        if callable(preflight):
+            advice = preflight(request)
+            if hasattr(advice, "__await__"):
+                advice = await advice
+        else:
+            sync_preflight = getattr(bundle.llm_runtime, "preflight", None)
+            if callable(sync_preflight):
+                advice = sync_preflight(request)
+            else:
+                advice = LLMPreflightAdvice(status=LLMPreflightStatus.READY)
+        return EffectResult(status=RuntimeStatus.OK, payload=advice)
+
+    async def _handle_minion_llm_request(
+        self,
+        bundle: MinionRuntimeBundle,
+        state: MinionAgentLoopState,
+        effect: LLMRequestEffect,
+        *,
+        max_output_tokens: int,
+    ) -> EffectResult:
+        if self.blocked_summary:
+            return EffectResult(status=RuntimeStatus.OK, payload=CanonicalLLMOutcome(text=self.blocked_summary))
+        max_rounds = _optional_positive_int(self.pack.metadata.get("max_tool_rounds") if isinstance(self.pack.metadata, dict) else None)
+        if max_rounds is not None and state.llm_round_count >= max_rounds:
+            if self._completion_evidence_present() or self._artifact_completion_evidence_present():
+                outcome = CanonicalLLMOutcome(text="milestone produced completion evidence")
+            else:
+                self.blocked_summary = f"minion reached explicit max_tool_rounds={max_rounds} before completing the current milestone"
+                outcome = CanonicalLLMOutcome(text=self.blocked_summary)
+            return EffectResult(status=RuntimeStatus.OK, payload=outcome)
+
+        state.llm_round_count += 1
+        await self._emit_progress(
+            "llm_round_started",
+            round=state.llm_round_count,
+            tool_call_count=state.tool_call_count,
+            tool_count=len(_llm_tools_for_allowed(state.execution_runtime, self.pack.allowed_capabilities)),
+        )
+        request = CanonicalLLMRequest(
+            messages=self._minion_prompt_messages(state, effect.assembly_context),
+            max_output_tokens=max_output_tokens,
+            tools=_llm_tools_for_allowed(state.execution_runtime, self.pack.allowed_capabilities),
+            metadata=_minion_llm_request_metadata(self.pack, self.run_id),
+        )
+        self._append_debug_log(
+            "llm_request",
+            {
+                "round": state.llm_round_count,
+                "messages": request.messages,
+                "tools": request.tools,
+                "metadata": request.metadata,
+            },
+        )
+        outcome = await self._await_with_progress_heartbeat(
+            bundle.llm_runtime.agenerate(request),
+            phase="llm_round_waiting",
+            round=state.llm_round_count,
+            tool_call_count=state.tool_call_count,
+        )
+        tool_calls = [self._ensure_tool_call_identity(item) for item in list(getattr(outcome, "tool_calls", []) or [])]
+        if tool_calls:
+            outcome = CanonicalLLMOutcome(
+                text=str(getattr(outcome, "text", "") or ""),
+                reasoning_text=str(getattr(outcome, "reasoning_text", "") or ""),
+                tool_calls=tool_calls,
+                finish_reason=str(getattr(outcome, "finish_reason", "") or "stop"),
+                response_mode=getattr(outcome, "response_mode", None),
+                target_input_budget=int(getattr(outcome, "target_input_budget", 0) or 0),
+                reserved_output_tokens=int(getattr(outcome, "reserved_output_tokens", 0) or 0),
+                preferred_endpoint_id=getattr(outcome, "preferred_endpoint_id", None),
+                preferred_model_id=getattr(outcome, "preferred_model_id", None),
+            )
+            state.pending_assistant_tool_text = str(outcome.text or "")
+            state.pending_tool_call_batch = list(tool_calls)
+            state.pending_tool_results = []
+        self._append_debug_log(
+            "llm_outcome",
+            {
+                "round": state.llm_round_count,
+                "finish_reason": str(getattr(outcome, "finish_reason", "") or ""),
+                "response_mode": str(getattr(outcome, "response_mode", "") or ""),
+                "tool_calls": [_tool_call_summary(item) for item in list(getattr(outcome, "tool_calls", []) or [])],
+                "reasoning_text": str(getattr(outcome, "reasoning_text", "") or ""),
+                "text": str(getattr(outcome, "text", "") or "").strip(),
+            },
+        )
+        finish_reason = str(getattr(outcome, "finish_reason", "") or "")
+        if finish_reason == LLMFinishReason.ERROR:
+            if self._completion_evidence_present() or self._artifact_completion_evidence_present():
+                outcome = CanonicalLLMOutcome(
+                    text=self._completion_evidence_fallback_text(str(getattr(outcome, "text", "") or "")),
+                    finish_reason=LLMFinishReason.STOP,
                 )
-                await self._emit_progress(
-                    "tool_call_completed",
-                    round=rounds,
-                    tool_call_index=index,
-                    tool_name=tool_call.name,
-                    target_name=target_name,
-                    ok=bool(result.ok),
-                    status=str(result.status or ""),
-                    text_preview=_preview_text(_tool_result_text(result)),
+                finish_reason = str(LLMFinishReason.STOP)
+            else:
+                self.blocked_summary = str(getattr(outcome, "text", "") or "LLM generation failed")
+        elif _is_truncation_finish_reason(finish_reason):
+            partial_text = str(getattr(outcome, "text", "") or "").strip()
+            if partial_text:
+                await self._persist_text_deliverable_if_needed(
+                    partial_text,
+                    partial=True,
+                    truncation_reason=finish_reason,
                 )
-                messages.append({"role": "tool", "tool_call_id": str(tool_call.call_id or ""), "content": _tool_result_text(result)})
-                if self.blocked_summary:
-                    return final_text or self.blocked_summary
+            self.blocked_summary = self._truncated_output_blocked_summary(finish_reason)
+        await self._emit_progress(
+            "llm_round_completed",
+            round=state.llm_round_count,
+            finish_reason=finish_reason,
+            tool_call_count=state.tool_call_count,
+            tool_calls=[_tool_call_summary(item) for item in list(getattr(outcome, "tool_calls", []) or [])],
+            text_preview=_preview_text(str(getattr(outcome, "text", "") or "")),
+        )
+        return EffectResult(status=RuntimeStatus.OK, payload=outcome)
+
+    async def _handle_minion_memory_compact(
+        self,
+        bundle: MinionRuntimeBundle,
+        state: MinionAgentLoopState,
+        effect: MemoryCompactEffect,
+    ) -> EffectResult:
+        source_text = self._minion_compaction_source_text(state, target_input_budget=effect.target_input_budget)
+        metadata: dict[str, Any] = {}
+        structured_method = getattr(bundle.llm_runtime, "acompact_memory_structured", None)
+        if callable(structured_method) and source_text:
+            with contextlib.suppress(Exception):
+                structured = structured_method(
+                    source_text,
+                    max_output_tokens=max(384, min(effect.reserved_output_tokens or 1024, 2048)),
+                    preferred_endpoint_id=_preferred_endpoint_id_from_pack(self.pack),
+                )
+                metadata["structured_compaction"] = await structured if hasattr(structured, "__await__") else structured
+        if "structured_compaction" not in metadata and source_text:
+            summary_method = getattr(bundle.llm_runtime, "asummarize_compaction", None)
+            if callable(summary_method):
+                with contextlib.suppress(Exception):
+                    summary = summary_method(
+                        source_text,
+                        target_input_budget=effect.target_input_budget,
+                        reserved_output_tokens=effect.reserved_output_tokens,
+                        preferred_endpoint_id=_preferred_endpoint_id_from_pack(self.pack),
+                    )
+                    metadata["semantic_summary"] = await summary if hasattr(summary, "__await__") else summary
+            if "semantic_summary" not in metadata:
+                metadata["semantic_summary"] = source_text[: max(256, effect.target_input_budget or 1024)]
+        compact_result = state.memory_service.compact(
+            MemoryCompactRequest(
+                target_input_budget=effect.target_input_budget,
+                reserved_output_tokens=effect.reserved_output_tokens,
+                metadata=metadata,
+            )
+        )
+        await self._emit_progress(
+            "memory_compacted",
+            round=state.llm_round_count,
+            summary=_preview_text(compact_result.summary, limit=500),
+        )
+        return EffectResult(status=RuntimeStatus.OK, payload=compact_result)
+
+    async def _handle_minion_tool_call(self, state: MinionAgentLoopState, effect: ToolCallEffect) -> EffectResult:
+        tool_call = effect.tool_call
+        target_name = _effective_capability_name(tool_call)
+        index = len(state.pending_tool_results)
+        await self._emit_progress(
+            "tool_call_started",
+            round=state.llm_round_count,
+            tool_call_index=index,
+            tool_name=tool_call.name,
+            target_name=target_name,
+            args_preview=_json_preview(tool_call.args),
+        )
+        try:
+            self._append_debug_log(
+                "tool_call_started",
+                {
+                    "round": state.llm_round_count,
+                    "tool_call_index": index,
+                    "tool_name": tool_call.name,
+                    "target_name": target_name,
+                    "args": dict(tool_call.args),
+                },
+            )
+            result = await self._await_with_progress_heartbeat(
+                self._execute_allowed_tool(state.execution_runtime, tool_call),
+                phase="tool_call_waiting",
+                round=state.llm_round_count,
+                tool_call_index=index,
+                tool_name=tool_call.name,
+                target_name=target_name,
+            )
+        except Exception as exc:
+            self._append_debug_log(
+                "tool_call_failed",
+                {
+                    "round": state.llm_round_count,
+                    "tool_call_index": index,
+                    "tool_name": tool_call.name,
+                    "target_name": target_name,
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc),
+                },
+            )
+            await self._emit_progress(
+                "tool_call_failed",
+                round=state.llm_round_count,
+                tool_call_index=index,
+                tool_name=tool_call.name,
+                target_name=target_name,
+                error_type=exc.__class__.__name__,
+                error=_preview_text(str(exc), limit=500),
+            )
+            raise
+        state.tool_call_count += 1
+        state.pending_tool_results.append(result)
+        if state.pending_tool_call_batch and len(state.pending_tool_results) >= len(state.pending_tool_call_batch):
+            state.tool_protocol_messages.append(_assistant_tool_message(state.pending_assistant_tool_text, state.pending_tool_call_batch))
+            for item in state.pending_tool_results:
+                state.tool_protocol_messages.append({"role": "tool", "tool_call_id": str(item.call_id or ""), "content": _tool_result_text(item)})
+            await self._commit_minion_l1(
+                state,
+                [
+                    L1TranscriptMessage(
+                        role="assistant",
+                        content=state.pending_assistant_tool_text,
+                        tool_calls=list(state.tool_protocol_messages[-len(state.pending_tool_results) - 1].get("tool_calls") or []),
+                    ),
+                    *[
+                        L1TranscriptMessage(role="tool", content=_tool_result_text(item), tool_call_id=str(item.call_id or ""))
+                        for item in state.pending_tool_results
+                    ],
+                ],
+            )
+            state.pending_assistant_tool_text = ""
+            state.pending_tool_call_batch = []
+            state.pending_tool_results = []
+        self._append_debug_log(
+            "tool_call_completed",
+            {
+                "round": state.llm_round_count,
+                "tool_call_index": index,
+                "tool_name": tool_call.name,
+                "target_name": target_name,
+                "ok": bool(result.ok),
+                "status": str(result.status or ""),
+                "text": _tool_result_text(result),
+                "structured": dict(result.structured or {}),
+            },
+        )
+        await self._emit_progress(
+            "tool_call_completed",
+            round=state.llm_round_count,
+            tool_call_index=index,
+            tool_name=tool_call.name,
+            target_name=target_name,
+            ok=bool(result.ok),
+            status=str(result.status or ""),
+            text_preview=_preview_text(_tool_result_text(result)),
+        )
+        return EffectResult(status=RuntimeStatus.OK if result.ok else RuntimeStatus.ERROR, payload=result, text=_tool_result_text(result))
+
+    async def _commit_minion_l1(self, state: MinionAgentLoopState, transcript: list[L1TranscriptMessage]) -> None:
+        if not transcript:
+            return
+        with contextlib.suppress(Exception):
+            state.memory_service.commit_l1(MemoryCommitRequest(turn_id=self.run_id, transcript=transcript))
+
+    def _minion_prompt_messages(self, state: MinionAgentLoopState, assembly_context: Any) -> list[dict[str, Any]]:
+        scaffold = self._prompt_scaffold()
+        system = _render_system_prompt(scaffold)
+        memory_text = self._render_minion_memory_context(state)
+        retry_note = str((getattr(assembly_context, "metadata", {}) or {}).get("retry_note") or "").strip()
+        tool_protocol_messages = list(state.tool_protocol_messages)
+        task_parts: list[dict[str, Any]] = []
+        if memory_text and not tool_protocol_messages:
+            task_parts.append({"type": "text", "text": render_system_reminder(f"Minion run memory:\n{memory_text}")})
+        task_parts.append({"type": "text", "text": _render_task_prompt(self.pack)})
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": _coerce_user_content_parts(task_parts)},
+            *tool_protocol_messages,
+        ]
+        trailing_parts: list[dict[str, Any]] = []
+        if memory_text and tool_protocol_messages:
+            trailing_parts.append({"type": "text", "text": render_system_reminder(f"Minion run memory:\n{memory_text}")})
+        if retry_note:
+            trailing_parts.append({"type": "text", "text": render_system_reminder(f"Minion retry guidance:\n{retry_note}")})
+        if trailing_parts:
+            messages.append({"role": "user", "content": _coerce_user_content_parts(trailing_parts)})
+        return messages
+
+    def _render_minion_memory_context(self, state: MinionAgentLoopState) -> str:
+        pack = state.memory_service.build_pack(MemoryPackRequest(turn_kind="minion", work_order_id=self.pack.work_order_id))
+        parts: list[str] = []
+        if pack.current_summary is not None and str(pack.current_summary.summary or "").strip():
+            parts.append(f"Current summary:\n{pack.current_summary.summary.strip()}")
+        entries = [entry for entry in list(pack.l2_working_memory or []) if str(entry.entry_id) != "memory.summary"]
+        if entries:
+            lines = [f"- {entry.kind}:{entry.title or entry.entry_id}: {entry.summary}" for entry in entries[:8]]
+            parts.append("Working memory:\n" + "\n".join(lines))
+        records = list(getattr(state.memory_l3, "records", []) or [])
+        if records:
+            lines = [f"- {record.get('document_kind')}:{record.get('title')}: {record.get('summary')}" for record in records[:8]]
+            parts.append("Candidate experience records:\n" + "\n".join(lines))
+        return "\n\n".join(parts).strip()
+
+    def _minion_compaction_source_text(self, state: MinionAgentLoopState, *, target_input_budget: int) -> str:
+        parts: list[str] = []
+        existing = state.memory_service.build_compaction_source_text(target_input_budget=target_input_budget)
+        if existing:
+            parts.append(existing)
+        if state.tool_protocol_messages:
+            rendered = []
+            for message in state.tool_protocol_messages:
+                role = str(message.get("role") or "")
+                content = str(message.get("content") or "")
+                if message.get("tool_calls"):
+                    content += "\n" + json.dumps(message.get("tool_calls"), ensure_ascii=False, sort_keys=True)
+                rendered.append(f"{role}: {content}")
+            parts.append("[Current Minion Trajectory]\n" + "\n".join(rendered))
+        if not parts:
+            parts.append(_render_task_prompt(self.pack))
+        raw = "\n\n".join(parts).strip()
+        return raw[: max(256, target_input_budget or 4096)]
 
     def _requires_first_tool_call(self) -> bool:
         if bool((self.pack.metadata or {}).get("allow_text_only_completion")):
@@ -314,6 +669,17 @@ class MinionRunner:
                 llm_text="capability is not allowed for this minion run",
                 status=RuntimeStatus.ERROR,
             )
+        policy_error = self._runner_owned_git_command_error(target_name, tool_call)
+        if policy_error:
+            return CanonicalToolResult(
+                name=tool_call.name,
+                ok=False,
+                text=policy_error,
+                structured={"reason": "runner_owns_git_checkpoint", "capability": target_name},
+                call_id=tool_call.call_id,
+                llm_text=policy_error,
+                status=RuntimeStatus.ERROR,
+            )
         if await self._requires_approval(target_name, tool_call):
             decision = await self._request_approval(target_name, tool_call)
             if decision != "accept":
@@ -328,6 +694,21 @@ class MinionRunner:
                     status=RuntimeStatus.ERROR,
                 )
         return await execution_runtime.execute_tool_async(tool_call, allow_tools=True, turn_id=self.run_id)
+
+    def _runner_owned_git_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
+        if str(target_name or "") != "op_exec_shell":
+            return ""
+        completion_policy = self._completion_policy()
+        if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
+            return ""
+        cmd = str((tool_call.args or {}).get("cmd") or "").strip()
+        if not _contains_runner_owned_git_mutation(cmd):
+            return ""
+        return (
+            "Do not run git add, git commit, git reset, checkout/switch, clean, merge, rebase, tag, or push in this "
+            "minion workspace. Leave file changes in the workspace and finish with a concise report; the runner owns "
+            "the checkpoint commit."
+        )
 
     async def _await_with_progress_heartbeat(self, awaitable, *, phase: str, **payload: Any):
         interval = self._heartbeat_interval_seconds()
@@ -364,6 +745,8 @@ class MinionRunner:
 
     async def _requires_approval(self, capability_name: str, tool_call: CanonicalToolCall) -> bool:
         _ = tool_call
+        if self.auto_accept_approvals:
+            return False
         high_risk = {str(item) for item in list((self.pack.approval_policy or {}).get("high_risk_capabilities") or [])}
         return str(capability_name) in high_risk
 
@@ -384,8 +767,76 @@ class MinionRunner:
         timeout = float((self.pack.approval_policy or {}).get("decision_timeout_seconds") or 300)
         decision_payload = await self.read_decision(timeout)
         decision = str(((decision_payload or {}).get("decision") or {}).get("decision") or "").strip().lower()
+        if decision == "accept_all":
+            self.auto_accept_approvals = True
         await self._emit("decision_received", {"approval_id": approval_id, "decision": decision or "timeout"})
-        return decision
+        return "accept" if decision == "accept_all" else decision
+
+    async def _request_clarification(self, ask_user_question: dict[str, Any]) -> dict[str, Any]:
+        clarification_id = f"clarify_{uuid4().hex[:16]}"
+        payload = {
+            **dict(ask_user_question or {}),
+            "clarification_id": clarification_id,
+            "run_id": self.run_id,
+            "minion_id": self.minion_id,
+            "work_order_id": self.pack.work_order_id,
+            "status": "pending",
+        }
+        if not _clarification_questions_are_interactive(payload.get("questions")):
+            await self._emit(
+                "clarification_unavailable",
+                {
+                    "clarification_id": clarification_id,
+                    "reason": "required clarification questions must include inline options",
+                    "summary": _ask_user_question_summary(payload),
+                },
+            )
+            return {}
+        await self._emit("clarification_requested", payload)
+        timeout = float((self.pack.approval_policy or {}).get("clarification_timeout_seconds") or 3600)
+        message = await self.read_decision(timeout)
+        if not isinstance(message, dict):
+            await self._emit("clarification_timeout", {"clarification_id": clarification_id})
+            return {}
+        clarification = message.get("clarification") if isinstance(message.get("clarification"), dict) else message
+        if not isinstance(clarification, dict):
+            return {}
+        if str(clarification.get("clarification_id") or "") != clarification_id:
+            return {}
+        await self._emit(
+            "clarification_received",
+            {
+                "clarification_id": clarification_id,
+                "answer_count": len(list(clarification.get("answers") or [])),
+            },
+        )
+        return dict(clarification)
+
+    def _apply_clarification_response(self, clarification: dict[str, Any]) -> None:
+        answers = [dict(item) for item in list(clarification.get("answers") or []) if isinstance(item, dict)]
+        if not answers:
+            return
+        metadata = dict(self.pack.metadata or {})
+        existing_answers = [dict(item) for item in list(metadata.get("clarification_answers") or []) if isinstance(item, dict)]
+        existing_answers.extend(answers)
+        metadata["clarification_answers"] = existing_answers[-50:]
+        planner_work_order = dict(metadata.get("planner_work_order") or {})
+        if not planner_work_order:
+            planner_work_order = build_planner_work_order(
+                goal=self.pack.goal or self.pack.instruction,
+                task_id=str(metadata.get("task_id") or ""),
+                work_order_id=self.pack.work_order_id,
+            )
+        planner_work_order["turn_index"] = int(_coerce_int(planner_work_order.get("turn_index"), default=0)) + 1
+        planner_work_order["plan_revision"] = int(_coerce_int(planner_work_order.get("plan_revision"), default=0)) + 1
+        planner_work_order["clarifications"] = existing_answers[-50:]
+        metadata["planner_work_order"] = planner_work_order
+        metadata.pop("prompt_view", None)
+        self.pack = TaskContextPack.from_dict({**self.pack.to_dict(), "metadata": metadata})
+
+    def _max_clarification_rounds(self) -> int:
+        raw = (self.pack.approval_policy or {}).get("max_clarification_rounds")
+        return max(1, min(5, _coerce_int(raw, default=3)))
 
     async def _commit_current_milestone(self) -> dict[str, Any]:
         repo_path = str((self.pack.workspace or {}).get("repo_path") or "").strip()
@@ -401,16 +852,31 @@ class MinionRunner:
     async def _complete_current_milestone(self, final_text: str) -> dict[str, Any]:
         completion_policy = self._completion_policy()
         evidence = str(completion_policy.get("evidence") or "text_deliverable").strip().lower()
+        prompt_view = _prompt_view_from_pack(self.pack)
+        module = dict(prompt_view.get("module") or {}) if prompt_view else {}
+        ask_user_question = _extract_ask_user_question_payload(final_text)
         base_payload = {
+            "task_id": str((self.pack.metadata or {}).get("task_id") or prompt_view.get("task_id") or ""),
+            "module_id": str(module.get("module_id") or ""),
             "milestone_index": self._current_milestone_index(),
             "milestone_id": str(self._current_milestone().get("milestone_id") or ""),
             "summary": self._short_summary(final_text or "minion completed current milestone"),
         }
+        if ask_user_question:
+            return {
+                **base_payload,
+                "status": "blocked",
+                "summary": _ask_user_question_summary(ask_user_question),
+                "ask_user_question": ask_user_question,
+                **self._artifact_payload(),
+            }
         if evidence == "git_commit":
             await self._persist_text_deliverable_if_needed(final_text)
             checkpoint = await self._commit_current_milestone()
             if checkpoint.get("status") != "committed":
-                if checkpoint.get("status") == "no_changes" and self._completion_evidence_present():
+                if checkpoint.get("status") == "no_changes" and (
+                    self._completion_evidence_present() or self._artifact_completion_evidence_present()
+                ):
                     return {
                         **base_payload,
                         "status": "completed",
@@ -466,34 +932,79 @@ class MinionRunner:
         head = _repo_head(repo)
         return bool(base_sha and head and head != base_sha)
 
-    async def _persist_text_deliverable_if_needed(self, final_text: str) -> None:
+    def _artifact_completion_evidence_present(self) -> bool:
+        if not self.produced_artifacts:
+            return False
+        completion_policy = self._completion_policy()
+        if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
+            return False
+        metadata = self.pack.metadata if isinstance(self.pack.metadata, dict) else {}
+        return bool(metadata.get("allow_text_only_completion") or completion_policy.get("allow_artifact_evidence"))
+
+    def _completion_evidence_fallback_text(self, error_text: str) -> str:
+        summary = str(error_text or "LLM final report generation failed").strip()
+        if len(summary) > 500:
+            summary = summary[:497].rstrip() + "..."
+        return (
+            "Milestone produced completion evidence through capability calls.\n\n"
+            "The final report generation failed after evidence was produced, so the runner is "
+            "using the verified workspace evidence as the completion signal.\n\n"
+            f"LLM error: {summary}"
+        )
+
+    async def _persist_text_deliverable_if_needed(
+        self,
+        final_text: str,
+        *,
+        partial: bool = False,
+        truncation_reason: str = "",
+    ) -> None:
         text = str(final_text or "").strip()
         if not text or self.produced_artifacts:
             return
         if not str((self.pack.workspace or {}).get("artifact_dir") or "").strip():
             return
+        suffix = ".partial" if partial else ""
+        title = self._current_milestone_title()
+        header_lines = [
+            f"# {title}",
+            "",
+            f"- work_order_id: {self.pack.work_order_id}",
+            f"- minion_id: {self.minion_id}",
+            f"- run_id: {self.run_id}",
+        ]
+        if partial:
+            header_lines.extend(
+                [
+                    f"- status: blocked",
+                    f"- truncation_reason: {str(truncation_reason or 'unknown')}",
+                    "",
+                    "This is partial LLM output saved for diagnosis. It must not be treated as a completed deliverable.",
+                ]
+            )
+        header_lines.append("")
         artifact = _write_minion_artifact(
             self.pack.workspace,
             {
-                "relative_path": f"milestone_{self._current_milestone_index()}_{self._safe_path_part(self.pack.minion_profile)}.md",
-                "title": self._current_milestone_title(),
-                "role": "primary",
+                "relative_path": f"milestone_{self._current_milestone_index()}_{self._safe_path_part(self.pack.minion_profile)}{suffix}.md",
+                "title": title if not partial else f"{title} (partial truncated output)",
+                "role": "primary" if not partial else "partial",
                 "mime_type": "text/markdown",
-                "content": "\n".join(
-                    [
-                        f"# {self._current_milestone_title()}",
-                        "",
-                        f"- work_order_id: {self.pack.work_order_id}",
-                        f"- minion_id: {self.minion_id}",
-                        f"- run_id: {self.run_id}",
-                        "",
-                        text,
-                        "",
-                    ]
-                ),
+                "content": "\n".join([*header_lines, text, ""]),
             },
         )
         self._record_produced_artifact(artifact)
+
+    def _truncated_output_blocked_summary(self, finish_reason: str) -> str:
+        reason = str(finish_reason or "unknown").strip() or "unknown"
+        primary = dict(self._artifact_payload().get("primary_artifact") or {})
+        artifact_path = str(primary.get("path") or primary.get("relative_path") or "").strip()
+        saved = f" Partial output was saved to {artifact_path}." if artifact_path else ""
+        return (
+            f"LLM output was truncated before the minion completed the milestone "
+            f"(finish_reason={reason}). Treat this milestone as blocked.{saved} "
+            "For long deliverables, write the full result as an artifact/file and keep the final reply short."
+        )
 
     @staticmethod
     def _safe_path_part(value: str) -> str:
@@ -526,26 +1037,24 @@ class MinionRunner:
             },
         )
 
-    def _initial_messages(self) -> list[dict[str, Any]]:
-        scaffold = self._prompt_scaffold()
-        return [
-            {"role": "system", "content": _render_system_prompt(scaffold)},
-            {"role": "user", "content": _render_task_prompt(self.pack)},
-        ]
-
     def _prompt_scaffold(self) -> dict[str, Any]:
         profile = dict(self.pack.resolved_profile or {})
+        prompt_view = _prompt_view_from_pack(self.pack)
+        milestone = dict(prompt_view.get("milestone") or {}) if prompt_view else self._current_milestone()
+        acceptance = list(milestone.get("acceptance_criteria") or self.pack.acceptance_criteria)
+        instruction = str(milestone.get("task") or self.pack.instruction or self.pack.goal)
         return {
             "identity": str(profile.get("identity_fragment") or ""),
             "behavior": str(profile.get("behavior_fragment") or ""),
-            "instruction": self.pack.instruction or self.pack.goal,
-            "acceptance_criteria": list(self.pack.acceptance_criteria),
+            "instruction": instruction,
+            "acceptance_criteria": acceptance,
             "continuity": dict(self.pack.continuity),
-            "current_milestone": self._current_milestone(),
+            "current_milestone": milestone,
             "allowed_capabilities": list(self.pack.allowed_capabilities),
             "output_contract": str(profile.get("output_contract_fragment") or ""),
             "workspace_policy": self._workspace_policy(),
             "completion_policy": self._completion_policy(),
+            "prompt_view": prompt_view,
         }
 
     def _workspace_policy(self) -> dict[str, Any]:
@@ -567,6 +1076,10 @@ class MinionRunner:
         return {}
 
     def _current_milestone(self) -> dict[str, Any]:
+        prompt_view = _prompt_view_from_pack(self.pack)
+        milestone = dict(prompt_view.get("milestone") or {}) if prompt_view else {}
+        if milestone:
+            return milestone
         return dict((self.pack.continuity or {}).get("current_milestone") or {})
 
     def _current_milestone_index(self) -> int:
@@ -579,16 +1092,40 @@ class MinionRunner:
         return str(self._current_milestone().get("title") or self.pack.instruction or self.pack.goal or "Complete milestone")
 
     def _terminal_payload(self, status: str, summary: Any) -> dict[str, Any]:
+        resolved_status = str(status or "").strip() or "completed"
         summary_text = str(summary or "").strip()
+        ask_user_question = _extract_ask_user_question_payload(summary_text)
         lesson_payload = _extract_lessons_and_clean_summary(summary_text)
         summary_text = self._short_summary(str(lesson_payload.get("summary") or summary_text).strip())
-        return {
-            "status": str(status or "").strip() or "completed",
-            "summary": summary_text,
+        experience_payload = {
             "task_lessons": list(lesson_payload.get("task_lessons") or []),
             "system_lessons": list(lesson_payload.get("system_lessons") or []),
+            "memory_candidates": [dict(item) for item in self.memory_candidates],
+        }
+        payload = {
+            "status": resolved_status,
+            "summary": summary_text,
+            **experience_payload,
             **self._artifact_payload(),
         }
+        if resolved_status == "completed" and self._defer_experience_until_module_complete():
+            payload["task_lessons"] = []
+            payload["system_lessons"] = []
+            payload["memory_candidates"] = []
+            payload["deferred_experience"] = experience_payload
+        if ask_user_question:
+            payload["status"] = "blocked"
+            payload["summary"] = _ask_user_question_summary(ask_user_question)
+            payload["ask_user_question"] = ask_user_question
+        return payload
+
+    def _defer_experience_until_module_complete(self) -> bool:
+        metadata = dict(self.pack.metadata or {})
+        module_execution = dict(metadata.get("module_execution") or {})
+        return bool(
+            metadata.get("defer_experience_until_module_complete")
+            or module_execution.get("defer_experience_until_module_complete")
+        )
 
     def _artifact_payload(self) -> dict[str, Any]:
         artifacts = [dict(item) for item in self.produced_artifacts]
@@ -610,7 +1147,7 @@ class MinionRunner:
                 return
             if relative_path and str(existing.get("relative_path") or "") == relative_path:
                 return
-        self.produced_artifacts.append(dict(artifact))
+        _append_unique_artifact(self.produced_artifacts, artifact)
 
     @staticmethod
     def _short_summary(value: Any, *, limit: int = 500) -> str:
@@ -726,6 +1263,57 @@ def build_slim_minion_runtime(runtime_root: Path) -> MinionRuntimeBundle:
     return MinionRuntimeBundle(llm_runtime=llm_runtime, execution_runtime=core.context.execution_runtime, close_async=close)
 
 
+def _minion_prompt_context(pack: TaskContextPack, *, metadata: dict[str, Any]) -> PromptAssemblyContext:
+    return PromptAssemblyContext(
+        core_mode="minion",
+        turn_kind="minion",
+        work_order_id=pack.work_order_id,
+        metadata=dict(metadata),
+    )
+
+
+def _prompt_scaffold_summary(scaffold: dict[str, Any]) -> dict[str, Any]:
+    continuity = dict(scaffold.get("continuity") or {})
+    return {
+        "instruction_chars": len(str(scaffold.get("instruction") or "")),
+        "acceptance_criteria_count": len(list(scaffold.get("acceptance_criteria") or [])),
+        "allowed_capability_count": len(list(scaffold.get("allowed_capabilities") or [])),
+        "continuity": {
+            "keys": sorted(str(key) for key in continuity.keys()),
+            "recent_ledger_count": len(list(continuity.get("recent_ledger") or [])),
+            "completed_milestone_count": len(list(continuity.get("completed_milestones") or [])),
+            "task_lesson_count": len(list(continuity.get("task_lessons") or [])),
+        },
+        "current_milestone": dict(scaffold.get("current_milestone") or {}),
+        "workspace_policy": dict(scaffold.get("workspace_policy") or {}),
+        "completion_policy": dict(scaffold.get("completion_policy") or {}),
+    }
+
+
+def _memory_candidates_from_l3(memory_l3: MockL3Plugin) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for record in list(getattr(memory_l3, "records", []) or []):
+        if not isinstance(record, dict):
+            continue
+        item = {
+            "document_id": str(record.get("document_id") or ""),
+            "kind": str(record.get("document_kind") or record.get("kind") or ""),
+            "scope": str(record.get("scope") or "task"),
+            "title": str(record.get("title") or ""),
+            "summary": str(record.get("summary") or ""),
+            "search_text": str(record.get("search_text") or ""),
+            "canonical_key": str(record.get("canonical_key")) if record.get("canonical_key") is not None else None,
+            "dedupe_fingerprint": str(record.get("dedupe_fingerprint")) if record.get("dedupe_fingerprint") is not None else None,
+            "topics": list(record.get("topics") or []),
+            "payload": dict(record.get("payload") or {}),
+            "source_kind": "minion_ephemeral_l3",
+            "candidate_state": "candidate",
+        }
+        if item["summary"].strip() or item["title"].strip():
+            result.append(item)
+    return result
+
+
 def _llm_tools_for_allowed(execution_runtime: Any, allowed_capabilities: list[str]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -753,21 +1341,26 @@ def _llm_tools_for_allowed(execution_runtime: Any, allowed_capabilities: list[st
 
 
 MINION_DISCOVERY_TOOL_SURFACE = (
-    "op_exec_disc_search",
-    "op_exec_disc_read",
-    "op_exec_capability_call",
+    "op_tool_search",
+    "op_tool_read",
+    "op_tool_call",
 )
 
 
 MINION_DIRECT_WORK_TOOL_SURFACE = (
-    "op_exec_run",
+    "op_file_read",
+    "op_file_edit",
+    "op_file_write",
+    "op_exec_shell",
     "op_workspace_tree",
     "op_workspace_search",
     "op_workspace_read",
     "op_minion_artifact_write",
-    "op_web_search_query",
-    "op_web_fetch_read",
-    "op_l3_recall_query",
+    "op_minion_artifact_edit",
+    "op_minion_memory_candidate_write",
+    "op_web_search",
+    "op_web_read",
+    "op_memory_recall",
 )
 
 
@@ -812,7 +1405,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_artifact_write": {
         "name": "op_minion_artifact_write",
-        "description": "Write a minion deliverable file under workspace.artifact_dir and register it as produced artifact evidence.",
+        "description": "Write one complete minion deliverable file under workspace.artifact_dir and register it as produced artifact evidence. Use this for planner/reviewer plans and long structured output; final chat should only point to the artifact. Duplicate paths get a numbered suffix unless overwrite=true.",
         "parameters_schema": {
             "type": "object",
             "properties": {
@@ -821,8 +1414,47 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "title": {"type": "string"},
                 "role": {"type": "string", "description": "Artifact role such as primary, evidence, notes, or tests."},
                 "mime_type": {"type": "string", "default": "text/markdown"},
+                "overwrite": {"type": "boolean", "default": False, "description": "Overwrite an existing artifact path. Defaults to false; duplicate paths get a numbered suffix."},
             },
             "required": ["relative_path", "content"],
+        },
+    },
+    "op_minion_artifact_edit": {
+        "name": "op_minion_artifact_edit",
+        "description": "Create, append to, or replace a text artifact under workspace.artifact_dir and register it as produced artifact evidence. Use append for long deliverables split into coherent sections; use replace only when rewriting the complete artifact.",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "relative_path": {"type": "string", "description": "Artifact-dir-relative file path, for example plan.md."},
+                "operation": {"type": "string", "enum": ["append", "replace"], "default": "append"},
+                "content": {"type": "string", "description": "UTF-8 text content to append or replace with."},
+                "create_if_missing": {"type": "boolean", "default": True},
+                "title": {"type": "string"},
+                "role": {"type": "string", "description": "Artifact role such as primary, evidence, notes, or tests."},
+                "mime_type": {"type": "string", "default": "text/markdown"},
+            },
+            "required": ["relative_path", "content"],
+        },
+    },
+    "op_minion_memory_candidate_write": {
+        "name": "op_minion_memory_candidate_write",
+        "description": "Write a reusable memory candidate to this minion run's ephemeral in-memory L3. Pal will ask the user before absorbing candidates into durable memory.",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "description": "Memory kind such as fact or case."},
+                "scope": {"type": "string", "default": "task"},
+                "title": {"type": "string"},
+                "summary": {"type": "string"},
+                "canonical_key": {"type": "string"},
+                "topics": {"type": "array", "items": {"type": "string"}},
+                "payload": {"type": "object"},
+                "situation_text": {"type": "string"},
+                "task_text": {"type": "string"},
+                "action_text": {"type": "string"},
+                "result_text": {"type": "string"},
+            },
+            "required": ["kind", "summary"],
         },
     },
 }
@@ -845,6 +1477,7 @@ class MinionScopedExecutionRuntime:
     allowed_capabilities: list[str]
     workspace: dict[str, Any] = field(default_factory=dict)
     produced_artifacts: list[dict[str, Any]] = field(default_factory=list)
+    memory_l3: MockL3Plugin | None = None
 
     def __post_init__(self) -> None:
         self.allowed_capabilities = filter_minion_allowed_capabilities(self.allowed_capabilities)
@@ -855,10 +1488,12 @@ class MinionScopedExecutionRuntime:
         for name, spec in WORKSPACE_TOOL_SPECS.items():
             if name in allowed and not is_minion_capability_denied(name):
                 specs.append(dict(spec))
-        for spec in list(self.base_runtime.list_capability_specs()):
-            name = str(spec.get("name") or "").strip()
-            if name in allowed and not is_minion_capability_denied(name):
-                specs.append(spec)
+        list_specs = getattr(self.base_runtime, "list_capability_specs", None)
+        if callable(list_specs):
+            for spec in list(list_specs()):
+                name = str(spec.get("name") or "").strip()
+                if name in allowed and not is_minion_capability_denied(name):
+                    specs.append(spec)
         return specs
 
     def get_capability_spec(self, name: str) -> dict[str, Any] | None:
@@ -866,7 +1501,10 @@ class MinionScopedExecutionRuntime:
             if name not in set(self.allowed_capabilities) or is_minion_capability_denied(name):
                 return None
             return dict(WORKSPACE_TOOL_SPECS[name])
-        spec = self.base_runtime.get_capability_spec(name)
+        get_spec = getattr(self.base_runtime, "get_capability_spec", None)
+        if not callable(get_spec):
+            return None
+        spec = get_spec(name)
         if spec is None:
             return None
         canonical = str(spec.get("name") or spec.get("canonical_path") or name).strip()
@@ -881,22 +1519,24 @@ class MinionScopedExecutionRuntime:
         allow_tools: bool = True,
         turn_id: str | None = None,
     ) -> CanonicalToolResult:
-        if call.name == "op_exec_disc_search":
+        if call.name == "op_tool_search":
             return _capability_result_to_tool_result(
                 call,
                 ToolSearchTool(runtime=self).invoke(dict(call.args)),
             )
-        if call.name == "op_exec_disc_read":
+        if call.name == "op_tool_read":
             return _capability_result_to_tool_result(
                 call,
                 ToolReadTool(runtime=self).invoke(dict(call.args)),
             )
         if call.name in WORKSPACE_TOOL_SPECS:
+            if call.name == "op_minion_memory_candidate_write":
+                return _minion_memory_candidate_result(call, self.memory_l3)
             result = _workspace_tool_result(call, self.workspace)
-            if call.name == "op_minion_artifact_write" and result.ok:
+            if call.name in {"op_minion_artifact_write", "op_minion_artifact_edit"} and result.ok:
                 artifact = dict((result.structured or {}).get("artifact") or result.structured or {})
                 if artifact:
-                    self.produced_artifacts.append(artifact)
+                    _append_unique_artifact(self.produced_artifacts, artifact)
             return result
         return await self.base_runtime.execute_tool_async(call, allow_tools=allow_tools, turn_id=turn_id)
 
@@ -913,12 +1553,66 @@ def _capability_result_to_tool_result(call: CanonicalToolCall, result: Capabilit
     )
 
 
+def _minion_memory_candidate_result(call: CanonicalToolCall, memory_l3: MockL3Plugin | None) -> CanonicalToolResult:
+    if memory_l3 is None:
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text="minion memory candidate store is not available",
+            structured={"reason": "minion_memory_unavailable"},
+            call_id=call.call_id,
+            llm_text="minion memory candidate store is not available",
+            status=RuntimeStatus.ERROR,
+        )
+    try:
+        result = memory_l3.commit(
+            L3CommitRequest(
+                kind=str(call.args.get("kind") or "case"),
+                scope=str(call.args.get("scope") or "task"),
+                title=str(call.args.get("title") or ""),
+                summary=str(call.args.get("summary") or ""),
+                canonical_key=str(call.args.get("canonical_key")) if call.args.get("canonical_key") is not None else None,
+                payload=dict(call.args.get("payload") or {}),
+                topics=[str(value) for value in list(call.args.get("topics") or [])],
+                situation_text=str(call.args.get("situation_text") or ""),
+                task_text=str(call.args.get("task_text") or ""),
+                action_text=str(call.args.get("action_text") or ""),
+                result_text=str(call.args.get("result_text") or ""),
+            )
+        )
+        payload = {"memory_candidate": result.hit or {"document_id": result.document_id}}
+        return CanonicalToolResult(
+            name=call.name,
+            ok=result.status == RuntimeStatus.OK,
+            text="memory candidate recorded",
+            structured=payload,
+            call_id=call.call_id,
+            llm_text="memory candidate recorded",
+            status=result.status,
+        )
+    except Exception as exc:
+        message = str(exc) or exc.__class__.__name__
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=message,
+            structured={"error": message, "error_type": exc.__class__.__name__},
+            call_id=call.call_id,
+            llm_text=message,
+            status=RuntimeStatus.ERROR,
+        )
+
+
 def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult:
     try:
         if call.name == "op_minion_artifact_write":
             artifact = _write_minion_artifact(workspace, call.args)
             payload = {"artifact": artifact}
             text = f"Artifact written: {artifact['relative_path']}"
+        elif call.name == "op_minion_artifact_edit":
+            artifact = _edit_minion_artifact(workspace, call.args)
+            payload = {"artifact": artifact}
+            text = f"Artifact edited: {artifact['relative_path']}"
         else:
             root = _workspace_root(workspace)
             if call.name == "op_workspace_tree":
@@ -991,8 +1685,38 @@ def _write_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> d
     root = _artifact_root(workspace)
     path = _artifact_path(root, args.get("relative_path"))
     content = str(args.get("content") or "")
+    if not content.strip():
+        raise ValueError("artifact content is required")
+    if path.exists() and not bool(args.get("overwrite")):
+        path = _next_available_artifact_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+    return _artifact_metadata(root, path, args)
+
+
+def _edit_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    root = _artifact_root(workspace)
+    path = _artifact_path(root, args.get("relative_path"))
+    operation = str(args.get("operation") or "append").strip().lower() or "append"
+    if operation not in {"append", "replace"}:
+        raise ValueError("operation must be append or replace")
+    content = str(args.get("content") or "")
+    if not content.strip():
+        raise ValueError("artifact content is required")
+    create_if_missing = bool(args.get("create_if_missing", True))
+    if not path.exists() and not create_if_missing:
+        raise ValueError("artifact does not exist")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if operation == "replace":
+        path.write_text(content, encoding="utf-8")
+    else:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(content)
+    return _artifact_metadata(root, path, args)
+
+
+def _artifact_metadata(root: Path, path: Path, args: dict[str, Any]) -> dict[str, Any]:
+    content = path.read_text(encoding="utf-8", errors="ignore")
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     relative_path = str(path.relative_to(root)).replace("\\", "/")
     mime_type = str(args.get("mime_type") or mimetypes.guess_type(path.name)[0] or "text/plain").strip()
@@ -1007,6 +1731,32 @@ def _write_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> d
         "size_bytes": path.stat().st_size,
         "sha256": digest,
     }
+
+
+def _next_available_artifact_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    parent = path.parent
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(2, 1000):
+        candidate = parent / f"{stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise ValueError(f"could not allocate unique artifact path for {path.name}")
+
+
+def _append_unique_artifact(items: list[dict[str, Any]], artifact: dict[str, Any]) -> None:
+    path = str(artifact.get("path") or "").strip()
+    relative_path = str(artifact.get("relative_path") or "").strip()
+    for index, existing in enumerate(items):
+        if path and str(existing.get("path") or "") == path:
+            items[index] = dict(artifact)
+            return
+        if relative_path and str(existing.get("relative_path") or "") == relative_path:
+            items[index] = dict(artifact)
+            return
+    items.append(dict(artifact))
 
 
 def _workspace_path(root: Path, raw_path: Any = "") -> Path:
@@ -1100,7 +1850,7 @@ def _workspace_read(root: Path, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _effective_capability_name(tool_call: CanonicalToolCall) -> str:
-    if tool_call.name == "op_exec_capability_call":
+    if tool_call.name == "op_tool_call":
         return str(tool_call.args.get("name") or tool_call.name).strip()
     return tool_call.name
 
@@ -1128,6 +1878,11 @@ def _tool_result_text(result: CanonicalToolResult) -> str:
     if result.structured:
         return json.dumps(result.structured, ensure_ascii=False, sort_keys=True)
     return "tool completed" if result.ok else "tool failed"
+
+
+def _is_truncation_finish_reason(value: str) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized in {"length", "max_tokens", "max_output_tokens", "token_limit", "output_truncated"}
 
 
 def _tool_call_summary(tool_call: CanonicalToolCall) -> dict[str, str]:
@@ -1290,6 +2045,16 @@ def _repo_head(repo_path: Path) -> str:
     return str(completed.stdout or "").strip()
 
 
+_RUNNER_OWNED_GIT_MUTATION_RE = re.compile(
+    r"(?:^|[;&|()]\s*)git\s+"
+    r"(?:add|commit|reset|checkout|switch|clean|rm|mv|merge|rebase|tag|push|branch)\b"
+)
+
+
+def _contains_runner_owned_git_mutation(cmd: str) -> bool:
+    return bool(_RUNNER_OWNED_GIT_MUTATION_RE.search(str(cmd or "")))
+
+
 def _render_system_prompt(scaffold: dict[str, Any]) -> str:
     completion_policy = scaffold.get("completion_policy") or {}
     testing_guidance = ""
@@ -1299,28 +2064,70 @@ def _render_system_prompt(scaffold: dict[str, Any]) -> str:
             "run the relevant tests/checks available through listed capabilities, fix failures you caused, "
             "and report blocked instead of completed if tests cannot be run or cannot pass with concrete evidence.\n"
         )
-    return (
-        f"{scaffold.get('identity')}\n\n"
-        f"{scaffold.get('behavior')}\n\n"
-        "Your context is the task context pack, the current milestone, and the listed capabilities.\n"
+    operating_rules = (
+        "Your context is the prompt_view/task context pack, the current milestone, and the listed capabilities.\n"
+        "When prompt_view is present, treat it as the complete scoped assignment; do not infer or implement other modules.\n"
         "Use only the listed capabilities. Report by milestone, never by percentage or ETA.\n"
-        "Use `op_l3_recall_query` when prior Pal experience, project lessons, or user preferences may materially improve the result.\n"
+        "Use `op_memory_recall` when prior Pal experience, project lessons, or user preferences may materially improve the result.\n"
         "If capability evidence is required, use a relevant listed capability before completing the milestone.\n"
         f"{testing_guidance}"
         "If completion evidence cannot be produced, report blocked instead of completed.\n"
-        "When completion policy requires git_commit, leave file changes in the workspace; do not run git commit yourself.\n"
-        "When `op_minion_artifact_write` is available, write your primary deliverable to workspace.artifact_dir with that tool; keep the final chat summary short and point to the artifact.\n"
-        "If a tool/capability call fails and `op_l3_recall_query` is listed below, you MUST call `op_l3_recall_query` for relevant prior experience before retrying, debugging further, or reporting blocked.\n"
+        "When completion policy requires git_commit, leave file changes in the workspace; do not run git add, git commit, or other git mutation commands yourself. The runner owns checkpoint commits.\n"
+        "Do not create or rely on committing generated build/cache artifacts such as __pycache__, .pytest_cache, .o, .obj, .a, .so, .dylib, .dll, .exe, class files, coverage output, build directories, or minion_outputs reports.\n"
+        "When `op_minion_artifact_write` or `op_minion_artifact_edit` is available, write planner/reviewer deliverables and any long structured output to workspace.artifact_dir with artifact tools; keep the final chat summary short and point to the artifact.\n"
+        "Use `op_minion_artifact_write` for one complete coherent file. Use `op_minion_artifact_edit` append for long deliverables split into coherent sections, or replace only when rewriting the complete artifact. Do not rely on final chat text for long plans or reports.\n"
+        "When `op_minion_memory_candidate_write` is available and the run teaches something genuinely reusable, write a concise memory candidate there instead of asking Pal to remember it directly.\n"
+        "If a tool/capability call fails because of an obvious schema, argument, path, or local input mistake, correct the call directly.\n"
+        "If a tool/capability call fails and the next step is unclear, repeated retries would be guesswork, or the failure may have prior Pal/project repair history, use `op_memory_recall` when it is listed below before retrying, debugging further, or reporting blocked.\n"
         "When the current milestone is complete, stop with a concise milestone summary. "
-        "If the run taught something genuinely reusable, include separate Task lessons or System lessons; Pal will ask the user before absorbing them.\n\n"
-        f"Workspace policy:\n{json.dumps(scaffold.get('workspace_policy') or {}, ensure_ascii=False, sort_keys=True)}\n\n"
-        f"Completion policy:\n{json.dumps(scaffold.get('completion_policy') or {}, ensure_ascii=False, sort_keys=True)}\n\n"
-        f"Output contract:\n{scaffold.get('output_contract')}\n\n"
-        f"Allowed capabilities:\n{json.dumps(scaffold.get('allowed_capabilities') or [], ensure_ascii=False)}"
-    ).strip()
+        "Pal will ask the user before absorbing minion memory candidates."
+    )
+    blocks = [
+        ("identity", str(scaffold.get("identity") or "").strip()),
+        ("behavior_guidance", str(scaffold.get("behavior") or "").strip()),
+        ("operating_rules", operating_rules.strip()),
+        ("workspace_policy", json.dumps(scaffold.get("workspace_policy") or {}, ensure_ascii=False, sort_keys=True)),
+        ("completion_policy", json.dumps(scaffold.get("completion_policy") or {}, ensure_ascii=False, sort_keys=True)),
+        ("output_contract", str(scaffold.get("output_contract") or "").strip()),
+        ("allowed_capabilities", json.dumps(scaffold.get("allowed_capabilities") or [], ensure_ascii=False)),
+    ]
+    return "\n\n".join(render_xml_block(tag, content) for tag, content in blocks if str(content or "").strip()).strip()
+
+
+def _coerce_user_content_parts(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+    if len(parts) == 1 and parts[0].get("type") == "text":
+        return str(parts[0].get("text") or "")
+    return parts
+
+
+def _prompt_view_from_pack(pack: TaskContextPack) -> dict[str, Any]:
+    metadata = dict(pack.metadata or {})
+    prompt_view = prompt_view_from_metadata(metadata, workspace=dict(pack.workspace))
+    if prompt_view:
+        if pack.allowed_capabilities:
+            prompt_view["allowed_capabilities"] = list(pack.allowed_capabilities)
+        return prompt_view
+    continuity = dict(pack.continuity or {})
+    if isinstance(continuity.get("prompt_view"), dict):
+        prompt_view = prompt_view_from_metadata({"prompt_view": dict(continuity.get("prompt_view") or {})}, workspace=dict(pack.workspace))
+        if prompt_view and pack.allowed_capabilities:
+            prompt_view["allowed_capabilities"] = list(pack.allowed_capabilities)
+        return prompt_view
+    return {}
 
 
 def _render_task_prompt(pack: TaskContextPack) -> str:
+    prompt_view = _prompt_view_from_pack(pack)
+    if prompt_view:
+        payload = {
+            "prompt_view": prompt_view,
+            "instructions": [
+                "Execute only the scoped work in this prompt_view.",
+                "Use module contracts instead of inferring other module internals.",
+                "If a question is user-answerable and materially changes the plan, return ask_user_question with evidence.",
+            ],
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
     payload = {
         "work_order_id": pack.work_order_id,
         "goal": pack.goal,
@@ -1332,6 +2139,56 @@ def _render_task_prompt(pack: TaskContextPack) -> str:
         "memory_pack": dict(pack.memory_pack),
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _extract_ask_user_question_payload(text: str) -> dict[str, Any]:
+    loaded = _try_extract_json(str(text or "").strip())
+    if not isinstance(loaded, dict):
+        return {}
+    output_type = str(loaded.get("type") or loaded.get("output_type") or "").strip().lower()
+    if output_type not in {"ask_user_question", "clarification_request"} and "questions" not in loaded:
+        return {}
+    questions = [dict(item) for item in list(loaded.get("questions") or []) if isinstance(item, dict)]
+    if not questions:
+        return {}
+    payload = {
+        "type": "ask_user_question",
+        "task_id": str(loaded.get("task_id") or ""),
+        "work_order_id": str(loaded.get("work_order_id") or ""),
+        "turn_index": loaded.get("turn_index", 0),
+        "plan_revision": loaded.get("plan_revision", 0),
+        "plan_draft_id": str(loaded.get("plan_draft_id") or ""),
+        "questions": questions[:3],
+    }
+    return payload
+
+
+def _ask_user_question_summary(payload: dict[str, Any]) -> str:
+    questions = [dict(item) for item in list(payload.get("questions") or []) if isinstance(item, dict)]
+    if not questions:
+        return "minion asked a user clarification question"
+    first = str(questions[0].get("question") or "minion asked a user clarification question").strip()
+    if len(questions) == 1:
+        return first
+    return f"{first} (+{len(questions) - 1} more)"
+
+
+def _clarification_questions_are_interactive(value: Any) -> bool:
+    questions = [dict(item) for item in list(value or []) if isinstance(item, dict)]
+    if not questions:
+        return False
+    for question in questions[:3]:
+        options = [dict(item) for item in list(question.get("options") or []) if isinstance(item, dict)]
+        if not options:
+            return False
+    return True
+
+
+def _coerce_int(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def _extract_lessons_and_clean_summary(text: str) -> dict[str, Any]:

@@ -6,9 +6,11 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from pal.core import PalCore
+from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
 from pal.llm import EndpointResolver, LLMRuntime, RuntimeSettingRepository
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
-from pal.llm.introspection import LLMIntrospectionProvider
+from pal.llm.introspection import LLMIntrospectionProvider, register_with_core as register_llm_with_core
 from pal.runtime_app import open_runtime
 
 
@@ -65,7 +67,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
             finally:
                 asyncio.run(handle.stop_async())
 
-    def test_codex_app_server_connection_failure_skips_same_failure_domain(self) -> None:
+    def test_codex_cli_connection_failure_skips_same_failure_domain(self) -> None:
         class _Invoker:
             def __init__(self) -> None:
                 self.calls: list[str] = []
@@ -73,7 +75,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
             def invoke(self, endpoint, request):
                 _ = request
                 self.calls.append(endpoint.endpoint_id)
-                if str(endpoint.provider) == "codex_app_server":
+                if str(endpoint.provider) == "codex_cli":
                     raise TimeoutError("timed out waiting for codex app-server output")
                 return CanonicalLLMOutcome(text=f"ok:{endpoint.endpoint_id}")
 
@@ -86,9 +88,9 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                 codex_a = SimpleNamespace(
                     endpoint_id="codex_a",
                     model_id="gpt-5.4",
-                    provider="codex_app_server",
-                    base_url="codex://app-server",
-                    capabilities_blob={"official_codex_app_server": True},
+                    provider="codex_cli",
+                    base_url="codex://cli",
+                    capabilities_blob={"official_codex_cli": True},
                     supports_streaming=False,
                     max_output_tokens=1024,
                     context_window=8192,
@@ -96,9 +98,9 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                 codex_b = SimpleNamespace(
                     endpoint_id="codex_b",
                     model_id="gpt-5.3-codex-spark",
-                    provider="codex_app_server",
-                    base_url="codex://app-server",
-                    capabilities_blob={"official_codex_app_server": True},
+                    provider="codex_cli",
+                    base_url="codex://cli",
+                    capabilities_blob={"official_codex_cli": True},
                     supports_streaming=False,
                     max_output_tokens=1024,
                     context_window=8192,
@@ -136,6 +138,48 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                 self.assertEqual(result.status, "ok")
                 self.assertEqual(result.structured["active_endpoint_id"], "beta")
                 self.assertEqual(result.structured["endpoint_id"], "beta")
+                self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "beta")
+            finally:
+                asyncio.run(handle.stop_async())
+
+    def test_set_active_endpoint_is_discoverable_and_callable_by_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            handle = open_runtime(Path(tmpdir))
+            try:
+                alpha = _fake_endpoint("alpha", "alpha-model")
+                beta = _fake_endpoint("beta", "beta-model")
+                runtime = LLMRuntime(
+                    endpoint_resolver=EndpointResolver(endpoints=(alpha, beta)),
+                    settings_repository=RuntimeSettingRepository(),
+                    endpoint_invoker=_FailoverInvoker(),
+                )
+                core = PalCore()
+                register_execution_with_core(core.context)
+                core.publish_module_capabilities("execution")
+                register_llm_with_core(core.context, runtime)
+                core.publish_module_capabilities("llm")
+
+                search = core.context.execution_runtime.execute(
+                    CapabilityCall(name="op_tool_search", args={"query": "active llm endpoint", "top_k": 10})
+                )
+                self.assertEqual(search.status, "ok")
+                hit_names = [item["name"] for item in search.structured["hits"]]
+                self.assertIn("op_llm_mgmt_set_active_endpoint", hit_names)
+
+                read = core.context.execution_runtime.execute(
+                    CapabilityCall(name="op_tool_read", args={"name": "op_llm_mgmt_set_active_endpoint"})
+                )
+                self.assertEqual(read.status, "ok")
+                self.assertEqual(read.structured["capability"]["required_params"], ["active_endpoint_id"])
+
+                call = core.context.execution_runtime.execute(
+                    CapabilityCall(
+                        name="op_tool_call",
+                        args={"name": "op_llm_mgmt_set_active_endpoint", "args": {"active_endpoint_id": "beta"}},
+                    )
+                )
+                self.assertEqual(call.status, "ok")
+                self.assertEqual(call.structured["active_endpoint_id"], "beta")
                 self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "beta")
             finally:
                 asyncio.run(handle.stop_async())

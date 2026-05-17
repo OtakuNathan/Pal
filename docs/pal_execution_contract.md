@@ -67,7 +67,7 @@ Current boundaries:
 
 对于本地环境能力，推荐保持最小 built-in tool 集：
 
-- `shell.exec` 作为默认本地执行原语
+- `shell_exec` 作为默认本地执行原语
 - `web_search` 作为独立 capability / provider family
 - `web_fetch` 可通过 `curl` 或 headless browser tool backend 落地
 
@@ -146,7 +146,7 @@ flowchart LR
 - `control`
 - `memory`
 - `tasking`
-- `service`
+- `proactive`
 - `introspection`
 - `plugin`
 
@@ -484,10 +484,10 @@ async def __call__(self, payload: InputModel, *, meta: InvocationMeta | None = N
 
 最小 discovery surface 至少包括：
 
-- `tool.search`
-- `tool.read`
-- `skill.search`
-- `skill.read`
+- `tool_search`
+- `tool_read`
+- `skill_search`
+- `skill_read`
 
 ## Introspection Index
 
@@ -573,7 +573,7 @@ async def __call__(self, payload: InputModel, *, meta: InvocationMeta | None = N
 - `introspection.memory.*`
 - `introspection.execution.*`
 - `introspection.control.*`
-- `introspection.service.*`
+- `introspection.proactive.*`
 - `introspection.tasking.*`
 - `introspection.plugin.*`
 - `introspection.llm.*`
@@ -623,7 +623,7 @@ The split is:
 
 The LLM-facing difference is:
 
-- use `op_exec_disc_search` to discover available capability inventory.
+- use `op_tool_search` to discover available capability inventory.
 - use `op_behavior_advise` to ask which route fits a scenario.
 - use `op_skill_inject` to fetch a manual after advice returns a `skill_ref`.
 

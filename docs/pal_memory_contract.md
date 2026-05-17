@@ -13,7 +13,7 @@ Prompt ownership:
 Current system prompt rules:
 
 - If memory has been recalled or is present in the prompt, Pal MUST use it as reference before deciding, writing, retrying, debugging, or taking external action.
-- If a tool/capability call fails and memory recall is available, Pal MUST call `op_l3_recall_query` for relevant experience before debugging, retrying, or asking the user.
+- If a tool/capability call fails and memory recall is available, Pal MUST call `op_memory_recall` for relevant experience before debugging, retrying, or asking the user.
 - If the user challenges Pal's memory, says Pal already knows/remembers something, or corrects a recalled/stored fact, Pal MUST recall relevant memory before writing, patching, or insisting.
 - `memory_query_hints` from behavior advice do not trigger recall by themselves; when recall is required, use them as query seeds.
 

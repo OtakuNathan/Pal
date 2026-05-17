@@ -70,7 +70,7 @@ class BehaviorAdviceTool:
     name: str = "op_behavior_advise"
     display_name: str = "Behavior advice"
     family: str = "behavior"
-    description: str = "Ask Pal's behavior router which capabilities or skills may fit the current scenario. Async only."
+    description: str = "Ask Pal's behavior router which capabilities, skills, memory hints, or route guidance may fit the current scenario."
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("behavior", "affordance", "routing")
@@ -87,7 +87,7 @@ class BehaviorAdviceTool:
         structured = {"reason": "async_required", "tool": self.name}
         return CapabilityResult(
             status=RuntimeStatus.INVALID,
-            text="op_behavior_advise requires async execution.",
+            text="op_behavior_advise requires an active async turn context.",
             structured=structured,
             llm_text=render_titled_structured_for_llm("Behavior advice unavailable", structured),
         )
@@ -109,10 +109,10 @@ class BehaviorAdviceTool:
 @dataclass
 class AffordanceSubmitTool:
     service: BehaviorService
-    name: str = "op_behavior_affordance_submit"
-    display_name: str = "Submit affordance"
+    name: str = "op_behavior_save"
+    display_name: str = "Save behavior guidance"
     family: str = "behavior"
-    description: str = "Persist a user-instructed or learned affordance. This is not for ordinary memory cases."
+    description: str = "Persist a user-instructed or learned future behavior rule. This is not for ordinary memory cases."
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("behavior", "affordance", "write")
@@ -138,9 +138,9 @@ class AffordanceSubmitTool:
             structured = {"reason": "invalid_request", "error": str(exc)}
             return CapabilityResult(
                 status=RuntimeStatus.INVALID,
-                text="affordance submission failed",
+                text="behavior guidance save failed",
                 structured=structured,
-                llm_text=render_titled_structured_for_llm("Affordance submission failed", structured),
+                llm_text=render_titled_structured_for_llm("Behavior guidance save failed", structured),
             )
         structured = {
             "affordance_id": descriptor.affordance_id,
@@ -155,9 +155,9 @@ class AffordanceSubmitTool:
         }
         return CapabilityResult(
             status=RuntimeStatus.OK,
-            text="affordance submitted",
+            text="behavior guidance saved",
             structured=structured,
-            llm_text=render_titled_structured_for_llm("Affordance submitted", structured),
+            llm_text=render_titled_structured_for_llm("Behavior guidance saved", structured),
         )
 
 

@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 class IdentitySnapshot:
     has_persona: bool
     has_preferences: bool
-    has_state: bool
     mounted: bool = True
     degraded: bool = False
 
@@ -62,7 +61,6 @@ def inspect_identity(provider: IdentityIntrospectionProvider) -> IdentitySnapsho
     return IdentitySnapshot(
         has_persona=service.get_persona() is not None,
         has_preferences=service.get_preferences() is not None,
-        has_state=service.get_state() is not None,
         mounted=True,
         degraded=False,
     )

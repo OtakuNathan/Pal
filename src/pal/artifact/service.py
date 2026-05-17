@@ -805,7 +805,7 @@ def _snippet(text: str, terms: list[str], *, max_chars: int) -> str:
 
 def _next_actions_for(record: ArtifactRecord) -> tuple[str, ...]:
     if record.kind == ARTIFACT_KIND_PDF:
-        return ("Use op_artifact_content_search for specific terms.", "Use op_artifact_read with page or chunk for focused reading.")
+        return ("Use op_artifact_grep for specific terms.", "Use op_artifact_read with page or chunk for focused reading.")
     if record.kind == ARTIFACT_KIND_AUDIO:
         return ("Use op_artifact_transcribe if a transcript is needed.",)
     if record.kind == ARTIFACT_KIND_IMAGE:

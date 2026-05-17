@@ -5,12 +5,12 @@ from typing import Protocol
 from uuid import uuid4
 
 from pal.foundation import utc_now
-from pal.service.contracts import ServiceDefinition
-from pal.service.models import ServiceDefinitionModel, ServiceRunModel
+from pal.proactive.contracts import ProactiveDefinition
+from pal.proactive.models import ProactiveDefinitionModel, ProactiveRunModel
 from pal.shared import ProactiveTriggerEvent
 
-class ServiceRepositoryPort(Protocol):
-    def upsert_definition(self, definition: ServiceDefinition, *, next_due_at_utc: str | None = None) -> object:
+class ProactiveRepositoryPort(Protocol):
+    def upsert_definition(self, definition: ProactiveDefinition, *, next_due_at_utc: str | None = None) -> object:
         ...
 
     def list_definitions(self) -> list[object]:
@@ -18,7 +18,7 @@ class ServiceRepositoryPort(Protocol):
 
     def update_schedule_state(
         self,
-        service_id: str,
+        proactive_id: str,
         *,
         next_due_at_utc: str | None = None,
         last_run_at_utc: str | None = None,
@@ -28,27 +28,27 @@ class ServiceRepositoryPort(Protocol):
     def begin_run(self, trigger: ProactiveTriggerEvent) -> str:
         ...
 
-    def complete_run(self, service_run_id: str, *, turn_id: str, final_reply: str) -> None:
+    def complete_run(self, proactive_run_id: str, *, turn_id: str, final_reply: str) -> None:
         ...
 
-    def fail_run(self, service_run_id: str, *, error_text: str) -> None:
+    def fail_run(self, proactive_run_id: str, *, error_text: str) -> None:
         ...
 
-    def delete_definition(self, service_id: str) -> bool:
+    def delete_definition(self, proactive_id: str) -> bool:
         ...
 
 
 @dataclass(frozen=True)
-class StoredServiceDefinition:
-    definition: ServiceDefinition
+class StoredProactiveDefinition:
+    definition: ProactiveDefinition
     next_due_at_utc: str | None = None
     last_run_at_utc: str | None = None
 
 
 @dataclass(frozen=True)
-class StoredServiceRun:
-    service_run_id: str
-    service_id: str
+class StoredProactiveRun:
+    proactive_run_id: str
+    proactive_id: str
     trigger_kind: str
     status: str
     trigger_metadata: dict[str, object]
@@ -59,9 +59,9 @@ class StoredServiceRun:
     completed_at: str | None = None
 
 
-class ServiceRepository(ServiceRepositoryPort):
-    def upsert_definition(self, definition: ServiceDefinition, *, next_due_at_utc: str | None = None) -> ServiceDefinitionModel:
-        instance = ServiceDefinitionModel.get_or_none(ServiceDefinitionModel.service_id == definition.service_id)
+class ProactiveRepository(ProactiveRepositoryPort):
+    def upsert_definition(self, definition: ProactiveDefinition, *, next_due_at_utc: str | None = None) -> ProactiveDefinitionModel:
+        instance = ProactiveDefinitionModel.get_or_none(ProactiveDefinitionModel.proactive_id == definition.proactive_id)
         now = utc_now()
         payload = {
             "goal": definition.goal,
@@ -74,8 +74,8 @@ class ServiceRepository(ServiceRepositoryPort):
             "next_due_at_utc": next_due_at_utc,
         }
         if instance is None:
-            return ServiceDefinitionModel.create(
-                service_id=definition.service_id,
+            return ProactiveDefinitionModel.create(
+                proactive_id=definition.proactive_id,
                 created_at=now,
                 updated_at=now,
                 **payload,
@@ -86,14 +86,14 @@ class ServiceRepository(ServiceRepositoryPort):
         instance.save()
         return instance
 
-    def list_definitions(self) -> list[StoredServiceDefinition]:
-        items: list[StoredServiceDefinition] = []
-        query = ServiceDefinitionModel.select().order_by(ServiceDefinitionModel.service_id)
+    def list_definitions(self) -> list[StoredProactiveDefinition]:
+        items: list[StoredProactiveDefinition] = []
+        query = ProactiveDefinitionModel.select().order_by(ProactiveDefinitionModel.proactive_id)
         for row in query:
             items.append(
-                StoredServiceDefinition(
-                    definition=ServiceDefinition(
-                        service_id=row.service_id,
+                StoredProactiveDefinition(
+                    definition=ProactiveDefinition(
+                        proactive_id=row.proactive_id,
                         goal=row.goal,
                         method=row.method,
                         skill_refs=list(row.skill_refs_blob or []),
@@ -110,12 +110,12 @@ class ServiceRepository(ServiceRepositoryPort):
 
     def update_schedule_state(
         self,
-        service_id: str,
+        proactive_id: str,
         *,
         next_due_at_utc: str | None = None,
         last_run_at_utc: str | None = None,
-    ) -> ServiceDefinitionModel | None:
-        instance = ServiceDefinitionModel.get_or_none(ServiceDefinitionModel.service_id == service_id)
+    ) -> ProactiveDefinitionModel | None:
+        instance = ProactiveDefinitionModel.get_or_none(ProactiveDefinitionModel.proactive_id == proactive_id)
         if instance is None:
             return None
         if next_due_at_utc is not None or next_due_at_utc is None:
@@ -129,9 +129,9 @@ class ServiceRepository(ServiceRepositoryPort):
     def begin_run(self, trigger: ProactiveTriggerEvent) -> str:
         run_id = str(uuid4())
         now = utc_now()
-        ServiceRunModel.create(
-            service_run_id=run_id,
-            service_id=trigger.proactive_id,
+        ProactiveRunModel.create(
+            proactive_run_id=run_id,
+            proactive_id=trigger.proactive_id,
             trigger_kind=trigger.trigger_kind,
             status="running",
             trigger_metadata=dict(trigger.metadata or {}),
@@ -141,8 +141,8 @@ class ServiceRepository(ServiceRepositoryPort):
         )
         return run_id
 
-    def complete_run(self, service_run_id: str, *, turn_id: str, final_reply: str) -> None:
-        row = ServiceRunModel.get_or_none(ServiceRunModel.service_run_id == service_run_id)
+    def complete_run(self, proactive_run_id: str, *, turn_id: str, final_reply: str) -> None:
+        row = ProactiveRunModel.get_or_none(ProactiveRunModel.proactive_run_id == proactive_run_id)
         if row is None:
             return
         now = utc_now()
@@ -153,8 +153,8 @@ class ServiceRepository(ServiceRepositoryPort):
         row.updated_at = now
         row.save()
 
-    def fail_run(self, service_run_id: str, *, error_text: str) -> None:
-        row = ServiceRunModel.get_or_none(ServiceRunModel.service_run_id == service_run_id)
+    def fail_run(self, proactive_run_id: str, *, error_text: str) -> None:
+        row = ProactiveRunModel.get_or_none(ProactiveRunModel.proactive_run_id == proactive_run_id)
         if row is None:
             return
         now = utc_now()
@@ -164,37 +164,37 @@ class ServiceRepository(ServiceRepositoryPort):
         row.updated_at = now
         row.save()
 
-    def delete_definition(self, service_id: str) -> bool:
-        row = ServiceDefinitionModel.get_or_none(ServiceDefinitionModel.service_id == service_id)
+    def delete_definition(self, proactive_id: str) -> bool:
+        row = ProactiveDefinitionModel.get_or_none(ProactiveDefinitionModel.proactive_id == proactive_id)
         if row is None:
             return False
         row.delete_instance()
         return True
 
-    def list_runs(self, service_id: str, *, limit: int = 20) -> list[StoredServiceRun]:
+    def list_runs(self, proactive_id: str, *, limit: int = 20) -> list[StoredProactiveRun]:
         query = (
-            ServiceRunModel.select()
-            .where(ServiceRunModel.service_id == service_id)
-            .order_by(ServiceRunModel.started_at.desc(), ServiceRunModel.service_run_id.desc())
+            ProactiveRunModel.select()
+            .where(ProactiveRunModel.proactive_id == proactive_id)
+            .order_by(ProactiveRunModel.started_at.desc(), ProactiveRunModel.proactive_run_id.desc())
             .limit(max(1, int(limit)))
         )
         return [self._to_stored_run(row) for row in query]
 
-    def latest_run(self, service_id: str) -> StoredServiceRun | None:
+    def latest_run(self, proactive_id: str) -> StoredProactiveRun | None:
         row = (
-            ServiceRunModel.select()
-            .where(ServiceRunModel.service_id == service_id)
-            .order_by(ServiceRunModel.started_at.desc(), ServiceRunModel.service_run_id.desc())
+            ProactiveRunModel.select()
+            .where(ProactiveRunModel.proactive_id == proactive_id)
+            .order_by(ProactiveRunModel.started_at.desc(), ProactiveRunModel.proactive_run_id.desc())
             .first()
         )
         if row is None:
             return None
         return self._to_stored_run(row)
 
-    def _to_stored_run(self, row: ServiceRunModel) -> StoredServiceRun:
-        return StoredServiceRun(
-            service_run_id=row.service_run_id,
-            service_id=row.service_id,
+    def _to_stored_run(self, row: ProactiveRunModel) -> StoredProactiveRun:
+        return StoredProactiveRun(
+            proactive_run_id=row.proactive_run_id,
+            proactive_id=row.proactive_id,
             trigger_kind=row.trigger_kind,
             status=row.status,
             trigger_metadata=dict(row.trigger_metadata or {}),

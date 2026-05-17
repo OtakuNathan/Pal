@@ -6,8 +6,8 @@ from playhouse.sqlite_ext import JSONField
 from pal.foundation.persistence import BaseModel, utc_now
 
 
-class ServiceDefinitionModel(BaseModel):
-    service_id = CharField(primary_key=True)
+class ProactiveDefinitionModel(BaseModel):
+    proactive_id = CharField(primary_key=True)
     goal = TextField()
     method = TextField(default="")
     skill_refs_blob = JSONField(default=list)
@@ -21,12 +21,12 @@ class ServiceDefinitionModel(BaseModel):
     updated_at = TextField(default=utc_now)
 
     class Meta:
-        table_name = "service_definitions"
+        table_name = "proactive_definitions"
 
 
-class ServiceRunModel(BaseModel):
-    service_run_id = CharField(primary_key=True)
-    service_id = CharField(index=True)
+class ProactiveRunModel(BaseModel):
+    proactive_run_id = CharField(primary_key=True)
+    proactive_id = CharField(index=True)
     trigger_kind = CharField()
     status = CharField(default="running")
     trigger_metadata = JSONField(default=dict)
@@ -39,4 +39,4 @@ class ServiceRunModel(BaseModel):
     updated_at = TextField(default=utc_now)
 
     class Meta:
-        table_name = "service_runs"
+        table_name = "proactive_runs"

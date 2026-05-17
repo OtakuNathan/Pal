@@ -17,6 +17,8 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(cfg.stagnation_repeat_threshold, 3)
         self.assertEqual(cfg.llm_base_retry_delay_ms, 500)
         self.assertEqual(cfg.keep_recent_tool_messages, 10)
+        self.assertEqual(cfg.l1_tool_result_max_chars, 8_000)
+        self.assertEqual(cfg.l1_tool_result_preview_chars, 4_000)
 
     def test_load_without_runtime_root_returns_defaults(self) -> None:
         cfg = RuntimeConfig.load(None)
@@ -79,11 +81,13 @@ class RuntimeConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.toml"
             config_path.write_text(
-                '[memory]\nkeep_recent_tool_messages = 20\n',
+                '[memory]\nkeep_recent_tool_messages = 20\nl1_tool_result_max_chars = 12_000\nl1_tool_result_preview_chars = 6_000\n',
                 encoding="utf-8",
             )
             cfg = RuntimeConfig.load(Path(tmpdir))
             self.assertEqual(cfg.keep_recent_tool_messages, 20)
+            self.assertEqual(cfg.l1_tool_result_max_chars, 12_000)
+            self.assertEqual(cfg.l1_tool_result_preview_chars, 6_000)
 
     def test_load_ignores_invalid_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

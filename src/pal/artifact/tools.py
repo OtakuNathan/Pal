@@ -54,7 +54,7 @@ ARTIFACT_TOOL_ARGS_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {"artifact_id": ARTIFACT_ID_SCHEMA},
         "required": ["artifact_id"],
     },
-    "op_artifact_content_search": {
+    "op_artifact_grep": {
         "type": "object",
         "properties": {
             "artifact_id": ARTIFACT_ID_SCHEMA,
@@ -244,8 +244,8 @@ class ArtifactSelectTool:
 @dataclass
 class ArtifactContentSearchTool:
     service: ArtifactManager
-    name: str = "op_artifact_content_search"
-    display_name: str = "Search Artifact Content"
+    name: str = "op_artifact_grep"
+    display_name: str = "Grep Artifact"
     family: str = "artifact"
     description: str = (
         "Search inside existing text representations of a known artifact, such as text files, PDF page text/chunks, "
@@ -253,8 +253,8 @@ class ArtifactContentSearchTool:
     )
     tags: tuple[str, ...] = ("artifact", "content", "search")
     keywords: tuple[str, ...] = ("artifact", "content", "pdf", "transcript", "search")
-    args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_content_search"))
-    result_schema: dict[str, Any] = field(default_factory=lambda: artifact_result_schema("op_artifact_content_search"))
+    args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_grep"))
+    result_schema: dict[str, Any] = field(default_factory=lambda: artifact_result_schema("op_artifact_grep"))
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
         _ = args

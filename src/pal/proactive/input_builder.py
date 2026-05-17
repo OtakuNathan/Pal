@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from pal.service.contracts import ServiceDefinition
+from pal.proactive.contracts import ProactiveDefinition
 
 
-def build_proactive_trigger_input(definition: ServiceDefinition) -> str:
+def build_proactive_trigger_input(definition: ProactiveDefinition) -> str:
     lines = ["[Proactive Trigger]", f"Goal: {definition.goal.strip()}"]
     method = definition.method.strip()
     if method:

@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pal.service.service import ServiceManager
+from pal.proactive.runtime import ProactiveManager
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
 
 
 @dataclass
-class ServicePromptFragmentProvider(PromptFragmentProvider):
-    manager: ServiceManager
+class ProactivePromptFragmentProvider(PromptFragmentProvider):
+    manager: ProactiveManager
     provider_id: str = "proactive.prompt.default"
     module_id: str = "proactive"
 

@@ -90,16 +90,16 @@ class DebugDumpTests(unittest.TestCase):
             stream_outbox=[],
             list_endpoints=lambda: (_Endpoint(),),
         )
-        service_manager = SimpleNamespace(
+        proactive_manager = SimpleNamespace(
             registered={},
             trigger_mailbox=_Mailbox(0),
-            schedule_engine=SimpleNamespace(next_due_by_service_id={}),
+            schedule_engine=SimpleNamespace(next_due_by_proactive_id={}),
         )
         return SimpleNamespace(
             core=core,
             channel_runtime=channel_runtime,
-            service_manager=service_manager,
-            service_repository=None,
+            proactive_manager=proactive_manager,
+            proactive_repository=None,
             registration=SimpleNamespace(runtime=SimpleNamespace(runtime_root=Path("."))),
         )
 

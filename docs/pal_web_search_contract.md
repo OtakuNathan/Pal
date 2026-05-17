@@ -80,7 +80,7 @@ class WebSearchProviderPort(Protocol):
 | `intro_module_web_search_show` | 模块概览 |
 | `intro_module_web_search_list_providers` | 列出所有 provider |
 | `intro_module_web_search_active_provider` | 当前活跃 provider |
-| `op_web_search_query` | 执行搜索 |
+| `op_web_search` | 执行搜索 |
 | `op_web_search_mgmt_set_active_provider` | 切换活跃 provider |
 
 ### Provider 实例级能力

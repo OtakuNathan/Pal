@@ -34,6 +34,7 @@ class _CompactingLLMRuntime:
         self.generate_count = 0
         self.requests: list[tuple[str, object]] = []
         self.compaction_sources: list[str] = []
+        self.structured_compaction_max_output_tokens: list[int] = []
 
     def preflight(self, request) -> LLMPreflightAdvice:
         self.preflight_count += 1
@@ -85,6 +86,7 @@ class _CompactingLLMRuntime:
     ) -> dict[str, object]:
         _ = (max_output_tokens, preferred_endpoint_id, preferred_model_id)
         self.compaction_sources.append(text)
+        self.structured_compaction_max_output_tokens.append(max_output_tokens)
         return {
             "summary": {
                 "summary": "compacted prior context",
@@ -140,6 +142,17 @@ def _tool_contents(request) -> list[str]:
     ]
 
 
+def _message_text(message) -> str:
+    content = message.get("content")
+    if isinstance(content, list):
+        return "\n".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
+    return str(content or "")
+
+
+def _request_text(request) -> str:
+    return "\n".join(_message_text(message) for message in list(request.messages))
+
+
 class RuntimeCompactionTests(unittest.TestCase):
     def test_manual_compaction_summary_uses_current_llm_contract_imports(self) -> None:
         core = PalCore()
@@ -159,12 +172,16 @@ class RuntimeCompactionTests(unittest.TestCase):
 
         self.assertEqual(outcome.final_reply, "final answer")
         self.assertTrue(scripted_llm.compaction_sources)
+        self.assertGreaterEqual(scripted_llm.structured_compaction_max_output_tokens[0], 768)
         self.assertIn("prior user context before compaction", scripted_llm.compaction_sources[0])
         self.assertEqual(memory_service.l2_store.get_entry("memory_summary_current").summary, "compacted prior context")
         preflight_requests = [request for kind, request in scripted_llm.requests if kind == "preflight"]
         generate_requests = [request for kind, request in scripted_llm.requests if kind == "generate"]
         self.assertIn("stable-result", "\n".join(_tool_contents(preflight_requests[1])))
         self.assertIn("stable-result", "\n".join(_tool_contents(generate_requests[-1])))
+        post_compact_prompt = _request_text(generate_requests[-1])
+        self.assertIn("<conversation_summary>\ncompacted prior context\n</conversation_summary>", post_compact_prompt)
+        self.assertNotIn("Compaction Note:\ncompacted prior context", post_compact_prompt)
 
     def test_generate_compact_during_tool_turn_preserves_tool_result_and_endpoint_hint(self) -> None:
         core, memory_service, scripted_llm = _build_core_with_compacting_llm(compact_on="generate")
@@ -173,6 +190,7 @@ class RuntimeCompactionTests(unittest.TestCase):
 
         self.assertEqual(outcome.final_reply, "final answer")
         self.assertTrue(scripted_llm.compaction_sources)
+        self.assertGreaterEqual(scripted_llm.structured_compaction_max_output_tokens[0], 768)
         self.assertEqual(memory_service.l2_store.get_entry("memory_summary_current").summary, "compacted prior context")
         generate_requests = [request for kind, request in scripted_llm.requests if kind == "generate"]
         preflight_requests = [request for kind, request in scripted_llm.requests if kind == "preflight"]
@@ -180,6 +198,9 @@ class RuntimeCompactionTests(unittest.TestCase):
         self.assertIn("stable-result", "\n".join(_tool_contents(generate_requests[-1])))
         self.assertEqual(preflight_requests[-1].metadata.get("preferred_endpoint_id"), "fallback-after-tool")
         self.assertEqual(preflight_requests[-1].model_hint, "fallback-after-tool-model")
+        post_compact_prompt = _request_text(generate_requests[-1])
+        self.assertIn("<conversation_summary>\ncompacted prior context\n</conversation_summary>", post_compact_prompt)
+        self.assertNotIn("Compaction Note:\ncompacted prior context", post_compact_prompt)
 
 
 if __name__ == "__main__":

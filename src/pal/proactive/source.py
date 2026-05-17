@@ -4,13 +4,13 @@ from dataclasses import dataclass
 
 from pal.core.events import EventSource
 from pal.foundation import EventEnvelope
-from pal.service.service import ServiceManager
+from pal.proactive.runtime import ProactiveManager
 from pal.shared import EventKind, SourceKind
 
 
 @dataclass
-class ServiceEventSource(EventSource):
-    manager: ServiceManager
+class ProactiveEventSource(EventSource):
+    manager: ProactiveManager
     source_id: str = f"{SourceKind.PROACTIVE}.triggers"
 
     def prepare(self, context) -> bool:

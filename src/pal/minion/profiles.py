@@ -19,6 +19,8 @@ class MinionProfile:
     output_contract_fragment: str = ""
     capability_groups: tuple[str, ...] = ()
     default_allowed_capabilities: tuple[str, ...] = ()
+    skill_refs: tuple[str, ...] = ()
+    # Legacy constructor compatibility. New profile templates should use skill_refs.
     default_allowed_skills: tuple[str, ...] = ()
     default_approval_policy: dict[str, Any] = field(default_factory=dict)
     checkpoint_policy: dict[str, Any] = field(default_factory=dict)
@@ -43,7 +45,7 @@ class MinionProfile:
             "output_contract_fragment": self.output_contract_fragment,
             "capability_groups": list(self.capability_groups),
             "default_allowed_capabilities": list(self.default_allowed_capabilities),
-            "default_allowed_skills": list(self.default_allowed_skills),
+            "skill_refs": list(self.skill_refs or self.default_allowed_skills),
             "default_approval_policy": dict(self.default_approval_policy),
             "approval_policy": dict(self.default_approval_policy),
             "checkpoint_policy": dict(self.checkpoint_policy),
@@ -61,6 +63,15 @@ class MinionProfile:
         if not profile_id:
             raise ValueError("MinionProfile.profile_id is required")
         display_name = str(payload.get("display_name") or profile_id).strip()
+        skill_refs = tuple(
+            _string_list(
+                payload.get("skill_refs")
+                or payload.get("default_allowed_skills")
+                or payload.get("default_suggested_skills")
+                or payload.get("suggested_skills")
+                or payload.get("skills")
+            )
+        )
         return cls(
             profile_id=profile_id,
             display_name=display_name,
@@ -72,7 +83,8 @@ class MinionProfile:
             default_allowed_capabilities=tuple(
                 _string_list(payload.get("default_allowed_capabilities") or payload.get("allowed_capabilities"))
             ),
-            default_allowed_skills=tuple(_string_list(payload.get("default_allowed_skills"))),
+            skill_refs=skill_refs,
+            default_allowed_skills=skill_refs,
             default_approval_policy=_dict(payload.get("default_approval_policy") or payload.get("approval_policy")),
             checkpoint_policy=_dict(payload.get("checkpoint_policy")),
             workspace_policy=_dict(payload.get("workspace_policy")),
@@ -144,7 +156,7 @@ class MinionProfileRegistry:
                 allowed_capabilities = _dedupe([*self.ambient_capabilities, *base_capabilities])
             else:
                 allowed_capabilities = base_capabilities
-        allowed_skills = list(pack.allowed_skills) or list(profile.default_allowed_skills)
+        allowed_skills = _dedupe(list(pack.allowed_skills) or list(profile.skill_refs or profile.default_allowed_skills))
         approval_policy = dict(profile.default_approval_policy)
         approval_policy.update(dict(pack.approval_policy))
         checkpoint_policy = dict(profile.checkpoint_policy)
@@ -164,7 +176,7 @@ class MinionProfileRegistry:
             capability_policy=capability_policy,
         )
         resolved_profile = profile.to_dict()
-        resolved_profile["effective_allowed_skills"] = list(allowed_skills)
+        resolved_profile["effective_skill_refs"] = list(allowed_skills)
         resolved_profile["effective_approval_policy"] = dict(approval_policy)
         resolved_profile["effective_checkpoint_policy"] = dict(checkpoint_policy)
         resolved_profile["effective_workspace_policy"] = dict(workspace_policy)
@@ -206,11 +218,13 @@ class MinionProfileRegistry:
 
 
 CORE_MINION_CAPABILITIES = (
-    "op_exec_disc_search",
-    "op_exec_disc_read",
-    "op_exec_capability_call",
+    "op_tool_search",
+    "op_tool_read",
+    "op_tool_call",
     "op_minion_artifact_write",
-    "op_l3_recall_query",
+    "op_minion_artifact_edit",
+    "op_minion_memory_candidate_write",
+    "op_memory_recall",
 )
 
 
@@ -223,21 +237,22 @@ WORKSPACE_READ_CAPABILITIES = (
 
 CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "core_minion_read": CORE_MINION_CAPABILITIES,
-    "memory_recall": ("op_l3_recall_query",),
+    "memory_recall": ("op_memory_recall",),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
-    "web_research": ("op_web_search_query", "op_web_fetch_read"),
-    "code_work": ("op_exec_run",),
+    "web_research": ("op_web_search", "op_web_read"),
+    "code_work": ("op_file_read", "op_file_edit", "op_file_write", "op_exec_shell"),
 }
 
 
 DEFAULT_MINION_DENIED_CAPABILITIES = frozenset(
     {
         "op_behavior_advise",
-        "op_behavior_affordance_submit",
+        "op_behavior_save",
         "op_channel_send_attachment",
-        "op_l3_commit_write",
-        "op_l3_correct_patch",
-        "op_l3_maintenance_refresh_indexes",
+        "op_memory_write",
+        "op_memory_update",
+        "op_memory_delete",
+        "op_memory_refresh_indexes",
         "op_minion_draft_work_order",
         "op_minion_finalize",
         "op_minion_kill",
@@ -278,6 +293,8 @@ DEFAULT_MINION_DENIED_FRAGMENTS = (
 MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
     {
         "op_minion_artifact_write",
+        "op_minion_artifact_edit",
+        "op_minion_memory_candidate_write",
     }
 )
 
@@ -305,7 +322,7 @@ def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] 
         return True
     if capability in MINION_INTERNAL_ALLOWED_CAPABILITIES:
         return False
-    if str(policy.get("risk") or "").strip().lower() == "read_only" and capability == "op_exec_run":
+    if str(policy.get("risk") or "").strip().lower() == "read_only" and capability == "op_exec_shell":
         return True
     prefixes = (*DEFAULT_MINION_DENIED_PREFIXES, *tuple(_string_list(policy.get("deny_prefixes"))))
     if any(capability.startswith(prefix) for prefix in prefixes):

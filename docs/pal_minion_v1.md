@@ -22,7 +22,7 @@ Minion runner emits `approval_requested`.
 
 `MinionEventSource` converts it into `EventKind.APPROVAL_REQUEST`.
 
-`MinionControlEventHandler` converts it into a generic `interactive_open` control action. PalCore sends that interaction through the current route. Telegram renders the inline keyboard. Channel-specific fallback belongs in channel endpoints, not in minion business logic.
+`MinionControlEventHandler` asks `pal.control.interactions` to compile a typed `interactive_open` delivery and attaches it to a control action. PalCore sends that delivery through the current route. Telegram renders the inline keyboard. Channel-specific fallback belongs in channel endpoints, not in minion business logic.
 
 Button clicks use `control.action.dispatch` and produce `minion_approval_decision`. PalCore routes that action through `ControlActionHandlerRegistry`. The minion module handler calls manager RPC `send_decision` and records the ledger entry.
 
@@ -194,7 +194,7 @@ Current builtin profiles are `generic`, `planner`, `coder`, and `reviewer`. `pla
 
 Profile resolution order is builtin templates, runtime profile files, then currently mounted provider declarations. Later declarations with the same `profile_id` override earlier ones.
 
-Profiles may declare capability groups. `core_minion_read` includes scoped discovery/read/call plus read-only `op_l3_recall_query`, so runners can recall relevant experience without memory-write access. `web_research` expands to `op_web_search_query` and `op_web_fetch_read`, so research-capable minions reuse Pal's existing web tools instead of owning a second web integration.
+Profiles may declare capability groups. `core_minion_read` includes scoped discovery/read/call plus read-only `op_memory_recall`, so runners can recall relevant experience without memory-write access. `web_research` expands to `op_web_search` and `op_web_read`, so research-capable minions reuse Pal's existing web tools instead of owning a second web integration.
 
 Profiles may also use `capability_policy.mode = "inherit_filtered"`. In that mode, spawn starts from Pal's current capability registry, adds profile defaults and provider hook results, then applies the minion deny policy. Explicit `TaskContextPack.allowed_capabilities` still wins for tightly scoped runs.
 
@@ -210,7 +210,7 @@ Denied by default:
 
 - all `intro_*` capabilities
 - all `op_minion_*` capabilities
-- memory writes such as `op_l3_commit_write` and `op_l3_correct_patch`
+- memory writes such as `op_memory_write` and `op_memory_update`
 - behavior, skill, channel, plugin, lifecycle, attach/detach/rescan/enable/disable style operations
 
 This prevents recursive spawn/kill/list/read behavior. A task runner does not need to know the minion control plane exists; Pal observes and manages that layer through the minion module capabilities.
@@ -219,17 +219,17 @@ This prevents recursive spawn/kill/list/read behavior. A task runner does not ne
 
 ## Runner Loop
 
-The runner is a thin execution entity, not a forked Pal. It starts a slim runtime with LLM, execution, artifact metadata, read-only L3 recall, and allowed task tools such as shell/code execution and web search/fetch. It does not load channel endpoints, service triggers, control panel, or Pal user-facing routing.
+The runner is a thin execution entity, not a forked Pal. It starts a slim runtime with LLM, execution, artifact metadata, read-only L3 recall, and allowed task tools such as shell/code execution and web search/fetch. It does not load channel endpoints, proactive triggers, control panel, or Pal user-facing routing.
 
 If `TaskContextPack.metadata.preferred_endpoint_id` is present, the runner forwards it as `CanonicalLLMRequest.metadata.preferred_endpoint_id` and uses that endpoint's budget when resolving max output tokens. Without that metadata, no preferred endpoint is passed; the slim runtime reads the current active LLM endpoint from `pal.sqlite3`.
 
-`TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `op_exec_disc_search`, `op_exec_disc_read`, `op_exec_capability_call`, `op_exec_run`, `op_minion_artifact_write`, `op_web_search_query`, `op_web_fetch_read`, and `op_l3_recall_query` when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
+`TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `op_tool_search`, `op_tool_read`, `op_tool_call`, `op_exec_shell`, `op_minion_artifact_write`, `op_web_search`, `op_web_read`, and `op_memory_recall` when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
 
 When `op_minion_artifact_write` is available, the runner prompt asks the minion to write the primary deliverable to `artifact_dir` and keep the final summary short. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
 
 Tool calls are executed through the existing `ExecutionRuntime` path and must be present in `TaskContextPack.allowed_capabilities`.
 
-If a tool or capability call fails and read-only `op_l3_recall_query` is allowed, the runner prompt requires recall of relevant prior experience before retrying, debugging further, or reporting the milestone blocked.
+If a tool or capability call fails and read-only `op_memory_recall` is allowed, the runner prompt requires recall of relevant prior experience before retrying, debugging further, or reporting the milestone blocked.
 
 High-risk calls declared by the task approval policy pause the runner and emit `approval_requested`. Reject or edit decisions block the milestone; accept continues the tool call.
 
@@ -248,4 +248,4 @@ Lessons are never absorbed silently. If a terminal event carries lessons, Pal op
 - `Reject`
 - `Edit`
 
-Accept stores task lessons as tasking continuity and stores system lessons as accepted system candidates. It also attempts to commit accepted lessons to L3 memory when `op_l3_commit_write` is available in the current runtime. Reject discards the proposed lessons. Edit pauses absorption and asks for revised lesson text before saving.
+Accept stores task lessons as tasking continuity and stores system lessons as accepted system candidates. It also attempts to commit accepted lessons to L3 memory when `op_memory_write` is available in the current runtime. Reject discards the proposed lessons. Edit pauses absorption and asks for revised lesson text before saving.

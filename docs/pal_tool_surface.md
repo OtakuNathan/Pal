@@ -21,17 +21,17 @@ As of the current implementation, resident tools are intentionally small:
 
 ### Execution
 
-- `op_exec_disc_read`
-- `op_exec_disc_search`
-- `op_exec_run`
-- `op_exec_capability_call`
+- `op_tool_read`
+- `op_tool_search`
+- `op_exec_shell`
+- `op_tool_call`
 
 These keep the model able to inspect and invoke any registered capability without making every capability resident.
 
 ### Behavior
 
 - `op_behavior_advise`
-- `op_behavior_affordance_submit`
+- `op_behavior_save`
 
 Behavior advice is resident routing. Skill is intentionally not resident; skill tools remain discoverable and invocable through execution discovery when the user explicitly asks to learn/use a reusable procedure, or when behavior advice returns a skill ref.
 
@@ -44,16 +44,16 @@ Only metadata inspection and text-like reads are resident. Artifact list/search/
 
 ### Web
 
-- `op_web_search_query`
-- `op_web_fetch_read`
+- `op_web_search`
+- `op_web_read`
 
 ### Dynamic Memory Provider Tools
 
 The active L3 provider is resolved at runtime:
 
-- `op_l3_recall_query`
-- `op_l3_commit_write`
-- `op_l3_correct_patch`
+- `op_memory_recall`
+- `op_memory_write`
+- `op_memory_update`
 
 These stay resident because recall, commit, and correction are frequent global workflows.
 
@@ -64,7 +64,7 @@ Examples:
 - `op_artifact_list`
 - `op_artifact_search`
 - `op_artifact_select`
-- `op_artifact_content_search`
+- `op_artifact_grep`
 - `op_artifact_transcribe`
 - `op_channel_send_attachment`
 - `op_skill_assimilate`
@@ -77,13 +77,13 @@ Examples:
 - MCP-projected tools such as `op_mcp_<server>_tool_<tool>`
 - MCP prompt render capabilities such as `op_mcp_<server>_prompt_<prompt>_render`
 
-The model should find these through `op_exec_disc_search` and invoke them through `op_exec_capability_call` or `op_exec_run`.
+The model should find these through `op_tool_search` and invoke them through `op_tool_call` or `op_exec_shell`.
 
 ## Artifact Tool Boundary
 
 Artifact tools accept `artifact_id`, not arbitrary local paths.
 
-`op_artifact_content_search` searches existing text-like representations only. It does not inspect image pixels, perform OCR, or create audio transcripts. If an artifact needs OCR, ASR, PDF parsing, or image processing, Pal must discover a suitable capability for that representation or path.
+`op_artifact_grep` searches existing text-like representations only. It does not inspect image pixels, perform OCR, or create audio transcripts. If an artifact needs OCR, ASR, PDF parsing, or image processing, Pal must discover a suitable capability for that representation or path.
 
 ## MCP Tool Boundary
 

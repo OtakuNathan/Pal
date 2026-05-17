@@ -67,19 +67,21 @@ def _build_parser() -> argparse.ArgumentParser:
     browser_service_parser.add_argument("--idle-timeout-seconds", type=int, default=60)
     browser_service_parser.add_argument("--max-concurrency", type=int, default=2)
 
-    # -- codex-proxy ---------------------------------------------------------
-    codex_proxy_parser = subparsers.add_parser(
-        "codex-proxy",
-        help="Run a local OpenAI-compatible proxy backed by Codex app-server",
+    # -- codex-bridge --------------------------------------------------------
+    codex_bridge_parser = subparsers.add_parser(
+        "codex-bridge",
+        aliases=("codex-proxy",),
+        help="Run a local OpenAI-compatible bridge backed by Codex CLI",
     )
-    codex_proxy_parser.add_argument("--host", default="127.0.0.1")
-    codex_proxy_parser.add_argument("--port", type=int, default=8765)
-    codex_proxy_parser.add_argument("--codex-bin", default=None)
-    codex_proxy_parser.add_argument("--timeout-seconds", type=int, default=120)
-    codex_proxy_parser.add_argument("--api-key-env", default="PAL_CODEX_PROXY_API_KEY")
-    codex_proxy_parser.add_argument("--models-env", default="PAL_CODEX_PROXY_MODELS")
-    codex_proxy_parser.add_argument("--max-concurrency", type=int, default=None)
-    codex_proxy_parser.add_argument("--max-concurrency-env", default="PAL_CODEX_PROXY_MAX_CONCURRENCY")
+    codex_bridge_parser.set_defaults(command="codex-bridge")
+    codex_bridge_parser.add_argument("--host", default="127.0.0.1")
+    codex_bridge_parser.add_argument("--port", type=int, default=8765)
+    codex_bridge_parser.add_argument("--codex-bin", default=None)
+    codex_bridge_parser.add_argument("--timeout-seconds", type=int, default=120)
+    codex_bridge_parser.add_argument("--api-key-env", default="PAL_CODEX_BRIDGE_API_KEY")
+    codex_bridge_parser.add_argument("--models-env", default="PAL_CODEX_BRIDGE_MODELS")
+    codex_bridge_parser.add_argument("--max-concurrency", type=int, default=None)
+    codex_bridge_parser.add_argument("--max-concurrency-env", default="PAL_CODEX_BRIDGE_MAX_CONCURRENCY")
 
     return parser
 
@@ -208,10 +210,10 @@ def main() -> int:
             idle_timeout_seconds=int(args.idle_timeout_seconds),
             max_concurrency=int(args.max_concurrency),
         )
-    if args.command == "codex-proxy":
-        from pal.llm.codex_proxy import run_codex_proxy_cli
+    if args.command == "codex-bridge":
+        from pal.llm.codex_openai_bridge import run_codex_openai_bridge_cli
 
-        return run_codex_proxy_cli(
+        return run_codex_openai_bridge_cli(
             host=str(args.host),
             port=int(args.port),
             codex_bin=getattr(args, "codex_bin", None),

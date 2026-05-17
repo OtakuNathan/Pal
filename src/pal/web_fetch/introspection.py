@@ -16,9 +16,10 @@ from pal.shared import (
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.web_fetch.browser_service import BrowserServiceManager
-from pal.web_fetch.contracts import WebFetchRequest
+from pal.web_fetch.contracts import DEFAULT_WEB_FETCH_USER_AGENT, WebFetchRequest
 from pal.web_fetch.models import WebFetchProviderModel
 from pal.web_fetch.service import WebFetchService
+from pal.web_fetch.tools import WebScreenshotTool, web_screenshot_args_schema, web_screenshot_result_schema
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
@@ -222,10 +223,13 @@ class WebFetchIntrospectionProvider:
                 "url": {"type": "string"},
                 "timeout_ms": {"type": "integer"},
                 "max_chars": {"type": "integer"},
+                "max_raw_chars": {"type": "integer"},
+                "max_links": {"type": "integer"},
+                "user_agent": {"type": "string"},
             },
             "required": ["url"],
         },
-        metadata={"omit_family_in_canonical": True},
+        metadata={"canonical_path": "op_web_read", "omit_family_in_canonical": True},
     )
     def read(self, call: IntrospectionCall) -> IntrospectionResult:
         url = str(call.args.get("url") or "").strip()
@@ -237,6 +241,9 @@ class WebFetchIntrospectionProvider:
                     url=url,
                     timeout_ms=max(1000, int(call.args.get("timeout_ms") or 15000)),
                     max_chars=max(1000, int(call.args.get("max_chars") or 12000)),
+                    max_raw_chars=max(0, int(call.args.get("max_raw_chars") or 50000)),
+                    max_links=max(0, int(call.args.get("max_links") or 80)),
+                    user_agent=str(call.args.get("user_agent") or DEFAULT_WEB_FETCH_USER_AGENT),
                 )
             )
         except Exception as exc:
@@ -255,12 +262,43 @@ class WebFetchIntrospectionProvider:
             "effective_provider_id": result.effective_provider_id,
             "fetch_mode": result.fetch_mode,
             "fallback_used": result.fallback_used,
+            "status_code": result.status_code,
+            "content_type": result.content_type,
+            "content_length": result.content_length,
+            "text_truncated": result.text_truncated,
+            "raw_content_available": bool(result.raw_content),
+            "raw_content_truncated": result.raw_content_truncated,
+            "links": [link.to_dict() for link in result.links],
+            "metadata": dict(result.metadata or {}),
+            "response_headers": dict(result.response_headers or {}),
+            "user_agent": result.user_agent,
         }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="web fetch result",
             structured=payload,
             llm_text=render_titled_structured_for_llm("Web fetch result", payload),
+        )
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        action_name="screenshot",
+        description=(
+            "Render a URL in the browser and save a PNG screenshot as an artifact. "
+            "Returns artifact_id and local_cached_path. Use only when visual page evidence is needed."
+        ),
+        args_schema=web_screenshot_args_schema(),
+        result_schema=web_screenshot_result_schema(),
+        metadata={"canonical_path": "op_web_screenshot", "omit_family_in_canonical": True, "async_required": True},
+    )
+    def screenshot(self, call: IntrospectionCall) -> IntrospectionResult:
+        _ = call
+        return IntrospectionResult(
+            status=RuntimeStatus.INVALID,
+            text="op_web_screenshot requires async turn context",
+            structured={"reason": "async_required"},
+            llm_text="op_web_screenshot requires async turn context.",
         )
 
     @capability_action(
@@ -404,6 +442,12 @@ def inspect_web_fetch(provider: WebFetchIntrospectionProvider) -> WebFetchModule
 
 
 def register_with_core(context: MainContext, service: WebFetchService) -> ModuleHandle:
+    context.execution_runtime.register_tool(
+        WebScreenshotTool(
+            service=service,
+            artifact_manager=context.port_registry.get("artifact:artifact"),
+        )
+    )
     provider = WebFetchIntrospectionProvider(service=service)
     handle = ModuleHandle(
         module_id="web_fetch",

@@ -23,7 +23,7 @@ from pal.minion.repository import MinionTaskingRepository
 from pal.shared import MinionApprovalDecision, TaskContextPack
 
 
-_ACTIVE_RUN_STATUSES = {"starting", "running", "approval_pending"}
+_ACTIVE_RUN_STATUSES = {"starting", "running", "approval_pending", "clarification_pending"}
 _TERMINAL_RUN_STATUSES = {"completed", "failed", "blocked", "killed"}
 
 
@@ -44,6 +44,7 @@ class MinionRunState:
     llm_round_count: int = 0
     tool_call_count: int = 0
     pending_approval: dict[str, Any] = field(default_factory=dict)
+    pending_clarification: dict[str, Any] = field(default_factory=dict)
     ledger: list[dict[str, Any]] = field(default_factory=list)
     stderr_tail: list[str] = field(default_factory=list)
     stdout_task: asyncio.Task[None] | None = None
@@ -74,6 +75,7 @@ class MinionRunState:
             "stderr_tail": list(self.stderr_tail[-20:]),
             "last_event": dict(self.last_event),
             "pending_approval": dict(self.pending_approval),
+            "pending_clarification": dict(self.pending_clarification),
         }
 
     def detail(self) -> dict[str, Any]:
@@ -96,6 +98,7 @@ class MinionManager:
     event_subscribers: list[asyncio.StreamWriter] = field(default_factory=list)
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    _serial_followups_inflight: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.tasking_repository = MinionTaskingRepository(runtime_root=self.runtime_root)
@@ -186,8 +189,16 @@ class MinionManager:
             return await self.kill(str(params.get("run_id") or ""), str(params.get("reason") or ""))
         if method == "send_decision":
             return await self.send_decision(dict(params.get("decision") or {}))
+        if method == "send_clarification":
+            return await self.send_clarification(dict(params.get("clarification") or {}))
         if method == "finalize_work_order":
             return self.finalize_work_order(dict(params))
+        if method == "continue_work_order":
+            return await self.continue_work_order(str(params.get("work_order_id") or ""))
+        if method == "pause_work_order":
+            return self.pause_work_order(str(params.get("work_order_id") or ""), str(params.get("reason") or ""))
+        if method == "finish_work_order":
+            return self.finish_work_order(str(params.get("work_order_id") or ""), str(params.get("reason") or ""))
         if method == "shutdown":
             self._shutdown_event.set()
             return {"ok": True}
@@ -220,6 +231,15 @@ class MinionManager:
         if not pack.resolved_profile:
             pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
         pack = self.tasking_repository.prepare_pack_for_spawn(pack)
+        if _is_plan_parent_pack(pack):
+            continued = await self.continue_work_order(pack.work_order_id)
+            return {
+                "work_order_id": pack.work_order_id,
+                "minion_profile": pack.minion_profile,
+                "status": str(continued.get("status") or "ok"),
+                "plan_parent": True,
+                "continuation": continued,
+            }
         minion_id = f"minion_{uuid4().hex[:10]}"
         run_id = f"run_{uuid4().hex[:12]}"
         metadata = dict(pack.metadata)
@@ -287,6 +307,35 @@ class MinionManager:
         )
         return {"ok": True, "run": state.summary(), "decision": decision.to_dict()}
 
+    async def send_clarification(self, payload: dict[str, Any]) -> dict[str, Any]:
+        clarification_id = str(payload.get("clarification_id") or "").strip()
+        state = self._find_run_for_clarification(payload)
+        if state is None:
+            raise KeyError(f"unknown clarification target: {clarification_id or payload.get('run_id') or ''}")
+        if state.process is None or state.process.stdin is None or state.process.returncode is not None:
+            raise RuntimeError(f"minion is not accepting clarifications: {state.run_id}")
+        response = dict(payload)
+        response.setdefault("run_id", state.run_id)
+        response.setdefault("minion_id", state.minion_id)
+        response.setdefault("work_order_id", state.pack.work_order_id)
+        state.process.stdin.write(pack_sidecar_message({"type": "clarification", "clarification": response}))
+        await state.process.stdin.drain()
+        state.pending_clarification = {}
+        state.status = "running"
+        self._record_event(
+            state,
+            {
+                "event_kind": "clarification_received",
+                "payload": response,
+                "created_at": utc_now(),
+            },
+        )
+        for answer in list(response.get("answers") or []):
+            if isinstance(answer, dict):
+                with contextlib.suppress(Exception):
+                    self.tasking_repository.record_clarification_answer(state.pack.work_order_id, dict(answer))
+        return {"ok": True, "run": state.summary(), "clarification": response}
+
     def finalize_work_order(self, params: dict[str, Any]) -> dict[str, Any]:
         work_order_id = str(params.get("work_order_id") or "").strip()
         if not work_order_id:
@@ -313,6 +362,37 @@ class MinionManager:
         self._queue_event_delivery(event)
         self.tasking_repository.record_minion_event(event)
         return {"status": "ok" if result.get("status") in {"committed", "no_changes"} else "error", "work_order_id": work_order_id, **result}
+
+    async def continue_work_order(self, work_order_id: str) -> dict[str, Any]:
+        normalized = str(work_order_id or "").strip()
+        if not normalized:
+            raise ValueError("work_order_id is required")
+        pack = self.tasking_repository.next_plan_module_pack(normalized, allow_paused=True)
+        if pack is None:
+            snapshot = self.tasking_repository.read_work_order(normalized)
+            metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {}
+            plan_execution = dict(metadata.get("plan_execution") or {})
+            return {
+                "status": str(plan_execution.get("status") or snapshot.get("status") or "not_available"),
+                "work_order_id": normalized,
+                "reason": "no_next_module",
+            }
+        if not pack.resolved_profile:
+            pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
+        run = await self.spawn(pack.to_dict())
+        return {
+            "status": "running_module",
+            "work_order_id": normalized,
+            "child_work_order_id": pack.work_order_id,
+            "module_id": str(pack.metadata.get("module_id") or pack.metadata.get("parent_module_id") or ""),
+            "run": run,
+        }
+
+    def pause_work_order(self, work_order_id: str, reason: str = "") -> dict[str, Any]:
+        return self.tasking_repository.set_plan_parent_status(work_order_id, "paused", reason=reason)
+
+    def finish_work_order(self, work_order_id: str, reason: str = "") -> dict[str, Any]:
+        return self.tasking_repository.set_plan_parent_status(work_order_id, "completed", reason=reason)
 
     async def close_all(self) -> None:
         for state in list(self.runs.values()):
@@ -511,6 +591,19 @@ class MinionManager:
                 approval_payload["metadata"] = metadata
             state.pending_approval = approval_payload
             event["payload"] = approval_payload
+        elif event_kind == "clarification_requested":
+            state.status = "clarification_pending"
+            clarification_payload = dict(event["payload"])
+            clarification_payload.setdefault("minion_id", state.minion_id)
+            clarification_payload.setdefault("run_id", state.run_id)
+            clarification_payload.setdefault("work_order_id", state.pack.work_order_id)
+            metadata = dict(clarification_payload.get("metadata") or {})
+            if "control_route" not in metadata and isinstance(state.pack.metadata.get("control_route"), dict):
+                metadata["control_route"] = dict(state.pack.metadata.get("control_route") or {})
+            if metadata:
+                clarification_payload["metadata"] = metadata
+            state.pending_clarification = clarification_payload
+            event["payload"] = clarification_payload
         elif isinstance(state.pack.metadata.get("control_route"), dict):
             event_payload = dict(event["payload"])
             metadata = dict(event_payload.get("metadata") or {})
@@ -522,6 +615,7 @@ class MinionManager:
             state.status = terminal_status
             state.ended_at = utc_now()
             state.pending_approval = {}
+            state.pending_clarification = {}
         if event_kind == "progress":
             self._update_progress_state(state, event)
         state.last_event = event
@@ -540,6 +634,63 @@ class MinionManager:
             self.tasking_repository.record_minion_event(event)
         except Exception:
             self.logger.exception("failed to record minion tasking event: %s", state.run_id)
+            return
+        if event_kind == "terminal":
+            self._schedule_serial_module_followup(state, event)
+
+    def _schedule_serial_module_followup(self, state: MinionRunState, event: dict[str, Any]) -> None:
+        payload = dict(event.get("payload") or {})
+        if str(payload.get("status") or "").strip().lower() != "completed":
+            return
+        metadata = dict(state.pack.metadata or {})
+        module_execution = dict(metadata.get("module_execution") or {})
+        if str(module_execution.get("mode") or "") != "serial_module_milestones":
+            return
+        if not bool(module_execution.get("auto_advance")):
+            return
+        work_order_id = str(event.get("work_order_id") or state.pack.work_order_id)
+        if not work_order_id or work_order_id in self._serial_followups_inflight:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._serial_followups_inflight.add(work_order_id)
+        loop.create_task(self._continue_serial_module(work_order_id), name=f"minion-serial-followup-{work_order_id}")
+
+    async def _continue_serial_module(self, work_order_id: str) -> None:
+        try:
+            next_pack = self.tasking_repository.next_serial_module_pack(work_order_id)
+            if next_pack is not None:
+                self.logger.info("minion serial module advancing work_order=%s", work_order_id)
+                await self.spawn(next_pack.to_dict())
+                return
+            completion = self.tasking_repository.mark_serial_module_completed(work_order_id)
+            if str(completion.get("status") or "") != "completed":
+                return
+            parent_completion = self.tasking_repository.record_plan_module_completion(work_order_id, completion)
+            if str(parent_completion.get("status") or "") in {"awaiting_continue", "completed"}:
+                event_work_order_id = str(parent_completion.get("parent_work_order_id") or work_order_id)
+                event_payload = {**completion, **parent_completion}
+            else:
+                event_work_order_id = work_order_id
+                event_payload = completion
+            event = {
+                "event_kind": "module_completed",
+                "minion_id": "",
+                "run_id": "",
+                "work_order_id": event_work_order_id,
+                "minion_profile": "software_engineering.coder",
+                "payload": event_payload,
+                "created_at": utc_now(),
+            }
+            self._queue_event_delivery(event)
+            self.tasking_repository.record_minion_event(event)
+            self.logger.info("minion serial module completed work_order=%s", work_order_id)
+        except Exception:
+            self.logger.exception("failed to continue serial minion module: %s", work_order_id)
+        finally:
+            self._serial_followups_inflight.discard(work_order_id)
 
     def _queue_event_delivery(self, event: dict[str, Any]) -> None:
         if not self.event_subscribers:
@@ -611,6 +762,16 @@ class MinionManager:
                 return state
         return None
 
+    def _find_run_for_clarification(self, payload: dict[str, Any]) -> MinionRunState | None:
+        run_id = str(payload.get("run_id") or "").strip()
+        clarification_id = str(payload.get("clarification_id") or "").strip()
+        if run_id and run_id in self.runs:
+            return self.runs[run_id]
+        for state in self.runs.values():
+            if clarification_id and str(state.pending_clarification.get("clarification_id") or "") == clarification_id:
+                return state
+        return None
+
 
 def _debug_log_requested(pack: TaskContextPack) -> bool:
     metadata = dict(pack.metadata or {})
@@ -618,6 +779,12 @@ def _debug_log_requested(pack: TaskContextPack) -> bool:
     if isinstance(debug_log, dict) and "enabled" in debug_log:
         return bool(debug_log.get("enabled"))
     return bool(metadata.get("minion_debug_log_enabled") or metadata.get("prompt_log_enabled"))
+
+
+def _is_plan_parent_pack(pack: TaskContextPack) -> bool:
+    metadata = dict(pack.metadata or {})
+    plan_execution = dict(metadata.get("plan_execution") or {})
+    return str(plan_execution.get("mode") or "") == "module_parent_milestones"
 
 
 def _debug_log_path_from_pack(pack: TaskContextPack) -> str:

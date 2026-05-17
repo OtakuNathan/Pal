@@ -30,7 +30,7 @@ from pal.llm import (
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.memory import L3ProviderSelector, MemoryService, register_with_core as register_memory_with_core
 from pal.plugins import PluginHost, register_with_core as register_plugins_with_core
-from pal.service import ServiceManager, ServiceRepository, ServiceRunner, register_with_core as register_service_with_core
+from pal.proactive import ProactiveManager, ProactiveRepository, ProactiveRunner, register_with_core as register_proactive_with_core
 from pal.shared.text_search import warmup_jieba
 from pal.skill import SkillRepository, SkillService, register_with_core as register_skill_with_core
 from pal.wizard import PalRegistration, WizardService
@@ -47,9 +47,9 @@ class StubRuntimeHandle:
     llm_runtime: LLMRuntime
     memory_service: MemoryService
     plugin_host: PluginHost
-    service_manager: ServiceManager
-    service_repository: ServiceRepository
-    service_runner: ServiceRunner
+    proactive_manager: ProactiveManager
+    proactive_repository: ProactiveRepository
+    proactive_runner: ProactiveRunner
     control_plane: ControlPlane
     behavior_service: BehaviorService
     skill_service: SkillService
@@ -118,9 +118,9 @@ def compose_runtime(
         runtime_root=registration.runtime.runtime_root,
         services={"memory_service": memory_service},
     )
-    service_repository = ServiceRepository()
-    service_manager = ServiceManager(repository=service_repository)
-    service_runner = ServiceRunner(repository=service_repository)
+    proactive_repository = ProactiveRepository()
+    proactive_manager = ProactiveManager(repository=proactive_repository)
+    proactive_runner = ProactiveRunner(repository=proactive_repository)
     control_plane = ControlPlane()
     skill_repository = SkillRepository()
     behavior_repository = BehaviorRepository(skill_repository=skill_repository)
@@ -153,7 +153,7 @@ def compose_runtime(
     skill_service.llm_runtime = llm_runtime
     register_memory_with_core(core.context, memory_service, config=config)
     register_plugins_with_core(core.context, plugin_host)
-    register_service_with_core(core.context, service_manager, service_runner)
+    register_proactive_with_core(core.context, proactive_manager, proactive_runner)
     register_control_with_core(core.context, control_plane)
     register_failure_with_core(core, failure_runtime)
     for record in channel_repository.list_all():
@@ -163,8 +163,8 @@ def compose_runtime(
         )
         if runtime_endpoint is not None:
             channel_runtime.register_endpoint(runtime_endpoint)
-    for stored in service_repository.list_definitions():
-        service_manager.hydrate(stored.definition, next_due_at_utc=stored.next_due_at_utc)
+    for stored in proactive_repository.list_definitions():
+        proactive_manager.hydrate(stored.definition, next_due_at_utc=stored.next_due_at_utc)
     plugin_host.bootstrap()
 
     for module_id in ("core", "execution", "artifact", "skill", "behavior", "channel", "identity", "llm", "memory", "plugins", "proactive", "control", "failure"):
@@ -180,9 +180,9 @@ def compose_runtime(
         llm_runtime=llm_runtime,
         memory_service=memory_service,
         plugin_host=plugin_host,
-        service_manager=service_manager,
-        service_repository=service_repository,
-        service_runner=service_runner,
+        proactive_manager=proactive_manager,
+        proactive_repository=proactive_repository,
+        proactive_runner=proactive_runner,
         control_plane=control_plane,
         behavior_service=behavior_service,
         skill_service=skill_service,

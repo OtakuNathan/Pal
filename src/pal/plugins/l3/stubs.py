@@ -6,12 +6,19 @@ from pal.memory.contracts import (
     L2Entry,
     L3CommitRequest,
     L3CorrectRequest,
+    L3DeleteRequest,
     L3MutationResult,
     L3RecallResult,
     L3RetireResult,
     MemoryQuery,
 )
-from pal.plugins.l3.rendering import build_recall_structured_payload, normalize_recall_view, render_recall_result_for_llm
+from pal.memory.rendering import (
+    build_mutation_structured_payload,
+    build_recall_structured_payload,
+    normalize_recall_view,
+    render_mutation_result_for_llm,
+    render_recall_result_for_llm,
+)
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -24,13 +31,17 @@ from pal.shared import (
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
+def _read_mem_ref(args: dict[str, object]) -> str:
+    return str(args.get("mem_ref") or args.get("document_id") or "").strip()
+
+
 @capability_node(
     namespace=OPERATION_NAMESPACE,
     scope="provider",
     kind="provider",
     source="plugin:l3",
     target_kind="provider",
-    path_module_id="l3",
+    path_module_id="memory",
     iterable_resolver="iter_providers",
     target_id_resolver="resolve_provider_id",
     target_label_resolver="resolve_provider_label",
@@ -41,7 +52,7 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
     kind="provider",
     source="plugin:l3",
     target_kind="provider",
-    path_module_id="l3",
+    path_module_id="memory",
     iterable_resolver="iter_providers",
     target_id_resolver="resolve_provider_id",
     target_label_resolver="resolve_provider_label",
@@ -67,23 +78,23 @@ class _L3ProviderCapabilityMixin:
         namespace=INTROSPECTION_NAMESPACE,
         scope="provider",
         action_name="show",
-        description="Show l3 provider runtime state",
+        description="Show memory provider runtime state",
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self.inspect()
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="l3 provider",
+            text="memory provider",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("L3 provider", payload),
+            llm_text=render_titled_structured_for_llm("Memory provider", payload),
         )
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
         scope="provider",
         action_name="inventory",
-        description="Inspect l3 provider inventory and index status",
+        description="Inspect memory provider inventory and index status",
     )
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -91,17 +102,18 @@ class _L3ProviderCapabilityMixin:
         snapshot.setdefault("provider_id", self.provider_id)
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="l3 provider inventory",
+            text="memory provider inventory",
             structured=snapshot,
-            llm_text=render_titled_structured_for_llm("L3 provider inventory", snapshot),
+            llm_text=render_titled_structured_for_llm("Memory provider inventory", snapshot),
         )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="provider",
         family="recall",
-        action_name="query",
-        description="Recall durable L3 memory records",
+        action_name="recall",
+        description="Recall durable memory records",
+        metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
@@ -132,7 +144,7 @@ class _L3ProviderCapabilityMixin:
         )
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="l3 recall result",
+            text="memory recall result",
             structured=payload,
             llm_text=render_recall_result_for_llm(
                 provider_id=self.provider_id,
@@ -147,7 +159,8 @@ class _L3ProviderCapabilityMixin:
         scope="provider",
         family="commit",
         action_name="write",
-        description="Commit durable L3 memory",
+        description="Commit durable memory",
+        metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
@@ -184,26 +197,31 @@ class _L3ProviderCapabilityMixin:
                 result_text=str(call.args.get("result_text") or ""),
             )
         )
-        payload = result.hit or {"document_id": result.document_id}
+        payload = build_mutation_structured_payload(result)
         return IntrospectionResult(
             status=result.status,
-            text="l3 commit result",
+            text="memory commit result",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("L3 commit result", payload),
+            llm_text=render_mutation_result_for_llm("commit", result),
         )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="provider",
         family="correct",
-        action_name="patch",
-        description="Correct durable L3 memory",
+        action_name="update",
+        description="Update durable memory",
+        metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
-                "document_id": {"type": "string"},
+                "mem_ref": {
+                    "type": "string",
+                    "description": "Opaque memory ref returned by op_memory_recall, such as fact:fact_abc or case:case_abc.",
+                },
                 "title": {"type": "string"},
                 "summary": {"type": "string"},
+                "search_text": {"type": "string"},
                 "topics": {"type": "array", "items": {"type": "string"}},
                 "payload_patch": {"type": "object", "description": "Merge patch for existing payload fields"},
                 "situation_text": {"type": "string"},
@@ -211,15 +229,17 @@ class _L3ProviderCapabilityMixin:
                 "action_text": {"type": "string"},
                 "result_text": {"type": "string"},
             },
-            "required": ["document_id"],
+            "required": ["mem_ref"],
         },
     )
     def correct_patch(self, call: IntrospectionCall) -> IntrospectionResult:
+        mem_ref = _read_mem_ref(call.args)
         result = self.correct(
             L3CorrectRequest(
-                document_id=str(call.args.get("document_id") or ""),
+                document_id=mem_ref,
                 title=str(call.args.get("title")) if call.args.get("title") is not None else None,
                 summary=str(call.args.get("summary")) if call.args.get("summary") is not None else None,
+                search_text=str(call.args.get("search_text")) if call.args.get("search_text") is not None else None,
                 payload_patch=dict(call.args.get("payload_patch") or {}),
                 topics=[str(value) for value in list(call.args.get("topics") or [])] if call.args.get("topics") is not None else None,
                 situation_text=str(call.args.get("situation_text")) if call.args.get("situation_text") is not None else None,
@@ -228,34 +248,71 @@ class _L3ProviderCapabilityMixin:
                 result_text=str(call.args.get("result_text")) if call.args.get("result_text") is not None else None,
             )
         )
-        payload = result.hit or {"document_id": result.document_id}
+        payload = build_mutation_structured_payload(result)
         return IntrospectionResult(
             status=result.status,
-            text="l3 correction result",
+            text="memory update result",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("L3 correction result", payload),
+            llm_text=render_mutation_result_for_llm("update", result),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach l3 provider")
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="provider",
+        family="delete",
+        action_name="delete",
+        description=(
+            "Delete one durable memory record by exact mem_ref. "
+            "Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record."
+        ),
+        metadata={"omit_family_in_canonical": True},
+        args_schema={
+            "type": "object",
+            "properties": {
+                "mem_ref": {
+                    "type": "string",
+                    "description": "Opaque memory ref returned by op_memory_recall, such as fact:fact_abc or case:case_abc.",
+                },
+                "reason": {"type": "string", "description": "Brief reason for deletion"},
+            },
+            "required": ["mem_ref"],
+        },
+    )
+    def delete_memory(self, call: IntrospectionCall) -> IntrospectionResult:
+        result = self.delete(
+            L3DeleteRequest(
+                document_id=_read_mem_ref(call.args),
+                reason=str(call.args.get("reason") or ""),
+            )
+        )
+        payload = build_mutation_structured_payload(result)
+        return IntrospectionResult(
+            status=result.status,
+            text="memory delete result",
+            structured=payload,
+            llm_text=render_mutation_result_for_llm("delete", result),
+        )
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach memory provider")
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="l3 provider attached",
+            text="memory provider attached",
             structured={"mounted": True},
-            llm_text=render_titled_structured_for_llm("L3 provider attached", {"mounted": True}),
+            llm_text=render_titled_structured_for_llm("Memory provider attached", {"mounted": True}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach l3 provider")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach memory provider")
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="l3 provider detached",
+            text="memory provider detached",
             structured={"mounted": False},
-            llm_text=render_titled_structured_for_llm("L3 provider detached", {"mounted": False}),
+            llm_text=render_titled_structured_for_llm("Memory provider detached", {"mounted": False}),
         )
 
     @capability_action(
@@ -264,6 +321,7 @@ class _L3ProviderCapabilityMixin:
         family="maintenance",
         action_name="refresh_indexes",
         description="Refresh provider indexes and embedding state",
+        metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
@@ -306,6 +364,9 @@ class NullL3Plugin(_L3ProviderCapabilityMixin):
     def correct(self, request: L3CorrectRequest) -> L3MutationResult:
         _ = request
         return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id="")
+
+    def delete(self, request: L3DeleteRequest) -> L3MutationResult:
+        return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id=request.document_id)
 
     def retire_entries(self, entries: list[L2Entry]) -> L3RetireResult:
         _ = entries
@@ -475,6 +536,8 @@ class MockL3Plugin(_L3ProviderCapabilityMixin):
                 record["title"] = request.title
             if request.summary is not None:
                 record["summary"] = request.summary
+            if request.search_text is not None:
+                record["search_text"] = request.search_text
             if request.topics is not None:
                 record["topics"] = list(request.topics)
             if request.payload_patch:
@@ -502,6 +565,25 @@ class MockL3Plugin(_L3ProviderCapabilityMixin):
                 service.project_mutation(result)
             return result
         return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id=request.document_id)
+
+    def delete(self, request: L3DeleteRequest) -> L3MutationResult:
+        mem_ref = str(request.document_id or "").strip()
+        for index, record in enumerate(list(self.records)):
+            if str(record.get("document_id") or "").strip() != mem_ref:
+                continue
+            deleted = dict(record)
+            del self.records[index]
+            service = getattr(self, "service", None)
+            remove_projected_entries = getattr(service, "remove_projected_entries", None)
+            if callable(remove_projected_entries):
+                remove_projected_entries([mem_ref])
+            return L3MutationResult(
+                status=RuntimeStatus.OK,
+                document_id=mem_ref,
+                hit={"mem_ref": mem_ref, "deleted": True, "deleted_memory": deleted, "reason": request.reason},
+                metadata={"deleted": True},
+            )
+        return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id=mem_ref)
 
     def refresh_indexes(self, *, limit: int = 8, retry_failed: bool = False) -> dict[str, object]:
         _ = (limit, retry_failed)

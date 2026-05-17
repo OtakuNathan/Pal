@@ -18,6 +18,7 @@ from pal.memory.contracts import (
     L2Store,
     L3CommitRequest,
     L3CorrectRequest,
+    L3DeleteRequest,
     L3MutationResult,
     L3RecallResult,
     L3RetireResult,
@@ -63,6 +64,9 @@ class DetachedL3Provider:
     def correct(self, request: L3CorrectRequest) -> L3MutationResult:
         _ = request
         return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id="")
+
+    def delete(self, request: L3DeleteRequest) -> L3MutationResult:
+        return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id=request.document_id)
 
     def retire_entries(self, entries: list[L2Entry]) -> L3RetireResult:
         _ = entries
@@ -310,6 +314,12 @@ class MemoryService(MemoryServicePort):
         if result.projected_entry is None:
             return
         self.project_l3_entries([result.projected_entry], touch=True, top_of_mind=True)
+
+    def remove_projected_entries(self, entry_ids: list[str]) -> None:
+        for entry_id in entry_ids:
+            self.l2_store.items.pop(entry_id, None)
+            self.l2_store.top_of_mind_refs = [value for value in self.l2_store.top_of_mind_refs if value != entry_id]
+            self.l2_store.heat_registry.pop(entry_id, None)
 
     def soft_reset(self) -> None:
         self.l1_store.items = []

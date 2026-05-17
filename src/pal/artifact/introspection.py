@@ -79,7 +79,7 @@ class ArtifactIntrospectionProvider:
         description="List short-lived conversation artifacts visible to the current turn.",
         args_schema=artifact_args_schema("op_artifact_list"),
         result_schema=artifact_result_schema("op_artifact_list"),
-        metadata={"llm_exposed": True, "async_required": True},
+        metadata={"async_required": True},
     )
     def list_artifacts(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
@@ -93,7 +93,7 @@ class ArtifactIntrospectionProvider:
         description="Inspect metadata and available representations for one artifact id.",
         args_schema=artifact_args_schema("op_artifact_info"),
         result_schema=artifact_result_schema("op_artifact_info"),
-        metadata={"llm_exposed": True, "async_required": True},
+        metadata={"async_required": True},
     )
     def info(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
@@ -107,7 +107,7 @@ class ArtifactIntrospectionProvider:
         description="Read a text-like representation of a scoped artifact by artifact_id. Does not inspect visual image pixels.",
         args_schema=artifact_args_schema("op_artifact_read"),
         result_schema=artifact_result_schema("op_artifact_read"),
-        metadata={"llm_exposed": True, "async_required": True},
+        metadata={"async_required": True},
     )
     def read(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
@@ -121,7 +121,7 @@ class ArtifactIntrospectionProvider:
         description="Find a recent conversation artifact by filename, type, summary, or time hint.",
         args_schema=artifact_args_schema("op_artifact_search"),
         result_schema=artifact_result_schema("op_artifact_search"),
-        metadata={"llm_exposed": True, "async_required": True},
+        metadata={"async_required": True},
     )
     def search(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
@@ -135,7 +135,7 @@ class ArtifactIntrospectionProvider:
         description="Mark an artifact search result as selected and refresh its short-lived hot state.",
         args_schema=artifact_args_schema("op_artifact_select"),
         result_schema=artifact_result_schema("op_artifact_select"),
-        metadata={"llm_exposed": True, "async_required": True},
+        metadata={"async_required": True},
     )
     def select(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
@@ -145,18 +145,18 @@ class ArtifactIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         family="artifact",
-        action_name="content_search",
+        action_name="grep",
         description=(
             "Search inside existing text representations of a known artifact, such as text files, PDF page text/chunks, "
             "or an already-created transcript. Does not inspect image pixels or create transcripts from audio."
         ),
-        args_schema=artifact_args_schema("op_artifact_content_search"),
-        result_schema=artifact_result_schema("op_artifact_content_search"),
-        metadata={"llm_exposed": True, "async_required": True},
+        args_schema=artifact_args_schema("op_artifact_grep"),
+        result_schema=artifact_result_schema("op_artifact_grep"),
+        metadata={"async_required": True},
     )
     def content_search(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
-        return _async_required("op_artifact_content_search")
+        return _async_required("op_artifact_grep")
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -166,7 +166,7 @@ class ArtifactIntrospectionProvider:
         description="Request transcription for an audio artifact.",
         args_schema=artifact_args_schema("op_artifact_transcribe"),
         result_schema=artifact_result_schema("op_artifact_transcribe"),
-        metadata={"llm_exposed": True, "async_required": True},
+        metadata={"async_required": True},
     )
     def transcribe(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
@@ -176,6 +176,7 @@ class ArtifactIntrospectionProvider:
 def register_with_core(context: "MainContext", service: ArtifactManager) -> ModuleHandle:
     from pal.artifact.prompt import ArtifactPromptFragmentProvider
 
+    context.execution_runtime.register_provider_ref("artifact:artifact", service)
     context.execution_runtime.register_tool(ArtifactListTool(service=service))
     context.execution_runtime.register_tool(ArtifactInfoTool(service=service))
     context.execution_runtime.register_tool(ArtifactReadTool(service=service))

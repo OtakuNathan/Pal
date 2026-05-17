@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 from pal.foundation.persistence import utc_now
@@ -27,6 +27,26 @@ class ControlCommandInvocation:
     origin_event_id: str = ""
 
 
+ControlDeliveryKind = Literal[
+    "reply",
+    "interactive_open",
+    "interactive_update",
+    "interactive_resolve",
+    "interactive_expire",
+    "endpoint_status",
+]
+
+
+@dataclass(frozen=True)
+class ControlDelivery:
+    delivery_kind: ControlDeliveryKind
+    route: ControlRoute | None = None
+    text: str = ""
+    interaction: InteractionMessageSpec | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+    endpoint_id: str | None = None
+
+
 @dataclass(frozen=True)
 class ControlAction:
     action_kind: str
@@ -35,6 +55,7 @@ class ControlAction:
     requires_user_confirmation: bool = False
     args: dict[str, Any] = field(default_factory=dict)
     route: ControlRoute | None = None
+    delivery: ControlDelivery | None = None
     notes: str = ""
 
 

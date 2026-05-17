@@ -224,7 +224,7 @@ class WebSearchIntrospectionProvider:
             },
             "required": ["query"],
         },
-        metadata={"omit_family_in_canonical": True},
+        metadata={"canonical_path": "op_web_search", "omit_family_in_canonical": True},
     )
     def query(self, call: IntrospectionCall) -> IntrospectionResult:
         query_text = str(call.args.get("query") or "").strip()

@@ -220,10 +220,11 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("op_channel_send_attachment", names)
         search = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="op_exec_disc_search", args={"query": "send attachment", "top_k": 5})
+            CanonicalToolCall(name="op_tool_search", args={"query": "send attachment", "top_k": 5})
         )
         self.assertTrue(search.ok)
-        self.assertIn("op_channel_send_attachment", str(search.structured))
+        self.assertEqual(search.structured["hits"][0]["name"], "op_channel_send_attachment")
+        self.assertNotIn("aliases", search.structured["hits"][0])
 
 
 if __name__ == "__main__":

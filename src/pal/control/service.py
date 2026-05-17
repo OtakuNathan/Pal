@@ -146,6 +146,7 @@ class ControlPlane(ControlPlanePort):
             requires_user_confirmation=action.requires_user_confirmation,
             args=dict(action.args),
             route=invocation.route,
+            delivery=action.delivery,
             notes=action.notes,
         )
 
@@ -647,6 +648,7 @@ def _with_interaction_context(action: ControlAction, result: InteractionResult) 
         requires_user_confirmation=action.requires_user_confirmation,
         args=args,
         route=action.route or result.route,
+        delivery=action.delivery,
         notes=action.notes,
     )
 

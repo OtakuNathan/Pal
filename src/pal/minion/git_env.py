@@ -9,6 +9,53 @@ from typing import Any
 from pal.shared import TaskContextPack
 
 
+GENERATED_COMMIT_EXCLUDES = (
+    ":(exclude,glob)**/__pycache__/**",
+    ":(exclude,glob)**/.pytest_cache/**",
+    ":(exclude,glob)**/.mypy_cache/**",
+    ":(exclude,glob)**/.ruff_cache/**",
+    ":(exclude,glob)**/.coverage",
+    ":(exclude,glob)**/htmlcov/**",
+    ":(exclude,glob)**/coverage/**",
+    ":(exclude,glob)**/dist/**",
+    ":(exclude,glob)**/build/**",
+    ":(exclude,glob)**/target/**",
+    ":(exclude,glob)**/minion_outputs/**",
+    ":(exclude,glob)**/*.py[cod]",
+    ":(exclude,glob)**/*.o",
+    ":(exclude,glob)**/*.obj",
+    ":(exclude,glob)**/*.a",
+    ":(exclude,glob)**/*.so",
+    ":(exclude,glob)**/*.dylib",
+    ":(exclude,glob)**/*.dll",
+    ":(exclude,glob)**/*.exe",
+    ":(exclude,glob)**/*.class",
+)
+
+LOCAL_GIT_EXCLUDES = (
+    "__pycache__/",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    ".coverage",
+    "htmlcov/",
+    "coverage/",
+    "dist/",
+    "build/",
+    "target/",
+    "minion_outputs/",
+    "*.py[cod]",
+    "*.o",
+    "*.obj",
+    "*.a",
+    "*.so",
+    "*.dylib",
+    "*.dll",
+    "*.exe",
+    "*.class",
+)
+
+
 @dataclass(frozen=True)
 class GitCommandResult:
     ok: bool
@@ -21,8 +68,10 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
     metadata = dict(pack.metadata)
     task_id = _safe_ref(str(metadata.get("task_id") or f"task_{pack.work_order_id}"))
     workspace = _normalize_workspace_paths(pack.workspace)
-    repo_path = Path(str(workspace.get("repo_path") or runtime_root / "data" / "minion" / "repos" / task_id))
     source_repo = _source_repo(workspace)
+    if not source_repo:
+        source_repo = str(workspace.get("repo_path") or "").strip()
+    repo_path = _task_repo_path(runtime_root, workspace, task_id)
 
     if not (repo_path / ".git").exists():
         if source_repo and not _same_local_path(source_repo, repo_path):
@@ -34,6 +83,7 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
     _ensure_git_identity(repo_path)
     if not _has_head(repo_path):
         _git(repo_path, "commit", "--allow-empty", "-m", "minion: initialize task repo", check=True)
+    _ensure_local_git_excludes(repo_path)
 
     base_ref = str(workspace.get("base_ref") or _current_branch(repo_path) or "HEAD").strip() or "HEAD"
     if not _git(repo_path, "rev-parse", "--verify", base_ref).ok:
@@ -73,7 +123,7 @@ def prepare_task_workspace(runtime_root: Path, pack: TaskContextPack, *, run_id:
     completion_policy = _policy_from_pack(pack, "completion_policy")
     mode = str(workspace_policy.get("mode") or "").strip().lower()
     evidence = str(completion_policy.get("evidence") or "").strip().lower()
-    if not mode and not evidence and "op_exec_run" in {str(item) for item in pack.allowed_capabilities}:
+    if not mode and not evidence and "op_exec_shell" in {str(item) for item in pack.allowed_capabilities}:
         mode = "writable_git_branch"
         evidence = "git_commit"
         workspace_policy = {"mode": mode}
@@ -113,7 +163,21 @@ def commit_milestone(repo_path: Path, *, work_order_id: str, milestone_index: in
     head = _current_head(repo)
     if not status:
         return {"status": "no_changes", "commit_sha": head, "repo_path": str(repo)}
-    _git(repo, "add", "-A", check=True)
+    staged = _stage_milestone_changes(repo)
+    if not staged.ok:
+        return {
+            "status": "error",
+            "error": staged.stderr or staged.stdout or "git add failed",
+            "repo_path": str(repo),
+            "returncode": staged.returncode,
+        }
+    if not _has_staged_changes(repo):
+        return {
+            "status": "no_changes",
+            "commit_sha": head,
+            "repo_path": str(repo),
+            "ignored_generated_changes": True,
+        }
     message_title = str(title or f"milestone {milestone_index}").strip()
     message = f"minion({work_order_id}): complete milestone {milestone_index} - {message_title}"
     committed = _git(repo, "commit", "-m", message)
@@ -167,6 +231,18 @@ def _ensure_git_identity(repo_path: Path) -> None:
         _git(repo_path, "config", "user.name", "Pal Minion", check=True)
 
 
+def _ensure_local_git_excludes(repo_path: Path) -> None:
+    exclude_path = Path(repo_path) / ".git" / "info" / "exclude"
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    missing = [pattern for pattern in LOCAL_GIT_EXCLUDES if pattern not in existing.splitlines()]
+    if not missing:
+        return
+    prefix = "" if not existing or existing.endswith("\n") else "\n"
+    block = "\n".join(["# Pal minion generated artifact excludes", *missing])
+    exclude_path.write_text(f"{existing}{prefix}{block}\n", encoding="utf-8")
+
+
 def _has_head(repo_path: Path) -> bool:
     return _git(repo_path, "rev-parse", "--verify", "HEAD").ok
 
@@ -174,6 +250,15 @@ def _has_head(repo_path: Path) -> bool:
 def _current_head(repo_path: Path) -> str:
     result = _git(repo_path, "rev-parse", "HEAD")
     return result.stdout.strip() if result.ok else ""
+
+
+def _stage_milestone_changes(repo_path: Path) -> GitCommandResult:
+    return _git(repo_path, "add", "-A", "--", ".", *GENERATED_COMMIT_EXCLUDES)
+
+
+def _has_staged_changes(repo_path: Path) -> bool:
+    result = _git(repo_path, "diff", "--cached", "--quiet")
+    return result.returncode == 1
 
 
 def _current_branch(repo_path: Path) -> str:
@@ -216,6 +301,13 @@ def _clone_repo(source: str, repo_path: Path) -> None:
         raise RuntimeError(completed.stderr or completed.stdout or f"git clone {source} failed")
 
 
+def _task_repo_path(runtime_root: Path, workspace: dict[str, Any], task_id: str) -> Path:
+    explicit = str(workspace.get("task_repo_path") or workspace.get("target_repo_path") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return runtime_root / "data" / "minion" / "repos" / task_id
+
+
 def _source_repo(workspace: dict[str, Any]) -> str:
     for key in ("source_repo", "source_repo_path", "source_path", "clone_from", "repo_url", "remote_url"):
         value = str(workspace.get(key) or "").strip()
@@ -236,6 +328,9 @@ def _normalize_workspace_paths(workspace: dict[str, Any]) -> dict[str, Any]:
 
 def _with_folder_workspace(runtime_root: Path, pack: TaskContextPack, workspace: dict[str, Any], *, run_id: str = "") -> TaskContextPack:
     prepared_workspace = dict(workspace)
+    if str(run_id or "").strip():
+        for key in ("run_dir", "artifact_dir", "log_dir"):
+            prepared_workspace.pop(key, None)
     profile = _safe_ref(pack.minion_profile or "generic")
     run_part = _safe_ref(run_id or str(pack.metadata.get("run_id") or "") or pack.work_order_id)
     run_dir = Path(str(prepared_workspace.get("run_dir") or runtime_root / "data" / "minion" / "workspaces" / f"{run_part}_{profile}"))

@@ -10,7 +10,7 @@ BEGIN;
 -- user_pal_id / user_id removed from per-domain tables.
 --
 -- Table ordering follows dependency graph:
---   identity → channel → llm → memory → tasking → service → diagnostics
+--   identity → channel → llm → memory → tasking → proactive → diagnostics
 -- ============================================================
 
 
@@ -46,19 +46,6 @@ CREATE TABLE IF NOT EXISTS user_preferences (
   updated_at   TEXT NOT NULL,
   CHECK (preferences_blob IS NULL OR json_valid(preferences_blob))
 );
-
--- Runtime pal state.
--- top_of_mind is a hot LRU view (capacity 8), NOT durable truth.
-CREATE TABLE IF NOT EXISTS pal_states (
-  persona_id             TEXT PRIMARY KEY,
-  status                 TEXT NOT NULL DEFAULT 'idle',
-  top_of_mind_refs       TEXT NOT NULL DEFAULT '[]',  -- entry_id refs, max 8
-  last_active_at         TEXT,
-  created_at             TEXT NOT NULL,
-  updated_at             TEXT NOT NULL,
-  CHECK (json_valid(top_of_mind_refs))
-);
-
 
 -- ============================================================
 -- CHANNEL ENDPOINTS
@@ -504,64 +491,50 @@ ON worker_ledger(task_id, created_at DESC);
 
 
 -- ============================================================
--- SERVICE
+-- PROACTIVE
 -- ============================================================
 
--- Removed: user_id, user_pal_id.
--- out_channel_id FK to channel_endpoints — channel disappears → service invalidated.
--- service_spec structured: goal / method / skill_refs.
-CREATE TABLE IF NOT EXISTS pal_services (
-  service_id         TEXT PRIMARY KEY,
-  service_family     TEXT NOT NULL,              -- briefing | rotation | planning | recap | monitoring
-  title              TEXT NOT NULL,
-  schedule_blob      TEXT NOT NULL,              -- JSON: cron/recurrence spec
-  service_spec_goal  TEXT NOT NULL,              -- what to do
-  service_spec_method TEXT,                      -- how to do it
-  service_spec_skill_refs TEXT,                  -- JSON array of skill/manual refs
-  in_channel_id      TEXT,                       -- where the service was created
-  out_channel_id     TEXT NOT NULL,              -- where results are delivered
-  status             TEXT NOT NULL DEFAULT 'active',
-  last_run_at        TEXT,
-  next_run_at_utc    TEXT,
-  created_at         TEXT NOT NULL,
-  updated_at         TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS proactive_definitions (
+  proactive_id          TEXT PRIMARY KEY,
+  goal                  TEXT NOT NULL,
+  method                TEXT NOT NULL DEFAULT '',
+  skill_refs_blob       TEXT NOT NULL DEFAULT '[]',
+  out_channel_id        TEXT,
+  schedule_blob         TEXT NOT NULL DEFAULT '{}',
+  out_reply_target_blob TEXT NOT NULL DEFAULT '{}',
+  enabled               INTEGER NOT NULL DEFAULT 1,
+  next_due_at_utc       TEXT,
+  last_run_at_utc       TEXT,
+  created_at            TEXT NOT NULL,
+  updated_at            TEXT NOT NULL,
 
-  FOREIGN KEY (in_channel_id) REFERENCES channel_endpoints(endpoint_id),
-  FOREIGN KEY (out_channel_id) REFERENCES channel_endpoints(endpoint_id),
-  CHECK (service_family IN ('briefing', 'rotation', 'planning', 'recap', 'monitoring')),
-  CHECK (status IN ('active', 'paused', 'archived')),
+  CHECK (json_valid(skill_refs_blob)),
   CHECK (json_valid(schedule_blob)),
-  CHECK (service_spec_skill_refs IS NULL OR json_valid(service_spec_skill_refs))
+  CHECK (json_valid(out_reply_target_blob))
 );
 
-CREATE INDEX IF NOT EXISTS idx_pal_services_next_run
-ON pal_services(status, next_run_at_utc);
+CREATE INDEX IF NOT EXISTS idx_proactive_definitions_due
+ON proactive_definitions(enabled, next_due_at_utc);
 
--- One concrete service run execution record.
-CREATE TABLE IF NOT EXISTS pal_service_runs (
-  service_run_id           TEXT PRIMARY KEY,
-  service_id               TEXT NOT NULL,
-  triggered_at             TEXT NOT NULL,
-  status                   TEXT NOT NULL DEFAULT 'triggered',
-  preparation_mode         TEXT NOT NULL DEFAULT 'pal_inline',
-  worker_work_order_id     TEXT,
-  effective_out_channel_id TEXT,
-  output_summary           TEXT,
-  artifacts_blob           TEXT,
-  created_at               TEXT NOT NULL,
-  updated_at               TEXT NOT NULL,
-  finished_at              TEXT,
+CREATE TABLE IF NOT EXISTS proactive_runs (
+  proactive_run_id TEXT PRIMARY KEY,
+  proactive_id     TEXT NOT NULL,
+  trigger_kind     TEXT NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'running',
+  trigger_metadata TEXT NOT NULL DEFAULT '{}',
+  turn_id          TEXT,
+  output_summary   TEXT,
+  error_text       TEXT,
+  started_at       TEXT NOT NULL,
+  completed_at     TEXT,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
 
-  FOREIGN KEY (service_id) REFERENCES pal_services(service_id),
-  FOREIGN KEY (worker_work_order_id) REFERENCES work_orders(work_order_id),
-  FOREIGN KEY (effective_out_channel_id) REFERENCES channel_endpoints(endpoint_id),
-  CHECK (status IN ('triggered', 'running', 'done', 'error', 'cancelled')),
-  CHECK (preparation_mode IN ('pal_inline', 'worker_preparation')),
-  CHECK (artifacts_blob IS NULL OR json_valid(artifacts_blob))
+  CHECK (json_valid(trigger_metadata))
 );
 
-CREATE INDEX IF NOT EXISTS idx_pal_service_runs_by_service
-ON pal_service_runs(service_id, triggered_at DESC);
+CREATE INDEX IF NOT EXISTS idx_proactive_runs_by_task
+ON proactive_runs(proactive_id, started_at DESC);
 
 
 -- ============================================================
@@ -631,7 +604,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
 -- Structured object, not natural language complaint.
 CREATE TABLE IF NOT EXISTS developer_reports (
   report_id              TEXT PRIMARY KEY,
-  subsystem              TEXT NOT NULL,            -- channel | memory | execution | control | tasking | service | plugin | llm
+  subsystem              TEXT NOT NULL,            -- channel | memory | execution | control | tasking | proactive | plugin | llm
   component              TEXT,                     -- finer-grained: provider id, plugin id, etc.
   severity               TEXT NOT NULL,            -- low | medium | high | critical
   failure_kind           TEXT NOT NULL,            -- provider_failure | routing_failure | schema_failure | delivery_failure | maintenance_failure
@@ -645,13 +618,13 @@ CREATE TABLE IF NOT EXISTS developer_reports (
   safe_to_retry          INTEGER NOT NULL DEFAULT 0,
   requires_developer_action INTEGER NOT NULL DEFAULT 1,
   recommended_next_step  TEXT,
-  related_ids            TEXT,                     -- JSON: {task_id, work_order_id, service_id, ...}
+  related_ids            TEXT,                     -- JSON: {task_id, work_order_id, proactive_id, ...}
   status                 TEXT NOT NULL DEFAULT 'open',
   created_at             TEXT NOT NULL,
   updated_at             TEXT NOT NULL,
   resolved_at            TEXT,
 
-  CHECK (subsystem IN ('channel', 'memory', 'execution', 'control', 'tasking', 'service', 'plugin', 'llm', 'core')),
+  CHECK (subsystem IN ('channel', 'memory', 'execution', 'control', 'tasking', 'proactive', 'plugin', 'llm', 'core')),
   CHECK (severity IN ('low', 'medium', 'high', 'critical')),
   CHECK (status IN ('open', 'investigating', 'escalated', 'resolved', 'wontfix')),
   CHECK (json_valid(attempted_actions_blob)),
@@ -726,7 +699,7 @@ COMMIT;
 --
 -- NEW tables:
 --   memory_document_projection (VIEW) → unified retrieval layer
---   tasking_state               → tasking subsystem runtime state (extracted from pal_states)
+--   tasking_state               → tasking subsystem runtime state
 --   worker_ledger               → formal tasking accounting
 --   developer_reports           → structured failure escalation
 --

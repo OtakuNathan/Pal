@@ -7,19 +7,19 @@ import unittest
 from unittest.mock import patch
 
 from pal.llm.contracts import CanonicalLLMRequest
-from pal.llm.codex_app_server import (
-    CodexAppServerAuthMessages,
-    CodexAppServerClientInfo,
+from pal.llm.codex_auth_protocol import (
+    CodexAuthMessages,
+    CodexClientInfo,
     is_chatgpt_auth_tokens_refresh_request,
     redact_codex_auth_message,
 )
-from pal.llm.codex_proxy import (
-    CodexAppServerBridge,
+from pal.llm.codex_openai_bridge import (
+    CodexCliBridge,
     CodexCompletion,
-    CodexProxyError,
+    CodexBridgeError,
     CodexToolCall,
     _completion_payload,
-    _codex_app_server_config_effort,
+    _codex_cli_config_effort,
     _codex_effort_from_payload,
     _codex_env,
     _dynamic_tool_response_from_text,
@@ -36,13 +36,13 @@ from pal.llm.codex_proxy import (
     _tool_result_content_for_call,
     _turn_start_params,
 )
-from pal.llm.runtime import CodexAppServerEndpointInvoker
+from pal.llm.runtime import CodexCliEndpointInvoker
 
 
-class OpenAICodexAppServerAuthProtocolTests(unittest.TestCase):
+class OpenAICodexAuthProtocolTests(unittest.TestCase):
     def test_initialize_can_advertise_experimental_api_for_external_chatgpt_tokens(self) -> None:
-        messages = CodexAppServerAuthMessages(
-            client_info=CodexAppServerClientInfo(name="pal-test", title="Pal Test", version="1.2.3"),
+        messages = CodexAuthMessages(
+            client_info=CodexClientInfo(name="pal-test", title="Pal Test", version="1.2.3"),
             experimental_api=True,
         )
 
@@ -60,7 +60,7 @@ class OpenAICodexAppServerAuthProtocolTests(unittest.TestCase):
         self.assertEqual(messages.initialized_notification(), {"method": "initialized", "params": {}})
 
     def test_chatgpt_login_start_requests_match_official_auth_types(self) -> None:
-        messages = CodexAppServerAuthMessages()
+        messages = CodexAuthMessages()
 
         self.assertEqual(
             messages.login_chatgpt_browser_request(request_id=2),
@@ -98,7 +98,7 @@ class OpenAICodexAppServerAuthProtocolTests(unittest.TestCase):
         )
 
     def test_account_read_logout_rate_limits_and_external_token_refresh_shape(self) -> None:
-        messages = CodexAppServerAuthMessages()
+        messages = CodexAuthMessages()
 
         self.assertEqual(
             messages.account_read_request(request_id=5, refresh_token=True),
@@ -152,48 +152,48 @@ class OpenAICodexAppServerAuthProtocolTests(unittest.TestCase):
         self.assertEqual(raw["params"]["accessToken"], "token-a")
 
 
-class OpenAICodexProxyMappingTests(unittest.TestCase):
-    def test_proxy_api_key_auth_accepts_openai_bearer_header(self) -> None:
-        self.assertTrue(_request_authorized({"Authorization": "Bearer proxy-token"}, "proxy-token"))
-        self.assertTrue(_request_authorized({"X-API-Key": "proxy-token"}, "proxy-token"))
+class OpenAICodexBridgeMappingTests(unittest.TestCase):
+    def test_bridge_api_key_auth_accepts_openai_bearer_header(self) -> None:
+        self.assertTrue(_request_authorized({"Authorization": "Bearer bridge-token"}, "bridge-token"))
+        self.assertTrue(_request_authorized({"X-API-Key": "bridge-token"}, "bridge-token"))
         self.assertTrue(_request_authorized({}, ""))
-        self.assertFalse(_request_authorized({}, "proxy-token"))
-        self.assertFalse(_request_authorized({"Authorization": "Bearer wrong"}, "proxy-token"))
+        self.assertFalse(_request_authorized({}, "bridge-token"))
+        self.assertFalse(_request_authorized({"Authorization": "Bearer wrong"}, "bridge-token"))
 
-    def test_model_prefix_is_stripped_for_codex_app_server(self) -> None:
+    def test_model_prefix_is_stripped_for_codex_cli(self) -> None:
         self.assertEqual(_strip_openai_prefix("openai/gpt-5.4"), "gpt-5.4")
         self.assertEqual(_strip_openai_prefix("hosted_vllm/gpt-5.4"), "gpt-5.4")
         self.assertEqual(_strip_openai_prefix("gpt-5.3-codex"), "gpt-5.3-codex")
 
-    def test_proxy_advertises_multiple_codex_models(self) -> None:
+    def test_bridge_advertises_multiple_codex_models(self) -> None:
         model_ids = _parse_model_list("hosted_vllm/gpt-5.5,gpt-5.4\ngpt-5.3-codex,gpt-5.4")
         payload = _models_payload(model_ids)
 
         self.assertEqual(model_ids, ("gpt-5.5", "gpt-5.4", "gpt-5.3-codex"))
         self.assertEqual([item["id"] for item in payload["data"]], ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex"])
 
-    def test_proxy_max_concurrency_is_clamped(self) -> None:
+    def test_bridge_max_concurrency_is_clamped(self) -> None:
         self.assertEqual(_parse_max_concurrency("3"), 3)
         self.assertEqual(_parse_max_concurrency("0"), 1)
         self.assertEqual(_parse_max_concurrency("99"), 32)
         self.assertEqual(_parse_max_concurrency("bad"), 3)
 
-    def test_proxy_maps_completion_reasoning_effort_to_codex_effort(self) -> None:
+    def test_bridge_maps_completion_reasoning_effort_to_codex_effort(self) -> None:
         self.assertEqual(_codex_effort_from_payload({"reasoning_effort": "xhigh"}), "xhigh")
         self.assertEqual(_codex_effort_from_payload({"reasoning_effort": {"effort": "high"}}), "high")
         self.assertEqual(_codex_effort_from_payload({"reasoning": {"effort": "minimal"}}), "minimal")
         self.assertIsNone(_codex_effort_from_payload({"reasoning_effort": "invalid"}))
 
-    def test_codex_app_server_config_effort_avoids_user_xhigh_default(self) -> None:
-        self.assertEqual(_codex_app_server_config_effort(None), "medium")
-        self.assertEqual(_codex_app_server_config_effort("balanced"), "medium")
-        self.assertEqual(_codex_app_server_config_effort("minimal"), "low")
-        self.assertEqual(_codex_app_server_config_effort("xhigh"), "xhigh")
+    def test_codex_cli_config_effort_avoids_user_xhigh_default(self) -> None:
+        self.assertEqual(_codex_cli_config_effort(None), "medium")
+        self.assertEqual(_codex_cli_config_effort("balanced"), "medium")
+        self.assertEqual(_codex_cli_config_effort("minimal"), "low")
+        self.assertEqual(_codex_cli_config_effort("xhigh"), "xhigh")
 
     def test_codex_bridge_starts_app_server_with_effort_config_override(self) -> None:
         fake_proc = SimpleNamespace(pid=1234)
-        with patch("pal.llm.codex_proxy.subprocess.Popen", return_value=fake_proc) as popen:
-            proc = CodexAppServerBridge(codex_bin="/tmp/codex")._start_process(effort="low")
+        with patch("pal.llm.codex_openai_bridge.subprocess.Popen", return_value=fake_proc) as popen:
+            proc = CodexCliBridge(codex_bin="/tmp/codex")._start_process(effort="low")
 
         self.assertIs(proc, fake_proc)
         command = popen.call_args.args[0]
@@ -230,6 +230,9 @@ class OpenAICodexProxyMappingTests(unittest.TestCase):
         )
 
         self.assertIn("Pal owns memory", developer)
+        self.assertIn("op_exec_shell", developer)
+        self.assertIn("authorized shell path", developer)
+        self.assertIn("instead of claiming shell access is unavailable", developer)
         self.assertIn("Use Pal policy.", developer)
         self.assertIn("User:\nFind my reminder.", turn)
         self.assertIn("memory_search", turn)
@@ -345,7 +348,7 @@ class OpenAICodexProxyMappingTests(unittest.TestCase):
         class _FakeProc:
             stdin = io.StringIO()
 
-        class _ScriptedBridge(CodexAppServerBridge):
+        class _ScriptedBridge(CodexCliBridge):
             def __init__(self) -> None:
                 super().__init__(timeout_seconds=5)
                 self.items = iter(
@@ -399,7 +402,7 @@ class OpenAICodexProxyMappingTests(unittest.TestCase):
             def kill(self) -> None:
                 self.terminated = True
 
-        class _ScriptedBridge(CodexAppServerBridge):
+        class _ScriptedBridge(CodexCliBridge):
             def __init__(self) -> None:
                 super().__init__(timeout_seconds=5)
                 self.proc = _FakeProc()
@@ -499,7 +502,7 @@ class OpenAICodexProxyMappingTests(unittest.TestCase):
             def kill(self) -> None:
                 self.terminated = True
 
-        class _ScriptedBridge(CodexAppServerBridge):
+        class _ScriptedBridge(CodexCliBridge):
             def __init__(self) -> None:
                 super().__init__(timeout_seconds=5)
                 self.proc = _FakeProc()
@@ -607,7 +610,7 @@ class OpenAICodexProxyMappingTests(unittest.TestCase):
             def kill(self) -> None:
                 self.terminated = True
 
-        class _ScriptedBridge(CodexAppServerBridge):
+        class _ScriptedBridge(CodexCliBridge):
             def __init__(self) -> None:
                 super().__init__(timeout_seconds=5)
                 self.proc = _FakeProc()
@@ -720,12 +723,12 @@ class OpenAICodexProxyMappingTests(unittest.TestCase):
 
         endpoint = SimpleNamespace(
             endpoint_id="codex_native",
-            provider="codex_proxy",
+            provider="codex_cli",
             model_id="hosted_vllm/gpt-5.4",
-            base_url="http://127.0.0.1:8765/v1",
-            capabilities_blob={"official_codex_app_server": True},
+            base_url="codex://cli",
+            capabilities_blob={"official_codex_cli": True},
         )
-        invoker = CodexAppServerEndpointInvoker(bridge=_FakeBridge())
+        invoker = CodexCliEndpointInvoker(bridge=_FakeBridge())
         outcome = invoker.invoke(
             endpoint,
             CanonicalLLMRequest(
@@ -775,18 +778,18 @@ class OpenAICodexProxyMappingTests(unittest.TestCase):
             def invoke_turn(self, **kwargs):
                 self.calls.append(dict(kwargs))
                 if kwargs["dynamic_tools"]:
-                    raise CodexProxyError("timed out waiting for Codex app-server output")
+                    raise CodexBridgeError("timed out waiting for Codex app-server output")
                 return CodexCompletion(model="gpt-5.4", text="DONE")
 
         endpoint = SimpleNamespace(
             endpoint_id="codex_native",
-            provider="codex_app_server",
+            provider="codex_cli",
             model_id="hosted_vllm/gpt-5.4",
-            base_url="codex://app-server",
-            capabilities_blob={"official_codex_app_server": True},
+            base_url="codex://cli",
+            capabilities_blob={"official_codex_cli": True},
         )
         bridge = _FakeBridge()
-        invoker = CodexAppServerEndpointInvoker(bridge=bridge)
+        invoker = CodexCliEndpointInvoker(bridge=bridge)
         outcome = invoker.invoke(
             endpoint,
             CanonicalLLMRequest(
@@ -845,13 +848,13 @@ class OpenAICodexProxyMappingTests(unittest.TestCase):
 
         endpoint = SimpleNamespace(
             endpoint_id="codex_native",
-            provider="codex_app_server",
+            provider="codex_cli",
             model_id="hosted_vllm/gpt-5.4",
-            base_url="codex://app-server",
-            capabilities_blob={"official_codex_app_server": True},
+            base_url="codex://cli",
+            capabilities_blob={"official_codex_cli": True},
         )
         bridge = _FakeBridge()
-        invoker = CodexAppServerEndpointInvoker(bridge=bridge)
+        invoker = CodexCliEndpointInvoker(bridge=bridge)
         outcome = invoker.invoke(
             endpoint,
             CanonicalLLMRequest(

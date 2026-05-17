@@ -20,39 +20,65 @@ class BehaviorPromptFragmentProvider:
         _ = context
         fragments = [
             PromptFragment(
+                section="advisor_gate",
+                title="Advisor Gate",
+                content=(
+                    "Use op_behavior_advise for ambiguous, risky, multi-step, unfamiliar, route-unclear, or recovery work.\n\n"
+                    "Recovery work includes:\n"
+                    "- a capability/tool call failed and the next route is unclear\n"
+                    "- the available capability does not seem sufficient to complete the user's goal\n"
+                    "- Pal tried the obvious path but did not achieve the intended result\n"
+                    "- repeated retries would be guesswork\n\n"
+                    "Skip advisor when:\n"
+                    "- the route is already established by the current conversation\n"
+                    "- the user gives a direct implementation command for a clear, bounded, already-routed action\n"
+                    "- the task is a clear single-capability action\n"
+                    "- the failure is a simple local/schema/input mistake with an obvious correction"
+                ),
+                priority=70,
+                metadata={"module_id": self.module_id, "kind": "advisor_gate"},
+            ),
+            PromptFragment(
+                section="advisor_recovery_memory",
+                title="Advisor Recovery Memory",
+                content=(
+                    "When op_behavior_advise is used for recovery, debugging, unfamiliar work, or route repair, Pal must consider whether prior experience may help.\n\n"
+                    "If advice returns memory_query_hints and the task may depend on prior Pal/project/user history, call op_memory_recall with targeted queries before retrying or choosing a new route.\n\n"
+                    "If no memory_query_hints are returned but the failure is Pal-specific, capability-specific, project-specific, or resembles a repeated issue, call op_memory_recall using the failed capability/tool name, error text, and task goal as query seeds.\n\n"
+                    "Use a small recall budget:\n"
+                    "- limit 3-5\n"
+                    "- targeted queries\n"
+                    "- usually one recall before retry\n\n"
+                    "Do not recall for obvious schema/parameter mistakes with a clear correction."
+                ),
+                priority=71,
+                metadata={"module_id": self.module_id, "kind": "advisor_recovery_memory"},
+            ),
+            PromptFragment(
                 section="behavior_routing",
                 title="Behavior Routing",
                 content=(
-                    "When Pal needs to act:\n"
-                    "1. Casual chat\n"
-                    "- For casual conversation, greetings, simple reactions, or short replies that need no facts, files, tools, memory, design judgment, or external/runtime state, answer directly.\n"
-                    "- Code, system, design, debugging, configuration, project, or memory-related requests are not casual chat.\n\n"
-                    "2. Direct capability task\n"
-                    "- If the task can be completed by exactly one capability, either already known from current context or found with `op_exec_disc_search`, read/resolve the capability contract when needed, then call that capability.\n"
-                    "- Do not use this route when the capability call would only be a step toward analysis, diagnosis, design, research, repair, or code understanding.\n"
-                    "- Do not ask the advisor to re-decide an already clear single-capability route.\n\n"
-                    "3. Advisor Gate\n"
-                    "- Otherwise, for code understanding, debugging, design, review, refactor, research, configuration, plugin/runtime investigation, repair, multi-step, risky, unclear, or user-specific work, call `op_behavior_advise` before reading files or taking action.\n"
-                    "- \"Look at/read/check the code\" is not a direct capability task when the goal is understanding, diagnosis, design, review, or change.\n"
-                    "- Skip advisor only when direct capability applies, or an active route, injected skill, or current conversation already gives the route.\n\n"
-                    "4. Advice result\n"
+                    "Direct routes:\n"
+                    "- Casual chat: for greetings, simple reactions, or short replies that need no facts, files, tools, memory, design judgment, or external/runtime state, answer directly.\n"
+                    "- Direct capability task: if the task can be completed by exactly one capability, either already known from current context or found with `op_tool_search`, read/resolve the capability contract when needed, then call that capability.\n"
+                    "- Do not use the single-capability route when the capability call would only be a step toward analysis, diagnosis, design, research, repair, or code understanding.\n\n"
+                    "Advice result:\n"
                     "- Advice is a resource package, not an order. Evaluate matching `skill_refs`, `capability_refs`, and `memory_query_hints` against the current request.\n"
                     "- MUST NOT call `op_skill_inject` merely because `skill_refs` are present.\n"
                     "- Call `op_skill_inject` only when workflow, domain rules, design, review, repair, or multi-step work needs that guidance.\n"
                     "- If a listed capability directly completes the request, use the capability without injecting a skill.\n"
                     "- If advice returns `capability_refs`, resolve them against current capability inventory before relying on them.\n"
                     "- `memory_query_hints` do not trigger recall by themselves. When recall is required, use them as query seeds.\n\n"
-                    "5. Execution\n"
+                    "Execution:\n"
                     "- Execute only through capability calls.\n"
                     "- Respect capability policy, approval requirements, availability, and verification.\n"
                     "- Prefer the simplest viable action path.\n\n"
                     "Route map:\n"
                     "- Future, scheduled, recurring, reminder, timer, periodic check, or proactive push work -> Proactive route. Use `op_proactive_mgmt_create` for new proactive tasks and reminders, then configure schedule/output as needed.\n"
                     "- One-shot delegated implementation, research, review, or bounded async worker handoff -> Minion route.\n"
-                    "- Immediate answer or immediate single capability action -> direct Pal/capability route.\n\n"
-                    "If the user teaches a future behavior rule, submit an affordance with `op_behavior_affordance_submit`."
+                    "- Immediate answer or immediate single capability action -> direct Pal/capability route."
                 ),
-                priority=70,
+                priority=72,
                 metadata={"module_id": self.module_id, "kind": "behavior_routing"},
             ),
         ]

@@ -244,7 +244,7 @@ Rules:
 - over-budget skill manuals return structured failure
 - owned by `pal.skill`, not `pal.behavior`
 
-### `op_behavior_affordance_submit`
+### `op_behavior_save`
 
 Persist a new user-instructed or learned affordance.
 
@@ -267,7 +267,7 @@ Rules:
 
 ## Cap Search vs Behavior Advise
 
-`op_exec_disc_search` answers:
+`op_tool_search` answers:
 
 - what capabilities exist?
 - what can Execution invoke now?
@@ -287,7 +287,7 @@ Behavior contributes a small prompt fragment:
 
 - use `op_behavior_advise` when Pal intends to act and needs route advice.
 - use `op_skill_inject` when advice returns a `skill_ref`.
-- use `op_behavior_affordance_submit` only for recurring behavior rules.
+- use `op_behavior_save` only for recurring behavior rules.
 - keep affordance hints thin; multi-step procedures belong in skills.
 
 Resident affordances may also be injected as short hints, under a strict budget.
@@ -314,7 +314,7 @@ from pal.behavior import affordance, skill
     title="Commit safely",
     summary="Review and commit local changes safely.",
     manual_text="1. Inspect changes.\n2. Run tests.\n3. Commit with a clear message.",
-    capability_refs=("shell.exec",),
+    capability_refs=("shell_exec",),
 )
 @affordance(
     affordance_id="demo.commit_when_user_asks",
@@ -323,7 +323,7 @@ from pal.behavior import affordance, skill
     prompt_hint="Consider injecting the commit skill and checking working tree status.",
     activation_terms=("commit", "git", "changes"),
     skill_refs=("demo.commit",),
-    capability_refs=("shell.exec",),
+    capability_refs=("shell_exec",),
 )
 class DemoProvider:
     module_id = "demo"

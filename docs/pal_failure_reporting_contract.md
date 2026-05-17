@@ -31,7 +31,7 @@ flowchart TD
 - 子系统健康状态异常
 - provider 不可用
 - 插件加载失败
-- minion 或 service 流程阻塞
+- minion 或 proactive 流程阻塞
 - memory recall 或 execution 路径异常
 - channel delivery 失败
 
@@ -97,7 +97,7 @@ developer report 是结构化对象，不是随口自然语言抱怨。
 - `execution`
 - `control`
 - `tasking`
-- `service`
+- `proactive`
 - `plugin`
 
 ## `component`
@@ -185,8 +185,8 @@ developer report 是结构化对象，不是随口自然语言抱怨。
 - `conversation_id`
 - `task_id`
 - `work_order_id`
-- `service_id`
-- `service_run_id`
+- `proactive_id`
+- `proactive_run_id`
 
 ## 用户反馈与开发者报告分离
 

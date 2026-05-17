@@ -156,8 +156,15 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
-        self.assertEqual(request.messages[-2]["role"], "user")
-        self.assertIn("Available Artifacts", request.messages[-2]["content"])
+        self.assertEqual(request.messages[-1]["role"], "user")
+        self.assertIsInstance(request.messages[-1]["content"], list)
+        text_parts = [
+            str(part.get("text") or "")
+            for part in request.messages[-1]["content"]
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        self.assertIn("Available Artifacts", text_parts[0])
+        self.assertEqual(text_parts[-1], "看看这个附件")
 
     def test_artifact_info_exposes_local_file_metadata_for_tool_use(self) -> None:
         ref = self._register_text(name="invoice.txt", text="invoice total is 42")

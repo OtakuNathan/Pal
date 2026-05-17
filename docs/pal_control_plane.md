@@ -96,7 +96,24 @@ Inline control buttons should use typed actions. Generic command buttons use `co
 - `target_scope`
 - `target_id`
 - `requires_user_confirmation`
+- `delivery`
 - `notes`
+
+`delivery` is a typed `ControlDelivery` compiled by `control`, not by `core`.
+Its `delivery_kind` is one of:
+
+- `reply`
+- `interactive_open`
+- `interactive_update`
+- `interactive_resolve`
+- `interactive_expire`
+- `endpoint_status`
+
+The runtime path is:
+
+`channel event -> ControlEventHandler/ControlPlane -> ControlAction -> PalCore dispatch -> channel render`
+
+`PalCore` applies state changes and dispatches typed deliveries. Channel endpoints own platform rendering and fallback behavior.
 
 ## 运行模型
 

@@ -39,6 +39,8 @@ class RuntimeConfig:
 
     # memory
     keep_recent_tool_messages: int = 10
+    l1_tool_result_max_chars: int = 8_000
+    l1_tool_result_preview_chars: int = 4_000
 
     @classmethod
     def load(cls, runtime_root: Path | None) -> RuntimeConfig:
@@ -84,6 +86,8 @@ class RuntimeConfig:
         })
         cls._apply_section(kwargs, raw, "memory", {
             "keep_recent_tool_messages": int,
+            "l1_tool_result_max_chars": int,
+            "l1_tool_result_preview_chars": int,
         })
         return cls(**kwargs)
 

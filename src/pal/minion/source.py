@@ -2,9 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
-from uuid import uuid4
 
-from pal.control import ControlAction, ControlRoute, InteractionButtonSpec, InteractionMessageSpec
+from pal.control import ControlAction, ControlRoute
+from pal.control.interactions import (
+    delivery_for_reply,
+    minion_approval_delivery,
+    minion_lesson_approval_delivery,
+    minion_module_continue_delivery,
+    minion_question_delivery,
+)
 from pal.core.events import EventHandler, EventSource
 from pal.foundation import EventEnvelope
 from pal.shared import EventKind, SourceKind
@@ -52,27 +58,38 @@ class MinionControlEventHandler(EventHandler):
             EventKind.MINION_PROGRESS,
             EventKind.MINION_CHECKPOINT,
             EventKind.MINION_TERMINAL,
+            EventKind.MINION_MODULE_COMPLETED,
+            EventKind.MINION_CLARIFICATION_REQUEST,
         }
 
     def handle(self, event: EventEnvelope, context) -> list[EventEnvelope]:
         payload = dict(event.payload or {}) if isinstance(event.payload, dict) else {}
-        if event.event_kind == EventKind.MINION_TERMINAL:
+        if event.event_kind in {EventKind.MINION_TERMINAL, EventKind.MINION_MODULE_COMPLETED}:
             _record_minion_observation(self.provider, context, payload)
         route = _route_from_payload(payload.get("route"))
         if route is None:
             return []
         if event.event_kind == EventKind.APPROVAL_REQUEST:
-            spec = _build_minion_approval_interaction(payload, route)
+            delivery = minion_approval_delivery(payload, route)
             action = ControlAction(
                 action_kind="interactive_open",
                 target_scope="interaction",
-                target_id=str(payload.get("approval_id") or f"approval_{uuid4().hex[:8]}"),
+                target_id=delivery.interaction.interaction_id if delivery.interaction is not None else None,
                 route=route,
-                args={
-                    "kind": "approval_request",
-                    "interaction": _interaction_payload(spec),
-                },
+                delivery=delivery,
                 notes="minion approval request",
+            )
+        elif event.event_kind == EventKind.MINION_CLARIFICATION_REQUEST:
+            delivery = minion_question_delivery(payload, route)
+            if delivery is None:
+                return []
+            action = ControlAction(
+                action_kind="interactive_open",
+                target_scope="interaction",
+                target_id=delivery.interaction.interaction_id if delivery.interaction is not None else None,
+                route=route,
+                delivery=delivery,
+                notes="minion clarification request",
             )
         elif event.event_kind == EventKind.MINION_PROGRESS:
             # Progress is high-cardinality telemetry for the manager ledger, not a chat notification.
@@ -88,21 +105,40 @@ class MinionControlEventHandler(EventHandler):
                 target_scope="channel",
                 target_id=str(payload.get("run_id") or payload.get("minion_id") or ""),
                 route=route,
-                args={"text": text},
+                delivery=delivery_for_reply(route, text),
                 notes="minion event notification",
             )
-        elif event.event_kind == EventKind.MINION_TERMINAL:
+        elif event.event_kind in {EventKind.MINION_TERMINAL, EventKind.MINION_MODULE_COMPLETED}:
             text = _render_minion_event_notification(event.event_kind, payload)
             if not text:
                 return []
-            action = ControlAction(
-                action_kind="route_reply",
-                target_scope="channel",
-                target_id=str(payload.get("run_id") or payload.get("minion_id") or ""),
-                route=route,
-                args={"text": text},
-                notes="minion event notification",
+            module_continue_delivery = (
+                minion_module_continue_delivery(payload, route)
+                if event.event_kind == EventKind.MINION_MODULE_COMPLETED
+                else None
             )
+            if module_continue_delivery is not None:
+                action = ControlAction(
+                    action_kind="interactive_open",
+                    target_scope="interaction",
+                    target_id=(
+                        module_continue_delivery.interaction.interaction_id
+                        if module_continue_delivery.interaction is not None
+                        else None
+                    ),
+                    route=route,
+                    delivery=module_continue_delivery,
+                    notes="minion module continue",
+                )
+            else:
+                action = ControlAction(
+                    action_kind="route_reply",
+                    target_scope="channel",
+                    target_id=str(payload.get("run_id") or payload.get("minion_id") or ""),
+                    route=route,
+                    delivery=delivery_for_reply(route, text),
+                    notes="minion event notification",
+                )
             envelopes = [
                 EventEnvelope(
                     event_kind=EventKind.CONTROL_ACTION,
@@ -111,8 +147,8 @@ class MinionControlEventHandler(EventHandler):
                     correlation_id=event.correlation_id,
                 )
             ]
-            lesson_spec = _build_minion_lesson_interaction(payload, route)
-            if lesson_spec is not None:
+            lesson_delivery = minion_lesson_approval_delivery(payload, route)
+            if lesson_delivery is not None:
                 envelopes.append(
                     EventEnvelope(
                         event_kind=EventKind.CONTROL_ACTION,
@@ -120,9 +156,13 @@ class MinionControlEventHandler(EventHandler):
                         payload=ControlAction(
                             action_kind="interactive_open",
                             target_scope="interaction",
-                            target_id=lesson_spec.interaction_id,
+                            target_id=(
+                                lesson_delivery.interaction.interaction_id
+                                if lesson_delivery.interaction is not None
+                                else None
+                            ),
                             route=route,
-                            args={"kind": "minion_lesson_approval", "interaction": _interaction_payload(lesson_spec)},
+                            delivery=lesson_delivery,
                             notes="minion lesson approval",
                         ),
                         correlation_id=event.correlation_id,
@@ -149,8 +189,12 @@ def _should_notify_checkpoint(payload: dict[str, Any]) -> bool:
 def _event_kind_for_minion_event(event_kind: str) -> str:
     if event_kind == "approval_requested":
         return EventKind.APPROVAL_REQUEST
+    if event_kind == "clarification_requested":
+        return EventKind.MINION_CLARIFICATION_REQUEST
     if event_kind == "terminal":
         return EventKind.MINION_TERMINAL
+    if event_kind == "module_completed":
+        return EventKind.MINION_MODULE_COMPLETED
     if event_kind == "checkpoint":
         return EventKind.MINION_CHECKPOINT
     return EventKind.MINION_PROGRESS
@@ -170,162 +214,6 @@ def _payload_for_event(event_kind: str, item: dict) -> dict:
     if route:
         payload["route"] = route
     return payload
-
-
-def _build_minion_approval_interaction(payload: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec:
-    approval_id = str(payload.get("approval_id") or f"approval_{uuid4().hex[:8]}")
-    return InteractionMessageSpec(
-        interaction_id=approval_id,
-        interaction_kind="approval_request",
-        route=route,
-        text=_render_minion_approval_text(payload),
-        buttons=(
-            (
-                InteractionButtonSpec(
-                    label="Accept",
-                    action_key="control.action.dispatch",
-                    action_args=_minion_approval_action_payload(payload, "accept"),
-                ),
-                InteractionButtonSpec(
-                    label="Reject",
-                    action_key="control.action.dispatch",
-                    action_args=_minion_approval_action_payload(payload, "reject"),
-                ),
-                InteractionButtonSpec(
-                    label="Edit",
-                    action_key="control.action.dispatch",
-                    action_args=_minion_approval_action_payload(payload, "edit"),
-                ),
-            ),
-        ),
-    )
-
-
-def _interaction_payload(spec: InteractionMessageSpec) -> dict[str, Any]:
-    return {
-        "interaction_id": spec.interaction_id,
-        "interaction_kind": spec.interaction_kind,
-        "text": spec.text,
-        "buttons": [
-            [
-                {"label": button.label, "action_key": button.action_key, "action_args": dict(button.action_args)}
-                for button in row
-            ]
-            for row in spec.buttons
-        ],
-        "expires_at": spec.expires_at,
-    }
-
-
-def _minion_approval_action_payload(payload: dict[str, Any], decision: str) -> dict[str, Any]:
-    approval_id = str(payload.get("approval_id") or "")
-    return {
-        "action_kind": "minion_approval_decision",
-        "target_scope": "minion",
-        "target_id": approval_id,
-        "args": {
-            "approval_id": approval_id,
-            "run_id": str(payload.get("run_id") or ""),
-            "minion_id": str(payload.get("minion_id") or ""),
-            "decision": decision,
-        },
-    }
-
-
-def _build_minion_lesson_interaction(payload: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec | None:
-    task_lessons = _string_list(payload.get("task_lessons"))
-    system_lessons = _string_list(payload.get("system_lessons"))
-    if not task_lessons and not system_lessons:
-        return None
-    run_id = str(payload.get("run_id") or "")
-    work_order_id = str(payload.get("work_order_id") or "")
-    interaction_id = f"minion_lesson_{run_id or uuid4().hex[:12]}"
-    lines = [
-        "Minion proposed reusable lessons.",
-        "",
-        "Absorb these into Pal memory?",
-    ]
-    if task_lessons:
-        lines.append("")
-        lines.append("Task lessons:")
-        lines.extend(f"- {lesson}" for lesson in task_lessons)
-    if system_lessons:
-        lines.append("")
-        lines.append("System lessons:")
-        lines.extend(f"- {lesson}" for lesson in system_lessons)
-    base_args = {
-        "work_order_id": work_order_id,
-        "run_id": run_id,
-        "minion_id": str(payload.get("minion_id") or ""),
-        "task_lessons": task_lessons,
-        "system_lessons": system_lessons,
-    }
-    return InteractionMessageSpec(
-        interaction_id=interaction_id,
-        interaction_kind="minion_lesson_approval",
-        route=route,
-        text="\n".join(lines),
-        buttons=(
-            (
-                InteractionButtonSpec(
-                    label="Accept",
-                    action_key="control.action.dispatch",
-                    action_args={
-                        "action_kind": "minion_lesson_decision",
-                        "target_scope": "minion",
-                        "target_id": work_order_id,
-                        "args": {**base_args, "decision": "accept"},
-                    },
-                ),
-                InteractionButtonSpec(
-                    label="Reject",
-                    action_key="control.action.dispatch",
-                    action_args={
-                        "action_kind": "minion_lesson_decision",
-                        "target_scope": "minion",
-                        "target_id": work_order_id,
-                        "args": {**base_args, "decision": "reject"},
-                    },
-                ),
-                InteractionButtonSpec(
-                    label="Edit",
-                    action_key="control.action.dispatch",
-                    action_args={
-                        "action_kind": "minion_lesson_decision",
-                        "target_scope": "minion",
-                        "target_id": work_order_id,
-                        "args": {**base_args, "decision": "edit"},
-                    },
-                ),
-            ),
-        ),
-    )
-
-
-def _render_minion_approval_text(payload: dict[str, Any]) -> str:
-    args_summary = payload.get("args_summary")
-    if not isinstance(args_summary, dict):
-        args_summary = {}
-    lines = [
-        "Minion approval request",
-        "",
-        f"Title: {payload.get('title') or 'High-risk operation'}",
-        f"Run: {payload.get('run_id') or '-'}",
-        f"Work order: {payload.get('work_order_id') or '-'}",
-        f"Requested action: {payload.get('requested_action') or payload.get('target') or '-'}",
-        f"Risk: {payload.get('risk') or 'high'}",
-    ]
-    impact = str(payload.get("impact") or "").strip()
-    if impact:
-        lines.append(f"Impact: {impact}")
-    target = str(payload.get("target") or "").strip()
-    if target:
-        lines.append(f"Target: {target}")
-    if args_summary:
-        rendered = ", ".join(f"{key}={value}" for key, value in sorted(args_summary.items()))
-        if rendered:
-            lines.append(f"Args: {rendered}")
-    return "\n".join(lines)
 
 
 def _render_minion_event_notification(event_kind: str, payload: dict[str, Any]) -> str:
@@ -357,6 +245,22 @@ def _render_minion_event_notification(event_kind: str, payload: dict[str, Any]) 
         if summary and summary != phase:
             lines.append(f"Summary: {summary}")
         return "\n".join(lines)
+    if event_kind == EventKind.MINION_MODULE_COMPLETED:
+        status = str(payload.get("status") or "completed")
+        summary = str(payload.get("summary") or "").strip()
+        module_id = str(payload.get("module_id") or "").strip()
+        lines = [f"Minion module completed: {status}", f"Profile: {profile}"]
+        if module_id:
+            lines.append(f"Module: {module_id}")
+        if work_order_id:
+            lines.append(f"Work order: {work_order_id}")
+        completed_count = payload.get("completed_milestone_count")
+        if completed_count is not None:
+            lines.append(f"Milestones: {completed_count}")
+        if summary:
+            lines.append("Summary:")
+            lines.append(_preview_text(summary, limit=500))
+        return "\n".join(lines)
     if event_kind == EventKind.MINION_TERMINAL:
         status = str(payload.get("status") or "terminal")
         summary = _preview_text(_strip_lesson_sections(str(payload.get("summary") or "")).strip(), limit=500)
@@ -381,16 +285,6 @@ def _render_minion_event_notification(event_kind: str, payload: dict[str, Any]) 
             lines.append(summary)
         return "\n".join(lines)
     return ""
-
-
-def _string_list(value: Any) -> list[str]:
-    if isinstance(value, str):
-        values = [value]
-    elif isinstance(value, (list, tuple)):
-        values = list(value)
-    else:
-        values = []
-    return _dedupe_nonempty([str(item) for item in values])
 
 
 def _artifact_list(value: Any) -> list[dict[str, Any]]:
@@ -438,18 +332,6 @@ def _compact_preview_text(value: str) -> str:
             blank_pending = False
         lines.append(line)
     return "\n".join(lines).strip()
-
-
-def _dedupe_nonempty(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        item = " ".join(str(value or "").split())
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        result.append(item)
-    return result
 
 
 def _strip_lesson_sections(text: str) -> str:

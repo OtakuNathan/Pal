@@ -16,17 +16,23 @@ from collections.abc import Iterable
 from typing import Any
 
 
-_PROXY_DEVELOPER_GUARD = (
-    "You are serving as the language model behind Pal's local OpenAI-compatible proxy. "
+_BRIDGE_DEVELOPER_GUARD = (
+    "You are serving as the language model behind Pal's local OpenAI-compatible Codex bridge. "
     "Pal owns memory, capability lookup, tool execution, approvals, scheduling, and plugin policy. "
-    "Do not read local files, execute shell commands, edit files, browse, or use built-in Codex tools. "
+    "Do not use built-in Codex tools to read local files, execute shell commands, edit files, or browse. "
+    "Those actions are available only through Pal-provided dynamic tools when present. "
+    "If a dynamic tool such as op_exec_shell is provided, it is the authorized shell path for this turn; use it instead of claiming shell access is unavailable. "
+    "If a needed dynamic tool is absent, use Pal discovery tools when provided, or state that the specific Pal capability is unavailable only after checking the current tool surface. "
     "Answer from the provided conversation or request one of the provided dynamic tools."
 )
-DEFAULT_CODEX_PROXY_API_KEY_ENV = "PAL_CODEX_PROXY_API_KEY"
-DEFAULT_CODEX_PROXY_MODELS_ENV = "PAL_CODEX_PROXY_MODELS"
-DEFAULT_CODEX_PROXY_MAX_CONCURRENCY_ENV = "PAL_CODEX_PROXY_MAX_CONCURRENCY"
-DEFAULT_CODEX_PROXY_MAX_CONCURRENCY = 3
-DEFAULT_CODEX_PROXY_MODELS = (
+DEFAULT_CODEX_BRIDGE_API_KEY_ENV = "PAL_CODEX_BRIDGE_API_KEY"
+DEFAULT_CODEX_BRIDGE_MODELS_ENV = "PAL_CODEX_BRIDGE_MODELS"
+DEFAULT_CODEX_BRIDGE_MAX_CONCURRENCY_ENV = "PAL_CODEX_BRIDGE_MAX_CONCURRENCY"
+LEGACY_CODEX_BRIDGE_API_KEY_ENV = "PAL_CODEX_PROXY_API_KEY"
+LEGACY_CODEX_BRIDGE_MODELS_ENV = "PAL_CODEX_PROXY_MODELS"
+LEGACY_CODEX_BRIDGE_MAX_CONCURRENCY_ENV = "PAL_CODEX_PROXY_MAX_CONCURRENCY"
+DEFAULT_CODEX_BRIDGE_MAX_CONCURRENCY = 3
+DEFAULT_CODEX_BRIDGE_MODELS = (
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.3-codex",
@@ -35,7 +41,7 @@ DEFAULT_CODEX_PROXY_MODELS = (
 _CODEX_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 
 
-class CodexProxyError(RuntimeError):
+class CodexBridgeError(RuntimeError):
     pass
 
 
@@ -87,7 +93,7 @@ def _strip_openai_prefix(model: str) -> str:
 def _parse_model_list(raw: str | None) -> tuple[str, ...]:
     text = str(raw or "").strip()
     if not text:
-        return DEFAULT_CODEX_PROXY_MODELS
+        return DEFAULT_CODEX_BRIDGE_MODELS
     items: list[str] = []
     seen: set[str] = set()
     for chunk in text.replace("\n", ",").split(","):
@@ -96,7 +102,7 @@ def _parse_model_list(raw: str | None) -> tuple[str, ...]:
             continue
         seen.add(model)
         items.append(model)
-    return tuple(items) or DEFAULT_CODEX_PROXY_MODELS
+    return tuple(items) or DEFAULT_CODEX_BRIDGE_MODELS
 
 
 def _models_payload(model_ids: tuple[str, ...]) -> dict[str, Any]:
@@ -110,7 +116,7 @@ def _parse_max_concurrency(raw: str | int | None) -> int:
     try:
         parsed = int(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return DEFAULT_CODEX_PROXY_MAX_CONCURRENCY
+        return DEFAULT_CODEX_BRIDGE_MAX_CONCURRENCY
     return max(1, min(parsed, 32))
 
 
@@ -126,7 +132,7 @@ def _codex_effort_from_payload(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def _codex_app_server_config_effort(effort: str | None) -> str:
+def _codex_cli_config_effort(effort: str | None) -> str:
     normalized = str(effort or "").strip().lower()
     if normalized in {"high", "xhigh"}:
         return normalized
@@ -274,7 +280,7 @@ def _messages_to_codex_turn(messages: list[dict[str, Any]]) -> tuple[str, str]:
 
 
 def _messages_to_codex_input(messages: list[dict[str, Any]], *, artifact_manager: Any = None) -> tuple[str, list[dict[str, Any]]]:
-    developer_parts = [_PROXY_DEVELOPER_GUARD]
+    developer_parts = [_BRIDGE_DEVELOPER_GUARD]
     transcript: list[str] = []
 
     def flush_text(input_items: list[dict[str, Any]]) -> None:
@@ -462,7 +468,7 @@ def _codex_env(codex_bin: str) -> dict[str, str]:
 
 
 @dataclass
-class CodexAppServerBridge:
+class CodexCliBridge:
     codex_bin: str = ""
     timeout_seconds: int = 45
     cwd: str | None = None
@@ -481,7 +487,7 @@ class CodexAppServerBridge:
             codex_bin,
             "app-server",
             "-c",
-            f'model_reasoning_effort="{_codex_app_server_config_effort(effort or self.default_effort)}"',
+            f'model_reasoning_effort="{_codex_cli_config_effort(effort or self.default_effort)}"',
             "--listen",
             "stdio://",
         ]
@@ -530,12 +536,12 @@ class CodexAppServerBridge:
                 if self._pending_tool_request is not None:
                     if not self._resume_pending_tool_request(proc, messages or []):
                         pending = self._pending_tool_request
-                        raise CodexProxyError(
+                        raise CodexBridgeError(
                             "Codex app-server is waiting for a Pal tool result "
                             f"for call_id={pending.call_id!r}"
                         )
                     if self._active_turn is None:
-                        raise CodexProxyError("Codex app-server lost active turn after tool response")
+                        raise CodexBridgeError("Codex app-server lost active turn after tool response")
                     deadline = time.time() + max(1, int(self.timeout_seconds))
                     return self._continue_process_turn(proc, self._active_turn, deadline=deadline)
                 return self._invoke_process(
@@ -598,7 +604,7 @@ class CodexAppServerBridge:
             self._reset_process()
 
     def _ensure_process(self, *, effort: str | None = None) -> subprocess.Popen[str]:
-        process_effort = _codex_app_server_config_effort(effort or self.default_effort)
+        process_effort = _codex_cli_config_effort(effort or self.default_effort)
         proc = self._proc
         if proc is not None and proc.poll() is None:
             if self._process_effort != process_effort:
@@ -650,12 +656,12 @@ class CodexAppServerBridge:
     @staticmethod
     def _write_message(proc: subprocess.Popen[str], message: dict[str, Any]) -> None:
         if proc.stdin is None:
-            raise CodexProxyError("Codex app-server stdin is not available")
+            raise CodexBridgeError("Codex app-server stdin is not available")
         try:
             proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
             proc.stdin.flush()
         except (BrokenPipeError, OSError, ValueError) as exc:
-            raise CodexProxyError("failed writing to Codex app-server") from exc
+            raise CodexBridgeError("failed writing to Codex app-server") from exc
 
     def _initialize_process(self, proc: subprocess.Popen[str]) -> None:
         deadline = time.time() + max(1, int(self.timeout_seconds))
@@ -663,7 +669,7 @@ class CodexAppServerBridge:
             proc,
             "initialize",
             {
-                "clientInfo": {"name": "pal-codex-proxy", "title": "Pal Codex Proxy", "version": "0.1.0"},
+                "clientInfo": {"name": "pal-codex-bridge", "title": "Pal Codex Bridge", "version": "0.1.0"},
                 "capabilities": {"experimentalApi": True},
             },
         )
@@ -672,10 +678,10 @@ class CodexAppServerBridge:
             item = self._read_message(proc, deadline=deadline)
             _debug_log(f"codex init recv id={item.get('id')} method={item.get('method')}")
             if item.get("error"):
-                raise CodexProxyError(str(item["error"]))
+                raise CodexBridgeError(str(item["error"]))
             if item.get("id") == initialize_id:
                 return
-        raise CodexProxyError("timed out initializing Codex app-server")
+        raise CodexBridgeError("timed out initializing Codex app-server")
 
     def _invoke_process(
         self,
@@ -705,11 +711,11 @@ class CodexAppServerBridge:
             item = self._read_message(proc, deadline=deadline)
             _debug_log(f"codex recv id={item.get('id')} method={item.get('method')}")
             if item.get("error"):
-                raise CodexProxyError(str(item["error"]))
+                raise CodexBridgeError(str(item["error"]))
             if item.get("id") == thread_id_request:
                 thread_id = ((item.get("result") or {}).get("thread") or {}).get("id")
                 if not thread_id:
-                    raise CodexProxyError(f"thread/start returned no thread id: {item}")
+                    raise CodexBridgeError(f"thread/start returned no thread id: {item}")
                 turn_id_request = self._send_request(
                     proc,
                     "turn/start",
@@ -719,13 +725,13 @@ class CodexAppServerBridge:
             if turn_id_request is not None and item.get("id") == turn_id_request:
                 turn_id = ((item.get("result") or {}).get("turn") or {}).get("id")
                 if not thread_id or not turn_id:
-                    raise CodexProxyError(f"turn/start returned no turn id: {item}")
+                    raise CodexBridgeError(f"turn/start returned no turn id: {item}")
                 active = _ActiveCodexTurn(model=model, thread_id=thread_id, turn_id=turn_id)
                 self._active_turn = active
                 return self._continue_process_turn(proc, active, deadline=deadline)
             if "method" in item and "id" in item:
                 self._respond_to_unsupported_server_request(proc, item)
-        raise CodexProxyError("timed out waiting for Codex app-server response")
+        raise CodexBridgeError("timed out waiting for Codex app-server response")
 
     def _continue_process_turn(
         self,
@@ -738,7 +744,7 @@ class CodexAppServerBridge:
             item = self._read_message(proc, deadline=deadline)
             _debug_log(f"codex recv id={item.get('id')} method={item.get('method')}")
             if item.get("error"):
-                raise CodexProxyError(str(item["error"]))
+                raise CodexBridgeError(str(item["error"]))
             method = str(item.get("method") or "")
             params = item.get("params") or {}
             if method and not self._matches_current_turn(params, thread_id=active.thread_id, turn_id=active.turn_id):
@@ -764,7 +770,7 @@ class CodexAppServerBridge:
                     return self._finish_active_turn(active)
             elif method == "turn/completed":
                 return self._finish_active_turn(active)
-        raise CodexProxyError("timed out waiting for Codex app-server response")
+        raise CodexBridgeError("timed out waiting for Codex app-server response")
 
     def _capture_tool_call(
         self,
@@ -869,11 +875,11 @@ class CodexAppServerBridge:
             item = self._read_message(proc, deadline=deadline)
             _debug_log(f"codex stream recv id={item.get('id')} method={item.get('method')}")
             if item.get("error"):
-                raise CodexProxyError(str(item["error"]))
+                raise CodexBridgeError(str(item["error"]))
             if item.get("id") == thread_id_request:
                 thread_id = ((item.get("result") or {}).get("thread") or {}).get("id")
                 if not thread_id:
-                    raise CodexProxyError(f"thread/start returned no thread id: {item}")
+                    raise CodexBridgeError(f"thread/start returned no thread id: {item}")
                 turn_id_request = self._send_request(
                     proc,
                     "turn/start",
@@ -929,7 +935,7 @@ class CodexAppServerBridge:
                     yield _stream_delta_payload(model, content=text)
                 yield _stream_done_payload(model, "stop")
                 return
-        raise CodexProxyError("timed out waiting for Codex app-server stream")
+        raise CodexBridgeError("timed out waiting for Codex app-server stream")
 
     def _drain_ready_messages(self, proc: subprocess.Popen[str], *, seconds: float = 0.05) -> None:
         stdout = getattr(proc, "stdout", None)
@@ -986,12 +992,12 @@ class CodexAppServerBridge:
             if proc.stdout in ready:
                 line = proc.stdout.readline()
                 if not line:
-                    raise CodexProxyError("Codex app-server exited without output")
+                    raise CodexBridgeError("Codex app-server exited without output")
                 try:
                     return json.loads(line)
                 except json.JSONDecodeError as exc:
-                    raise CodexProxyError(f"invalid Codex app-server JSON line: {line[:500]}") from exc
-        raise CodexProxyError(
+                    raise CodexBridgeError(f"invalid Codex app-server JSON line: {line[:500]}") from exc
+        raise CodexBridgeError(
             f"timed out waiting for Codex app-server output pid={proc.pid} returncode={proc.poll()}"
         )
 
@@ -1042,11 +1048,11 @@ def _write_sse(handler: BaseHTTPRequestHandler, payload: dict[str, Any] | str) -
 
 
 def _log(message: str) -> None:
-    print(f"[pal-codex-proxy] {message}", flush=True)
+    print(f"[pal-codex-bridge] {message}", flush=True)
 
 
 def _debug_log(message: str) -> None:
-    if os.environ.get("PAL_CODEX_PROXY_DEBUG") == "1":
+    if os.environ.get("PAL_CODEX_BRIDGE_DEBUG") == "1" or os.environ.get("PAL_CODEX_PROXY_DEBUG") == "1":
         _log(message)
 
 
@@ -1059,14 +1065,14 @@ def _safe_json_method(line: str) -> str:
 
 
 def _make_handler(
-    bridge: CodexAppServerBridge,
+    bridge: CodexCliBridge,
     *,
     api_key: str | None = None,
-    model_ids: tuple[str, ...] = DEFAULT_CODEX_PROXY_MODELS,
+    model_ids: tuple[str, ...] = DEFAULT_CODEX_BRIDGE_MODELS,
     semaphore: threading.BoundedSemaphore | None = None,
 ):
-    class CodexProxyHandler(BaseHTTPRequestHandler):
-        server_version = "PalCodexProxy/0.1"
+    class CodexOpenAIBridgeHandler(BaseHTTPRequestHandler):
+        server_version = "PalCodexBridge/0.1"
 
         def _require_authorized(self) -> bool:
             if _request_authorized(self.headers, api_key):
@@ -1129,32 +1135,49 @@ def _make_handler(
         def log_message(self, format: str, *args: Any) -> None:
             return
 
-    return CodexProxyHandler
+    return CodexOpenAIBridgeHandler
 
 
-def run_codex_proxy_cli(
+def run_codex_openai_bridge_cli(
     *,
     host: str,
     port: int,
     codex_bin: str | None = None,
     timeout_seconds: int = 120,
-    api_key_env: str = DEFAULT_CODEX_PROXY_API_KEY_ENV,
-    models_env: str = DEFAULT_CODEX_PROXY_MODELS_ENV,
+    api_key_env: str = DEFAULT_CODEX_BRIDGE_API_KEY_ENV,
+    models_env: str = DEFAULT_CODEX_BRIDGE_MODELS_ENV,
     max_concurrency: int | None = None,
-    max_concurrency_env: str = DEFAULT_CODEX_PROXY_MAX_CONCURRENCY_ENV,
+    max_concurrency_env: str = DEFAULT_CODEX_BRIDGE_MAX_CONCURRENCY_ENV,
 ) -> int:
-    bridge = CodexAppServerBridge(codex_bin=codex_bin or _default_codex_command(), timeout_seconds=timeout_seconds)
-    api_key = os.environ.get(api_key_env, "").strip() if api_key_env else ""
-    model_ids = _parse_model_list(os.environ.get(models_env, "") if models_env else "")
+    bridge = CodexCliBridge(codex_bin=codex_bin or _default_codex_command(), timeout_seconds=timeout_seconds)
+    api_key = _env_value(
+        api_key_env,
+        legacy_env=LEGACY_CODEX_BRIDGE_API_KEY_ENV if api_key_env == DEFAULT_CODEX_BRIDGE_API_KEY_ENV else None,
+    )
+    model_ids = _parse_model_list(
+        _env_value(
+            models_env,
+            legacy_env=LEGACY_CODEX_BRIDGE_MODELS_ENV if models_env == DEFAULT_CODEX_BRIDGE_MODELS_ENV else None,
+        )
+    )
     concurrency = _parse_max_concurrency(
-        max_concurrency if max_concurrency is not None else os.environ.get(max_concurrency_env, "")
+        max_concurrency
+        if max_concurrency is not None
+        else _env_value(
+            max_concurrency_env,
+            legacy_env=(
+                LEGACY_CODEX_BRIDGE_MAX_CONCURRENCY_ENV
+                if max_concurrency_env == DEFAULT_CODEX_BRIDGE_MAX_CONCURRENCY_ENV
+                else None
+            ),
+        )
     )
     semaphore = threading.BoundedSemaphore(concurrency)
     server = ThreadingHTTPServer(
         (host, port),
         _make_handler(bridge, api_key=api_key, model_ids=model_ids, semaphore=semaphore),
     )
-    print(f"Pal Codex proxy listening on http://{host}:{port}/v1")
+    print(f"Pal Codex OpenAI bridge listening on http://{host}:{port}/v1")
     print(f"Using Codex command: {bridge.codex_bin}")
     print(f"Advertised models: {', '.join(model_ids)}")
     print(f"Max concurrent Codex requests: {concurrency}")
@@ -1167,3 +1190,13 @@ def run_codex_proxy_cli(
         bridge.close()
         server.server_close()
     return 0
+
+
+def _env_value(primary_env: str | None, *, legacy_env: str | None = None) -> str:
+    if primary_env:
+        value = os.environ.get(primary_env, "").strip()
+        if value:
+            return value
+    if legacy_env:
+        return os.environ.get(legacy_env, "").strip()
+    return ""

@@ -15,6 +15,14 @@ from uuid import uuid4
 from pal.behavior.decorators import affordance
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.control import ControlAction
+from pal.control.interactions import (
+    minion_question_answers,
+    minion_question_ready,
+    minion_question_resolve_delivery,
+    minion_question_session,
+    minion_question_session_with_selection,
+    minion_question_update_delivery,
+)
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.foundation import BoundedTTLBuffer, utc_now
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
@@ -23,6 +31,7 @@ from pal.minion.profiles import MinionProfileRegistry
 from pal.minion.prompt import TaskingPromptFragmentProvider
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.source import MinionControlEventHandler, MinionEventSource
+from pal.minion.work_order import build_planner_work_order, prompt_view_from_metadata
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -450,17 +459,13 @@ class MinionManagerProvider:
         family="minion",
         action_name="spawn",
         description=(
-            "Spawn, dispatch, launch, or run a minion worker from a serialized TaskContextPack or resolved work order. "
-            "This is the capability that sends a minion out to actually do the work. "
-            "Do not spawn from a bare goal/profile handoff. Prefer a reviewed draft_id or stored work_order_id; if you pass "
-            "task_context_pack directly, it must be a complete handoff with task_title, goal, instruction, source_summary, "
-            "conversation_summary, module_boundaries, milestones, acceptance_criteria, workspace, artifacts, and minion_profile. "
+            "Spawn, dispatch, launch, or run a minion worker from a stored work_order_id, reviewed draft_id, "
+            "or compiled TaskContextPack. Do not spawn from a bare goal/profile handoff. For structured minion work, "
+            "Pal should compile a role-specific prompt_view so the worker sees only its scoped module/milestone. "
             "For repo work, workspace should include repo_path; cwd with type=local_repo is accepted and normalized but repo_path is preferred. "
             "If the user explicitly asks for a specific LLM model or endpoint for this minion, resolve it to an enabled llm endpoint_id "
             "and pass preferred_endpoint_id. If the user does not specify one, omit preferred_endpoint_id so the minion uses the current "
             "Pal active endpoint at request time. "
-            "Use empty arrays or objects only when that section is truly not applicable. If those facts are missing, call "
-            "op_minion_draft_work_order first instead of launching the runner. "
             "Before choosing minion_profile, call intro_minion_profile_list and intro_minion_profile_read unless the user already named "
             "a valid registered profile. Runtime profile TOML files are loaded from runtime_root/plugins/minion/profiles/*.toml; profile truth is "
             "the live registry, not DB or chat memory. Do not invent profile ids."
@@ -482,10 +487,8 @@ class MinionManagerProvider:
                 "task_context_pack": {
                     "type": "object",
                     "description": (
-                        "Complete TaskContextPack handoff for direct spawn. Include work_order_id, goal, instruction, "
-                        "acceptance_criteria, workspace, artifacts, minion_profile, and metadata carrying task_title, "
-                        "source_summary, conversation_summary, module_boundaries, and milestones. Do not use a minimal "
-                        "goal-only packet here. For repo work, set workspace.repo_path; cwd plus type=local_repo is only a fallback."
+                        "Compiled TaskContextPack for direct spawn. Prefer metadata.prompt_view or a stored work_order_id; "
+                        "do not use a minimal goal-only packet. For repo work, set workspace.repo_path; cwd plus type=local_repo is only a fallback."
                     ),
                     "properties": {
                         "work_order_id": {"type": "string"},
@@ -501,25 +504,18 @@ class MinionManagerProvider:
                         "metadata": {
                             "type": "object",
                             "description": (
-                                "Work-order metadata, including task_id/task_title, source_summary, conversation_summary, "
-                                "module_boundaries, and milestones."
+                                "Work-order metadata. Structured runs should carry prompt_view or a role-specific work order object."
                             ),
                             "properties": {
                                 "task_id": {"type": "string"},
                                 "task_title": {"type": "string"},
-                                "source_summary": {"type": "string"},
-                                "conversation_summary": {"type": "string"},
-                                "module_boundaries": {},
+                                "prompt_view": {"type": "object"},
+                                "planner_work_order": {"type": "object"},
+                                "coder_work_order": {"type": "object"},
+                                "reviewer_work_order": {"type": "object"},
                                 "milestones": {"type": "array"},
                                 "preferred_endpoint_id": {"type": "string"},
                             },
-                            "required": [
-                                "task_title",
-                                "source_summary",
-                                "conversation_summary",
-                                "module_boundaries",
-                                "milestones",
-                            ],
                         },
                     },
                     "required": [
@@ -550,6 +546,14 @@ class MinionManagerProvider:
                 },
                 "draft_id": {"type": "string", "description": "Reviewed work-order draft to promote and spawn."},
                 "work_order_id": {"type": "string", "description": "Existing stored work order to hydrate and spawn."},
+                "final_plan_artifact": {
+                    "type": "object",
+                    "description": (
+                        "Validated planner FinalPlanArtifact. Pair with module_id to spawn one serial coder module work order; "
+                        "the manager will advance that module through its milestones one runner turn at a time."
+                    ),
+                },
+                "module_id": {"type": "string", "description": "Module id from final_plan_artifact to run with coder."},
                 "goal": {
                     "type": "string",
                     "description": "Optional override when paired with a stored work_order_id; never sufficient by itself.",
@@ -587,10 +591,8 @@ class MinionManagerProvider:
         family="minion",
         action_name="draft_work_order",
         description=(
-            "Draft a complete minion work order from user brainstorming or module-boundary discussion. Fill every handoff field "
-            "you can before spawning: task_title/title, goal, instruction, milestones, acceptance_criteria, artifacts, "
-            "conversation_summary, module_boundaries, workspace, source_summary, and minion_profile. Do not create a lazy "
-            "goal-only draft; empty arrays or objects are acceptable only when that section is truly not applicable."
+            "Draft a minion work order candidate from user brainstorming or module-boundary discussion. "
+            "Prefer structured module plans, prompt_view, and acceptance criteria over dumping raw conversation or payload JSON."
         ),
         args_schema={
             "type": "object",
@@ -599,9 +601,9 @@ class MinionManagerProvider:
                 "goal": {"type": "string", "description": "User-visible outcome the minion must achieve."},
                 "instruction": {"type": "string", "description": "Concrete handoff instructions, not just the goal repeated."},
                 "source_summary": {"type": "string", "description": "Facts, files, commands, or evidence that justify the work order."},
-                "conversation_summary": {"type": "string", "description": "Relevant user conversation context the minion needs."},
+                "conversation_summary": {"type": "string", "description": "Short relevant user context, only when needed."},
                 "module_boundaries": {
-                    "description": "Allowed scope, forbidden scope, ownership boundaries, and files/modules to inspect or avoid.",
+                    "description": "Positive module ownership boundaries and scoped responsibilities.",
                 },
                 "milestones": {
                     "type": "array",
@@ -627,17 +629,7 @@ class MinionManagerProvider:
                 "metadata": {"type": "object"},
             },
             "required": [
-                "task_title",
                 "goal",
-                "instruction",
-                "source_summary",
-                "conversation_summary",
-                "module_boundaries",
-                "milestones",
-                "acceptance_criteria",
-                "workspace",
-                "artifacts",
-                "minion_profile",
             ],
         },
     )
@@ -719,9 +711,58 @@ class MinionManagerProvider:
         except Exception as exc:
             return _capability_error("minion finalize failed", exc)
 
-    async def handle_control_action_async(self, action: ControlAction) -> str:
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
+        family="minion",
+        action_name="continue_work_order",
+        description="Continue a paused or awaiting minion parent work order from its current milestone",
+        args_schema={
+            "type": "object",
+            "properties": {"work_order_id": {"type": "string"}},
+            "required": ["work_order_id"],
+        },
+    )
+    def continue_work_order(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            self._ensure_manager_started()
+            result = self.client.request_sync("continue_work_order", {"work_order_id": str(call.args.get("work_order_id") or "")})
+            return _capability_from_rpc("minion work order continued", result)
+        except Exception as exc:
+            return _capability_error("minion work order continue failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
+        family="minion",
+        action_name="pause_work_order",
+        description="Pause a minion parent work order at its current milestone cursor",
+        args_schema={
+            "type": "object",
+            "properties": {"work_order_id": {"type": "string"}, "reason": {"type": "string"}},
+            "required": ["work_order_id"],
+        },
+    )
+    def pause_work_order(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            self._ensure_manager_started()
+            result = self.client.request_sync(
+                "pause_work_order",
+                {"work_order_id": str(call.args.get("work_order_id") or ""), "reason": str(call.args.get("reason") or "")},
+            )
+            return _capability_from_rpc("minion work order paused", result)
+        except Exception as exc:
+            return _capability_error("minion work order pause failed", exc)
+
+    async def handle_control_action_async(self, action: ControlAction) -> Any:
         if action.action_kind == "minion_lesson_decision":
             return await self._handle_lesson_decision_async(action)
+        if action.action_kind in {"minion_question_select", "minion_question_nav"}:
+            return await self._handle_question_interaction_async(action)
+        if action.action_kind == "minion_question_answer":
+            return await self._handle_question_answer_async(action)
+        if action.action_kind in {"minion_plan_continue", "minion_plan_pause", "minion_plan_finish"}:
+            return await self._handle_plan_control_async(action)
         if action.action_kind != "minion_approval_decision":
             return ""
         decision = str(action.args.get("decision") or "").strip().lower()
@@ -737,14 +778,107 @@ class MinionManagerProvider:
         result = await _to_thread(self.client.send_decision_sync, payload)
         status = str(result.get("status") or RuntimeStatus.OK)
         if status == RuntimeStatus.OK:
+            if decision == "accept_all":
+                return "Minion approval recorded; remaining approvals for this run will be accepted."
             return f"Minion approval {decision or 'decision'} recorded."
         return str(result.get("error") or "Minion approval decision failed.")
+
+    async def _handle_plan_control_async(self, action: ControlAction) -> str:
+        work_order_id = str(action.args.get("work_order_id") or action.target_id or "").strip()
+        if not work_order_id:
+            return "Minion work order action is missing work_order_id."
+        self._ensure_manager_started()
+        if action.action_kind == "minion_plan_continue":
+            result = await _to_thread(self.client.request_sync, "continue_work_order", {"work_order_id": work_order_id})
+            if str(result.get("status") or "") == "running_module":
+                module_id = str(result.get("module_id") or "")
+                return f"Minion work order continued{f' with {module_id}' if module_id else ''}."
+            return f"Minion work order continue result: {result.get('status') or 'unknown'}."
+        if action.action_kind == "minion_plan_pause":
+            result = await _to_thread(
+                self.client.request_sync,
+                "pause_work_order",
+                {"work_order_id": work_order_id, "reason": str(action.args.get("reason") or "user paused at milestone boundary")},
+            )
+            return f"Minion work order paused ({result.get('status') or 'unknown'})."
+        result = await _to_thread(
+            self.client.request_sync,
+            "finish_work_order",
+            {"work_order_id": work_order_id, "reason": str(action.args.get("reason") or "user finished at milestone boundary")},
+        )
+        return f"Minion work order finished ({result.get('status') or 'unknown'})."
+
+    async def _handle_question_answer_async(self, action: ControlAction) -> str:
+        work_order_id = str(action.args.get("work_order_id") or action.target_id or "").strip()
+        question_id = str(action.args.get("question_id") or "").strip()
+        if not work_order_id or not question_id:
+            return "Minion question answer is missing work_order_id or question_id."
+        answer = {
+            "question_id": question_id,
+            "selected_option_id": str(action.args.get("selected_option_id") or "").strip(),
+            "answer": str(action.args.get("answer") or "").strip(),
+            "run_id": str(action.args.get("run_id") or ""),
+            "minion_id": str(action.args.get("minion_id") or ""),
+            "turn_index": action.args.get("turn_index", 0),
+            "plan_revision": action.args.get("plan_revision", 0),
+        }
+        result = await _to_thread(self._repository().record_clarification_answer, work_order_id, answer)
+        if str(result.get("status") or RuntimeStatus.OK) != RuntimeStatus.OK:
+            return str(result.get("error") or "Minion question answer failed.")
+        resume = await _to_thread(self._resume_planner_after_question_answer, work_order_id, action)
+        if str(resume.get("status") or "") == "resumed":
+            run_id = str((resume.get("run") or {}).get("run_id") or "")
+            return f"Minion question answer recorded; planner resumed{f' as {run_id}' if run_id else ''}."
+        if str(resume.get("status") or "") == "skipped":
+            return "Minion question answer recorded."
+        return f"Minion question answer recorded, but planner resume failed: {resume.get('error') or resume.get('status') or 'unknown error'}"
+
+    async def _handle_question_interaction_async(self, action: ControlAction) -> Any:
+        session = minion_question_session(action.args)
+        if action.action_kind == "minion_question_nav":
+            session["current_index"] = action.args.get("target_index", session.get("current_index", 0))
+            if action.route is None:
+                return "Minion question page updated."
+            delivery = minion_question_update_delivery(session, action.route)
+            return {"delivery": delivery} if delivery is not None else "Minion question page updated."
+        updated = minion_question_session_with_selection(
+            session,
+            question_id=str(action.args.get("question_id") or ""),
+            selected_option_id=str(action.args.get("selected_option_id") or ""),
+            answer=str(action.args.get("answer") or ""),
+        )
+        if not minion_question_ready(updated):
+            if action.route is None:
+                return "Minion question answer recorded."
+            delivery = minion_question_update_delivery(updated, action.route)
+            return {"delivery": delivery} if delivery is not None else "Minion question answer recorded."
+        clarification = {
+            "clarification_id": str(updated.get("clarification_id") or ""),
+            "run_id": str(updated.get("run_id") or ""),
+            "minion_id": str(updated.get("minion_id") or ""),
+            "work_order_id": str(updated.get("work_order_id") or ""),
+            "turn_index": updated.get("turn_index", 0),
+            "plan_revision": updated.get("plan_revision", 0),
+            "answers": minion_question_answers(updated),
+        }
+        self._ensure_manager_started()
+        try:
+            result = await _to_thread(self.client.send_clarification_sync, clarification)
+        except Exception as exc:
+            return f"Minion clarification submit failed: {exc}"
+        if not bool(result.get("ok", True)):
+            return str(result.get("error") or "Minion clarification submit failed.")
+        if action.route is None:
+            return "Planner input received; continuing planning."
+        delivery = minion_question_resolve_delivery(updated, action.route, "Planner input received. Continuing planning.")
+        return {"delivery": delivery} if delivery is not None else "Planner input received; continuing planning."
 
     async def _handle_lesson_decision_async(self, action: ControlAction) -> str:
         decision = str(action.args.get("decision") or "").strip().lower()
         work_order_id = str(action.args.get("work_order_id") or action.target_id or "").strip()
         task_lessons = _string_list(action.args.get("task_lessons"))
         system_lessons = _string_list(action.args.get("system_lessons"))
+        memory_candidates = _dict_list(action.args.get("memory_candidates"))
         if decision == "reject":
             return "Minion lessons discarded."
         if decision == "edit":
@@ -761,17 +895,33 @@ class MinionManagerProvider:
         )
         if str(result.get("status") or RuntimeStatus.OK) != RuntimeStatus.OK:
             return str(result.get("error") or "Minion lesson absorption failed.")
-        l3_result = await _to_thread(self._commit_lessons_to_l3, work_order_id, task_lessons, system_lessons)
+        l3_result = await _to_thread(
+            self._commit_approved_memory_to_l3,
+            work_order_id,
+            task_lessons,
+            system_lessons,
+            memory_candidates,
+        )
         total = int(result.get("task_lesson_count") or 0) + int(result.get("system_lesson_count") or 0)
+        reviewed = total + len(memory_candidates)
         if l3_result:
-            return f"Minion lessons accepted ({total} stored; {l3_result})."
-        return f"Minion lessons accepted ({total} stored)."
+            return f"Minion memory accepted ({reviewed} reviewed; {total} lessons stored; {l3_result})."
+        return f"Minion memory accepted ({reviewed} reviewed; {total} lessons stored)."
 
     def _commit_lessons_to_l3(self, work_order_id: str, task_lessons: list[str], system_lessons: list[str]) -> str:
+        return self._commit_approved_memory_to_l3(work_order_id, task_lessons, system_lessons, [])
+
+    def _commit_approved_memory_to_l3(
+        self,
+        work_order_id: str,
+        task_lessons: list[str],
+        system_lessons: list[str],
+        memory_candidates: list[dict[str, Any]],
+    ) -> str:
         if self.context is None:
             return ""
         runtime = getattr(self.context, "execution_runtime", None)
-        if runtime is None or "op_l3_commit_write" not in getattr(runtime, "capabilities", {}):
+        if runtime is None or "op_memory_write" not in getattr(runtime, "capabilities", {}):
             return ""
         committed = 0
         for lesson in task_lessons:
@@ -779,6 +929,9 @@ class MinionManagerProvider:
                 committed += 1
         for lesson in system_lessons:
             if self._commit_one_lesson_to_l3(runtime, lesson, scope="system", work_order_id=work_order_id):
+                committed += 1
+        for candidate in memory_candidates:
+            if self._commit_one_memory_candidate_to_l3(runtime, candidate, work_order_id=work_order_id):
                 committed += 1
         return f"{committed} memory records committed" if committed else ""
 
@@ -789,7 +942,7 @@ class MinionManagerProvider:
         title = f"Minion {scope} lesson: {_preview_text(text, limit=72)}"
         result = runtime.execute(
             CapabilityCall(
-                name="op_l3_commit_write",
+                name="op_memory_write",
                 args={
                     "kind": "case",
                     "title": title,
@@ -802,6 +955,13 @@ class MinionManagerProvider:
                 },
             )
         )
+        return str(getattr(result, "status", "") or "") == RuntimeStatus.OK
+
+    def _commit_one_memory_candidate_to_l3(self, runtime: Any, candidate: dict[str, Any], *, work_order_id: str) -> bool:
+        args = _l3_commit_args_from_memory_candidate(candidate, work_order_id=work_order_id)
+        if not args:
+            return False
+        result = runtime.execute(CapabilityCall(name="op_memory_write", args=args))
         return str(getattr(result, "status", "") or "") == RuntimeStatus.OK
 
     def has_pending_events(self) -> bool:
@@ -1086,6 +1246,29 @@ class MinionManagerProvider:
         metadata["preferred_endpoint_id"] = preferred_endpoint_id
         return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
 
+    def _resume_planner_after_question_answer(self, work_order_id: str, action: ControlAction) -> dict[str, Any]:
+        repository = self._repository()
+        try:
+            pack = repository.pack_for_work_order(work_order_id)
+        except Exception as exc:
+            return {"status": "error", "error": str(exc) or exc.__class__.__name__}
+        if not _is_planner_pack(pack):
+            return {"status": "skipped", "reason": "work_order_is_not_planner", "work_order_id": work_order_id}
+        metadata = _planner_resume_metadata(pack, action)
+        if action.route is not None:
+            metadata["control_route"] = _control_route_payload_from_route(action.route)
+        resumed = TaskContextPack.from_dict(
+            {
+                **pack.to_dict(),
+                "metadata": metadata,
+                "minion_profile": pack.minion_profile or "software_engineering.planner",
+            }
+        )
+        resumed = repository.prepare_pack_for_spawn(resumed)
+        self._ensure_manager_started()
+        result = self.client.spawn_sync(resumed.to_dict())
+        return {"status": "resumed", "work_order_id": work_order_id, "run": dict(result or {})}
+
 
 def inspect_minion(provider: MinionManagerProvider) -> MinionSnapshot:
     payload = provider._status_payload()
@@ -1097,6 +1280,69 @@ def inspect_minion(provider: MinionManagerProvider) -> MinionSnapshot:
         run_count=int(payload.get("run_count") or 0),
         pending_event_count=int(payload.get("pending_event_count") or 0),
     )
+
+
+def _is_planner_pack(pack: TaskContextPack) -> bool:
+    profile = str(pack.minion_profile or "").strip().lower()
+    if profile.endswith(".planner") or profile == "planner":
+        return True
+    metadata = dict(pack.metadata or {})
+    if isinstance(metadata.get("planner_work_order"), dict):
+        return True
+    prompt_view = prompt_view_from_metadata(metadata, workspace=dict(pack.workspace))
+    return str(prompt_view.get("role") or "").strip().lower() == "planner"
+
+
+def _planner_resume_metadata(pack: TaskContextPack, action: ControlAction) -> dict[str, Any]:
+    metadata = dict(pack.metadata or {})
+    answers = [dict(item) for item in list(metadata.get("clarification_answers") or []) if isinstance(item, dict)]
+    if not answers:
+        answers = [
+            {
+                "question_id": str(action.args.get("question_id") or ""),
+                "selected_option_id": str(action.args.get("selected_option_id") or ""),
+                "answer": str(action.args.get("answer") or ""),
+                "run_id": str(action.args.get("run_id") or ""),
+                "minion_id": str(action.args.get("minion_id") or ""),
+                "turn_index": action.args.get("turn_index", 0),
+                "plan_revision": action.args.get("plan_revision", 0),
+            }
+        ]
+        metadata["clarification_answers"] = answers
+    planner_work_order = dict(metadata.get("planner_work_order") or {})
+    if not planner_work_order:
+        planner_work_order = build_planner_work_order(
+            goal=pack.goal or pack.instruction,
+            task_id=str(metadata.get("task_id") or ""),
+            work_order_id=pack.work_order_id,
+            turn_index=0,
+            plan_revision=0,
+        )
+    planner_work_order["turn_index"] = int(_coerce_int(planner_work_order.get("turn_index"), default=0)) + 1
+    planner_work_order["plan_revision"] = int(_coerce_int(planner_work_order.get("plan_revision"), default=0)) + 1
+    planner_work_order["clarifications"] = answers
+    metadata["planner_work_order"] = planner_work_order
+    metadata.pop("prompt_view", None)
+    return metadata
+
+
+def _control_route_payload_from_route(route: Any) -> dict[str, Any]:
+    if route is None:
+        return {}
+    return {
+        "endpoint_id": str(getattr(route, "endpoint_id", "") or ""),
+        "channel_kind": str(getattr(route, "channel_kind", "") or ""),
+        "reply_target": dict(getattr(route, "reply_target", {}) or {}),
+        "control_scope_key": str(getattr(route, "control_scope_key", "") or ""),
+        "correlation_id": str(getattr(route, "correlation_id", "") or ""),
+    }
+
+
+def _coerce_int(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def _minion_observation_from_terminal(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1142,10 +1388,18 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
             EventKind.MINION_PROGRESS: [event_handler],
             EventKind.MINION_CHECKPOINT: [event_handler],
             EventKind.MINION_TERMINAL: [event_handler],
+            EventKind.MINION_MODULE_COMPLETED: [event_handler],
+            EventKind.MINION_CLARIFICATION_REQUEST: [event_handler],
         },
         control_action_handlers={
             "minion_approval_decision": provider.handle_control_action_async,
             "minion_lesson_decision": provider.handle_control_action_async,
+            "minion_question_select": provider.handle_control_action_async,
+            "minion_question_nav": provider.handle_control_action_async,
+            "minion_question_answer": provider.handle_control_action_async,
+            "minion_plan_continue": provider.handle_control_action_async,
+            "minion_plan_pause": provider.handle_control_action_async,
+            "minion_plan_finish": provider.handle_control_action_async,
         },
         ports={"minion": provider},
         shutdown_sync=provider._stop_manager,
@@ -1156,6 +1410,8 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
     context.event_handler_registry.register(EventKind.MINION_PROGRESS, event_handler, module_id="minion")
     context.event_handler_registry.register(EventKind.MINION_CHECKPOINT, event_handler, module_id="minion")
     context.event_handler_registry.register(EventKind.MINION_TERMINAL, event_handler, module_id="minion")
+    context.event_handler_registry.register(EventKind.MINION_MODULE_COMPLETED, event_handler, module_id="minion")
+    context.event_handler_registry.register(EventKind.MINION_CLARIFICATION_REQUEST, event_handler, module_id="minion")
     context.prompt_fragment_registry.register(prompt_provider)
     return handle
 
@@ -1173,6 +1429,29 @@ def _pack_from_args(args: dict[str, Any], *, repository: MinionTaskingRepository
         return TaskContextPack.from_dict(dict(args.get("task_context_pack") or {}))
     if str(args.get("task_json") or "").strip():
         return TaskContextPack.from_json(str(args.get("task_json") or ""))
+    if isinstance(args.get("final_plan_artifact"), dict):
+        if repository is None:
+            raise ValueError("repository is required to spawn from final_plan_artifact")
+        module_id = str(args.get("module_id") or "").strip()
+        if module_id:
+            return repository.build_coder_module_pack_from_plan(
+                dict(args.get("final_plan_artifact") or {}),
+                module_id=module_id,
+                work_order_id=str(args.get("work_order_id") or ""),
+                workspace=dict(args.get("workspace") or {}),
+                metadata=dict(args.get("metadata") or {}),
+                goal=str(args.get("goal") or ""),
+                instruction=str(args.get("instruction") or ""),
+                minion_profile=str(args.get("minion_profile") or "software_engineering.coder"),
+            )
+        return repository.build_plan_parent_pack_from_plan(
+            dict(args.get("final_plan_artifact") or {}),
+            work_order_id=str(args.get("work_order_id") or ""),
+            workspace=dict(args.get("workspace") or {}),
+            metadata=dict(args.get("metadata") or {}),
+            goal=str(args.get("goal") or ""),
+            instruction=str(args.get("instruction") or ""),
+        )
     draft_id = str(args.get("draft_id") or "").strip()
     if draft_id and repository is not None:
         promoted = repository.promote_work_order_draft(
@@ -1259,6 +1538,54 @@ def _string_list(value: Any) -> list[str]:
         seen.add(text)
         result.append(text)
     return result
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _l3_commit_args_from_memory_candidate(candidate: dict[str, Any], *, work_order_id: str) -> dict[str, Any]:
+    kind = str(candidate.get("kind") or candidate.get("document_kind") or "case").strip() or "case"
+    scope = str(candidate.get("scope") or "task").strip() or "task"
+    title = " ".join(str(candidate.get("title") or "").split())
+    summary = " ".join(str(candidate.get("summary") or candidate.get("search_text") or title).split())
+    search_text = str(candidate.get("search_text") or summary or title).strip()
+    if not title:
+        title = _preview_text(summary or search_text, limit=72)
+    if not summary:
+        summary = search_text or title
+    if not search_text:
+        search_text = summary or title
+    if not kind or not title or not summary or not search_text:
+        return {}
+    topics_payload = candidate.get("topics")
+    if isinstance(topics_payload, str):
+        topics = [topics_payload]
+    elif isinstance(topics_payload, (list, tuple)):
+        topics = list(topics_payload)
+    else:
+        topics = []
+    args: dict[str, Any] = {
+        "kind": kind,
+        "scope": scope,
+        "title": title,
+        "summary": summary,
+        "search_text": search_text,
+        "topics": [str(value) for value in topics if str(value or "").strip()],
+        "payload": dict(candidate.get("payload") or {}),
+    }
+    task_id = str(candidate.get("task_id") or "").strip()
+    if task_id:
+        args["task_id"] = task_id
+    elif scope == "task" and work_order_id:
+        args["task_id"] = work_order_id
+    for key in ("canonical_key", "situation_text", "task_text", "action_text", "result_text"):
+        value = str(candidate.get(key) or "").strip()
+        if value:
+            args[key] = value
+    return args
 
 
 def _preview_text(text: str, *, limit: int) -> str:

@@ -96,6 +96,9 @@ class MinionManagerClient:
     def send_decision_sync(self, decision: dict[str, Any]) -> dict[str, Any]:
         return self.request_sync("send_decision", {"decision": dict(decision)})
 
+    def send_clarification_sync(self, clarification: dict[str, Any]) -> dict[str, Any]:
+        return self.request_sync("send_clarification", {"clarification": dict(clarification)})
+
     def finalize_work_order_sync(self, work_order_id: str, **params: Any) -> dict[str, Any]:
         return self.request_sync("finalize_work_order", {"work_order_id": work_order_id, **dict(params)})
 

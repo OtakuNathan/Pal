@@ -664,8 +664,11 @@ class TurnExecutor:
         )
         base_messages = list(prompt.messages)
         prepared_tool_protocol = self._prepare_tool_protocol_for_prompt(continuation.tool_protocol_messages)
-        if continuation.tool_protocol_messages:
-            prompt.messages.extend(prepared_tool_protocol)
+        prompt_messages = self._merge_tool_protocol_into_prompt(
+            base_messages,
+            prepared_tool_protocol,
+            primary_input=extract_text_from_payload(getattr(getattr(assembly_context, "event", None), "payload", None)).strip(),
+        )
         metadata = dict(prompt.metadata)
         if snapshot_think_level:
             metadata["think_level"] = snapshot_think_level
@@ -679,7 +682,7 @@ class TurnExecutor:
             prepared_tool_protocol=prepared_tool_protocol,
         )
         prompt = CanonicalLLMRequest(
-            messages=list(prompt.messages),
+            messages=prompt_messages,
             max_output_tokens=prompt.max_output_tokens,
             model_hint=prompt.model_hint,
             temperature=prompt.temperature,
@@ -687,6 +690,62 @@ class TurnExecutor:
             metadata=metadata,
         )
         return prompt
+
+    def _merge_tool_protocol_into_prompt(
+        self,
+        base_messages: list[dict[str, Any]],
+        prepared_tool_protocol: list[dict[str, Any]],
+        *,
+        primary_input: str,
+    ) -> list[dict[str, Any]]:
+        if not prepared_tool_protocol:
+            return list(base_messages)
+        split = self._split_final_user_context(base_messages, primary_input=primary_input)
+        if split is None:
+            return [*base_messages, *prepared_tool_protocol]
+        prefix, current_user_message, trailing_context_message = split
+        messages = [*prefix, current_user_message, *prepared_tool_protocol]
+        if trailing_context_message is not None:
+            messages.append(trailing_context_message)
+        return messages
+
+    def _split_final_user_context(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        primary_input: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any] | None] | None:
+        if not messages or not primary_input:
+            return None
+        last = dict(messages[-1])
+        if str(last.get("role") or "").strip() != "user":
+            return None
+        content = last.get("content")
+        if not isinstance(content, list):
+            return None
+        parts = [dict(part) for part in content if isinstance(part, dict)]
+        if not parts:
+            return None
+        final_part = parts[-1]
+        if final_part.get("type") != "text" or str(final_part.get("text") or "") != primary_input:
+            return None
+        context_parts = parts[:-1]
+        if any(str(part.get("type") or "") != "text" for part in context_parts):
+            return None
+        current_user_message = {**last, "content": primary_input}
+        trailing_context_message = None
+        if context_parts:
+            trailing_context_message = {
+                "role": "user",
+                "content": self._coerce_text_parts_content(context_parts),
+            }
+        return list(messages[:-1]), current_user_message, trailing_context_message
+
+    @staticmethod
+    def _coerce_text_parts_content(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
+        if len(parts) == 1 and parts[0].get("type") == "text":
+            return str(parts[0].get("text") or "")
+        return parts
 
     def _resolve_llm_capabilities(self, continuation) -> dict[str, Any]:
         llm_runtime = self.context.port_registry.get("llm:llm")
@@ -724,7 +783,7 @@ class TurnExecutor:
         prepared_tool_protocol: list[dict[str, Any]],
     ) -> dict[str, int]:
         system_chars = sum(
-            len(str(message.get("content", "")))
+            self._estimate_prompt_message_chars(message)
             for message in base_messages
             if str(message.get("role") or "").strip() == "system"
         )
@@ -734,12 +793,12 @@ class TurnExecutor:
         if not primary_input:
             for message in reversed(base_messages):
                 if str(message.get("role") or "").strip() == "user":
-                    primary_input = str(message.get("content", "")).strip()
+                    primary_input = self._message_content_text(message.get("content")).strip()
                     if primary_input:
                         break
         current_user_chars = len(primary_input)
         base_non_system_chars = sum(
-            len(str(message.get("content", "")))
+            self._estimate_prompt_message_chars(message)
             for message in base_messages
             if str(message.get("role") or "").strip() != "system"
         )
@@ -758,7 +817,7 @@ class TurnExecutor:
     def _build_tool_call_budget(self, continuation, *, execution_call=None) -> ToolCallBudget:
         cfg = self._config
         token_limit = cfg.max_tool_result_tokens
-        if execution_call is not None and str(getattr(execution_call, "name", "") or "").strip() == "shell.exec":
+        if execution_call is not None and str(getattr(execution_call, "name", "") or "").strip() == "shell_exec":
             token_limit = min(cfg.max_tool_result_tokens, cfg.default_max_output_tokens)
         max_output_chars = min(
             cfg.default_max_result_size_chars,
@@ -827,14 +886,14 @@ class TurnExecutor:
     @staticmethod
     def _tool_result_chars(messages: list[dict[str, Any]]) -> int:
         return sum(
-            len(str(message.get("content", "")))
+            TurnExecutor._message_content_chars(message.get("content"))
             for message in messages
             if str(message.get("role") or "").strip() == "tool"
         )
 
     @staticmethod
     def _estimate_prompt_message_chars(message: dict[str, Any]) -> int:
-        total = len(str(message.get("content", "")))
+        total = TurnExecutor._message_content_chars(message.get("content"))
         tool_calls = message.get("tool_calls")
         if tool_calls:
             try:
@@ -845,6 +904,22 @@ class TurnExecutor:
         if tool_call_id:
             total += len(tool_call_id)
         return total
+
+    @staticmethod
+    def _message_content_chars(content: Any) -> int:
+        return len(TurnExecutor._message_content_text(content))
+
+    @staticmethod
+    def _message_content_text(content: Any) -> str:
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type") or "") == "text":
+                    parts.append(str(item.get("text") or ""))
+            return "\n".join(part for part in parts if part)
+        return str(content or "")
 
     def _render_tool_preview(self, content: str) -> str:
         if len(content) <= self._config.active_tool_result_preview:
@@ -940,8 +1015,8 @@ class TurnExecutor:
         continuation.pending_tool_results = []
 
     def _render_tool_result_content(self, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> str:
-        if self._is_l3_recall_tool_call(tool_call.name):
-            return self._render_l3_recall_tool_observation(tool_call, result)
+        if self._is_memory_recall_tool_call(tool_call.name):
+            return self._render_memory_recall_tool_observation(tool_call, result)
         if str(result.llm_text or "").strip():
             return str(result.llm_text).strip()
         if str(result.text or "").strip():
@@ -951,11 +1026,11 @@ class TurnExecutor:
         return "ok" if result.ok else "error"
 
     @staticmethod
-    def _is_l3_recall_tool_call(name: str) -> bool:
+    def _is_memory_recall_tool_call(name: str) -> bool:
         normalized = str(name or "").strip()
-        return normalized == "op_l3_recall_query" or normalized.endswith("_l3_recall_query")
+        return normalized == "op_memory_recall" or normalized.endswith("_memory_recall")
 
-    def _render_l3_recall_tool_observation(self, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> str:
+    def _render_memory_recall_tool_observation(self, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> str:
         provider_id = str(tool_call.args.get("target_id") or "").strip() or "default"
         queries = [str(value).strip() for value in list(tool_call.args.get("queries") or []) if str(value).strip()]
         topic_scope = [str(value).strip() for value in list(tool_call.args.get("topic_scope") or []) if str(value).strip()]
@@ -1112,7 +1187,7 @@ class TurnExecutor:
         if callable(async_method):
             result = async_method(
                 source_text,
-                max_output_tokens=min(max(192, reserved_output_tokens or 0), 384),
+                max_output_tokens=min(max(768, reserved_output_tokens or 0), 2048),
                 preferred_endpoint_id=preferred_endpoint_id,
                 preferred_model_id=preferred_model_id,
             )

@@ -196,8 +196,8 @@ class MinionApprovalDecision:
         decision = str(payload.get("decision") or "").strip().lower()
         if not approval_id:
             raise ValueError("approval_id is required")
-        if decision not in {"accept", "reject", "edit"}:
-            raise ValueError("decision must be accept, reject, or edit")
+        if decision not in {"accept", "accept_all", "reject", "edit"}:
+            raise ValueError("decision must be accept, accept_all, reject, or edit")
         return cls(
             approval_id=approval_id,
             decision=decision,

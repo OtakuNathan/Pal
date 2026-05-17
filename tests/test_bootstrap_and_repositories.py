@@ -43,11 +43,11 @@ from pal.llm.adapters import LLMProviderAdapter, LLMProviderRegistry, build_defa
 from pal.memory import HashingEmbedder, L3CommitRequest, L3CorrectRequest, L3ProviderSelector, MemoryPackRequest, MemoryQuery, MemoryService
 from pal.plugins.l3 import SQLiteVecL3Plugin
 from pal.plugins import PluginBundleRepository
-from pal.service import ServiceDefinition, ServiceRepository
+from pal.proactive import ProactiveDefinition, ProactiveRepository
 from pal.shared import LLMFinishReason, LLMStreamEventKind
 from pal.stream_events import NormalizedLLMStreamEvent
 from pal.wizard import WizardService
-from pal.web_fetch import BrowserServiceManager, WebFetchProviderRepository
+from pal.web_fetch import DEFAULT_WEB_FETCH_USER_AGENT, BrowserServiceManager, WebFetchProviderRepository, plain_http_fetch
 from pal.web_search import WebSearchItem, WebSearchProviderRepository
 
 
@@ -103,6 +103,13 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.database.close()
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
+    def _find_search_hit_by_canonical(self, core, search, canonical_path: str) -> dict:
+        _ = core
+        for item in search.structured["hits"]:
+            if item.get("name") == canonical_path:
+                return item
+        self.fail(f"search result did not include readable capability {canonical_path}")
+
     def test_bootstrap_creates_only_new_tables(self) -> None:
         conn = sqlite3.connect(self.db_path)
         try:
@@ -120,30 +127,30 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("llm_endpoints", tables)
         self.assertIn("pal_runtime_settings", tables)
         self.assertIn("plugin_bundles", tables)
-        self.assertIn("service_definitions", tables)
-        self.assertIn("service_runs", tables)
+        self.assertIn("proactive_definitions", tables)
+        self.assertIn("proactive_runs", tables)
         self.assertIn("web_search_providers", tables)
         self.assertIn("web_fetch_providers", tables)
         self.assertNotIn("users", tables)
         self.assertNotIn("conversation_routes", tables)
         self.assertNotIn("pal_memories", tables)
 
-    def test_compose_runtime_includes_service_runtime(self) -> None:
+    def test_compose_runtime_includes_proactive_runtime(self) -> None:
         handle = compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
 
-        self.assertIsNotNone(handle.service_manager)
-        self.assertIsNotNone(handle.service_repository)
-        self.assertIsNotNone(handle.service_runner)
+        self.assertIsNotNone(handle.proactive_manager)
+        self.assertIsNotNone(handle.proactive_repository)
+        self.assertIsNotNone(handle.proactive_runner)
         self.assertIn("proactive", handle.core.context.module_registry.modules)
 
-    def test_service_repository_round_trips_definition_and_run(self) -> None:
-        repository = ServiceRepository()
-        definition = ServiceDefinition(
-            service_id="daily_digest",
+    def test_proactive_repository_round_trips_definition_and_run(self) -> None:
+        repository = ProactiveRepository()
+        definition = ProactiveDefinition(
+            proactive_id="daily_digest",
             goal="Summarize repository updates",
             method="Review recent changes and publish a short digest.",
             skill_refs=["git", "summary"],
@@ -157,7 +164,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         stored = repository.list_definitions()
 
         self.assertEqual(len(stored), 1)
-        self.assertEqual(stored[0].definition.service_id, "daily_digest")
+        self.assertEqual(stored[0].definition.proactive_id, "daily_digest")
         self.assertEqual(stored[0].definition.skill_refs, ["git", "summary"])
         self.assertEqual(stored[0].definition.out_reply_target, {"session_id": "session-1", "request_id": "req-1"})
         self.assertEqual(stored[0].next_due_at_utc, "2026-04-11T01:00:00+00:00")
@@ -178,7 +185,6 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         persona = repository.get_persona()
         preferences = repository.get_user_preferences()
-        state = repository.get_pal_state()
 
         self.assertIsNotNone(persona)
         self.assertEqual(persona.persona_id, DEFAULT_PERSONA_ID)
@@ -190,9 +196,24 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(preferences.timezone, "Asia/Shanghai")
         self.assertEqual(preferences.preferences_blob, {})
 
-        self.assertIsNotNone(state)
-        self.assertEqual(state.status, "idle")
-        self.assertEqual(state.top_of_mind_refs, [])
+    def test_identity_repository_refreshes_legacy_empty_defaults(self) -> None:
+        repository = IdentityRepository()
+        repository.ensure_defaults(display_name="pal", language="en")
+
+        repository.ensure_defaults()
+
+        persona = repository.get_persona()
+        preferences = repository.get_user_preferences()
+
+        self.assertIsNotNone(persona)
+        self.assertEqual(persona.display_name, "Pal")
+        self.assertIn("Default to the user's language", persona.language)
+        self.assertEqual(persona.vibe, "thoughtful, direct, warm, humorous, non-preachy.")
+        self.assertEqual(persona.tone, "direct, humorous")
+        self.assertIn("Never fabricate facts, memory, or runtime state.", persona.core_policy)
+        self.assertIsNotNone(preferences)
+        self.assertIn("Be concise.", preferences.style_preference)
+        self.assertEqual(preferences.timezone, "Asia/Shanghai")
 
     def test_channel_endpoint_repository_upserts_and_filters_enabled_endpoints(self) -> None:
         repository = ChannelEndpointRepository()
@@ -364,19 +385,19 @@ class PalV2BootstrapTests(unittest.TestCase):
         repository = LLMEndpointRepository()
         settings = RuntimeSettingRepository()
         endpoint = repository.upsert(
-            endpoint_id="codex_proxy",
+            endpoint_id="codex_bridge",
             provider="openai",
             model_id="openai/gpt-5.4",
             api_mode="openai_chat",
             base_url="http://127.0.0.1:8765/v1",
             auth_kind="api_key_ref",
-            credential_ref="codex_proxy:api-key",
+            credential_ref="codex_bridge:api-key",
             priority=0,
             enabled=True,
         )
-        settings.set_active_llm_endpoint_id("codex_proxy")
+        settings.set_active_llm_endpoint_id("codex_bridge")
         secret_store = InMemorySecretStore()
-        secret_ref = SecretRef(service="codex_proxy", account="api-key")
+        secret_ref = SecretRef(service="codex_bridge", account="api-key")
         secret_store.set_secret(secret_ref, "old-token")
         resolver = LiteLLMCredentialResolver(secret_store=secret_store)
         invoker = LiteLLMEndpointInvoker(credentials=resolver)
@@ -392,7 +413,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         payload = runtime.refresh_llm_endpoints()
 
-        refreshed_endpoint = runtime.endpoint_resolver.primary(preferred_endpoint_id="codex_proxy")
+        refreshed_endpoint = runtime.endpoint_resolver.primary(preferred_endpoint_id="codex_bridge")
         assert refreshed_endpoint is not None
         self.assertTrue(payload["credentials_refreshed"])
         self.assertTrue(payload["provider_adapters_refreshed"])
@@ -560,7 +581,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_litellm_invoker_supplies_dummy_key_for_local_openai_endpoint(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="codex_proxy",
+            endpoint_id="codex_bridge",
             provider="openai",
             model_id="gpt-5.4",
             api_mode="openai_chat",
@@ -580,21 +601,21 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(kwargs["api_key"], "local-provider-auth")
         self.assertEqual(kwargs["api_base"], "http://127.0.0.1:8765/v1")
 
-    def test_litellm_invoker_forwards_generation_controls_for_codex_proxy(self) -> None:
+    def test_litellm_invoker_forwards_generation_controls_for_codex_bridge(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="codex_proxy",
-            provider="codex_proxy",
+            endpoint_id="codex_bridge",
+            provider="codex_bridge",
             model_id="hosted_vllm/gpt-5.4",
             api_mode="openai_chat",
             base_url="http://127.0.0.1:8765/v1",
             auth_kind="api_key_ref",
-            credential_ref="codex_proxy:api-key",
+            credential_ref="codex_bridge:api-key",
             priority=0,
             enabled=True,
-            capabilities_blob={"codex_proxy": True},
+            capabilities_blob={"codex_bridge": True},
         )
         secret_store = InMemorySecretStore()
-        secret_store.set_secret(SecretRef(service="codex_proxy", account="api-key"), "proxy-token")
+        secret_store.set_secret(SecretRef(service="codex_bridge", account="api-key"), "bridge-token")
         invoker = LiteLLMEndpointInvoker(
             credentials=LiteLLMCredentialResolver(secret_store=secret_store)
         )
@@ -619,7 +640,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(kwargs["api_key"], "proxy-token")
+        self.assertEqual(kwargs["api_key"], "bridge-token")
         self.assertEqual(kwargs["model"], "hosted_vllm/gpt-5.4")
         self.assertIn("tools", kwargs)
         self.assertEqual(kwargs["temperature"], 0.7)
@@ -885,13 +906,13 @@ class PalV2BootstrapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="pal_secret_reload_test_") as tmp:
             secrets_path = Path(tmp) / "secrets.json"
             first = EncryptedFileSecretStore(secrets_path)
-            ref = SecretRef(service="codex_proxy", account="api-key")
+            ref = SecretRef(service="codex_bridge", account="api-key")
             self.assertIsNone(first.get_secret(ref))
 
             second = EncryptedFileSecretStore(secrets_path)
-            second.set_secret(ref, "proxy-token")
+            second.set_secret(ref, "bridge-token")
 
-            self.assertEqual(first.get_secret(ref), "proxy-token")
+            self.assertEqual(first.get_secret(ref), "bridge-token")
 
     def test_oauth_profile_without_access_token_does_not_become_api_key(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
@@ -1105,8 +1126,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(handle.core.context.module_registry.get("web_search"))
         self.assertIsNotNone(handle.core.context.module_registry.get("web_fetch"))
         self.assertIsNotNone(handle.core.context.module_registry.get("mcp"))
-        self.assertIn("op_web_search_query", handle.core.context.capability_registry.descriptors)
-        self.assertIn("op_web_fetch_read", handle.core.context.capability_registry.descriptors)
+        self.assertIn("op_web_search", handle.core.context.capability_registry.descriptors)
+        self.assertIn("op_web_read", handle.core.context.capability_registry.descriptors)
+        self.assertIn("op_web_screenshot", handle.core.context.capability_registry.descriptors)
         self.assertIn("op_mcp_image_prepare", handle.core.context.capability_registry.descriptors)
         self.assertIn("intro_module_web_search_show", handle.core.context.capability_registry.descriptors)
         self.assertIn("intro_module_web_fetch_show", handle.core.context.capability_registry.descriptors)
@@ -1117,8 +1139,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(
             any(name.startswith("op_web_fetch_mgmt_set_config") for name in handle.core.context.capability_registry.descriptors)
         )
-        self.assertIn("op_web_search_query", tool_names)
-        self.assertIn("op_web_fetch_read", tool_names)
+        self.assertIn("op_web_search", tool_names)
+        self.assertIn("op_web_read", tool_names)
+        self.assertNotIn("op_web_screenshot", tool_names)
 
     def test_compose_runtime_loads_minion_as_first_party_builtin_plugin(self) -> None:
         if not _local_sidecar_bind_available():
@@ -1141,10 +1164,13 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(observed.status, "ok")
         self.assertTrue(observed.structured["manager_running"])
         search = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="op_exec_disc_search", args={"query": "dispatch minion"})
+            CapabilityCall(name="op_tool_search", args={"query": "dispatch minion"})
         )
-        hit_names = [item["name"] for item in search.structured["hits"]]
-        self.assertIn("op_minion_spawn", hit_names)
+        minion_hit = self._find_search_hit_by_canonical(handle.core, search, "op_minion_spawn")
+        self.assertEqual(minion_hit["name"], "op_minion_spawn")
+        self.assertNotIn("canonical_path", minion_hit)
+        self.assertNotIn("module_id", minion_hit)
+        self.assertIn("required_params", minion_hit)
 
     def test_stub_runtime_provisions_builtin_plugins_for_fresh_compose(self) -> None:
         root = Path(tempfile.mkdtemp(prefix="pal_stub_builtin_test_"))
@@ -1158,10 +1184,13 @@ class PalV2BootstrapTests(unittest.TestCase):
             )
             self.assertIn("op_minion_spawn", handle.core.context.capability_registry.descriptors)
             search = handle.core.context.execution_runtime.execute(
-                CapabilityCall(name="op_exec_disc_search", args={"query": "minion"})
+                CapabilityCall(name="op_tool_search", args={"query": "minion"})
             )
-            hit_names = [item["name"] for item in search.structured["hits"]]
-            self.assertIn("op_minion_spawn", hit_names)
+            minion_hit = self._find_search_hit_by_canonical(handle.core, search, "op_minion_spawn")
+            self.assertEqual(minion_hit["name"], "op_minion_spawn")
+            self.assertNotIn("canonical_path", minion_hit)
+            self.assertNotIn("module_id", minion_hit)
+            self.assertIn("required_params", minion_hit)
         finally:
             provisioned.database.close()
             shutil.rmtree(root, ignore_errors=True)
@@ -1300,7 +1329,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                         "",
                         "@capability_node(namespace=OPERATION_NAMESPACE, scope='demo_reload', kind='module', source='test', target_kind='module')",
                         "class DemoProvider:",
-                        "    @capability_action(namespace=OPERATION_NAMESPACE, scope='demo_reload', family='operation', action_name='ping', aliases=('demo_reload.ping',))",
+                        "    @capability_action(namespace=OPERATION_NAMESPACE, scope='demo_reload', family='operation', action_name='ping', aliases=('demo_reload_ping',))",
                         "    def ping(self, call: CapabilityCall) -> CapabilityResult:",
                         "        _ = call",
                         "        return CapabilityResult(status='ok', text=VALUE, llm_text=VALUE)",
@@ -1330,7 +1359,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 CapabilityCall(name="op_plugin_mgmt_rescan_and_attach_new_first_party")
             )
             self.assertEqual(result.status, "ok")
-            first = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload.ping"))
+            first = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload_ping"))
             self.assertEqual(first.text, "v1")
 
             detached = handle.core.context.execution_runtime.execute(
@@ -1345,7 +1374,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 CapabilityCall(name="op_plugin_mgmt_attach", args={"plugin_id": "demo_reload"})
             )
             self.assertEqual(attached.status, "ok")
-            second = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload.ping"))
+            second = handle.core.context.execution_runtime.execute(CapabilityCall(name="demo_reload_ping"))
             self.assertEqual(second.text, "v2")
             self.assertIn("op_demo_reload_ping", handle.core.context.capability_registry.descriptors)
             self.assertNotIn("op_demo_reload_operation_ping", handle.core.context.capability_registry.descriptors)
@@ -1379,7 +1408,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         expectations = {
             "mcp": ("pal.mcp", "intro_module_mcp_show"),
             "minion": ("pal.minion", "intro_module_minion_show"),
-            "sqlite_vec_l3": ("pal.plugins.l3", "intro_provider_l3_show::sqlite_vec_l3"),
+            "sqlite_vec_l3": ("pal.plugins.l3", "intro_provider_memory_show::sqlite_vec_l3"),
             "web_fetch": ("pal.web_fetch", "intro_module_web_fetch_show"),
             "web_search": ("pal.web_search", "intro_module_web_search_show"),
         }
@@ -1481,14 +1510,14 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertIn("intro_module_plugins_show", handle.core.context.capability_registry.descriptors)
         self.assertIn("op_plugin_mgmt_detach", handle.core.context.capability_registry.descriptors)
-        self.assertIn("intro_provider_l3_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
+        self.assertIn("intro_provider_memory_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
 
         detached = handle.core.context.execution_runtime.execute(
             CapabilityCall(name="op_plugin_mgmt_detach", args={"plugin_id": "sqlite_vec_l3"})
         )
 
         self.assertEqual(detached.status, "ok")
-        self.assertNotIn("intro_provider_l3_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
+        self.assertNotIn("intro_provider_memory_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
 
     def test_plugin_detach_runs_module_cleanup_callbacks(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -1571,7 +1600,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         commit = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="op_l3_commit_write",
+                name="op_memory_write",
                 args={
                     "target_id": "sqlite_vec_l3",
                     "kind": "fact",
@@ -1598,13 +1627,11 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         committed = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="op_l3_commit_write",
+                name="op_memory_write",
                 args={
-                    "target_id": "sqlite_vec_l3",
                     "kind": "case",
                     "scope": "task",
                     "task_id": "task-1",
-                    "title": "Recover minion",
                     "summary": "Recovered the minion after memory pressure crash.",
                     "search_text": "Minion crashed under memory pressure. Restarted the minion and reduced concurrency. Queue drain recovered and latency normalized.",
                     "situation_text": "Minion crashed under memory pressure",
@@ -1615,13 +1642,12 @@ class PalV2BootstrapTests(unittest.TestCase):
                 },
             )
         )
-        document_id = committed.structured["document_id"]
+        mem_ref = committed.structured["mem_ref"]
 
         recalled = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="op_l3_recall_query",
+                name="op_memory_recall",
                 args={
-                    "target_id": "sqlite_vec_l3",
                     "queries": ["minion memory pressure stabilize"],
                     "limit": 4,
                 },
@@ -1629,9 +1655,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         recalled_origin = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="op_l3_recall_query",
+                name="op_memory_recall",
                 args={
-                    "target_id": "sqlite_vec_l3",
                     "queries": ["minion memory pressure stabilize"],
                     "limit": 4,
                     "view": "origin",
@@ -1640,10 +1665,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         corrected = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="op_l3_correct_patch",
+                name="op_memory_update",
                 args={
-                    "target_id": "sqlite_vec_l3",
-                    "document_id": document_id,
+                    "mem_ref": mem_ref,
                     "summary": "Recovered the minion after memory pressure.",
                     "topics": ["minion", "recovery"],
                 },
@@ -1651,7 +1675,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         inventory = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="intro_provider_l3_inventory",
+                name="intro_provider_memory_inventory",
                 args={"target_id": "sqlite_vec_l3"},
             )
         )
@@ -1661,7 +1685,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(recalled_origin.status, "ok")
         self.assertEqual(corrected.status, "ok")
         self.assertEqual(recalled.structured["hit_count"], 1)
-        self.assertEqual(recalled.structured["hits_preview"][0]["document_id"], document_id)
+        self.assertEqual(recalled.structured["hits_preview"][0]["mem_ref"], mem_ref)
+        self.assertEqual(recalled.structured["hits_preview"][0]["summary"], "Recovered the minion after memory pressure crash.")
         self.assertEqual(recalled.structured["view"], "summary")
         self.assertNotIn("hits", recalled.structured)
         self.assertNotIn("projected_entries", recalled.structured)
@@ -1670,15 +1695,17 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("Recovered the minion after memory pressure crash.", recalled.llm_text)
         self.assertEqual(recalled_origin.structured["view"], "origin")
         self.assertEqual(recalled_origin.structured["hit_count"], 1)
+        self.assertEqual(recalled_origin.structured["hits_preview"][0]["mem_ref"], mem_ref)
+        self.assertIn("Restarted the minion", recalled_origin.structured["hits_preview"][0]["search_text"])
         self.assertNotIn("hits", recalled_origin.structured)
         self.assertNotIn("projected_entries", recalled_origin.structured)
         self.assertIn("Restarted the minion and reduced concurrency.", recalled_origin.llm_text)
         self.assertNotIn("projected_entries", recalled_origin.llm_text)
         self.assertEqual(inventory.status, "ok")
         self.assertEqual(inventory.structured["provider_id"], "sqlite_vec_l3")
-        self.assertIn(document_id, handle.memory_service.l2_store.items)
-        self.assertIn(document_id, handle.memory_service.l2_store.heat_registry)
-        self.assertEqual(handle.memory_service.l2_store.items[document_id].summary, "Recovered the minion after memory pressure.")
+        self.assertIn(mem_ref, handle.memory_service.l2_store.items)
+        self.assertIn(mem_ref, handle.memory_service.l2_store.heat_registry)
+        self.assertEqual(handle.memory_service.l2_store.items[mem_ref].summary, "Recovered the minion after memory pressure.")
 
     def test_sqlite_vec_l3_commit_truth_topics_and_pending_index(self) -> None:
         service = MemoryService()
@@ -2630,15 +2657,20 @@ class PalV2BootstrapTests(unittest.TestCase):
             CapabilityCall(name="intro_module_llm_think_level")
         )
         llm_show = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="intro_endpoint_llm_show", args={"target_id": "stub_llm_default"})
+            CapabilityCall(name="intro_module_llm_show", args={"model_id": "stub-model"})
         )
 
         self.assertEqual(llm_list.status, "ok")
         self.assertEqual(llm_active.status, "ok")
         self.assertEqual(llm_think_level.status, "ok")
         self.assertEqual(llm_show.status, "ok")
+        self.assertEqual(llm_list.structured["items"][0]["model_id"], "stub-model")
+        self.assertEqual(llm_active.structured["model_id"], "stub-model")
+        self.assertEqual(llm_active.structured["active_endpoint_id"], "stub_llm_default")
         self.assertNotIn("credential_ref", llm_show.structured)
         self.assertNotIn("base_url", llm_show.structured)
+        self.assertEqual(llm_show.structured["model_id"], "stub-model")
+        self.assertEqual(llm_show.structured["endpoint_id"], "stub_llm_default")
         self.assertEqual(llm_think_level.structured["effective_think_level"], DEFAULT_THINK_LEVEL)
 
     def test_compose_runtime_consumes_wizard_owned_database(self) -> None:
@@ -2710,7 +2742,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         result = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="op_web_search_query",
+                name="op_web_search",
                 args={"query": "pal runtime docs", "limit": 3},
             )
         )
@@ -2776,6 +2808,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             database=self.database,
         )
         service = handle.core.context.module_registry.require("web_fetch").ports["web_fetch"]
+        seen_requests: list[object] = []
 
         class RaisingFetchProvider:
             provider_kind = "playwright_fetch"
@@ -2790,11 +2823,21 @@ class PalV2BootstrapTests(unittest.TestCase):
 
             def read(self, record, request):
                 _ = record
+                seen_requests.append(request)
                 return {
                     "requested_url": request.url,
-                    "final_url": request.url,
+                    "final_url": "https://example.com/final",
                     "title": "Example Domain",
                     "text": "Example body text",
+                    "raw_content": "<html><body>Example body text</body></html>",
+                    "raw_content_truncated": False,
+                    "status_code": 200,
+                    "content_type": "text/html; charset=utf-8",
+                    "content_length": 1234,
+                    "text_truncated": True,
+                    "links": [{"href": "https://example.com/about", "text": "About", "rel": ""}],
+                    "metadata": {"description": "Example metadata"},
+                    "response_headers": {"content-type": "text/html; charset=utf-8"},
                 }
 
         service.providers = {
@@ -2804,7 +2847,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         result = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="op_web_fetch_read",
+                name="op_web_read",
                 args={"url": "https://example.com"},
             )
         )
@@ -2814,6 +2857,16 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(result.structured["configured_provider_id"], "playwright_fetch_default")
         self.assertEqual(result.structured["effective_provider_id"], "plain_http_fetch_default")
         self.assertEqual(result.structured["fetch_mode"], "http")
+        self.assertEqual(result.structured["final_url"], "https://example.com/final")
+        self.assertEqual(result.structured["status_code"], 200)
+        self.assertEqual(result.structured["content_type"], "text/html; charset=utf-8")
+        self.assertTrue(result.structured["text_truncated"])
+        self.assertTrue(result.structured["raw_content_available"])
+        self.assertFalse(result.structured["raw_content_truncated"])
+        self.assertEqual(result.structured["links"][0]["href"], "https://example.com/about")
+        self.assertEqual(result.structured["metadata"]["description"], "Example metadata")
+        self.assertIn("Chrome/", result.structured["user_agent"])
+        self.assertEqual(seen_requests[0].user_agent, DEFAULT_WEB_FETCH_USER_AGENT)
 
         class ShutdownTrackingManager:
             def __init__(self) -> None:
@@ -2835,6 +2888,70 @@ class PalV2BootstrapTests(unittest.TestCase):
         asyncio.run(handle.stop_async())
 
         self.assertEqual(tracking_manager.shutdown_calls, 1)
+
+    def test_plain_http_fetch_uses_chrome_user_agent_and_preserves_page_metadata(self) -> None:
+        captured = {}
+
+        class FakeHeaders:
+            def get(self, key, default=None):
+                values = {
+                    "Content-Type": "text/html; charset=utf-8",
+                    "Content-Length": "321",
+                }
+                return values.get(key, default)
+
+            def items(self):
+                return {
+                    "Content-Type": "text/html; charset=utf-8",
+                    "Content-Length": "321",
+                    "Set-Cookie": "secret=ignored",
+                }.items()
+
+        class FakeResponse:
+            headers = FakeHeaders()
+            status = 203
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                _ = (exc_type, exc, tb)
+                return False
+
+            def geturl(self):
+                return "https://example.test/final"
+
+            def read(self):
+                return (
+                    b"<html lang='en'><head><title>Example</title>"
+                    b"<meta name='description' content='A useful page'>"
+                    b"<link rel='canonical' href='https://example.test/canonical'>"
+                    b"</head><body><a href='/docs' rel='help'>Docs</a>"
+                    b"<p>Hello world</p></body></html>"
+                )
+
+        def fake_urlopen(request, timeout):
+            captured["user_agent"] = request.get_header("User-agent")
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        with patch("pal.web_fetch.browser_service.urlopen", fake_urlopen):
+            document = plain_http_fetch("https://example.test", timeout_ms=2500, max_chars=20, max_raw_chars=30)
+
+        self.assertIn("Chrome/", captured["user_agent"])
+        self.assertEqual(captured["timeout"], 2.5)
+        self.assertEqual(document.status_code, 203)
+        self.assertEqual(document.final_url, "https://example.test/final")
+        self.assertEqual(document.title, "Example")
+        self.assertTrue(document.text_truncated)
+        self.assertTrue(document.raw_content.startswith("<html"))
+        self.assertTrue(document.raw_content_truncated)
+        self.assertEqual(document.links[0].href, "/docs")
+        self.assertEqual(document.links[0].text, "Docs")
+        self.assertEqual(document.metadata["description"], "A useful page")
+        self.assertEqual(document.metadata["canonical_url"], "https://example.test/canonical")
+        self.assertIn("content-type", document.response_headers or {})
+        self.assertNotIn("Set-Cookie", document.response_headers or {})
 
 
 class PalV2SocketEndpointUnitTests(unittest.TestCase):

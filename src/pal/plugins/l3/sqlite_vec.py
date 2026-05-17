@@ -12,6 +12,7 @@ from pal.memory import (
     L2Entry,
     L3CommitRequest,
     L3CorrectRequest,
+    L3DeleteRequest,
     L3MutationResult,
     L3RecallResult,
     L3RetireResult,
@@ -27,7 +28,13 @@ from pal.memory.repository import (
     parse_iso_timestamp,
     serialize_vector,
 )
-from pal.plugins.l3.rendering import build_recall_structured_payload, normalize_recall_view, render_recall_result_for_llm
+from pal.memory.rendering import (
+    build_mutation_structured_payload,
+    build_recall_structured_payload,
+    normalize_recall_view,
+    render_mutation_result_for_llm,
+    render_recall_result_for_llm,
+)
 from pal.memory.schema import ensure_sqlite_vec_loaded
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -44,6 +51,10 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 
 def _stable_document_search_text(*parts: str) -> str:
     return "\n".join(part.strip() for part in parts if str(part or "").strip())
+
+
+def _read_mem_ref(args: dict[str, Any]) -> str:
+    return str(args.get("mem_ref") or args.get("document_id") or "").strip()
 
 
 def _stable_hash(payload: dict[str, Any]) -> str:
@@ -114,7 +125,7 @@ def _extract_entry_topics(entry: L2Entry) -> list[str]:
     kind="provider",
     source="plugin:l3",
     target_kind="provider",
-    path_module_id="l3",
+    path_module_id="memory",
     iterable_resolver="iter_providers",
     target_id_resolver="resolve_provider_id",
     target_label_resolver="resolve_provider_label",
@@ -125,7 +136,7 @@ def _extract_entry_topics(entry: L2Entry) -> list[str]:
     kind="provider",
     source="plugin:l3",
     target_kind="provider",
-    path_module_id="l3",
+    path_module_id="memory",
     iterable_resolver="iter_providers",
     target_id_resolver="resolve_provider_id",
     target_label_resolver="resolve_provider_label",
@@ -189,38 +200,39 @@ class SQLiteVecL3Plugin:
         )
         return inventory
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="show", description="Show sqlite-backed l3 provider state")
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="show", description="Show sqlite-backed memory provider state")
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self.inspect()
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="sqlite vec l3 provider",
+            text="sqlite vec memory provider",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("SQLite vec L3 provider", payload),
+            llm_text=render_titled_structured_for_llm("SQLite vec memory provider", payload),
         )
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory", description="Inspect sqlite-backed l3 inventory")
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="provider", action_name="inventory", description="Inspect sqlite-backed memory inventory")
     def inventory(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         payload = self.inspect()
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="sqlite vec l3 inventory",
+            text="sqlite vec memory inventory",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("SQLite vec L3 inventory", payload),
+            llm_text=render_titled_structured_for_llm("SQLite vec memory inventory", payload),
         )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="provider",
         family="recall",
-        action_name="query",
+        action_name="recall",
         description=(
-            "Recall durable L3 memory records by searching against the source-of-truth text. "
+            "Recall durable memory records by searching against the source-of-truth text. "
             "queries: natural language search terms — the system will match against original verbatim facts. "
             "Provide descriptive, specific queries for best recall results."
         ),
+        metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
@@ -255,7 +267,7 @@ class SQLiteVecL3Plugin:
         )
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="l3 recall result",
+            text="memory recall result",
             structured=payload,
             llm_text=render_recall_result_for_llm(
                 provider_id=self.provider_id,
@@ -271,12 +283,13 @@ class SQLiteVecL3Plugin:
         family="commit",
         action_name="write",
         description=(
-            "Commit a durable L3 memory record. "
+            "Commit a durable memory record. "
             "title: short label for this memory. "
             "summary: concise summary for future LLM consumption (compressed). "
             "search_text: the original verbatim fact or statement — source of truth for retrieval indexing. "
             "Do NOT omit or leave empty — all three are required for correct indexing."
         ),
+        metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
@@ -327,28 +340,32 @@ class SQLiteVecL3Plugin:
                 result_text=str(call.args.get("result_text") or ""),
             )
         )
-        payload = result.hit | {"metadata": result.metadata}
+        payload = build_mutation_structured_payload(result)
         return IntrospectionResult(
             status=result.status,
-            text="l3 commit result",
+            text="memory commit result",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("L3 commit result", payload),
+            llm_text=render_mutation_result_for_llm("commit", result),
         )
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="provider",
         family="correct",
-        action_name="patch",
+        action_name="update",
         description=(
-            "Correct an existing durable L3 memory record. "
+            "Update an existing durable memory record. "
             "Only provided fields will be updated. "
             "search_text: updated source of truth for retrieval indexing."
         ),
+        metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
-                "document_id": {"type": "string"},
+                "mem_ref": {
+                    "type": "string",
+                    "description": "Opaque memory ref returned by op_memory_recall, such as fact:fact_abc or case:case_abc.",
+                },
                 "title": {"type": "string", "description": "Updated short label"},
                 "summary": {"type": "string", "description": "Updated concise summary"},
                 "search_text": {"type": "string", "description": "Updated source of truth — original verbatim fact for retrieval"},
@@ -359,13 +376,14 @@ class SQLiteVecL3Plugin:
                 "action_text": {"type": "string"},
                 "result_text": {"type": "string"},
             },
-            "required": ["document_id"],
+            "required": ["mem_ref"],
         },
     )
     def correct_patch(self, call: IntrospectionCall) -> IntrospectionResult:
+        mem_ref = _read_mem_ref(call.args)
         result = self.correct(
             L3CorrectRequest(
-                document_id=str(call.args.get("document_id") or ""),
+                document_id=mem_ref,
                 title=str(call.args.get("title")) if call.args.get("title") is not None else None,
                 summary=str(call.args.get("summary")) if call.args.get("summary") is not None else None,
                 search_text=str(call.args.get("search_text")) if call.args.get("search_text") is not None else None,
@@ -377,34 +395,72 @@ class SQLiteVecL3Plugin:
                 result_text=str(call.args.get("result_text")) if call.args.get("result_text") is not None else None,
             )
         )
-        payload = result.hit | {"metadata": result.metadata}
+        payload = build_mutation_structured_payload(result)
         return IntrospectionResult(
             status=result.status,
-            text="l3 correction result",
+            text="memory update result",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("L3 correction result", payload),
+            llm_text=render_mutation_result_for_llm("update", result),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach l3 provider")
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="provider",
+        family="delete",
+        action_name="delete",
+        description=(
+            "Delete one durable memory record by exact mem_ref. "
+            "Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record."
+        ),
+        metadata={"omit_family_in_canonical": True},
+        args_schema={
+            "type": "object",
+            "properties": {
+                "mem_ref": {
+                    "type": "string",
+                    "description": "Opaque memory ref returned by op_memory_recall, such as fact:fact_abc or case:case_abc.",
+                },
+                "reason": {"type": "string", "description": "Brief reason for deletion"},
+            },
+            "required": ["mem_ref"],
+        },
+    )
+    def delete_memory(self, call: IntrospectionCall) -> IntrospectionResult:
+        mem_ref = _read_mem_ref(call.args)
+        result = self.delete(
+            L3DeleteRequest(
+                document_id=mem_ref,
+                reason=str(call.args.get("reason") or ""),
+            )
+        )
+        payload = build_mutation_structured_payload(result)
+        return IntrospectionResult(
+            status=result.status,
+            text="memory delete result",
+            structured=payload,
+            llm_text=render_mutation_result_for_llm("delete", result),
+        )
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="attach", description="Attach memory provider")
     def attach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = True
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="l3 provider attached",
+            text="memory provider attached",
             structured={"mounted": True},
-            llm_text=render_titled_structured_for_llm("L3 provider attached", {"mounted": True}),
+            llm_text=render_titled_structured_for_llm("Memory provider attached", {"mounted": True}),
         )
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach l3 provider")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="provider", family="lifecycle", action_name="detach", description="Detach memory provider")
     def detach(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         self.mounted = False
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="l3 provider detached",
+            text="memory provider detached",
             structured={"mounted": False},
-            llm_text=render_titled_structured_for_llm("L3 provider detached", {"mounted": False}),
+            llm_text=render_titled_structured_for_llm("Memory provider detached", {"mounted": False}),
         )
 
     @capability_action(
@@ -413,6 +469,7 @@ class SQLiteVecL3Plugin:
         family="maintenance",
         action_name="refresh_indexes",
         description="Refresh provider indexes and embedding state",
+        metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
@@ -700,6 +757,31 @@ class SQLiteVecL3Plugin:
         )
         self.service.project_mutation(result)
         return result
+
+    def delete(self, request: L3DeleteRequest) -> L3MutationResult:
+        if not self.mounted:
+            return L3MutationResult(status=RuntimeStatus.UNAVAILABLE, document_id=request.document_id)
+        document_id = str(request.document_id or "").strip()
+        if not document_id:
+            return L3MutationResult(status=RuntimeStatus.INVALID, document_id="")
+        deleted = self.repository.delete_document(document_id)
+        if deleted is None:
+            return L3MutationResult(status=RuntimeStatus.NOT_FOUND, document_id=document_id)
+        remove_projected_entries = getattr(self.service, "remove_projected_entries", None)
+        if callable(remove_projected_entries):
+            remove_projected_entries([document_id])
+        payload = {
+            "document_id": document_id,
+            "deleted": True,
+            "deleted_document": deleted,
+            "reason": str(request.reason or ""),
+        }
+        return L3MutationResult(
+            status=RuntimeStatus.OK,
+            document_id=document_id,
+            hit=payload,
+            metadata={"deleted": True},
+        )
 
     def recall(self, query: MemoryQuery) -> L3RecallResult:
         if not self.mounted:

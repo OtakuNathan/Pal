@@ -835,47 +835,6 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         except Exception as exc:
             self.last_delivery_error = str(exc)
 
-    async def _send_control_message_async(
-        self,
-        response_handle: ResponseHandle,
-        payload: dict[str, Any],
-        *,
-        store_request_id: str,
-    ) -> None:
-        interaction_id = str(store_request_id or payload.get("request_id") or f"legacy_{time.monotonic_ns()}").strip()
-        spec = InteractionMessageSpec(
-            interaction_id=interaction_id,
-            interaction_kind=str(payload.get("prompt_kind") or "legacy_control").strip() or "legacy_control",
-            text=str(payload.get("text") or "").strip(),
-            buttons=self._legacy_control_buttons_to_rows(payload.get("buttons")),
-            expires_at=None,
-        )
-        allow_update = bool(store_request_id) and interaction_id in self._interactive_messages
-        await self._open_or_update_interaction_async(
-            response_handle,
-            spec=spec,
-            allow_update=allow_update,
-        )
-
-    async def _expire_control_prompt_async(self, payload: dict[str, Any]) -> None:
-        request_id = str(payload.get("request_id") or "").strip()
-        text = str(payload.get("text") or "This request expired.").strip()
-        if not request_id:
-            return
-        metadata = self._interactive_messages.get(request_id)
-        interaction_kind = "legacy_control"
-        if isinstance(metadata, dict):
-            interaction_kind = str(metadata.get("interaction_kind") or interaction_kind)
-        await self._resolve_interaction_async(
-            InteractionMessageSpec(
-                interaction_id=request_id,
-                interaction_kind=interaction_kind,
-                text=text,
-                buttons=(),
-                expires_at=None,
-            )
-        )
-
     async def _apply_interactive_status_async(
         self,
         response_handle: ResponseHandle,
@@ -1143,63 +1102,6 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         if not rows:
             return None
         return InlineKeyboardMarkup(rows)
-
-    def _legacy_control_buttons_to_rows(self, buttons: Any) -> tuple[tuple[InteractionButtonSpec, ...], ...]:
-        rows: list[tuple[InteractionButtonSpec, ...]] = []
-        for row_items in list(buttons or []):
-            row: list[InteractionButtonSpec] = []
-            for item in list(row_items or []):
-                if not isinstance(item, dict):
-                    continue
-                button = self._legacy_control_command_to_button(
-                    str(item.get("label") or "").strip(),
-                    str(item.get("command") or "").strip(),
-                )
-                if button is not None:
-                    row.append(button)
-            if row:
-                rows.append(tuple(row))
-        return tuple(rows)
-
-    def _legacy_control_command_to_button(self, label: str, command: str) -> InteractionButtonSpec | None:
-        if not label or not command:
-            return None
-        raw = command.strip()
-        if not raw.startswith("/"):
-            return None
-        if raw == "/control":
-            return InteractionButtonSpec(label=label, action_key="control.panel.show")
-        if raw == "/think":
-            return InteractionButtonSpec(label=label, action_key="control.think.open")
-        if raw == "/interrupt":
-            return InteractionButtonSpec(label=label, action_key="control.interrupt.run")
-        if raw == "/compact":
-            return InteractionButtonSpec(label=label, action_key="control.compact.run")
-        if raw == "/reset":
-            return InteractionButtonSpec(label=label, action_key="control.reset.open")
-        if raw.startswith("/reset confirm "):
-            request_id = raw.removeprefix("/reset confirm ").strip()
-            if not request_id:
-                return None
-            return InteractionButtonSpec(
-                label=label,
-                action_key="control.reset.confirm",
-                action_args={"request_id": request_id},
-            )
-        return None
-
-    def _build_control_markup(self, buttons: list[list[dict[str, Any]]]):
-        rows = self._legacy_control_buttons_to_rows(buttons)
-        return self._build_interaction_markup(
-            InteractionMessageSpec(
-                interaction_id="legacy",
-                interaction_kind="legacy_control",
-                text="",
-                buttons=rows,
-                expires_at=None,
-            )
-        )
-
 
 @dataclass(frozen=True)
 class TelegramChannelEndpointFactory:

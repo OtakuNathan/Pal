@@ -6,7 +6,6 @@ from pal.identity.contracts import (
     IdentityServicePort,
     PalPersonaProfile,
     PalPreferencesProfile,
-    PalStateProfile,
 )
 from pal.identity.repository import IdentityRepository
 
@@ -40,17 +39,6 @@ class IdentityService(IdentityServicePort):
             style_preference=preferences.style_preference,
             timezone=preferences.timezone,
             preferences_blob=dict(preferences.preferences_blob or {}),
-        )
-
-    def get_state(self) -> PalStateProfile | None:
-        state = self.repository.get_pal_state()
-        if state is None:
-            return None
-        return PalStateProfile(
-            persona_id=state.persona,
-            status=state.status,
-            top_of_mind_refs=list(state.top_of_mind_refs or []),
-            last_active_at=state.last_active_at,
         )
 
     def update_preferences(self, *, timezone: str | None = None) -> PalPreferencesProfile:

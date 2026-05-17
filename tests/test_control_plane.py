@@ -13,16 +13,19 @@ from pal.channel.endpoints.telegram_endpoint import TelegramChannelEndpoint
 from pal.control import (
     ControlAction,
     ControlCommandSpec,
+    ControlDelivery,
     ControlEvent,
     ControlPlane,
     ControlRoute,
     InteractionResult,
     register_with_core as register_control_with_core,
 )
+from pal.control import interactions as control_interactions
 from pal.core import PalCore, TurnContinuation, register_with_core as register_core_with_core
 from pal.core.contracts import PendingControlRequest
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.turns import channel_turn_program
+from pal.execution import CapabilityResult
 from pal.foundation import EventEnvelope
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
 from pal.llm.repository import DEFAULT_THINK_LEVEL
@@ -44,6 +47,7 @@ class _StubEndpoint(ChannelEndpointQueueBase):
         if not hasattr(self, "sent_statuses"):
             self.sent_statuses = []
         self.sent_statuses.append((str(kind), dict(payload), dict(response_handle.reply_target)))
+        super().send_status(response_handle, kind, payload)
 
     def inspect_health(self) -> dict[str, object]:
         return {"healthy": True}
@@ -80,6 +84,16 @@ class _FakeLLMRuntime:
             "added_endpoint_ids": [],
             "removed_endpoint_ids": [],
         }
+
+
+class _FakeCapabilityRuntime:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.calls = []
+
+    async def execute_async(self, call):
+        self.calls.append(call)
+        return CapabilityResult(status=RuntimeStatus.OK, text=self.text, llm_text=self.text)
 
 
 class _BlockingInterruptHandle:
@@ -471,7 +485,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                 "singleton_count": 3,
                 "dynamic_count": 1,
                 "resident_tool_count": 2,
-                "resident_tool_names": ["op_exec_disc_search", "op_exec_capability_call"],
+                "resident_tool_names": ["op_tool_search", "op_tool_call"],
             }
 
         self.core.tool_surface.reload_config = reload_config  # type: ignore[method-assign]
@@ -487,7 +501,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["reload"])
         self.assertIn("Tool surface refreshed.", self.endpoint.outbox[-1].text)
         self.assertIn("Resident tools for future turns: 2", self.endpoint.outbox[-1].text)
-        self.assertIn("op_exec_disc_search, op_exec_capability_call", self.endpoint.outbox[-1].text)
+        self.assertIn("op_tool_search, op_tool_call", self.endpoint.outbox[-1].text)
 
     async def test_slash_command_with_telegram_bot_suffix_runs_end_to_end(self) -> None:
         self.core.bind_async_wakeup_sources()
@@ -513,7 +527,34 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(self.endpoint.outbox[-1].text, "Prompt log: off\nUse /log start or /log end. Changes apply to new turns only.")
+        statuses = list(self.endpoint.status_outbox)
+        self.assertGreaterEqual(len(statuses), 2)
+        self.assertEqual(statuses[-2].kind, "interactive_update")
+        self.assertEqual(statuses[-2].payload["spec"].text, "Prompt log: off\nUse /log start or /log end. Changes apply to new turns only.")
+
+    async def test_base_channel_falls_back_to_interaction_text(self) -> None:
+        delivery = ControlDelivery(
+            delivery_kind="interactive_open",
+            route=self.route,
+            interaction=control_interactions.build_terminal_interaction(
+                interaction_id="ix-fallback",
+                interaction_kind="control_panel",
+                route=self.route,
+                text="Fallback text.",
+            ),
+        )
+
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="interactive_open",
+                target_scope="interaction",
+                route=self.route,
+                delivery=delivery,
+            )
+        )
+        self.endpoint.flush_status_outbox()
+
+        self.assertEqual(self.endpoint.sent_replies[-1][0], "Fallback text.")
 
     async def test_button_backed_set_log_resolves_interaction(self) -> None:
         route = ControlRoute(
@@ -725,6 +766,24 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.endpoint.has_queued_status())
         self.assertEqual(self.endpoint.status_outbox[-1].kind, "working_stop")
 
+    async def test_non_interactive_capability_reply_preserves_full_text(self) -> None:
+        text = "capability result " + ("x" * 320)
+        runtime = _FakeCapabilityRuntime(text)
+        self.core.context.execution_runtime = runtime
+
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="invoke_capability",
+                target_scope="execution",
+                target_id="op_demo_long",
+                route=self.route,
+            )
+        )
+
+        self.assertEqual(runtime.calls[0].name, "op_demo_long")
+        self.assertTrue(self.endpoint.has_queued_replies())
+        self.assertEqual(self.endpoint.outbox[-1].text, text)
+
     async def test_run_until_idle_flushes_working_stop_after_background_turn_completion(self) -> None:
         envelope = ChannelEnvelope(
             event=EventEnvelope(
@@ -823,7 +882,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        spec = self.core._build_control_panel_interaction(self.control_plane, self.route)
+        spec = control_interactions.build_control_panel_interaction(self.control_plane, self.route)
         flattened = [button for row in spec.buttons for button in row]
 
         self.assertTrue(any(button.label == "Think" and button.action_key == "control.think.open" for button in flattened))

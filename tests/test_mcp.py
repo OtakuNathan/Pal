@@ -352,8 +352,13 @@ class McpPluginSidecarTests(unittest.TestCase):
 
         host._do_attach(handle)
         try:
-            search = core.context.execution_runtime.execute(CapabilityCall(name="op_exec_disc_search", args={"query": "alpha"}))
-            self.assertIn("op_mcp_demo_tool_alpha", str(search.structured))
+            search = core.context.execution_runtime.execute(CapabilityCall(name="op_tool_search", args={"query": "alpha"}))
+            alpha_hit = next(item for item in search.structured["hits"] if item["name"] == "op_mcp_demo_tool_alpha")
+            alpha_read = core.context.execution_runtime.execute(
+                CapabilityCall(name="op_tool_read", args={"name": alpha_hit["name"]})
+            )
+            self.assertEqual(alpha_read.structured["capability"]["name"], "op_mcp_demo_tool_alpha")
+            self.assertNotIn("result_schema", alpha_read.structured["capability"])
             self.assertIn("mcp_demo_prompt_brief", str(SkillSearchTool(service=skill_service).invoke({"query": "brief", "top_k": 5}).structured))
             show = core.context.execution_runtime.execute(CapabilityCall(name="intro_module_mcp_show", args={}))
             self.assertEqual(show.status, RuntimeStatus.OK)

@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
-from pal.service.service import ServiceManager, ServiceRunner
-from pal.service.source import ServiceEventSource
+from pal.proactive.runtime import ProactiveManager, ProactiveRunner
+from pal.proactive.source import ProactiveEventSource
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -27,7 +27,7 @@ PROACTIVE_MODULE_ID = "proactive"
 
 
 @dataclass(frozen=True)
-class ServiceSnapshot:
+class ProactiveSnapshot:
     registered_proactive_tasks: int
     pending_triggers: int
     triggered_runs: int
@@ -36,8 +36,8 @@ class ServiceSnapshot:
 
 
 @dataclass(frozen=True)
-class ServiceTarget:
-    service_id: str
+class ProactiveTarget:
+    proactive_id: str
     goal: str
     method: str
     skill_refs: list[str]
@@ -55,9 +55,9 @@ class ServiceTarget:
     kind="proactive_task",
     source="builtin:proactive",
     target_kind="proactive_task",
-    iterable_resolver="iter_services",
-    target_id_resolver="resolve_service_id",
-    target_label_resolver="resolve_service_label",
+    iterable_resolver="iter_proactive_tasks",
+    target_id_resolver="resolve_proactive_id",
+    target_label_resolver="resolve_proactive_label",
 )
 @capability_node(
     namespace=OPERATION_NAMESPACE,
@@ -74,20 +74,20 @@ class ServiceTarget:
     target_kind="module",
 )
 @dataclass
-class ServiceIntrospectionProvider:
-    manager: ServiceManager
-    runner: ServiceRunner | None = None
+class ProactiveIntrospectionProvider:
+    manager: ProactiveManager
+    runner: ProactiveRunner | None = None
     module_id: str = PROACTIVE_MODULE_ID
     mounted: bool = True
     degraded: bool = False
     refresh_capabilities: Callable[[], None] | None = None
 
-    def iter_services(self) -> list[ServiceTarget]:
-        items: list[ServiceTarget] = []
-        for definition in sorted(self.manager.registered.values(), key=lambda item: item.service_id):
+    def iter_proactive_tasks(self) -> list[ProactiveTarget]:
+        items: list[ProactiveTarget] = []
+        for definition in sorted(self.manager.registered.values(), key=lambda item: item.proactive_id):
             items.append(
-                ServiceTarget(
-                    service_id=definition.service_id,
+                ProactiveTarget(
+                    proactive_id=definition.proactive_id,
                     goal=definition.goal,
                     method=definition.method,
                     skill_refs=list(definition.skill_refs),
@@ -95,17 +95,17 @@ class ServiceIntrospectionProvider:
                     enabled=definition.enabled,
                     out_reply_target=dict(definition.out_reply_target),
                     schedule=dict(definition.schedule),
-                    next_due_at=self.manager.schedule_engine.next_due_at(definition.service_id),
-                    last_run_at=self._last_run_at_for(definition.service_id),
+                    next_due_at=self.manager.schedule_engine.next_due_at(definition.proactive_id),
+                    last_run_at=self._last_run_at_for(definition.proactive_id),
                 )
             )
         return items
 
-    def resolve_service_id(self, service: ServiceTarget) -> str:
-        return service.service_id
+    def resolve_proactive_id(self, target: ProactiveTarget) -> str:
+        return target.proactive_id
 
-    def resolve_service_label(self, service: ServiceTarget) -> str:
-        return service.service_id
+    def resolve_proactive_label(self, target: ProactiveTarget) -> str:
+        return target.proactive_id
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -115,7 +115,7 @@ class ServiceIntrospectionProvider:
     )
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        snapshot = inspect_service(self)
+        snapshot = inspect_proactive(self)
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive snapshot",
@@ -132,10 +132,10 @@ class ServiceIntrospectionProvider:
     def list(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
         items = []
-        for definition in sorted(self.manager.registered.values(), key=lambda item: item.service_id):
+        for definition in sorted(self.manager.registered.values(), key=lambda item: item.proactive_id):
             items.append(
                 {
-                    "proactive_id": definition.service_id,
+                    "proactive_id": definition.proactive_id,
                     "goal": definition.goal,
                     "method": definition.method,
                     "skill_refs": list(definition.skill_refs),
@@ -143,8 +143,8 @@ class ServiceIntrospectionProvider:
                     "enabled": definition.enabled,
                     "out_reply_target": dict(definition.out_reply_target),
                     "schedule": dict(definition.schedule),
-                    "next_due_at": self.manager.schedule_engine.next_due_at(definition.service_id),
-                    "last_run_at": self._last_run_at_for(definition.service_id),
+                    "next_due_at": self.manager.schedule_engine.next_due_at(definition.proactive_id),
+                    "last_run_at": self._last_run_at_for(definition.proactive_id),
                 }
             )
         payload = {"items": items}
@@ -161,8 +161,8 @@ class ServiceIntrospectionProvider:
         action_name="show",
         description="Show a configured proactive task",
     )
-    def show_service(self, call: IntrospectionCall) -> IntrospectionResult:
-        target = self._require_service_target(call)
+    def show_task(self, call: IntrospectionCall) -> IntrospectionResult:
+        target = self._require_proactive_target(call)
         if target is None:
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
@@ -170,7 +170,7 @@ class ServiceIntrospectionProvider:
                 llm_text="proactive task not found",
             )
         payload = {
-            "proactive_id": target.service_id,
+            "proactive_id": target.proactive_id,
             "goal": target.goal,
             "method": target.method,
             "skill_refs": list(target.skill_refs),
@@ -195,7 +195,7 @@ class ServiceIntrospectionProvider:
         description="Show the latest run for a proactive task",
     )
     def last_run(self, call: IntrospectionCall) -> IntrospectionResult:
-        target = self._require_service_target(call)
+        target = self._require_proactive_target(call)
         if target is None:
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
@@ -204,23 +204,23 @@ class ServiceIntrospectionProvider:
             )
         repository = self.manager.repository
         if repository is None:
-            payload = {"proactive_id": target.service_id, "run": None}
+            payload = {"proactive_id": target.proactive_id, "run": None}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="proactive run history unavailable",
                 structured=payload,
                 llm_text=render_titled_structured_for_llm("Proactive latest run", payload),
             )
-        run = repository.latest_run(target.service_id)
+        run = repository.latest_run(target.proactive_id)
         if run is None:
-            payload = {"proactive_id": target.service_id, "run": None}
+            payload = {"proactive_id": target.proactive_id, "run": None}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="proactive task has not run yet",
                 structured=payload,
                 llm_text=render_titled_structured_for_llm("Proactive latest run", payload),
             )
-        payload = {"proactive_id": target.service_id, "run": self._render_run(run)}
+        payload = {"proactive_id": target.proactive_id, "run": self._render_run(run)}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive latest run",
@@ -243,7 +243,7 @@ class ServiceIntrospectionProvider:
         },
     )
     def list_runs(self, call: IntrospectionCall) -> IntrospectionResult:
-        target = self._require_service_target(call)
+        target = self._require_proactive_target(call)
         if target is None:
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
@@ -252,7 +252,7 @@ class ServiceIntrospectionProvider:
             )
         repository = self.manager.repository
         if repository is None:
-            payload = {"proactive_id": target.service_id, "items": []}
+            payload = {"proactive_id": target.proactive_id, "items": []}
             return IntrospectionResult(
                 status=RuntimeStatus.OK,
                 text="proactive run history unavailable",
@@ -260,8 +260,8 @@ class ServiceIntrospectionProvider:
                 llm_text=render_titled_structured_for_llm("Proactive run history", payload),
             )
         limit = max(1, min(50, int(call.args.get("limit") or 10)))
-        items = [self._render_run(item) for item in repository.list_runs(target.service_id, limit=limit)]
-        payload = {"proactive_id": target.service_id, "items": items}
+        items = [self._render_run(item) for item in repository.list_runs(target.proactive_id, limit=limit)]
+        payload = {"proactive_id": target.proactive_id, "items": items}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive run history",
@@ -294,16 +294,16 @@ class ServiceIntrospectionProvider:
         },
     )
     def create(self, call: IntrospectionCall) -> IntrospectionResult:
-        service_id = str(call.args.get("proactive_id") or "").strip()
+        proactive_id = str(call.args.get("proactive_id") or "").strip()
         goal = str(call.args.get("goal") or "").strip()
-        if not service_id or not goal:
+        if not proactive_id or not goal:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
                 text="proactive_id and goal are required",
                 llm_text="proactive_id and goal are required",
             )
-        definition = self.manager.create_service(
-            service_id=service_id,
+        definition = self.manager.create_task(
+            proactive_id=proactive_id,
             goal=goal,
             method=str(call.args.get("method") or "").strip(),
             skill_refs=[str(item).strip() for item in list(call.args.get("skill_refs") or []) if str(item).strip()],
@@ -314,10 +314,10 @@ class ServiceIntrospectionProvider:
         )
         self._refresh_capabilities()
         payload = {
-            "proactive_id": definition.service_id,
+            "proactive_id": definition.proactive_id,
             "out_channel_id": definition.out_channel_id,
             "out_reply_target": dict(definition.out_reply_target),
-            "next_due_at": self.manager.schedule_engine.next_due_at(definition.service_id),
+            "next_due_at": self.manager.schedule_engine.next_due_at(definition.proactive_id),
         }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -339,22 +339,22 @@ class ServiceIntrospectionProvider:
         },
     )
     def destroy(self, call: IntrospectionCall) -> IntrospectionResult:
-        service_id = str(call.args.get("target_id") or "").strip()
-        if not service_id:
+        proactive_id = str(call.args.get("target_id") or "").strip()
+        if not proactive_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
                 text="target_id is required",
                 llm_text="target_id is required",
             )
-        if not self.manager.destroy_service(service_id):
+        if not self.manager.destroy_task(proactive_id):
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
                 text="proactive task not found",
-                structured={"proactive_id": service_id},
+                structured={"proactive_id": proactive_id},
                 llm_text="proactive task not found",
             )
         self._refresh_capabilities()
-        payload = {"proactive_id": service_id}
+        payload = {"proactive_id": proactive_id}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive task destroyed",
@@ -408,8 +408,8 @@ class ServiceIntrospectionProvider:
         },
     )
     def set_output_channel(self, call: IntrospectionCall) -> IntrospectionResult:
-        service_id = str(call.args.get("target_id") or "").strip()
-        if not service_id:
+        proactive_id = str(call.args.get("target_id") or "").strip()
+        if not proactive_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
                 text="target_id is required",
@@ -417,17 +417,17 @@ class ServiceIntrospectionProvider:
             )
         raw_channel = call.args.get("out_channel_id")
         out_channel_id = str(raw_channel or "").strip() or None
-        updated = self.manager.set_output_channel(service_id, out_channel_id)
+        updated = self.manager.set_output_channel(proactive_id, out_channel_id)
         if updated is None:
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
                 text="proactive task not found",
-                structured={"proactive_id": service_id},
+                structured={"proactive_id": proactive_id},
                 llm_text="proactive task not found",
             )
         self._refresh_capabilities()
         payload = {
-            "proactive_id": service_id,
+            "proactive_id": proactive_id,
             "out_channel_id": updated.out_channel_id,
             "out_reply_target": dict(updated.out_reply_target),
         }
@@ -454,24 +454,24 @@ class ServiceIntrospectionProvider:
         },
     )
     def set_output_target(self, call: IntrospectionCall) -> IntrospectionResult:
-        service_id = str(call.args.get("target_id") or "").strip()
-        if not service_id:
+        proactive_id = str(call.args.get("target_id") or "").strip()
+        if not proactive_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
                 text="target_id is required",
                 llm_text="target_id is required",
             )
         out_reply_target = dict(call.args.get("out_reply_target") or {})
-        updated = self.manager.set_output_target(service_id, out_reply_target)
+        updated = self.manager.set_output_target(proactive_id, out_reply_target)
         if updated is None:
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
                 text="proactive task not found",
-                structured={"proactive_id": service_id},
+                structured={"proactive_id": proactive_id},
                 llm_text="proactive task not found",
             )
         self._refresh_capabilities()
-        payload = {"proactive_id": service_id, "out_reply_target": dict(updated.out_reply_target)}
+        payload = {"proactive_id": proactive_id, "out_reply_target": dict(updated.out_reply_target)}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive output target updated",
@@ -495,9 +495,9 @@ class ServiceIntrospectionProvider:
         },
     )
     def update_schedule(self, call: IntrospectionCall) -> IntrospectionResult:
-        service_id = str(call.args.get("target_id") or "").strip()
+        proactive_id = str(call.args.get("target_id") or "").strip()
         schedule = call.args.get("schedule")
-        if not service_id:
+        if not proactive_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
                 text="target_id is required",
@@ -509,16 +509,16 @@ class ServiceIntrospectionProvider:
                 text="schedule must be an object",
                 llm_text="schedule must be an object",
             )
-        updated = self.manager.update_schedule(service_id, dict(schedule))
+        updated = self.manager.update_schedule(proactive_id, dict(schedule))
         if updated is None:
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
                 text="proactive task not found",
-                structured={"proactive_id": service_id},
+                structured={"proactive_id": proactive_id},
                 llm_text="proactive task not found",
             )
         self._refresh_capabilities()
-        payload = {"proactive_id": service_id, "next_due_at": self.manager.schedule_engine.next_due_at(service_id)}
+        payload = {"proactive_id": proactive_id, "next_due_at": self.manager.schedule_engine.next_due_at(proactive_id)}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="proactive schedule updated",
@@ -551,26 +551,26 @@ class ServiceIntrospectionProvider:
         )
 
     def _set_enabled(self, call: IntrospectionCall, *, enabled: bool) -> IntrospectionResult:
-        service_id = str(call.args.get("target_id") or "").strip()
-        if not service_id:
+        proactive_id = str(call.args.get("target_id") or "").strip()
+        if not proactive_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
                 text="target_id is required",
                 llm_text="target_id is required",
             )
-        updated = self.manager.set_enabled(service_id, enabled)
+        updated = self.manager.set_enabled(proactive_id, enabled)
         if updated is None:
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
                 text="proactive task not found",
-                structured={"proactive_id": service_id},
+                structured={"proactive_id": proactive_id},
                 llm_text="proactive task not found",
             )
         self._refresh_capabilities()
         payload = {
-            "proactive_id": service_id,
+            "proactive_id": proactive_id,
             "enabled": updated.enabled,
-            "next_due_at": self.manager.schedule_engine.next_due_at(service_id),
+            "next_due_at": self.manager.schedule_engine.next_due_at(proactive_id),
         }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -579,28 +579,28 @@ class ServiceIntrospectionProvider:
             llm_text=render_titled_structured_for_llm("Proactive state updated", payload),
         )
 
-    def _require_service_target(self, call: IntrospectionCall) -> ServiceTarget | None:
-        service_id = str(call.args.get("target_id") or "").strip()
-        if not service_id:
+    def _require_proactive_target(self, call: IntrospectionCall) -> ProactiveTarget | None:
+        proactive_id = str(call.args.get("target_id") or "").strip()
+        if not proactive_id:
             return None
-        for target in self.iter_services():
-            if target.service_id == service_id:
+        for target in self.iter_proactive_tasks():
+            if target.proactive_id == proactive_id:
                 return target
         return None
 
-    def _last_run_at_for(self, service_id: str) -> str | None:
+    def _last_run_at_for(self, proactive_id: str) -> str | None:
         repository = self.manager.repository
         if repository is None:
             return None
-        latest = repository.latest_run(service_id)
+        latest = repository.latest_run(proactive_id)
         if latest is None:
             return None
         return latest.completed_at or latest.started_at
 
     def _render_run(self, run) -> dict[str, object]:
         return {
-            "proactive_run_id": run.service_run_id,
-            "proactive_id": run.service_id,
+            "proactive_run_id": run.proactive_run_id,
+            "proactive_id": run.proactive_id,
             "trigger_kind": run.trigger_kind,
             "status": run.status,
             "trigger_metadata": dict(run.trigger_metadata or {}),
@@ -617,8 +617,8 @@ class ServiceIntrospectionProvider:
         self.refresh_capabilities()
 
 
-def inspect_service(provider: ServiceIntrospectionProvider) -> ServiceSnapshot:
-    return ServiceSnapshot(
+def inspect_proactive(provider: ProactiveIntrospectionProvider) -> ProactiveSnapshot:
+    return ProactiveSnapshot(
         registered_proactive_tasks=len(provider.manager.registered),
         pending_triggers=len(provider.manager.pending_triggers),
         triggered_runs=len(provider.runner.triggered) if provider.runner is not None else 0,
@@ -629,11 +629,11 @@ def inspect_service(provider: ServiceIntrospectionProvider) -> ServiceSnapshot:
 
 def register_with_core(
     context: MainContext,
-    manager: ServiceManager,
-    runner: ServiceRunner | None = None,
+    manager: ProactiveManager,
+    runner: ProactiveRunner | None = None,
 ) -> ModuleHandle:
-    from pal.service.handler import ServiceTriggerHandler
-    from pal.service.prompt import ServicePromptFragmentProvider
+    from pal.proactive.handler import ProactiveTriggerHandler
+    from pal.proactive.prompt import ProactivePromptFragmentProvider
 
     def refresh_capabilities() -> None:
         handle = context.module_registry.get(PROACTIVE_MODULE_ID)
@@ -645,10 +645,10 @@ def register_with_core(
         handle.published_capabilities = context.execution_runtime.mount_subtree(handle)
 
     manager.on_change = refresh_capabilities
-    provider = ServiceIntrospectionProvider(manager=manager, runner=runner, refresh_capabilities=refresh_capabilities)
-    prompt_provider = ServicePromptFragmentProvider(manager=manager)
-    source = ServiceEventSource(manager=manager)
-    event_handler = ServiceTriggerHandler(manager=manager, runner=runner)
+    provider = ProactiveIntrospectionProvider(manager=manager, runner=runner, refresh_capabilities=refresh_capabilities)
+    prompt_provider = ProactivePromptFragmentProvider(manager=manager)
+    source = ProactiveEventSource(manager=manager)
+    event_handler = ProactiveTriggerHandler(manager=manager, runner=runner)
     handle = ModuleHandle(
         module_id=PROACTIVE_MODULE_ID,
         tier=MODULE_TIER_DETACHABLE,
@@ -658,7 +658,7 @@ def register_with_core(
         supports_lifecycle_capabilities=True,
         event_sources=[source],
         event_handlers={EventKind.PROACTIVE_TRIGGER: [event_handler]},
-        ports={"service_manager": manager, "service_runner": runner},
+        ports={"proactive_manager": manager, "proactive_runner": runner},
     )
     context.register_module(handle)
     context.prompt_fragment_registry.register(prompt_provider)

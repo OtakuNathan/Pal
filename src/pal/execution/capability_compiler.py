@@ -148,6 +148,9 @@ def _canonical_path(
     action_blueprint: CapabilityActionBlueprint,
     node_blueprint: CapabilityNodeBlueprint,
 ) -> str:
+    override = str(action_blueprint.metadata.get("canonical_path") or "").strip()
+    if override:
+        return override
     return _underscore_canonical_path(
         module_id=module_id,
         action_blueprint=action_blueprint,

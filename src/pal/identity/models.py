@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from peewee import Check, CharField, TextField
+from peewee import CharField, TextField
 from playhouse.sqlite_ext import JSONField
 
 from pal.foundation.persistence import BaseModel, utc_now
@@ -31,14 +31,3 @@ class UserPreferencesModel(BaseModel):
     class Meta:
         table_name = "user_preferences"
 
-
-class PalStateModel(BaseModel):
-    persona = CharField(primary_key=True, column_name="persona_id")
-    status = CharField(default="idle", constraints=[Check("status IN ('idle', 'running', 'paused', 'blocked')")])
-    top_of_mind_refs = JSONField(default=list)
-    last_active_at = TextField(null=True)
-    created_at = TextField(default=utc_now)
-    updated_at = TextField(default=utc_now)
-
-    class Meta:
-        table_name = "pal_states"

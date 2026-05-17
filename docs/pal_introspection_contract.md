@@ -45,7 +45,7 @@
 - `introspection.execution.*`
 - `introspection.control.*`
 - `introspection.tasking.*`
-- `introspection.service.*`
+- `introspection.proactive.*`
 - `introspection.plugin.*`
 - `introspection.llm.*`
 

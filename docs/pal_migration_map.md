@@ -15,13 +15,13 @@
 
 - 当前职责：总装配、主循环、能力调用、memory 编排、scheduler 编排、worker 编排、diagnostics 编排
 - 当前问题：主体编排与领域协调混在一个超级入口里，边界不清
-- 目标归属：`core` + `bootstrap` + 若干 domain service orchestrators
+- 目标归属：`core` + `bootstrap` + 若干 domain orchestrators
 - 迁移方式：拆成 `PalCore`、turn runner、runtime wiring
 - 是否保留语义：保留主循环语义，不保留当前文件形状
 
 ## `src/pal/runtime/pal/capabilities.py`
 
-- 当前职责：单点注册 memory、task、work order、service、introspection 等能力
+- 当前职责：单点注册 memory、task、work order、proactive、introspection 等能力
 - 当前问题：所有领域 capability 杂糅在一个模块，无法体现插件化和子系统分权
 - 目标归属：各子系统 provider 自注册到 `Execution`
 - 迁移方式：拆成 per-domain capability providers
@@ -29,7 +29,7 @@
 
 ## `src/pal/storage/sqlite.py`
 
-- 当前职责：全局数据库入口、迁移、memory、service、tasking、diagnostics、channel route 全部读写
+- 当前职责：全局数据库入口、迁移、memory、proactive、tasking、diagnostics、channel route 全部读写
 - 当前问题：单文件承担所有领域持久化，已经成为事实上的系统核心
 - 目标归属：`foundation/persistence` + per-domain repositories
 - 迁移方式：拆成 database infra 和领域 repository
@@ -77,13 +77,13 @@
 - 迁移方式：保留 I/O 和 normalize 核心，改为依赖 `EndpointConfig` 和 `ResponseHandle`
 - 是否保留语义：保留 receive / send / segmented send / reply route 主路径
 
-## `service` 相关旧 schema / store 路径
+## `proactive` 相关旧 schema / store 路径
 
-- 当前职责：`pal_services`、`pal_service_runs`、schedule 计算、service run 记账、in/out channel blob 持久化
-- 当前问题：`user_pal_id` 是单主体场景下的冗余字段；`in_channel_blob / out_channel_blob` 过重，缺少对 channel endpoint 的正式外键关系；service spec 语义也还不够清楚
-- 目标归属：`service`
-- 迁移方式：保留旧 service 语义与 schedule/run 主链；删除 `user_id / user_pal_id` 维度；把 output channel 收成 `out_channel_id` 并绑定 channel endpoint foreign key；把 service spec 收成 `goal / method / skill_refs`
-- 是否保留语义：保留 service family、schedule、run lifecycle、worker preparation 语义；不保留匿名 channel blob 作为长期主绑定形式
+- 当前职责：`proactive_definitions`、`proactive_runs`、schedule 计算、proactive run 记账、output channel / reply target 持久化
+- 当前问题：旧命名已经退休，durable hot-state 表也不再需要
+- 目标归属：`proactive`
+- 迁移方式：只保留 `proactive_definitions/proactive_runs` active schema；hot/top-of-mind state 留在 runtime memory
+- 是否保留语义：保留 schedule、due trigger、run lifecycle 和 output routing；不保留 `service` 作为子系统名
 
 ## 包装迁移
 

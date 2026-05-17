@@ -10,12 +10,12 @@ from pal.channel import ChannelEndpointRepository
 from pal.channel.endpoints import DEFAULT_SOCKET_FILENAME
 from pal.foundation import PalV2Database
 from pal.identity import IdentityRepository
-from pal.identity.models import PalPersonaModel, PalStateModel, UserPreferencesModel
+from pal.identity.models import PalPersonaModel, UserPreferencesModel
 from pal.llm import LLMEndpointRepository, RuntimeSettingRepository
 from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 from pal.memory import MemoryCaseModel, MemoryEmbeddingModel, MemoryEmbeddingVecModel, MemoryFactModel, MemoryTopicModel
 from pal.plugins import PluginBundleModel
-from pal.service import ServiceDefinitionModel, ServiceRunModel
+from pal.proactive import ProactiveDefinitionModel, ProactiveRunModel
 from pal.skill import SkillModel
 from pal.web_fetch import WebFetchProviderModel, WebFetchProviderRepository
 from pal.web_search import WebSearchProviderModel, WebSearchProviderRepository
@@ -26,7 +26,6 @@ from pal.wizard.contracts import PalRegistration, ProvisionedRuntime, RuntimeLau
 ALL_MODELS = (
     PalPersonaModel,
     UserPreferencesModel,
-    PalStateModel,
     ChannelEndpointModel,
     LLMEndpointModel,
     PalRuntimeSettingModel,
@@ -36,8 +35,8 @@ ALL_MODELS = (
     MemoryEmbeddingModel,
     MemoryEmbeddingVecModel,
     PluginBundleModel,
-    ServiceDefinitionModel,
-    ServiceRunModel,
+    ProactiveDefinitionModel,
+    ProactiveRunModel,
     WebSearchProviderModel,
     WebFetchProviderModel,
     BehaviorAffordanceModel,
@@ -276,7 +275,7 @@ class WizardService(WizardServicePort):
             if provider:
                 pass
             elif base_url.lower().startswith("codex://"):
-                provider = "codex_app_server"
+                provider = "codex_cli"
             elif "anthropic" in ep.api_mode:
                 provider = "anthropic"
             elif "openai" in ep.api_mode or ep.api_mode == "openai_chat":

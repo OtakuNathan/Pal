@@ -5,6 +5,7 @@ from typing import Any
 
 from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus
+from pal.shared.prompt_rendering import render_system_reminder
 from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.skill.contracts import SKILL_INJECT_MANUAL_CHAR_BUDGET
 from pal.skill.service import SkillService
@@ -131,7 +132,7 @@ class SkillAssimilateTool:
     name: str = "op_skill_assimilate"
     display_name: str = "Assimilate skill"
     family: str = "skill"
-    description: str = "Create a sanitized Pal skill candidate from plain text or SKILL.md content. Async only; does not commit."
+    description: str = "Create a sanitized Pal skill candidate from plain text or SKILL.md content. Does not commit."
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("skill", "learn", "sanitize")
@@ -148,7 +149,7 @@ class SkillAssimilateTool:
         structured = {"reason": "async_required", "tool": self.name}
         return CapabilityResult(
             status=RuntimeStatus.INVALID,
-            text="op_skill_assimilate requires async execution.",
+            text="op_skill_assimilate requires an active async turn context.",
             structured=structured,
             llm_text=render_titled_structured_for_llm("Skill assimilation unavailable", structured),
         )
@@ -476,8 +477,34 @@ class SkillInjectTool:
             status=RuntimeStatus.OK,
             text=skill.manual_text,
             structured=structured,
-            llm_text=render_titled_structured_for_llm("Skill manual", structured),
+            llm_text=render_system_reminder(_render_injected_skill_for_llm(structured)),
         )
+
+
+def _render_injected_skill_for_llm(payload: dict[str, Any]) -> str:
+    lines = ["Injected skill:"]
+    title = str(payload.get("title") or "").strip()
+    skill_id = str(payload.get("skill_id") or "").strip()
+    summary = str(payload.get("summary") or "").strip()
+    use_when = str(payload.get("use_when") or "").strip()
+    avoid_when = str(payload.get("avoid_when") or "").strip()
+    manual = str(payload.get("manual_text") or "").strip()
+    capability_refs = [str(item).strip() for item in list(payload.get("capability_refs") or []) if str(item).strip()]
+    if title:
+        lines.append(f"Title: {title}")
+    if skill_id:
+        lines.append(f"Skill id: {skill_id}")
+    if summary:
+        lines.append(f"Summary: {summary}")
+    if use_when:
+        lines.append(f"Use when: {use_when}")
+    if avoid_when:
+        lines.append(f"Avoid when: {avoid_when}")
+    if capability_refs:
+        lines.append(f"Capability refs: {', '.join(capability_refs)}")
+    if manual:
+        lines.extend(["", "Manual:", manual])
+    return "\n".join(lines).strip()
 
 
 def _skill_search_score(skill, query: str) -> tuple[float, str, bool]:

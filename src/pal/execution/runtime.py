@@ -389,7 +389,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         budget: ToolCallBudget,
     ) -> CanonicalToolResult:
-        if call.name != "shell.exec":
+        if call.name != "shell_exec":
             return result
         structured = dict(result.structured or {})
         max_lines = budget.max_lines_to_read
@@ -509,12 +509,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 }
             )
             if instance_targets:
-                return CapabilityResult(
-                    status=RuntimeStatus.INVALID,
-                    text="target_id is required for this capability",
-                    structured={"canonical_path": call.name, "available_target_ids": instance_targets},
-                    llm_text="target_id is required for this capability",
-                )
+                return _target_id_required_result(canonical_path=call.name, available_target_ids=instance_targets)
         registered = self.capabilities.get(call.name)
         if registered is None:
             resolved = self._resolve_descriptor(call.name, target_id=target_id)
@@ -616,12 +611,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             }
         )
         if instance_targets:
-            return CapabilityResult(
-                status=RuntimeStatus.INVALID,
-                text="target_id is required for this capability",
-                structured={"name": name, "available_target_ids": instance_targets},
-                llm_text="target_id is required for this capability",
-            )
+            return _target_id_required_result(name=name, available_target_ids=instance_targets)
         return None
 
     def execute(self, call: CapabilityCall) -> CapabilityResult:
@@ -712,6 +702,34 @@ def _truncate_linewise(text: str, *, max_lines: int | None) -> tuple[str, bool]:
     return f"{kept}{suffix}".strip(), True
 
 
+def _target_id_required_result(
+    *,
+    available_target_ids: list[str],
+    canonical_path: str = "",
+    name: str = "",
+) -> CapabilityResult:
+    payload = {
+        "error_code": "target_id_required",
+        "available_target_ids": list(available_target_ids),
+    }
+    if canonical_path:
+        payload["canonical_path"] = canonical_path
+    if name:
+        payload["name"] = name
+    target_text = ", ".join(available_target_ids) if available_target_ids else "(none)"
+    capability = canonical_path or name or "this capability"
+    return CapabilityResult(
+        status=RuntimeStatus.INVALID,
+        text="target_id is required for this capability",
+        structured=payload,
+        llm_text=(
+            f"target_id is required for {capability}. "
+            f"Available target_id values: {target_text}. "
+            "Retry with args.target_id set to one of these values."
+        ),
+    )
+
+
 def _capability_spec_payload(descriptor: CapabilityDescriptor) -> dict[str, Any]:
     canonical = descriptor.canonical_path or descriptor.name
     display = descriptor.display_name or canonical
@@ -734,4 +752,5 @@ def _capability_spec_payload(descriptor: CapabilityDescriptor) -> dict[str, Any]
         "source": descriptor.source,
         "target_kind": descriptor.target_kind,
         "target_id": descriptor.target_id,
+        "metadata": dict(descriptor.metadata or {}),
     }

@@ -15,7 +15,7 @@ flowchart TD
     CTRL["control"]
     CORE["core"]
     TASK["tasking"]
-    SVC["service"]
+    PRO["proactive"]
 
     IO --> CH
     IO --> CORE
@@ -23,7 +23,7 @@ flowchart TD
     PERSIST --> MEM
     PERSIST --> EX
     PERSIST --> TASK
-    PERSIST --> SVC
+    PERSIST --> PRO
 
     CH --> CORE
     CTRL --> CORE
@@ -32,7 +32,7 @@ flowchart TD
     LLM --> CORE
 
     EX --> TASK
-    EX --> SVC
+    EX --> PRO
     MEM --> TASK
 ```
 
@@ -230,7 +230,7 @@ IM channel 默认采用三阶段反馈：
 - channel state
 - execution policy
 - minions lifecycle
-- service lifecycle
+- proactive lifecycle
 
 ### Exposes
 
@@ -275,14 +275,14 @@ IM channel 默认采用三阶段反馈：
 
 推荐原则：
 
-- 本地执行优先通过 `shell.exec`
+- 本地执行优先通过 `shell_exec`
 - `web_search` 保留为独立能力与 provider family
 - `web_fetch` 可以通过 `curl` 或 headless browser backend 落地
 
 也就是说：
 
 - 不必为每个本地动作都发明单独 built-in tool
-- `shell.exec` 可以作为默认本地执行原语
+- `shell_exec` 可以作为默认本地执行原语
 - 但需要结构化 provider 选择或外部信息能力的场景，应保留独立 capability family
 
 ## control
@@ -324,7 +324,7 @@ IM channel 默认采用三阶段反馈：
 - tool registry details
 - durable memory
 - work order details
-- service run details
+- proactive run details
 
 ### Exposes
 
@@ -358,16 +358,16 @@ IM channel 默认采用三阶段反馈：
 - minions checkpoint contracts
 - minions observation and termination capabilities
 
-## service
+## proactive
 
 ### Owns
 
 - scheduled triggers
-- recurring service state
-- service run lifecycle
+- recurring proactive task state
+- proactive run lifecycle
 - due event materialization
 - output channel binding
-- service action contract
+- proactive action contract
 
 ### Does Not Own
 
@@ -378,13 +378,13 @@ IM channel 默认采用三阶段反馈：
 
 ### Exposes
 
-- `ServicePlugin`
-- service trigger contracts
-- service run contracts
+- `ProactiveDefinition`
+- proactive trigger contracts
+- proactive run contracts
 
-### Service Shape Rule
+### Proactive Shape Rule
 
-service 的内部定义至少应表达：
+proactive task 的内部定义至少应表达：
 
 - 你要做什么
 - 你如何做
@@ -392,9 +392,9 @@ service 的内部定义至少应表达：
 
 并且：
 
-- `out_channel_id` 默认等于创建时的输入 channel
-- `out_channel_id` 必须通过 foreign key 绑定到 channel endpoint
-- output channel 消失后，service 不应继续保留为有效服务
+- `out_channel_id` 可选；设置后必须能被 channel runtime 解析
+- `out_reply_target` 保存 endpoint-specific reply metadata
+- output channel 无法解析时，本次 proactive run 不发 channel 输出，但 run history 仍然保留
 
 ## 关键接口清单
 
@@ -429,4 +429,4 @@ service 的内部定义至少应表达：
 - 不定义字段级数据库 schema
 - 不定义具体 Python 包内文件名
 - 不规定第一版 plugin marketplace 机制
-- 不把 `Task`、`Service` 提升为 Core owned subsystem
+- 不把 `Task`、`Proactive` 提升为 Core owned subsystem

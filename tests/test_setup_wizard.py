@@ -271,7 +271,7 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertEqual(endpoints[0].endpoint_id, "test-claude")
         self.assertEqual(endpoints[1].endpoint_id, "deepseek-fallback")
 
-    def test_seed_from_wizard_writes_codex_app_server_endpoint(self) -> None:
+    def test_seed_from_wizard_writes_codex_cli_endpoint(self) -> None:
         from pal.llm import LLMEndpointRepository
 
         collected = _make_collected()
@@ -282,17 +282,17 @@ class TestSeedFromWizard(unittest.TestCase):
         endpoint = LLMEndpointRepository().get_primary_enabled()
         self.assertIsNotNone(endpoint)
         self.assertEqual(endpoint.endpoint_id, "codex_gpt_5_5")
-        self.assertEqual(endpoint.provider, "codex_app_server")
+        self.assertEqual(endpoint.provider, "codex_cli")
         self.assertEqual(endpoint.model_id, "gpt-5.5")
         self.assertEqual(endpoint.api_mode, "openai_chat")
-        self.assertEqual(endpoint.base_url, "codex://app-server")
+        self.assertEqual(endpoint.base_url, "codex://cli")
         self.assertEqual(endpoint.auth_kind, "local_provider_auth")
         self.assertEqual(endpoint.credential_ref, "")
         self.assertTrue(endpoint.supports_reasoning)
         self.assertTrue(endpoint.supports_tools)
         self.assertTrue(endpoint.supports_streaming)
         self.assertTrue(endpoint.supports_vision)
-        self.assertTrue(endpoint.capabilities_blob["official_codex_app_server"])
+        self.assertTrue(endpoint.capabilities_blob["official_codex_cli"])
 
 
 class TestCodexWizardEndpoints(unittest.TestCase):
@@ -301,11 +301,11 @@ class TestCodexWizardEndpoints(unittest.TestCase):
 
         self.assertEqual([ep.endpoint_id for ep in endpoints], ["codex_gpt_5_5", "codex_gpt_5_3_codex_spark"])
         self.assertEqual([ep.priority for ep in endpoints], [0, 1])
-        self.assertEqual(endpoints[0].provider, "codex_app_server")
+        self.assertEqual(endpoints[0].provider, "codex_cli")
         self.assertEqual(endpoints[0].auth_kind, "local_provider_auth")
         self.assertEqual(endpoints[0].credential_ref, "")
-        self.assertEqual(endpoints[0].base_url, "codex://app-server")
-        self.assertTrue(endpoints[0].capabilities_blob["codex_app_server"])
+        self.assertEqual(endpoints[0].base_url, "codex://cli")
+        self.assertTrue(endpoints[0].capabilities_blob["codex_cli"])
 
 
 class TestLLMPreflight(unittest.TestCase):
@@ -371,10 +371,10 @@ class TestLLMPreflight(unittest.TestCase):
         result = run_llm_endpoint_preflight(build_codex_wizard_endpoints(("gpt-5.5",))[0], invoker=invoker)
 
         self.assertEqual(result.status, "warn")
-        self.assertEqual(invoker.endpoints[0].provider, "codex_app_server")
+        self.assertEqual(invoker.endpoints[0].provider, "codex_cli")
         self.assertEqual(invoker.endpoints[0].auth_kind, "local_provider_auth")
         self.assertEqual(invoker.endpoints[0].credential_ref, "")
-        self.assertTrue(invoker.endpoints[0].capabilities_blob["official_codex_app_server"])
+        self.assertTrue(invoker.endpoints[0].capabilities_blob["official_codex_cli"])
 
 
 class TestServiceGeneration(unittest.TestCase):
@@ -624,7 +624,7 @@ class TestDependencyDoctor(unittest.TestCase):
 
         self.assertEqual(exit_code, 2)
 
-    def test_service_manager_check_supports_launchd(self) -> None:
+    def test_proactive_manager_check_supports_launchd(self) -> None:
         from pal.wizard import dependencies as dep_mod
 
         with patch.object(dep_mod.platform, "system", return_value="Darwin"):
@@ -634,7 +634,7 @@ class TestDependencyDoctor(unittest.TestCase):
         self.assertEqual(check.status, "ok")
         self.assertIn("LaunchAgent", check.detail)
 
-    def test_service_manager_check_warns_when_launchctl_missing(self) -> None:
+    def test_proactive_manager_check_warns_when_launchctl_missing(self) -> None:
         from pal.wizard import dependencies as dep_mod
 
         with patch.object(dep_mod.platform, "system", return_value="Darwin"):

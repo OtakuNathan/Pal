@@ -109,6 +109,12 @@ class L3CorrectRequest:
 
 
 @dataclass(frozen=True)
+class L3DeleteRequest:
+    document_id: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class L3MutationResult:
     status: str
     document_id: str
@@ -191,6 +197,9 @@ class L3ProviderPort(Protocol):
         ...
 
     def correct(self, request: L3CorrectRequest) -> L3MutationResult:
+        ...
+
+    def delete(self, request: L3DeleteRequest) -> L3MutationResult:
         ...
 
     def retire_entries(self, entries: list[L2Entry]) -> L3RetireResult:

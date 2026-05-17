@@ -79,14 +79,14 @@ class BehaviorIntrospectionProvider:
         description="Ask the behavior router for scenario-to-action route candidates. Async tool path is required.",
         args_schema=ADVISE_ARGS_SCHEMA,
         result_schema=ADVISE_RESULT_SCHEMA,
-        metadata={"llm_exposed": True, "async_required": True},
+        metadata={"async_required": True},
     )
     def advise(self, call: CapabilityCall) -> CapabilityResult:
         _ = call
         structured = {"reason": "async_required", "tool": "op_behavior_advise"}
         return CapabilityResult(
             status=RuntimeStatus.INVALID,
-            text="op_behavior_advise requires async execution.",
+            text="op_behavior_advise requires an active async turn context.",
             structured=structured,
             llm_text=render_titled_structured_for_llm("Behavior advice unavailable", structured),
         )
@@ -99,7 +99,6 @@ class BehaviorIntrospectionProvider:
         description="Persist a user-instructed or learned affordance. Do not use for ordinary memory cases.",
         args_schema=AFFORDANCE_SUBMIT_ARGS_SCHEMA,
         result_schema=AFFORDANCE_SUBMIT_RESULT_SCHEMA,
-        metadata={"llm_exposed": True},
     )
     def submit_affordance(self, call: CapabilityCall) -> CapabilityResult:
         return AffordanceSubmitTool(service=self.service).invoke(call.args)

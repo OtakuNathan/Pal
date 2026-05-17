@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Any, Iterable, Protocol
 
 from pal.llm.adapters import LLMProviderRegistry, build_runtime_provider_registry, _think_level_to_completion_reasoning_effort
-from pal.llm.codex_proxy import (
-    DEFAULT_CODEX_PROXY_MAX_CONCURRENCY,
-    CodexAppServerBridge,
+from pal.llm.codex_openai_bridge import (
+    DEFAULT_CODEX_BRIDGE_MAX_CONCURRENCY,
+    CodexCliBridge,
     CodexCompletion,
-    CodexProxyError,
+    CodexBridgeError,
     _messages_to_codex_input,
     _openai_tools_to_dynamic_tools,
     _strip_openai_prefix,
@@ -115,13 +115,13 @@ def _endpoint_connection_failure_domain(endpoint: LLMEndpointModel) -> tuple[str
     base_url = str(getattr(endpoint, "base_url", "") or "").strip().lower()
     capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
     if (
-        provider in {"codex", "codex_app_server"}
+        provider in {"codex", "codex_cli"}
         or base_url.startswith("codex://")
-        or capabilities.get("codex_app_server")
-        or capabilities.get("official_codex_app_server")
+        or capabilities.get("codex_cli")
+        or capabilities.get("official_codex_cli")
         or capabilities.get("codex_native")
     ):
-        return ("codex_app_server", base_url or "codex://app-server")
+        return ("codex_cli", base_url or "codex://cli")
     return None
 
 
@@ -408,17 +408,17 @@ class LiteLLMEndpointInvoker:
 
 
 @dataclass
-class CodexAppServerEndpointInvoker:
-    """Native Codex app-server invoker that returns Pal canonical outcomes."""
+class CodexCliEndpointInvoker:
+    """Native Codex CLI invoker that returns Pal canonical outcomes."""
 
-    bridge: CodexAppServerBridge | None = None
+    bridge: CodexCliBridge | None = None
     artifact_manager: Any = None
-    max_concurrency: int = DEFAULT_CODEX_PROXY_MAX_CONCURRENCY
+    max_concurrency: int = DEFAULT_CODEX_BRIDGE_MAX_CONCURRENCY
     _semaphore: threading.BoundedSemaphore = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.bridge is None:
-            self.bridge = CodexAppServerBridge()
+            self.bridge = CodexCliBridge()
         self._semaphore = threading.BoundedSemaphore(max(1, int(self.max_concurrency)))
 
     @staticmethod
@@ -428,16 +428,16 @@ class CodexAppServerEndpointInvoker:
         adapter = str(capabilities.get("adapter") or capabilities.get("llm_adapter") or "").strip().lower()
         base_url = str(getattr(endpoint, "base_url", "") or "").strip().lower()
         return bool(
-            provider in {"codex", "codex_app_server"}
-            or adapter in {"codex", "codex_app_server", "codex_native"}
-            or capabilities.get("codex_app_server")
-            or capabilities.get("official_codex_app_server")
+            provider in {"codex", "codex_cli"}
+            or adapter in {"codex", "codex_cli", "codex_native"}
+            or capabilities.get("codex_cli")
+            or capabilities.get("official_codex_cli")
             or capabilities.get("codex_native")
             or base_url.startswith("codex://")
         )
 
     def invoke(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        model, developer_instructions, input_items, dynamic_tools, effort = _codex_app_server_request_parts(
+        model, developer_instructions, input_items, dynamic_tools, effort = _codex_cli_request_parts(
             endpoint,
             request,
             artifact_manager=self.artifact_manager,
@@ -453,7 +453,7 @@ class CodexAppServerEndpointInvoker:
                     effort=effort,
                     messages=list(request.messages or []),
                 )
-            except CodexProxyError as exc:
+            except CodexBridgeError as exc:
                 if not _should_retry_codex_final_answer_without_tools(exc, request, dynamic_tools):
                     raise
                 completion = bridge.invoke_turn(
@@ -486,9 +486,9 @@ class CodexAppServerEndpointInvoker:
             yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=outcome.text)
         yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=outcome.finish_reason)
 
-    def _require_bridge(self) -> CodexAppServerBridge:
+    def _require_bridge(self) -> CodexCliBridge:
         if self.bridge is None:
-            self.bridge = CodexAppServerBridge()
+            self.bridge = CodexCliBridge()
         return self.bridge
 
 
@@ -497,7 +497,7 @@ class RoutingLLMEndpointInvoker:
     """Route native providers before falling back to LiteLLM."""
 
     litellm_invoker: LiteLLMEndpointInvoker = field(default_factory=LiteLLMEndpointInvoker)
-    codex_invoker: CodexAppServerEndpointInvoker = field(default_factory=CodexAppServerEndpointInvoker)
+    codex_invoker: CodexCliEndpointInvoker = field(default_factory=CodexCliEndpointInvoker)
 
     @property
     def provider_registry(self) -> LLMProviderRegistry:
@@ -533,11 +533,11 @@ def build_default_endpoint_invoker(
             artifact_manager=artifact_manager,
             runtime_root=runtime_root,
         ),
-        codex_invoker=CodexAppServerEndpointInvoker(artifact_manager=artifact_manager),
+        codex_invoker=CodexCliEndpointInvoker(artifact_manager=artifact_manager),
     )
 
 
-def _codex_app_server_request_parts(
+def _codex_cli_request_parts(
     endpoint: LLMEndpointModel,
     request: CanonicalLLMRequest,
     *,
@@ -551,7 +551,7 @@ def _codex_app_server_request_parts(
 
 
 def _should_retry_codex_final_answer_without_tools(
-    exc: CodexProxyError,
+    exc: CodexBridgeError,
     request: CanonicalLLMRequest,
     dynamic_tools: list[dict[str, Any]],
 ) -> bool:
@@ -1177,7 +1177,7 @@ class LLMRuntime(LLMRuntimePort):
 
     @staticmethod
     def _estimate_message_chars(message: dict[str, Any]) -> int:
-        total = len(str(message.get("content", "")))
+        total = _message_content_chars(message.get("content"))
         tool_calls = message.get("tool_calls")
         if tool_calls:
             try:
@@ -1323,6 +1323,18 @@ def _coerce_tools_for_litellm(
             }
         )
     return normalized
+
+
+def _message_content_chars(content: Any) -> int:
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "") == "text":
+                parts.append(str(item.get("text") or ""))
+        return len("\n".join(part for part in parts if part))
+    return len(str(content or ""))
 
 
 def _coerce_messages_for_litellm(
