@@ -23,7 +23,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
         return getattr(self.config, "keep_recent_tool_messages", _DEFAULT_KEEP_RECENT_TOOL_MESSAGES) if self.config else _DEFAULT_KEEP_RECENT_TOOL_MESSAGES
 
     def build_prompt_fragments(self, context: PromptAssemblyContext) -> list[PromptFragment]:
-        fragments: list[PromptFragment] = [_memory_routing_fragment()]
+        fragments: list[PromptFragment] = [_memory_guide_fragment()]
         pack = context.metadata.get("memory_pack")
         if not isinstance(pack, MemoryPack):
             return fragments
@@ -163,10 +163,10 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
         return fragments
 
 
-def _memory_routing_fragment() -> PromptFragment:
+def _memory_guide_fragment() -> PromptFragment:
     return PromptFragment(
-        section="memory_routing",
-        title="Memory Routing",
+        section="memory_guide",
+        title="Memory Guide",
         content=(
             "Memory is the source of truth for durable user facts, preferences, prior Pal decisions, project history, repair lessons, and reusable case knowledge.\n\n"
             "Mandatory recall:\n"
@@ -197,7 +197,7 @@ def _memory_routing_fragment() -> PromptFragment:
             "- Use op_memory_delete only when the user explicitly asks to forget/delete a specific memory or approves deleting a clearly invalid recalled record."
         ),
         priority=71,
-        metadata={"module_id": "memory", "kind": "memory_routing"},
+        metadata={"module_id": "memory", "kind": "memory_guide"},
     )
 
 

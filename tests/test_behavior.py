@@ -677,23 +677,20 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertIn("op_behavior_advise", content)
         self.assertIn("Casual chat", content)
-        self.assertIn("Direct capability task", content)
-        self.assertLess(content.index("op_behavior_advise"), content.index("Direct capability task"))
-        self.assertIn("completed by exactly one capability", content)
-        self.assertIn("already known from current context or found with `op_tool_search`", content)
-        self.assertIn("read/resolve the capability contract when needed", content)
-        self.assertIn("only be a step toward analysis, diagnosis, design, research, repair, or code understanding", content)
-        self.assertIn("direct implementation command for a clear, bounded, already-routed action", content)
-        self.assertIn("obvious correction", content)
-        self.assertIn("op_tool_search", content)
-        self.assertIn("op_skill_inject", content)
-        self.assertIn("Advice is a resource package, not an order", content)
-        self.assertIn("MUST NOT call `op_skill_inject` merely because `skill_refs` are present", content)
-        self.assertIn("Call `op_skill_inject` only when workflow, domain rules, design, review, repair, or multi-step work needs that guidance", content)
-        self.assertIn("If a listed capability directly completes the request, use the capability without injecting a skill", content)
+        self.assertIn("Clear single-capability action", content)
+        self.assertLess(content.index("Casual chat"), content.index("op_behavior_advise"))
+        self.assertIn("resolve the capability contract when needed", content)
+        self.assertIn("project analysis", content)
+        self.assertIn("direct implementation command for a clear already-routed action", content)
+        self.assertIn("obvious local/schema/input mistake", content)
+        self.assertIn("Advisor output is a resource package, not an order", content)
         self.assertNotIn("If advice returns `skill_ref`, call `op_skill_inject` before executing that workflow", content)
-        self.assertIn("memory_query_hints", content)
-        self.assertIn("op_memory_recall", content)
+        self.assertIn("capability refs", content)
+        self.assertIn("skill refs", content)
+        self.assertIn("memory hints", content)
+        self.assertIn("Behavior guidance answers", content)
+        self.assertIn("op_behavior_save", content)
+        self.assertIn("affordances with affordance_id values", content)
         self.assertNotIn("op_memory_write", content)
 
     def test_behavior_prompt_sections_enter_system_prompt_in_order(self) -> None:
@@ -704,57 +701,61 @@ class BehaviorSubsystemTests(unittest.TestCase):
         prompt = core.build_canonical_prompt(PromptAssemblyContext())
         system = prompt.messages[0]["content"]
 
-        self.assertIn("<system_surfaces>", system)
+        self.assertIn("<system_map>", system)
         self.assertIn("<source_of_truth>", system)
         self.assertIn("<prompt_context_policy>", system)
         self.assertIn("<operating_rules>", system)
-        self.assertIn("<advisor_gate>", system)
-        self.assertIn("<advisor_recovery_memory>", system)
-        self.assertIn("<behavior_routing>", system)
-        self.assertIn("<behavior_memory_write_boundary>", system)
-        self.assertNotIn("<memory_routing>", system)
+        self.assertIn("<priority>", system)
+        self.assertIn("<task_flow>", system)
+        self.assertIn("<tool_efficiency>", system)
+        self.assertIn("<mutation_policy>", system)
+        self.assertIn("<behavior_guidance_guide>", system)
+        self.assertIn("<knowledge_storage_boundary>", system)
+        self.assertNotIn("<memory_guide>", system)
         self.assertNotIn("<behavior_guidance>", system)
         self.assertNotIn("##", system)
-        self.assertLess(system.index("<system_surfaces>"), system.index("<source_of_truth>"))
+        self.assertLess(system.index("<system_map>"), system.index("<source_of_truth>"))
         self.assertLess(system.index("<source_of_truth>"), system.index("<prompt_context_policy>"))
         self.assertLess(system.index("<prompt_context_policy>"), system.index("<operating_rules>"))
-        self.assertLess(system.index("<operating_rules>"), system.index("<advisor_gate>"))
-        self.assertLess(system.index("<advisor_gate>"), system.index("<advisor_recovery_memory>"))
-        self.assertLess(system.index("<advisor_recovery_memory>"), system.index("<behavior_routing>"))
+        self.assertLess(system.index("<operating_rules>"), system.index("<priority>"))
+        self.assertLess(system.index("<priority>"), system.index("<task_flow>"))
+        self.assertLess(system.index("<task_flow>"), system.index("<tool_efficiency>"))
+        self.assertLess(system.index("<mutation_policy>"), system.index("<behavior_guidance_guide>"))
         self.assertEqual(
             prompt.metadata["fragment_sections"],
             [
-                "system_surfaces",
+                "system_map",
                 "source_of_truth",
                 "prompt_context_policy",
                 "operating_rules",
-                "advisor_gate",
-                "advisor_recovery_memory",
-                "behavior_routing",
-                "behavior_memory_write_boundary",
+                "priority",
+                "task_flow",
+                "tool_efficiency",
+                "mutation_policy",
+                "behavior_guidance_guide",
+                "knowledge_storage_boundary",
             ],
         )
 
         surfaces = system.split("<operating_rules>", 1)[0]
-        self.assertIn('Capability answers: "What executable ability exists right now?"', surfaces)
-        self.assertIn('Affordance answers: "When this kind of situation appears, what route should Pal consider?"', surfaces)
-        self.assertIn('Skill answers: "What reusable procedure should Pal follow to accomplish this kind of task?"', surfaces)
-        self.assertIn('Memory answers: "What durable fact, preference, history, or lesson may matter now?"', surfaces)
+        self.assertIn("execution/capability", surfaces)
+        self.assertIn("behavior: advisor and behavior guidance", surfaces)
+        self.assertNotIn("minion", system.split("</system_map>", 1)[0].lower())
         source_of_truth = system.split("<source_of_truth>", 1)[1].split("</source_of_truth>", 1)[0]
         self.assertIn("Use the right source for the truth needed", source_of_truth)
         self.assertIn("live introspection/capability calls", source_of_truth)
         operating = system.split("<operating_rules>", 1)[1].split("</operating_rules>", 1)[0]
-        self.assertIn("Mutation and Side-Effect Boundary", operating)
-        self.assertIn("do not refuse merely because runtime state will change", operating)
-        self.assertIn("source code/config/policy changes are separate", operating)
-        self.assertIn("bypasses capability policy", operating)
-        self.assertIn("Priority", operating)
+        self.assertIn("No success claim without confirmation", operating)
         self.assertNotIn("op_behavior_advise", operating)
         self.assertNotIn("op_memory_recall", operating)
         self.assertNotIn("op_memory_write", operating)
-        self.assertIn("<advisor_gate>", system)
-        self.assertIn("If the user explicitly asks Pal to adopt or follow a future behavior rule", system)
-        self.assertIn("remember/save a durable fact, preference, project context, or repair lesson", system)
+        mutation = system.split("<mutation_policy>", 1)[1].split("</mutation_policy>", 1)[0]
+        self.assertIn("Runtime capability calls are governed actions", mutation)
+        self.assertIn("Source code, config, policy, and approval-boundary changes require explicit user request or approval", mutation)
+        self.assertIn("bypassing capability policy", mutation)
+        self.assertIn("<task_flow>", system)
+        self.assertIn("Use op_behavior_save only when the user explicitly asks Pal to adopt/follow/save a future behavior rule", system)
+        self.assertIn("Stable fact, preference, project context, prior decision, or repair lesson -> memory", system)
 
     def test_behavior_advice_tool_result_projects_to_behavior_guidance(self) -> None:
         self.repository.upsert_affordance(
@@ -885,7 +886,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
     def test_memory_prompt_always_projects_memory_routing(self) -> None:
         fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext())
-        self.assertEqual([fragment.section for fragment in fragments], ["memory_routing"])
+        self.assertEqual([fragment.section for fragment in fragments], ["memory_guide"])
         routing = fragments[0].content
 
         self.assertIn("op_memory_recall", routing)
@@ -955,14 +956,16 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(
             with_resident_prompt.metadata["fragment_sections"],
             [
-                "system_surfaces",
+                "system_map",
                 "source_of_truth",
                 "prompt_context_policy",
                 "operating_rules",
-                "advisor_gate",
-                "advisor_recovery_memory",
-                "behavior_routing",
-                "behavior_memory_write_boundary",
+                "priority",
+                "task_flow",
+                "tool_efficiency",
+                "mutation_policy",
+                "behavior_guidance_guide",
+                "knowledge_storage_boundary",
                 "resident_affordances",
             ],
         )

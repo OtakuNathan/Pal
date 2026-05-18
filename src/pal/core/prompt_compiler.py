@@ -41,11 +41,11 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
-            elif normalized_section == "system_surfaces":
+            elif normalized_section == "system_map":
                 system_blocks.append(
                     PromptIRBlock(
-                        block_id="system_surfaces",
-                        title="System Surfaces",
+                        block_id="system_map",
+                        title="System Map",
                         content=rendered_body,
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
@@ -68,7 +68,7 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
-            elif normalized_section == "rules":
+            elif normalized_section == "operating_rules":
                 system_blocks.append(
                     PromptIRBlock(
                         block_id="operating_rules",
@@ -77,56 +77,74 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
-            elif normalized_section == "behavior_routing":
+            elif normalized_section == "priority":
                 system_blocks.append(
                     PromptIRBlock(
-                        block_id="behavior_routing",
-                        title="Behavior Routing",
+                        block_id="priority",
+                        title="Priority",
                         content=rendered_body,
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
-            elif normalized_section == "advisor_gate":
+            elif normalized_section == "task_flow":
                 system_blocks.append(
                     PromptIRBlock(
-                        block_id="advisor_gate",
-                        title="Advisor Gate",
+                        block_id="task_flow",
+                        title="Task Flow",
                         content=rendered_body,
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
-            elif normalized_section == "advisor_recovery_memory":
+            elif normalized_section == "tool_efficiency":
                 system_blocks.append(
                     PromptIRBlock(
-                        block_id="advisor_recovery_memory",
-                        title="Advisor Recovery Memory",
+                        block_id="tool_efficiency",
+                        title="Tool Efficiency",
                         content=rendered_body,
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
-            elif normalized_section == "memory_routing":
+            elif normalized_section == "mutation_policy":
                 system_blocks.append(
                     PromptIRBlock(
-                        block_id="memory_routing",
-                        title="Memory Routing",
+                        block_id="mutation_policy",
+                        title="Mutation Policy",
                         content=rendered_body,
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
-            elif normalized_section == "behavior_memory_write_boundary":
+            elif normalized_section == "memory_guide":
                 system_blocks.append(
                     PromptIRBlock(
-                        block_id="behavior_memory_write_boundary",
-                        title="Behavior Memory Write Boundary",
+                        block_id="memory_guide",
+                        title="Memory Guide",
                         content=rendered_body,
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
-            elif normalized_section == "skill_learning":
+            elif normalized_section == "behavior_guidance_guide":
                 system_blocks.append(
                     PromptIRBlock(
-                        block_id="skill_learning",
-                        title="Skill Learning",
+                        block_id="behavior_guidance_guide",
+                        title="Behavior Guidance Guide",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
+            elif normalized_section == "skill_guide":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="skill_guide",
+                        title="Skill Guide",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
+            elif normalized_section == "knowledge_storage_boundary":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="knowledge_storage_boundary",
+                        title="Knowledge Storage Boundary",
                         content=rendered_body,
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
@@ -290,22 +308,35 @@ class PromptCompiler:
 
     def _normalize_prompt_section(self, section: str) -> str:
         lowered = str(section or "").strip().lower()
+        aliases = {
+            "system_surfaces": "system_map",
+            "rules": "operating_rules",
+            "advisor_gate": "task_flow",
+            "advisor_recovery_memory": "task_flow",
+            "behavior_routing": "task_flow",
+            "memory_routing": "memory_guide",
+            "behavior_memory_write_boundary": "knowledge_storage_boundary",
+            "skill_learning": "skill_guide",
+        }
+        lowered = aliases.get(lowered, lowered)
         if lowered in {
             "identity",
             "memory",
             "memory_system",
             "artifact",
             "runtime",
-            "system_surfaces",
+            "system_map",
             "source_of_truth",
             "prompt_context_policy",
-            "rules",
-            "behavior_routing",
-            "advisor_gate",
-            "advisor_recovery_memory",
-            "memory_routing",
-            "behavior_memory_write_boundary",
-            "skill_learning",
+            "operating_rules",
+            "priority",
+            "task_flow",
+            "tool_efficiency",
+            "mutation_policy",
+            "memory_guide",
+            "behavior_guidance_guide",
+            "skill_guide",
+            "knowledge_storage_boundary",
             "resident_affordances",
         }:
             return lowered
@@ -354,16 +385,18 @@ class PromptCompiler:
 
     def _order_system_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
         identity_blocks = [block for block in blocks if block.block_id == "identity"]
-        system_surface_blocks = [block for block in blocks if block.block_id == "system_surfaces"]
+        system_map_blocks = [block for block in blocks if block.block_id == "system_map"]
         source_of_truth_blocks = [block for block in blocks if block.block_id == "source_of_truth"]
         prompt_context_policy_blocks = [block for block in blocks if block.block_id == "prompt_context_policy"]
         rule_blocks = [block for block in blocks if block.block_id == "operating_rules"]
-        behavior_blocks = [block for block in blocks if block.block_id == "behavior_routing"]
-        advisor_gate_blocks = [block for block in blocks if block.block_id == "advisor_gate"]
-        advisor_recovery_memory_blocks = [block for block in blocks if block.block_id == "advisor_recovery_memory"]
-        memory_routing_blocks = [block for block in blocks if block.block_id == "memory_routing"]
-        behavior_memory_write_boundary_blocks = [block for block in blocks if block.block_id == "behavior_memory_write_boundary"]
-        skill_learning_blocks = [block for block in blocks if block.block_id == "skill_learning"]
+        priority_blocks = [block for block in blocks if block.block_id == "priority"]
+        task_flow_blocks = [block for block in blocks if block.block_id == "task_flow"]
+        tool_efficiency_blocks = [block for block in blocks if block.block_id == "tool_efficiency"]
+        mutation_policy_blocks = [block for block in blocks if block.block_id == "mutation_policy"]
+        memory_guide_blocks = [block for block in blocks if block.block_id == "memory_guide"]
+        behavior_guidance_guide_blocks = [block for block in blocks if block.block_id == "behavior_guidance_guide"]
+        skill_guide_blocks = [block for block in blocks if block.block_id == "skill_guide"]
+        knowledge_storage_boundary_blocks = [block for block in blocks if block.block_id == "knowledge_storage_boundary"]
         resident_blocks = [block for block in blocks if block.block_id == "resident_affordances"]
         memory_blocks = [block for block in blocks if block.block_id == "memory_context"]
         runtime_blocks = [block for block in blocks if block.block_id == "runtime_overlay"]
@@ -371,16 +404,18 @@ class PromptCompiler:
         ordered_runtime.extend(block for block in runtime_blocks if block.metadata.get("priority") == "finalization")
         return [
             *identity_blocks,
-            *system_surface_blocks,
+            *system_map_blocks,
             *source_of_truth_blocks,
             *prompt_context_policy_blocks,
             *rule_blocks,
-            *advisor_gate_blocks,
-            *advisor_recovery_memory_blocks,
-            *behavior_blocks,
-            *memory_routing_blocks,
-            *behavior_memory_write_boundary_blocks,
-            *skill_learning_blocks,
+            *priority_blocks,
+            *task_flow_blocks,
+            *tool_efficiency_blocks,
+            *mutation_policy_blocks,
+            *memory_guide_blocks,
+            *behavior_guidance_guide_blocks,
+            *skill_guide_blocks,
+            *knowledge_storage_boundary_blocks,
             *resident_blocks,
             *memory_blocks,
             *ordered_runtime,
