@@ -24,9 +24,15 @@ As of the current implementation, resident tools are intentionally small:
 - `op_tool_read`
 - `op_tool_search`
 - `op_exec_shell`
+- `op_file_read`
+- `op_file_edit`
+- `op_file_write`
+- `op_file_state`
 - `op_tool_call`
 
-These keep the model able to inspect and invoke any registered capability without making every capability resident.
+These keep the model able to inspect and invoke any registered capability without making every capability resident, while giving common UTF-8 file work a structured path.
+
+`op_exec_shell` is the command/test/build/script escape hatch. It should not be the default path for ad-hoc `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, `echo`, heredoc file edits, or Pal runtime state/config inspection when a dedicated capability exists.
 
 ### Behavior
 
@@ -49,13 +55,14 @@ Only metadata inspection and text-like reads are resident. Artifact list/search/
 
 ### Dynamic Memory Provider Tools
 
-The active L3 provider is resolved at runtime:
+The active durable memory provider is resolved at runtime:
 
 - `op_memory_recall`
 - `op_memory_write`
 - `op_memory_update`
+- `op_memory_delete`
 
-These stay resident because recall, commit, and correction are frequent global workflows.
+These stay resident because recall, commit, correction, and explicit deletion are frequent global workflows.
 
 ## Non-Resident But Discoverable
 
@@ -77,7 +84,7 @@ Examples:
 - MCP-projected tools such as `op_mcp_<server>_tool_<tool>`
 - MCP prompt render capabilities such as `op_mcp_<server>_prompt_<prompt>_render`
 
-The model should find these through `op_tool_search` and invoke them through `op_tool_call` or `op_exec_shell`.
+The model should find these through `op_tool_search` and invoke them through `op_tool_call`. Use `op_exec_shell` only for actual shell commands, not as a generic capability invocation or discovery substitute.
 
 ## Artifact Tool Boundary
 

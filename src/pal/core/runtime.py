@@ -1056,7 +1056,7 @@ class PalCore:
                 },
                 {"role": "user", "content": source_text.strip()},
             ],
-            max_output_tokens=256,
+            max_output_tokens=1024,
             temperature=0.2,
             tools=[],
             metadata={"response_mode_hint": "operational", "purpose": "manual_compaction"},
@@ -1109,9 +1109,13 @@ class PalCore:
             return
         if not control_interactions.is_interaction_action(action):
             await self._reply_to_route_async(action.route, "Compacting memory...")
-        summary = await self._generate_compaction_summary_async(source_text)
-        if not summary:
-            await self._complete_compact_reply_async(action, "Compaction failed - could not generate summary.")
+        metadata = await self.turn_executor.build_compaction_metadata_async(
+            memory_service,
+            target_input_budget=8192,
+            reserved_output_tokens=4096,
+        )
+        if not metadata:
+            await self._complete_compact_reply_async(action, "Compaction failed - could not generate structured summary.")
             return
         compact_method = getattr(memory_service, "acompact", None)
         if not callable(compact_method):
@@ -1123,8 +1127,8 @@ class PalCore:
 
         request = MemoryCompactRequest(
             target_input_budget=4096,
-            reserved_output_tokens=256,
-            metadata={"semantic_summary": summary},
+            reserved_output_tokens=4096,
+            metadata=metadata,
         )
         result = compact_method(request)
         if inspect.isawaitable(result):

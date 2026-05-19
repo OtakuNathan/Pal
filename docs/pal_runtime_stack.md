@@ -275,14 +275,15 @@ IM channel 默认采用三阶段反馈：
 
 推荐原则：
 
-- 本地执行优先通过 `shell_exec`
+- 常见 UTF-8 文件读写改优先通过结构化文件能力，例如 `op_file_read`、`op_file_edit`、`op_file_write`、`op_file_state`
+- 命令、测试、构建、脚本执行通过 `op_exec_shell`
 - `web_search` 保留为独立能力与 provider family
 - `web_fetch` 可以通过 `curl` 或 headless browser backend 落地
 
 也就是说：
 
 - 不必为每个本地动作都发明单独 built-in tool
-- `shell_exec` 可以作为默认本地执行原语
+- `op_exec_shell` 是通用 escape hatch，但不是文件读写查改的默认路径
 - 但需要结构化 provider 选择或外部信息能力的场景，应保留独立 capability family
 
 ## control

@@ -314,7 +314,7 @@ from pal.behavior import affordance, skill
     title="Commit safely",
     summary="Review and commit local changes safely.",
     manual_text="1. Inspect changes.\n2. Run tests.\n3. Commit with a clear message.",
-    capability_refs=("shell_exec",),
+    capability_refs=("op_exec_shell",),
 )
 @affordance(
     affordance_id="demo.commit_when_user_asks",
@@ -323,7 +323,7 @@ from pal.behavior import affordance, skill
     prompt_hint="Consider injecting the commit skill and checking working tree status.",
     activation_terms=("commit", "git", "changes"),
     skill_refs=("demo.commit",),
-    capability_refs=("shell_exec",),
+    capability_refs=("op_exec_shell",),
 )
 class DemoProvider:
     module_id = "demo"

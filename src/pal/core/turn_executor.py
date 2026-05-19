@@ -143,25 +143,13 @@ class TurnExecutor:
     async def _handle_memory_compact(self, effect, continuation):
         memory_service = self.context.require_port("memory:memory")
         metadata = dict(effect.assembly_context.metadata)
-        structured_compaction = await self.build_structured_compaction_async(
+        metadata.update(await self.build_compaction_metadata_async(
             memory_service,
             target_input_budget=effect.target_input_budget,
             reserved_output_tokens=effect.reserved_output_tokens,
             preferred_endpoint_id=metadata.get("preferred_endpoint_id"),
             preferred_model_id=metadata.get("preferred_model_id"),
-        )
-        if structured_compaction:
-            metadata["structured_compaction"] = structured_compaction
-        else:
-            semantic_summary = await self.summarize_compaction_async(
-                memory_service,
-                target_input_budget=effect.target_input_budget,
-                reserved_output_tokens=effect.reserved_output_tokens,
-                preferred_endpoint_id=metadata.get("preferred_endpoint_id"),
-                preferred_model_id=metadata.get("preferred_model_id"),
-            )
-            if semantic_summary:
-                metadata["semantic_summary"] = semantic_summary
+        ))
         compact_result = await self._call_port_async(
             memory_service,
             "acompact",
@@ -1134,7 +1122,7 @@ class TurnExecutor:
         if callable(async_method):
             result = async_method(
                 source_text,
-                max_output_tokens=min(max(128, reserved_output_tokens or 0), 256),
+                max_output_tokens=min(max(512, reserved_output_tokens or 0), 1024),
                 preferred_endpoint_id=preferred_endpoint_id,
                 preferred_model_id=preferred_model_id,
             )
@@ -1150,7 +1138,7 @@ class TurnExecutor:
                 result = await asyncio.to_thread(
                     sync_method,
                     source_text,
-                    max_output_tokens=min(max(128, reserved_output_tokens or 0), 256),
+                    max_output_tokens=min(max(512, reserved_output_tokens or 0), 1024),
                     preferred_endpoint_id=preferred_endpoint_id,
                     preferred_model_id=preferred_model_id,
                 )
@@ -1158,6 +1146,35 @@ class TurnExecutor:
                 return ""
             return str(result or "").strip()
         return ""
+
+    async def build_compaction_metadata_async(
+        self,
+        memory_service,
+        *,
+        target_input_budget: int,
+        reserved_output_tokens: int,
+        preferred_endpoint_id: str | None = None,
+        preferred_model_id: str | None = None,
+    ) -> dict[str, Any]:
+        structured_compaction = await self.build_structured_compaction_async(
+            memory_service,
+            target_input_budget=target_input_budget,
+            reserved_output_tokens=reserved_output_tokens,
+            preferred_endpoint_id=preferred_endpoint_id,
+            preferred_model_id=preferred_model_id,
+        )
+        if structured_compaction:
+            return {"structured_compaction": structured_compaction}
+        semantic_summary = await self.summarize_compaction_async(
+            memory_service,
+            target_input_budget=target_input_budget,
+            reserved_output_tokens=reserved_output_tokens,
+            preferred_endpoint_id=preferred_endpoint_id,
+            preferred_model_id=preferred_model_id,
+        )
+        if semantic_summary:
+            return {"semantic_summary": semantic_summary}
+        return {}
 
     def build_compaction_source_text(self, memory_service, *, target_input_budget: int) -> str:
         builder = getattr(memory_service, "build_compaction_source_text", None)
@@ -1187,7 +1204,7 @@ class TurnExecutor:
         if callable(async_method):
             result = async_method(
                 source_text,
-                max_output_tokens=min(max(768, reserved_output_tokens or 0), 2048),
+                max_output_tokens=min(max(1536, reserved_output_tokens or 0), 4096),
                 preferred_endpoint_id=preferred_endpoint_id,
                 preferred_model_id=preferred_model_id,
             )

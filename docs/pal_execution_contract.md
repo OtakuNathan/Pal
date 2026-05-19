@@ -67,11 +67,15 @@ Current boundaries:
 
 对于本地环境能力，推荐保持最小 built-in tool 集：
 
-- `shell_exec` 作为默认本地执行原语
+- `op_tool_search` / `op_tool_read` / `op_tool_call` 作为 capability discovery 和 invocation 元能力
+- `op_file_read` / `op_file_edit` / `op_file_write` / `op_file_state` 作为 UTF-8 文本文件读写改的结构化路径
+- `op_exec_shell` 作为命令、测试、构建、脚本和无专用 capability 时的 escape hatch
 - `web_search` 作为独立 capability / provider family
 - `web_fetch` 可通过 `curl` 或 headless browser tool backend 落地
 
 也就是说，`MCP` 只是 tool 的一种来源，而不是独立平级哲学层。
+
+`op_exec_shell` 不再是文件读写查改的默认路径。LLM-facing 描述会要求模型优先使用 dedicated Pal capabilities，并避免在已有专用能力时用 shell 跑 `find`、`grep`、`cat`、`sed`、`awk`、`echo` 或 heredoc 文件编辑。
 
 provider native tool calling 只是外部厂商协议层的调用壳。
 

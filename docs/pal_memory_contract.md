@@ -6,9 +6,9 @@ The current code treats memory as a prompt and routing surface, not as an execut
 
 Prompt ownership:
 
-- `pal.memory.prompt.MemoryPromptFragmentProvider` always contributes `Memory Routing` when the memory module is registered.
+- `pal.memory.prompt.MemoryPromptFragmentProvider` always contributes `Memory Guide` when the memory module is registered.
 - Dynamic memory context is appended only when a `MemoryPack` is present.
-- `Memory Routing` is no longer owned by `pal.behavior`.
+- Memory rules are no longer owned by `pal.behavior`.
 
 Current system prompt rules:
 
@@ -20,11 +20,11 @@ Current system prompt rules:
 Current prompt projection:
 
 - Recent L1 context is projected as `Recent Context`.
-- Current summary is projected as `Current Summary`.
-- L2 factual/project/preference entries are projected as `Remembered Facts`.
-- L2 case/repair/task-experience entries are projected as `Relevant Experience`.
-- Behavior-route entries are projected separately as `Active Route Guidance`.
+- Current summary is projected as `<conversation_summary>`.
+- Recalled durable facts, preferences, project context, and case knowledge are projected as `<recalled_memories view="summary">`.
+- Behavior-route entries are projected separately as `<advisor_hints>`.
 - The old single `Working Memory` prompt label is no longer the current projection.
+- Recalled memories render as `[mem_ref]: text`; `mem_ref` is operational metadata for `op_memory_update` and `op_memory_delete`.
 - L3 recall render suffixes such as `[L3 summary; origin available]` are not shown in prompt output.
 
 L1 tool-result compaction:
@@ -113,7 +113,7 @@ flowchart LR
 
 - 决定 memory 行为的是 entry 内部 metadata
 - bucket 主要服务于 runtime 组织和 prompt 投影
-- `Working Memory` 仅包含当前处于 HOT 状态的条目
+- HOT prompt projection 仅包含当前处于 HOT 状态的条目，并按 entry kind/source 渲染为 `<recalled_memories>` 或 `<advisor_hints>`
 
 ### 内容
 
@@ -137,7 +137,7 @@ flowchart LR
 也就是说：
 
 - 它是当前热记忆的集合
-- `Working Memory` 是 HOT 条目的 prompt 投影视图
+- HOT prompt projection 是 HOT 条目的 prompt 投影视图；当前实现不再使用一个通用 `Working Memory` 标签
 - 它不应被理解成先进先出的业务队列
 
 ### Scope 原则
@@ -275,13 +275,13 @@ HOT      ──再次recall──→ HOT          (renewal_count 不变，只刷
 
 TTL 是 turn-based，不是 function-call-based。`tick_heat()` 在 turn 结束时调用，不在 `build_pack()` 里调用。
 
-### `Working Memory` Prompt Projection
+### HOT Prompt Projection
 
-`Working Memory` 是 L2 中所有 HOT 条目的 prompt 投影。
+HOT prompt projection 是 L2 中所有 HOT 条目的 prompt 投影。当前实现按内容类型渲染为 XML-style user-context blocks，而不是一个通用 `Working Memory` block。
 
 核心原则：
 
-- `Working Memory` 只包含 HOT 条目
+- HOT prompt projection 只包含 HOT 条目
 - 无 HOT 条目时不注入任何 L2 块
 - GHOST 条目不渲染
 - compact 只更新 L1，不直接触发 HOT
@@ -786,7 +786,7 @@ embedding provider 不可用时退化为原有 hash 去重。
 
 ### Recall Promotion 阈值
 
-recall 返回的所有 hit 都会投影到 L2，但只有 final score >= `RECALL_PROMOTION_THRESHOLD`（当前 0.3）的条目才进入 HOT 状态。低于阈值的条目存入 L2 但不进 Working Memory，避免低相关性噪音污染 prompt。
+recall 返回的所有 hit 都会投影到 L2，但只有 final score >= `RECALL_PROMOTION_THRESHOLD`（当前 0.3）的条目才进入 HOT 状态。低于阈值的条目存入 L2 但不进 HOT prompt projection，避免低相关性噪音污染 prompt。
 
 ## commit
 
@@ -859,13 +859,14 @@ LLM 不应逐字段消费 `L2` 内部 schema。
 
 默认推荐顺序：
 
-1. `Working Memory`（仅 HOT 条目）
-2. `Current Summary`
-3. `Recent L1 Context`
+1. `Recent Context`
+2. `<conversation_summary>`
+3. `<recalled_memories view="summary">`
+4. `<advisor_hints>`
 
 这意味着：
 
-- `Working Memory` 只包含当前真正被用上的记忆
+- recalled memories 只包含当前真正被用上的记忆
 - 无 HOT 条目时不注入任何 L2 块
 - `source_kind / candidate_state / scope` 等字段主要服务于 runtime 逻辑，而不是逐字段暴露给 LLM
 
@@ -879,13 +880,13 @@ LLM 不应逐字段消费 `L2` 内部 schema。
 - `L2 -> L3` 叫 retire。
 - `L3 -> L2` 叫 recall。
 - `commit` 是显式写入，不带 `level`。
-- `Working Memory` 仅包含 HOT 条目，不是 durable bucket。
+- HOT prompt projection 仅包含 HOT 条目，不是 durable bucket。
 - L2 条目有 HOT / GHOST / DORMANT 生命周期，TTL 续命封顶 3 次。
 - `task-wise memory` 是 scope，不是 bucket。
 - `page_fault` 正式废弃。
 - `commit` 写入前做向量去重，避免重复记忆。
 - recall 只在涉及用户/Pal 特定事实、过去事件引用、行为承诺时触发，不用于通用知识问题。
-- recall 结果中 final score < 0.3 的条目不进入 HOT，避免低相关性噪音污染 Working Memory。
+- recall 结果中 final score < 0.3 的条目不进入 HOT，避免低相关性噪音污染 prompt。
 
 ## Non-Goals
 

@@ -190,6 +190,8 @@ def _memory_guide_fragment() -> PromptFragment:
             "- For current external facts; verify externally instead.\n\n"
             "Write/update/delete:\n"
             "- Write memory directly with op_memory_write only when the user explicitly asks Pal to remember/save it, or states a clear durable fact/preference with low ambiguity.\n"
+            "- Before op_memory_write, call op_memory_recall with the candidate summary/search_text, limit 3-5.\n"
+            "- If a recalled memory is semantically the same record, an older version, already covers the candidate, or is being corrected, use op_memory_update instead of writing a duplicate.\n"
             "- When recalled memories are shown with [mem_ref], use that mem_ref when updating, merging, or deleting a recalled memory.\n"
             "- Do not invent mem_ref values.\n"
             "- If no relevant mem_ref is present, call op_memory_recall before update/delete.\n"

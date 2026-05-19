@@ -381,7 +381,7 @@ class PromptCompiler:
         ]
         if turn_kind == "proactive_trigger":
             return []
-        return [*l1_blocks, *summary_blocks, *working_memory_blocks, *trailing_blocks]
+        return [*summary_blocks, *l1_blocks, *working_memory_blocks, *trailing_blocks]
 
     def _order_system_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
         identity_blocks = [block for block in blocks if block.block_id == "identity"]
@@ -428,6 +428,11 @@ class PromptCompiler:
             messages.append({"role": "system", "content": system_content})
         final_user_parts: list[dict[str, Any]] = []
         for block in prompt_ir.user_context_blocks:
+            if block.block_id == "memory_current_summary":
+                parts = self._render_user_context_parts(block)
+                if parts:
+                    messages.append({"role": "user", "content": self._coerce_message_content(parts)})
+                continue
             if block.block_id.startswith("l1_recent_context"):
                 messages.append(self._render_l1_context_message(block))
                 continue

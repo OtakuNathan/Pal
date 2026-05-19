@@ -883,6 +883,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             memory_update = next(item for item in request.tools if item["function"]["name"] == "op_memory_update")
             self.assertIn("mem_ref", memory_update["function"]["parameters"]["properties"])
             self.assertNotIn("target_id", memory_update["function"]["parameters"]["properties"])
+            memory_write = next(item for item in request.tools if item["function"]["name"] == "op_memory_write")
+            memory_write_description = memory_write["function"]["description"]
+            self.assertIn("Before using this tool, call op_memory_recall", memory_write_description)
+            self.assertIn("use op_memory_update with that mem_ref instead", memory_write_description)
+            self.assertIn("Do not write duplicate memories", memory_write_description)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)

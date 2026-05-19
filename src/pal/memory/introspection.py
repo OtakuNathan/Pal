@@ -183,7 +183,11 @@ class MemoryIntrospectionProvider:
         family="commit",
         action_name="write",
         description=(
-            "Commit a durable memory record to the active memory provider. "
+            "Commit a new durable memory record to the active memory provider only when no existing recalled memory covers it. "
+            "Before using this tool, call op_memory_recall with the candidate summary/search_text, limit 3-5. "
+            "If a recalled [mem_ref] is semantically the same record, an older version, or the memory being corrected, "
+            "use op_memory_update with that mem_ref instead. "
+            "Do not write duplicate memories. Do not invent mem_ref values. "
             "Use summary for prompt-ready memory text and search_text for source-of-truth retrieval text."
         ),
         metadata={"omit_family_in_canonical": True},

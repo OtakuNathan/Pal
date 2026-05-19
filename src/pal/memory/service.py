@@ -292,16 +292,13 @@ class MemoryService(MemoryServicePort):
         current_summary = self.l2_store.get_entry(SUMMARY_ENTRY_ID)
         recent_l1 = _flatten_recent_l1_context(self.l1_store.items)
         rendered_turns = _render_l1_recent_context(recent_l1)
-        parts: list[str] = []
-        if current_summary is not None and current_summary.summary.strip():
-            parts.append(f"[Current Summary]\n{current_summary.summary.strip()}")
-        if rendered_turns:
-            parts.append(f"[Recent L1]\n{rendered_turns}")
-        raw = "\n\n".join(parts).strip()
-        if not raw:
-            return ""
         limit = max(256, target_input_budget or 0)
-        return raw[:limit]
+        summary_text = current_summary.summary.strip() if current_summary is not None else ""
+        return _render_compaction_source(
+            summary_text=summary_text,
+            recent_text=rendered_turns,
+            limit=limit,
+        )
 
     def project_l3_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = True) -> None:
         self.project_l2_entries(entries, touch=touch, top_of_mind=top_of_mind)
@@ -401,6 +398,45 @@ def _render_l1_recent_context(messages: list[L1TranscriptMessage]) -> str:
         if role and content:
             lines.append(f"{role}: {content}")
     return "\n".join(lines).strip()
+
+
+def _render_compaction_source(*, summary_text: str, recent_text: str, limit: int) -> str:
+    summary_section = f"[Current Summary]\n{summary_text.strip()}" if summary_text.strip() else ""
+    recent_section = f"[Recent L1]\n{recent_text.strip()}" if recent_text.strip() else ""
+    raw = "\n\n".join(part for part in (summary_section, recent_section) if part).strip()
+    if not raw:
+        return ""
+    if len(raw) <= limit:
+        return raw
+    if not summary_section:
+        return _tail_clip(raw, limit)
+    if not recent_section:
+        return _head_clip(raw, limit)
+
+    separator = "\n\n"
+    summary_budget = min(len(summary_section), max(128, limit // 4))
+    recent_budget = max(1, limit - summary_budget - len(separator))
+    summary_part = _head_clip(summary_section, summary_budget)
+    recent_part = _tail_clip(recent_section, recent_budget)
+    return f"{summary_part}{separator}{recent_part}".strip()
+
+
+def _head_clip(text: str, limit: int) -> str:
+    normalized = str(text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    if limit <= 20:
+        return normalized[:limit].rstrip()
+    return f"{normalized[: limit - 18].rstrip()}\n[... clipped]"
+
+
+def _tail_clip(text: str, limit: int) -> str:
+    normalized = str(text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    if limit <= 20:
+        return normalized[-limit:].lstrip()
+    return f"[... clipped]\n{normalized[-(limit - 18):].lstrip()}"
 
 
 def _normalize_l2_entry(entry: L2Entry) -> L2Entry:
