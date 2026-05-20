@@ -18,13 +18,13 @@ SHELL_EXEC_DESCRIPTION = (
     "IMPORTANT: Prefer dedicated Pal capabilities for reading, writing, searching, inspecting, or editing files. "
     "Avoid using this tool to run find, grep, cat, head, tail, sed, awk, or echo unless the user explicitly asks "
     "for a shell command, no dedicated capability is available, or you have verified the dedicated capability is insufficient. "
-    "In minion workspaces, do not use shell for git add/commit or other checkpoint mutations; the runner owns checkpoint commits."
+    "In minion workspaces, do not use shell for git add/commit or other checkpoint mutations; use the dedicated checkpoint commit capability instead."
 )
 
 SHELL_EXEC_CMD_DESCRIPTION = (
     "Shell command to execute. Prefer dedicated Pal capabilities over shell commands for file read/write/search/edit tasks; "
     "avoid find/grep/cat/head/tail/sed/awk/echo unless explicitly requested or no suitable dedicated capability is available. "
-    "In minion workspaces, do not run git add/commit/reset/checkout/clean/merge/rebase/push for checkpointing."
+    "In minion workspaces, do not run git add/commit/reset/checkout/clean/merge/rebase/push for checkpointing; use the dedicated checkpoint commit capability instead."
 )
 
 

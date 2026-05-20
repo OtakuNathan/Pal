@@ -191,6 +191,35 @@ def commit_milestone(repo_path: Path, *, work_order_id: str, milestone_index: in
     return {"status": "committed", "commit_sha": _current_head(repo), "repo_path": str(repo), "message": message}
 
 
+def inspect_milestone_checkpoint(repo_path: Path, *, base_sha: str = "") -> dict[str, Any]:
+    repo = Path(repo_path)
+    if not (repo / ".git").exists():
+        return {"status": "error", "error": "workspace is not a git repository", "repo_path": str(repo)}
+    status_result = _git(repo, "status", "--porcelain", check=True)
+    head = _current_head(repo)
+    base = str(base_sha or "").strip()
+    changed_since_base = bool(base and head and head != base)
+    payload = {
+        "commit_sha": head,
+        "repo_path": str(repo),
+        "base_sha": base,
+        "changed_since_base": changed_since_base,
+    }
+    if status_result.stdout.strip():
+        return {
+            **payload,
+            "status": "uncommitted_changes",
+            "summary": "workspace has uncommitted changes; run op_minion_checkpoint_commit",
+        }
+    if changed_since_base:
+        return {
+            **payload,
+            "status": "committed",
+            "summary": "milestone checkpoint commit exists",
+        }
+    return {**payload, "status": "no_changes", "summary": "no milestone checkpoint commit exists"}
+
+
 def finalize_work_order_branch(repo_path: Path, *, work_order_branch: str, merge_target: str, message: str) -> dict[str, Any]:
     repo = Path(repo_path)
     if not (repo / ".git").exists():

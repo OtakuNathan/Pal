@@ -30,10 +30,10 @@ Return a ReviewReport: approved, changes_requested, or blocked.
 Include findings ordered by severity with evidence, affected area, contract impact, suggested fix, test gaps, and residual risk.
 Say clearly when no issue is found, and still mention meaningful remaining test gaps or residual risk.
 """
-capability_groups = ["core_minion_read", "workspace_read", "web_research", "memory_recall"]
+capability_groups = ["workspace_read", "web_research", "memory_recall", "minion_artifacts", "minion_memory_candidates"]
 
 [capability_policy]
-mode = "inherit_filtered"
+mode = "profile_only"
 risk = "read_only"
 
 [workspace_policy]

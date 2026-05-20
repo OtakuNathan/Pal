@@ -180,6 +180,10 @@ class MinionContractTests(unittest.TestCase):
         self.assertEqual(decision.decision, "accept_all")
         self.assertEqual(decision.to_dict()["decision"], "accept_all")
 
+    def test_minion_approval_decision_rejects_edit(self) -> None:
+        with self.assertRaises(ValueError):
+            MinionApprovalDecision.from_dict({"approval_id": "ap1", "decision": "edit"})
+
     def test_task_context_pack_json_roundtrip_uses_allowed_capabilities(self) -> None:
         pack = TaskContextPack.from_dict(
             {
@@ -382,8 +386,103 @@ class MinionContractTests(unittest.TestCase):
         self.assertEqual(_prompt_view_from_pack(pack)["module"]["module_id"], "module_prompt")
         self.assertEqual(parsed["prompt_view"]["milestone"]["title"], "Scoped milestone")
         self.assertEqual(parsed["prompt_view"]["workspace"], {"repo_path": "/tmp/repo"})
+        self.assertNotIn("ask_user_question", rendered)
         self.assertNotIn("large raw continuity", rendered)
         self.assertNotIn("run_dir", rendered)
+
+    def test_planner_prompt_view_allows_ask_user_question_instruction(self) -> None:
+        pack = TaskContextPack(
+            work_order_id="wo_planner_question_prompt",
+            metadata={
+                "prompt_view": {
+                    "role": "planner",
+                    "task_id": "task_planner_question_prompt",
+                    "work_order_id": "wo_planner_question_prompt",
+                    "module": {},
+                    "milestone": {},
+                    "workspace": {},
+                }
+            },
+        )
+
+        rendered = _render_task_prompt(pack)
+
+        self.assertIn("ask_user_question", rendered)
+
+    def test_minion_manager_injects_skill_manual_context_for_runner(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_skill_inject_test_") as tmp:
+            root = Path(tmp)
+            database = PalV2Database(root / "pal.sqlite3")
+            database.initialize([BehaviorSkillModel])
+            try:
+                manual_text = "SUPERPOWER MANUAL BEGIN\n" + ("prefer boring correctness over theatrics.\n" * 500) + "SUPERPOWER MANUAL END"
+                BehaviorSkillModel.create(
+                    skill_id="superpower",
+                    module_id="dogfood",
+                    title="Superpower",
+                    summary="Dogfood fake skill.",
+                    manual_text=manual_text,
+                    source_kind="learned",
+                    activation_terms_blob=["superpower"],
+                    capability_refs_blob=[],
+                    metadata_blob={"status": "active", "use_when": "Testing minion skill injection."},
+                    enabled=True,
+                )
+                BehaviorSkillModel.create(
+                    skill_id="bonuspower",
+                    module_id="dogfood",
+                    title="Bonuspower",
+                    summary="Dogfood bonus skill.",
+                    manual_text="BONUSPOWER MANUAL",
+                    source_kind="learned",
+                    activation_terms_blob=["bonuspower"],
+                    capability_refs_blob=[],
+                    metadata_blob={"status": "active"},
+                    enabled=True,
+                )
+                pack = TaskContextPack(
+                    work_order_id="wo_skill_context",
+                    allowed_skills=["superpower"],
+                    resolved_profile={"effective_skill_refs": ["superpower"]},
+                    metadata={
+                        "spawn_bonus_skill_refs": ["bonuspower"],
+                        "prompt_view": {
+                            "role": "coder",
+                            "task_id": "task_skill_context",
+                            "work_order_id": "wo_skill_context",
+                            "skill_refs": ["superpower"],
+                            "module": {},
+                            "milestone": {},
+                            "workspace": {},
+                        }
+                    },
+                )
+
+                injected = MinionManager(runtime_root=root)._inject_skill_manual_context(pack)
+                scaffold = MinionRunner(
+                    runtime_root=root,
+                    pack=injected,
+                    minion_id="minion_skill_context",
+                    run_id="run_skill_context",
+                    write_event=lambda event: None,
+                    read_decision=lambda request_id: None,
+                )._prompt_scaffold()
+                system = _render_system_prompt(scaffold)
+
+                self.assertEqual(injected.metadata["injected_skill_refs"], ["superpower", "bonuspower"])
+                self.assertEqual(injected.metadata["profile_skill_refs"], ["superpower"])
+                self.assertEqual(injected.metadata["pack_allowed_skill_refs"], ["superpower"])
+                self.assertEqual(injected.metadata["work_order_skill_refs"], ["superpower"])
+                self.assertEqual(injected.metadata["spawn_bonus_skill_refs"], ["bonuspower"])
+                self.assertIn("<system-reminder>", system)
+                self.assertNotIn("<skill_manual_context>", system)
+                self.assertIn("SUPERPOWER MANUAL BEGIN", system)
+                self.assertIn("SUPERPOWER MANUAL END", system)
+                self.assertIn("BONUSPOWER MANUAL", system)
+                self.assertIn("Testing minion skill injection.", system)
+                self.assertNotIn("op_skill_inject", system)
+            finally:
+                database.close()
 
     def test_prompt_view_workspace_prefers_prepared_workspace(self) -> None:
         pack = TaskContextPack(
@@ -828,9 +927,14 @@ class MinionContractTests(unittest.TestCase):
             self.assertEqual(pack.minion_profile, "software_engineering.planner")
             self.assertEqual(pack.resolved_profile["canonical_profile_id"], "software_engineering.planner")
             self.assertEqual(pack.resolved_profile["profile_group"], "software_engineering")
-            self.assertEqual(pack.allowed_skills, ["software_planning"])
-            self.assertEqual(pack.resolved_profile["skill_refs"], ["software_planning"])
-            self.assertEqual(pack.resolved_profile["effective_skill_refs"], ["software_planning"])
+            self.assertEqual(
+                pack.allowed_skills,
+                [
+                    "software_planning",
+                ],
+            )
+            self.assertEqual(pack.resolved_profile["skill_refs"], pack.allowed_skills)
+            self.assertEqual(pack.resolved_profile["effective_skill_refs"], pack.allowed_skills)
             self.assertNotIn("default_allowed_skills", pack.resolved_profile)
 
     def test_profile_skill_refs_accept_legacy_skill_fields(self) -> None:
@@ -880,7 +984,7 @@ class MinionContractTests(unittest.TestCase):
         self.assertEqual(pack.allowed_capabilities, ["op_exec_shell", "op_memory_recall", "op_web_search", "op_fake_extra"])
         self.assertIn("effective_capability_policy", pack.resolved_profile)
 
-    def test_profile_resolution_can_inherit_current_capability_surface(self) -> None:
+    def test_builtin_profile_resolution_does_not_inherit_current_capability_surface(self) -> None:
         registry = MinionProfileRegistry(
             ambient_capabilities=(
                 "op_tool_search",
@@ -890,6 +994,8 @@ class MinionContractTests(unittest.TestCase):
                 "op_memory_recall",
                 "op_web_search",
                 "op_web_read",
+                "op_llm_mgmt_set_active_endpoint",
+                "op_fake_ambient",
                 "intro_minion_task_read",
                 "op_minion_spawn",
                 "op_memory_write",
@@ -899,19 +1005,51 @@ class MinionContractTests(unittest.TestCase):
         )
         pack = registry.resolve_pack(TaskContextPack(work_order_id="wo_inherit", goal="inherit"), requested_profile="software_engineering.planner")
 
-        self.assertIn("op_tool_search", pack.allowed_capabilities)
-        self.assertIn("op_tool_read", pack.allowed_capabilities)
-        self.assertIn("op_tool_call", pack.allowed_capabilities)
+        self.assertNotIn("op_tool_search", pack.allowed_capabilities)
+        self.assertNotIn("op_tool_read", pack.allowed_capabilities)
+        self.assertNotIn("op_tool_call", pack.allowed_capabilities)
         self.assertNotIn("op_exec_shell", pack.allowed_capabilities)
         self.assertIn("op_workspace_read", pack.allowed_capabilities)
         self.assertIn("op_memory_recall", pack.allowed_capabilities)
         self.assertIn("op_web_search", pack.allowed_capabilities)
         self.assertIn("op_web_read", pack.allowed_capabilities)
+        self.assertNotIn("op_llm_mgmt_set_active_endpoint", pack.allowed_capabilities)
+        self.assertNotIn("op_fake_ambient", pack.allowed_capabilities)
         self.assertNotIn("intro_minion_task_read", pack.allowed_capabilities)
         self.assertNotIn("op_minion_spawn", pack.allowed_capabilities)
         self.assertNotIn("op_memory_write", pack.allowed_capabilities)
         self.assertNotIn("op_memory_update", pack.allowed_capabilities)
         self.assertNotIn("op_memory_delete", pack.allowed_capabilities)
+
+    def test_profile_resolution_can_inherit_current_capability_surface_when_opted_in(self) -> None:
+        profile = MinionProfile(
+            profile_id="runtime_writer",
+            display_name="Runtime Writer",
+            identity_fragment="Runtime writer.",
+            capability_groups=("workspace_read",),
+            capability_policy={"mode": "inherit_filtered", "risk": "read_only"},
+        )
+        registry = MinionProfileRegistry(
+            builtin_profiles=(profile,),
+            ambient_capabilities=(
+                "op_tool_search",
+                "op_exec_shell",
+                "op_memory_recall",
+                "op_fake_ambient",
+                "intro_minion_task_read",
+                "op_minion_spawn",
+                "op_memory_write",
+            ),
+        )
+        pack = registry.resolve_pack(TaskContextPack(work_order_id="wo_inherit_opt_in", goal="inherit"), requested_profile="runtime_writer")
+
+        self.assertIn("op_tool_search", pack.allowed_capabilities)
+        self.assertIn("op_fake_ambient", pack.allowed_capabilities)
+        self.assertIn("op_workspace_read", pack.allowed_capabilities)
+        self.assertNotIn("op_exec_shell", pack.allowed_capabilities)
+        self.assertNotIn("intro_minion_task_read", pack.allowed_capabilities)
+        self.assertNotIn("op_minion_spawn", pack.allowed_capabilities)
+        self.assertNotIn("op_memory_write", pack.allowed_capabilities)
 
     def test_runtime_profiles_load_recursively_with_scoped_profile_name(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_profile_registry_test_") as tmp:
@@ -2142,6 +2280,11 @@ class MinionManagerTests(unittest.TestCase):
                             text="",
                             tool_calls=[CanonicalToolCall(name="op_fake_tool", args={"value": 1})],
                         )
+                    if self.calls == 2:
+                        return CanonicalLLMOutcome(
+                            text="",
+                            tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "approval work"})],
+                        )
                     return CanonicalLLMOutcome(
                         text=(
                             "milestone done\n"
@@ -2181,7 +2324,7 @@ class MinionManagerTests(unittest.TestCase):
 
             code = await MinionRunner(
                 runtime_root=self.root,
-                pack=TaskContextPack.from_dict({**repo_pack.to_dict(), "allowed_capabilities": ["op_fake_tool"]}),
+                pack=TaskContextPack.from_dict({**repo_pack.to_dict(), "allowed_capabilities": ["op_fake_tool", "op_minion_checkpoint_commit"]}),
                 minion_id="m1",
                 run_id="r1",
                 write_event=write_event,
@@ -2195,6 +2338,7 @@ class MinionManagerTests(unittest.TestCase):
             checkpoint = next(event for event in events if event["event_kind"] == "checkpoint")
             self.assertEqual(checkpoint["payload"]["status"], "completed")
             self.assertTrue(checkpoint["payload"]["commit_sha"])
+            self.assertEqual(checkpoint["payload"]["git_commit"]["status"], "committed")
             terminal = next(event for event in events if event["event_kind"] == "terminal")
             self.assertEqual(terminal["payload"]["status"], "completed")
             self.assertNotIn("Task lessons", terminal["payload"]["summary"])
@@ -2408,7 +2552,7 @@ class MinionManagerTests(unittest.TestCase):
                     work_order_id="wo_nudge",
                     goal="write evidence file",
                     continuity={"current_milestone": {"milestone_index": 0, "title": "write evidence"}},
-                    allowed_capabilities=["op_fake_write"],
+                    allowed_capabilities=["op_fake_write", "op_minion_checkpoint_commit"],
                 ),
             )
             repo = Path(repo_pack.workspace["repo_path"])
@@ -2426,6 +2570,11 @@ class MinionManagerTests(unittest.TestCase):
                         return CanonicalLLMOutcome(
                             text="",
                             tool_calls=[CanonicalToolCall(name="op_fake_write", args={"content": "OK"})],
+                        )
+                    if self.calls == 3:
+                        return CanonicalLLMOutcome(
+                            text="",
+                            tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "write evidence"})],
                         )
                     return CanonicalLLMOutcome(text="milestone done with evidence")
 
@@ -2875,7 +3024,7 @@ class MinionManagerTests(unittest.TestCase):
                     work_order_id="wo_many_tools",
                     goal="use many tool calls",
                     continuity={"current_milestone": {"milestone_index": 0, "title": "many tools"}},
-                    allowed_capabilities=["op_fake_append"],
+                    allowed_capabilities=["op_fake_append", "op_minion_checkpoint_commit"],
                 ),
             )
             repo = Path(repo_pack.workspace["repo_path"])
@@ -2891,6 +3040,11 @@ class MinionManagerTests(unittest.TestCase):
                         return CanonicalLLMOutcome(
                             text="",
                             tool_calls=[CanonicalToolCall(name="op_fake_append", args={"value": self.calls})],
+                        )
+                    if self.calls == 13:
+                        return CanonicalLLMOutcome(
+                            text="",
+                            tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "many tools"})],
                         )
                     return CanonicalLLMOutcome(text="completed after many tool calls")
 
@@ -2997,7 +3151,7 @@ class MinionManagerTests(unittest.TestCase):
                     work_order_id="wo_limit_with_evidence",
                     goal="write before limit",
                     continuity={"current_milestone": {"milestone_index": 0, "title": "write before limit"}},
-                    allowed_capabilities=["op_fake_write"],
+                    allowed_capabilities=["op_fake_write", "op_minion_checkpoint_commit"],
                     metadata={"max_tool_rounds": 1},
                 ),
             )
@@ -3006,7 +3160,13 @@ class MinionManagerTests(unittest.TestCase):
             class FakeLLM:
                 async def agenerate(self, request):
                     _ = request
-                    return CanonicalLLMOutcome(text="", tool_calls=[CanonicalToolCall(name="op_fake_write", args={})])
+                    return CanonicalLLMOutcome(
+                        text="",
+                        tool_calls=[
+                            CanonicalToolCall(name="op_fake_write", args={}),
+                            CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "write before limit"}),
+                        ],
+                    )
 
             class FakeExecution:
                 def get_capability_spec(self, name):
@@ -3041,6 +3201,7 @@ class MinionManagerTests(unittest.TestCase):
             checkpoint = next(event for event in events if event["event_kind"] == "checkpoint")
             self.assertEqual(checkpoint["payload"]["status"], "completed")
             self.assertTrue(checkpoint["payload"]["commit_sha"])
+            self.assertEqual(checkpoint["payload"]["git_commit"]["status"], "committed")
 
         asyncio.run(scenario())
 
@@ -3148,7 +3309,7 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(code, 0)
             checkpoint = next(event for event in events if event["event_kind"] == "checkpoint")
             self.assertEqual(checkpoint["payload"]["status"], "blocked")
-            self.assertIn("milestone produced no git changes", checkpoint["payload"]["summary"])
+            self.assertIn("no milestone checkpoint commit exists", checkpoint["payload"]["summary"])
 
         asyncio.run(scenario())
 
@@ -3161,7 +3322,7 @@ class MinionManagerTests(unittest.TestCase):
                     work_order_id="wo_retry_no_changes",
                     goal="retry before report-only completion",
                     continuity={"current_milestone": {"milestone_index": 0, "title": "code"}},
-                    allowed_capabilities=["op_fake_read", "op_fake_change"],
+                    allowed_capabilities=["op_fake_read", "op_fake_change", "op_minion_checkpoint_commit"],
                 ),
             )
             repo = Path(repo_pack.workspace["repo_path"])
@@ -3175,7 +3336,7 @@ class MinionManagerTests(unittest.TestCase):
                     self.calls += 1
                     messages = list(getattr(request, "messages", []) or [])
                     rendered = json.dumps(messages, ensure_ascii=False)
-                    if "no runner-owned git completion evidence exists" in rendered:
+                    if "no minion checkpoint commit exists" in rendered:
                         self.retry_seen = True
                     if self.calls == 1:
                         return CanonicalLLMOutcome(text="", tool_calls=[CanonicalToolCall(name="op_fake_read", args={})])
@@ -3183,6 +3344,13 @@ class MinionManagerTests(unittest.TestCase):
                         return CanonicalLLMOutcome(text="report only, no changes")
                     if self.calls == 3:
                         return CanonicalLLMOutcome(text="", tool_calls=[CanonicalToolCall(name="op_fake_change", args={})])
+                    if self.calls == 4:
+                        return CanonicalLLMOutcome(text="changed but forgot checkpoint commit")
+                    if self.calls == 5:
+                        return CanonicalLLMOutcome(
+                            text="",
+                            tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "retry changes"})],
+                        )
                     return CanonicalLLMOutcome(text="changed after retry")
 
             llm = FakeLLM()
@@ -3219,7 +3387,7 @@ class MinionManagerTests(unittest.TestCase):
 
             self.assertEqual(code, 0)
             self.assertTrue(llm.retry_seen)
-            self.assertGreaterEqual(llm.calls, 4)
+            self.assertGreaterEqual(llm.calls, 6)
             checkpoint = next(event for event in events if event["event_kind"] == "checkpoint")
             self.assertEqual(checkpoint["payload"]["status"], "completed")
             self.assertEqual(checkpoint["payload"]["git_commit"]["status"], "committed")
@@ -3330,6 +3498,13 @@ class MinionManagerTests(unittest.TestCase):
             )
             repo_path = Path(repo_pack.workspace["repo_path"])
             (repo_path / "result.txt").write_text("done\n", encoding="utf-8")
+            commit_result = commit_milestone(
+                repo_path,
+                work_order_id="wo_llm_error_evidence",
+                milestone_index=0,
+                title="pre-existing completion evidence",
+            )
+            self.assertEqual(commit_result["status"], "committed")
 
             class FakeLLM:
                 async def agenerate(self, request):
@@ -3401,8 +3576,8 @@ class MinionManagerTests(unittest.TestCase):
             )
 
             self.assertFalse(result.ok)
-            self.assertEqual(result.structured["reason"], "runner_owns_git_checkpoint")
-            self.assertIn("runner owns", result.llm_text)
+            self.assertEqual(result.structured["reason"], "use_checkpoint_commit_capability")
+            self.assertIn("op_minion_checkpoint_commit", result.llm_text)
             self.assertFalse(runner.blocked_summary)
             self.assertFalse(called)
 
@@ -3940,6 +4115,16 @@ class MinionManagerTests(unittest.TestCase):
                 def get_capability_spec(self, name):
                     return self.specs.get(name)
 
+                async def execute_tool_async(self, call, *, allow_tools=True, turn_id=None):
+                    _ = allow_tools, turn_id
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text=f"{call.name} ok",
+                        llm_text=f"{call.name} ok",
+                        status=RuntimeStatus.OK,
+                    )
+
             allowed = [
                 "op_tool_search",
                 "op_tool_read",
@@ -3993,6 +4178,12 @@ class MinionManagerTests(unittest.TestCase):
 
             denied_read = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_read", args={"name": "op_minion_spawn"}))
             self.assertEqual(denied_read.status, RuntimeStatus.NOT_FOUND)
+            allowed_call = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_call", args={"name": "op_file_read", "args": {}}))
+            self.assertTrue(allowed_call.ok)
+            self.assertEqual(allowed_call.name, "op_file_read")
+            denied_call = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_call", args={"name": "op_minion_spawn", "args": {}}))
+            self.assertFalse(denied_call.ok)
+            self.assertEqual(denied_call.structured["reason"], "capability_not_allowed")
 
         asyncio.run(scenario())
 
@@ -4098,14 +4289,17 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("op_file_read", pack.allowed_capabilities)
         self.assertIn("op_file_edit", pack.allowed_capabilities)
         self.assertIn("op_file_write", pack.allowed_capabilities)
+        self.assertIn("op_minion_checkpoint_commit", pack.allowed_capabilities)
         self.assertIn("op_minion_artifact_write", pack.allowed_capabilities)
         self.assertIn("op_minion_artifact_edit", pack.allowed_capabilities)
         self.assertIn("op_file_edit", prompt)
         self.assertIn("op_file_write", prompt)
+        self.assertIn("op_minion_checkpoint_commit", prompt)
         self.assertIn("op_minion_artifact_write", prompt)
         self.assertIn("op_minion_artifact_edit", prompt)
         self.assertIn("Do not create or commit generated", prompt)
         self.assertIn("CMakeLists.txt", prompt)
+        self.assertEqual(pack.allowed_skills, ["test_debugging"])
 
     def test_reviewer_prompt_uses_contract_lifecycle_and_severity_rubric(self) -> None:
         registry = MinionProfileRegistry(runtime_root=self.root)
@@ -4131,6 +4325,37 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("lifecycle management", prompt)
         self.assertIn("blocker: correctness/security/data loss/API breakage", prompt)
         self.assertIn("note: residual risk or observation", prompt)
+
+    def test_writer_profile_can_write_files_without_shell(self) -> None:
+        registry = MinionProfileRegistry(runtime_root=self.root)
+        pack = registry.resolve_pack(
+            TaskContextPack(work_order_id="wo_writer_prompt", goal="write a design handoff"),
+            requested_profile="software_engineering.writer",
+        )
+        prompt = _render_system_prompt(
+            {
+                "identity": pack.resolved_profile["identity_fragment"],
+                "behavior": pack.resolved_profile["behavior_fragment"],
+                "output_contract": pack.resolved_profile["output_contract_fragment"],
+                "allowed_capabilities": pack.allowed_capabilities,
+                "workspace_policy": pack.workspace["workspace_policy"],
+                "completion_policy": pack.workspace["completion_policy"],
+            }
+        )
+
+        self.assertEqual(pack.minion_profile, "software_engineering.writer")
+        self.assertEqual(
+            pack.allowed_skills,
+            [],
+        )
+        self.assertIn("technical context", prompt)
+        self.assertIn("design notes, specs, proposals", prompt)
+        self.assertIn("confirmed facts and source evidence", prompt)
+        self.assertIn("op_workspace_read", pack.allowed_capabilities)
+        self.assertIn("op_web_search", pack.allowed_capabilities)
+        self.assertIn("op_file_read", pack.allowed_capabilities)
+        self.assertIn("op_file_edit", pack.allowed_capabilities)
+        self.assertIn("op_file_write", pack.allowed_capabilities)
         self.assertNotIn("op_exec_shell", pack.allowed_capabilities)
 
     async def _start_manager(self):
@@ -4438,6 +4663,9 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("profile_id", profile_arg["description"])
                 endpoint_arg = spawn_spec["parameters_schema"]["properties"]["preferred_endpoint_id"]
                 self.assertIn("active endpoint", endpoint_arg["description"])
+                bonus_arg = spawn_spec["parameters_schema"]["properties"]["spawn_bonus_skill_refs"]
+                self.assertIn("optional skill libraries", bonus_arg["description"])
+                self.assertIn("spawn_bonus_skill_refs", pack_arg["properties"]["metadata"]["properties"])
 
                 draft_spec = core.context.execution_runtime.get_capability_spec("op_minion_draft_work_order")
                 self.assertIsNotNone(draft_spec)
@@ -4642,6 +4870,7 @@ class MinionIntegrationTests(unittest.TestCase):
                                 "allowed_skills": ["skill.only"],
                                 "approval_policy": {"custom": True},
                             },
+                            "spawn_bonus_skill_refs": ["bonus.skill"],
                         },
                     )
                 )
@@ -4653,6 +4882,8 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(pack["allowed_capabilities"], ["op_only_this"])
                 self.assertEqual(pack["allowed_skills"], ["skill.only"])
                 self.assertTrue(pack["approval_policy"]["custom"])
+                self.assertEqual(pack["metadata"]["spawn_bonus_skill_refs"], ["bonus.skill"])
+                self.assertIn("bonus.skill", pack["metadata"]["unresolved_skill_refs"])
             finally:
                 handle.shutdown_sync()
 
@@ -4749,6 +4980,8 @@ class MinionIntegrationTests(unittest.TestCase):
         self.assertEqual(action.delivery.interaction.buttons[0][0].action_args["action_kind"], "minion_approval_decision")
         self.assertEqual(action.delivery.interaction.buttons[0][1].label, "Accept All")
         self.assertEqual(action.delivery.interaction.buttons[0][1].action_args["args"]["decision"], "accept_all")
+        approval_labels = [button.label for row in action.delivery.interaction.buttons for button in row]
+        self.assertEqual(approval_labels, ["Accept", "Accept All", "Reject"])
 
     def test_minion_approval_text_truncates_large_args_and_preserves_decision_target(self) -> None:
         route = ControlRoute(endpoint_id="telegram_main", channel_kind="telegram", reply_target={"chat_id": "42"})
@@ -5357,7 +5590,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 {
                     "question_id": "q1",
                     "question": "Which module goes first?",
-                    "options": [{"id": "module_a", "label": "Module A"}],
+                    "options": [{"id": "module_a", "label": "Module A"}, {"id": "module_b", "label": "Module B"}],
                 },
                 {
                     "question_id": "q2",
@@ -5407,11 +5640,64 @@ class MinionIntegrationTests(unittest.TestCase):
             )
         )
 
+        self.assertEqual(fake_client.submitted, [])
+        review = final["delivery"].interaction
+        assert review is not None
+        self.assertIn("Review answers", review.text)
+        self.assertIn("Which module goes first?", review.text)
+        self.assertIn("> Module A", review.text)
+        edit = next(button for row in review.buttons for button in row if button.label == "Edit")
+        edit_update = asyncio.run(
+            provider.handle_control_action_async(
+                ControlAction(
+                    action_kind="minion_question_nav",
+                    target_scope="minion",
+                    target_id="clarify_submit",
+                    route=route,
+                    args=edit.action_args["args"],
+                )
+            )
+        )
+        edit_page = edit_update["delivery"].interaction
+        assert edit_page is not None
+        self.assertIn("Question 1/2", edit_page.text)
+        self.assertIn("> 1. Module A", edit_page.text)
+        revised = asyncio.run(
+            provider.handle_control_action_async(
+                ControlAction(
+                    action_kind="minion_question_select",
+                    target_scope="minion",
+                    target_id="clarify_submit",
+                    route=route,
+                    args=edit_page.buttons[0][1].action_args["args"],
+                )
+            )
+        )
+        revised_review = revised["delivery"].interaction
+        assert revised_review is not None
+        self.assertIn("Review answers", revised_review.text)
+        self.assertIn("> Module B", revised_review.text)
+        self.assertIn("> Integration", revised_review.text)
+        submit = next(button for row in revised_review.buttons for button in row if button.label == "Submit")
+        submitted_result = asyncio.run(
+            provider.handle_control_action_async(
+                ControlAction(
+                    action_kind="minion_question_submit",
+                    target_scope="minion",
+                    target_id="clarify_submit",
+                    route=route,
+                    args=submit.action_args["args"],
+                )
+            )
+        )
+
         self.assertEqual(len(fake_client.submitted), 1)
         submitted = fake_client.submitted[0]
         self.assertEqual(submitted["clarification_id"], "clarify_submit")
         self.assertEqual([answer["question_id"] for answer in submitted["answers"]], ["q1", "q2"])
-        self.assertEqual(final["delivery"].delivery_kind, "interactive_resolve")
+        self.assertEqual(submitted["answers"][0]["selected_option_id"], "module_b")
+        self.assertEqual(submitted["answers"][0]["answer"], "Module B")
+        self.assertEqual(submitted_result["delivery"].delivery_kind, "interactive_resolve")
 
     def test_control_plane_turns_minion_approval_button_into_decision_action(self) -> None:
         route = ControlRoute(endpoint_id="telegram_main", channel_kind="telegram", reply_target={"chat_id": "42"})

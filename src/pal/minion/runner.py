@@ -7,7 +7,6 @@ import mimetypes
 import os
 import json
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -49,7 +48,7 @@ from pal.memory import (
     MemoryService,
     register_with_core as register_memory_with_core,
 )
-from pal.minion.git_env import commit_milestone
+from pal.minion.git_env import commit_milestone, inspect_milestone_checkpoint
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
 from pal.minion.work_order import build_planner_work_order, prompt_view_from_metadata
 from pal.plugins.l3 import MockL3Plugin, SQLiteVecL3Plugin, register_with_core as register_l3_with_core
@@ -188,10 +187,14 @@ class MinionRunner:
             )
         )
         memory_l3.service = memory_service
+        workspace = dict(self.pack.workspace)
+        workspace.setdefault("work_order_id", self.pack.work_order_id)
+        workspace.setdefault("current_milestone_index", self._current_milestone_index())
+        workspace.setdefault("current_milestone_title", self._current_milestone_title())
         execution_runtime = MinionScopedExecutionRuntime(
             bundle.execution_runtime,
             self.pack.allowed_capabilities,
-            dict(self.pack.workspace),
+            workspace,
             produced_artifacts=self.produced_artifacts,
             memory_l3=memory_l3,
         )
@@ -249,18 +252,15 @@ class MinionRunner:
             return ""
         if str(getattr(outcome, "finish_reason", "") or "") == LLMFinishReason.ERROR:
             return ""
-        if retry_count > 0:
-            return ""
         tools_available = bool(self.pack.allowed_capabilities)
         if not tools_available:
             return ""
         if observations and self._needs_git_completion_retry():
-            return (
-                "The milestone is not complete yet: no runner-owned git completion evidence exists. "
-                "Use the listed file/workspace capabilities now to make and verify the required change. "
-                "Do not stop with a report-only response. If completion is truly impossible, report a concrete blocker "
-                "that explains which required input, permission, file, or contract is missing."
-            )
+            if retry_count >= self._git_completion_retry_limit():
+                return ""
+            return self._git_completion_retry_note()
+        if retry_count > 0:
+            return ""
         if observations:
             return ""
         if not self._requires_first_tool_call():
@@ -279,6 +279,32 @@ class MinionRunner:
         if bool(metadata.get("allow_text_only_completion") or completion_policy.get("allow_artifact_evidence")):
             return False
         return not self._completion_evidence_present()
+
+    def _git_completion_retry_limit(self) -> int:
+        metadata = self.pack.metadata if isinstance(self.pack.metadata, dict) else {}
+        raw = metadata.get("git_completion_retry_limit")
+        return max(1, min(5, _coerce_int(raw, default=3)))
+
+    def _git_completion_retry_note(self) -> str:
+        checkpoint = inspect_milestone_checkpoint(
+            Path(str((self.pack.workspace or {}).get("repo_path") or ".")),
+            base_sha=str((self.pack.workspace or {}).get("base_sha") or ""),
+        )
+        status = str(checkpoint.get("status") or "").strip()
+        if status == "uncommitted_changes":
+            return (
+                "The milestone has uncommitted workspace changes and is not complete until a structured checkpoint "
+                "commit exists. Do not answer with final text. If implementation and verification are complete, call "
+                "`op_minion_checkpoint_commit` now. Do not use shell git add/commit; Pal needs the structured result "
+                "from `op_minion_checkpoint_commit` for manager reporting."
+            )
+        return (
+            "The milestone is not complete yet: no minion checkpoint commit exists. Use the listed file/workspace "
+            "capabilities to make and verify the required change, then call `op_minion_checkpoint_commit` to create "
+            "the milestone checkpoint commit. Do not stop with a report-only response. If completion is truly "
+            "impossible, report a concrete blocker that explains which required input, permission, file, or contract "
+            "is missing."
+        )
 
     async def _execute_minion_agent_effect(
         self,
@@ -675,7 +701,7 @@ class MinionRunner:
                 name=tool_call.name,
                 ok=False,
                 text=policy_error,
-                structured={"reason": "runner_owns_git_checkpoint", "capability": target_name},
+                structured={"reason": "use_checkpoint_commit_capability", "capability": target_name},
                 call_id=tool_call.call_id,
                 llm_text=policy_error,
                 status=RuntimeStatus.ERROR,
@@ -705,9 +731,9 @@ class MinionRunner:
         if not _contains_runner_owned_git_mutation(cmd):
             return ""
         return (
-            "Do not run git add, git commit, git reset, checkout/switch, clean, merge, rebase, tag, or push in this "
-            "minion workspace. Leave file changes in the workspace and finish with a concise report; the runner owns "
-            "the checkpoint commit."
+            "Do not run git add, git commit, git reset, checkout/switch, clean, merge, rebase, tag, or push through "
+            "shell in this minion workspace. Use `op_minion_checkpoint_commit` for milestone checkpoint commits so "
+            "Pal can record structured commit evidence."
         )
 
     async def _await_with_progress_heartbeat(self, awaitable, *, phase: str, **payload: Any):
@@ -838,15 +864,13 @@ class MinionRunner:
         raw = (self.pack.approval_policy or {}).get("max_clarification_rounds")
         return max(1, min(5, _coerce_int(raw, default=3)))
 
-    async def _commit_current_milestone(self) -> dict[str, Any]:
+    async def _inspect_current_milestone_checkpoint(self) -> dict[str, Any]:
         repo_path = str((self.pack.workspace or {}).get("repo_path") or "").strip()
         if not repo_path:
             return {"status": "error", "error": "workspace.repo_path is missing"}
-        return commit_milestone(
+        return inspect_milestone_checkpoint(
             Path(repo_path),
-            work_order_id=self.pack.work_order_id,
-            milestone_index=self._current_milestone_index(),
-            title=self._current_milestone_title(),
+            base_sha=str((self.pack.workspace or {}).get("base_sha") or ""),
         )
 
     async def _complete_current_milestone(self, final_text: str) -> dict[str, Any]:
@@ -872,37 +896,35 @@ class MinionRunner:
             }
         if evidence == "git_commit":
             await self._persist_text_deliverable_if_needed(final_text)
-            checkpoint = await self._commit_current_milestone()
-            if checkpoint.get("status") != "committed":
-                if checkpoint.get("status") == "no_changes" and (
-                    self._completion_evidence_present() or self._artifact_completion_evidence_present()
-                ):
-                    return {
-                        **base_payload,
-                        "status": "completed",
-                        "commit_sha": str(checkpoint.get("commit_sha") or ""),
-                        "git_commit": checkpoint,
-                        "evidence": "git_commit",
-                        **self._artifact_payload(),
-                    }
-                blocked_summary = str(
-                    checkpoint.get("error")
-                    or ("milestone produced no git changes" if checkpoint.get("status") == "no_changes" else "")
-                    or f"milestone commit did not complete: {checkpoint.get('status')}"
-                )
+            checkpoint = await self._inspect_current_milestone_checkpoint()
+            if checkpoint.get("status") == "committed":
                 return {
                     **base_payload,
-                    "status": "blocked",
-                    "summary": blocked_summary,
+                    "status": "completed",
+                    "commit_sha": str(checkpoint.get("commit_sha") or ""),
                     "git_commit": checkpoint,
+                    "evidence": "git_commit",
                     **self._artifact_payload(),
                 }
+            if checkpoint.get("status") == "no_changes" and self._artifact_completion_evidence_present():
+                return {
+                    **base_payload,
+                    "status": "completed",
+                    "commit_sha": str(checkpoint.get("commit_sha") or ""),
+                    "git_commit": checkpoint,
+                    "evidence": "git_commit",
+                    **self._artifact_payload(),
+                }
+            blocked_summary = str(
+                checkpoint.get("error")
+                or checkpoint.get("summary")
+                or f"milestone checkpoint is not committed: {checkpoint.get('status')}"
+            )
             return {
                 **base_payload,
-                "status": "completed",
-                "commit_sha": str(checkpoint.get("commit_sha") or ""),
+                "status": "blocked",
+                "summary": blocked_summary,
                 "git_commit": checkpoint,
-                "evidence": "git_commit",
                 **self._artifact_payload(),
             }
         await self._persist_text_deliverable_if_needed(final_text)
@@ -926,11 +948,11 @@ class MinionRunner:
         repo = Path(repo_path)
         if not (repo / ".git").exists():
             return False
-        if _repo_has_changes(repo):
-            return True
-        base_sha = str((self.pack.workspace or {}).get("base_sha") or "").strip()
-        head = _repo_head(repo)
-        return bool(base_sha and head and head != base_sha)
+        checkpoint = inspect_milestone_checkpoint(
+            repo,
+            base_sha=str((self.pack.workspace or {}).get("base_sha") or ""),
+        )
+        return checkpoint.get("status") == "committed"
 
     def _artifact_completion_evidence_present(self) -> bool:
         if not self.produced_artifacts:
@@ -1051,6 +1073,7 @@ class MinionRunner:
             "continuity": dict(self.pack.continuity),
             "current_milestone": milestone,
             "allowed_capabilities": list(self.pack.allowed_capabilities),
+            "skill_manual_context": list((self.pack.metadata or {}).get("skill_manual_context") or []),
             "output_contract": str(profile.get("output_contract_fragment") or ""),
             "workspace_policy": self._workspace_policy(),
             "completion_policy": self._completion_policy(),
@@ -1352,6 +1375,7 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_file_edit",
     "op_file_write",
     "op_exec_shell",
+    "op_minion_checkpoint_commit",
     "op_workspace_tree",
     "op_workspace_search",
     "op_workspace_read",
@@ -1457,6 +1481,20 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "required": ["kind", "summary"],
         },
     },
+    "op_minion_checkpoint_commit": {
+        "name": "op_minion_checkpoint_commit",
+        "description": (
+            "Create the current milestone checkpoint commit in the minion workspace git branch and return structured "
+            "commit evidence. Use this after implementation and verification are complete. The tool stages source, "
+            "tests, docs, and project config while excluding generated build/cache artifacts and minion_outputs."
+        ),
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short milestone title for the commit message."},
+            },
+        },
+    },
 }
 
 
@@ -1529,9 +1567,13 @@ class MinionScopedExecutionRuntime:
                 call,
                 ToolReadTool(runtime=self).invoke(dict(call.args)),
             )
+        if call.name == "op_tool_call":
+            return await self._execute_scoped_tool_call(call, allow_tools=allow_tools, turn_id=turn_id)
         if call.name in WORKSPACE_TOOL_SPECS:
             if call.name == "op_minion_memory_candidate_write":
                 return _minion_memory_candidate_result(call, self.memory_l3)
+            if call.name == "op_minion_checkpoint_commit":
+                return _minion_checkpoint_commit_result(call, self.workspace)
             result = _workspace_tool_result(call, self.workspace)
             if call.name in {"op_minion_artifact_write", "op_minion_artifact_edit"} and result.ok:
                 artifact = dict((result.structured or {}).get("artifact") or result.structured or {})
@@ -1539,6 +1581,42 @@ class MinionScopedExecutionRuntime:
                     _append_unique_artifact(self.produced_artifacts, artifact)
             return result
         return await self.base_runtime.execute_tool_async(call, allow_tools=allow_tools, turn_id=turn_id)
+
+    async def _execute_scoped_tool_call(
+        self,
+        call: CanonicalToolCall,
+        *,
+        allow_tools: bool = True,
+        turn_id: str | None = None,
+    ) -> CanonicalToolResult:
+        target_name = str(call.args.get("name") or call.args.get("capability") or call.args.get("tool") or "").strip()
+        if not target_name:
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text="name is required",
+                structured={"reason": "name_required"},
+                call_id=call.call_id,
+                llm_text="name is required",
+                status=RuntimeStatus.INVALID,
+            )
+        spec = self.get_capability_spec(target_name)
+        canonical = str((spec or {}).get("name") or (spec or {}).get("canonical_path") or target_name).strip()
+        if spec is None or canonical == call.name:
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text=f"capability is not allowed for this minion: {target_name}",
+                structured={"reason": "capability_not_allowed", "target": target_name},
+                call_id=call.call_id,
+                llm_text=f"capability is not allowed for this minion: {target_name}",
+                status=RuntimeStatus.ERROR,
+            )
+        return await self.execute_tool_async(
+            CanonicalToolCall(name=canonical, args=dict(call.args.get("args") or {}), call_id=call.call_id),
+            allow_tools=allow_tools,
+            turn_id=turn_id,
+        )
 
 
 def _capability_result_to_tool_result(call: CanonicalToolCall, result: CapabilityResult) -> CanonicalToolResult:
@@ -1589,6 +1667,70 @@ def _minion_memory_candidate_result(call: CanonicalToolCall, memory_l3: MockL3Pl
             call_id=call.call_id,
             llm_text="memory candidate recorded",
             status=result.status,
+        )
+    except Exception as exc:
+        message = str(exc) or exc.__class__.__name__
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=message,
+            structured={"error": message, "error_type": exc.__class__.__name__},
+            call_id=call.call_id,
+            llm_text=message,
+            status=RuntimeStatus.ERROR,
+        )
+
+
+def _minion_checkpoint_commit_result(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult:
+    try:
+        repo_path = str((workspace or {}).get("repo_path") or "").strip()
+        if not repo_path:
+            raise ValueError("workspace.repo_path is not available")
+        repo = Path(repo_path)
+        title = str(call.args.get("title") or workspace.get("current_milestone_title") or "").strip()
+        result = commit_milestone(
+            repo,
+            work_order_id=str(workspace.get("work_order_id") or "work_order"),
+            milestone_index=_coerce_int(workspace.get("current_milestone_index"), default=0),
+            title=title,
+        )
+        status = str(result.get("status") or "").strip()
+        if status == "no_changes":
+            inspected = inspect_milestone_checkpoint(repo, base_sha=str(workspace.get("base_sha") or ""))
+            if inspected.get("status") == "committed":
+                payload = {**inspected, "already_committed": True}
+                return CanonicalToolResult(
+                    name=call.name,
+                    ok=True,
+                    text=f"Milestone checkpoint already committed: {payload.get('commit_sha')}",
+                    structured=payload,
+                    call_id=call.call_id,
+                    llm_text=f"Milestone checkpoint already committed: {payload.get('commit_sha')}",
+                    status=RuntimeStatus.OK,
+                )
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text="No milestone changes to commit.",
+                structured={**result, **inspected},
+                call_id=call.call_id,
+                llm_text="No milestone changes to commit.",
+                status=RuntimeStatus.ERROR,
+            )
+        ok = status == "committed"
+        text = (
+            f"Milestone checkpoint committed: {result.get('commit_sha')}"
+            if ok
+            else str(result.get("error") or f"Milestone checkpoint commit failed: {status}")
+        )
+        return CanonicalToolResult(
+            name=call.name,
+            ok=ok,
+            text=text,
+            structured=result,
+            call_id=call.call_id,
+            llm_text=text,
+            status=RuntimeStatus.OK if ok else RuntimeStatus.ERROR,
         )
     except Exception as exc:
         message = str(exc) or exc.__class__.__name__
@@ -2015,36 +2157,6 @@ def _max_output_tokens_from_context_window(context_window: int, llm_runtime: Any
     return max(512, min(cap, max(floor, context_fraction), usable))
 
 
-def _repo_has_changes(repo_path: Path) -> bool:
-    try:
-        completed = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=str(repo_path),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except Exception:
-        return True
-    return bool((completed.stdout or "").strip())
-
-
-def _repo_head(repo_path: Path) -> str:
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(repo_path),
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except Exception:
-        return ""
-    if completed.returncode != 0:
-        return ""
-    return str(completed.stdout or "").strip()
-
-
 _RUNNER_OWNED_GIT_MUTATION_RE = re.compile(
     r"(?:^|[;&|()]\s*)git\s+"
     r"(?:add|commit|reset|checkout|switch|clean|rm|mv|merge|rebase|tag|push|branch)\b"
@@ -2072,7 +2184,8 @@ def _render_system_prompt(scaffold: dict[str, Any]) -> str:
         "If capability evidence is required, use a relevant listed capability before completing the milestone.\n"
         f"{testing_guidance}"
         "If completion evidence cannot be produced, report blocked instead of completed.\n"
-        "When completion policy requires git_commit, leave file changes in the workspace; do not run git add, git commit, or other git mutation commands yourself. The runner owns checkpoint commits.\n"
+        "When completion policy requires git_commit, do not run git add, git commit, or other git mutation commands through shell. "
+        "After implementing and verifying the milestone, call `op_minion_checkpoint_commit` to create the structured checkpoint commit in the minion workspace branch.\n"
         "Do not create or rely on committing generated build/cache artifacts such as __pycache__, .pytest_cache, .o, .obj, .a, .so, .dylib, .dll, .exe, class files, coverage output, build directories, or minion_outputs reports.\n"
         "When `op_minion_artifact_write` or `op_minion_artifact_edit` is available, write planner/reviewer deliverables and any long structured output to workspace.artifact_dir with artifact tools; keep the final chat summary short and point to the artifact.\n"
         "Use `op_minion_artifact_write` for one complete coherent file. Use `op_minion_artifact_edit` append for long deliverables split into coherent sections, or replace only when rewriting the complete artifact. Do not rely on final chat text for long plans or reports.\n"
@@ -2085,6 +2198,7 @@ def _render_system_prompt(scaffold: dict[str, Any]) -> str:
     blocks = [
         ("identity", str(scaffold.get("identity") or "").strip()),
         ("behavior_guidance", str(scaffold.get("behavior") or "").strip()),
+        ("system-reminder", _render_skill_manual_context(scaffold.get("skill_manual_context"))),
         ("operating_rules", operating_rules.strip()),
         ("workspace_policy", json.dumps(scaffold.get("workspace_policy") or {}, ensure_ascii=False, sort_keys=True)),
         ("completion_policy", json.dumps(scaffold.get("completion_policy") or {}, ensure_ascii=False, sort_keys=True)),
@@ -2092,6 +2206,31 @@ def _render_system_prompt(scaffold: dict[str, Any]) -> str:
         ("allowed_capabilities", json.dumps(scaffold.get("allowed_capabilities") or [], ensure_ascii=False)),
     ]
     return "\n\n".join(render_xml_block(tag, content) for tag, content in blocks if str(content or "").strip()).strip()
+
+
+def _render_skill_manual_context(items: Any) -> str:
+    blocks: list[str] = []
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        skill_id = str(item.get("skill_id") or "").strip()
+        manual_text = str(item.get("manual_text") or "").strip()
+        if not skill_id or not manual_text:
+            continue
+        title = str(item.get("title") or skill_id).strip()
+        summary = str(item.get("summary") or "").strip()
+        use_when = str(item.get("use_when") or "").strip()
+        avoid_when = str(item.get("avoid_when") or "").strip()
+        parts = [
+            f"Skill: {skill_id} - {title}",
+            f"Summary: {summary}" if summary else "",
+            f"Use when: {use_when}" if use_when else "",
+            f"Avoid when: {avoid_when}" if avoid_when else "",
+            "Manual:",
+            manual_text,
+        ]
+        blocks.append("\n".join(part for part in parts if part).strip())
+    return "\n\n".join(blocks).strip()
 
 
 def _coerce_user_content_parts(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
@@ -2119,13 +2258,17 @@ def _prompt_view_from_pack(pack: TaskContextPack) -> dict[str, Any]:
 def _render_task_prompt(pack: TaskContextPack) -> str:
     prompt_view = _prompt_view_from_pack(pack)
     if prompt_view:
+        instructions = [
+            "Execute only the scoped work in this prompt_view.",
+            "Use module contracts instead of inferring other module internals.",
+        ]
+        if str(prompt_view.get("role") or "").strip().lower() == "planner":
+            instructions.append(
+                "If a question is user-answerable and materially changes the plan, return ask_user_question with evidence."
+            )
         payload = {
             "prompt_view": prompt_view,
-            "instructions": [
-                "Execute only the scoped work in this prompt_view.",
-                "Use module contracts instead of inferring other module internals.",
-                "If a question is user-answerable and materially changes the plan, return ask_user_question with evidence.",
-            ],
+            "instructions": instructions,
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
     payload = {

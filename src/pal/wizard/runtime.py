@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import resources
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -163,6 +164,7 @@ class WizardService(WizardServicePort):
         )
         self.register(registration)
         self.provision_builtin_plugins(registration)
+        self.provision_minion_profile_templates(registration)
         return registration
 
     def create_database(
@@ -214,6 +216,25 @@ class WizardService(WizardServicePort):
         sentinel = builtin_root / ".managed"
         if not sentinel.exists():
             sentinel.write_text("# Managed by Pal. Do not modify manually.\n", encoding="utf-8")
+
+    def provision_minion_profile_templates(self, registration: PalRegistration) -> None:
+        """Seed editable minion profile demos into the runtime home.
+
+        The package templates remain the builtin fallback. The runtime copies are
+        intentionally user-editable and are not overwritten after first create.
+        """
+
+        source = resources.files("pal.minion").joinpath("profile_templates")
+        target_root = registration.runtime.runtime_root / "plugins" / "minion" / "profiles"
+        target_root.mkdir(parents=True, exist_ok=True)
+        with resources.as_file(source) as source_root:
+            for source_path in sorted(Path(source_root).rglob("*.toml")):
+                relative_path = source_path.relative_to(source_root)
+                target_path = target_root / relative_path
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                if target_path.exists():
+                    continue
+                shutil.copy2(source_path, target_path)
 
     def provision_stub_runtime(self, runtime_root: Path) -> ProvisionedRuntime:
         registration = self.provision_runtime(

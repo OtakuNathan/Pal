@@ -138,7 +138,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                     "- Current runtime state -> none; inspect live runtime when needed.\n\n"
                     "<examples>\n"
                     "- Stable fact or preference: \"User prefers concise Chinese replies.\" -> memory.\n"
-                    "- Past repair lesson: \"Minion runner owns checkpoint commits; coders leave git changes for the runner.\" -> memory.\n"
+                    "- Past repair lesson: \"Coder minions create checkpoint commits through op_minion_checkpoint_commit so Pal can record structured commit evidence.\" -> memory.\n"
                     "- Future route hint: \"When brainstorm becomes actionable, ask for a structured plan first.\" -> behavior guidance.\n"
                     "- Reusable procedure: \"When complex code review involves async code, trace happens-before chains.\" -> skill candidate.\n"
                     "- Current runtime state: \"Telegram is attached now.\" -> neither memory nor behavior guidance; inspect live runtime state.\n"

@@ -23,6 +23,7 @@ from pal.llm.contracts import CanonicalLLMRequest
 from pal.shared import LLMFinishReason
 from pal.shared.text_search import jieba_search_terms
 from pal.skill.contracts import (
+    SKILL_ADMISSION_MANUAL_CHAR_BUDGET,
     SKILL_INJECT_MANUAL_CHAR_BUDGET,
     SKILL_SOURCE_DECLARED,
     SKILL_SOURCE_INSTRUCTED,
@@ -43,6 +44,7 @@ class SkillService:
     llm_runtime: Any | None = None
     runtime_root: Path | None = None
     inject_manual_char_budget: int = SKILL_INJECT_MANUAL_CHAR_BUDGET
+    admission_manual_char_budget: int = SKILL_ADMISSION_MANUAL_CHAR_BUDGET
     pending_candidates: dict[str, SkillAssimilationCandidate] = field(default_factory=dict)
 
     def inject_skill(self, skill_id: str) -> SkillDescriptor | None:
@@ -58,6 +60,8 @@ class SkillService:
         source_format = _validated_source_format(payload.get("source_format"))
         intent = _validated_intent(payload.get("intent"))
         desired_skill_id = str(payload.get("desired_skill_id") or "").strip()
+        source_refs = _string_tuple(payload.get("source_refs"))
+        source_metadata = dict(payload.get("source_metadata") or {})
         parsed = _parse_source(source_text, source_format=source_format)
         risk_hints = _risk_hints(source_text)
         sanitized = await self._sanitize_with_llm_or_fallback(
@@ -72,6 +76,8 @@ class SkillService:
             sanitized,
             source_format=source_format,
             risk_hints=risk_hints,
+            source_refs=source_refs,
+            source_metadata=source_metadata,
         )
         self.pending_candidates[candidate.candidate_id] = candidate
         return candidate
@@ -243,13 +249,15 @@ class SkillService:
         *,
         source_format: str,
         risk_hints: tuple[str, ...],
+        source_refs: tuple[str, ...] = (),
+        source_metadata: dict[str, Any] | None = None,
     ) -> SkillAssimilationCandidate:
         if not isinstance(sanitized, dict):
             raise ValueError("sanitizer_invalid_payload")
         skill_payload = dict(sanitized.get("skill") or sanitized)
         title = str(skill_payload.get("title") or "Untitled Skill").strip()
         summary = str(skill_payload.get("summary") or title).strip()
-        manual_text = _compress_manual(str(skill_payload.get("manual_text") or ""))
+        manual_text = _normalize_manual(str(skill_payload.get("manual_text") or ""))
         if not manual_text:
             raise ValueError("manual_text is required")
         skill_id = _safe_skill_id(str(skill_payload.get("skill_id") or title))
@@ -258,6 +266,13 @@ class SkillService:
         avoid_when = str(skill_payload.get("avoid_when") or "").strip()
         removed_risks = _string_tuple(sanitized.get("removed_risks")) or risk_hints
         warnings = _string_tuple(sanitized.get("warnings"))
+        decision = str(sanitized.get("decision") or "accept")
+        if len(manual_text) > self.admission_manual_char_budget:
+            decision = "needs_review"
+            warnings = (*warnings, "manual_exceeds_admission_budget")
+        metadata = dict(skill_payload.get("metadata") or {})
+        metadata.update(dict(source_metadata or {}))
+        metadata["assimilation_decision"] = decision
         skill = SkillDescriptor(
             skill_id=skill_id,
             module_id="skill",
@@ -268,14 +283,15 @@ class SkillService:
             activation_terms=_string_tuple(skill_payload.get("activation_terms")) or _token_tuple(" ".join((title, summary, use_when))),
             capability_refs=_string_tuple(skill_payload.get("capability_refs")),
             enabled=True,
-            status=SKILL_STATUS_ACTIVE if str(sanitized.get("decision") or "accept") == "accept" else SKILL_STATUS_NEEDS_REVIEW,
+            status=SKILL_STATUS_ACTIVE if decision == "accept" else SKILL_STATUS_NEEDS_REVIEW,
             applicability_star=star,
             use_when=use_when,
             avoid_when=avoid_when,
             sanitization_notes=removed_risks,
             source_format=source_format,
+            source_refs=source_refs or _string_tuple(skill_payload.get("source_refs")),
             version=1,
-            metadata={"assimilation_decision": str(sanitized.get("decision") or "accept")},
+            metadata=metadata,
             updated_at=utc_now(),
         )
         duplicate_candidates, conflict_candidates = self._detect_duplicates(skill)
@@ -283,7 +299,7 @@ class SkillService:
         affordance = _thin_affordance_payload(skill)
         return SkillAssimilationCandidate(
             candidate_id=candidate_id,
-            decision=str(sanitized.get("decision") or "accept"),
+            decision=decision,
             skill=skill,
             affordance=affordance,
             duplicate_candidates=tuple(duplicate_candidates),
@@ -427,7 +443,7 @@ def _deterministic_sanitized(
     _ = source_format, intent
     title = str(frontmatter.get("name") or frontmatter.get("title") or desired_skill_id or _first_heading(source_text) or "Learned Skill")
     summary = str(frontmatter.get("description") or _first_sentence(source_text) or title)
-    manual = _compress_manual(_remove_dangerous_lines(source_text))
+    manual = _normalize_manual(_remove_dangerous_lines(source_text))
     skill_id = _safe_skill_id(desired_skill_id or title)
     star = {
         "situation": summary,
@@ -576,11 +592,9 @@ def _remove_dangerous_lines(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _compress_manual(text: str, *, max_chars: int = 8_000) -> str:
+def _normalize_manual(text: str) -> str:
     normalized = re.sub(r"\n{3,}", "\n\n", str(text or "").strip())
-    if len(normalized) <= max_chars:
-        return normalized
-    return normalized[: max_chars - 80].rstrip() + "\n\n[truncated by skill sanitizer budget]"
+    return normalized
 
 
 def _first_heading(text: str) -> str:

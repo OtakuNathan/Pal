@@ -220,7 +220,6 @@ class MinionProfileRegistry:
 CORE_MINION_CAPABILITIES = (
     "op_tool_search",
     "op_tool_read",
-    "op_tool_call",
     "op_minion_artifact_write",
     "op_minion_artifact_edit",
     "op_minion_memory_candidate_write",
@@ -237,10 +236,14 @@ WORKSPACE_READ_CAPABILITIES = (
 
 CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "core_minion_read": CORE_MINION_CAPABILITIES,
+    "tool_discovery": ("op_tool_search", "op_tool_read"),
+    "capability_call": ("op_tool_call",),
+    "minion_artifacts": ("op_minion_artifact_write", "op_minion_artifact_edit"),
+    "minion_memory_candidates": ("op_minion_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
     "web_research": ("op_web_search", "op_web_read"),
-    "code_work": ("op_file_read", "op_file_edit", "op_file_write", "op_exec_shell"),
+    "code_work": ("op_file_read", "op_file_edit", "op_file_write", "op_exec_shell", "op_minion_checkpoint_commit"),
 }
 
 
@@ -294,6 +297,7 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
     {
         "op_minion_artifact_write",
         "op_minion_artifact_edit",
+        "op_minion_checkpoint_commit",
         "op_minion_memory_candidate_write",
     }
 )

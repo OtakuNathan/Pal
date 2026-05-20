@@ -172,6 +172,30 @@ class PalV2BootstrapTests(unittest.TestCase):
     def test_wizard_provision_runtime_creates_third_party_plugin_directory(self) -> None:
         self.assertTrue((self.registration.runtime.runtime_root / "plugins").is_dir())
 
+    def test_wizard_provision_runtime_seeds_editable_minion_profile_templates(self) -> None:
+        profile_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles"
+
+        self.assertTrue((profile_root / "generic.toml").is_file())
+        self.assertTrue((profile_root / "software_engineering" / "planner.toml").is_file())
+        self.assertTrue((profile_root / "software_engineering" / "coder.toml").is_file())
+        self.assertTrue((profile_root / "software_engineering" / "reviewer.toml").is_file())
+        self.assertTrue((profile_root / "software_engineering" / "writer.toml").is_file())
+        self.assertIn(
+            'profile_id = "writer"',
+            (profile_root / "software_engineering" / "writer.toml").read_text(encoding="utf-8"),
+        )
+
+    def test_wizard_minion_profile_template_seed_preserves_user_edits(self) -> None:
+        profile_path = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles" / "software_engineering" / "writer.toml"
+        profile_path.write_text('profile_id = "writer"\ndisplay_name = "Custom Runtime Writer"\n', encoding="utf-8")
+
+        self.wizard.provision_minion_profile_templates(self.registration)
+
+        self.assertEqual(
+            profile_path.read_text(encoding="utf-8"),
+            'profile_id = "writer"\ndisplay_name = "Custom Runtime Writer"\n',
+        )
+
     def test_identity_repository_bootstraps_singletons(self) -> None:
         repository = IdentityRepository()
         repository.ensure_defaults(

@@ -4,10 +4,10 @@ profile_group = "general"
 identity_fragment = "You are a bounded task runner. Complete the assigned work from the given task context and current milestone."
 behavior_fragment = "Keep scope tight. Use available capabilities when they materially improve the answer. Report concrete milestone results and blockers."
 output_contract_fragment = "Output the milestone result, evidence used or produced, blockers, and remaining risks."
-capability_groups = ["core_minion_read", "memory_recall"]
+capability_groups = ["memory_recall", "minion_artifacts", "minion_memory_candidates"]
 
 [capability_policy]
-mode = "inherit_filtered"
+mode = "profile_only"
 risk = "default"
 
 [workspace_policy]

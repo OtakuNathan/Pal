@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
+import sqlite3
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -240,6 +242,7 @@ class MinionManager:
                 "plan_parent": True,
                 "continuation": continued,
             }
+        pack = self._inject_skill_manual_context(pack)
         minion_id = f"minion_{uuid4().hex[:10]}"
         run_id = f"run_{uuid4().hex[:12]}"
         metadata = dict(pack.metadata)
@@ -393,6 +396,83 @@ class MinionManager:
 
     def finish_work_order(self, work_order_id: str, reason: str = "") -> dict[str, Any]:
         return self.tasking_repository.set_plan_parent_status(work_order_id, "completed", reason=reason)
+
+    def _inject_skill_manual_context(self, pack: TaskContextPack) -> TaskContextPack:
+        skill_sources = _skill_ref_sources_for_pack(pack)
+        skill_refs = _dedupe_strings(
+            [
+                *skill_sources["pack_allowed_skill_refs"],
+                *skill_sources["profile_skill_refs"],
+                *skill_sources["work_order_skill_refs"],
+                *skill_sources["spawn_bonus_skill_refs"],
+            ]
+        )
+        if not skill_refs:
+            return pack
+        metadata = dict(pack.metadata)
+        existing = _coerce_skill_manual_context(metadata.get("skill_manual_context"))
+        existing_ids = {str(item.get("skill_id") or "").strip() for item in existing}
+        loaded, unresolved = self._load_skill_manual_context(
+            [skill_id for skill_id in skill_refs if skill_id not in existing_ids],
+        )
+        metadata["profile_skill_refs"] = skill_sources["profile_skill_refs"]
+        metadata["pack_allowed_skill_refs"] = skill_sources["pack_allowed_skill_refs"]
+        metadata["work_order_skill_refs"] = skill_sources["work_order_skill_refs"]
+        metadata["spawn_bonus_skill_refs"] = skill_sources["spawn_bonus_skill_refs"]
+        if unresolved:
+            metadata["unresolved_skill_refs"] = unresolved
+        if not existing and not loaded:
+            return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
+        context_items = [*existing, *loaded]
+        metadata["skill_manual_context"] = context_items
+        metadata["injected_skill_refs"] = [str(item.get("skill_id") or "") for item in context_items if str(item.get("skill_id") or "")]
+        return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
+
+    def _load_skill_manual_context(self, skill_refs: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+        if not skill_refs:
+            return [], list(skill_refs)
+        db_path = self.runtime_root / "pal.sqlite3"
+        if not db_path.exists():
+            return [], list(skill_refs)
+        result: list[dict[str, Any]] = []
+        unresolved: list[str] = []
+        try:
+            with sqlite3.connect(str(db_path)) as db:
+                db.row_factory = sqlite3.Row
+                for skill_id in skill_refs:
+                    row = db.execute(
+                        """
+                        SELECT skill_id, title, summary, manual_text, capability_refs_blob, metadata_blob, enabled
+                        FROM behavior_skills
+                        WHERE skill_id = ?
+                        """,
+                        (skill_id,),
+                    ).fetchone()
+                    if row is None or not bool(row["enabled"]):
+                        unresolved.append(skill_id)
+                        continue
+                    metadata = _loads_json_object(row["metadata_blob"])
+                    if str(metadata.get("status") or "active").strip() != "active":
+                        unresolved.append(skill_id)
+                        continue
+                    manual_text = str(row["manual_text"] or "").strip()
+                    if not manual_text:
+                        unresolved.append(skill_id)
+                        continue
+                    result.append(
+                        {
+                            "skill_id": str(row["skill_id"] or ""),
+                            "title": str(row["title"] or ""),
+                            "summary": str(row["summary"] or ""),
+                            "manual_text": manual_text,
+                            "use_when": str(metadata.get("use_when") or ""),
+                            "avoid_when": str(metadata.get("avoid_when") or ""),
+                            "capability_refs": _loads_json_list(row["capability_refs_blob"]),
+                        }
+                    )
+        except sqlite3.Error:
+            return [], list(skill_refs)
+        return result, unresolved
 
     async def close_all(self) -> None:
         for state in list(self.runs.values()):
@@ -756,7 +836,10 @@ class MinionManager:
 
     def _find_run_for_decision(self, decision: MinionApprovalDecision) -> MinionRunState | None:
         if decision.run_id and decision.run_id in self.runs:
-            return self.runs[decision.run_id]
+            state = self.runs[decision.run_id]
+            if str(state.pending_approval.get("approval_id") or "") == decision.approval_id:
+                return state
+            return None
         for state in self.runs.values():
             if str(state.pending_approval.get("approval_id") or "") == decision.approval_id:
                 return state
@@ -785,6 +868,103 @@ def _is_plan_parent_pack(pack: TaskContextPack) -> bool:
     metadata = dict(pack.metadata or {})
     plan_execution = dict(metadata.get("plan_execution") or {})
     return str(plan_execution.get("mode") or "") == "module_parent_milestones"
+
+
+def _skill_refs_for_pack(pack: TaskContextPack) -> list[str]:
+    sources = _skill_ref_sources_for_pack(pack)
+    return _dedupe_strings(
+        [
+            *sources["pack_allowed_skill_refs"],
+            *sources["profile_skill_refs"],
+            *sources["work_order_skill_refs"],
+            *sources["spawn_bonus_skill_refs"],
+        ]
+    )
+
+
+def _skill_ref_sources_for_pack(pack: TaskContextPack) -> dict[str, list[str]]:
+    metadata = dict(pack.metadata or {})
+    prompt_view = dict(metadata.get("prompt_view") or {})
+    milestone = prompt_view.get("milestone")
+    work_order_refs: list[str] = []
+    work_order_refs.extend(_string_list(metadata.get("skill_refs")))
+    work_order_refs.extend(_string_list(prompt_view.get("skill_refs")))
+    if isinstance(milestone, dict):
+        work_order_refs.extend(_string_list(milestone.get("skill_refs")))
+    bonus_refs = [
+        *_string_list(metadata.get("spawn_bonus_skill_refs")),
+        *_string_list(metadata.get("bonus_skill_refs")),
+    ]
+    values: list[str] = []
+    values.extend(_string_list(pack.allowed_skills))
+    profile = dict(pack.resolved_profile or {})
+    profile_refs = _string_list(profile.get("effective_skill_refs") or profile.get("skill_refs"))
+    return {
+        "pack_allowed_skill_refs": _dedupe_strings(values),
+        "profile_skill_refs": _dedupe_strings(profile_refs),
+        "work_order_skill_refs": _dedupe_strings(work_order_refs),
+        "spawn_bonus_skill_refs": _dedupe_strings(bonus_refs),
+    }
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        values = [value]
+    elif isinstance(value, (list, tuple, set)):
+        values = list(value)
+    else:
+        values = []
+    return _dedupe_strings([str(item) for item in values])
+
+
+def _coerce_skill_manual_context(value: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in list(value or []):
+        if not isinstance(item, dict):
+            continue
+        skill_id = str(item.get("skill_id") or "").strip()
+        manual_text = str(item.get("manual_text") or "").strip()
+        if skill_id and manual_text:
+            result.append(dict(item))
+    return result
+
+
+def _loads_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        loaded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return dict(loaded) if isinstance(loaded, dict) else {}
+
+
+def _loads_json_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return _dedupe_strings([str(item) for item in value])
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        loaded = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return _dedupe_strings([str(item) for item in loaded])
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        item = str(value or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
 
 
 def _debug_log_path_from_pack(pack: TaskContextPack) -> str:

@@ -64,10 +64,17 @@ class BehaviorPromptFragmentProvider:
             lines.append(f"- {item.title}: {hint}")
         if not lines:
             return None
+        guidance = (
+            "These are active behavior-routing hints. They are not optional decoration.\n"
+            "When the current user request matches a listed scenario, Pal MUST consider the hint before choosing a route.\n"
+            "Follow relevant hints unless a higher-priority rule, the user's current explicit instruction, source-of-truth requirements, or capability policy makes them inappropriate.\n"
+            "If a relevant hint is not followed, Pal should have a concrete reason such as scenario mismatch, stale runtime state, missing permission, or a clearer direct route.\n\n"
+            + "\n".join(lines)
+        )
         return PromptFragment(
             section="resident_affordances",
             title="Resident Affordances",
-            content="\n".join(lines),
+            content=guidance,
             priority=75,
             metadata={"module_id": self.module_id, "kind": "resident_affordances"},
         )
@@ -92,11 +99,18 @@ class DeclaredResidentAffordancePromptFragmentProvider:
             lines.append(f"- {item.title}: {hint}")
         if not lines:
             return []
+        guidance = (
+            "These are active behavior-routing hints. They are not optional decoration.\n"
+            "When the current user request matches a listed scenario, Pal MUST consider the hint before choosing a route.\n"
+            "Follow relevant hints unless a higher-priority rule, the user's current explicit instruction, source-of-truth requirements, or capability policy makes them inappropriate.\n"
+            "If a relevant hint is not followed, Pal should have a concrete reason such as scenario mismatch, stale runtime state, missing permission, or a clearer direct route.\n\n"
+            + "\n".join(lines)
+        )
         return [
             PromptFragment(
                 section="resident_affordances",
                 title="Resident Affordances",
-                content="\n".join(lines),
+                content=guidance,
                 priority=75,
                 metadata={"module_id": self.module_id, "kind": "declared_resident_affordances"},
             )

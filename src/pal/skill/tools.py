@@ -7,7 +7,6 @@ from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus
 from pal.shared.prompt_rendering import render_system_reminder
 from pal.shared.result_rendering import render_titled_structured_for_llm
-from pal.skill.contracts import SKILL_INJECT_MANUAL_CHAR_BUDGET
 from pal.skill.service import SkillService
 
 
@@ -18,6 +17,8 @@ SKILL_ASSIMILATE_ARGS_SCHEMA = {
         "source_format": {"type": "string", "enum": ["plain_text", "skill_md"], "default": "plain_text"},
         "intent": {"type": "string", "enum": ["learn", "summarize", "sanitize"], "default": "learn"},
         "desired_skill_id": {"type": "string"},
+        "source_refs": {"type": "array", "items": {"type": "string"}},
+        "source_metadata": {"type": "object"},
     },
     "required": ["source_text"],
 }
@@ -339,7 +340,7 @@ class SkillSearchTool:
                 "score": round(score, 4),
                 "match_reason": reason,
                 "manual_chars": len(skill.manual_text),
-                "injectable": bool(skill.active and len(skill.manual_text) <= self.service.inject_manual_char_budget),
+                "injectable": bool(skill.active),
             }
             if avoid_overlap:
                 hit["avoid_when_overlap"] = True
@@ -446,19 +447,6 @@ class SkillInjectTool:
             return CapabilityResult(
                 status=RuntimeStatus.NOT_FOUND,
                 text="skill not found or inactive",
-                structured=structured,
-                llm_text=render_titled_structured_for_llm("Skill injection failed", structured),
-            )
-        if len(skill.manual_text) > self.service.inject_manual_char_budget:
-            structured = {
-                "reason": "manual_too_long",
-                "skill_id": skill_id,
-                "manual_chars": len(skill.manual_text),
-                "budget_chars": self.service.inject_manual_char_budget,
-            }
-            return CapabilityResult(
-                status=RuntimeStatus.INVALID,
-                text="skill manual is too long to inject safely",
                 structured=structured,
                 llm_text=render_titled_structured_for_llm("Skill injection failed", structured),
             )

@@ -175,7 +175,6 @@ class MinionApprovalDecision:
     decision: str
     minion_id: str = ""
     run_id: str = ""
-    edit_note: str = ""
     decided_at: str = field(default_factory=utc_now)
 
     def to_dict(self) -> dict[str, Any]:
@@ -184,7 +183,6 @@ class MinionApprovalDecision:
             "decision": self.decision,
             "minion_id": self.minion_id,
             "run_id": self.run_id,
-            "edit_note": self.edit_note,
             "decided_at": self.decided_at,
         }
 
@@ -196,14 +194,13 @@ class MinionApprovalDecision:
         decision = str(payload.get("decision") or "").strip().lower()
         if not approval_id:
             raise ValueError("approval_id is required")
-        if decision not in {"accept", "accept_all", "reject", "edit"}:
-            raise ValueError("decision must be accept, accept_all, reject, or edit")
+        if decision not in {"accept", "accept_all", "reject"}:
+            raise ValueError("decision must be accept, accept_all, or reject")
         return cls(
             approval_id=approval_id,
             decision=decision,
             minion_id=str(payload.get("minion_id") or ""),
             run_id=str(payload.get("run_id") or ""),
-            edit_note=str(payload.get("edit_note") or ""),
             decided_at=str(payload.get("decided_at") or utc_now()),
         )
 

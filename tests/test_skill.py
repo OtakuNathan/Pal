@@ -83,6 +83,53 @@ class SkillSubsystemTests(unittest.TestCase):
         self.assertIn("avoid_when", result.structured["skill"])
         self.assertIsNone(self.skill_repository.get_skill("safe.git.commit"))
 
+    def test_assimilate_preserves_long_manual_and_source_metadata(self) -> None:
+        source_text = "When building software, preserve the full reusable workflow.\n" + ("Follow the verified step.\n" * 600)
+
+        candidate = asyncio.run(
+            self.service.assimilate_async(
+                {
+                    "source_text": source_text,
+                    "source_format": "plain_text",
+                    "desired_skill_id": "external.long.workflow",
+                    "source_refs": ["https://example.test/skills/workflow/SKILL.md"],
+                    "source_metadata": {"license": "MIT", "upstream": "example/workflow"},
+                }
+            )
+        )
+
+        self.assertEqual(candidate.skill.skill_id, "external.long.workflow")
+        self.assertIn("Follow the verified step.", candidate.skill.manual_text)
+        self.assertGreater(len(candidate.skill.manual_text), 8_000)
+        self.assertNotIn("truncated by skill sanitizer budget", candidate.skill.manual_text)
+        self.assertEqual(candidate.skill.source_refs, ("https://example.test/skills/workflow/SKILL.md",))
+        self.assertEqual(candidate.skill.metadata["license"], "MIT")
+
+    def test_assimilate_marks_oversized_manual_for_review_without_truncating(self) -> None:
+        service = SkillService(
+            repository=self.skill_repository,
+            behavior_repository=self.behavior_repository,
+            runtime_root=self.root,
+            admission_manual_char_budget=80,
+        )
+        source_text = "Preserve this workflow.\n" + ("critical semantic step\n" * 10)
+
+        candidate = asyncio.run(
+            service.assimilate_async(
+                {
+                    "source_text": source_text,
+                    "source_format": "plain_text",
+                    "desired_skill_id": "external.review.workflow",
+                }
+            )
+        )
+
+        self.assertEqual(candidate.skill.status, "needs_review")
+        self.assertEqual(candidate.decision, "needs_review")
+        self.assertIn("manual_exceeds_admission_budget", candidate.warnings)
+        self.assertIn("critical semantic step", candidate.skill.manual_text)
+        self.assertNotIn("truncated by skill sanitizer budget", candidate.skill.manual_text)
+
     def test_skill_md_ignores_allowed_tools_and_llm_sanitizes(self) -> None:
         payload = {
             "decision": "accept",
@@ -174,7 +221,7 @@ Run the workflow.
         self.assertEqual(result.status, "invalid")
         self.assertEqual(result.structured["error"], "duplicate_skill_requires_update_or_replace")
 
-    def test_inject_only_active_and_rejects_too_long_manual(self) -> None:
+    def test_inject_only_active_and_preserves_long_manual(self) -> None:
         self.skill_repository.upsert_skill(
             SkillDescriptor(
                 skill_id="active",
@@ -217,7 +264,8 @@ Run the workflow.
         self.assertIn("Manual:\n1. Do it.", active.llm_text)
         self.assertNotIn("manual_text", active.llm_text)
         self.assertEqual(disabled.structured["reason"], "skill_not_found_or_inactive")
-        self.assertEqual(long.structured["reason"], "manual_too_long")
+        self.assertEqual(long.status, "ok")
+        self.assertEqual(long.structured["manual_text"], "x" * 100)
 
     def test_search_and_read_skills_without_injecting_manual_by_default(self) -> None:
         self.skill_repository.upsert_skill(

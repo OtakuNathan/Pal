@@ -510,6 +510,11 @@ class MinionManagerProvider:
                                 "task_id": {"type": "string"},
                                 "task_title": {"type": "string"},
                                 "prompt_view": {"type": "object"},
+                                "spawn_bonus_skill_refs": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "description": "Optional Pal-added runtime skill refs to inject in addition to profile and work-order skill refs.",
+                                },
                                 "planner_work_order": {"type": "object"},
                                 "coder_work_order": {"type": "object"},
                                 "reviewer_work_order": {"type": "object"},
@@ -544,6 +549,14 @@ class MinionManagerProvider:
                         "or endpoint for the minion; otherwise omit it so the runner follows Pal's active endpoint setting."
                     ),
                 },
+                "spawn_bonus_skill_refs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional Pal-added runtime skill refs to inject for this spawn in addition to profile and work-order skill refs. "
+                        "Use this for locally installed optional skill libraries; do not bake optional library refs into builtin profiles."
+                    ),
+                },
                 "draft_id": {"type": "string", "description": "Reviewed work-order draft to promote and spawn."},
                 "work_order_id": {"type": "string", "description": "Existing stored work order to hydrate and spawn."},
                 "final_plan_artifact": {
@@ -570,6 +583,7 @@ class MinionManagerProvider:
         try:
             repository = self._repository()
             pack = _pack_from_args(call.args, repository=repository)
+            pack = _inject_spawn_bonus_skill_refs(pack, call.args)
             pack = self._inject_control_route(pack, call)
             pack = self._inject_debug_log_request(pack, call)
             pack = self._inject_preferred_endpoint(pack, call)
@@ -757,7 +771,7 @@ class MinionManagerProvider:
     async def handle_control_action_async(self, action: ControlAction) -> Any:
         if action.action_kind == "minion_lesson_decision":
             return await self._handle_lesson_decision_async(action)
-        if action.action_kind in {"minion_question_select", "minion_question_nav"}:
+        if action.action_kind in {"minion_question_select", "minion_question_nav", "minion_question_submit"}:
             return await self._handle_question_interaction_async(action)
         if action.action_kind == "minion_question_answer":
             return await self._handle_question_answer_async(action)
@@ -772,7 +786,6 @@ class MinionManagerProvider:
             "decision": decision,
             "run_id": str(action.args.get("run_id") or ""),
             "minion_id": str(action.args.get("minion_id") or ""),
-            "edit_note": str(action.args.get("edit_note") or ""),
         }
         self._ensure_manager_started()
         result = await _to_thread(self.client.send_decision_sync, payload)
@@ -835,6 +848,13 @@ class MinionManagerProvider:
 
     async def _handle_question_interaction_async(self, action: ControlAction) -> Any:
         session = minion_question_session(action.args)
+        if action.action_kind == "minion_question_submit":
+            if not minion_question_ready(session):
+                if action.route is None:
+                    return "Minion question needs more answers before submit."
+                delivery = minion_question_update_delivery(session, action.route)
+                return {"delivery": delivery} if delivery is not None else "Minion question needs more answers before submit."
+            return await self._submit_question_clarification(session, action.route)
         if action.action_kind == "minion_question_nav":
             session["current_index"] = action.args.get("target_index", session.get("current_index", 0))
             if action.route is None:
@@ -847,19 +867,20 @@ class MinionManagerProvider:
             selected_option_id=str(action.args.get("selected_option_id") or ""),
             answer=str(action.args.get("answer") or ""),
         )
-        if not minion_question_ready(updated):
-            if action.route is None:
-                return "Minion question answer recorded."
-            delivery = minion_question_update_delivery(updated, action.route)
-            return {"delivery": delivery} if delivery is not None else "Minion question answer recorded."
+        if action.route is None:
+            return "Minion question answer recorded."
+        delivery = minion_question_update_delivery(updated, action.route)
+        return {"delivery": delivery} if delivery is not None else "Minion question answer recorded."
+
+    async def _submit_question_clarification(self, session: dict[str, Any], route: ControlRoute | None) -> Any:
         clarification = {
-            "clarification_id": str(updated.get("clarification_id") or ""),
-            "run_id": str(updated.get("run_id") or ""),
-            "minion_id": str(updated.get("minion_id") or ""),
-            "work_order_id": str(updated.get("work_order_id") or ""),
-            "turn_index": updated.get("turn_index", 0),
-            "plan_revision": updated.get("plan_revision", 0),
-            "answers": minion_question_answers(updated),
+            "clarification_id": str(session.get("clarification_id") or ""),
+            "run_id": str(session.get("run_id") or ""),
+            "minion_id": str(session.get("minion_id") or ""),
+            "work_order_id": str(session.get("work_order_id") or ""),
+            "turn_index": session.get("turn_index", 0),
+            "plan_revision": session.get("plan_revision", 0),
+            "answers": minion_question_answers(session),
         }
         self._ensure_manager_started()
         try:
@@ -868,9 +889,9 @@ class MinionManagerProvider:
             return f"Minion clarification submit failed: {exc}"
         if not bool(result.get("ok", True)):
             return str(result.get("error") or "Minion clarification submit failed.")
-        if action.route is None:
+        if route is None:
             return "Planner input received; continuing planning."
-        delivery = minion_question_resolve_delivery(updated, action.route, "Planner input received. Continuing planning.")
+        delivery = minion_question_resolve_delivery(session, route, "Planner input received. Continuing planning.")
         return {"delivery": delivery} if delivery is not None else "Planner input received; continuing planning."
 
     async def _handle_lesson_decision_async(self, action: ControlAction) -> str:
@@ -1396,6 +1417,7 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
             "minion_lesson_decision": provider.handle_control_action_async,
             "minion_question_select": provider.handle_control_action_async,
             "minion_question_nav": provider.handle_control_action_async,
+            "minion_question_submit": provider.handle_control_action_async,
             "minion_question_answer": provider.handle_control_action_async,
             "minion_plan_continue": provider.handle_control_action_async,
             "minion_plan_pause": provider.handle_control_action_async,
@@ -1476,6 +1498,20 @@ def _pack_from_args(args: dict[str, Any], *, repository: MinionTaskingRepository
             )
         raise MinionSpawnResolutionError(query=query, candidates=candidates)
     raise ValueError("task_context_pack, task_json, work_order_id, or task_query is required")
+
+
+def _inject_spawn_bonus_skill_refs(pack: TaskContextPack, args: dict[str, Any]) -> TaskContextPack:
+    bonus_refs = _string_list(args.get("spawn_bonus_skill_refs") or args.get("bonus_skill_refs"))
+    if not bonus_refs:
+        return pack
+    metadata = dict(pack.metadata or {})
+    metadata["spawn_bonus_skill_refs"] = _string_list(
+        [
+            *_string_list(metadata.get("spawn_bonus_skill_refs")),
+            *bonus_refs,
+        ]
+    )
+    return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
 
 
 class MinionSpawnResolutionError(ValueError):

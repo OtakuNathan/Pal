@@ -13,15 +13,18 @@ Do not create a new planner work order, implementation diary, or payload dump. D
 
 Before editing:
 - Inspect nearby code, public contracts, existing tests, project commands, and the module's lifecycle assumptions.
-- Derive a developer test plan from the function goals, inputs, outputs, state changes, edge cases, and acceptance criteria.
-- When practical, write or update focused tests before changing implementation.
+- Derive a developer test plan from the function goals, inputs, outputs, state changes, lifecycle, failure modes, edge cases, and acceptance criteria.
+- Prefer TDD: write or update focused failing tests before changing implementation when the repo makes that practical.
+- For async, concurrent, stateful, or lifecycle-sensitive code, include tests or explicit reasoning for ordering, cancellation, timeout, retry, repeated invocation, exception escape, cleanup, and persistence consistency.
 
 Implementation:
 - Make the smallest coherent code change that satisfies the work order.
 - Preserve existing style and project boundaries.
 - Keep interfaces stable unless the work order explicitly requires a contract change.
+- Implement to the module contract and engineering design, not merely to make the current tests pass.
+- Use clean abstractions when they reduce real complexity or clarify ownership/lifecycle; avoid test-only hacks, overfitting, or broad refactors outside the assigned boundary.
 - Prefer `op_file_read` + `op_file_edit`/`op_file_write` for source and test file changes. Use shell for commands, tests, builds, and scripts, not for ad-hoc cat/sed/echo/heredoc file edits when file tools are available.
-- Do not run `git add`, `git commit`, `git reset`, `git checkout`, `git switch`, `git clean`, `git merge`, `git rebase`, or `git push`. Leave workspace changes for the runner; the runner owns checkpoint commits. Use `git status`, `git diff`, or `git log` only for verification when needed.
+- Do not run `git add`, `git commit`, `git reset`, `git checkout`, `git switch`, `git clean`, `git merge`, `git rebase`, or `git push` through shell. When the milestone is implemented and verified, call `op_minion_checkpoint_commit` to create the structured milestone checkpoint commit in the minion workspace branch.
 - If a contract mismatch appears, stop and report the concrete blocker instead of silently changing another module's responsibility.
 - Do not create or commit generated build/cache artifacts. Generated artifacts include `__pycache__`, `.pytest_cache`, object files (`.o`, `.obj`), static/shared libraries (`.a`, `.so`, `.dylib`, `.dll`), executables, class files, coverage output, and build directories. Commit only source, tests, docs, and project configuration such as `CMakeLists.txt`, `Makefile`, lockfiles, or manifest/config files required by the change.
 
@@ -29,9 +32,10 @@ Verification:
 - Run focused unit tests for each changed function or behavior.
 - Run module tests that prove the assigned module satisfies its contract: data flow, output structure, state lifecycle, and failure behavior.
 - Run integration tests when the work order touches cross-module handoff.
-- If concurrency is involved, test the relevant happens-before boundary, lifecycle race, or stress condition.
+- If concurrency is involved, test the relevant happens-before boundary, lifecycle race, repeated invocation, cancellation, timeout, or stress condition.
 - Dogfood the changed system path at least once as a user would when the repo makes that practical.
 - Fix failures until they pass or a concrete blocker is proven.
+- Passing tests are necessary but not sufficient: also check contract fit, abstraction quality, lifecycle ownership, compatibility, and maintainability before reporting completion.
 """
 output_contract_fragment = """
 Return a MilestoneReport with:
@@ -41,16 +45,16 @@ Return a MilestoneReport with:
 - developer test plan
 - tests/commands run with pass/fail evidence
 - dogfood evidence when practical
-- runner checkpoint/commit evidence
+- `op_minion_checkpoint_commit` checkpoint evidence
 - remaining risks or blockers
 """
-capability_groups = ["core_minion_read", "workspace_read", "web_research", "memory_recall", "code_work"]
+capability_groups = ["workspace_read", "web_research", "memory_recall", "code_work", "minion_artifacts", "minion_memory_candidates"]
 
 [approval_policy]
 high_risk_capabilities = ["op_exec_shell"]
 
 [capability_policy]
-mode = "inherit_filtered"
+mode = "profile_only"
 risk = "code_write"
 
 [workspace_policy]

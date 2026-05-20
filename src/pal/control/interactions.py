@@ -389,11 +389,6 @@ def build_minion_approval_interaction(payload: dict[str, Any], route: ControlRou
                     action_key="control.action.dispatch",
                     action_args=_minion_approval_action_payload(action_payload, "reject"),
                 ),
-                InteractionButtonSpec(
-                    label="Edit",
-                    action_key="control.action.dispatch",
-                    action_args=_minion_approval_action_payload(action_payload, "edit"),
-                ),
             ),
         ),
     )
@@ -427,16 +422,24 @@ def render_minion_approval_text(payload: dict[str, Any]) -> str:
 
 def _minion_approval_action_payload(payload: dict[str, Any], decision: str) -> dict[str, Any]:
     approval_id = str(payload.get("approval_id") or "")
-    return {
-        "action_kind": "minion_approval_decision",
-        "target_scope": "minion",
-        "target_id": approval_id,
-        "args": {
+    return _minion_interaction_action_payload(
+        action_kind="minion_approval_decision",
+        target_id=approval_id,
+        args={
             "approval_id": approval_id,
             "run_id": str(payload.get("run_id") or ""),
             "minion_id": str(payload.get("minion_id") or ""),
             "decision": decision,
         },
+    )
+
+
+def _minion_interaction_action_payload(*, action_kind: str, target_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "action_kind": action_kind,
+        "target_scope": "minion",
+        "target_id": str(target_id or ""),
+        "args": dict(args),
     }
 
 
@@ -658,6 +661,8 @@ def build_minion_question_interaction(payload: dict[str, Any], route: ControlRou
     questions = _dict_list(session.get("questions"))[:3]
     if not questions:
         return None
+    if minion_question_ready(session) and bool(session.get("review")):
+        return _build_minion_question_review_interaction(session, route)
     current_index = _clamp_int(session.get("current_index"), minimum=0, maximum=len(questions) - 1)
     current_question = dict(questions[current_index])
     answers = _answer_map(session.get("answers"))
@@ -784,6 +789,7 @@ def minion_question_session(payload: dict[str, Any]) -> dict[str, Any]:
         "questions": questions,
         "answers": answers,
         "current_index": _clamp_int(raw.get("current_index"), minimum=0, maximum=max(len(questions) - 1, 0)),
+        "review": bool(raw.get("review")),
     }
 
 
@@ -806,6 +812,7 @@ def minion_question_session_with_selection(session: dict[str, Any], *, question_
     required_ids = _required_question_ids(questions)
     if all(question_id in answers for question_id in required_ids):
         updated["ready"] = True
+        updated["review"] = True
         return updated
     current_index = _clamp_int(updated.get("current_index"), minimum=0, maximum=max(len(questions) - 1, 0))
     for index in range(current_index + 1, len(questions)):
@@ -868,6 +875,68 @@ def _question_option_button_label(label: str, *, selected: bool) -> str:
     return f"{prefix}{text}"
 
 
+def _build_minion_question_review_interaction(session: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec | None:
+    questions = _dict_list(session.get("questions"))[:3]
+    answers = _answer_map(session.get("answers"))
+    if not questions:
+        return None
+    lines = [
+        "Planner needs input.",
+        "",
+        "Review answers",
+    ]
+    for index, question in enumerate(questions):
+        question_id = _question_id(question, index)
+        answer = answers.get(question_id, {})
+        question_text = " ".join(str(question.get("question") or f"Question {index + 1}").split())
+        answer_text = _question_answer_text(question, answer)
+        lines.append("")
+        lines.append(f"{index + 1}. {question_text}")
+        lines.append(f"> {answer_text or '-'}")
+    edit_args = _minion_question_action_payload(
+        session,
+        action_kind="minion_question_nav",
+        current_index=0,
+        extra={"target_index": 0, "review": False},
+    )
+    submit_args = _minion_question_action_payload(
+        session,
+        action_kind="minion_question_submit",
+        current_index=_clamp_int(session.get("current_index"), minimum=0, maximum=max(len(questions) - 1, 0)),
+    )
+    return InteractionMessageSpec(
+        interaction_id=str(session.get("interaction_id") or ""),
+        interaction_kind="minion_question",
+        route=route,
+        text=_truncate_text("\n".join(lines), _INTERACTION_MESSAGE_SAFE_LIMIT),
+        buttons=(
+            (
+                InteractionButtonSpec(
+                    label="Edit",
+                    action_key="control.action.dispatch",
+                    action_args=edit_args,
+                ),
+                InteractionButtonSpec(
+                    label="Submit",
+                    action_key="control.action.dispatch",
+                    action_args=submit_args,
+                ),
+            ),
+        ),
+    )
+
+
+def _question_answer_text(question: dict[str, Any], answer: dict[str, Any]) -> str:
+    explicit = str(answer.get("answer") or "").strip()
+    if explicit:
+        return explicit
+    selected = str(answer.get("selected_option_id") or "").strip()
+    for index, option in enumerate(_dict_list(question.get("options"))[:3], start=1):
+        if _option_id(option, index) == selected:
+            return _option_label(option, index)
+    return selected
+
+
 def _minion_question_action_payload(
     session: dict[str, Any],
     *,
@@ -886,14 +955,14 @@ def _minion_question_action_payload(
         "questions": _dict_list(session.get("questions"))[:3],
         "answers": _answer_map(session.get("answers")),
         "current_index": int(current_index),
+        "review": bool(session.get("review")),
     }
     args.update(dict(extra or {}))
-    return {
-        "action_kind": action_kind,
-        "target_scope": "minion",
-        "target_id": str(session.get("clarification_id") or ""),
-        "args": args,
-    }
+    return _minion_interaction_action_payload(
+        action_kind=action_kind,
+        target_id=str(session.get("clarification_id") or ""),
+        args=args,
+    )
 
 
 def _answer_map(value: Any) -> dict[str, dict[str, Any]]:
