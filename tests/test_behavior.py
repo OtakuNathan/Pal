@@ -17,7 +17,9 @@ from pal.behavior import (
     AFFORDANCE_UNAVAILABLE,
     AFFORDANCE_VISIBILITY_RESIDENT,
     AffordanceDescriptor,
+    AffordanceDeleteTool,
     AffordanceSubmitTool,
+    AffordanceUpdateTool,
     BehaviorAdviceRequest,
     BehaviorAdviceTool,
     BehaviorAffordanceModel,
@@ -671,6 +673,155 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(advice.candidates[0].affordance_id, affordance_id)
         self.assertEqual(advice.candidates[0].availability, AFFORDANCE_AVAILABLE)
 
+    def test_update_affordance_tool_preserves_source_metadata_and_refs(self) -> None:
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="skill.route.debug",
+                module_id="skill",
+                title="Debug skill route",
+                scenario_text="debug async failure",
+                prompt_hint="Use the old debugging hint.",
+                source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+                skill_refs=("debug.skill",),
+                capability_refs=("cap.known",),
+                evidence_refs=("skill:debug.skill",),
+                metadata={"generated_by": "op_skill_commit"},
+                activation_threshold=0.0,
+            )
+        )
+
+        result = AffordanceUpdateTool(service=self.service).invoke(
+            {
+                "affordance": "Use the old debugging hint.",
+                "prompt_hint": "Use the updated debugging hint.",
+                "activation_terms": ["updated-debug"],
+            }
+        )
+        stored = self.repository.get_affordance("skill.route.debug")
+        advice = asyncio.run(self.service.advise_async(BehaviorAdviceRequest(scenario="updated-debug problem", top_k=5)))
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(stored.module_id, "skill")
+        self.assertEqual(stored.prompt_hint, "Use the updated debugging hint.")
+        self.assertEqual(stored.skill_refs, ("debug.skill",))
+        self.assertEqual(stored.capability_refs, ("cap.known",))
+        self.assertEqual(stored.evidence_refs, ("skill:debug.skill",))
+        self.assertEqual(stored.metadata, {"generated_by": "op_skill_commit"})
+        self.assertEqual(advice.candidates[0].affordance_id, "skill.route.debug")
+
+    def test_update_affordance_tool_rejects_declared_injected_guidance(self) -> None:
+        descriptor = AffordanceDescriptor(
+            affordance_id="declared.injected.route",
+            module_id="plugin.test",
+            title="Injected route",
+            scenario_text="plugin injected behavior",
+            prompt_hint="Use injected plugin route.",
+            source_kind=AFFORDANCE_SOURCE_DECLARED,
+            activation_threshold=0.0,
+        )
+        self.service.declared_affordances["plugin.test"] = (descriptor,)
+
+        result = AffordanceUpdateTool(service=self.service).invoke(
+            {
+                "affordance": "Use injected plugin route.",
+                "prompt_hint": "Try to rewrite plugin guidance.",
+            }
+        )
+
+        self.assertEqual(result.status, "invalid")
+        self.assertIn("readonly injected affordance", result.structured["error"])
+
+    def test_update_affordance_tool_matches_rendered_resident_guidance_line(self) -> None:
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="rendered.line.route",
+                module_id="behavior",
+                title="Minion skill dispatch",
+                scenario_text="dispatching minion tasks",
+                prompt_hint="Before dispatching a minion, search the skill library for matching skills and inject them first.",
+                source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+                activation_threshold=0.0,
+            )
+        )
+
+        result = AffordanceUpdateTool(service=self.service).invoke(
+            {
+                "affordance": "- Minion skill dispatch: Before dispatching a minion, search the skill library for matching skills and inject them first.",
+                "prompt_hint": "Before dispatching minion tasks, inject matching skills first.",
+            }
+        )
+        stored = self.repository.get_affordance("rendered.line.route")
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(stored.prompt_hint, "Before dispatching minion tasks, inject matching skills first.")
+
+    def test_update_affordance_tool_matches_xml_wrapped_guidance(self) -> None:
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="xml.route",
+                module_id="behavior",
+                title="XML route",
+                scenario_text="xml guidance",
+                prompt_hint="Use XML wrapped affordance text.",
+                source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+                activation_threshold=0.0,
+            )
+        )
+
+        result = AffordanceUpdateTool(service=self.service).invoke(
+            {
+                "affordance": "<behavior_guidance>\n- XML route: Use XML wrapped affordance text.\n</behavior_guidance>",
+                "prompt_hint": "Updated XML wrapped affordance text.",
+            }
+        )
+        stored = self.repository.get_affordance("xml.route")
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(stored.prompt_hint, "Updated XML wrapped affordance text.")
+
+    def test_delete_affordance_tool_matches_text_and_deletes_database_guidance(self) -> None:
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="delete.route",
+                module_id="behavior",
+                title="Delete route",
+                scenario_text="remove this behavior route",
+                prompt_hint="Delete me by original text.",
+                source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+                activation_threshold=0.0,
+            )
+        )
+
+        result = AffordanceDeleteTool(service=self.service).invoke({"affordance": "Delete me by original text."})
+
+        self.assertEqual(result.status, "ok")
+        self.assertTrue(result.structured["deleted"])
+        self.assertIsNone(self.repository.get_affordance("delete.route"))
+
+    def test_update_affordance_tool_returns_ambiguous_for_multiple_text_matches(self) -> None:
+        for suffix in ("a", "b"):
+            self.repository.upsert_affordance(
+                AffordanceDescriptor(
+                    affordance_id=f"duplicate.route.{suffix}",
+                    module_id="behavior",
+                    title=f"Duplicate {suffix}",
+                    scenario_text=f"duplicate route {suffix}",
+                    prompt_hint="Shared duplicate guidance.",
+                    source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+                    activation_threshold=0.0,
+                )
+            )
+
+        result = AffordanceUpdateTool(service=self.service).invoke(
+            {
+                "affordance": "Shared duplicate guidance.",
+                "prompt_hint": "Updated duplicate guidance.",
+            }
+        )
+
+        self.assertEqual(result.status, "invalid")
+        self.assertIn("matched multiple entries", result.structured["error"])
+
     def test_behavior_prompt_always_mentions_advise_inject_and_submit_tools(self) -> None:
         fragments = BehaviorPromptFragmentProvider(service=self.service).build_prompt_fragments(PromptAssemblyContext())
         content = "\n".join(fragment.content for fragment in fragments)
@@ -690,7 +841,14 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("memory hints", content)
         self.assertIn("Behavior guidance answers", content)
         self.assertIn("op_behavior_save", content)
-        self.assertIn("affordances with affordance_id values", content)
+        self.assertIn("op_behavior_affordance_update", content)
+        self.assertIn("op_behavior_affordance_delete", content)
+        self.assertIn("MUST call op_behavior_affordance_update", content)
+        self.assertIn("original rendered guidance line", content)
+        self.assertIn("rendered behavior guidance block, set prompt_hint to the new guidance text", content)
+        self.assertIn("scenario_text only when the user explicitly asks to change the activation scenario", content)
+        self.assertIn("Do not claim behavior guidance was updated or deleted unless the tool result confirms it", content)
+        self.assertNotIn("affordances with affordance_id values", content)
         self.assertNotIn("op_memory_write", content)
 
     def test_behavior_prompt_sections_enter_system_prompt_in_order(self) -> None:

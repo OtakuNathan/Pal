@@ -41,9 +41,13 @@ class BehaviorPromptFragmentProvider:
                     "Behavior guidance answers: \"When this situation appears, what route should Pal consider?\"\n\n"
                     "Use behavior guidance for future routing rules and recurring decision hints.\n"
                     "It is not durable factual memory and not a step-by-step procedure.\n\n"
-                    "Internally, behavior guidance may be represented as affordances with affordance_id values.\n"
-                    "For normal reasoning, treat it as behavior guidance.\n\n"
+                    "For normal reasoning, treat it as behavior guidance; internal IDs are runtime metadata.\n\n"
                     "Use op_behavior_save only when the user explicitly asks Pal to adopt/follow/save a future behavior rule, or clearly teaches a durable routing preference.\n"
+                    "When the user asks to update existing behavior guidance, Pal MUST call op_behavior_affordance_update; pass the original rendered guidance line as affordance, not an internal ID.\n"
+                    "When replacing or editing the text shown in the rendered behavior guidance block, set prompt_hint to the new guidance text. Use scenario_text only when the user explicitly asks to change the activation scenario.\n"
+                    "When the user asks to delete existing behavior guidance, Pal MUST call op_behavior_affordance_delete; pass the original rendered guidance line as affordance.\n"
+                    "Do not claim behavior guidance was updated or deleted unless the tool result confirms it.\n"
+                    "Injected/plugin behavior guidance is read-only through these tools.\n"
                     "Do not save ordinary facts, preferences, runtime state, or reusable procedures as behavior guidance."
                 ),
                 priority=72,

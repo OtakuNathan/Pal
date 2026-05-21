@@ -161,6 +161,185 @@ class AffordanceSubmitTool:
         )
 
 
+AFFORDANCE_UPDATE_ARGS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "affordance": {
+            "type": "string",
+            "description": "Original behavior guidance text to match. Pass the affordance text itself; Pal resolves the internal record.",
+        },
+        "affordance_id": {"type": "string", "description": "Legacy exact affordance_id. Prefer affordance text instead."},
+        "scenario_text": {
+            "type": "string",
+            "description": (
+                "Updated activation scenario text. Do not use this when replacing the visible behavior guidance "
+                "shown in <behavior_guidance>; use prompt_hint for that."
+            ),
+        },
+        "prompt_hint": {
+            "type": "string",
+            "description": (
+                "Updated visible behavior guidance text rendered in <behavior_guidance>. Use this when the user "
+                "asks to replace, edit, or update the guidance/original text."
+            ),
+        },
+        "title": {"type": "string"},
+        "activation_terms": {"type": "array", "items": {"type": "string"}},
+        "capability_refs": {"type": "array", "items": {"type": "string"}},
+        "skill_refs": {"type": "array", "items": {"type": "string"}},
+        "memory_query_hints": {"type": "array", "items": {"type": "string"}},
+        "visibility_mode": {"type": "string", "enum": ["resident", "discoverable"]},
+        "activation_kind": {"type": "string", "enum": ["deliberative", "reactive"]},
+        "activation_mode": {"type": "string", "enum": ["suggest", "automatic", "require_approval"]},
+        "source_kind": {"type": "string", "enum": ["instructed", "learned"]},
+        "priority": {"type": "integer"},
+        "activation_threshold": {"type": "number"},
+        "enabled": {"type": "boolean"},
+    },
+    "required": ["affordance"],
+}
+
+AFFORDANCE_UPDATE_RESULT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "affordance_id": {"type": "string"},
+        "affordance_hash": {"type": "string"},
+        "updated_fields": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+
+@dataclass
+class AffordanceUpdateTool:
+    service: BehaviorService
+    name: str = "op_behavior_affordance_update"
+    display_name: str = "Update behavior guidance"
+    family: str = "behavior"
+    description: str = (
+        "Update persisted database behavior guidance by matching the original affordance text. "
+        "For replacing the visible guidance line shown to Pal, set prompt_hint to the new text. "
+        "scenario_text is only the activation scenario. Injected/plugin affordances are read-only here."
+    )
+    args_schema: dict[str, Any] = None  # type: ignore[assignment]
+    result_schema: dict[str, Any] = None  # type: ignore[assignment]
+    tags: tuple[str, ...] = ("behavior", "affordance", "update")
+    keywords: tuple[str, ...] = ("affordance", "update", "behavior", "edit")
+
+    def __post_init__(self) -> None:
+        if self.args_schema is None:
+            self.args_schema = AFFORDANCE_UPDATE_ARGS_SCHEMA
+        if self.result_schema is None:
+            self.result_schema = AFFORDANCE_UPDATE_RESULT_SCHEMA
+
+    def invoke(self, args: dict[str, Any]) -> CapabilityResult:
+        return self._update(args)
+
+    async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
+        _ = kwargs
+        return self._update(args)
+
+    def _update(self, args: dict[str, Any]) -> CapabilityResult:
+        try:
+            descriptor = self.service.update_affordance(args)
+        except ValueError as exc:
+            structured = {"reason": "invalid_request", "error": str(exc)}
+            return CapabilityResult(
+                status=RuntimeStatus.INVALID,
+                text="behavior guidance update failed",
+                structured=structured,
+                llm_text=render_titled_structured_for_llm("Behavior guidance update failed", structured),
+            )
+        updated_fields = [k for k in args if k not in {"affordance", "affordance_id"} and args[k] is not None]
+        structured = {
+            "affordance_id": descriptor.affordance_id,
+            "affordance_hash": self.service.affordance_text_hash(descriptor),
+            "module_id": descriptor.module_id,
+            "title": descriptor.title,
+            "scenario_text": descriptor.scenario_text,
+            "prompt_hint": descriptor.prompt_hint,
+            "updated_fields": updated_fields,
+        }
+        return CapabilityResult(
+            status=RuntimeStatus.OK,
+            text="behavior guidance updated",
+            structured=structured,
+            llm_text=render_titled_structured_for_llm("Behavior guidance updated", structured),
+        )
+
+
+AFFORDANCE_DELETE_ARGS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "affordance": {
+            "type": "string",
+            "description": "Original behavior guidance text to match. Pass the affordance text itself; Pal resolves the internal record.",
+        },
+        "affordance_id": {"type": "string", "description": "Legacy exact affordance_id. Prefer affordance text instead."},
+    },
+    "required": ["affordance"],
+}
+
+AFFORDANCE_DELETE_RESULT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "affordance_id": {"type": "string"},
+        "affordance_hash": {"type": "string"},
+        "deleted": {"type": "boolean"},
+    },
+}
+
+
+@dataclass
+class AffordanceDeleteTool:
+    service: BehaviorService
+    name: str = "op_behavior_affordance_delete"
+    display_name: str = "Delete behavior guidance"
+    family: str = "behavior"
+    description: str = "Delete persisted database behavior guidance by matching the original affordance text. Injected/plugin affordances are read-only here."
+    args_schema: dict[str, Any] = None  # type: ignore[assignment]
+    result_schema: dict[str, Any] = None  # type: ignore[assignment]
+    tags: tuple[str, ...] = ("behavior", "affordance", "delete")
+    keywords: tuple[str, ...] = ("affordance", "delete", "behavior", "forget")
+
+    def __post_init__(self) -> None:
+        if self.args_schema is None:
+            self.args_schema = AFFORDANCE_DELETE_ARGS_SCHEMA
+        if self.result_schema is None:
+            self.result_schema = AFFORDANCE_DELETE_RESULT_SCHEMA
+
+    def invoke(self, args: dict[str, Any]) -> CapabilityResult:
+        return self._delete(args)
+
+    async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
+        _ = kwargs
+        return self._delete(args)
+
+    def _delete(self, args: dict[str, Any]) -> CapabilityResult:
+        try:
+            descriptor = self.service.delete_affordance(args)
+        except ValueError as exc:
+            structured = {"reason": "invalid_request", "error": str(exc)}
+            return CapabilityResult(
+                status=RuntimeStatus.INVALID,
+                text="behavior guidance delete failed",
+                structured=structured,
+                llm_text=render_titled_structured_for_llm("Behavior guidance delete failed", structured),
+            )
+        structured = {
+            "affordance_id": descriptor.affordance_id,
+            "affordance_hash": self.service.affordance_text_hash(descriptor),
+            "module_id": descriptor.module_id,
+            "title": descriptor.title,
+            "deleted": True,
+        }
+        return CapabilityResult(
+            status=RuntimeStatus.OK,
+            text="behavior guidance deleted",
+            structured=structured,
+            llm_text=render_titled_structured_for_llm("Behavior guidance deleted", structured),
+        )
+
+
 def _advice_request_from_args(args: dict[str, Any]) -> BehaviorAdviceRequest:
     return BehaviorAdviceRequest(
         scenario=str(args.get("scenario") or ""),

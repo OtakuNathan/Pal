@@ -518,6 +518,9 @@ class TurnExecutor:
             return EffectResult(status=RuntimeStatus.SKIPPED, text="interrupted")
         channel_runtime = self.context.require_port("channel:channel")
         reply_id = channel_runtime.queue_reply(effect.channel_envelope, effect.text)
+        text = str(effect.text or "").strip()
+        if text:
+            continuation.emitted_reply_texts.append(text)
         self._debug_log_reply(continuation, effect.text)
         return EffectResult(status=RuntimeStatus.QUEUED, payload={"reply_id": reply_id}, text=effect.text)
 

@@ -45,6 +45,7 @@ from pal.foundation import EventEnvelope, RawSQLHookRegistry
 from pal.identity import IdentityRepository, IdentityService, register_with_core as register_identity_with_core
 from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
 from pal.memory import (
+    L1MessageKind,
     L1TranscriptMessage,
     L2Entry,
     L3RecallView,
@@ -1158,6 +1159,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(prompt.messages[2], {"role": "assistant", "content": "I should use Asia/Shanghai context."})
             final_text = "\n".join(part["text"] for part in prompt.messages[-1]["content"] if part.get("type") == "text")
             self.assertNotIn("Recalled memory references are operational metadata.", final_text)
+            self.assertIn('<runtime_context_update kind="memory">', final_text)
+            self.assertIn("This is not a new user message. Do not answer this block directly.", final_text)
             self.assertIn('<recalled_memories view="summary">', final_text)
             self.assertIn("[summary-1]: The user prefers replies in Asia/Shanghai context.", final_text)
             self.assertNotIn("Working Memory", final_text)
@@ -2110,8 +2113,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(
             memory_service.l1_store.items,
             [[
-                L1TranscriptMessage(role="user", content="hello"),
-                L1TranscriptMessage(role="assistant", content="final answer"),
+                L1TranscriptMessage(role="user", content="hello", kind=L1MessageKind.USER_REQUEST),
+                L1TranscriptMessage(role="assistant", content="final answer", kind=L1MessageKind.ASSISTANT_REPLY),
             ]],
         )
 
@@ -2799,7 +2802,13 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(result.summary, "The user prefers concise replies.")
         self.assertEqual(
             service.l1_store.items,
-            [[L1TranscriptMessage(role="assistant", content="The user prefers concise replies.")]],
+            [[
+                L1TranscriptMessage(
+                    role="assistant",
+                    content="The user prefers concise replies.",
+                    kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
+                )
+            ]],
         )
         projected = service.l2_store.items["memory_summary_current"]
         self.assertEqual(projected.summary, "The user prefers concise replies.")

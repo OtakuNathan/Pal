@@ -144,19 +144,78 @@ class OledTurnStateSubscriberTests(unittest.TestCase):
         sub = OledTurnStateSubscriber(socket_path=mock_socket)
         return sub, sent
 
+    def test_attach_detach_resubscribes_turn_events(self) -> None:
+        import sys
+        dir_str = str(self.oled_plugin_dir)
+        if dir_str not in sys.path:
+            sys.path.insert(0, dir_str)
+
+        from introspection import register_with_core
+
+        class FakeContext:
+            def __init__(self) -> None:
+                self.turn_event_bus = TurnEventBus()
+                self.modules = []
+
+            def register_module(self, handle) -> None:
+                self.modules.append(handle)
+
+        context = FakeContext()
+        handle = register_with_core(context, plugin_dir=self.oled_plugin_dir)
+        provider = handle.introspection_provider
+        provider.sidecar_manager.ensure_running = lambda: "already_running"
+        provider.sidecar_manager.stop_sync = lambda: None
+
+        for topic in (TURN_START, TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_END):
+            self.assertEqual(context.turn_event_bus.subscribers_for(topic), ())
+
+        provider.attach(None)
+        for topic in (TURN_START, TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_END):
+            self.assertEqual(len(context.turn_event_bus.subscribers_for(topic)), 1)
+
+        provider.detach(None)
+        for topic in (TURN_START, TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_END):
+            self.assertEqual(context.turn_event_bus.subscribers_for(topic), ())
+
+        provider.attach(None)
+        for topic in (TURN_START, TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_END):
+            self.assertEqual(len(context.turn_event_bus.subscribers_for(topic)), 1)
+
+        provider.detach(None)
+        for topic in (TURN_START, TURN_TOOL_CALL_BEFORE, TURN_TOOL_CALL_AFTER, TURN_END):
+            self.assertEqual(context.turn_event_bus.subscribers_for(topic), ())
+
     def test_standby_to_thinking_on_turn_start(self) -> None:
         sub, sent = self._make_subscriber()
         sub(TURN_START, {"turn_id": "t1"})
         self.assertEqual(sub.state, "thinking")
         self.assertIn("thinking", sent)
 
-    def test_sleeping_to_shock_then_thinking(self) -> None:
+    def test_turn_start_sends_thinking_without_local_wakeup_state(self) -> None:
         sub, sent = self._make_subscriber()
-        sub.state = "sleeping"
         sub(TURN_START, {"turn_id": "t1"})
         self.assertEqual(sub.state, "thinking")
-        self.assertIn("shock", sent)
-        self.assertIn("thinking", sent)
+        self.assertEqual(sent, ["thinking"])
+
+    def test_sidecar_queue_inserts_wakeup_shock_when_sleeping(self) -> None:
+        import sys
+        dir_str = str(self.oled_plugin_dir)
+        if dir_str not in sys.path:
+            sys.path.insert(0, dir_str)
+
+        from sidecar import EmotionRequest
+
+        request = EmotionRequest()
+        request.push("thinking", is_sleeping=True)
+
+        first = request.pop()
+        second = request.pop()
+
+        self.assertEqual(first["emotion"], "shock")
+        self.assertTrue(first["wakeup"])
+        self.assertTrue(first["uninterruptible"])
+        self.assertEqual(second["emotion"], "thinking")
+        self.assertFalse(second["wakeup"])
 
     def test_thinking_to_working_on_tool_call(self) -> None:
         sub, sent = self._make_subscriber()
@@ -189,7 +248,6 @@ class OledTurnStateSubscriberTests(unittest.TestCase):
 
     def test_full_lifecycle(self) -> None:
         sub, sent = self._make_subscriber()
-        sub.state = "sleeping"
         sub(TURN_START, {"turn_id": "t1"})
         sub(TURN_TOOL_CALL_BEFORE, {"turn_id": "t1", "tool_name": "shell_exec"})
         sub(TURN_TOOL_CALL_AFTER, {"turn_id": "t1", "tool_name": "shell_exec", "ok": True})
@@ -197,7 +255,7 @@ class OledTurnStateSubscriberTests(unittest.TestCase):
         sub(TURN_TOOL_CALL_AFTER, {"turn_id": "t1", "tool_name": "tool_read", "ok": True})
         sub(TURN_END, {"turn_id": "t1", "status": "success"})
         self.assertEqual(sub.state, "standby")
-        self.assertEqual(sent, ["shock", "thinking", "working", "thinking", "working", "thinking", "standby"])
+        self.assertEqual(sent, ["thinking", "working", "thinking", "working", "thinking", "standby"])
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ from typing import Any
 
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptIR, PromptIRBlock
 from pal.shared.payloads import extract_text_from_payload
-from pal.shared.prompt_rendering import render_system_reminder, render_xml_block
+from pal.shared.prompt_rendering import render_runtime_context_update, render_system_reminder, render_xml_block
 
 
 class PromptCompiler:
@@ -453,6 +453,14 @@ class PromptCompiler:
         rendered = block.content.strip()
         content_parts = list(block.metadata.get("content_parts") or [])
         parts: list[dict[str, Any]] = []
+        runtime_context_kind = str(block.metadata.get("runtime_context_kind") or "").strip()
+        if runtime_context_kind and (rendered or content_parts):
+            update = render_runtime_context_update(
+                runtime_context_kind,
+                self._runtime_context_update_text(runtime_context_kind),
+            )
+            if update:
+                parts.append({"type": "text", "text": update})
         if rendered and block.metadata.get("raw_user_context"):
             parts.append({"type": "text", "text": rendered})
         elif rendered:
@@ -464,6 +472,49 @@ class PromptCompiler:
                 if isinstance(part, dict):
                     parts.append(dict(part))
         return parts
+
+    @staticmethod
+    def _runtime_context_update_text(kind: str) -> str:
+        normalized = str(kind or "").strip()
+        messages = {
+            "conversation_summary": (
+                "Runtime context update: compressed prior conversation for this task.\n"
+                "Use it as relevant reference; it is not noise.\n"
+                "It is not a new user message. Do not answer this block directly.\n"
+                "Continue the current task using this context."
+            ),
+            "memory": (
+                "Tool side effect: activated recalled memories for this turn.\n"
+                "Use them as relevant reference; they are not noise.\n"
+                "This is not a new user message. Do not answer this block directly.\n"
+                "Continue the current task using this context."
+            ),
+            "behavior": (
+                "Runtime context update: activated behavior or advisor hints for this turn.\n"
+                "Evaluate relevant hints before continuing; they are not noise.\n"
+                "This is not a new user message. Do not answer this block directly.\n"
+                "Continue the current task using this context."
+            ),
+            "skill": (
+                "Tool side effect: activated skill reference material for this turn.\n"
+                "Use it as relevant execution context; it is not noise.\n"
+                "This is not a new user message. Do not answer this block directly.\n"
+                "Continue the current task using this context."
+            ),
+            "artifact": (
+                "Runtime context update: activated artifact context for this turn.\n"
+                "Use it as relevant reference; it is not noise.\n"
+                "This is not a new user message. Do not answer this block directly.\n"
+                "Continue the current task using this context."
+            ),
+        }
+        return messages.get(
+            normalized,
+            "Runtime context update for this turn.\n"
+            "Use it as relevant reference; it is not noise.\n"
+            "This is not a new user message. Do not answer this block directly.\n"
+            "Continue the current task using this context.",
+        )
 
     @staticmethod
     def _coerce_message_content(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:

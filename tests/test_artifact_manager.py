@@ -163,7 +163,8 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             for part in request.messages[-1]["content"]
             if isinstance(part, dict) and part.get("type") == "text"
         ]
-        self.assertIn("Available Artifacts", text_parts[0])
+        self.assertIn('<runtime_context_update kind="artifact">', text_parts[0])
+        self.assertIn("Available Artifacts", text_parts[1])
         self.assertEqual(text_parts[-1], "看看这个附件")
 
     def test_artifact_info_exposes_local_file_metadata_for_tool_use(self) -> None:
@@ -240,7 +241,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exposure.text, "")
         self.assertEqual(exposure.inline_parts, ())
 
-    def test_historical_reference_without_current_artifact_refs_can_expose_hot_artifacts(self) -> None:
+    def test_historical_reference_without_current_artifact_refs_does_not_auto_expose_hot_artifacts(self) -> None:
         ref = self._register_image(name="old.jpg", turn_id="old-turn")
 
         exposure = self.manager.select_prompt_exposure(
@@ -250,7 +251,11 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             {"supports_vision": False},
         )
 
-        self.assertIn(ref.artifact_id, exposure.text)
+        self.assertEqual(exposure.text, "")
+        self.assertEqual(exposure.inline_parts, ())
+
+        hits = self.manager.artifact_search(self.scope_key, query="old", limit=5)
+        self.assertEqual([hit.artifact_id for hit in hits], [ref.artifact_id])
 
     def test_current_image_artifact_refs_with_vision_still_attach_inline(self) -> None:
         ref = self._register_image(name="fresh.jpg", turn_id="current-turn")
@@ -432,8 +437,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         later_content = later_request.messages[0]["content"]
-        self.assertIsInstance(later_content, list)
-        self.assertTrue(any(part.get("type") == "artifact_image" for part in later_content if isinstance(part, dict)))
+        self.assertEqual(later_content, "try this artifact again")
 
         no_caption_request = compiler.build_canonical_prompt(
             PromptAssemblyContext(
@@ -484,7 +488,10 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             for contract in core.tool_surface.build_llm_tool_contracts()
         }
 
+        self.assertIn("op_artifact_list", contracts)
+        self.assertIn("op_artifact_search", contracts)
         self.assertIn("op_artifact_read", contracts)
+        self.assertIn("query", contracts["op_artifact_search"]["properties"])
         self.assertIn("artifact_id", contracts["op_artifact_read"]["properties"])
         self.assertIn("representation", contracts["op_artifact_read"]["properties"])
 

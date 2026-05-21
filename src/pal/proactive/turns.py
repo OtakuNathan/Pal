@@ -13,7 +13,7 @@ from pal.core.turns import (
     agent_turn_program,
 )
 from pal.foundation import EventEnvelope
-from pal.memory import L1TranscriptMessage
+from pal.memory import L1MessageKind, L1TranscriptMessage
 from pal.proactive.contracts import ProactiveDefinition
 from pal.proactive.input_builder import build_proactive_trigger_input
 from pal.shared import EventKind, PromptAssemblyContext, ProactiveTriggerEvent, SourceKind
@@ -124,7 +124,11 @@ def _build_proactive_turn_transcript(
 ) -> list[L1TranscriptMessage]:
     transcript: list[L1TranscriptMessage] = []
     if proactive_input.strip():
-        transcript.append(L1TranscriptMessage(role="user", content=proactive_input.strip()))
+        transcript.append(L1TranscriptMessage(
+            role="user",
+            content=proactive_input.strip(),
+            kind=L1MessageKind.USER_REQUEST,
+        ))
     tool_summary = _render_tool_summary(observations or [])
     replies = tuple(str(item).strip() for item in (reply_texts or (final_reply,)) if str(item).strip())
     for index, assistant_content in enumerate(replies):
@@ -132,6 +136,7 @@ def _build_proactive_turn_transcript(
             L1TranscriptMessage(
                 role="assistant",
                 content=assistant_content,
+                kind=L1MessageKind.ASSISTANT_REPLY,
                 tool_trace=(tool_summary or None) if index == len(replies) - 1 else None,
             )
         )

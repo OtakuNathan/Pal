@@ -132,7 +132,11 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     title="Conversation summary",
                     content=_render_conversation_summary_context(summary_text),
                     priority=55,
-                    metadata={"block_id": "memory_current_summary", "raw_user_context": True},
+                    metadata={
+                        "block_id": "memory_current_summary",
+                        "raw_user_context": True,
+                        "runtime_context_kind": "conversation_summary",
+                    },
                 )
             )
 
@@ -146,7 +150,11 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     title="Recalled memories",
                     content=_render_recalled_memories_context(memory_lines),
                     priority=56,
-                    metadata={"block_id": "memory_recalled_context", "raw_user_context": True},
+                    metadata={
+                        "block_id": "memory_recalled_context",
+                        "raw_user_context": True,
+                        "runtime_context_kind": "memory",
+                    },
                 )
             )
         guidance_lines = _render_behavior_guidance_lines(behavior_entries)
@@ -157,7 +165,11 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     title="Active route suggestions",
                     content=_render_advisor_hints_context(guidance_lines),
                     priority=57,
-                    metadata={"block_id": "advisor_hints", "raw_user_context": True},
+                    metadata={
+                        "block_id": "advisor_hints",
+                        "raw_user_context": True,
+                        "runtime_context_kind": "behavior",
+                    },
                 )
             )
         return fragments

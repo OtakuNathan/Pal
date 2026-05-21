@@ -16,7 +16,7 @@ from pal.failure.contracts import (
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolCall, CanonicalToolResult
 from pal.shared import EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus
 from pal.shared.payloads import extract_text_from_payload
-from pal.memory import L1TranscriptMessage
+from pal.memory import L1MessageKind, L1TranscriptMessage
 from pal.stream_events import NormalizedLLMStreamEvent
 
 
@@ -149,8 +149,10 @@ class TurnContinuation:
     pending_tool_call_batch: list[CanonicalToolCall] = field(default_factory=list)
     pending_tool_results: list[CanonicalToolResult] = field(default_factory=list)
     pending_assistant_tool_text: str = ""
+    emitted_reply_texts: list[str] = field(default_factory=list)
     budget_failure_feedback_text: str = ""
     prompt_budget_snapshot: dict[str, Any] = field(default_factory=dict)
+    l1_exit_checkpoint_committed: bool = False
 
 
 @dataclass(frozen=True)
@@ -324,7 +326,7 @@ def _build_turn_transcript(
     user_text = extract_text_from_payload(channel_envelope.event.payload)
     transcript: list[L1TranscriptMessage] = []
     if user_text:
-        transcript.append(L1TranscriptMessage(role="user", content=user_text))
+        transcript.append(L1TranscriptMessage(role="user", content=user_text, kind=L1MessageKind.USER_REQUEST))
     tool_summary = _render_tool_summary(observations or [])
     replies = tuple(str(item).strip() for item in (reply_texts or (final_reply,)) if str(item).strip())
     for index, assistant_content in enumerate(replies):
@@ -332,6 +334,7 @@ def _build_turn_transcript(
             L1TranscriptMessage(
                 role="assistant",
                 content=assistant_content,
+                kind=L1MessageKind.ASSISTANT_REPLY,
                 tool_trace=(tool_summary or None) if index == len(replies) - 1 else None,
             )
         )

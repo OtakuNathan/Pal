@@ -39,6 +39,7 @@ from pal.llm.contracts import (
 )
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.memory import (
+    L1MessageKind,
     L1TranscriptMessage,
     L3CommitRequest,
     L3ProviderSelector,
@@ -215,8 +216,16 @@ class MinionRunner:
         def build_commit_payload(final_reply: str, observations: list[Any], reply_texts: list[str]) -> L1CommitPayload:
             _ = reply_texts
             transcript = [
-                L1TranscriptMessage(role="user", content=_render_task_prompt(self.pack)),
-                L1TranscriptMessage(role="assistant", content=final_reply or "minion completed"),
+                L1TranscriptMessage(
+                    role="user",
+                    content=_render_task_prompt(self.pack),
+                    kind=L1MessageKind.USER_REQUEST,
+                ),
+                L1TranscriptMessage(
+                    role="assistant",
+                    content=final_reply or "minion completed",
+                    kind=L1MessageKind.ASSISTANT_REPLY,
+                ),
             ]
             return L1CommitPayload(turn_id=self.run_id, transcript=transcript, tool_observations=list(observations))
 
@@ -562,10 +571,16 @@ class MinionRunner:
                     L1TranscriptMessage(
                         role="assistant",
                         content=state.pending_assistant_tool_text,
+                        kind=L1MessageKind.ASSISTANT_TOOL_CALL,
                         tool_calls=list(state.tool_protocol_messages[-len(state.pending_tool_results) - 1].get("tool_calls") or []),
                     ),
                     *[
-                        L1TranscriptMessage(role="tool", content=_tool_result_text(item), tool_call_id=str(item.call_id or ""))
+                        L1TranscriptMessage(
+                            role="tool",
+                            content=_tool_result_text(item),
+                            kind=L1MessageKind.TOOL_RESULT,
+                            tool_call_id=str(item.call_id or ""),
+                        )
                         for item in state.pending_tool_results
                     ],
                 ],

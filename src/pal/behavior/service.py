@@ -5,7 +5,7 @@ import hashlib
 import inspect
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, Sequence
 
 from pal.behavior.contracts import (
@@ -48,6 +48,12 @@ SOURCE_SORT_ORDER = {
 }
 
 
+@dataclass(frozen=True)
+class AffordanceTextMatch:
+    status: str
+    candidates: tuple[AffordanceDescriptor, ...] = ()
+
+
 @dataclass
 class BehaviorService:
     repository: BehaviorRepository = field(default_factory=BehaviorRepository)
@@ -77,6 +83,146 @@ class BehaviorService:
                     router_error=f"{exc.__class__.__name__}: {exc}",
                 )
             )
+
+    def update_affordance(self, payload: dict[str, Any]) -> AffordanceDescriptor:
+        existing = self.resolve_mutable_affordance(payload)
+        updates: dict[str, Any] = {}
+        updatable_fields = {
+            "scenario_text",
+            "prompt_hint",
+            "title",
+            "activation_terms",
+            "capability_refs",
+            "skill_refs",
+            "memory_query_hints",
+            "visibility_mode",
+            "activation_kind",
+            "activation_mode",
+            "source_kind",
+            "priority",
+            "activation_threshold",
+            "enabled",
+        }
+        for field_name in updatable_fields:
+            if field_name in payload and payload[field_name] is not None:
+                updates[field_name] = payload[field_name]
+        if "scenario_text" in updates:
+            updates["scenario_text"] = str(updates["scenario_text"] or "").strip()
+            if not updates["scenario_text"]:
+                raise ValueError("scenario_text is required")
+        if "prompt_hint" in updates:
+            updates["prompt_hint"] = str(updates["prompt_hint"] or "").strip()
+            if not updates["prompt_hint"]:
+                raise ValueError("prompt_hint is required")
+        if "title" in updates:
+            updates["title"] = str(updates["title"] or "").strip()
+        if "source_kind" in updates:
+            source_kind = str(updates["source_kind"] or "").strip()
+            if source_kind not in {AFFORDANCE_SOURCE_INSTRUCTED, AFFORDANCE_SOURCE_LEARNED}:
+                raise ValueError("source_kind must be instructed or learned for tool updates")
+            updates["source_kind"] = source_kind
+        if "visibility_mode" in updates:
+            updates["visibility_mode"] = _validated_choice(
+                updates["visibility_mode"],
+                {AFFORDANCE_VISIBILITY_RESIDENT, AFFORDANCE_VISIBILITY_DISCOVERABLE},
+                existing.visibility_mode,
+            )
+        if "activation_kind" in updates:
+            updates["activation_kind"] = _validated_choice(
+                updates["activation_kind"],
+                {AFFORDANCE_ACTIVATION_DELIBERATIVE, AFFORDANCE_ACTIVATION_REACTIVE},
+                existing.activation_kind,
+            )
+        if "activation_mode" in updates:
+            updates["activation_mode"] = _validated_choice(
+                updates["activation_mode"],
+                {AFFORDANCE_MODE_SUGGEST, AFFORDANCE_MODE_AUTOMATIC, AFFORDANCE_MODE_REQUIRE_APPROVAL},
+                existing.activation_mode,
+            )
+        if "activation_terms" in updates:
+            updates["activation_terms"] = _string_tuple(updates["activation_terms"])
+        if "capability_refs" in updates:
+            updates["capability_refs"] = _string_tuple(updates["capability_refs"])
+        if "skill_refs" in updates:
+            updates["skill_refs"] = _string_tuple(updates["skill_refs"])
+        if "memory_query_hints" in updates:
+            updates["memory_query_hints"] = _string_tuple(updates["memory_query_hints"])
+        if "priority" in updates:
+            updates["priority"] = int(updates["priority"])
+        if "activation_threshold" in updates:
+            updates["activation_threshold"] = float(updates["activation_threshold"])
+        if "enabled" in updates:
+            updates["enabled"] = bool(updates["enabled"])
+        descriptor = replace(existing, **updates)
+        return self.repository.upsert_affordance(descriptor)
+
+    def delete_affordance(self, payload: dict[str, Any]) -> AffordanceDescriptor:
+        existing = self.resolve_mutable_affordance(payload)
+        if not self.repository.delete_affordance(existing.affordance_id):
+            raise ValueError(f"affordance not found: {existing.affordance_id}")
+        return existing
+
+    def affordance_text_hash(self, affordance: AffordanceDescriptor) -> str:
+        return _affordance_text_hash(affordance)
+
+    def resolve_mutable_affordance(self, payload: dict[str, Any]) -> AffordanceDescriptor:
+        affordance_id = str(payload.get("affordance_id") or "").strip()
+        if affordance_id:
+            existing = self.repository.get_affordance(affordance_id)
+            if existing is None:
+                raise ValueError(f"affordance not found: {affordance_id}")
+            if existing.source_kind == AFFORDANCE_SOURCE_DECLARED:
+                raise ValueError(_readonly_affordance_error(existing))
+            return existing
+
+        query = str(payload.get("affordance") or payload.get("match_text") or "").strip()
+        if not query:
+            raise ValueError("affordance text is required")
+        match = self.resolve_affordance_by_text(query)
+        if match.status == "not_found":
+            raise ValueError("affordance not found for provided text")
+        if match.status == "ambiguous":
+            candidates = ", ".join(
+                f"{candidate.affordance_id} [{candidate.source_kind}] hash={_affordance_text_hash(candidate)}"
+                for candidate in match.candidates[:5]
+            )
+            raise ValueError(f"affordance text matched multiple entries: {candidates}")
+        if match.status == "readonly":
+            descriptor = match.candidates[0]
+            raise ValueError(_readonly_affordance_error(descriptor))
+        return match.candidates[0]
+
+    def resolve_affordance_by_text(self, text: str) -> "AffordanceTextMatch":
+        query_variants = _affordance_query_variants(text)
+        if not query_variants:
+            return AffordanceTextMatch(status="not_found", candidates=())
+        candidates = [
+            item
+            for item in (*self.repository.list_affordances(), *self._declared_affordance_index().values())
+            if item.enabled
+        ]
+        exact = [
+            item
+            for item in candidates
+            if any(_normalize_affordance_text(_affordance_match_text(item)) == query for query in query_variants)
+        ]
+        if not exact:
+            exact = [item for item in candidates if any(_affordance_text_hash(item) == query for query in query_variants)]
+        if not exact:
+            exact = [
+                item
+                for item in candidates
+                if _affordance_matches_any_query(item, query_variants)
+            ]
+        unique = _unique_affordances(exact)
+        if not unique:
+            return AffordanceTextMatch(status="not_found", candidates=())
+        if len(unique) > 1:
+            return AffordanceTextMatch(status="ambiguous", candidates=tuple(unique))
+        descriptor = unique[0]
+        if descriptor.source_kind == AFFORDANCE_SOURCE_DECLARED:
+            return AffordanceTextMatch(status="readonly", candidates=(descriptor,))
+        return AffordanceTextMatch(status="mutable", candidates=(descriptor,))
 
     def submit_affordance(self, payload: dict[str, Any]) -> AffordanceDescriptor:
         scenario_text = str(payload.get("scenario_text") or "").strip()
@@ -562,6 +708,100 @@ def _validated_choice(value: object, allowed: set[str], default: str) -> str:
     if candidate not in allowed:
         raise ValueError(f"unsupported value: {candidate}")
     return candidate
+
+
+def _affordance_match_text(affordance: AffordanceDescriptor) -> str:
+    return "\n".join(
+        part
+        for part in (
+            affordance.title,
+            affordance.scenario_text,
+            affordance.prompt_hint,
+        )
+        if str(part or "").strip()
+    )
+
+
+def _normalize_affordance_text(value: object) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def _affordance_query_variants(value: object) -> tuple[str, ...]:
+    raw = str(value or "").strip()
+    if not raw:
+        return ()
+    variants = [raw]
+    variants.append(_strip_xml_tags(raw))
+    for line in raw.splitlines():
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        variants.append(cleaned)
+        without_bullet = re.sub(r"^\s*[-*•]\s+", "", cleaned).strip()
+        variants.append(without_bullet)
+        title_split = _split_rendered_affordance_line(without_bullet)
+        if title_split:
+            variants.append(title_split)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in variants:
+        candidate = _normalize_affordance_text(item)
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            normalized.append(candidate)
+    return tuple(normalized)
+
+
+def _strip_xml_tags(value: str) -> str:
+    return re.sub(r"</?[^>\n]+>", " ", str(value or ""))
+
+
+def _split_rendered_affordance_line(value: str) -> str:
+    text = str(value or "").strip()
+    if not text or ":" not in text:
+        return ""
+    title, remainder = text.split(":", 1)
+    if len(title.strip()) > 100:
+        return ""
+    return remainder.strip()
+
+
+def _affordance_matches_any_query(affordance: AffordanceDescriptor, queries: tuple[str, ...]) -> bool:
+    fields = (
+        _normalize_affordance_text(_affordance_match_text(affordance)),
+        _normalize_affordance_text(affordance.prompt_hint),
+        _normalize_affordance_text(affordance.scenario_text),
+        _normalize_affordance_text(affordance.title),
+    )
+    for query in queries:
+        for field in fields:
+            if not query or not field:
+                continue
+            if query == field or query in field or field in query:
+                return True
+    return False
+
+
+def _affordance_text_hash(affordance: AffordanceDescriptor) -> str:
+    return hashlib.sha256(_normalize_affordance_text(_affordance_match_text(affordance)).encode("utf-8")).hexdigest()[:16]
+
+
+def _unique_affordances(items: Iterable[AffordanceDescriptor]) -> list[AffordanceDescriptor]:
+    seen: set[str] = set()
+    unique: list[AffordanceDescriptor] = []
+    for item in items:
+        if item.affordance_id in seen:
+            continue
+        seen.add(item.affordance_id)
+        unique.append(item)
+    return unique
+
+
+def _readonly_affordance_error(affordance: AffordanceDescriptor) -> str:
+    return (
+        "readonly injected affordance; behavior update/delete only changes persisted database affordances. "
+        f"source_kind={affordance.source_kind}, module_id={affordance.module_id}, hash={_affordance_text_hash(affordance)}"
+    )
 
 
 def _generated_affordance_id(payload: dict[str, Any], *, source_kind: str) -> str:

@@ -11,6 +11,7 @@ from pal.memory.contracts import (
     DEFAULT_GHOST_TTL,
     DEFAULT_HOT_TTL,
     L1Store,
+    L1MessageKind,
     L1TranscriptMessage,
     L2Entry,
     L2HeatLevel,
@@ -230,7 +231,13 @@ class MemoryService(MemoryServicePort):
         )
         summary_entry = payload["summary_entry"]
         projected_entries = [summary_entry, *payload["stable_entries"]]
-        self.l1_store.items = [[L1TranscriptMessage(role="assistant", content=summary_entry.summary)]]
+        self.l1_store.items = [[
+            L1TranscriptMessage(
+                role="assistant",
+                content=summary_entry.summary,
+                kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
+            )
+        ]]
         evicted = self.l2_store.upsert_entries(projected_entries, touch=True, top_of_mind=False)
         retired = self._retire_entries(evicted)
         return MemoryCompactResult(
@@ -362,23 +369,41 @@ def _normalize_l1_transcript(item: list[L1TranscriptMessage] | list[dict[str, ob
     for entry in list(item or []):
         if isinstance(entry, L1TranscriptMessage):
             if entry.content.strip():
+                role = str(entry.role or "").strip()
+                content = entry.content.strip()
+                tool_calls = entry.tool_calls
+                tool_call_id = entry.tool_call_id
                 normalized.append(L1TranscriptMessage(
-                    role=entry.role,
-                    content=entry.content.strip(),
+                    role=role,
+                    content=content,
+                    kind=_normalize_l1_message_kind(
+                        entry.kind,
+                        role=role,
+                        tool_calls=tool_calls,
+                        tool_call_id=tool_call_id,
+                    ),
                     tool_trace=entry.tool_trace,
-                    tool_calls=entry.tool_calls,
-                    tool_call_id=entry.tool_call_id,
+                    tool_calls=tool_calls,
+                    tool_call_id=tool_call_id,
                 ))
             continue
         if isinstance(entry, dict):
             role = str(entry.get("role") or "").strip()
             content = str(entry.get("content") or "").strip()
             if role and content:
+                tool_calls = entry.get("tool_calls")
+                tool_call_id = entry.get("tool_call_id")
                 normalized.append(L1TranscriptMessage(
                     role=role,
                     content=content,
-                    tool_calls=entry.get("tool_calls"),
-                    tool_call_id=entry.get("tool_call_id"),
+                    kind=_normalize_l1_message_kind(
+                        entry.get("kind"),
+                        role=role,
+                        tool_calls=tool_calls,
+                        tool_call_id=tool_call_id,
+                    ),
+                    tool_calls=tool_calls,
+                    tool_call_id=tool_call_id,
                 ))
     return normalized
 
@@ -395,9 +420,52 @@ def _render_l1_recent_context(messages: list[L1TranscriptMessage]) -> str:
     for message in messages:
         role = str(message.role or "").strip()
         content = str(message.content or "").strip()
+        kind = _normalize_l1_message_kind(
+            message.kind,
+            role=role,
+            tool_calls=message.tool_calls,
+            tool_call_id=message.tool_call_id,
+        )
+        if kind not in _COMPACTABLE_L1_MESSAGE_KINDS:
+            continue
         if role and content:
             lines.append(f"{role}: {content}")
     return "\n".join(lines).strip()
+
+
+_COMPACTABLE_L1_MESSAGE_KINDS = frozenset({
+    L1MessageKind.USER_REQUEST,
+    L1MessageKind.ASSISTANT_REPLY,
+    L1MessageKind.TURN_INTERRUPTED,
+    L1MessageKind.TURN_ABORTED,
+})
+
+
+def _normalize_l1_message_kind(
+    value: object,
+    *,
+    role: str,
+    tool_calls: object = None,
+    tool_call_id: object = None,
+) -> L1MessageKind:
+    raw = str(value or "").strip()
+    if raw:
+        try:
+            return L1MessageKind(raw)
+        except ValueError:
+            pass
+    normalized_role = str(role or "").strip()
+    if normalized_role == "tool":
+        return L1MessageKind.TOOL_RESULT
+    if normalized_role == "assistant" and tool_calls:
+        return L1MessageKind.ASSISTANT_TOOL_CALL
+    if normalized_role == "assistant":
+        return L1MessageKind.ASSISTANT_REPLY
+    if normalized_role == "user":
+        return L1MessageKind.USER_REQUEST
+    if tool_call_id:
+        return L1MessageKind.TOOL_RESULT
+    return L1MessageKind.ASSISTANT_REPLY
 
 
 def _render_compaction_source(*, summary_text: str, recent_text: str, limit: int) -> str:

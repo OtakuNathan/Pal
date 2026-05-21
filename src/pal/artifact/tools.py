@@ -106,7 +106,7 @@ class ArtifactListTool:
     name: str = "op_artifact_list"
     display_name: str = "List Artifacts"
     family: str = "artifact"
-    description: str = "List short-lived conversation artifacts visible to the current turn."
+    description: str = "List recent tagged conversation artifacts visible to the current turn. Use this when the user refers to a prior attachment but no artifact is present in the prompt."
     tags: tuple[str, ...] = ("artifact", "attachment", "list")
     keywords: tuple[str, ...] = ("artifact", "attachment", "file", "recent")
     args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_list"))
@@ -190,7 +190,7 @@ class ArtifactSearchTool:
     name: str = "op_artifact_search"
     display_name: str = "Search Artifacts"
     family: str = "artifact"
-    description: str = "Find a recent conversation artifact by filename, type, summary, or time hint."
+    description: str = "Search recent tagged conversation artifacts by filename, kind, caption, summary, or time hint. Use this instead of assuming a prior image/document is attached."
     tags: tuple[str, ...] = ("artifact", "attachment", "search")
     keywords: tuple[str, ...] = ("artifact", "search", "recent", "file")
     args_schema: dict[str, Any] = field(default_factory=lambda: artifact_args_schema("op_artifact_search"))

@@ -7,9 +7,15 @@ from pal.behavior.service import BehaviorService
 from pal.behavior.tools import (
     ADVISE_ARGS_SCHEMA,
     ADVISE_RESULT_SCHEMA,
+    AFFORDANCE_DELETE_ARGS_SCHEMA,
+    AFFORDANCE_DELETE_RESULT_SCHEMA,
     AFFORDANCE_SUBMIT_ARGS_SCHEMA,
     AFFORDANCE_SUBMIT_RESULT_SCHEMA,
+    AFFORDANCE_UPDATE_ARGS_SCHEMA,
+    AFFORDANCE_UPDATE_RESULT_SCHEMA,
+    AffordanceDeleteTool,
     AffordanceSubmitTool,
+    AffordanceUpdateTool,
     BehaviorAdviceTool,
 )
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
@@ -103,6 +109,31 @@ class BehaviorIntrospectionProvider:
     def submit_affordance(self, call: CapabilityCall) -> CapabilityResult:
         return AffordanceSubmitTool(service=self.service).invoke(call.args)
 
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="behavior",
+        action_name="affordance_update",
+        description="Update persisted database behavior guidance by matching the original affordance text. Injected/plugin affordances are read-only here.",
+        args_schema=AFFORDANCE_UPDATE_ARGS_SCHEMA,
+        result_schema=AFFORDANCE_UPDATE_RESULT_SCHEMA,
+    )
+    def update_affordance(self, call: CapabilityCall) -> CapabilityResult:
+        return AffordanceUpdateTool(service=self.service).invoke(call.args)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="behavior",
+        action_name="affordance_delete",
+        description="Delete persisted database behavior guidance by matching the original affordance text. Injected/plugin affordances are read-only here.",
+        args_schema=AFFORDANCE_DELETE_ARGS_SCHEMA,
+        result_schema=AFFORDANCE_DELETE_RESULT_SCHEMA,
+    )
+    def delete_affordance(self, call: CapabilityCall) -> CapabilityResult:
+        return AffordanceDeleteTool(service=self.service).invoke(call.args)
+
+
 def register_with_core(context: "MainContext", service: BehaviorService) -> ModuleHandle:
     from pal.behavior.prompt import BehaviorPromptFragmentProvider
 
@@ -110,6 +141,8 @@ def register_with_core(context: "MainContext", service: BehaviorService) -> Modu
     service.prompt_fragment_registry = service.prompt_fragment_registry or context.prompt_fragment_registry
     context.execution_runtime.register_tool(BehaviorAdviceTool(service=service))
     context.execution_runtime.register_tool(AffordanceSubmitTool(service=service))
+    context.execution_runtime.register_tool(AffordanceUpdateTool(service=service))
+    context.execution_runtime.register_tool(AffordanceDeleteTool(service=service))
     provider = BehaviorIntrospectionProvider(service=service)
     prompt_provider = BehaviorPromptFragmentProvider(service=service)
     handle = ModuleHandle(

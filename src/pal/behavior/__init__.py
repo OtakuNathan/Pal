@@ -24,7 +24,7 @@ from pal.behavior.introspection import BehaviorIntrospectionProvider, register_w
 from pal.behavior.models import BehaviorAffordanceModel, BehaviorSkillModel
 from pal.behavior.repository import BehaviorRepository
 from pal.behavior.service import BehaviorService
-from pal.behavior.tools import AffordanceSubmitTool, BehaviorAdviceTool
+from pal.behavior.tools import AffordanceDeleteTool, AffordanceSubmitTool, AffordanceUpdateTool, BehaviorAdviceTool
 
 __all__ = [
     "AFFORDANCE_ACTIVATION_DELIBERATIVE",
@@ -42,7 +42,9 @@ __all__ = [
     "AFFORDANCE_VISIBILITY_RESIDENT",
     "AffordanceBlueprint",
     "AffordanceDescriptor",
+    "AffordanceDeleteTool",
     "AffordanceSubmitTool",
+    "AffordanceUpdateTool",
     "BehaviorAdviceRequest",
     "BehaviorAdviceResult",
     "BehaviorAdviceTool",

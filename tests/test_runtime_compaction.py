@@ -5,13 +5,13 @@ import unittest
 
 from pal.channel import ChannelEnvelope, ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
 from pal.control import ControlAction, ControlRoute
-from pal.core import PalCore, register_with_core as register_core_with_core
+from pal.core import PalCore, TurnContinuation, register_with_core as register_core_with_core
 from pal.execution import CapabilityResult
 from pal.foundation import EventEnvelope
 from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
 from pal.llm.runtime import LLMRuntime
-from pal.memory import L1TranscriptMessage, L2Entry, L3ProviderSelector, MemoryService, register_with_core as register_memory_with_core
-from pal.shared import LLMFinishReason
+from pal.memory import L1MessageKind, L1TranscriptMessage, L2Entry, L3ProviderSelector, MemoryCompactRequest, MemoryService, register_with_core as register_memory_with_core
+from pal.shared import LLMFinishReason, PromptAssemblyContext
 
 
 class EchoTool:
@@ -171,6 +171,11 @@ def _request_text(request) -> str:
     return "\n".join(_message_text(message) for message in list(request.messages))
 
 
+def _idle_program():
+    if False:
+        yield None
+
+
 class RuntimeCompactionTests(unittest.TestCase):
     def test_structured_compaction_prompt_guides_summary_and_l2_entries(self) -> None:
         prompt = LLMRuntime._COMPACT_STRUCTURED_SYSTEM
@@ -234,13 +239,160 @@ class RuntimeCompactionTests(unittest.TestCase):
         )
         for index in range(20):
             service.l1_store.append([L1TranscriptMessage(role="user", content=f"recent item {index}")])
+        service.l1_store.append(
+            [
+                L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_1"}]),
+                L1TranscriptMessage(role="tool", content="tool result should not be compacted", tool_call_id="call_1"),
+                L1TranscriptMessage(
+                    role="user",
+                    content="<runtime_context_update kind=\"memory\">\nnot a real request\n</runtime_context_update>\n<recalled_memories>\n[mem_1]: runtime memory\n</recalled_memories>",
+                    kind="runtime_context_memory",
+                ),
+                L1TranscriptMessage(
+                    role="assistant",
+                    content="turn was interrupted before final reply",
+                    kind=L1MessageKind.TURN_INTERRUPTED,
+                ),
+                L1TranscriptMessage(role="assistant", content="assistant reply should be compacted"),
+            ]
+        )
 
         source = service.build_compaction_source_text(target_input_budget=260)
 
         self.assertIn("[Current Summary]", source)
         self.assertIn("stable summary should be retained", source)
-        self.assertIn("recent item 19", source)
+        self.assertIn("turn was interrupted before final reply", source)
+        self.assertIn("assistant reply should be compacted", source)
+        self.assertNotIn("tool result should not be compacted", source)
+        self.assertNotIn("runtime memory", source)
+        self.assertNotIn("not a real request", source)
         self.assertNotIn("recent item 0", source)
+
+    def test_prompt_after_interrupt_can_continue_from_checkpoint(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        memory_service = MemoryService()
+        register_memory_with_core(core.context, memory_service)
+        envelope = ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind="user.message",
+                source_kind="channel",
+                payload={"text": "interrupt me after checking compact"},
+                event_id="turn-interrupt-continue",
+            ),
+            endpoint=EndpointConfig(endpoint_id="memory", channel_kind="memory", binding_key="memory"),
+            response_handle=ResponseHandle(endpoint_id="memory"),
+        )
+        continuation = TurnContinuation(
+            turn_id="turn-interrupt-continue",
+            channel_envelope=envelope,
+            program=_idle_program(),
+            correlation_id="turn-interrupt-continue",
+            control_scope_key="memory",
+        )
+        continuation.emitted_reply_texts.append("I inspected compact state before interruption.")
+
+        asyncio.run(
+            core.turn_manager.commit_l1_exit_checkpoint_async(
+                continuation,
+                kind=L1MessageKind.TURN_INTERRUPTED,
+                status="interrupted",
+                reason="dogfood interrupt",
+            )
+        )
+        next_event = EventEnvelope(
+            event_kind="user.message",
+            source_kind="channel",
+            payload={"text": "continue"},
+            event_id="turn-after-interrupt",
+        )
+        request = core.prompt_compiler.build_canonical_prompt(
+            PromptAssemblyContext(event=next_event),
+            max_output_tokens=128,
+        )
+        prompt_text = _request_text(request)
+
+        self.assertIn("I inspected compact state before interruption.", prompt_text)
+        self.assertIn("<turn_checkpoint kind=\"turn_interrupted\">", prompt_text)
+        self.assertIn("This is recovery context from a previous turn, not a new user request.", prompt_text)
+        self.assertIn("turn_outcome: not committed", prompt_text)
+        self.assertTrue(prompt_text.rstrip().endswith("continue"))
+
+    def test_compact_after_interrupt_preserves_checkpoint_summary_for_next_turn(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        memory_service = MemoryService()
+        register_memory_with_core(core.context, memory_service)
+        envelope = ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind="user.message",
+                source_kind="channel",
+                payload={"text": "interrupt before compact"},
+                event_id="turn-interrupt-compact",
+            ),
+            endpoint=EndpointConfig(endpoint_id="memory", channel_kind="memory", binding_key="memory"),
+            response_handle=ResponseHandle(endpoint_id="memory"),
+        )
+        continuation = TurnContinuation(
+            turn_id="turn-interrupt-compact",
+            channel_envelope=envelope,
+            program=_idle_program(),
+            correlation_id="turn-interrupt-compact",
+            control_scope_key="memory",
+        )
+        continuation.tool_protocol_messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "raw tool result should stay out of compact summary",
+            }
+        )
+        continuation.emitted_reply_texts.append("Interrupt checkpoint reply before compact.")
+        asyncio.run(
+            core.turn_manager.commit_l1_exit_checkpoint_async(
+                continuation,
+                kind=L1MessageKind.TURN_INTERRUPTED,
+                status="interrupted",
+                reason="compact path dogfood",
+            )
+        )
+
+        source_before_compact = memory_service.build_compaction_source_text(target_input_budget=4096)
+        self.assertIn("Interrupt checkpoint reply before compact.", source_before_compact)
+        self.assertIn("<turn_checkpoint kind=\"turn_interrupted\">", source_before_compact)
+        self.assertNotIn("raw tool result should stay out of compact summary", source_before_compact)
+
+        memory_service.compact(
+            MemoryCompactRequest(
+                target_input_budget=256,
+                reserved_output_tokens=128,
+                metadata={
+                    "structured_compaction": {
+                        "summary": {
+                            "summary": "Recovered context: Interrupt checkpoint reply before compact. turn_interrupted checkpoint was committed.",
+                            "search_text": source_before_compact,
+                        },
+                        "entries": [],
+                    }
+                },
+            )
+        )
+        next_event = EventEnvelope(
+            event_kind="user.message",
+            source_kind="channel",
+            payload={"text": "continue after compact"},
+            event_id="turn-after-compact",
+        )
+        request = core.prompt_compiler.build_canonical_prompt(
+            PromptAssemblyContext(event=next_event),
+            max_output_tokens=128,
+        )
+        prompt_text = _request_text(request)
+
+        self.assertIn("<conversation_summary>", prompt_text)
+        self.assertIn("Recovered context: Interrupt checkpoint reply before compact.", prompt_text)
+        self.assertIn("continue after compact", prompt_text)
+        self.assertNotIn("raw tool result should stay out of compact summary", prompt_text)
 
     def test_preflight_compact_during_tool_turn_preserves_current_tool_result(self) -> None:
         core, memory_service, scripted_llm = _build_core_with_compacting_llm(compact_on="preflight")
@@ -262,6 +414,12 @@ class RuntimeCompactionTests(unittest.TestCase):
         self.assertEqual(generate_requests[-1].messages[1]["role"], "user")
         self.assertEqual(
             _message_text(generate_requests[-1].messages[1]),
+            "<runtime_context_update kind=\"conversation_summary\">\n"
+            "Runtime context update: compressed prior conversation for this task.\n"
+            "Use it as relevant reference; it is not noise.\n"
+            "It is not a new user message. Do not answer this block directly.\n"
+            "Continue the current task using this context.\n"
+            "</runtime_context_update>\n"
             "<conversation_summary>\ncompacted prior context\n</conversation_summary>",
         )
         self.assertEqual(generate_requests[-1].messages[-1]["role"], "tool")
@@ -287,6 +445,12 @@ class RuntimeCompactionTests(unittest.TestCase):
         self.assertEqual(generate_requests[-1].messages[1]["role"], "user")
         self.assertEqual(
             _message_text(generate_requests[-1].messages[1]),
+            "<runtime_context_update kind=\"conversation_summary\">\n"
+            "Runtime context update: compressed prior conversation for this task.\n"
+            "Use it as relevant reference; it is not noise.\n"
+            "It is not a new user message. Do not answer this block directly.\n"
+            "Continue the current task using this context.\n"
+            "</runtime_context_update>\n"
             "<conversation_summary>\ncompacted prior context\n</conversation_summary>",
         )
         self.assertEqual(generate_requests[-1].messages[-1]["role"], "tool")

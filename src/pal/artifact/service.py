@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import mimetypes
-import re
 import shutil
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -456,11 +455,7 @@ class ArtifactManager:
         current = [record for record in records if record.turn_id == turn_id]
         if current:
             return current
-        if not str(user_text or "").strip():
-            return []
-        if not _looks_artifact_relevant(user_text, self.policy):
-            return []
-        return records[: max(1, int(self.policy.exposure.max_hot_prompt_refs))]
+        return []
 
     def _tool_handling_manifest(self, record: ArtifactRecord) -> str:
         local_file = _local_file_metadata(record)
@@ -739,15 +734,6 @@ def _existing_path_text(value: str) -> str:
 
 _LLVM_HIDDEN_METADATA_KEYS = frozenset({"local_cached_path", "path", "telegram_file_path", "source_url"})
 _LLVM_HIDDEN_NESTED_KEYS = frozenset({"source_url", "telegram_file_path"})
-_URL_LIKE_RE = re.compile(r"https?://\S+", re.IGNORECASE)
-_EN_ARTIFACT_REFERENCE_RE = re.compile(
-    r"\b(attachments?|artifacts?|images?|photos?|pictures?|screenshots?|pdfs?|documents?|audio|voices?)\b",
-    re.IGNORECASE,
-)
-_EN_FILE_REFERENCE_RE = re.compile(
-    r"\b(this|that|the|previous|last|above|recent|attached)\s+files?\b",
-    re.IGNORECASE,
-)
 
 
 def _prompt_scalar(value: Any) -> str:
@@ -764,20 +750,6 @@ def _sanitize_metadata_for_llm(metadata: dict[str, Any]) -> dict[str, Any]:
         else:
             cleaned[key] = value
     return cleaned
-
-
-def _looks_artifact_relevant(user_text: str, policy: ArtifactPolicy) -> bool:
-    text = str(user_text or "").strip().lower()
-    if not text:
-        return True
-    text_without_urls = _URL_LIKE_RE.sub(" ", text)
-    if _EN_ARTIFACT_REFERENCE_RE.search(text_without_urls) or _EN_FILE_REFERENCE_RE.search(text_without_urls):
-        return True
-    return any(
-        str(term).lower() in text
-        for term in policy.exposure.relevance_terms
-        if any(ord(char) > 127 for char in str(term))
-    )
 
 
 def _prompt_actions_for(record: ArtifactRecord, *, image_inlined: bool) -> tuple[str, ...]:

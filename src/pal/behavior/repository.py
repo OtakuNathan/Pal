@@ -75,6 +75,14 @@ class BehaviorRepository:
         except DoesNotExist:
             return None
 
+    def delete_affordance(self, affordance_id: str) -> bool:
+        normalized = str(affordance_id or "").strip()
+        if not normalized:
+            return False
+        deleted = BehaviorAffordanceModel.delete().where(BehaviorAffordanceModel.affordance_id == normalized).execute()
+        self.sync_fts_row(normalized)
+        return bool(deleted)
+
     def get_skill(self, skill_id: str) -> SkillDescriptor | None:
         return self.skill_repository.get_skill(skill_id)
 

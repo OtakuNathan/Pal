@@ -1,5 +1,6 @@
 from pal.memory.contracts import (
     L1Store,
+    L1MessageKind,
     L1TranscriptMessage,
     L2Entry,
     L2Store,
@@ -49,6 +50,7 @@ __all__ = [
     "HashingEmbedder",
     "InProcBGEEmbeddingProvider",
     "L1Store",
+    "L1MessageKind",
     "L1TranscriptMessage",
     "L2Entry",
     "L2Store",

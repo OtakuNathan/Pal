@@ -24,12 +24,12 @@ from pal.control import interactions as control_interactions
 from pal.core import PalCore, TurnContinuation, register_with_core as register_core_with_core
 from pal.core.contracts import PendingControlRequest
 from pal.core.runtime_config import RuntimeConfig
-from pal.core.turns import channel_turn_program
+from pal.core.turns import ToolObservation, channel_turn_program
 from pal.execution import CapabilityResult
 from pal.foundation import EventEnvelope
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
 from pal.llm.repository import DEFAULT_THINK_LEVEL
-from pal.memory import MemoryService, register_with_core as register_memory_with_core
+from pal.memory import L1MessageKind, MemoryService, register_with_core as register_memory_with_core
 from pal.shared import EventKind, PromptAssemblyContext, RuntimeStatus, SourceKind
 from pal.stream_events import NormalizedLLMStreamEvent
 
@@ -949,14 +949,84 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         )
         task = asyncio.create_task(asyncio.sleep(10))
         self.core.state.turn_tasks["turn-1"] = task
+        continuation.tool_protocol_messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "checking the runtime",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "op_exec_shell", "arguments": "{\"cmd\": \"date\"}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "shell result before interrupt",
+                },
+            ]
+        )
+        continuation.tool_observations.append(
+            ToolObservation(tool_name="op_exec_shell", ok=True, summary="shell result before interrupt")
+        )
+        continuation.emitted_reply_texts.append("I found a runtime clue before interruption.")
 
         interrupted = await self.core.turn_manager.interrupt_by_scope(scope_key)
 
         self.assertTrue(interrupted)
         self.assertTrue(continuation.interrupted)
         self.assertTrue(self.endpoint._stream_sessions[id(response_handle)]["closed"])
+        self.assertEqual(len(self.memory_service.l1_store.items), 1)
+        checkpoint = self.memory_service.l1_store.items[-1]
+        kinds = [item.kind for item in checkpoint]
+        self.assertIn(L1MessageKind.USER_REQUEST, kinds)
+        self.assertIn(L1MessageKind.ASSISTANT_TOOL_CALL, kinds)
+        self.assertIn(L1MessageKind.TOOL_RESULT, kinds)
+        self.assertIn(L1MessageKind.ASSISTANT_REPLY, kinds)
+        self.assertIn(L1MessageKind.TURN_INTERRUPTED, kinds)
+        summary = next(item.content for item in checkpoint if item.kind == L1MessageKind.TURN_INTERRUPTED)
+        self.assertIn("This is recovery context", summary)
+        self.assertIn("op_exec_shell", summary)
+        self.assertIn("turn_outcome: not committed", summary)
         with self.assertRaises(asyncio.CancelledError):
             await task
+
+    async def test_unhandled_turn_exception_commits_aborted_checkpoint(self) -> None:
+        envelope = self._make_channel_envelope(
+            turn_id="turn-aborted",
+            request_id="req-aborted",
+            text="please do the thing",
+        )
+
+        def _crashing_program():
+            if False:
+                yield None
+            raise RuntimeError("boom")
+
+        continuation = TurnContinuation(
+            turn_id="turn-aborted",
+            channel_envelope=envelope,
+            program=_crashing_program(),
+            correlation_id="req-aborted",
+            control_scope_key=self.route.control_scope_key,
+            turn_settings_snapshot={"think_level": "balanced"},
+        )
+
+        with self.assertRaises(RuntimeError):
+            await self.core.run_turn_continuation_async(continuation)
+
+        self.assertEqual(len(self.memory_service.l1_store.items), 1)
+        checkpoint = self.memory_service.l1_store.items[-1]
+        kinds = [item.kind for item in checkpoint]
+        self.assertIn(L1MessageKind.USER_REQUEST, kinds)
+        self.assertIn(L1MessageKind.TURN_ABORTED, kinds)
+        summary = next(item.content for item in checkpoint if item.kind == L1MessageKind.TURN_ABORTED)
+        self.assertIn("status: aborted", summary)
+        self.assertIn("RuntimeError: boom", summary)
+        self.assertIn("turn_outcome: not committed", summary)
 
     async def test_interrupt_by_scope_deduplicates_concurrent_interrupts(self) -> None:
         response_handle = ResponseHandle(

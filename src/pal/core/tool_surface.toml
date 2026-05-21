@@ -18,12 +18,16 @@ capabilities = [
     # -- behavior (affordance + skill) --
     "op_behavior_advise",
     "op_behavior_save",
+    "op_behavior_affordance_update",
+    "op_behavior_affordance_delete",
     # -- memory (active provider) --
     "op_memory_recall",
     "op_memory_write",
     "op_memory_update",
     "op_memory_delete",
     # -- artifacts (conversation attachments) --
+    "op_artifact_list",
+    "op_artifact_search",
     "op_artifact_info",
     "op_artifact_read",
     # -- channel output --

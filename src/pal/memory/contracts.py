@@ -24,6 +24,20 @@ class L3RecallView(StrEnum):
     ORIGIN = "origin"
 
 
+class L1MessageKind(StrEnum):
+    USER_REQUEST = "user_request"
+    ASSISTANT_REPLY = "assistant_reply"
+    ASSISTANT_TOOL_CALL = "assistant_tool_call"
+    TOOL_RESULT = "tool_result"
+    TURN_INTERRUPTED = "turn_interrupted"
+    TURN_ABORTED = "turn_aborted"
+    RUNTIME_CONTEXT_MEMORY = "runtime_context_memory"
+    RUNTIME_CONTEXT_BEHAVIOR = "runtime_context_behavior"
+    RUNTIME_CONTEXT_SKILL = "runtime_context_skill"
+    RUNTIME_CONTEXT_ARTIFACT = "runtime_context_artifact"
+    RUNTIME_CONTEXT_SUMMARY = "runtime_context_summary"
+
+
 VECTOR_DEDUP_THRESHOLD = 0.85
 RECALL_PROMOTION_THRESHOLD = 0.3
 
@@ -32,6 +46,7 @@ RECALL_PROMOTION_THRESHOLD = 0.3
 class L1TranscriptMessage:
     role: str
     content: str
+    kind: L1MessageKind | str = ""
     tool_trace: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None

@@ -31,8 +31,10 @@ from pal.execution.contracts import CapabilityResult
 from pal.foundation import AttachmentSpec, EventEnvelope, utc_now
 from pal.failure import FailureSignal, FailureUserFeedback
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
+from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryCommitRequest
 from pal.shared import EventKind, SourceKind
 from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus
+from pal.shared.payloads import extract_text_from_payload
 
 
 @dataclass
@@ -128,6 +130,12 @@ class TurnManager:
             if isinstance(continuation, TurnContinuation):
                 continuation.interrupted = True
                 continuation.interrupt_reason = reason
+                await self.commit_l1_exit_checkpoint_async(
+                    continuation,
+                    kind=L1MessageKind.TURN_INTERRUPTED,
+                    status="interrupted",
+                    reason=reason,
+                )
             channel_runtime = self.context.port_registry.get("channel:channel")
             if channel_runtime is not None and isinstance(continuation, TurnContinuation):
                 channel_runtime.abort_stream(continuation.channel_envelope.response_handle, reason=reason)
@@ -154,6 +162,165 @@ class TurnManager:
             continuation.interrupt_reason = reason
         self.guard.clear(turn_id)
         self._mark_turn_exited(turn_id)
+
+    async def commit_l1_exit_checkpoint_async(
+        self,
+        continuation: TurnContinuation,
+        *,
+        kind: L1MessageKind,
+        status: str,
+        reason: str,
+    ) -> None:
+        if continuation.l1_exit_checkpoint_committed:
+            return
+        transcript = self._build_l1_exit_checkpoint_transcript(
+            continuation,
+            kind=kind,
+            status=status,
+            reason=reason,
+        )
+        if not transcript:
+            return
+        continuation.l1_exit_checkpoint_committed = True
+        memory_service = self.context.port_registry.get("memory:memory")
+        if memory_service is None:
+            return
+        try:
+            request = MemoryCommitRequest(
+                turn_id=continuation.turn_id,
+                transcript=transcript,
+                metadata={"exit_checkpoint_status": status},
+            )
+            async_method = getattr(memory_service, "acommit_l1", None)
+            if callable(async_method):
+                result = async_method(request)
+                if inspect.isawaitable(result):
+                    result = await result
+            else:
+                sync_method = getattr(memory_service, "commit_l1")
+                result = await asyncio.to_thread(sync_method, request)
+        except Exception as exc:
+            self.state.diagnostics.append(
+                {
+                    "kind": "memory.exit_checkpoint.failed",
+                    "turn_id": continuation.turn_id,
+                    "status": status,
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+            )
+            return
+        if getattr(result, "status", RuntimeStatus.OK) != RuntimeStatus.OK:
+            self.state.diagnostics.append(
+                {
+                    "kind": "memory.exit_checkpoint.retry",
+                    "turn_id": continuation.turn_id,
+                    "status": getattr(result, "status", ""),
+                    "exit_status": status,
+                }
+            )
+
+    def _build_l1_exit_checkpoint_transcript(
+        self,
+        continuation: TurnContinuation,
+        *,
+        kind: L1MessageKind,
+        status: str,
+        reason: str,
+    ) -> list[L1TranscriptMessage]:
+        transcript: list[L1TranscriptMessage] = []
+        user_text = extract_text_from_payload(continuation.channel_envelope.event.payload).strip()
+        if user_text:
+            transcript.append(L1TranscriptMessage(role="user", content=user_text, kind=L1MessageKind.USER_REQUEST))
+
+        protocol_assistant_contents: list[str] = []
+        for msg in continuation.tool_protocol_messages:
+            role = str(msg.get("role", "") or "").strip()
+            content = str(msg.get("content", "") or "")
+            if role == "tool":
+                content = self._truncate_tool_result_for_l1(content)
+            tool_calls = msg.get("tool_calls")
+            if role == "assistant" and tool_calls:
+                protocol_assistant_contents.append(content.strip())
+            transcript.append(
+                L1TranscriptMessage(
+                    role=role,
+                    content=content,
+                    kind=L1MessageKind.TOOL_RESULT if role == "tool" else L1MessageKind.ASSISTANT_TOOL_CALL,
+                    tool_calls=tool_calls if isinstance(tool_calls, list) else None,
+                    tool_call_id=msg.get("tool_call_id"),
+                )
+            )
+
+        for text in continuation.emitted_reply_texts:
+            rendered = str(text or "").strip()
+            if not rendered:
+                continue
+            if rendered in protocol_assistant_contents:
+                continue
+            transcript.append(L1TranscriptMessage(role="assistant", content=rendered, kind=L1MessageKind.ASSISTANT_REPLY))
+
+        summary = self._render_l1_exit_checkpoint_summary(
+            continuation,
+            kind=kind,
+            status=status,
+            reason=reason,
+            user_text=user_text,
+        )
+        transcript.append(L1TranscriptMessage(role="assistant", content=summary, kind=kind))
+        return transcript
+
+    def _render_l1_exit_checkpoint_summary(
+        self,
+        continuation: TurnContinuation,
+        *,
+        kind: L1MessageKind,
+        status: str,
+        reason: str,
+        user_text: str,
+    ) -> str:
+        lines = [
+            f'<turn_checkpoint kind="{kind.value}">',
+            "This is recovery context from a previous turn, not a new user request.",
+            f"turn_id: {continuation.turn_id}",
+            f"status: {status}",
+        ]
+        reason_text = self._truncate_checkpoint_text(reason, max_chars=240)
+        if reason_text:
+            lines.append(f"reason: {reason_text}")
+        user_preview = self._truncate_checkpoint_text(user_text, max_chars=360)
+        if user_preview:
+            lines.append(f"user_request: {user_preview}")
+        if continuation.tool_observations:
+            lines.append("completed_tools:")
+            for observation in continuation.tool_observations[:8]:
+                ok = "ok" if getattr(observation, "ok", False) else "error"
+                summary = self._truncate_checkpoint_text(getattr(observation, "summary", ""), max_chars=220)
+                lines.append(f"- {getattr(observation, 'tool_name', '')} ({ok}): {summary}")
+            if len(continuation.tool_observations) > 8:
+                lines.append(f"- ... +{len(continuation.tool_observations) - 8} more")
+        else:
+            lines.append("completed_tools: none recorded")
+        if continuation.pending_tool_call_batch:
+            lines.append(f"pending_tool_batch: {len(continuation.pending_tool_call_batch)} tool call(s) were not fully recorded")
+        lines.append("turn_outcome: not committed")
+        lines.append("</turn_checkpoint>")
+        return "\n".join(lines)
+
+    def _truncate_tool_result_for_l1(self, content: str) -> str:
+        max_chars = max(0, int(getattr(self.config, "l1_tool_result_max_chars", 8_000) or 0))
+        if not max_chars or len(content) <= max_chars:
+            return content
+        configured_preview = int(getattr(self.config, "l1_tool_result_preview_chars", 4_000) or 0)
+        preview_chars = max(1, min(configured_preview or max_chars, max_chars))
+        preview = content[:preview_chars].rstrip()
+        return f"{preview}\n\n[... truncated, original: {len(content)} chars]"
+
+    @staticmethod
+    def _truncate_checkpoint_text(value: object, *, max_chars: int) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) <= max_chars:
+            return text
+        return f"{text[: max(1, max_chars - 18)].rstrip()}...[truncated]"
 
     def _build_turn_settings_snapshot(self) -> dict[str, Any]:
         llm_runtime = self.context.port_registry.get("llm:llm")
@@ -1284,15 +1451,32 @@ class PalCore:
 
     async def _run_turn_continuation_async(self, continuation: TurnContinuation) -> TurnOutcome:
         current: EffectResult | None = None
-        while True:
-            if continuation.interrupted:
-                raise asyncio.CancelledError(continuation.interrupt_reason or "interrupted")
-            yielded = self.turn_manager.resume(continuation, current)
-            if isinstance(yielded, TurnOutcome):
-                outcome = self._enrich_transcript_with_tool_protocol(yielded, continuation)
-                await self._schedule_post_turn_commit_async(outcome)
-                return outcome
-            current = await self._execute_turn_effect_async(continuation, yielded)
+        try:
+            while True:
+                if continuation.interrupted:
+                    raise asyncio.CancelledError(continuation.interrupt_reason or "interrupted")
+                yielded = self.turn_manager.resume(continuation, current)
+                if isinstance(yielded, TurnOutcome):
+                    outcome = self._enrich_transcript_with_tool_protocol(yielded, continuation)
+                    await self._schedule_post_turn_commit_async(outcome)
+                    return outcome
+                current = await self._execute_turn_effect_async(continuation, yielded)
+        except asyncio.CancelledError:
+            await self.turn_manager.commit_l1_exit_checkpoint_async(
+                continuation,
+                kind=L1MessageKind.TURN_INTERRUPTED,
+                status="interrupted",
+                reason=continuation.interrupt_reason or "interrupted",
+            )
+            raise
+        except Exception as exc:
+            await self.turn_manager.commit_l1_exit_checkpoint_async(
+                continuation,
+                kind=L1MessageKind.TURN_ABORTED,
+                status="aborted",
+                reason=f"{exc.__class__.__name__}: {exc}",
+            )
+            raise
 
     def _truncate_tool_result_for_l1(self, content: str) -> str:
         max_chars = max(0, int(getattr(self.config, "l1_tool_result_max_chars", 8_000) or 0))
@@ -1304,7 +1488,7 @@ class PalCore:
         return f"{preview}\n\n[... truncated, original: {len(content)} chars]"
 
     def _enrich_transcript_with_tool_protocol(self, outcome: TurnOutcome, continuation: TurnContinuation) -> TurnOutcome:
-        from pal.memory.contracts import L1TranscriptMessage
+        from pal.memory.contracts import L1MessageKind, L1TranscriptMessage
 
         if not continuation.tool_protocol_messages:
             return outcome
@@ -1320,6 +1504,7 @@ class PalCore:
             new_transcript.append(L1TranscriptMessage(
                 role=str(msg.get("role", "")),
                 content=content,
+                kind=L1MessageKind.TOOL_RESULT if msg.get("role") == "tool" else L1MessageKind.ASSISTANT_TOOL_CALL,
                 tool_calls=msg.get("tool_calls"),
                 tool_call_id=msg.get("tool_call_id"),
             ))
@@ -1334,7 +1519,11 @@ class PalCore:
             if content and content in protocol_assistant_contents:
                 protocol_assistant_contents.remove(content)
                 continue
-            new_transcript.append(L1TranscriptMessage(role=m.role, content=m.content))
+            new_transcript.append(L1TranscriptMessage(
+                role=m.role,
+                content=m.content,
+                kind=L1MessageKind.ASSISTANT_REPLY,
+            ))
         return TurnOutcome(
             turn_id=outcome.turn_id,
             final_reply=outcome.final_reply,
