@@ -2118,7 +2118,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             ]],
         )
 
-    def test_turn_runtime_shows_reasoning_context_on_stdio(self) -> None:
+    def test_turn_runtime_keeps_reasoning_out_of_final_reply_and_l1(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
@@ -2137,9 +2137,15 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("[thinking]", outcome.final_reply)
-        self.assertIn("thinking here", outcome.final_reply)
-        self.assertTrue(outcome.final_reply.endswith("final answer"))
+        self.assertEqual(outcome.final_reply, "final answer")
+        self.assertNotIn("thinking here", outcome.final_reply)
+        self.assertEqual(
+            memory_service.l1_store.items[-1],
+            [
+                L1TranscriptMessage(role="user", content="hello", kind=L1MessageKind.USER_REQUEST),
+                L1TranscriptMessage(role="assistant", content="final answer", kind=L1MessageKind.ASSISTANT_REPLY),
+            ],
+        )
 
     def test_turn_runtime_streams_events_through_stdio_endpoint_while_core_executes_tools(self) -> None:
         core = PalCore()

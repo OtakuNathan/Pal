@@ -41,6 +41,13 @@ AskUserQuestion:
 output_contract_fragment = """
 Output exactly one JSON object and no surrounding prose.
 
+If artifact tools are available, the primary planner deliverable must be a JSON artifact, not Markdown:
+- relative_path: plan.json
+- role: primary
+- mime_type: application/json
+- content: exactly one JSON object matching one allowed JSON output type below
+After writing plan.json, the final response must be a short pointer to the artifact, not a rewritten plan.
+
 Allowed JSON output types:
 - {"type": "PlanDraft", ...}
 - {"type": "AskUserQuestion", ...}

@@ -16,6 +16,8 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(cfg.max_tool_results_per_message_chars, 200_000)
         self.assertEqual(cfg.stagnation_repeat_threshold, 3)
         self.assertEqual(cfg.llm_base_retry_delay_ms, 500)
+        self.assertEqual(cfg.llm_request_timeout_seconds, 180.0)
+        self.assertEqual(cfg.llm_compaction_timeout_seconds, 180.0)
         self.assertEqual(cfg.keep_recent_tool_messages, 10)
         self.assertEqual(cfg.l1_tool_result_max_chars, 8_000)
         self.assertEqual(cfg.l1_tool_result_preview_chars, 4_000)
@@ -70,12 +72,14 @@ class RuntimeConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.toml"
             config_path.write_text(
-                '[llm]\nbase_retry_delay_ms = 1000\nendpoint_retry_attempts = 5\n',
+                '[llm]\nbase_retry_delay_ms = 1000\nendpoint_retry_attempts = 5\nrequest_timeout_seconds = 90.5\ncompaction_timeout_seconds = 45.0\n',
                 encoding="utf-8",
             )
             cfg = RuntimeConfig.load(Path(tmpdir))
             self.assertEqual(cfg.llm_base_retry_delay_ms, 1000)
             self.assertEqual(cfg.llm_endpoint_retry_attempts, 5)
+            self.assertEqual(cfg.llm_request_timeout_seconds, 90.5)
+            self.assertEqual(cfg.llm_compaction_timeout_seconds, 45.0)
 
     def test_load_reads_memory_section(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

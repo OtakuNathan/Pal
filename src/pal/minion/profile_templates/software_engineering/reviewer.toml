@@ -29,6 +29,9 @@ output_contract_fragment = """
 Return a ReviewReport: approved, changes_requested, or blocked.
 Include findings ordered by severity with evidence, affected area, contract impact, suggested fix, test gaps, and residual risk.
 Say clearly when no issue is found, and still mention meaningful remaining test gaps or residual risk.
+
+If artifact tools are available, write the primary review deliverable as review_report.md or review_report.json.
+The artifact content must still satisfy this ReviewReport contract. Do not use artifact output as a loose implementation diary.
 """
 capability_groups = ["workspace_read", "web_research", "memory_recall", "minion_artifacts", "minion_memory_candidates"]
 

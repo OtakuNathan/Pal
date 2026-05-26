@@ -58,6 +58,7 @@ class LLMPreflightRequest:
     messages: list[dict[str, Any]]
     max_output_tokens: int
     model_hint: str | None = None
+    tools: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

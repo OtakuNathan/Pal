@@ -68,6 +68,7 @@ class LLMPreflightEffect(EffectRequest):
     assembly_context: PromptAssemblyContext = field(default_factory=PromptAssemblyContext)
     model_hint: str | None = None
     max_output_tokens: int = 1024
+    tools_override: list[dict[str, Any]] | None = None
     kind: str = EffectKind.LLM_PREFLIGHT
 
 
@@ -224,6 +225,7 @@ def agent_turn_program(
         advice = yield LLMPreflightEffect(
             assembly_context=assembly_context,
             max_output_tokens=max_output_tokens,
+            tools_override=tools_override,
         )
         if getattr(advice.payload, "status", "") == LLMPreflightStatus.COMPACT_REQUIRED:
             compact_result = yield MemoryCompactEffect(
@@ -286,15 +288,8 @@ def agent_turn_program(
 
 
 def render_final_reply(channel_envelope: ChannelEnvelope, outcome: CanonicalLLMOutcome) -> str:
-    if channel_envelope.endpoint.channel_kind != "stdio":
-        return outcome.text
-    reasoning = str(outcome.reasoning_text or "").strip()
-    answer = str(outcome.text or "").strip()
-    if not reasoning:
-        return outcome.text
-    if not answer:
-        return f"[thinking]\n{reasoning}"
-    return f"[thinking]\n{reasoning}\n\n{answer}"
+    _ = channel_envelope
+    return outcome.text
 
 
 def _render_tool_summary(observations: list[ToolObservation], *, max_summary_chars: int = 500) -> str:

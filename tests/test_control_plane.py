@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -433,6 +434,38 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(continuation.turn_settings_snapshot["think_level"], "deep")
         self.assertEqual(prompt.metadata["think_level"], "deep")
+
+    async def test_turn_prompt_budget_snapshot_counts_tools_schema(self) -> None:
+        envelope = self._make_channel_envelope(turn_id="turn-budget-tools", request_id="req-budget-tools", text="hello")
+        continuation = self.core.turn_manager.start(envelope)
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "op_test_tool",
+                    "description": "tool schema budget",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"payload": {"type": "string", "description": "x" * 120}},
+                    },
+                },
+            }
+        ]
+
+        prompt = self.core.turn_executor.build_turn_prompt(
+            continuation,
+            PromptAssemblyContext(event=envelope.event, core_mode="default"),
+            max_output_tokens=64,
+            tools=tools,
+        )
+
+        snapshot = prompt.metadata["prompt_budget_snapshot"]
+        expected_tool_chars = len(json.dumps(tools, ensure_ascii=False, sort_keys=True))
+        self.assertEqual(snapshot["tools_schema_chars"], expected_tool_chars)
+        self.assertEqual(
+            snapshot["hard_keep_chars"],
+            snapshot["system_chars"] + snapshot["current_user_chars"] + snapshot["tool_protocol_chars"] + expected_tool_chars,
+        )
 
     async def test_set_log_updates_future_turn_snapshot_only(self) -> None:
         first = self._make_channel_envelope(turn_id="turn-log-1", request_id="req-log-1")

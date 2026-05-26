@@ -56,6 +56,9 @@ LOCAL_GIT_EXCLUDES = (
 )
 
 
+CHECKPOINT_COMMIT_CAPABILITY = "op_minion_checkpoint_commit"
+
+
 @dataclass(frozen=True)
 class GitCommandResult:
     ok: bool
@@ -114,7 +117,7 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
     workspace["completion_policy"] = {"evidence": "git_commit", "requires_capability_evidence": True}
     if source_repo:
         workspace.setdefault("source_repo", source_repo)
-    return TaskContextPack.from_dict({**pack.to_dict(), "workspace": workspace})
+    return _with_checkpoint_commit_capability(TaskContextPack.from_dict({**pack.to_dict(), "workspace": workspace}))
 
 
 def prepare_task_workspace(runtime_root: Path, pack: TaskContextPack, *, run_id: str = "") -> TaskContextPack:
@@ -134,7 +137,7 @@ def prepare_task_workspace(runtime_root: Path, pack: TaskContextPack, *, run_id:
         prepared_workspace["workspace_policy"] = {**workspace_policy, "mode": "writable_git_branch"}
         if completion_policy:
             prepared_workspace["completion_policy"] = dict(completion_policy)
-        return TaskContextPack.from_dict({**prepared.to_dict(), "workspace": prepared_workspace})
+        return _with_checkpoint_commit_capability(TaskContextPack.from_dict({**prepared.to_dict(), "workspace": prepared_workspace}))
     if mode == "read_only_repo":
         source_repo = _source_repo(workspace)
         repo_path = str(workspace.get("repo_path") or "").strip()
@@ -153,6 +156,19 @@ def prepare_task_workspace(runtime_root: Path, pack: TaskContextPack, *, run_id:
     if completion_policy:
         workspace["completion_policy"] = dict(completion_policy)
     return _with_folder_workspace(runtime_root, pack, workspace, run_id=run_id)
+
+
+def _with_checkpoint_commit_capability(pack: TaskContextPack) -> TaskContextPack:
+    completion_policy = _policy_from_pack(pack, "completion_policy")
+    if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
+        return pack
+    metadata = pack.metadata if isinstance(pack.metadata, dict) else {}
+    if bool(metadata.get("allow_text_only_completion") or completion_policy.get("allow_artifact_evidence")):
+        return pack
+    allowed = [str(item).strip() for item in list(pack.allowed_capabilities or []) if str(item).strip()]
+    if CHECKPOINT_COMMIT_CAPABILITY not in allowed:
+        allowed.append(CHECKPOINT_COMMIT_CAPABILITY)
+    return TaskContextPack.from_dict({**pack.to_dict(), "allowed_capabilities": allowed})
 
 
 def commit_milestone(repo_path: Path, *, work_order_id: str, milestone_index: int, title: str = "") -> dict[str, Any]:

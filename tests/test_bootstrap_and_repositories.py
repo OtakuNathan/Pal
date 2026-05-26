@@ -1000,6 +1000,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(advice.fallback_chain, [])
         self.assertEqual(advice.breakdown["system_chars"], 5000)
         self.assertEqual(advice.breakdown["tool_protocol_chars"], 0)
+        self.assertEqual(advice.breakdown["tools_schema_chars"], 0)
         self.assertEqual(advice.breakdown["conversation_chars"], 0)
         self.assertEqual(advice.breakdown["current_user_chars"], 0)
         self.assertEqual(advice.breakdown["hard_keep_chars"], 5000)
@@ -1049,9 +1050,61 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(bool(advice.breakdown["hard_overflow"]))
         self.assertEqual(advice.breakdown["system_chars"], 3000)
         self.assertGreaterEqual(advice.breakdown["tool_protocol_chars"], 2000)
+        self.assertEqual(advice.breakdown["tools_schema_chars"], 0)
         self.assertEqual(advice.breakdown["current_user_chars"], 1000)
         self.assertGreaterEqual(advice.breakdown["hard_keep_chars"], 6000)
         self.assertLess(advice.breakdown["available_input_budget_chars"], advice.breakdown["hard_keep_chars"])
+
+    def test_llm_runtime_preflight_counts_tool_schema_budget(self) -> None:
+        repository = LLMEndpointRepository()
+        settings_repository = RuntimeSettingRepository()
+        settings_repository.ensure_defaults()
+        repository.ensure_defaults(
+            [
+                {
+                    "endpoint_id": "stub_endpoint",
+                    "provider": "stub",
+                    "model_id": "stub-model",
+                    "api_mode": "openai_chat",
+                    "base_url": "stub://local/llm",
+                    "credential_ref": "stub-key",
+                    "context_window": 10000,
+                    "max_output_tokens": 1200,
+                    "priority": 0,
+                    "enabled": True,
+                }
+            ]
+        )
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=repository),
+            settings_repository=settings_repository,
+        )
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "op_large_tool",
+                    "description": "d" * 500,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"payload": {"type": "string", "description": "x" * 300}},
+                    },
+                },
+            }
+        ]
+        expected_tool_chars = len(json.dumps(tools, ensure_ascii=False, sort_keys=True))
+
+        advice = runtime.preflight(
+            LLMPreflightRequest(
+                messages=[{"role": "user", "content": "u"}],
+                max_output_tokens=256,
+                tools=tools,
+            )
+        )
+
+        self.assertEqual(advice.breakdown["tools_schema_chars"], expected_tool_chars)
+        self.assertEqual(advice.breakdown["estimated_input_chars"], expected_tool_chars + 1)
+        self.assertEqual(advice.breakdown["hard_keep_chars"], expected_tool_chars + 1)
 
     def test_runtime_setting_repository_persists_think_level(self) -> None:
         repository = RuntimeSettingRepository()
@@ -1097,6 +1150,51 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertIsNotNone(runtime.last_request)
         self.assertEqual(runtime.last_request.metadata["think_level"], "deep")
+
+    def test_llm_runtime_injects_default_timeout_into_effective_request(self) -> None:
+        endpoint_repository = LLMEndpointRepository()
+        settings_repository = RuntimeSettingRepository()
+        endpoint_repository.ensure_defaults(
+            [
+                {
+                    "endpoint_id": "stub_endpoint",
+                    "provider": "stub",
+                    "model_id": "stub-model",
+                    "api_mode": "openai_chat",
+                    "base_url": "stub://local/llm",
+                    "credential_ref": "stub-key",
+                    "context_window": 10000,
+                    "max_output_tokens": 1200,
+                    "priority": 0,
+                    "enabled": True,
+                }
+            ]
+        )
+
+        class CaptureInvoker:
+            def __init__(self) -> None:
+                self.requests: list[CanonicalLLMRequest] = []
+
+            def invoke(self, endpoint, request: CanonicalLLMRequest):  # type: ignore[no-untyped-def]
+                self.requests.append(request)
+                return CanonicalLLMOutcome(text="ok", finish_reason=LLMFinishReason.STOP)
+
+        invoker = CaptureInvoker()
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
+            settings_repository=settings_repository,
+            endpoint_invoker=invoker,
+            config=RuntimeConfig(llm_request_timeout_seconds=37.0),
+        )
+
+        runtime.generate(
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=256,
+            )
+        )
+
+        self.assertEqual(invoker.requests[0].metadata["timeout_seconds"], 37.0)
 
     def test_compose_runtime_loads_first_party_sqlite_vec_plugin_via_plugin_host(self) -> None:
         self.wizard.seed_defaults(self.registration)

@@ -954,7 +954,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                 self.assertIn(detail["status"], {"completed", "blocked", "failed"})
                 self.assertTrue(detail["last_event_at"])
                 self.assertEqual(detail["last_phase"], "milestone_finalizing")
-                self.assertEqual(detail["last_tool_call"]["target_name"], "op_exec_shell")
+                self.assertEqual(detail["last_tool_call"]["target_name"], "op_minion_checkpoint_commit")
                 self.assertGreaterEqual(detail["llm_round_count"], 1)
                 self.assertGreaterEqual(detail["tool_call_count"], 1)
                 metadata = (detail["work_order_snapshot"].get("work_order") or {}).get("metadata") or {}
@@ -963,6 +963,13 @@ class RealLLMIntegrationTests(unittest.TestCase):
                 progress_phases = [event.get("payload", {}).get("phase") for event in progress_events]
                 self.assertIn("tool_call_started", progress_phases)
                 self.assertIn("tool_call_completed", progress_phases)
+                completed_targets = [
+                    str(event.get("payload", {}).get("target_name") or "")
+                    for event in progress_events
+                    if event.get("payload", {}).get("phase") == "tool_call_completed"
+                ]
+                self.assertIn("op_exec_shell", completed_targets)
+                self.assertIn("op_minion_checkpoint_commit", completed_targets)
             finally:
                 if client is not None:
                     with contextlib.suppress(Exception):

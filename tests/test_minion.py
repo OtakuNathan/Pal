@@ -1873,6 +1873,38 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
         self.assertIn(finalized["status"], {"committed", "no_changes"})
 
+    def test_git_task_environment_exposes_checkpoint_commit_capability(self) -> None:
+        pack = self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_git_checkpoint_tool",
+                goal="git backed work",
+                allowed_capabilities=["op_exec_shell"],
+                metadata={"task_id": "task_git_checkpoint_tool"},
+            )
+        )
+
+        prepared = prepare_git_task_environment(self.root, pack)
+
+        self.assertEqual(prepared.workspace["completion_policy"]["evidence"], "git_commit")
+        self.assertIn("op_exec_shell", prepared.allowed_capabilities)
+        self.assertIn("op_minion_checkpoint_commit", prepared.allowed_capabilities)
+        self.assertEqual(prepared.allowed_capabilities.count("op_minion_checkpoint_commit"), 1)
+
+    def test_git_task_environment_keeps_text_only_planner_without_checkpoint_tool(self) -> None:
+        pack = self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_git_text_only",
+                goal="draft text deliverable",
+                allowed_capabilities=[],
+                metadata={"task_id": "task_git_text_only", "allow_text_only_completion": True},
+            )
+        )
+
+        prepared = prepare_git_task_environment(self.root, pack)
+
+        self.assertEqual(prepared.workspace["completion_policy"]["evidence"], "git_commit")
+        self.assertNotIn("op_minion_checkpoint_commit", prepared.allowed_capabilities)
+
     def test_commit_milestone_excludes_generated_artifacts(self) -> None:
         pack = self.repository.prepare_pack_for_spawn(
             TaskContextPack(work_order_id="wo_generated", goal="ignore generated", metadata={"task_id": "task_generated"})
@@ -4187,6 +4219,28 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_runner_tool_surface_preserves_custom_allowed_tools_with_checkpoint(self) -> None:
+        class FakeExecution:
+            def get_capability_spec(self, name):
+                if name == "op_fake_write":
+                    return {
+                        "name": "op_fake_write",
+                        "description": "write fake evidence",
+                        "parameters_schema": {
+                            "type": "object",
+                            "properties": {"content": {"type": "string"}},
+                            "required": ["content"],
+                        },
+                    }
+                return None
+
+        allowed = ["op_fake_write", "op_minion_checkpoint_commit"]
+        scoped = MinionScopedExecutionRuntime(FakeExecution(), allowed)
+        tool_names = [item["function"]["name"] for item in _llm_tools_for_allowed(scoped, allowed)]
+
+        self.assertIn("op_fake_write", tool_names)
+        self.assertIn("op_minion_checkpoint_commit", tool_names)
+
     def test_slim_runner_runtime_publishes_resident_work_capabilities(self) -> None:
         async def scenario() -> None:
             bundle = build_slim_minion_runtime(self.root)
@@ -4247,6 +4301,11 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("Integration tests", prompt)
         self.assertIn("dogfood", prompt)
         self.assertIn("Output exactly one JSON object", prompt)
+        self.assertIn("primary planner deliverable must be a JSON artifact", prompt)
+        self.assertIn("relative_path: plan.json", prompt)
+        self.assertIn("mime_type: application/json", prompt)
+        self.assertIn("content: exactly one JSON object", prompt)
+        self.assertIn("Artifact output must satisfy the current output_contract", prompt)
         self.assertIn('"type": "FinalPlanArtifact"', prompt)
         self.assertIn("Do not output markdown tables", prompt)
         self.assertIn("op_workspace_read", prompt)
@@ -4323,6 +4382,7 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("preconditions and postconditions", prompt)
         self.assertIn("exception escape", prompt)
         self.assertIn("lifecycle management", prompt)
+        self.assertIn("review_report.md or review_report.json", prompt)
         self.assertIn("blocker: correctness/security/data loss/API breakage", prompt)
         self.assertIn("note: residual risk or observation", prompt)
 
@@ -4351,6 +4411,8 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("technical context", prompt)
         self.assertIn("design notes, specs, proposals", prompt)
         self.assertIn("confirmed facts and source evidence", prompt)
+        self.assertIn("write the requested document to the requested path", prompt)
+        self.assertIn("final response should be a short pointer plus verification summary", prompt)
         self.assertIn("op_workspace_read", pack.allowed_capabilities)
         self.assertIn("op_web_search", pack.allowed_capabilities)
         self.assertIn("op_file_read", pack.allowed_capabilities)

@@ -341,9 +341,11 @@ class MinionRunner:
         *,
         max_output_tokens: int,
     ) -> EffectResult:
+        tools = _llm_tools_for_allowed(state.execution_runtime, self.pack.allowed_capabilities)
         request = LLMPreflightRequest(
             messages=self._minion_prompt_messages(state, effect.assembly_context),
             max_output_tokens=max_output_tokens,
+            tools=tools,
             metadata=_minion_llm_request_metadata(self.pack, self.run_id),
         )
         preflight = getattr(bundle.llm_runtime, "apreflight", None)
@@ -385,10 +387,11 @@ class MinionRunner:
             tool_call_count=state.tool_call_count,
             tool_count=len(_llm_tools_for_allowed(state.execution_runtime, self.pack.allowed_capabilities)),
         )
+        tools = _llm_tools_for_allowed(state.execution_runtime, self.pack.allowed_capabilities)
         request = CanonicalLLMRequest(
             messages=self._minion_prompt_messages(state, effect.assembly_context),
             max_output_tokens=max_output_tokens,
-            tools=_llm_tools_for_allowed(state.execution_runtime, self.pack.allowed_capabilities),
+            tools=tools,
             metadata=_minion_llm_request_metadata(self.pack, self.run_id),
         )
         self._append_debug_log(
@@ -1514,14 +1517,17 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
 
 
 def _minion_llm_tool_surface(allowed_capabilities: list[str]) -> list[str]:
-    surface = [
+    ordered = [
         name
         for name in (*MINION_DISCOVERY_TOOL_SURFACE, *MINION_DIRECT_WORK_TOOL_SURFACE)
         if name in allowed_capabilities
     ]
-    if surface:
-        return surface
-    return allowed_capabilities
+    seen = set(ordered)
+    for name in allowed_capabilities:
+        if name not in seen:
+            ordered.append(name)
+            seen.add(name)
+    return ordered
 
 
 @dataclass
@@ -2204,6 +2210,7 @@ def _render_system_prompt(scaffold: dict[str, Any]) -> str:
         "Do not create or rely on committing generated build/cache artifacts such as __pycache__, .pytest_cache, .o, .obj, .a, .so, .dylib, .dll, .exe, class files, coverage output, build directories, or minion_outputs reports.\n"
         "When `op_minion_artifact_write` or `op_minion_artifact_edit` is available, write planner/reviewer deliverables and any long structured output to workspace.artifact_dir with artifact tools; keep the final chat summary short and point to the artifact.\n"
         "Use `op_minion_artifact_write` for one complete coherent file. Use `op_minion_artifact_edit` append for long deliverables split into coherent sections, or replace only when rewriting the complete artifact. Do not rely on final chat text for long plans or reports.\n"
+        "Artifact output must satisfy the current output_contract. If the output_contract requires JSON, write a .json artifact with application/json content containing exactly that JSON object; do not turn it into Markdown prose just because it is an artifact.\n"
         "When `op_minion_memory_candidate_write` is available and the run teaches something genuinely reusable, write a concise memory candidate there instead of asking Pal to remember it directly.\n"
         "If a tool/capability call fails because of an obvious schema, argument, path, or local input mistake, correct the call directly.\n"
         "If a tool/capability call fails and the next step is unclear, repeated retries would be guesswork, or the failure may have prior Pal/project repair history, use `op_memory_recall` when it is listed below before retrying, debugging further, or reporting blocked.\n"

@@ -32,6 +32,9 @@ Return a written artifact with:
 - main body appropriate to the requested artifact type
 - open questions, assumptions, risks, or follow-up items when relevant
 - verification notes or cited evidence when the artifact makes factual claims
+
+If artifact or file tools are available, write the requested document to the requested path or a clearly named Markdown artifact.
+The artifact is the deliverable; the final response should be a short pointer plus verification summary, not a second full copy.
 """
 capability_groups = ["workspace_read", "web_research", "memory_recall", "minion_artifacts"]
 default_allowed_capabilities = ["op_file_read", "op_file_edit", "op_file_write"]

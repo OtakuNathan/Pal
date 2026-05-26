@@ -43,6 +43,8 @@ from pal.stream_events import NormalizedLLMStreamEvent
 _DEFAULT_BASE_RETRY_DELAY_MS = 500
 _DEFAULT_MAX_RETRY_DELAY_MS = 32_000
 _DEFAULT_STALE_CONNECTION_SETTLE_MS = 300
+_DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS = 180.0
+_DEFAULT_LLM_COMPACTION_TIMEOUT_SECONDS = 180.0
 
 
 def _is_stale_connection(message: str) -> bool:
@@ -146,6 +148,16 @@ def _compute_retry_delay(
     base = min(base_delay_ms * (2 ** (attempt - 1)), max_delay_ms)
     jitter = random.random() * 0.25 * base  # noqa: S311
     return (base + jitter) / 1000.0
+
+
+def _coerce_timeout_seconds(value: Any, *, default: float) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        seconds = default
+    if seconds <= 0:
+        seconds = default
+    return max(1.0, seconds)
 
 
 @dataclass
@@ -351,7 +363,7 @@ class LiteLLMEndpointInvoker:
         timeout_seconds = request.metadata.get("timeout_seconds")
         if timeout_seconds is not None:
             try:
-                draft.timeout = max(1, min(int(timeout_seconds), 120))
+                draft.timeout = max(1, int(float(timeout_seconds)))
             except (TypeError, ValueError):
                 pass
         if endpoint.base_url and not str(endpoint.base_url).startswith("stub://"):
@@ -672,6 +684,36 @@ class LLMRuntime(LLMRuntimePort):
     def _retry_stale_settle_ms(self) -> int:
         return getattr(self.config, "llm_stale_connection_settle_ms", _DEFAULT_STALE_CONNECTION_SETTLE_MS) if self.config else _DEFAULT_STALE_CONNECTION_SETTLE_MS
 
+    @property
+    def _default_request_timeout_seconds(self) -> float:
+        value = (
+            getattr(self.config, "llm_request_timeout_seconds", _DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS)
+            if self.config
+            else _DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS
+        )
+        return _coerce_timeout_seconds(value, default=_DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS)
+
+    @property
+    def _default_compaction_timeout_seconds(self) -> float:
+        value = (
+            getattr(self.config, "llm_compaction_timeout_seconds", _DEFAULT_LLM_COMPACTION_TIMEOUT_SECONDS)
+            if self.config
+            else _DEFAULT_LLM_COMPACTION_TIMEOUT_SECONDS
+        )
+        return _coerce_timeout_seconds(value, default=_DEFAULT_LLM_COMPACTION_TIMEOUT_SECONDS)
+
+    def _timeout_seconds_for_metadata(self, metadata: dict[str, Any]) -> float:
+        explicit = metadata.get("timeout_seconds")
+        if explicit is not None:
+            return _coerce_timeout_seconds(explicit, default=self._default_request_timeout_seconds)
+        purpose = str(metadata.get("purpose") or "").strip().lower()
+        if "compaction" in purpose:
+            return self._default_compaction_timeout_seconds
+        return self._default_request_timeout_seconds
+
+    def _timeout_seconds_for_request(self, request: CanonicalLLMRequest) -> float:
+        return self._timeout_seconds_for_metadata(dict(request.metadata))
+
     def refresh_runtime_settings(self) -> None:
         self.think_level = self.settings_repository.get_think_level()
         configured_active = self.settings_repository.get_active_llm_endpoint_id()
@@ -825,6 +867,7 @@ class LLMRuntime(LLMRuntimePort):
                     messages=effective_request.messages,
                     max_output_tokens=effective_request.max_output_tokens,
                     model_hint=effective_request.model_hint,
+                    tools=list(effective_request.tools),
                     metadata=dict(effective_request.metadata),
                 ),
                 fallback_chain=[],
@@ -914,7 +957,16 @@ class LLMRuntime(LLMRuntimePort):
         )
 
     async def agenerate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        return await asyncio.to_thread(self.generate, request)
+        timeout_seconds = self._timeout_seconds_for_request(request)
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(self.generate, request), timeout=timeout_seconds)
+        except TimeoutError:
+            return CanonicalLLMOutcome(
+                text=f"LLM generation timed out after {timeout_seconds:.0f}s.",
+                reasoning_text="",
+                tool_calls=[],
+                finish_reason=LLMFinishReason.ERROR,
+            )
 
     def generate_stream(self, request: CanonicalLLMRequest) -> list[NormalizedLLMStreamEvent]:
         self.refresh_runtime_settings()
@@ -951,7 +1003,19 @@ class LLMRuntime(LLMRuntimePort):
         ]
 
     async def agenerate_stream(self, request: CanonicalLLMRequest) -> list[NormalizedLLMStreamEvent]:
-        return await asyncio.to_thread(self.generate_stream, request)
+        timeout_seconds = self._timeout_seconds_for_request(request)
+        try:
+            return await asyncio.wait_for(asyncio.to_thread(self.generate_stream, request), timeout=timeout_seconds)
+        except TimeoutError:
+            msg = f"LLM generation timed out after {timeout_seconds:.0f}s."
+            return [
+                NormalizedLLMStreamEvent(
+                    event_kind=LLMStreamEventKind.ERROR,
+                    error_text=msg,
+                    finish_reason=LLMFinishReason.ERROR,
+                ),
+                NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.ERROR),
+            ]
 
     def summarize_compaction(
         self,
@@ -996,13 +1060,19 @@ class LLMRuntime(LLMRuntimePort):
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
     ) -> str:
-        return await asyncio.to_thread(
-            self.summarize_compaction,
-            text,
-            max_output_tokens=max_output_tokens,
-            preferred_endpoint_id=preferred_endpoint_id,
-            preferred_model_id=preferred_model_id,
-        )
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.summarize_compaction,
+                    text,
+                    max_output_tokens=max_output_tokens,
+                    preferred_endpoint_id=preferred_endpoint_id,
+                    preferred_model_id=preferred_model_id,
+                ),
+                timeout=self._default_compaction_timeout_seconds,
+            )
+        except TimeoutError:
+            return ""
 
     _COMPACT_STRUCTURED_SYSTEM = (
         "You are a memory compaction engine.\n"
@@ -1077,13 +1147,19 @@ class LLMRuntime(LLMRuntimePort):
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(
-            self.compact_memory_structured,
-            text,
-            max_output_tokens=max_output_tokens,
-            preferred_endpoint_id=preferred_endpoint_id,
-            preferred_model_id=preferred_model_id,
-        )
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.compact_memory_structured,
+                    text,
+                    max_output_tokens=max_output_tokens,
+                    preferred_endpoint_id=preferred_endpoint_id,
+                    preferred_model_id=preferred_model_id,
+                ),
+                timeout=self._default_compaction_timeout_seconds,
+            )
+        except TimeoutError:
+            return {}
 
     def _build_preflight_advice(
         self,
@@ -1145,12 +1221,18 @@ class LLMRuntime(LLMRuntimePort):
                 for key in (
                     "system_chars",
                     "tool_protocol_chars",
+                    "tools_schema_chars",
                     "conversation_chars",
                     "current_user_chars",
                     "estimated_input_chars",
                     "hard_keep_chars",
                 )
             }
+            if "tools_schema_chars" not in snapshot:
+                tools_schema_chars = _estimate_tools_schema_chars(request.tools)
+                breakdown["tools_schema_chars"] = tools_schema_chars
+                breakdown["estimated_input_chars"] += tools_schema_chars
+                breakdown["hard_keep_chars"] += tools_schema_chars
             return breakdown
         system_chars = 0
         tool_protocol_chars = 0
@@ -1170,14 +1252,16 @@ class LLMRuntime(LLMRuntimePort):
                 current_user_chars += content_chars
                 continue
             conversation_chars += content_chars
-        estimated_input_chars = system_chars + tool_protocol_chars + conversation_chars + current_user_chars
+        tools_schema_chars = _estimate_tools_schema_chars(request.tools)
+        estimated_input_chars = system_chars + tool_protocol_chars + tools_schema_chars + conversation_chars + current_user_chars
         return {
             "system_chars": system_chars,
             "tool_protocol_chars": tool_protocol_chars,
+            "tools_schema_chars": tools_schema_chars,
             "conversation_chars": conversation_chars,
             "current_user_chars": current_user_chars,
             "estimated_input_chars": estimated_input_chars,
-            "hard_keep_chars": system_chars + tool_protocol_chars + current_user_chars,
+            "hard_keep_chars": system_chars + tool_protocol_chars + tools_schema_chars + current_user_chars,
         }
 
     @staticmethod
@@ -1230,6 +1314,8 @@ class LLMRuntime(LLMRuntimePort):
             **dict(request.metadata),
             "think_level": requested_think_level,
         }
+        if metadata.get("timeout_seconds") is None:
+            metadata["timeout_seconds"] = self._timeout_seconds_for_metadata(metadata)
         if endpoint is not None:
             metadata.update(
                 {
@@ -1340,6 +1426,15 @@ def _message_content_chars(content: Any) -> int:
                 parts.append(str(item.get("text") or ""))
         return len("\n".join(part for part in parts if part))
     return len(str(content or ""))
+
+
+def _estimate_tools_schema_chars(tools: list[dict[str, Any]]) -> int:
+    if not tools:
+        return 0
+    try:
+        return len(json.dumps(tools, ensure_ascii=False, sort_keys=True))
+    except TypeError:
+        return len(str(tools))
 
 
 def _coerce_messages_for_litellm(

@@ -102,7 +102,13 @@ class TurnExecutor:
     @_dispatch_effect.register(LLMPreflightEffect)
     async def _handle_llm_preflight(self, effect, continuation):
         llm_runtime = self.context.require_port("llm:llm")
-        prompt = self.build_turn_prompt(continuation, effect.assembly_context, max_output_tokens=effect.max_output_tokens)
+        tools = self._resolve_llm_tools(continuation, effect.tools_override)
+        prompt = self.build_turn_prompt(
+            continuation,
+            effect.assembly_context,
+            max_output_tokens=effect.max_output_tokens,
+            tools=tools,
+        )
         advice = await self._call_port_async(
             llm_runtime,
             "apreflight",
@@ -111,6 +117,7 @@ class TurnExecutor:
                 messages=prompt.messages,
                 max_output_tokens=prompt.max_output_tokens,
                 model_hint=prompt.model_hint,
+                tools=tools,
                 metadata=dict(prompt.metadata),
             )
         )
@@ -178,11 +185,13 @@ class TurnExecutor:
                 ),
             )
         llm_runtime = self.context.require_port("llm:llm")
-        prompt = self.build_turn_prompt(continuation, effect.assembly_context, max_output_tokens=effect.max_output_tokens)
-        if effect.tools_override is not None:
-            tools = list(effect.tools_override)
-        else:
-            tools = [] if continuation.finalization_only else self._build_llm_tool_contracts()
+        tools = self._resolve_llm_tools(continuation, effect.tools_override)
+        prompt = self.build_turn_prompt(
+            continuation,
+            effect.assembly_context,
+            max_output_tokens=effect.max_output_tokens,
+            tools=tools,
+        )
         request = CanonicalLLMRequest(
             messages=list(prompt.messages),
             max_output_tokens=prompt.max_output_tokens,
@@ -249,8 +258,13 @@ class TurnExecutor:
                 tool_calls=[],
                 finish_reason=LLMFinishReason.FALLBACK,
                 response_mode=LLMResponseMode.CHAT,
-            )
+        )
         return EffectResult(status=RuntimeStatus.OK, payload=outcome)
+
+    def _resolve_llm_tools(self, continuation, tools_override: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        if tools_override is not None:
+            return list(tools_override)
+        return [] if continuation.finalization_only else self._build_llm_tool_contracts()
 
     @_dispatch_effect.register(ToolCallEffect)
     async def _handle_tool_call(self, effect, continuation):
@@ -602,7 +616,14 @@ class TurnExecutor:
 
     # ── prompt building ─────────────────────────────────────────────────
 
-    def build_turn_prompt(self, continuation, assembly_context, *, max_output_tokens: int) -> CanonicalLLMRequest:
+    def build_turn_prompt(
+        self,
+        continuation,
+        assembly_context,
+        *,
+        max_output_tokens: int,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> CanonicalLLMRequest:
         from pal.shared import PromptAssemblyContext
 
         metadata = dict(assembly_context.metadata)
@@ -671,6 +692,7 @@ class TurnExecutor:
             assembly_context,
             base_messages=base_messages,
             prepared_tool_protocol=prepared_tool_protocol,
+            tools=list(tools or []),
         )
         prompt = CanonicalLLMRequest(
             messages=prompt_messages,
@@ -772,6 +794,7 @@ class TurnExecutor:
         *,
         base_messages: list[dict[str, Any]],
         prepared_tool_protocol: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
     ) -> dict[str, int]:
         system_chars = sum(
             self._estimate_prompt_message_chars(message)
@@ -794,16 +817,27 @@ class TurnExecutor:
             if str(message.get("role") or "").strip() != "system"
         )
         tool_protocol_chars = sum(self._estimate_prompt_message_chars(message) for message in prepared_tool_protocol)
+        tools_schema_chars = self._estimate_tools_schema_chars(tools)
         conversation_chars = max(base_non_system_chars - current_user_chars, 0)
-        estimated_input_chars = system_chars + current_user_chars + conversation_chars + tool_protocol_chars
+        estimated_input_chars = system_chars + current_user_chars + conversation_chars + tool_protocol_chars + tools_schema_chars
         return {
             "system_chars": system_chars,
             "tool_protocol_chars": tool_protocol_chars,
+            "tools_schema_chars": tools_schema_chars,
             "conversation_chars": conversation_chars,
             "current_user_chars": current_user_chars,
             "estimated_input_chars": estimated_input_chars,
-            "hard_keep_chars": system_chars + current_user_chars + tool_protocol_chars,
+            "hard_keep_chars": system_chars + current_user_chars + tool_protocol_chars + tools_schema_chars,
         }
+
+    @staticmethod
+    def _estimate_tools_schema_chars(tools: list[dict[str, Any]]) -> int:
+        if not tools:
+            return 0
+        try:
+            return len(json.dumps(tools, ensure_ascii=False, sort_keys=True))
+        except TypeError:
+            return len(str(tools))
 
     def _build_tool_call_budget(self, continuation, *, execution_call=None) -> ToolCallBudget:
         cfg = self._config
