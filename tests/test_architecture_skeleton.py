@@ -390,6 +390,21 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 forbidden_fragments=("pal.channel",),
             )
 
+    def test_agent_turn_layers_use_shared_agent_io_not_concrete_channel_contracts(self) -> None:
+        for relative_path in (
+            "src/pal/core/turns.py",
+            "src/pal/core/turn_executor.py",
+            "src/pal/core/turn_handler.py",
+            "src/pal/control/routing.py",
+            "src/pal/control/handler.py",
+            "src/pal/proactive/turns.py",
+            "src/pal/minion/runner.py",
+        ):
+            self._assert_no_forbidden_imports(
+                ROOT / relative_path,
+                forbidden_fragments=("pal.channel",),
+            )
+
     def test_memory_does_not_import_plugin_implementations_directly(self) -> None:
         for relative_path in (
             "src/pal/memory/contracts.py",

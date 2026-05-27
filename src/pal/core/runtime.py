@@ -10,7 +10,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from pal.channel.contracts import ChannelEnvelope
 from pal.control import interactions as control_interactions
 from pal.control.contracts import ControlAction, ControlDelivery, ControlRoute
 from pal.control.routing import derive_control_scope_key
@@ -32,7 +31,7 @@ from pal.foundation import AttachmentSpec, EventEnvelope, utc_now
 from pal.failure import FailureSignal, FailureUserFeedback
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
 from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryCommitRequest
-from pal.shared import EventKind, SourceKind
+from pal.shared import ChannelEnvelope, EventKind, SourceKind
 from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus
 from pal.shared.payloads import extract_text_from_payload
 
@@ -136,9 +135,11 @@ class TurnManager:
                     status="interrupted",
                     reason=reason,
                 )
-            channel_runtime = self.context.port_registry.get("channel:channel")
-            if channel_runtime is not None and isinstance(continuation, TurnContinuation):
-                channel_runtime.abort_stream(continuation.channel_envelope.response_handle, reason=reason)
+            output_port = self.context.port_registry.get("agent_io:output") or self.context.port_registry.get("channel:channel")
+            if output_port is not None and isinstance(continuation, TurnContinuation):
+                abort_result = output_port.abort_stream(continuation.channel_envelope.response_handle, reason=reason)
+                if inspect.isawaitable(abort_result):
+                    await abort_result
             execution_runtime = getattr(self.context, "execution_runtime", None)
             if execution_runtime is not None:
                 interrupt_turn = getattr(execution_runtime, "interrupt_turn", None)
@@ -1428,7 +1429,7 @@ class PalCore:
         endpoint = channel_runtime.get_endpoint(route.endpoint_id) if channel_runtime is not None else None
         endpoint_config = endpoint.endpoint if endpoint is not None else None
         if endpoint_config is None:
-            from pal.channel.contracts import EndpointConfig, ResponseHandle
+            from pal.shared import EndpointConfig, ResponseHandle
 
             endpoint_config = EndpointConfig(
                 endpoint_id=route.endpoint_id,

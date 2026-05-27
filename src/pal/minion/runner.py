@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import inspect
 import mimetypes
 import os
 import json
@@ -15,19 +16,22 @@ from uuid import uuid4
 from pal.artifact import ArtifactManager, ArtifactRepository, register_with_core as register_artifact_with_core
 from pal.core import PalCore
 from pal.core.runtime_config import RuntimeConfig
+from pal.core.tool_stagnation import ToolStagnationGuardProcess
+from pal.core.turn_events import TurnEventBus
+from pal.core.turn_executor import TurnExecutor
 from pal.core.turns import (
     AgentLoopFrame,
     EffectResult,
     L1CommitPayload,
-    LLMPreflightEffect,
     LLMRequestEffect,
     MemoryCompactEffect,
     ToolCallEffect,
+    TurnContinuation,
     TurnOutcome,
     agent_turn_program,
 )
 from pal.execution import CapabilityCall, CapabilityResult, register_with_core as register_execution_with_core
-from pal.foundation import PalV2Database, utc_now
+from pal.foundation import EventEnvelope, PalV2Database, utc_now
 from pal.llm import EndpointResolver, LLMEndpointRepository, LLMRuntime, LiteLLMCredentialResolver, RuntimeSettingRepository, build_default_endpoint_invoker
 from pal.llm.contracts import (
     CanonicalLLMOutcome,
@@ -50,11 +54,33 @@ from pal.memory import (
     register_with_core as register_memory_with_core,
 )
 from pal.minion.git_env import commit_milestone, inspect_milestone_checkpoint
+from pal.minion.prompt_adapter import (
+    build_minion_prompt_messages,
+    build_minion_task_envelope as _minion_task_envelope,
+    minion_primary_input as _minion_primary_input,
+    prompt_scaffold_summary as _prompt_scaffold_summary,
+    prompt_view_from_pack as _prompt_view_from_pack,
+)
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
-from pal.minion.work_order import build_planner_work_order, prompt_view_from_metadata
+from pal.minion.user_interaction import (
+    MinionUserInteractionPort,
+    ask_user_question_summary as _ask_user_question_summary,
+)
+from pal.minion.work_order import build_planner_work_order
 from pal.plugins.l3 import MockL3Plugin, SQLiteVecL3Plugin, register_with_core as register_l3_with_core
-from pal.shared import LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus, TaskContextPack
-from pal.shared.prompt_rendering import render_system_reminder, render_xml_block
+from pal.shared import (
+    ChannelEnvelope,
+    EndpointConfig,
+    EventKind,
+    LLMFinishReason,
+    LLMPreflightStatus,
+    PromptAssemblyContext,
+    ResponseHandle,
+    RuntimeStatus,
+    SourceKind,
+    TaskContextPack,
+    default_tool_result_text,
+)
 from pal.execution.tool_search import ToolReadTool, ToolSearchTool
 from pal.web_fetch import BrowserServiceManager, WebFetchProviderRepository, WebFetchService, register_with_core as register_web_fetch_with_core
 from pal.web_search import WebSearchProviderRepository, WebSearchService, register_with_core as register_web_search_with_core
@@ -77,10 +103,279 @@ class MinionRuntimeBundle:
 
 
 @dataclass
+class _MinionTurnContext:
+    execution_runtime: Any
+    port_registry: dict[str, Any]
+    turn_event_bus: TurnEventBus = field(default_factory=TurnEventBus)
+
+    def require_port(self, key: str) -> Any:
+        return self.port_registry[key]
+
+
+@dataclass
+class _MinionTurnState:
+    diagnostics: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class _MinionTurnManager:
+    guard: ToolStagnationGuardProcess = field(default_factory=ToolStagnationGuardProcess)
+
+
+@dataclass
+class _MinionFailureResult:
+    user_feedback: str
+    verification: Any = None
+    report: Any = None
+
+
+class _MinionLLMRuntimeAdapter:
+    def __init__(self, runner: "MinionRunner", base_runtime: Any, state: "MinionAgentLoopState") -> None:
+        self._runner = runner
+        self._base = base_runtime
+        self._state = state
+
+    def resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None) -> int | None:
+        fn = getattr(self._base, "resolve_max_output_tokens", None)
+        if not callable(fn):
+            return None
+        try:
+            return fn(preferred_endpoint_id=preferred_endpoint_id)
+        except TypeError:
+            return fn()
+
+    def resolve_endpoint_facts(self, *args, **kwargs) -> dict[str, Any]:
+        fn = getattr(self._base, "resolve_endpoint_facts", None)
+        if not callable(fn):
+            return {}
+        try:
+            value = fn(*args, **kwargs)
+        except TypeError:
+            value = fn()
+        return dict(value or {}) if isinstance(value, dict) else {}
+
+    async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
+        method = getattr(self._base, "apreflight", None)
+        if callable(method):
+            result = method(request)
+            return await result if inspect.isawaitable(result) else result
+        method = getattr(self._base, "preflight", None)
+        if callable(method):
+            result = method(request)
+            if inspect.isawaitable(result):
+                return await result
+            return await asyncio.to_thread(lambda: result)
+        return LLMPreflightAdvice(status=LLMPreflightStatus.READY)
+
+    async def agenerate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
+        await self._runner._emit_progress(
+            "llm_round_started",
+            round=self._state.llm_round_count,
+            tool_call_count=self._state.tool_call_count,
+            tool_count=len(list(request.tools or [])),
+        )
+        method = getattr(self._base, "agenerate", None)
+        if callable(method):
+            awaitable = method(request)
+        else:
+            sync_method = getattr(self._base, "generate")
+            awaitable = asyncio.to_thread(sync_method, request)
+        return await self._runner._await_with_progress_heartbeat(
+            awaitable,
+            phase="llm_round_waiting",
+            round=self._state.llm_round_count,
+            tool_call_count=self._state.tool_call_count,
+        )
+
+    async def acompact_memory_structured(self, *args, **kwargs) -> dict[str, Any]:
+        method = getattr(self._base, "acompact_memory_structured", None)
+        if callable(method):
+            result = method(*args, **kwargs)
+            result = await result if inspect.isawaitable(result) else result
+            return dict(result or {}) if isinstance(result, dict) else {}
+        method = getattr(self._base, "compact_memory_structured", None)
+        if callable(method):
+            result = await asyncio.to_thread(method, *args, **kwargs)
+            return dict(result or {}) if isinstance(result, dict) else {}
+        return {}
+
+    async def asummarize_compaction(self, *args, **kwargs) -> str:
+        method = getattr(self._base, "asummarize_compaction", None)
+        if callable(method):
+            result = method(*args, **kwargs)
+            result = await result if inspect.isawaitable(result) else result
+            return str(result or "").strip()
+        method = getattr(self._base, "summarize_compaction", None)
+        if callable(method):
+            result = await asyncio.to_thread(method, *args, **kwargs)
+            return str(result or "").strip()
+        return ""
+
+
+class _MinionMemoryServiceAdapter:
+    def __init__(self, runner: "MinionRunner", state: "MinionAgentLoopState") -> None:
+        self._runner = runner
+        self._state = state
+
+    def build_pack(self, request: MemoryPackRequest):
+        return self._state.memory_service.build_pack(request)
+
+    def build_compaction_source_text(self, *, target_input_budget: int) -> str:
+        return self._runner._minion_compaction_source_text(self._state, target_input_budget=target_input_budget)
+
+    def compact(self, request: MemoryCompactRequest):
+        return self._state.memory_service.compact(request)
+
+    def commit_l1(self, request: MemoryCommitRequest):
+        return self._state.memory_service.commit_l1(request)
+
+    def project_l2_entries(self, *args, **kwargs):
+        method = getattr(self._state.memory_service, "project_l2_entries", None)
+        if not callable(method):
+            return None
+        return method(*args, **kwargs)
+
+
+class _MinionOutputPort:
+    def __init__(self, runner: "MinionRunner") -> None:
+        self._runner = runner
+
+    async def queue_reply(self, envelope: ChannelEnvelope, text: str) -> str:
+        _ = envelope
+        await self._runner._emit("progress", {"phase": "reply", "summary": _preview_text(text, limit=500)})
+        return f"minion_reply_{uuid4().hex[:12]}"
+
+    async def queue_stream_event(self, envelope: ChannelEnvelope, event: Any) -> str:
+        _ = envelope
+        _ = event
+        return f"minion_stream_{uuid4().hex[:12]}"
+
+    async def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
+        _ = response_handle
+        _ = reason
+
+    async def queue_status(self, envelope: ChannelEnvelope, kind: str, *, payload: dict[str, Any] | None = None) -> str:
+        _ = envelope
+        await self._runner._emit("progress", {"phase": kind, "summary": _preview_text(json.dumps(payload or {}, ensure_ascii=False), limit=500)})
+        return f"minion_status_{uuid4().hex[:12]}"
+
+    async def queue_attachment(self, envelope: ChannelEnvelope, attachment: Any) -> str:
+        _ = envelope
+        _ = attachment
+        return f"minion_attachment_{uuid4().hex[:12]}"
+
+
+class _MinionExecutionRuntimeAdapter:
+    def __init__(self, runner: "MinionRunner", state: "MinionAgentLoopState", continuation: TurnContinuation) -> None:
+        self._runner = runner
+        self._state = state
+        self._continuation = continuation
+
+    async def execute_tool_async(
+        self,
+        call: CanonicalToolCall,
+        *,
+        allow_tools: bool = True,
+        budget: Any = None,
+        turn_id: str | None = None,
+    ) -> CanonicalToolResult:
+        _ = allow_tools
+        _ = budget
+        _ = turn_id
+        target_name = _effective_capability_name(call)
+        index = len(self._continuation.pending_tool_results)
+        await self._runner._emit_progress(
+            "tool_call_started",
+            round=self._state.llm_round_count,
+            tool_call_index=index,
+            tool_name=call.name,
+            target_name=target_name,
+            args_preview=_json_preview(call.args),
+        )
+        self._runner._append_debug_log(
+            "tool_call_started",
+            {
+                "round": self._state.llm_round_count,
+                "tool_call_index": index,
+                "tool_name": call.name,
+                "target_name": target_name,
+                "args": dict(call.args),
+            },
+        )
+        try:
+            result = await self._runner._await_with_progress_heartbeat(
+                self._runner._execute_allowed_tool(self._state.execution_runtime, call),
+                phase="tool_call_waiting",
+                round=self._state.llm_round_count,
+                tool_call_index=index,
+                tool_name=call.name,
+                target_name=target_name,
+            )
+        except Exception as exc:
+            self._runner._append_debug_log(
+                "tool_call_failed",
+                {
+                    "round": self._state.llm_round_count,
+                    "tool_call_index": index,
+                    "tool_name": call.name,
+                    "target_name": target_name,
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc),
+                },
+            )
+            await self._runner._emit_progress(
+                "tool_call_failed",
+                round=self._state.llm_round_count,
+                tool_call_index=index,
+                tool_name=call.name,
+                target_name=target_name,
+                error_type=exc.__class__.__name__,
+                error=_preview_text(str(exc), limit=500),
+            )
+            raise
+        self._state.tool_call_count += 1
+        self._runner._append_debug_log(
+            "tool_call_completed",
+            {
+                "round": self._state.llm_round_count,
+                "tool_call_index": index,
+                "tool_name": call.name,
+                "target_name": target_name,
+                "ok": bool(result.ok),
+                "status": str(result.status or ""),
+                "text": _tool_result_text(result),
+                "structured": dict(result.structured or {}),
+            },
+        )
+        await self._runner._emit_progress(
+            "tool_call_completed",
+            round=self._state.llm_round_count,
+            tool_call_index=index,
+            tool_name=call.name,
+            target_name=target_name,
+            ok=bool(result.ok),
+            status=str(result.status or ""),
+            text_preview=_preview_text(_tool_result_text(result)),
+        )
+        return result
+
+
+@dataclass
 class MinionAgentLoopState:
     execution_runtime: "MinionScopedExecutionRuntime"
     memory_service: MemoryService
     memory_l3: MockL3Plugin
+    channel_envelope: ChannelEnvelope = field(
+        default_factory=lambda: ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind=EventKind.USER_MESSAGE,
+                source_kind=SourceKind.MINION,
+                payload={"text": ""},
+            ),
+            endpoint=EndpointConfig(endpoint_id="minion:unknown", channel_kind="stdio", binding_key="unknown"),
+            response_handle=ResponseHandle(endpoint_id="minion:unknown"),
+        )
+    )
     tool_protocol_messages: list[dict[str, Any]] = field(default_factory=list)
     pending_assistant_tool_text: str = ""
     pending_tool_call_batch: list[CanonicalToolCall] = field(default_factory=list)
@@ -102,6 +397,7 @@ class MinionRunner:
     produced_artifacts: list[dict[str, Any]] = field(default_factory=list)
     memory_candidates: list[dict[str, Any]] = field(default_factory=list)
     auto_accept_approvals: bool = False
+    user_interaction: MinionUserInteractionPort | None = field(default=None, init=False, repr=False)
 
     async def run(self) -> int:
         bundle: MinionRuntimeBundle | None = None
@@ -199,10 +495,12 @@ class MinionRunner:
             produced_artifacts=self.produced_artifacts,
             memory_l3=memory_l3,
         )
+        channel_envelope = _minion_task_envelope(self.pack, minion_id=self.minion_id, run_id=self.run_id)
         state = MinionAgentLoopState(
             execution_runtime=execution_runtime,
             memory_service=memory_service,
             memory_l3=memory_l3,
+            channel_envelope=channel_envelope,
         )
         max_output_tokens = _resolve_minion_max_output_tokens(bundle.llm_runtime, self.pack)
 
@@ -218,7 +516,7 @@ class MinionRunner:
             transcript = [
                 L1TranscriptMessage(
                     role="user",
-                    content=_render_task_prompt(self.pack),
+                    content=_minion_primary_input(state.channel_envelope),
                     kind=L1MessageKind.USER_REQUEST,
                 ),
                 L1TranscriptMessage(
@@ -237,6 +535,16 @@ class MinionRunner:
             max_output_tokens=max_output_tokens,
             build_retry_note=self._build_minion_retry_note,
         )
+        continuation = TurnContinuation(
+            turn_id=self.run_id,
+            channel_envelope=state.channel_envelope,
+            program=program,
+            correlation_id=self.run_id,
+            control_scope_key=f"minion:{self.run_id}",
+            turn_settings_snapshot={"prompt_log_enabled": bool((self.pack.metadata or {}).get("prompt_log_enabled"))},
+            tool_protocol_messages=state.tool_protocol_messages,
+        )
+        executor = self._build_minion_turn_executor(bundle, state, continuation)
         current: EffectResult | None = None
         while True:
             try:
@@ -254,7 +562,13 @@ class MinionRunner:
                 await self._commit_minion_l1(state, outcome.commit_payload.transcript)
                 self.memory_candidates = _memory_candidates_from_l3(state.memory_l3)
                 return outcome.final_reply
-            current = await self._execute_minion_agent_effect(bundle, state, yielded, max_output_tokens=max_output_tokens)
+            current = await self._execute_minion_agent_effect(
+                executor,
+                continuation,
+                state,
+                yielded,
+                max_output_tokens=max_output_tokens,
+            )
 
     def _build_minion_retry_note(self, outcome: Any, observations: list[Any], retry_count: int) -> str:
         if self.blocked_summary:
@@ -315,127 +629,112 @@ class MinionRunner:
             "is missing."
         )
 
-    async def _execute_minion_agent_effect(
+    def _build_minion_turn_executor(
         self,
         bundle: MinionRuntimeBundle,
+        state: MinionAgentLoopState,
+        continuation: TurnContinuation,
+    ) -> TurnExecutor:
+        llm_runtime = _MinionLLMRuntimeAdapter(self, bundle.llm_runtime, state)
+        memory_service = _MinionMemoryServiceAdapter(self, state)
+        output_port = _MinionOutputPort(self)
+        execution_runtime = _MinionExecutionRuntimeAdapter(self, state, continuation)
+        context = _MinionTurnContext(
+            execution_runtime=execution_runtime,
+            port_registry={
+                "llm:llm": llm_runtime,
+                "memory:memory": memory_service,
+                "agent_io:output": output_port,
+            },
+            turn_event_bus=TurnEventBus(),
+        )
+        turn_state = _MinionTurnState()
+        turn_manager = _MinionTurnManager()
+
+        def build_canonical_prompt(
+            assembly_context: PromptAssemblyContext,
+            *,
+            max_output_tokens: int = 1024,
+            model_hint: str | None = None,
+        ) -> CanonicalLLMRequest:
+            return CanonicalLLMRequest(
+                messages=build_minion_prompt_messages(
+                    scaffold=self._prompt_scaffold(),
+                    channel_envelope=state.channel_envelope,
+                    memory_text=self._render_minion_memory_context(state),
+                    retry_note=str((assembly_context.metadata or {}).get("retry_note") or ""),
+                    tool_protocol_messages=state.tool_protocol_messages,
+                    include_tool_protocol=False,
+                ),
+                max_output_tokens=max_output_tokens,
+                model_hint=model_hint,
+                tools=[],
+                metadata=_minion_llm_request_metadata(self.pack, self.run_id),
+            )
+
+        return TurnExecutor(
+            context,
+            turn_state,
+            turn_manager,
+            call_port_async=self._call_port_async,
+            build_canonical_prompt=build_canonical_prompt,
+            debug_log_prompt=lambda _continuation, request: self._debug_log_minion_llm_request(state, request),
+            debug_log_outcome=lambda _continuation, outcome: self._debug_log_minion_llm_outcome(state, outcome),
+            debug_log_reply=lambda _continuation, text: self._append_debug_log("reply", {"text": str(text or "")}),
+            build_llm_tool_contracts=lambda: _llm_tools_for_allowed(state.execution_runtime, self.pack.allowed_capabilities),
+            handle_failure_async=_minion_noop_failure_handler,
+            render_failure_feedback_text=lambda feedback: str(feedback or ""),
+            should_enter_failure_flow_for_tool_result=lambda _tool_result: False,
+            handle_llm_provider_errors=False,
+        )
+
+    async def _execute_minion_agent_effect(
+        self,
+        executor: TurnExecutor,
+        continuation: TurnContinuation,
         state: MinionAgentLoopState,
         effect: Any,
         *,
         max_output_tokens: int,
     ) -> EffectResult:
-        if isinstance(effect, LLMPreflightEffect):
-            return await self._handle_minion_preflight(bundle, state, effect, max_output_tokens=max_output_tokens)
-        if isinstance(effect, MemoryCompactEffect):
-            return await self._handle_minion_memory_compact(bundle, state, effect)
         if isinstance(effect, LLMRequestEffect):
-            return await self._handle_minion_llm_request(bundle, state, effect, max_output_tokens=max_output_tokens)
-        if isinstance(effect, ToolCallEffect):
-            return await self._handle_minion_tool_call(state, effect)
-        return EffectResult(status=RuntimeStatus.UNSUPPORTED, text=f"unsupported minion effect: {getattr(effect, 'kind', '')}")
+            preflight = self._preflight_minion_llm_round(state)
+            if preflight is not None:
+                return preflight
+        before_protocol_len = len(state.tool_protocol_messages)
+        result = await executor.execute_turn_effect_async(continuation, effect)
+        self._sync_minion_state_from_continuation(state, continuation)
+        if isinstance(effect, MemoryCompactEffect):
+            await self._emit_progress(
+                "memory_compacted",
+                round=state.llm_round_count,
+                summary=_preview_text(getattr(result.payload, "summary", ""), limit=500),
+            )
+        if isinstance(effect, LLMRequestEffect):
+            result = await self._postprocess_minion_llm_round(state, result)
+        if isinstance(effect, ToolCallEffect) and len(state.tool_protocol_messages) > before_protocol_len:
+            await self._commit_minion_l1(
+                state,
+                _tool_protocol_transcript(state.tool_protocol_messages[before_protocol_len:]),
+            )
+        return result
 
-    async def _handle_minion_preflight(
-        self,
-        bundle: MinionRuntimeBundle,
-        state: MinionAgentLoopState,
-        effect: LLMPreflightEffect,
-        *,
-        max_output_tokens: int,
-    ) -> EffectResult:
-        tools = _llm_tools_for_allowed(state.execution_runtime, self.pack.allowed_capabilities)
-        request = LLMPreflightRequest(
-            messages=self._minion_prompt_messages(state, effect.assembly_context),
-            max_output_tokens=max_output_tokens,
-            tools=tools,
-            metadata=_minion_llm_request_metadata(self.pack, self.run_id),
-        )
-        preflight = getattr(bundle.llm_runtime, "apreflight", None)
-        if callable(preflight):
-            advice = preflight(request)
-            if hasattr(advice, "__await__"):
-                advice = await advice
-        else:
-            sync_preflight = getattr(bundle.llm_runtime, "preflight", None)
-            if callable(sync_preflight):
-                advice = sync_preflight(request)
-            else:
-                advice = LLMPreflightAdvice(status=LLMPreflightStatus.READY)
-        return EffectResult(status=RuntimeStatus.OK, payload=advice)
-
-    async def _handle_minion_llm_request(
-        self,
-        bundle: MinionRuntimeBundle,
-        state: MinionAgentLoopState,
-        effect: LLMRequestEffect,
-        *,
-        max_output_tokens: int,
-    ) -> EffectResult:
+    def _preflight_minion_llm_round(self, state: MinionAgentLoopState) -> EffectResult | None:
         if self.blocked_summary:
             return EffectResult(status=RuntimeStatus.OK, payload=CanonicalLLMOutcome(text=self.blocked_summary))
         max_rounds = _optional_positive_int(self.pack.metadata.get("max_tool_rounds") if isinstance(self.pack.metadata, dict) else None)
-        if max_rounds is not None and state.llm_round_count >= max_rounds:
-            if self._completion_evidence_present() or self._artifact_completion_evidence_present():
-                outcome = CanonicalLLMOutcome(text="milestone produced completion evidence")
-            else:
-                self.blocked_summary = f"minion reached explicit max_tool_rounds={max_rounds} before completing the current milestone"
-                outcome = CanonicalLLMOutcome(text=self.blocked_summary)
-            return EffectResult(status=RuntimeStatus.OK, payload=outcome)
+        if max_rounds is None or state.llm_round_count < max_rounds:
+            state.llm_round_count += 1
+            return None
+        if self._completion_evidence_present() or self._artifact_completion_evidence_present():
+            outcome = CanonicalLLMOutcome(text="milestone produced completion evidence")
+        else:
+            self.blocked_summary = f"minion reached explicit max_tool_rounds={max_rounds} before completing the current milestone"
+            outcome = CanonicalLLMOutcome(text=self.blocked_summary)
+        return EffectResult(status=RuntimeStatus.OK, payload=outcome)
 
-        state.llm_round_count += 1
-        await self._emit_progress(
-            "llm_round_started",
-            round=state.llm_round_count,
-            tool_call_count=state.tool_call_count,
-            tool_count=len(_llm_tools_for_allowed(state.execution_runtime, self.pack.allowed_capabilities)),
-        )
-        tools = _llm_tools_for_allowed(state.execution_runtime, self.pack.allowed_capabilities)
-        request = CanonicalLLMRequest(
-            messages=self._minion_prompt_messages(state, effect.assembly_context),
-            max_output_tokens=max_output_tokens,
-            tools=tools,
-            metadata=_minion_llm_request_metadata(self.pack, self.run_id),
-        )
-        self._append_debug_log(
-            "llm_request",
-            {
-                "round": state.llm_round_count,
-                "messages": request.messages,
-                "tools": request.tools,
-                "metadata": request.metadata,
-            },
-        )
-        outcome = await self._await_with_progress_heartbeat(
-            bundle.llm_runtime.agenerate(request),
-            phase="llm_round_waiting",
-            round=state.llm_round_count,
-            tool_call_count=state.tool_call_count,
-        )
-        tool_calls = [self._ensure_tool_call_identity(item) for item in list(getattr(outcome, "tool_calls", []) or [])]
-        if tool_calls:
-            outcome = CanonicalLLMOutcome(
-                text=str(getattr(outcome, "text", "") or ""),
-                reasoning_text=str(getattr(outcome, "reasoning_text", "") or ""),
-                tool_calls=tool_calls,
-                finish_reason=str(getattr(outcome, "finish_reason", "") or "stop"),
-                response_mode=getattr(outcome, "response_mode", None),
-                target_input_budget=int(getattr(outcome, "target_input_budget", 0) or 0),
-                reserved_output_tokens=int(getattr(outcome, "reserved_output_tokens", 0) or 0),
-                preferred_endpoint_id=getattr(outcome, "preferred_endpoint_id", None),
-                preferred_model_id=getattr(outcome, "preferred_model_id", None),
-            )
-            state.pending_assistant_tool_text = str(outcome.text or "")
-            state.pending_tool_call_batch = list(tool_calls)
-            state.pending_tool_results = []
-        self._append_debug_log(
-            "llm_outcome",
-            {
-                "round": state.llm_round_count,
-                "finish_reason": str(getattr(outcome, "finish_reason", "") or ""),
-                "response_mode": str(getattr(outcome, "response_mode", "") or ""),
-                "tool_calls": [_tool_call_summary(item) for item in list(getattr(outcome, "tool_calls", []) or [])],
-                "reasoning_text": str(getattr(outcome, "reasoning_text", "") or ""),
-                "text": str(getattr(outcome, "text", "") or "").strip(),
-            },
-        )
+    async def _postprocess_minion_llm_round(self, state: MinionAgentLoopState, result: EffectResult) -> EffectResult:
+        outcome = result.payload
         finish_reason = str(getattr(outcome, "finish_reason", "") or "")
         if finish_reason == LLMFinishReason.ERROR:
             if self._completion_evidence_present() or self._artifact_completion_evidence_present():
@@ -444,6 +743,7 @@ class MinionRunner:
                     finish_reason=LLMFinishReason.STOP,
                 )
                 finish_reason = str(LLMFinishReason.STOP)
+                result = EffectResult(status=RuntimeStatus.OK, payload=outcome)
             else:
                 self.blocked_summary = str(getattr(outcome, "text", "") or "LLM generation failed")
         elif _is_truncation_finish_reason(finish_reason):
@@ -463,188 +763,53 @@ class MinionRunner:
             tool_calls=[_tool_call_summary(item) for item in list(getattr(outcome, "tool_calls", []) or [])],
             text_preview=_preview_text(str(getattr(outcome, "text", "") or "")),
         )
-        return EffectResult(status=RuntimeStatus.OK, payload=outcome)
+        return result
 
-    async def _handle_minion_memory_compact(
-        self,
-        bundle: MinionRuntimeBundle,
-        state: MinionAgentLoopState,
-        effect: MemoryCompactEffect,
-    ) -> EffectResult:
-        source_text = self._minion_compaction_source_text(state, target_input_budget=effect.target_input_budget)
-        metadata: dict[str, Any] = {}
-        structured_method = getattr(bundle.llm_runtime, "acompact_memory_structured", None)
-        if callable(structured_method) and source_text:
-            with contextlib.suppress(Exception):
-                structured = structured_method(
-                    source_text,
-                    max_output_tokens=max(384, min(effect.reserved_output_tokens or 1024, 2048)),
-                    preferred_endpoint_id=_preferred_endpoint_id_from_pack(self.pack),
-                )
-                metadata["structured_compaction"] = await structured if hasattr(structured, "__await__") else structured
-        if "structured_compaction" not in metadata and source_text:
-            summary_method = getattr(bundle.llm_runtime, "asummarize_compaction", None)
-            if callable(summary_method):
-                with contextlib.suppress(Exception):
-                    summary = summary_method(
-                        source_text,
-                        target_input_budget=effect.target_input_budget,
-                        reserved_output_tokens=effect.reserved_output_tokens,
-                        preferred_endpoint_id=_preferred_endpoint_id_from_pack(self.pack),
-                    )
-                    metadata["semantic_summary"] = await summary if hasattr(summary, "__await__") else summary
-            if "semantic_summary" not in metadata:
-                metadata["semantic_summary"] = source_text[: max(256, effect.target_input_budget or 1024)]
-        compact_result = state.memory_service.compact(
-            MemoryCompactRequest(
-                target_input_budget=effect.target_input_budget,
-                reserved_output_tokens=effect.reserved_output_tokens,
-                metadata=metadata,
-            )
-        )
-        await self._emit_progress(
-            "memory_compacted",
-            round=state.llm_round_count,
-            summary=_preview_text(compact_result.summary, limit=500),
-        )
-        return EffectResult(status=RuntimeStatus.OK, payload=compact_result)
+    def _sync_minion_state_from_continuation(self, state: MinionAgentLoopState, continuation: TurnContinuation) -> None:
+        state.tool_protocol_messages = continuation.tool_protocol_messages
+        state.pending_assistant_tool_text = continuation.pending_assistant_tool_text
+        state.pending_tool_call_batch = list(continuation.pending_tool_call_batch)
+        state.pending_tool_results = list(continuation.pending_tool_results)
 
-    async def _handle_minion_tool_call(self, state: MinionAgentLoopState, effect: ToolCallEffect) -> EffectResult:
-        tool_call = effect.tool_call
-        target_name = _effective_capability_name(tool_call)
-        index = len(state.pending_tool_results)
-        await self._emit_progress(
-            "tool_call_started",
-            round=state.llm_round_count,
-            tool_call_index=index,
-            tool_name=tool_call.name,
-            target_name=target_name,
-            args_preview=_json_preview(tool_call.args),
-        )
-        try:
-            self._append_debug_log(
-                "tool_call_started",
-                {
-                    "round": state.llm_round_count,
-                    "tool_call_index": index,
-                    "tool_name": tool_call.name,
-                    "target_name": target_name,
-                    "args": dict(tool_call.args),
-                },
-            )
-            result = await self._await_with_progress_heartbeat(
-                self._execute_allowed_tool(state.execution_runtime, tool_call),
-                phase="tool_call_waiting",
-                round=state.llm_round_count,
-                tool_call_index=index,
-                tool_name=tool_call.name,
-                target_name=target_name,
-            )
-        except Exception as exc:
-            self._append_debug_log(
-                "tool_call_failed",
-                {
-                    "round": state.llm_round_count,
-                    "tool_call_index": index,
-                    "tool_name": tool_call.name,
-                    "target_name": target_name,
-                    "error_type": exc.__class__.__name__,
-                    "error": str(exc),
-                },
-            )
-            await self._emit_progress(
-                "tool_call_failed",
-                round=state.llm_round_count,
-                tool_call_index=index,
-                tool_name=tool_call.name,
-                target_name=target_name,
-                error_type=exc.__class__.__name__,
-                error=_preview_text(str(exc), limit=500),
-            )
-            raise
-        state.tool_call_count += 1
-        state.pending_tool_results.append(result)
-        if state.pending_tool_call_batch and len(state.pending_tool_results) >= len(state.pending_tool_call_batch):
-            state.tool_protocol_messages.append(_assistant_tool_message(state.pending_assistant_tool_text, state.pending_tool_call_batch))
-            for item in state.pending_tool_results:
-                state.tool_protocol_messages.append({"role": "tool", "tool_call_id": str(item.call_id or ""), "content": _tool_result_text(item)})
-            await self._commit_minion_l1(
-                state,
-                [
-                    L1TranscriptMessage(
-                        role="assistant",
-                        content=state.pending_assistant_tool_text,
-                        kind=L1MessageKind.ASSISTANT_TOOL_CALL,
-                        tool_calls=list(state.tool_protocol_messages[-len(state.pending_tool_results) - 1].get("tool_calls") or []),
-                    ),
-                    *[
-                        L1TranscriptMessage(
-                            role="tool",
-                            content=_tool_result_text(item),
-                            kind=L1MessageKind.TOOL_RESULT,
-                            tool_call_id=str(item.call_id or ""),
-                        )
-                        for item in state.pending_tool_results
-                    ],
-                ],
-            )
-            state.pending_assistant_tool_text = ""
-            state.pending_tool_call_batch = []
-            state.pending_tool_results = []
+    def _debug_log_minion_llm_request(self, state: MinionAgentLoopState, request: CanonicalLLMRequest) -> None:
         self._append_debug_log(
-            "tool_call_completed",
+            "llm_request",
             {
                 "round": state.llm_round_count,
-                "tool_call_index": index,
-                "tool_name": tool_call.name,
-                "target_name": target_name,
-                "ok": bool(result.ok),
-                "status": str(result.status or ""),
-                "text": _tool_result_text(result),
-                "structured": dict(result.structured or {}),
+                "messages": request.messages,
+                "tools": request.tools,
+                "metadata": request.metadata,
             },
         )
-        await self._emit_progress(
-            "tool_call_completed",
-            round=state.llm_round_count,
-            tool_call_index=index,
-            tool_name=tool_call.name,
-            target_name=target_name,
-            ok=bool(result.ok),
-            status=str(result.status or ""),
-            text_preview=_preview_text(_tool_result_text(result)),
+
+    def _debug_log_minion_llm_outcome(self, state: MinionAgentLoopState, outcome: Any) -> None:
+        self._append_debug_log(
+            "llm_outcome",
+            {
+                "round": state.llm_round_count,
+                "finish_reason": str(getattr(outcome, "finish_reason", "") or ""),
+                "response_mode": str(getattr(outcome, "response_mode", "") or ""),
+                "tool_calls": [_tool_call_summary(item) for item in list(getattr(outcome, "tool_calls", []) or [])],
+                "reasoning_text": str(getattr(outcome, "reasoning_text", "") or ""),
+                "text": str(getattr(outcome, "text", "") or "").strip(),
+            },
         )
-        return EffectResult(status=RuntimeStatus.OK if result.ok else RuntimeStatus.ERROR, payload=result, text=_tool_result_text(result))
+
+    async def _call_port_async(self, port: Any, async_name: str, sync_name: str, *args: Any, **kwargs: Any) -> Any:
+        async_method = getattr(port, async_name, None)
+        if callable(async_method):
+            result = async_method(*args, **kwargs)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        sync_method = getattr(port, sync_name)
+        return await asyncio.to_thread(sync_method, *args, **kwargs)
 
     async def _commit_minion_l1(self, state: MinionAgentLoopState, transcript: list[L1TranscriptMessage]) -> None:
         if not transcript:
             return
         with contextlib.suppress(Exception):
             state.memory_service.commit_l1(MemoryCommitRequest(turn_id=self.run_id, transcript=transcript))
-
-    def _minion_prompt_messages(self, state: MinionAgentLoopState, assembly_context: Any) -> list[dict[str, Any]]:
-        scaffold = self._prompt_scaffold()
-        system = _render_system_prompt(scaffold)
-        memory_text = self._render_minion_memory_context(state)
-        retry_note = str((getattr(assembly_context, "metadata", {}) or {}).get("retry_note") or "").strip()
-        tool_protocol_messages = list(state.tool_protocol_messages)
-        task_parts: list[dict[str, Any]] = []
-        if memory_text and not tool_protocol_messages:
-            task_parts.append({"type": "text", "text": render_system_reminder(f"Minion run memory:\n{memory_text}")})
-        task_parts.append({"type": "text", "text": _render_task_prompt(self.pack)})
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": _coerce_user_content_parts(task_parts)},
-            *tool_protocol_messages,
-        ]
-        trailing_parts: list[dict[str, Any]] = []
-        if memory_text and tool_protocol_messages:
-            trailing_parts.append({"type": "text", "text": render_system_reminder(f"Minion run memory:\n{memory_text}")})
-        if retry_note:
-            trailing_parts.append({"type": "text", "text": render_system_reminder(f"Minion retry guidance:\n{retry_note}")})
-        if trailing_parts:
-            messages.append({"role": "user", "content": _coerce_user_content_parts(trailing_parts)})
-        return messages
 
     def _render_minion_memory_context(self, state: MinionAgentLoopState) -> str:
         pack = state.memory_service.build_pack(MemoryPackRequest(turn_kind="minion", work_order_id=self.pack.work_order_id))
@@ -676,7 +841,7 @@ class MinionRunner:
                 rendered.append(f"{role}: {content}")
             parts.append("[Current Minion Trajectory]\n" + "\n".join(rendered))
         if not parts:
-            parts.append(_render_task_prompt(self.pack))
+            parts.append(_minion_primary_input(state.channel_envelope))
         raw = "\n\n".join(parts).strip()
         return raw[: max(256, target_input_budget or 4096)]
 
@@ -789,72 +954,34 @@ class MinionRunner:
 
     async def _requires_approval(self, capability_name: str, tool_call: CanonicalToolCall) -> bool:
         _ = tool_call
-        if self.auto_accept_approvals:
-            return False
-        high_risk = {str(item) for item in list((self.pack.approval_policy or {}).get("high_risk_capabilities") or [])}
-        return str(capability_name) in high_risk
+        return self._user_interaction_port().should_request_approval(capability_name, self.pack.approval_policy or {})
 
     async def _request_approval(self, capability_name: str, tool_call: CanonicalToolCall) -> str:
-        approval_id = f"appr_{uuid4().hex[:16]}"
-        await self._emit(
-            "approval_requested",
-            {
-                "approval_id": approval_id,
-                "title": "Minion high-risk operation",
-                "requested_action": capability_name,
-                "risk": "high",
-                "impact": "Minion requested permission before running a high-risk operation.",
-                "target": capability_name,
-                "args_summary": dict(tool_call.args),
-            },
+        decision = await self._user_interaction_port().request_approval(
+            capability_name=capability_name,
+            args_summary=dict(tool_call.args),
+            approval_policy=self.pack.approval_policy or {},
         )
-        timeout = float((self.pack.approval_policy or {}).get("decision_timeout_seconds") or 300)
-        decision_payload = await self.read_decision(timeout)
-        decision = str(((decision_payload or {}).get("decision") or {}).get("decision") or "").strip().lower()
-        if decision == "accept_all":
-            self.auto_accept_approvals = True
-        await self._emit("decision_received", {"approval_id": approval_id, "decision": decision or "timeout"})
-        return "accept" if decision == "accept_all" else decision
+        self.auto_accept_approvals = self._user_interaction_port().auto_accept_approvals
+        return decision
 
     async def _request_clarification(self, ask_user_question: dict[str, Any]) -> dict[str, Any]:
-        clarification_id = f"clarify_{uuid4().hex[:16]}"
-        payload = {
-            **dict(ask_user_question or {}),
-            "clarification_id": clarification_id,
-            "run_id": self.run_id,
-            "minion_id": self.minion_id,
-            "work_order_id": self.pack.work_order_id,
-            "status": "pending",
-        }
-        if not _clarification_questions_are_interactive(payload.get("questions")):
-            await self._emit(
-                "clarification_unavailable",
-                {
-                    "clarification_id": clarification_id,
-                    "reason": "required clarification questions must include inline options",
-                    "summary": _ask_user_question_summary(payload),
-                },
-            )
-            return {}
-        await self._emit("clarification_requested", payload)
-        timeout = float((self.pack.approval_policy or {}).get("clarification_timeout_seconds") or 3600)
-        message = await self.read_decision(timeout)
-        if not isinstance(message, dict):
-            await self._emit("clarification_timeout", {"clarification_id": clarification_id})
-            return {}
-        clarification = message.get("clarification") if isinstance(message.get("clarification"), dict) else message
-        if not isinstance(clarification, dict):
-            return {}
-        if str(clarification.get("clarification_id") or "") != clarification_id:
-            return {}
-        await self._emit(
-            "clarification_received",
-            {
-                "clarification_id": clarification_id,
-                "answer_count": len(list(clarification.get("answers") or [])),
-            },
+        return await self._user_interaction_port().request_clarification(
+            ask_user_question,
+            approval_policy=self.pack.approval_policy or {},
         )
-        return dict(clarification)
+
+    def _user_interaction_port(self) -> MinionUserInteractionPort:
+        if self.user_interaction is None:
+            self.user_interaction = MinionUserInteractionPort(
+                emit_event=self._emit,
+                read_response=self.read_decision,
+                run_id=self.run_id,
+                minion_id=self.minion_id,
+                work_order_id=self.pack.work_order_id,
+                auto_accept_approvals=self.auto_accept_approvals,
+            )
+        return self.user_interaction
 
     def _apply_clarification_response(self, clarification: dict[str, Any]) -> None:
         answers = [dict(item) for item in list(clarification.get("answers") or []) if isinstance(item, dict)]
@@ -1221,12 +1348,6 @@ class MinionRunner:
         except Exception:
             return
 
-    @staticmethod
-    def _ensure_tool_call_identity(tool_call: CanonicalToolCall) -> CanonicalToolCall:
-        call_id = str(getattr(tool_call, "call_id", "") or "").strip() or f"call_{uuid4().hex[:12]}"
-        return CanonicalToolCall(name=tool_call.name, args=dict(tool_call.args), call_id=call_id)
-
-
 def build_slim_minion_runtime(runtime_root: Path) -> MinionRuntimeBundle:
     from pal.core import register_with_core as register_core_with_core
 
@@ -1313,24 +1434,6 @@ def _minion_prompt_context(pack: TaskContextPack, *, metadata: dict[str, Any]) -
     )
 
 
-def _prompt_scaffold_summary(scaffold: dict[str, Any]) -> dict[str, Any]:
-    continuity = dict(scaffold.get("continuity") or {})
-    return {
-        "instruction_chars": len(str(scaffold.get("instruction") or "")),
-        "acceptance_criteria_count": len(list(scaffold.get("acceptance_criteria") or [])),
-        "allowed_capability_count": len(list(scaffold.get("allowed_capabilities") or [])),
-        "continuity": {
-            "keys": sorted(str(key) for key in continuity.keys()),
-            "recent_ledger_count": len(list(continuity.get("recent_ledger") or [])),
-            "completed_milestone_count": len(list(continuity.get("completed_milestones") or [])),
-            "task_lesson_count": len(list(continuity.get("task_lessons") or [])),
-        },
-        "current_milestone": dict(scaffold.get("current_milestone") or {}),
-        "workspace_policy": dict(scaffold.get("workspace_policy") or {}),
-        "completion_policy": dict(scaffold.get("completion_policy") or {}),
-    }
-
-
 def _memory_candidates_from_l3(memory_l3: MockL3Plugin) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for record in list(getattr(memory_l3, "records", []) or []):
@@ -1353,6 +1456,39 @@ def _memory_candidates_from_l3(memory_l3: MockL3Plugin) -> list[dict[str, Any]]:
         if item["summary"].strip() or item["title"].strip():
             result.append(item)
     return result
+
+
+async def _minion_noop_failure_handler(*args: Any, **kwargs: Any) -> _MinionFailureResult:
+    _ = args
+    _ = kwargs
+    return _MinionFailureResult(user_feedback="minion turn failed before a normal reply could be produced")
+
+
+def _tool_protocol_transcript(messages: list[dict[str, Any]]) -> list[L1TranscriptMessage]:
+    transcript: list[L1TranscriptMessage] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").strip()
+        if role == "assistant" and message.get("tool_calls"):
+            transcript.append(
+                L1TranscriptMessage(
+                    role="assistant",
+                    content=str(message.get("content") or ""),
+                    kind=L1MessageKind.ASSISTANT_TOOL_CALL,
+                    tool_calls=[dict(item) for item in list(message.get("tool_calls") or []) if isinstance(item, dict)],
+                )
+            )
+        elif role == "tool":
+            transcript.append(
+                L1TranscriptMessage(
+                    role="tool",
+                    content=str(message.get("content") or ""),
+                    kind=L1MessageKind.TOOL_RESULT,
+                    tool_call_id=str(message.get("tool_call_id") or ""),
+                )
+            )
+    return transcript
 
 
 def _llm_tools_for_allowed(execution_runtime: Any, allowed_capabilities: list[str]) -> list[dict[str, Any]]:
@@ -1413,7 +1549,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative directory path."},
+                "path": {"type": "string", "description": "Workspace-relative directory path. Use '.' for the repo root; do not use '/'."},
                 "max_depth": {"type": "integer", "default": 2},
                 "limit": {"type": "integer", "default": 200},
             },
@@ -1426,7 +1562,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
-                "path": {"type": "string", "description": "Workspace-relative directory path."},
+                "path": {"type": "string", "description": "Workspace-relative directory path. Use '.' for the repo root; do not use '/'."},
                 "limit": {"type": "integer", "default": 50},
             },
             "required": ["query"],
@@ -1434,11 +1570,11 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_workspace_read": {
         "name": "op_workspace_read",
-        "description": "Read a workspace-relative text file without modifying anything.",
+        "description": "Read a workspace-relative text file without modifying anything. This is for inspection only; if you intend to edit the file with op_file_edit, call op_file_read on the absolute file path first so file_edit has the required file state.",
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string"},
+                "path": {"type": "string", "description": "Workspace-relative file path. Use paths like 'src/app.py', not absolute paths."},
                 "start_line": {"type": "integer", "default": 1},
                 "limit_lines": {"type": "integer", "default": 200},
             },
@@ -1459,6 +1595,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "overwrite": {"type": "boolean", "default": False, "description": "Overwrite an existing artifact path. Defaults to false; duplicate paths get a numbered suffix."},
             },
             "required": ["relative_path", "content"],
+            "additionalProperties": False,
         },
     },
     "op_minion_artifact_edit": {
@@ -1476,6 +1613,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "mime_type": {"type": "string", "default": "text/markdown"},
             },
             "required": ["relative_path", "content"],
+            "additionalProperties": False,
         },
     },
     "op_minion_memory_candidate_write": {
@@ -1789,6 +1927,8 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
                 text = payload["text"]
             else:
                 raise ValueError(f"unknown workspace tool: {call.name}")
+        if not text.strip():
+            text = _empty_workspace_tool_text(call.name, payload)
         return CanonicalToolResult(
             name=call.name,
             ok=True,
@@ -1845,6 +1985,7 @@ def _artifact_path(root: Path, raw_path: Any) -> Path:
 
 
 def _write_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    _reject_unknown_args(args, {"relative_path", "content", "title", "role", "mime_type", "overwrite"})
     root = _artifact_root(workspace)
     path = _artifact_path(root, args.get("relative_path"))
     content = str(args.get("content") or "")
@@ -1858,6 +1999,7 @@ def _write_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> d
 
 
 def _edit_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    _reject_unknown_args(args, {"relative_path", "content", "operation", "create_if_missing", "title", "role", "mime_type"})
     root = _artifact_root(workspace)
     path = _artifact_path(root, args.get("relative_path"))
     operation = str(args.get("operation") or "append").strip().lower() or "append"
@@ -1896,6 +2038,12 @@ def _artifact_metadata(root: Path, path: Path, args: dict[str, Any]) -> dict[str
     }
 
 
+def _reject_unknown_args(args: dict[str, Any], allowed: set[str]) -> None:
+    unknown = sorted(str(key) for key in args if str(key) not in allowed)
+    if unknown:
+        raise ValueError(f"unknown argument(s): {', '.join(unknown)}")
+
+
 def _next_available_artifact_path(path: Path) -> Path:
     if not path.exists():
         return path
@@ -1930,6 +2078,45 @@ def _workspace_path(root: Path, raw_path: Any = "") -> Path:
     return candidate
 
 
+_WORKSPACE_SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv"}
+_WORKSPACE_SKIP_SUFFIXES = {
+    ".a",
+    ".bin",
+    ".class",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".o",
+    ".obj",
+    ".pdf",
+    ".png",
+    ".pyc",
+    ".pyo",
+    ".so",
+    ".zip",
+}
+
+
+def _workspace_should_skip_generated(path: Path, root: Path) -> bool:
+    with contextlib.suppress(ValueError):
+        parts = path.relative_to(root).parts
+        if any(part in _WORKSPACE_SKIP_DIRS for part in parts):
+            return True
+    return path.suffix.lower() in _WORKSPACE_SKIP_SUFFIXES
+
+
+def _empty_workspace_tool_text(name: str, payload: dict[str, Any]) -> str:
+    if name == "op_workspace_tree":
+        return "No workspace entries found."
+    if name == "op_workspace_search":
+        query = str(payload.get("query") or "").strip()
+        return f"No workspace matches found for query: {query}" if query else "No workspace matches found."
+    if name == "op_workspace_read":
+        path = str(payload.get("path") or "").strip()
+        return f"{path}: empty file" if path else "Empty workspace file."
+    return "Workspace tool completed with no textual output."
+
+
 def _workspace_tree(root: Path, args: dict[str, Any]) -> dict[str, Any]:
     base = _workspace_path(root, args.get("path") or ".")
     if not base.exists():
@@ -1946,7 +2133,7 @@ def _workspace_tree(root: Path, args: dict[str, Any]) -> dict[str, Any]:
         current_path = Path(current)
         rel_parts = current_path.relative_to(root).parts if current_path != root else ()
         depth = len(rel_parts) - base_depth
-        dirs[:] = [name for name in sorted(dirs) if name not in {".git", "__pycache__", ".pytest_cache"}]
+        dirs[:] = [name for name in sorted(dirs) if name not in _WORKSPACE_SKIP_DIRS]
         for name in dirs:
             if len(items) >= limit:
                 return {"root": str(root), "items": items, "count": len(items), "truncated": True}
@@ -1973,7 +2160,7 @@ def _workspace_search(root: Path, args: dict[str, Any]) -> dict[str, Any]:
     query_lower = query.lower()
     paths = [base] if base.is_file() else [path for path in base.rglob("*") if path.is_file()]
     for path in paths:
-        if ".git" in path.relative_to(root).parts:
+        if _workspace_should_skip_generated(path, root):
             continue
         try:
             for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
@@ -2018,29 +2205,8 @@ def _effective_capability_name(tool_call: CanonicalToolCall) -> str:
     return tool_call.name
 
 
-def _assistant_tool_message(text: str, tool_calls: list[CanonicalToolCall]) -> dict[str, Any]:
-    return {
-        "role": "assistant",
-        "content": text or "",
-        "tool_calls": [
-            {
-                "id": str(tool_call.call_id or ""),
-                "type": "function",
-                "function": {"name": tool_call.name, "arguments": json.dumps(tool_call.args, ensure_ascii=False, sort_keys=True)},
-            }
-            for tool_call in tool_calls
-        ],
-    }
-
-
 def _tool_result_text(result: CanonicalToolResult) -> str:
-    if str(result.llm_text or "").strip():
-        return str(result.llm_text).strip()
-    if str(result.text or "").strip():
-        return str(result.text).strip()
-    if result.structured:
-        return json.dumps(result.structured, ensure_ascii=False, sort_keys=True)
-    return "tool completed" if result.ok else "tool failed"
+    return default_tool_result_text(result, fallback_ok="tool completed", fallback_error="tool failed")
 
 
 def _is_truncation_finish_reason(value: str) -> bool:
@@ -2188,124 +2354,6 @@ def _contains_runner_owned_git_mutation(cmd: str) -> bool:
     return bool(_RUNNER_OWNED_GIT_MUTATION_RE.search(str(cmd or "")))
 
 
-def _render_system_prompt(scaffold: dict[str, Any]) -> str:
-    completion_policy = scaffold.get("completion_policy") or {}
-    testing_guidance = ""
-    if isinstance(completion_policy, dict) and bool(completion_policy.get("requires_developer_tests")):
-        testing_guidance = (
-            "Completion requires developer test evidence: before completing, state the focused test plan, "
-            "run the relevant tests/checks available through listed capabilities, fix failures you caused, "
-            "and report blocked instead of completed if tests cannot be run or cannot pass with concrete evidence.\n"
-        )
-    operating_rules = (
-        "Your context is the prompt_view/task context pack, the current milestone, and the listed capabilities.\n"
-        "When prompt_view is present, treat it as the complete scoped assignment; do not infer or implement other modules.\n"
-        "Use only the listed capabilities. Report by milestone, never by percentage or ETA.\n"
-        "Use `op_memory_recall` when prior Pal experience, project lessons, or user preferences may materially improve the result.\n"
-        "If capability evidence is required, use a relevant listed capability before completing the milestone.\n"
-        f"{testing_guidance}"
-        "If completion evidence cannot be produced, report blocked instead of completed.\n"
-        "When completion policy requires git_commit, do not run git add, git commit, or other git mutation commands through shell. "
-        "After implementing and verifying the milestone, call `op_minion_checkpoint_commit` to create the structured checkpoint commit in the minion workspace branch.\n"
-        "Do not create or rely on committing generated build/cache artifacts such as __pycache__, .pytest_cache, .o, .obj, .a, .so, .dylib, .dll, .exe, class files, coverage output, build directories, or minion_outputs reports.\n"
-        "When `op_minion_artifact_write` or `op_minion_artifact_edit` is available, write planner/reviewer deliverables and any long structured output to workspace.artifact_dir with artifact tools; keep the final chat summary short and point to the artifact.\n"
-        "Use `op_minion_artifact_write` for one complete coherent file. Use `op_minion_artifact_edit` append for long deliverables split into coherent sections, or replace only when rewriting the complete artifact. Do not rely on final chat text for long plans or reports.\n"
-        "Artifact output must satisfy the current output_contract. If the output_contract requires JSON, write a .json artifact with application/json content containing exactly that JSON object; do not turn it into Markdown prose just because it is an artifact.\n"
-        "When `op_minion_memory_candidate_write` is available and the run teaches something genuinely reusable, write a concise memory candidate there instead of asking Pal to remember it directly.\n"
-        "If a tool/capability call fails because of an obvious schema, argument, path, or local input mistake, correct the call directly.\n"
-        "If a tool/capability call fails and the next step is unclear, repeated retries would be guesswork, or the failure may have prior Pal/project repair history, use `op_memory_recall` when it is listed below before retrying, debugging further, or reporting blocked.\n"
-        "When the current milestone is complete, stop with a concise milestone summary. "
-        "Pal will ask the user before absorbing minion memory candidates."
-    )
-    blocks = [
-        ("identity", str(scaffold.get("identity") or "").strip()),
-        ("behavior_guidance", str(scaffold.get("behavior") or "").strip()),
-        ("system-reminder", _render_skill_manual_context(scaffold.get("skill_manual_context"))),
-        ("operating_rules", operating_rules.strip()),
-        ("workspace_policy", json.dumps(scaffold.get("workspace_policy") or {}, ensure_ascii=False, sort_keys=True)),
-        ("completion_policy", json.dumps(scaffold.get("completion_policy") or {}, ensure_ascii=False, sort_keys=True)),
-        ("output_contract", str(scaffold.get("output_contract") or "").strip()),
-        ("allowed_capabilities", json.dumps(scaffold.get("allowed_capabilities") or [], ensure_ascii=False)),
-    ]
-    return "\n\n".join(render_xml_block(tag, content) for tag, content in blocks if str(content or "").strip()).strip()
-
-
-def _render_skill_manual_context(items: Any) -> str:
-    blocks: list[str] = []
-    for item in list(items or []):
-        if not isinstance(item, dict):
-            continue
-        skill_id = str(item.get("skill_id") or "").strip()
-        manual_text = str(item.get("manual_text") or "").strip()
-        if not skill_id or not manual_text:
-            continue
-        title = str(item.get("title") or skill_id).strip()
-        summary = str(item.get("summary") or "").strip()
-        use_when = str(item.get("use_when") or "").strip()
-        avoid_when = str(item.get("avoid_when") or "").strip()
-        parts = [
-            f"Skill: {skill_id} - {title}",
-            f"Summary: {summary}" if summary else "",
-            f"Use when: {use_when}" if use_when else "",
-            f"Avoid when: {avoid_when}" if avoid_when else "",
-            "Manual:",
-            manual_text,
-        ]
-        blocks.append("\n".join(part for part in parts if part).strip())
-    return "\n\n".join(blocks).strip()
-
-
-def _coerce_user_content_parts(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
-    if len(parts) == 1 and parts[0].get("type") == "text":
-        return str(parts[0].get("text") or "")
-    return parts
-
-
-def _prompt_view_from_pack(pack: TaskContextPack) -> dict[str, Any]:
-    metadata = dict(pack.metadata or {})
-    prompt_view = prompt_view_from_metadata(metadata, workspace=dict(pack.workspace))
-    if prompt_view:
-        if pack.allowed_capabilities:
-            prompt_view["allowed_capabilities"] = list(pack.allowed_capabilities)
-        return prompt_view
-    continuity = dict(pack.continuity or {})
-    if isinstance(continuity.get("prompt_view"), dict):
-        prompt_view = prompt_view_from_metadata({"prompt_view": dict(continuity.get("prompt_view") or {})}, workspace=dict(pack.workspace))
-        if prompt_view and pack.allowed_capabilities:
-            prompt_view["allowed_capabilities"] = list(pack.allowed_capabilities)
-        return prompt_view
-    return {}
-
-
-def _render_task_prompt(pack: TaskContextPack) -> str:
-    prompt_view = _prompt_view_from_pack(pack)
-    if prompt_view:
-        instructions = [
-            "Execute only the scoped work in this prompt_view.",
-            "Use module contracts instead of inferring other module internals.",
-        ]
-        if str(prompt_view.get("role") or "").strip().lower() == "planner":
-            instructions.append(
-                "If a question is user-answerable and materially changes the plan, return ask_user_question with evidence."
-            )
-        payload = {
-            "prompt_view": prompt_view,
-            "instructions": instructions,
-        }
-        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    payload = {
-        "work_order_id": pack.work_order_id,
-        "goal": pack.goal,
-        "instruction": pack.instruction,
-        "acceptance_criteria": list(pack.acceptance_criteria),
-        "workspace": dict(pack.workspace),
-        "continuity": dict(pack.continuity),
-        "artifacts": list(pack.artifacts),
-        "memory_pack": dict(pack.memory_pack),
-    }
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-
-
 def _extract_ask_user_question_payload(text: str) -> dict[str, Any]:
     loaded = _try_extract_json(str(text or "").strip())
     if not isinstance(loaded, dict):
@@ -2326,27 +2374,6 @@ def _extract_ask_user_question_payload(text: str) -> dict[str, Any]:
         "questions": questions[:3],
     }
     return payload
-
-
-def _ask_user_question_summary(payload: dict[str, Any]) -> str:
-    questions = [dict(item) for item in list(payload.get("questions") or []) if isinstance(item, dict)]
-    if not questions:
-        return "minion asked a user clarification question"
-    first = str(questions[0].get("question") or "minion asked a user clarification question").strip()
-    if len(questions) == 1:
-        return first
-    return f"{first} (+{len(questions) - 1} more)"
-
-
-def _clarification_questions_are_interactive(value: Any) -> bool:
-    questions = [dict(item) for item in list(value or []) if isinstance(item, dict)]
-    if not questions:
-        return False
-    for question in questions[:3]:
-        options = [dict(item) for item in list(question.get("options") or []) if isinstance(item, dict)]
-        if not options:
-            return False
-    return True
 
 
 def _coerce_int(value: Any, *, default: int) -> int:

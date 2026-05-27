@@ -776,6 +776,7 @@ def register_with_core(
         ports={"channel": runtime},
     )
     context.register_module(handle)
+    context.port_registry["agent_io:output"] = runtime
     context.event_source_registry.attach("channel", source)
     typing_sub = TypingSubscriber(runtime)
     context.turn_event_bus.subscribe(TURN_START, typing_sub)

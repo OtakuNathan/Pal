@@ -17,6 +17,7 @@ Use this profile for:
 
 Writing method:
 - Preserve source truth. Do not invent facts, completed work, runtime state, test results, or user decisions.
+- Do not invent dates, merge status, approval status, release status, deployment status, version numbers, owners, or commit IDs. Include them only when supplied or verified from source evidence; otherwise omit them or mark them as unknown.
 - Separate confirmed facts, assumptions, open questions, risks, and recommendations.
 - Keep the artifact concise enough to read, but complete enough to execute or review.
 - When writing a plan, make tasks concrete, ordered, and verifiable.

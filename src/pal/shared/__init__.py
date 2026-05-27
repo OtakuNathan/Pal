@@ -18,6 +18,20 @@ from pal.shared.capability_forest import (
     capability_action,
     capability_node,
 )
+from pal.shared.agent_io import (
+    AgentOutputPort,
+    ChannelAdapter,
+    ChannelDeliveryError,
+    ChannelEnvelope,
+    ChannelNormalizer,
+    ChannelRuntimePort,
+    EndpointConfig,
+    QueuedAttachment,
+    QueuedReply,
+    QueuedStatus,
+    QueuedStreamEvent,
+    ResponseHandle,
+)
 from pal.shared.enums import (
     EffectKind,
     EventKind,
@@ -45,6 +59,12 @@ from pal.shared.prompting import (
     PromptFragmentProvider,
 )
 from pal.shared.prompt_rendering import render_system_reminder, render_xml_block
+from pal.shared.tool_protocol import (
+    append_tool_protocol_messages,
+    assistant_tool_message,
+    default_tool_result_text,
+    ensure_tool_call_identity,
+)
 from pal.shared.messages import (
     CheckpointEvent,
     MinionApprovalDecision,
@@ -61,14 +81,21 @@ from pal.shared.payloads import extract_text_from_payload
 __all__ = [
     "BoundActionIndex",
     "BoundCapabilityAction",
+    "AgentOutputPort",
     "CapabilityActionBlueprint",
     "CapabilityForestRegistry",
     "CapabilityNodeBlueprint",
     "CheckpointEvent",
+    "ChannelAdapter",
+    "ChannelDeliveryError",
+    "ChannelEnvelope",
+    "ChannelNormalizer",
+    "ChannelRuntimePort",
     "CompiledCapabilityIndex",
     "DURABLE_TRUTH_SURFACES",
     "EffectKind",
     "EventKind",
+    "EndpointConfig",
     "GuardAction",
     "GuardStatus",
     "HydratedCapabilityNode",
@@ -95,10 +122,15 @@ __all__ = [
     "PromptIR",
     "PromptIRBlock",
     "PromptFragmentProvider",
+    "QueuedAttachment",
+    "QueuedReply",
+    "QueuedStatus",
+    "QueuedStreamEvent",
     "render_system_reminder",
     "render_xml_block",
     "RUNTIME_ONLY_SURFACES",
     "RuntimeStatus",
+    "ResponseHandle",
     "SINGLETON_TARGET",
     "ProactiveTriggerEvent",
     "SourceKind",
@@ -106,5 +138,9 @@ __all__ = [
     "capability_node",
     "standard_descriptors",
     "TaskContextPack",
+    "append_tool_protocol_messages",
+    "assistant_tool_message",
     "extract_text_from_payload",
+    "default_tool_result_text",
+    "ensure_tool_call_identity",
 ]

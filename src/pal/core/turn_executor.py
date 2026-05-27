@@ -6,7 +6,6 @@ import json
 from dataclasses import dataclass, replace
 from functools import singledispatchmethod
 from typing import Any, Awaitable, Callable
-from uuid import uuid4
 
 from pal.execution.contracts import ToolCallBudget
 from pal.core.runtime_config import RuntimeConfig
@@ -28,7 +27,17 @@ from pal.core.turns import (
 from pal.failure import FailureSignal
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolResult, LLMPreflightRequest
 from pal.memory.contracts import L2Entry, MemoryCommitRequest, MemoryCompactRequest, MemoryPackRequest
-from pal.shared import GuardAction, LLMFinishReason, LLMPreflightStatus, LLMResponseMode, LLMStreamEventKind, RuntimeStatus
+from pal.shared import (
+    GuardAction,
+    LLMFinishReason,
+    LLMPreflightStatus,
+    LLMResponseMode,
+    LLMStreamEventKind,
+    RuntimeStatus,
+    append_tool_protocol_messages,
+    default_tool_result_text,
+    ensure_tool_call_identity,
+)
 from pal.shared.payloads import extract_text_from_payload
 from pal.stream_events import NormalizedLLMStreamEvent
 
@@ -56,6 +65,7 @@ class TurnExecutor:
         handle_failure_async: Callable[..., Awaitable[Any]],
         render_failure_feedback_text: Callable[[Any], str],
         should_enter_failure_flow_for_tool_result: Callable[[Any], bool],
+        handle_llm_provider_errors: bool = True,
         config: RuntimeConfig | None = None,
     ) -> None:
         self.context = context
@@ -71,6 +81,7 @@ class TurnExecutor:
         self._handle_failure_async = handle_failure_async
         self._render_failure_feedback_text = render_failure_feedback_text
         self._should_enter_failure_flow_for_tool_result = should_enter_failure_flow_for_tool_result
+        self._handle_llm_provider_errors = handle_llm_provider_errors
 
         self._stream_accumulators = {
             LLMStreamEventKind.TEXT_DELTA: self._accumulate_text_delta,
@@ -234,7 +245,11 @@ class TurnExecutor:
                     finish_reason=LLMFinishReason.FALLBACK,
                     response_mode=LLMResponseMode.CHAT,
                 )
-        if effect.assembly_context.turn_kind != "failure" and outcome.finish_reason == LLMFinishReason.ERROR:
+        if (
+            self._handle_llm_provider_errors
+            and effect.assembly_context.turn_kind != "failure"
+            and outcome.finish_reason == LLMFinishReason.ERROR
+        ):
             failure_result = await self._handle_failure_async(
                 FailureSignal(
                     subsystem="llm",
@@ -530,8 +545,8 @@ class TurnExecutor:
     async def _handle_mailbox_reply(self, effect, continuation):
         if continuation.interrupted:
             return EffectResult(status=RuntimeStatus.SKIPPED, text="interrupted")
-        channel_runtime = self.context.require_port("channel:channel")
-        reply_id = channel_runtime.queue_reply(effect.channel_envelope, effect.text)
+        output_port = self._require_agent_output_port()
+        reply_id = await self._call_output_port_async(output_port, "queue_reply", effect.channel_envelope, effect.text)
         text = str(effect.text or "").strip()
         if text:
             continuation.emitted_reply_texts.append(text)
@@ -542,9 +557,19 @@ class TurnExecutor:
     async def _handle_mailbox_reply_stream(self, effect, continuation):
         if continuation.interrupted:
             return EffectResult(status=RuntimeStatus.SKIPPED, text="interrupted")
-        channel_runtime = self.context.require_port("channel:channel")
-        event_id = channel_runtime.queue_stream_event(effect.channel_envelope, effect.event)
+        output_port = self._require_agent_output_port()
+        event_id = await self._call_output_port_async(output_port, "queue_stream_event", effect.channel_envelope, effect.event)
         return EffectResult(status=RuntimeStatus.QUEUED, payload={"event_id": event_id})
+
+    def _require_agent_output_port(self):
+        return self.context.port_registry.get("agent_io:output") or self.context.require_port("channel:channel")
+
+    async def _call_output_port_async(self, output_port, method_name: str, *args, **kwargs):
+        method = getattr(output_port, method_name)
+        result = method(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
     # ── stream request (table-driven accumulator) ───────────────────────
 
@@ -998,43 +1023,18 @@ class TurnExecutor:
         return "I stopped the tool loop to avoid getting stuck and can only provide a text-only final reply."
 
     def _ensure_tool_call_identity(self, tool_call):
-        call_id = str(getattr(tool_call, "call_id", "") or "").strip() or f"call_{uuid4().hex[:12]}"
-        return type(tool_call)(name=tool_call.name, args=dict(tool_call.args), call_id=call_id)
+        return ensure_tool_call_identity(tool_call)
 
     def _flush_tool_protocol_messages(self, continuation) -> None:
         if not continuation.pending_tool_call_batch:
             return
-        assistant_message = {
-            "role": "assistant",
-            "content": str(continuation.pending_assistant_tool_text or ""),
-            "tool_calls": [
-                {
-                    "id": str(tool_call.call_id or ""),
-                    "type": "function",
-                    "function": {
-                        "name": tool_call.name,
-                        "arguments": json.dumps(tool_call.args, ensure_ascii=False, sort_keys=True),
-                    },
-                }
-                for tool_call in continuation.pending_tool_call_batch
-            ],
-        }
-        continuation.tool_protocol_messages.append(assistant_message)
-        result_by_call_id = {
-            str(result.call_id or ""): result for result in continuation.pending_tool_results if str(result.call_id or "").strip()
-        }
-        for tool_call in continuation.pending_tool_call_batch:
-            call_id = str(tool_call.call_id or "").strip()
-            result = result_by_call_id.get(call_id)
-            if result is None:
-                continue
-            continuation.tool_protocol_messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": self._render_tool_result_content(tool_call, result),
-                }
-            )
+        append_tool_protocol_messages(
+            continuation.tool_protocol_messages,
+            assistant_text=str(continuation.pending_assistant_tool_text or ""),
+            tool_calls=continuation.pending_tool_call_batch,
+            tool_results=continuation.pending_tool_results,
+            render_tool_result_content=self._render_tool_result_content,
+        )
         continuation.pending_assistant_tool_text = ""
         continuation.pending_tool_call_batch = []
         continuation.pending_tool_results = []
@@ -1044,11 +1044,7 @@ class TurnExecutor:
             return self._render_memory_recall_tool_observation(tool_call, result)
         if str(result.llm_text or "").strip():
             return str(result.llm_text).strip()
-        if str(result.text or "").strip():
-            return str(result.text).strip()
-        if result.structured:
-            return json.dumps(result.structured, ensure_ascii=False, sort_keys=True)
-        return "ok" if result.ok else "error"
+        return default_tool_result_text(result)
 
     @staticmethod
     def _is_memory_recall_tool_call(name: str) -> bool:

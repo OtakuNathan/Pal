@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from pal.channel.contracts import ChannelEnvelope
 from pal.control.contracts import ControlRoute
+from pal.shared import ChannelEnvelope
 
 
 def derive_control_scope_key(

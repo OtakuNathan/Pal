@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pal.channel import ChannelEnvelope
-from pal.channel.contracts import EndpointConfig, ResponseHandle
 from pal.core.turns import (
     AgentLoopFrame,
     L1CommitPayload,
@@ -16,7 +14,7 @@ from pal.foundation import EventEnvelope
 from pal.memory import L1MessageKind, L1TranscriptMessage
 from pal.proactive.contracts import ProactiveDefinition
 from pal.proactive.input_builder import build_proactive_trigger_input
-from pal.shared import EventKind, PromptAssemblyContext, ProactiveTriggerEvent, SourceKind
+from pal.shared import ChannelEnvelope, EndpointConfig, EventKind, PromptAssemblyContext, ProactiveTriggerEvent, ResponseHandle, SourceKind
 
 
 def build_proactive_turn_continuation(

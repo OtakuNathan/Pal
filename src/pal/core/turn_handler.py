@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pal.channel.contracts import ChannelEnvelope
 from pal.core.events import EventHandler
 from pal.foundation import EventEnvelope
-from pal.shared import EventKind
+from pal.shared import ChannelEnvelope, EventKind
 
 
 @dataclass

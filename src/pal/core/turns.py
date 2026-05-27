@@ -7,14 +7,13 @@ import re
 from typing import Any, Callable
 from uuid import uuid4
 
-from pal.channel import ChannelEnvelope
 from pal.failure.contracts import (
     FAILURE_VERIFICATION_FAILED,
     FailureDraft,
     VerificationResult,
 )
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolCall, CanonicalToolResult
-from pal.shared import EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus
+from pal.shared import ChannelEnvelope, EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus
 from pal.shared.payloads import extract_text_from_payload
 from pal.memory import L1MessageKind, L1TranscriptMessage
 from pal.stream_events import NormalizedLLMStreamEvent

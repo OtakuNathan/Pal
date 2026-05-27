@@ -23,6 +23,7 @@ from pal.behavior import (
 from pal.control import ControlAction, ControlEvent, ControlPlane, ControlRoute, InteractionResult
 from pal.control.interactions import build_minion_question_interaction
 from pal.core import MemoryCompactEffect, PalCore
+from pal.core.turns import TurnContinuation
 from pal.channel.contracts import ChannelEnvelope, EndpointConfig, ResponseHandle
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution import CapabilityCall, CapabilityDescriptor, CapabilityResult, register_with_core as register_execution_with_core
@@ -74,11 +75,14 @@ from pal.minion.runner import (
     MinionScopedExecutionRuntime,
     _llm_tools_for_allowed,
     _minion_llm_request_metadata,
-    _prompt_view_from_pack,
-    _render_task_prompt,
-    _render_system_prompt,
     _resolve_minion_max_output_tokens,
     build_slim_minion_runtime,
+)
+from pal.minion.prompt_adapter import (
+    build_minion_prompt_messages,
+    prompt_view_from_pack as _prompt_view_from_pack,
+    render_minion_system_prompt as _render_system_prompt,
+    render_minion_task_prompt as _render_task_prompt,
 )
 from pal.minion.introspection import _control_route_payload_for_turn, _prompt_log_enabled_for_turn
 from pal.minion.prompt import TaskingPromptFragmentProvider
@@ -2833,6 +2837,9 @@ class MinionManagerTests(unittest.TestCase):
             repo.mkdir()
             (repo / "src").mkdir()
             (repo / "src" / "app.py").write_text("def target():\n    return 'ok'\n", encoding="utf-8")
+            (repo / "src" / "__init__.py").write_text("", encoding="utf-8")
+            (repo / "__pycache__").mkdir()
+            (repo / "__pycache__" / "app.cpython-313.pyc").write_text("target should not be searched", encoding="utf-8")
             (self.root / "outside.txt").write_text("secret", encoding="utf-8")
 
             class FakeBase:
@@ -2864,10 +2871,19 @@ class MinionManagerTests(unittest.TestCase):
             search = await runtime.execute_tool_async(CanonicalToolCall(name="op_workspace_search", args={"query": "target"}), turn_id="r")
             self.assertTrue(search.ok)
             self.assertIn("src/app.py:1", search.text)
+            self.assertNotIn("__pycache__", search.text)
+
+            no_match = await runtime.execute_tool_async(CanonicalToolCall(name="op_workspace_search", args={"query": "missing"}), turn_id="r")
+            self.assertTrue(no_match.ok)
+            self.assertIn("No workspace matches found", no_match.text)
 
             read = await runtime.execute_tool_async(CanonicalToolCall(name="op_workspace_read", args={"path": "src/app.py"}), turn_id="r")
             self.assertTrue(read.ok)
             self.assertIn("1: def target", read.text)
+
+            empty_read = await runtime.execute_tool_async(CanonicalToolCall(name="op_workspace_read", args={"path": "src/__init__.py"}), turn_id="r")
+            self.assertTrue(empty_read.ok)
+            self.assertIn("src/__init__.py: empty file", empty_read.text)
 
             escaped = await runtime.execute_tool_async(CanonicalToolCall(name="op_workspace_read", args={"path": "../outside.txt"}), turn_id="r")
             self.assertFalse(escaped.ok)
@@ -2903,6 +2919,8 @@ class MinionManagerTests(unittest.TestCase):
             specs = {spec["name"] for spec in runtime.list_capability_specs()}
             self.assertIn("op_minion_artifact_write", specs)
             self.assertIn("op_minion_artifact_edit", specs)
+            write_spec = runtime.get_capability_spec("op_minion_artifact_write")
+            self.assertFalse(write_spec["parameters_schema"]["additionalProperties"])
 
             result = await runtime.execute_tool_async(
                 CanonicalToolCall(
@@ -2993,6 +3011,17 @@ class MinionManagerTests(unittest.TestCase):
             )
             self.assertFalse(empty_edit.ok)
             self.assertIn("content is required", empty_edit.text)
+
+            malformed = await runtime.execute_tool_async(
+                CanonicalToolCall(
+                    name="op_minion_artifact_write",
+                    args={"relative_path": "bad.md", "content": "partial body", "unexpected": "spilled text"},
+                ),
+                turn_id="r",
+            )
+            self.assertFalse(malformed.ok)
+            self.assertIn("unknown argument", malformed.text)
+            self.assertFalse((artifact_dir / "bad.md").exists())
 
             escaped = await runtime.execute_tool_async(
                 CanonicalToolCall(name="op_minion_artifact_write", args={"relative_path": "../escape.md", "content": "no"}),
@@ -3837,10 +3866,25 @@ class MinionManagerTests(unittest.TestCase):
                 )
             ]
 
-            result = await runner._handle_minion_memory_compact(
-                MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            bundle = MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace())
+            continuation = TurnContinuation(
+                turn_id=runner.run_id,
+                channel_envelope=state.channel_envelope,
+                program=(item for item in ()),
+                correlation_id=runner.run_id,
+                control_scope_key=f"minion:{runner.run_id}",
+                tool_protocol_messages=state.tool_protocol_messages,
+                pending_assistant_tool_text=state.pending_assistant_tool_text,
+                pending_tool_call_batch=list(state.pending_tool_call_batch),
+                pending_tool_results=list(state.pending_tool_results),
+            )
+            executor = runner._build_minion_turn_executor(bundle, state, continuation)
+            result = await runner._execute_minion_agent_effect(
+                executor,
+                continuation,
                 state,
                 MemoryCompactEffect(target_input_budget=256, reserved_output_tokens=128),
+                max_output_tokens=1024,
             )
 
             self.assertEqual(result.status, RuntimeStatus.OK)
@@ -3888,7 +3932,13 @@ class MinionManagerTests(unittest.TestCase):
             {"role": "tool", "tool_call_id": "call_1", "content": "fresh tool result"},
         ]
 
-        messages = runner._minion_prompt_messages(state, PromptAssemblyContext(metadata={}))
+        messages = build_minion_prompt_messages(
+            scaffold=runner._prompt_scaffold(),
+            channel_envelope=state.channel_envelope,
+            memory_text=runner._render_minion_memory_context(state),
+            retry_note="",
+            tool_protocol_messages=state.tool_protocol_messages,
+        )
 
         self.assertEqual([message["role"] for message in messages], ["system", "user", "assistant", "tool", "user"])
         self.assertNotIn("Minion run memory", _message_text(messages[1]))
@@ -4410,6 +4460,7 @@ class MinionManagerTests(unittest.TestCase):
         )
         self.assertIn("technical context", prompt)
         self.assertIn("design notes, specs, proposals", prompt)
+        self.assertIn("Do not invent dates, merge status, approval status", prompt)
         self.assertIn("confirmed facts and source evidence", prompt)
         self.assertIn("write the requested document to the requested path", prompt)
         self.assertIn("final response should be a short pointer plus verification summary", prompt)

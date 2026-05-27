@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pal.channel.contracts import ChannelEnvelope
 from pal.control.contracts import ControlAction, ControlEvent, InteractionResult
 from pal.control.routing import route_from_channel_envelope
 from pal.control.service import ControlPlane
 from pal.core.events import EventHandler
 from pal.foundation import EventEnvelope
-from pal.shared import EventKind, SourceKind
+from pal.shared import ChannelEnvelope, EventKind, SourceKind
 
 
 @dataclass(frozen=True)
