@@ -20,6 +20,15 @@ from pal.foundation.attachment import AttachmentSpec
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase, ChannelEndpointQueueBase
 from pal.channel.introspection import ChannelIntrospectionProvider, ChannelSnapshot, inspect_channel, register_with_core
 from pal.channel.models import ChannelEndpointModel
+from pal.channel.provider_manager import (
+    ChannelProviderBuildContext,
+    ChannelEndpointProviderManager,
+    ChannelProvider,
+    ChannelProviderContext,
+    FactoryChannelProvider,
+    RuntimeChannelProviderManifest,
+    build_default_channel_provider_manager,
+)
 from pal.channel.repository import ChannelEndpointRepository
 from pal.channel.runtime import ChannelAdapterRegistry, ChannelEndpointRegistry, ChannelRuntime
 from pal.channel.source import ChannelEventSource
@@ -31,9 +40,13 @@ __all__ = [
     "ChannelEndpointFactory",
     "ChannelEndpointFactoryRegistry",
     "ChannelEndpointModel",
+    "ChannelEndpointProviderManager",
+    "ChannelProvider",
+    "ChannelProviderContext",
     "ChannelEndpointQueueBase",
     "ChannelEndpointRegistry",
     "ChannelEndpointRepository",
+    "ChannelProviderBuildContext",
     "ChannelEnvelope",
     "ChannelEventSource",
     "ChannelIntrospectionProvider",
@@ -42,15 +55,18 @@ __all__ = [
     "ChannelRuntimePort",
     "ChannelSnapshot",
     "EndpointConfig",
+    "FactoryChannelProvider",
     "ArtifactIngestor",
     "AttachmentSpec",
     "QueuedAttachment",
     "QueuedReply",
     "QueuedStatus",
     "ResponseHandle",
+    "RuntimeChannelProviderManifest",
     "SocketChannelEndpointFactory",
     "StoredArtifact",
     "build_default_factory_registry",
+    "build_default_channel_provider_manager",
     "inspect_channel",
     "register_with_core",
 ]

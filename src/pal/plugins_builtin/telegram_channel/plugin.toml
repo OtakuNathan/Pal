@@ -1,0 +1,5 @@
+plugin_id = "telegram_channel"
+entrypoint = "pal.plugins_builtin.telegram_channel.runtime"
+version = "0.1.0"
+enabled_by_default = true
+reload_modules = ["pal.channel.endpoints.telegram_endpoint"]

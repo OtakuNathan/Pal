@@ -8,7 +8,6 @@ from pathlib import Path
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
@@ -221,9 +220,6 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _stop_event: asyncio.Event | None = None
     _ingestor: ArtifactIngestor | None = None
     _typing_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
-    _interactive_messages: dict[str, dict[str, Any]] = field(default_factory=dict)
-    _control_commands_manifest: list[dict[str, str]] = field(default_factory=list)
-    _interactive_default_ttl_seconds: float = 60.0
     _polling_running: bool = False
     _authorized: bool = False
     _last_poll_error: str = ""
@@ -534,14 +530,10 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 "message_id": str(getattr(message, "message_id", "") or ""),
                 "thread_id": str(getattr(message, "message_thread_id", "") or ""),
             }
-            envelope = self.emit_normalized(
-                EventEnvelope(
-                    event_kind=EventKind.INTERACTION_RESULT,
-                    source_kind=SourceKind.CHANNEL,
-                    payload=interaction_result,
-                    correlation_id=str(getattr(getattr(update, "callback_query", None), "id", "") or ""),
-                ),
-                response_handle=self.build_response_handle(reply_target=reply_target),
+            envelope = self.emit_interaction_result(
+                interaction_result,
+                correlation_id=str(getattr(getattr(update, "callback_query", None), "id", "") or ""),
+                reply_target=reply_target,
             )
             if envelope is not None:
                 self.queue_status("typing_start", response_handle=envelope.response_handle)
@@ -582,14 +574,13 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             return None
         with contextlib.suppress(Exception):
             await callback_query.answer()
-        interaction_id, button_token = self._parse_interaction_callback_data(data)
+        interaction_id, button_token = self.parse_interaction_callback_data(data)
         if not interaction_id or not button_token:
             return None
         metadata = self._interactive_messages.get(interaction_id)
         if not metadata:
             return None
-        expires_at_monotonic = metadata.get("expires_at_monotonic")
-        if isinstance(expires_at_monotonic, (int, float)) and float(expires_at_monotonic) <= time.monotonic():
+        if self.is_interaction_metadata_expired(metadata):
             target = self._interactive_messages.pop(interaction_id, None)
             if isinstance(target, dict):
                 await self._edit_interaction_message_async(
@@ -597,23 +588,14 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     spec=InteractionMessageSpec(
                         interaction_id=interaction_id,
                         interaction_kind=str(metadata.get("interaction_kind") or ""),
-                        text=self._expired_interaction_text(str(metadata.get("interaction_kind") or "")),
+                        text=self.expired_interaction_text(str(metadata.get("interaction_kind") or "")),
                         buttons=(),
                         expires_at=None,
                     ),
                     clear_keyboard=True,
                 )
             return None
-        actions = metadata.get("actions")
-        action_payload = actions.get(button_token) if isinstance(actions, dict) else None
-        if not isinstance(action_payload, dict):
-            return None
-        return InteractionResult(
-            interaction_id=interaction_id,
-            interaction_kind=str(metadata.get("interaction_kind") or ""),
-            action_key=str(action_payload.get("action_key") or "").strip(),
-            action_args=dict(action_payload.get("action_args") or {}),
-        )
+        return self.interaction_result_from_token(interaction_id, button_token)
 
     async def _payload_from_update(self, update: Any) -> dict[str, Any] | None:
         message = getattr(update, "effective_message", None)
@@ -867,9 +849,9 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         existing = self._interactive_messages.get(spec.interaction_id)
         if allow_update and existing is not None:
             if await self._edit_interaction_message_async(existing, spec=spec):
-                self._remember_interaction_message(spec, existing)
+                self.remember_interaction_message(spec, existing)
                 return
-            self._forget_interactive_message(spec.interaction_id)
+            self.forget_interaction_message(spec.interaction_id)
         chat_id = _safe_int(response_handle.reply_target.get("chat_id"))
         thread_id = _safe_int(response_handle.reply_target.get("thread_id"))
         if chat_id is None:
@@ -885,7 +867,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         except Exception as exc:
             self.last_delivery_error = str(exc)
             return
-        self._remember_interaction_message(
+        self.remember_interaction_message(
             spec,
             {
                 "chat_id": chat_id,
@@ -927,48 +909,15 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             return False
         return True
 
-    def _remember_interaction_message(self, spec: InteractionMessageSpec, target: dict[str, Any]) -> None:
-        self._interactive_messages[spec.interaction_id] = {
-            "chat_id": _safe_int(target.get("chat_id")),
-            "message_id": _safe_int(target.get("message_id")),
-            "interaction_kind": spec.interaction_kind,
-            "expires_at_monotonic": self._interaction_expiry_monotonic(spec),
-            "actions": self._build_interaction_action_map(spec),
-        }
-
-    def _interaction_expiry_monotonic(self, spec: InteractionMessageSpec) -> float | None:
-        raw = str(spec.expires_at or "").strip()
-        if not raw:
-            return None
-        try:
-            parsed = datetime.fromisoformat(raw)
-        except ValueError:
-            return time.monotonic() + float(self._interactive_default_ttl_seconds)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        current = datetime.now(timezone.utc)
-        delta = max((parsed.astimezone(timezone.utc) - current).total_seconds(), 0.0)
-        return time.monotonic() + delta
-
     def _prune_interactive_messages(self, *, now: float | None = None) -> None:
-        current = float(now if now is not None else time.monotonic())
-        stale = [
-            interaction_id
-            for interaction_id, metadata in self._interactive_messages.items()
-            if isinstance(metadata.get("expires_at_monotonic"), (int, float))
-            and float(metadata["expires_at_monotonic"]) <= current
-        ]
-        for interaction_id in stale:
-            self._interactive_messages.pop(interaction_id, None)
+        self.prune_interactive_messages(now=now)
 
     async def _prune_interactive_messages_async(self, *, now: float | None = None) -> None:
         current = float(now if now is not None else time.monotonic())
         stale: list[tuple[str, dict[str, Any]]] = []
         for interaction_id, metadata in list(self._interactive_messages.items()):
             expires_at_monotonic = metadata.get("expires_at_monotonic")
-            if not isinstance(expires_at_monotonic, (int, float)):
-                continue
-            if float(expires_at_monotonic) <= current:
+            if isinstance(expires_at_monotonic, (int, float)) and self.is_interaction_metadata_expired(metadata, now=current):
                 target = self._interactive_messages.pop(interaction_id, None)
                 if isinstance(target, dict):
                     stale.append((interaction_id, target))
@@ -978,7 +927,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 spec=InteractionMessageSpec(
                     interaction_id=interaction_id,
                     interaction_kind=str(target.get("interaction_kind") or ""),
-                    text=self._expired_interaction_text(str(target.get("interaction_kind") or "")),
+                    text=self.expired_interaction_text(str(target.get("interaction_kind") or "")),
                     buttons=(),
                     expires_at=None,
                 ),
@@ -986,40 +935,19 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             )
 
     def _forget_interactive_message(self, interaction_id: str) -> None:
-        self._interactive_messages.pop(str(interaction_id or "").strip(), None)
+        self.forget_interaction_message(interaction_id)
 
     def _expired_interaction_text(self, interaction_kind: str) -> str:
-        kind = str(interaction_kind or "").strip()
-        if kind == "reset_confirm":
-            return "This reset request expired."
-        if kind == "approval_request":
-            return "This approval request expired."
-        return "This interaction expired."
+        return self.expired_interaction_text(interaction_kind)
 
     def _build_interaction_action_map(self, spec: InteractionMessageSpec) -> dict[str, dict[str, Any]]:
-        actions: dict[str, dict[str, Any]] = {}
-        button_index = 0
-        for row in spec.buttons:
-            for button in row:
-                token = f"b{button_index}"
-                button_index += 1
-                actions[token] = {
-                    "action_key": button.action_key,
-                    "action_args": dict(button.action_args),
-                }
-        return actions
+        return self.build_interaction_action_map(spec)
 
     def _parse_interaction_callback_data(self, data: str) -> tuple[str, str]:
-        raw = str(data or "").strip()
-        if not raw.startswith("ix:"):
-            return "", ""
-        parts = raw.split(":", 2)
-        if len(parts) != 3:
-            return "", ""
-        return parts[1].strip(), parts[2].strip()
+        return self.parse_interaction_callback_data(data)
 
     async def _apply_control_catalog_async(self, payload: dict[str, Any]) -> None:
-        commands = self._normalize_control_commands(payload)
+        commands = self.normalize_control_commands(payload)
         self._control_commands_manifest = commands
         if self.application is None or not commands:
             return
@@ -1053,25 +981,6 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             self._last_status_error = str(exc)
             logger.exception("telegram command menu button update failed")
 
-    def _normalize_control_commands(self, payload: dict[str, Any]) -> list[dict[str, str]]:
-        manifest: list[dict[str, str]] = []
-        for item in list(payload.get("commands") or []):
-            if not isinstance(item, dict):
-                continue
-            command = str(item.get("command") or "").strip().lower()
-            description = str(item.get("description") or "").strip()
-            if not command or not description:
-                continue
-            if re.fullmatch(r"[a-z0-9_]{1,32}", command) is None:
-                continue
-            manifest.append(
-                {
-                    "command": command,
-                    "description": description[:256],
-                }
-            )
-        return manifest
-
     def _build_interaction_markup(self, spec: InteractionMessageSpec):
         if not spec.buttons:
             return None
@@ -1089,7 +998,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 label = str(item.label or "").strip()
                 if not label:
                     continue
-                token = f"b{button_index}"
+                token = self.interaction_button_token(button_index)
                 button_index += 1
                 row.append(
                     InlineKeyboardButton(

@@ -18,6 +18,8 @@ from pal.control import (
     ControlEvent,
     ControlPlane,
     ControlRoute,
+    InteractionButtonSpec,
+    InteractionMessageSpec,
     InteractionResult,
     register_with_core as register_control_with_core,
 )
@@ -702,6 +704,39 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item.get("command") == "control" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_llm_endpoint" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_tool_surface" for item in commands))
+
+    async def test_generic_channel_endpoint_handles_interaction_buttons_without_telegram(self) -> None:
+        spec = InteractionMessageSpec(
+            interaction_id="generic_panel",
+            interaction_kind="control_panel",
+            route=self.route,
+            text="Generic control panel",
+            buttons=((InteractionButtonSpec(label="Think", action_key="control.think.open"),),),
+        )
+        self.endpoint.queue_status(
+            "interactive_update",
+            payload={"spec": spec},
+            response_handle=self.endpoint.build_response_handle(reply_target=self.route.reply_target),
+        )
+
+        self.endpoint.flush_status_outbox()
+
+        self.assertIn("generic_panel", self.endpoint._interactive_messages)
+        self.assertEqual(self.endpoint.sent_replies[-1][0], "Generic control panel")
+        result = self.endpoint.interaction_result_from_token("generic_panel", "b0")
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.action_key, "control.think.open")
+        envelope = self.endpoint.emit_interaction_result(
+            result,
+            correlation_id="generic-callback",
+            reply_target=self.route.reply_target,
+        )
+
+        self.assertIsNotNone(envelope)
+        drained = self.endpoint.poll()
+        self.assertEqual(drained[-1].event.event_kind, EventKind.INTERACTION_RESULT)
+        self.assertIsInstance(drained[-1].event.payload, InteractionResult)
 
     async def test_channel_attach_replays_cached_control_catalog(self) -> None:
         await self.core.publish_control_catalog_async(endpoint_id="socket_main")

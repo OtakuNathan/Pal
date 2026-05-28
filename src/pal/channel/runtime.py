@@ -35,6 +35,9 @@ class ChannelEndpointRegistry:
     def register(self, endpoint: ChannelEndpointBase) -> None:
         self.endpoints[endpoint.endpoint.endpoint_id] = endpoint
 
+    def unregister(self, endpoint_id: str) -> ChannelEndpointBase | None:
+        return self.endpoints.pop(endpoint_id, None)
+
     def get(self, endpoint_id: str) -> ChannelEndpointBase | None:
         return self.endpoints.get(endpoint_id)
 
@@ -109,6 +112,32 @@ class ChannelRuntime(ChannelRuntimePort):
             future.result(timeout=timeout_seconds)
             return
         asyncio.run(_replace())
+
+    async def remove_endpoint_async(self, endpoint_id: str) -> bool:
+        endpoint = self.endpoint_registry.unregister(endpoint_id)
+        if endpoint is None:
+            return False
+        stopper = getattr(endpoint, "stop_async", None)
+        if callable(stopper):
+            await stopper()
+        return True
+
+    def remove_endpoint(self, endpoint_id: str, *, timeout_seconds: float = 10.0) -> bool:
+        async def _remove() -> bool:
+            return await self.remove_endpoint_async(endpoint_id)
+
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop is loop:
+                loop.create_task(_remove())
+                return True
+            future = asyncio.run_coroutine_threadsafe(_remove(), loop)
+            return bool(future.result(timeout=timeout_seconds))
+        return bool(asyncio.run(_remove()))
 
     def get_endpoint(self, endpoint_id: str) -> ChannelEndpointBase | None:
         return self.endpoint_registry.get(endpoint_id)

@@ -29,6 +29,12 @@ class ChannelEndpointFactoryRegistry:
     def register(self, factory: ChannelEndpointFactory) -> None:
         self.factories[factory.channel_kind] = factory
 
+    def unregister(self, channel_kind: str) -> ChannelEndpointFactory | None:
+        return self.factories.pop(str(channel_kind or "").strip(), None)
+
+    def get(self, channel_kind: str) -> ChannelEndpointFactory | None:
+        return self.factories.get(str(channel_kind or "").strip())
+
     def reload_modules_for_kind(self, channel_kind: str) -> tuple[str, ...]:
         factory = self.factories.get(channel_kind)
         if factory is None:
@@ -79,9 +85,6 @@ class SocketChannelEndpointFactory:
 
 
 def build_default_factory_registry() -> ChannelEndpointFactoryRegistry:
-    from pal.channel.endpoints.telegram_endpoint import TelegramChannelEndpointFactory
-
     registry = ChannelEndpointFactoryRegistry()
     registry.register(SocketChannelEndpointFactory())
-    registry.register(TelegramChannelEndpointFactory())
     return registry

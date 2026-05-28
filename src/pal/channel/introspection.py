@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import importlib
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase
 from pal.channel.models import ChannelEndpointModel
+from pal.channel.provider_manager import ChannelEndpointProviderManager, build_default_channel_provider_manager
 from pal.channel.repository import ChannelEndpointRepository
 from pal.channel.runtime import ChannelRuntime
 from pal.channel.source import ChannelEventSource
@@ -54,6 +52,7 @@ class ChannelEndpointListItem:
     enabled: bool
     attached: bool
     paired: bool
+    provider_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -109,9 +108,18 @@ class ChannelIntrospectionProvider:
     runtime: ChannelRuntime
     repository: ChannelEndpointRepository
     runtime_root: Path | None = None
-    endpoint_factories: Any = None
+    provider_manager: ChannelEndpointProviderManager | None = None
+    main_context: MainContext | None = None
     module_id: str = "channel"
     owner_id: str = "channel"
+
+    def __post_init__(self) -> None:
+        if self.provider_manager is None:
+            self.provider_manager = build_default_channel_provider_manager(
+                runtime=self.runtime,
+                repository=self.repository,
+                runtime_root=self.runtime_root or Path.cwd(),
+            )
 
     def iter_endpoints(self) -> list[ChannelEndpointTarget]:
         targets: dict[str, ChannelEndpointTarget] = {}
@@ -167,6 +175,7 @@ class ChannelIntrospectionProvider:
                 enabled=target.enabled,
                 attached=target.attached,
                 paired=target.runtime_endpoint.paired if target.runtime_endpoint is not None else False,
+                provider_id=getattr(self._provider_for_target(target), "provider_id", ""),
             ).__dict__
             for target in self.iter_endpoints()
         ]
@@ -277,11 +286,39 @@ class ChannelIntrospectionProvider:
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="module",
+        family="provider",
+        action_name="rescan",
+        description="Rescan channel providers and update the channel provider registry.",
+        aliases=("channel_provider_rescan", "refresh_channel_providers"),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "attach_enabled_endpoints": {
+                    "type": "boolean",
+                    "description": "Whether to attach enabled endpoints after provider discovery.",
+                }
+            },
+        },
+    )
+    def rescan_providers(self, call: IntrospectionCall) -> IntrospectionResult:
+        attach_enabled = bool(call.args.get("attach_enabled_endpoints", False))
+        payload = self._manager().rescan_providers(attach_enabled_endpoints=attach_enabled)
+        payload["republished_capability_names"] = self._republish_capabilities()
+        return IntrospectionResult(
+            status=RuntimeStatus.OK,
+            text="channel providers rescanned",
+            structured=payload,
+            llm_text=render_titled_structured_for_llm("Channel providers rescanned", payload),
+        )
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
         family="management",
         action_name="reload_provider",
         description=(
-            "Hot-reload the provider implementation for one channel endpoint. "
-            "The channel bus stays mounted; only the endpoint/provider instance is rebuilt."
+            "Restart one channel endpoint runtime instance through its provider. "
+            "Use channel provider rescan to discover newly available providers."
         ),
         aliases=("channel_reload_endpoint", "reload_channel_provider"),
         args_schema={
@@ -291,7 +328,7 @@ class ChannelIntrospectionProvider:
         },
     )
     def reload_provider(self, call: IntrospectionCall) -> IntrospectionResult:
-        return self._reload_endpoint_provider(str(call.args.get("target_id") or "").strip())
+        return self._restart_endpoint(str(call.args.get("target_id") or "").strip())
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -308,20 +345,7 @@ class ChannelIntrospectionProvider:
                 text="channel endpoint not found",
                 llm_text="channel endpoint not found",
             )
-        snapshot = ChannelEndpointSnapshot(
-            endpoint_id=target.endpoint_id,
-            channel_kind=target.channel_kind,
-            binding_key=target.binding_key,
-            enabled=target.enabled,
-            attached=target.attached,
-            paired=target.runtime_endpoint.paired if target.runtime_endpoint is not None else False,
-        )
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="channel endpoint snapshot",
-            structured=snapshot.__dict__,
-            llm_text=render_titled_structured_for_llm("Channel endpoint snapshot", snapshot.__dict__),
-        )
+        return self._manager().inspect_endpoint(target.endpoint_id)
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -337,27 +361,7 @@ class ChannelIntrospectionProvider:
                 text="channel endpoint not found",
                 llm_text="channel endpoint not found",
             )
-        if target.runtime_endpoint is None:
-            payload = {
-                "endpoint_id": target.endpoint_id,
-                "paired": False,
-                "attached": target.attached,
-                "authorized": False,
-            }
-            return IntrospectionResult(
-                status=RuntimeStatus.OK,
-                text="channel endpoint authorization state",
-                structured=payload,
-                llm_text=render_titled_structured_for_llm("Channel endpoint authorization state", payload),
-            )
-        auth_state = dict(target.runtime_endpoint.inspect_auth_state())
-        auth_state.setdefault("endpoint_id", target.endpoint_id)
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="channel endpoint authorization state",
-            structured=auth_state,
-            llm_text=render_titled_structured_for_llm("Channel endpoint authorization state", auth_state),
-        )
+        return self._manager().inspect_auth_state(target.endpoint_id)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -375,11 +379,11 @@ class ChannelIntrospectionProvider:
     )
     def set_auth_material(self, call: IntrospectionCall) -> IntrospectionResult:
         target = self._require_target(call)
-        if target is None or target.runtime_endpoint is None:
+        if target is None:
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
-                text="channel endpoint runtime not found",
-                llm_text="channel endpoint runtime not found",
+                text="channel endpoint not found",
+                llm_text="channel endpoint not found",
             )
         material = call.args.get("material")
         if not isinstance(material, dict):
@@ -388,37 +392,7 @@ class ChannelIntrospectionProvider:
                 text="material must be an object",
                 llm_text="material must be an object",
             )
-        # Authorization material is write-only from the LLM-facing surface. We
-        # can persist non-sensitive hints about what was supplied, but never
-        # echo secrets/tokens back through introspection.
-        auth_state = target.runtime_endpoint.apply_auth_material(dict(material))
-        try:
-            persisted_patch: dict[str, Any] = {
-                "auth_keys": sorted(str(key) for key in material.keys()),
-                "paired": bool(target.runtime_endpoint.paired),
-            }
-            if target.channel_kind == "telegram":
-                bot_token = str(material.get("bot_token") or "").strip()
-                if bot_token:
-                    persisted_patch["bot_token"] = bot_token
-            self.repository.merge_binding_metadata(
-                target.endpoint_id,
-                persisted_patch,
-            )
-        except Exception:
-            pass
-        sanitized = dict(auth_state)
-        sanitized.pop("token", None)
-        sanitized.pop("secret", None)
-        sanitized.pop("bot_token", None)
-        sanitized.setdefault("endpoint_id", target.endpoint_id)
-        sanitized.setdefault("accepted_keys", sorted(str(key) for key in material.keys()))
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="channel endpoint auth material updated",
-            structured=sanitized,
-            llm_text=render_titled_structured_for_llm("Channel endpoint auth material updated", sanitized),
-        )
+        return self._manager().set_auth_material(target.endpoint_id, dict(material))
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -434,22 +408,7 @@ class ChannelIntrospectionProvider:
                 text="channel endpoint not found",
                 llm_text="channel endpoint not found",
             )
-        if target.runtime_endpoint is None:
-            payload = {"endpoint_id": target.endpoint_id, "inbox_size": 0, "outbox_size": 0}
-            return IntrospectionResult(
-                status=RuntimeStatus.OK,
-                text="channel endpoint backlog state",
-                structured=payload,
-                llm_text=render_titled_structured_for_llm("Channel endpoint backlog state", payload),
-            )
-        payload = dict(target.runtime_endpoint.inspect_backlog())
-        payload.setdefault("endpoint_id", target.endpoint_id)
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="channel endpoint backlog state",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Channel endpoint backlog state", payload),
-        )
+        return self._manager().inspect_backlog(target.endpoint_id)
 
     @capability_action(
         namespace=INTROSPECTION_NAMESPACE,
@@ -465,32 +424,7 @@ class ChannelIntrospectionProvider:
                 text="channel endpoint not found",
                 llm_text="channel endpoint not found",
             )
-        if target.runtime_endpoint is None:
-            payload = {
-                "endpoint_id": target.endpoint_id,
-                "attached": target.attached,
-                "enabled": target.enabled,
-                "healthy": False,
-                "reason": "runtime_endpoint_missing",
-            }
-            return IntrospectionResult(
-                status=RuntimeStatus.OK,
-                text="channel endpoint health",
-                structured=payload,
-                llm_text=render_titled_structured_for_llm("Channel endpoint health", payload),
-            )
-        payload = dict(target.runtime_endpoint.inspect_health())
-        payload.setdefault("endpoint_id", target.endpoint_id)
-        payload.setdefault("attached", target.attached)
-        payload.setdefault("enabled", target.enabled)
-        payload.pop("token", None)
-        payload.pop("secret", None)
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="channel endpoint health",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Channel endpoint health", payload),
-        )
+        return self._manager().inspect_health(target.endpoint_id)
 
     # --- module lifecycle owner for endpoint providers ---
 
@@ -520,6 +454,13 @@ class ChannelIntrospectionProvider:
     def _require_target(self, call: IntrospectionCall) -> ChannelEndpointTarget | None:
         target = call.meta.get("resolved_target")
         return target if isinstance(target, ChannelEndpointTarget) else None
+
+    def _manager(self) -> ChannelEndpointProviderManager:
+        assert self.provider_manager is not None
+        return self.provider_manager
+
+    def _provider_for_target(self, target: ChannelEndpointTarget):
+        return self._manager().provider_for_endpoint_type(target.channel_kind)
 
     def _set_enabled(self, call: IntrospectionCall, *, enabled: bool) -> IntrospectionResult:
         endpoint_id = str(call.args.get("target_id") or "").strip()
@@ -564,79 +505,21 @@ class ChannelIntrospectionProvider:
                 text="target_id is required",
                 llm_text="target_id is required",
             )
-        endpoint = self.runtime.get_endpoint(endpoint_id)
-        if endpoint is not None:
-            if attached:
-                self.runtime.attach_endpoint(endpoint_id)
-            else:
-                self.runtime.detach_endpoint(endpoint_id)
-        try:
-            record = self.repository.set_attached(endpoint_id, attached)
-        except Exception:
-            record = None
-        if endpoint is None and record is None:
-            return IntrospectionResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="channel endpoint not found",
-                llm_text="channel endpoint not found",
-            )
-        payload = {"endpoint_id": endpoint_id, "attached": attached}
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text=f"channel endpoint {'attached' if attached else 'detached'}",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Channel endpoint lifecycle updated", payload),
-        )
+        if attached:
+            return self._manager().attach_endpoint(endpoint_id)
+        return self._manager().detach_endpoint(endpoint_id)
 
     def _attach_endpoint_provider(self, endpoint_id: str) -> IntrospectionResult:
-        return self._reload_endpoint_provider(endpoint_id, attached=True)
+        return self._set_endpoint_attached(endpoint_id, attached=True)
 
-    def _reload_endpoint_provider(self, endpoint_id: str, *, attached: bool | None = None) -> IntrospectionResult:
+    def _restart_endpoint(self, endpoint_id: str) -> IntrospectionResult:
         if not endpoint_id:
             return IntrospectionResult(
                 status=RuntimeStatus.INVALID,
                 text="target_id is required",
                 llm_text="target_id is required",
             )
-        if attached is not None:
-            record = self.repository.set_attached(endpoint_id, attached)
-        else:
-            record = self.repository.get(endpoint_id)
-        if record is None:
-            return IntrospectionResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="channel endpoint not found",
-                llm_text="channel endpoint not found",
-            )
-        reload_modules = self._reload_modules_for_kind(str(record.channel_kind))
-        old_endpoint = self.runtime.get_endpoint(endpoint_id)
-        _drop_module_import_cache(reload_modules)
-        self.endpoint_factories = _fresh_endpoint_factories()
-        endpoint = self.endpoint_factories.create(record, runtime_root=self.runtime_root or Path.cwd())
-        if endpoint is None:
-            return IntrospectionResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="channel provider not found",
-                structured={"endpoint_id": endpoint_id, "channel_kind": record.channel_kind},
-                llm_text="channel provider not found",
-            )
-        if attached is not None:
-            endpoint.attached = attached
-        _preserve_runtime_endpoint_state(old_endpoint, endpoint)
-        self.runtime.replace_endpoint(endpoint)
-        payload = {
-            "endpoint_id": endpoint_id,
-            "channel_kind": record.channel_kind,
-            "reload_modules": list(reload_modules),
-            "attached": bool(endpoint.attached),
-            "enabled": bool(endpoint.enabled),
-        }
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="channel endpoint provider reloaded",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Channel endpoint provider reloaded", payload),
-        )
+        return self._manager().restart_endpoint(endpoint_id)
 
     def _endpoint_id_from_lifecycle_module(self, module_id: str) -> str:
         prefix = "channel.endpoint:"
@@ -669,14 +552,23 @@ class ChannelIntrospectionProvider:
             payload={"endpoint_id": endpoint_id, "channel_result": structured},
         )
 
-    def _reload_modules_for_kind(self, channel_kind: str) -> tuple[str, ...]:
-        factories = self.endpoint_factories
-        reload_modules_for_kind = getattr(factories, "reload_modules_for_kind", None)
-        if callable(reload_modules_for_kind):
-            modules = tuple(str(item) for item in reload_modules_for_kind(channel_kind) if str(item).strip())
-            if modules:
-                return modules
-        return _default_reload_modules_for_kind(channel_kind)
+    def _republish_capabilities(self) -> list[str]:
+        context = self.main_context
+        if context is None:
+            return []
+        handle = context.module_registry.get(self.module_id)
+        if handle is None:
+            return []
+        context.capability_registry.unregister_module(self.module_id)
+        context.execution_runtime.unmount_subtree(handle)
+        handle.mounted_subtree = None
+        context.execution_runtime.hydrate_module_handle(handle)
+        published = context.execution_runtime.mount_subtree(handle)
+        for descriptor_name in published:
+            descriptor = context.execution_runtime.compiled_capability_index.records[descriptor_name]
+            context.capability_registry.register(descriptor)
+        handle.published_capabilities = published
+        return published
 
 
 def inspect_channel(provider: ChannelIntrospectionProvider) -> ChannelSnapshot:
@@ -686,53 +578,6 @@ def inspect_channel(provider: ChannelIntrospectionProvider) -> ChannelSnapshot:
         attached_count=sum(1 for item in targets if item.attached),
         enabled_count=sum(1 for item in targets if item.enabled),
     )
-
-
-def _fresh_endpoint_factories():
-    module = importlib.import_module("pal.channel.factory")
-    return module.build_default_factory_registry()
-
-
-def _default_reload_modules_for_kind(channel_kind: str) -> tuple[str, ...]:
-    if channel_kind == "socket":
-        return ("pal.channel.factory", "pal.channel.endpoints.socket_endpoint")
-    if channel_kind == "telegram":
-        return ("pal.channel.factory", "pal.channel.endpoints.telegram_endpoint")
-    return ("pal.channel.factory",)
-
-
-def _preserve_runtime_endpoint_state(old_endpoint: ChannelEndpointBase | None, new_endpoint: ChannelEndpointBase) -> None:
-    if old_endpoint is None or old_endpoint is new_endpoint:
-        return
-    if getattr(old_endpoint, "paired", False):
-        new_endpoint.paired = True
-    pairing_metadata = dict(getattr(old_endpoint, "pairing_metadata", {}) or {})
-    if pairing_metadata:
-        new_endpoint.pairing_metadata.update(pairing_metadata)
-    old_token = str(getattr(old_endpoint, "bot_token", "") or "").strip()
-    new_token = str(getattr(new_endpoint, "bot_token", "") or "").strip()
-    if old_token and hasattr(new_endpoint, "bot_token") and not new_token:
-        setattr(new_endpoint, "bot_token", old_token)
-    if hasattr(old_endpoint, "_authorized") and hasattr(new_endpoint, "_authorized"):
-        setattr(
-            new_endpoint,
-            "_authorized",
-            bool(getattr(old_endpoint, "_authorized", False)) or bool(getattr(new_endpoint, "_authorized", False)),
-        )
-    control_commands = list(getattr(old_endpoint, "_control_commands_manifest", []) or [])
-    if control_commands and hasattr(new_endpoint, "_control_commands_manifest"):
-        setattr(new_endpoint, "_control_commands_manifest", control_commands)
-
-
-def _drop_module_import_cache(prefixes: tuple[str, ...]) -> None:
-    clean_prefixes = tuple(dict.fromkeys(str(prefix).strip() for prefix in prefixes if str(prefix).strip()))
-    if not clean_prefixes:
-        return
-    importlib.invalidate_caches()
-    for module_name in list(sys.modules):
-        if any(module_name == prefix or module_name.startswith(f"{prefix}.") for prefix in clean_prefixes):
-            sys.modules.pop(module_name, None)
-
 
 class TypingSubscriber:
     def __init__(self, runtime: ChannelRuntime) -> None:
@@ -760,11 +605,18 @@ def register_with_core(
     runtime_root: Path | None = None,
     endpoint_factories: Any = None,
 ) -> ModuleHandle:
+    repository = ChannelEndpointRepository()
+    provider_manager = build_default_channel_provider_manager(
+        runtime=runtime,
+        repository=repository,
+        runtime_root=runtime_root or Path.cwd(),
+    )
     provider = ChannelIntrospectionProvider(
         runtime=runtime,
-        repository=ChannelEndpointRepository(),
+        repository=repository,
         runtime_root=runtime_root,
-        endpoint_factories=endpoint_factories or _fresh_endpoint_factories(),
+        provider_manager=provider_manager,
+        main_context=context,
     )
     source = ChannelEventSource(runtime=runtime)
     handle = ModuleHandle(
@@ -773,7 +625,10 @@ def register_with_core(
         detachable=False,
         introspection_provider=provider,
         event_sources=[source],
-        ports={"channel": runtime},
+        ports={
+            "channel": runtime,
+            "provider_manager": provider_manager,
+        },
     )
     context.register_module(handle)
     context.port_registry["agent_io:output"] = runtime

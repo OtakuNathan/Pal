@@ -6,9 +6,7 @@ from pal.artifact import ArtifactManager, ArtifactRepository, register_with_core
 from pal.behavior import BehaviorRepository, BehaviorService, register_with_core as register_behavior_with_core
 from pal.bootstrap.contracts import RuntimeComposerPort
 from pal.channel import (
-    ChannelEndpointRepository,
     ChannelRuntime,
-    build_default_factory_registry,
     register_with_core as register_channel_with_core,
 )
 from pal.control import ControlPlane, register_with_core as register_control_with_core
@@ -86,7 +84,6 @@ def compose_runtime(
     identity_service = IdentityService(repository=IdentityRepository())
     llm_repository = LLMEndpointRepository()
     runtime_settings_repository = RuntimeSettingRepository()
-    channel_repository = ChannelEndpointRepository()
 
     config = RuntimeConfig.load(registration.runtime.runtime_root)
     core = PalCore(config=config)
@@ -135,8 +132,6 @@ def compose_runtime(
         execution_runtime=core.context.execution_runtime,
     )
     failure_runtime = FailureRuntime()
-    endpoint_factories = build_default_factory_registry()
-
     register_core_with_core(core)
     register_execution_with_core(core.context)
     register_artifact_with_core(core.context, artifact_service)
@@ -146,7 +141,6 @@ def compose_runtime(
         core.context,
         channel_runtime,
         runtime_root=registration.runtime.runtime_root,
-        endpoint_factories=endpoint_factories,
     )
     register_identity_with_core(core.context, identity_service)
     register_llm_with_core(core.context, llm_runtime)
@@ -156,16 +150,12 @@ def compose_runtime(
     register_proactive_with_core(core.context, proactive_manager, proactive_runner)
     register_control_with_core(core.context, control_plane)
     register_failure_with_core(core, failure_runtime)
-    for record in channel_repository.list_all():
-        runtime_endpoint = endpoint_factories.create(
-            record,
-            runtime_root=registration.runtime.runtime_root,
-        )
-        if runtime_endpoint is not None:
-            channel_runtime.register_endpoint(runtime_endpoint)
     for stored in proactive_repository.list_definitions():
         proactive_manager.hydrate(stored.definition, next_due_at_utc=stored.next_due_at_utc)
     plugin_host.bootstrap()
+    channel_provider_manager = core.context.require_port("channel:provider_manager")
+    channel_provider_manager.plugin_host = plugin_host
+    channel_provider_manager.rescan_providers(attach_enabled_endpoints=True)
 
     for module_id in ("core", "execution", "artifact", "skill", "behavior", "channel", "identity", "llm", "memory", "plugins", "proactive", "control", "failure"):
         core.publish_module_capabilities(module_id)

@@ -4,6 +4,9 @@ from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import re
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -17,10 +20,14 @@ from pal.channel.contracts import (
     QueuedStreamEvent,
     ResponseHandle,
 )
+from pal.control.contracts import InteractionButtonSpec, InteractionMessageSpec, InteractionResult
 from pal.core.mailbox import Mailbox
 from pal.foundation import AttachmentSpec, EventEnvelope
 from pal.shared import EventKind, SourceKind
 from pal.stream_events import NormalizedLLMStreamEvent
+
+
+INTERACTIVE_STATUS_KINDS = {"interactive_open", "interactive_update", "interactive_resolve", "interactive_expire"}
 
 
 @dataclass
@@ -41,6 +48,9 @@ class ChannelEndpointQueueBase(ABC):
     last_delivery_error: str = ""
     on_ready: Callable[[], None] | None = None
     _stream_sessions: dict[int, dict[str, Any]] = field(default_factory=dict)
+    _interactive_messages: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _interactive_default_ttl_seconds: float = 60.0
+    _control_commands_manifest: list[dict[str, str]] = field(default_factory=list)
 
     @abstractmethod
     def normalize_raw(self, payload: Any) -> dict[str, Any]:
@@ -62,7 +72,14 @@ class ChannelEndpointQueueBase(ABC):
         return {}
 
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, Any]) -> None:
-        if kind not in {"interactive_open", "interactive_update", "interactive_resolve", "interactive_expire"}:
+        if kind == "control_catalog":
+            self.apply_control_catalog(payload)
+            return
+        if kind not in INTERACTIVE_STATUS_KINDS:
+            return
+        spec = payload.get("spec")
+        if isinstance(spec, InteractionMessageSpec):
+            self.apply_interaction_status(response_handle, kind=kind, spec=spec, payload=payload)
             return
         spec = payload.get("spec")
         text = str(payload.get("text") or "").strip()
@@ -70,6 +87,180 @@ class ChannelEndpointQueueBase(ABC):
             text = str(getattr(spec, "text", "") or "").strip()
         if text:
             self.send_reply(response_handle, text)
+
+    def apply_control_catalog(self, payload: dict[str, Any]) -> None:
+        self._control_commands_manifest = self.normalize_control_commands(payload)
+
+    def normalize_control_commands(self, payload: dict[str, Any]) -> list[dict[str, str]]:
+        manifest: list[dict[str, str]] = []
+        for item in list(payload.get("commands") or []):
+            if not isinstance(item, dict):
+                continue
+            command = str(item.get("command") or "").strip().lower()
+            description = str(item.get("description") or "").strip()
+            if not command or not description:
+                continue
+            if re.fullmatch(r"[a-z0-9_]{1,32}", command) is None:
+                continue
+            manifest.append({"command": command, "description": description[:256]})
+        return manifest
+
+    def apply_interaction_status(
+        self,
+        response_handle: ResponseHandle,
+        *,
+        kind: str,
+        spec: InteractionMessageSpec,
+        payload: dict[str, Any],
+    ) -> None:
+        _ = payload
+        if kind in {"interactive_open", "interactive_update"}:
+            self.open_or_update_interaction(response_handle, spec=spec, allow_update=(kind == "interactive_update"))
+            return
+        if kind in {"interactive_resolve", "interactive_expire"}:
+            self.resolve_interaction(response_handle, spec=spec)
+
+    def open_or_update_interaction(
+        self,
+        response_handle: ResponseHandle,
+        *,
+        spec: InteractionMessageSpec,
+        allow_update: bool,
+    ) -> None:
+        _ = allow_update
+        self.prune_interactive_messages()
+        self.remember_interaction_message(spec, {"reply_target": dict(response_handle.reply_target)})
+        if spec.text:
+            self.send_reply(response_handle, spec.text)
+
+    def resolve_interaction(self, response_handle: ResponseHandle, *, spec: InteractionMessageSpec) -> None:
+        self.forget_interaction_message(spec.interaction_id)
+        if spec.text:
+            self.send_reply(response_handle, spec.text)
+
+    def remember_interaction_message(self, spec: InteractionMessageSpec, target: dict[str, Any]) -> None:
+        metadata = dict(target)
+        metadata.update(
+            {
+                "interaction_kind": spec.interaction_kind,
+                "expires_at_monotonic": self.interaction_expiry_monotonic(spec),
+                "actions": self.build_interaction_action_map(spec),
+            }
+        )
+        self._interactive_messages[spec.interaction_id] = metadata
+
+    def interaction_expiry_monotonic(self, spec: InteractionMessageSpec) -> float | None:
+        raw = str(spec.expires_at or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return time.monotonic() + float(self._interactive_default_ttl_seconds)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        current = datetime.now(timezone.utc)
+        delta = max((parsed.astimezone(timezone.utc) - current).total_seconds(), 0.0)
+        return time.monotonic() + delta
+
+    def prune_interactive_messages(self, *, now: float | None = None) -> None:
+        current = float(now if now is not None else time.monotonic())
+        stale = [
+            interaction_id
+            for interaction_id, metadata in self._interactive_messages.items()
+            if self.is_interaction_metadata_expired(metadata, now=current)
+        ]
+        for interaction_id in stale:
+            self._interactive_messages.pop(interaction_id, None)
+
+    def is_interaction_metadata_expired(
+        self,
+        metadata: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> bool:
+        expires_at_monotonic = metadata.get("expires_at_monotonic")
+        if not isinstance(expires_at_monotonic, (int, float)):
+            return False
+        current = float(now if now is not None else time.monotonic())
+        return float(expires_at_monotonic) <= current
+
+    def forget_interaction_message(self, interaction_id: str) -> None:
+        self._interactive_messages.pop(str(interaction_id or "").strip(), None)
+
+    def expired_interaction_text(self, interaction_kind: str) -> str:
+        kind = str(interaction_kind or "").strip()
+        if kind == "reset_confirm":
+            return "This reset request expired."
+        if kind == "approval_request":
+            return "This approval request expired."
+        return "This interaction expired."
+
+    def build_interaction_action_map(self, spec: InteractionMessageSpec) -> dict[str, dict[str, Any]]:
+        actions: dict[str, dict[str, Any]] = {}
+        button_index = 0
+        for row in spec.buttons:
+            for button in row:
+                if not isinstance(button, InteractionButtonSpec):
+                    continue
+                token = self.interaction_button_token(button_index)
+                button_index += 1
+                actions[token] = {
+                    "action_key": button.action_key,
+                    "action_args": dict(button.action_args),
+                }
+        return actions
+
+    def interaction_button_token(self, button_index: int) -> str:
+        return f"b{button_index}"
+
+    def parse_interaction_callback_data(self, data: str) -> tuple[str, str]:
+        raw = str(data or "").strip()
+        if not raw.startswith("ix:"):
+            return "", ""
+        parts = raw.split(":", 2)
+        if len(parts) != 3:
+            return "", ""
+        return parts[1].strip(), parts[2].strip()
+
+    def interaction_result_from_token(self, interaction_id: str, button_token: str) -> InteractionResult | None:
+        interaction_id = str(interaction_id or "").strip()
+        button_token = str(button_token or "").strip()
+        if not interaction_id or not button_token:
+            return None
+        metadata = self._interactive_messages.get(interaction_id)
+        if not metadata:
+            return None
+        if self.is_interaction_metadata_expired(metadata):
+            self.forget_interaction_message(interaction_id)
+            return None
+        actions = metadata.get("actions")
+        action_payload = actions.get(button_token) if isinstance(actions, dict) else None
+        if not isinstance(action_payload, dict):
+            return None
+        return InteractionResult(
+            interaction_id=interaction_id,
+            interaction_kind=str(metadata.get("interaction_kind") or ""),
+            action_key=str(action_payload.get("action_key") or "").strip(),
+            action_args=dict(action_payload.get("action_args") or {}),
+        )
+
+    def emit_interaction_result(
+        self,
+        result: InteractionResult,
+        *,
+        correlation_id: str | None = None,
+        reply_target: dict[str, Any] | None = None,
+    ) -> ChannelEnvelope | None:
+        return self.emit_normalized(
+            EventEnvelope(
+                event_kind=EventKind.INTERACTION_RESULT,
+                source_kind=SourceKind.CHANNEL,
+                payload=result,
+                correlation_id=correlation_id,
+            ),
+            response_handle=self.build_response_handle(reply_target=reply_target),
+        )
 
     def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
         _ = response_handle

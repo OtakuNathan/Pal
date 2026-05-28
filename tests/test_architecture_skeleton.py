@@ -2001,31 +2001,31 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             channel_runtime = ChannelRuntime()
             repository = importlib.import_module("pal.channel.repository").ChannelEndpointRepository()
             repository.upsert(
-                endpoint_id="telegram_main",
-                channel_kind="telegram",
-                binding_key="chat:1",
+                endpoint_id="socket_main",
+                channel_kind="socket",
+                binding_key=str(runtime_root / "runtime.sock"),
                 enabled=True,
             )
             endpoint = StubEndpoint(
-                endpoint=EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key="chat:1")
+                endpoint=EndpointConfig(endpoint_id="socket_main", channel_kind="socket", binding_key=str(runtime_root / "runtime.sock"))
             )
             channel_runtime.register_endpoint(endpoint)
             register_channel_with_core(core.context, channel_runtime)
 
             published = core.publish_module_capabilities("channel")
 
-            self.assertIn("intro_endpoint_channel_inspect::telegram_main", published)
-            self.assertIn("intro_endpoint_channel_auth_state::telegram_main", published)
-            self.assertIn("op_channel_endpoint_set_auth_material::telegram_main", published)
-            self.assertIn("intro_endpoint_channel_backlog::telegram_main", published)
-            self.assertIn("intro_endpoint_channel_health::telegram_main", published)
-            self.assertNotIn("op_channel_endpoint_attach::telegram_main", published)
-            self.assertNotIn("op_channel_endpoint_detach::telegram_main", published)
+            self.assertIn("intro_endpoint_channel_inspect::socket_main", published)
+            self.assertIn("intro_endpoint_channel_auth_state::socket_main", published)
+            self.assertIn("op_channel_endpoint_set_auth_material::socket_main", published)
+            self.assertIn("intro_endpoint_channel_backlog::socket_main", published)
+            self.assertIn("intro_endpoint_channel_health::socket_main", published)
+            self.assertNotIn("op_channel_endpoint_attach::socket_main", published)
+            self.assertNotIn("op_channel_endpoint_detach::socket_main", published)
 
             configured = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="op_channel_endpoint_set_auth_material",
-                    args={"target_id": "telegram_main", "material": {"bot_token": "secret-token", "authorized": True}},
+                    args={"target_id": "socket_main", "material": {"bot_token": "secret-token", "authorized": True}},
                 )
             )
             self.assertEqual(configured.status, "ok")
@@ -2035,7 +2035,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             auth_state = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="intro_endpoint_channel_auth_state",
-                    args={"target_id": "telegram_main"},
+                    args={"target_id": "socket_main"},
                 )
             )
             self.assertEqual(auth_state.status, "ok")
@@ -2045,7 +2045,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             health = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="intro_endpoint_channel_health",
-                    args={"target_id": "telegram_main"},
+                    args={"target_id": "socket_main"},
                 )
             )
             self.assertEqual(health.status, "ok")
@@ -2055,7 +2055,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             backlog = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="intro_endpoint_channel_backlog",
-                    args={"target_id": "telegram_main"},
+                    args={"target_id": "socket_main"},
                 )
             )
             self.assertEqual(backlog.status, "ok")
@@ -2071,20 +2071,20 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             channel_runtime = ChannelRuntime()
             repository = importlib.import_module("pal.channel.repository").ChannelEndpointRepository()
             repository.upsert(
-                endpoint_id="telegram_main",
-                channel_kind="telegram",
-                binding_key="chat:1",
+                endpoint_id="socket_main",
+                channel_kind="socket",
+                binding_key=str(runtime_root / "runtime.sock"),
                 enabled=True,
             )
             endpoint = StubEndpoint(
-                endpoint=EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key="chat:1")
+                endpoint=EndpointConfig(endpoint_id="socket_main", channel_kind="socket", binding_key=str(runtime_root / "runtime.sock"))
             )
             channel_runtime.register_endpoint(endpoint)
             register_channel_with_core(core.context, channel_runtime)
             core.publish_module_capabilities("channel")
 
             detached = core.context.execution_runtime.execute(
-                CapabilityCall(name="op_channel_mgmt_detach", args={"target_id": "telegram_main"})
+                CapabilityCall(name="op_channel_mgmt_detach", args={"target_id": "socket_main"})
             )
             self.assertEqual(detached.status, "ok")
             self.assertFalse(endpoint.attached)
@@ -2093,10 +2093,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIsNone(blocked)
 
             attached = core.context.execution_runtime.execute(
-                CapabilityCall(name="op_channel_mgmt_attach", args={"target_id": "telegram_main"})
+                CapabilityCall(name="op_channel_mgmt_attach", args={"target_id": "socket_main"})
             )
             self.assertEqual(attached.status, "ok")
-            active_endpoint = channel_runtime.get_endpoint("telegram_main")
+            active_endpoint = channel_runtime.get_endpoint("socket_main")
             self.assertIsNotNone(active_endpoint)
             self.assertIsNot(active_endpoint, endpoint)
             self.assertTrue(active_endpoint.attached)
