@@ -11,25 +11,26 @@ Older design notes are historical references. These docs are the active baseline
 3. [pal_runtime_stack.md](pal_runtime_stack.md)
 4. [pal_bootstrap_and_process.md](pal_bootstrap_and_process.md)
 5. [pal_channel_contract.md](pal_channel_contract.md)
-6. [pal_llm_contract.md](pal_llm_contract.md)
-7. [pal_execution_contract.md](pal_execution_contract.md)
-8. [pal_behavior_contract.md](pal_behavior_contract.md)
-9. [pal_skill_contract.md](pal_skill_contract.md)
-10. [pal_control_plane.md](pal_control_plane.md)
-11. [pal_introspection_contract.md](pal_introspection_contract.md)
-12. [pal_tasking_contract.md](pal_tasking_contract.md)
-13. [pal_minion_v1.md](pal_minion_v1.md)
-14. [pal_proactive_contract.md](pal_proactive_contract.md)
-15. [pal_memory_contract.md](pal_memory_contract.md)
-16. [pal_failure_reporting_contract.md](pal_failure_reporting_contract.md)
-17. [pal_migration_map.md](pal_migration_map.md)
-18. [pal_web_search_contract.md](pal_web_search_contract.md)
-19. [pal_web_fetch_contract.md](pal_web_fetch_contract.md)
-20. [pal_tool_surface.md](pal_tool_surface.md)
-21. [pal_mcp_contract.md](pal_mcp_contract.md)
-22. [capability_forest_structure.md](capability_forest_structure.md)
-23. [turn_runtime_structure.md](turn_runtime_structure.md)
-24. [pal_approval_access_design.md](pal_approval_access_design.md)
+6. [pal_change_admission.md](pal_change_admission.md)
+7. [pal_llm_contract.md](pal_llm_contract.md)
+8. [pal_execution_contract.md](pal_execution_contract.md)
+9. [pal_behavior_contract.md](pal_behavior_contract.md)
+10. [pal_skill_contract.md](pal_skill_contract.md)
+11. [pal_control_plane.md](pal_control_plane.md)
+12. [pal_introspection_contract.md](pal_introspection_contract.md)
+13. [pal_tasking_contract.md](pal_tasking_contract.md)
+14. [pal_minion_v1.md](pal_minion_v1.md)
+15. [pal_proactive_contract.md](pal_proactive_contract.md)
+16. [pal_memory_contract.md](pal_memory_contract.md)
+17. [pal_failure_reporting_contract.md](pal_failure_reporting_contract.md)
+18. [pal_migration_map.md](pal_migration_map.md)
+19. [pal_web_search_contract.md](pal_web_search_contract.md)
+20. [pal_web_fetch_contract.md](pal_web_fetch_contract.md)
+21. [pal_tool_surface.md](pal_tool_surface.md)
+22. [pal_mcp_contract.md](pal_mcp_contract.md)
+23. [capability_forest_structure.md](capability_forest_structure.md)
+24. [turn_runtime_structure.md](turn_runtime_structure.md)
+25. [pal_approval_access_design.md](pal_approval_access_design.md)
 
 ## Document Map
 
@@ -37,7 +38,8 @@ Older design notes are historical references. These docs are the active baseline
 - `pal_architecture_v1.md`: system-level invariants and ownership model.
 - `pal_runtime_stack.md`: module skeleton, owning boundaries, and public interfaces.
 - `pal_bootstrap_and_process.md`: supervisor, Pal process, minions, startup, and runtime composition.
-- `pal_channel_contract.md`: channel I/O, normalization, reply routing, and UX acknowledgment.
+- `pal_channel_contract.md`: channel provider lifecycle, I/O, normalization, reply routing, interaction realization, and UX acknowledgment.
+- `pal_change_admission.md`: change admission checklist for contract changes, generated code, dogfood, and review risk.
 - `pal_llm_contract.md`: canonical LLM shape, LiteLLM transport, streaming, and model routing.
 - `pal_execution_contract.md`: capability, tool, plugin, and execution contract.
 - `pal_behavior_contract.md`: affordance descriptors, skill manuals, behavior advice, and the cap-search vs advise split.

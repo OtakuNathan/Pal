@@ -1899,37 +1899,37 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             channel_runtime = ChannelRuntime()
             repository = importlib.import_module("pal.channel.repository").ChannelEndpointRepository()
             repository.upsert(
-                endpoint_id="telegram_main",
-                channel_kind="telegram",
-                binding_key="chat:1",
+                endpoint_id="socket_main",
+                channel_kind="socket",
+                binding_key=str(runtime_root / "pal.sock"),
                 enabled=True,
             )
             register_channel_with_core(core.context, channel_runtime)
             core.publish_module_capabilities("channel")
 
-            descriptor = core.context.capability_registry.descriptors["intro_endpoint_channel_inspect::telegram_main"]
+            descriptor = core.context.capability_registry.descriptors["intro_endpoint_channel_inspect::socket_main"]
             target_schema = descriptor.parameters_schema["properties"]["target_id"]
 
-            self.assertEqual(target_schema["enum"], ["telegram_main"])
+            self.assertEqual(target_schema["enum"], ["socket_main"])
             self.assertIn("target_id", descriptor.parameters_schema["required"])
 
             missing_target = core.context.execution_runtime.execute(
                 CapabilityCall(name="intro_endpoint_channel_inspect")
             )
             self.assertEqual(missing_target.status, "invalid")
-            self.assertEqual(missing_target.structured["available_target_ids"], ["telegram_main"])
+            self.assertEqual(missing_target.structured["available_target_ids"], ["socket_main"])
             self.assertEqual(missing_target.structured["error_code"], "target_id_required")
-            self.assertIn("telegram_main", missing_target.llm_text)
+            self.assertIn("socket_main", missing_target.llm_text)
             self.assertIn("Retry with args.target_id", missing_target.llm_text)
 
             resolved = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="intro_endpoint_channel_inspect",
-                    args={"target_id": "telegram_main"},
+                    args={"target_id": "socket_main"},
                 )
             )
             self.assertEqual(resolved.status, "ok")
-            self.assertEqual(resolved.structured["endpoint_id"], "telegram_main")
+            self.assertEqual(resolved.structured["endpoint_id"], "socket_main")
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)

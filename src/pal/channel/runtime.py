@@ -111,6 +111,9 @@ class ChannelRuntime(ChannelRuntimePort):
             future = asyncio.run_coroutine_threadsafe(_replace(), loop)
             future.result(timeout=timeout_seconds)
             return
+        if not self._started:
+            self.register_endpoint(endpoint)
+            return
         asyncio.run(_replace())
 
     async def remove_endpoint_async(self, endpoint_id: str) -> bool:
@@ -137,6 +140,8 @@ class ChannelRuntime(ChannelRuntimePort):
                 return True
             future = asyncio.run_coroutine_threadsafe(_remove(), loop)
             return bool(future.result(timeout=timeout_seconds))
+        if not self._started:
+            return self.endpoint_registry.unregister(endpoint_id) is not None
         return bool(asyncio.run(_remove()))
 
     def get_endpoint(self, endpoint_id: str) -> ChannelEndpointBase | None:

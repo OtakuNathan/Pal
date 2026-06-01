@@ -247,6 +247,98 @@ class WizardService(WizardServicePort):
         self.seed_defaults(registration)
         return ProvisionedRuntime(registration=registration, database=database)
 
+    def load_existing_wizard_data(self, runtime_root: Path) -> object | None:
+        """Read current runtime configuration as wizard defaults.
+
+        This is intentionally best-effort: if the runtime does not exist or
+        cannot be opened, setup should continue as a new configuration flow.
+        """
+
+        from pal.channel import ChannelEndpointRepository
+        from pal.identity import IdentityRepository
+        from pal.llm import LLMEndpointRepository, RuntimeSettingRepository
+        from pal.wizard.prompts import WizardChannel, WizardCollectedData, WizardIdentity, WizardLLMEndpoint
+
+        runtime_root = Path(runtime_root)
+        db_path = runtime_root / DEFAULT_DB_FILENAME
+        if not db_path.exists():
+            candidates = sorted(runtime_root.glob("*.sqlite3"))
+            if len(candidates) != 1:
+                return None
+            db_path = candidates[0]
+        database = PalV2Database(db_path=db_path)
+        try:
+            database.initialize(ALL_MODELS)
+            identity_repo = IdentityRepository()
+            persona = identity_repo.get_persona()
+            preferences = identity_repo.get_user_preferences()
+            identity = WizardIdentity(
+                display_name=str(getattr(persona, "display_name", "") or "Pal"),
+                language=str(getattr(persona, "language", "") or "en"),
+                vibe=getattr(persona, "vibe", None),
+                tone=getattr(persona, "tone", None),
+                core_policy=list(getattr(persona, "core_policy", None) or []),
+                timezone=str(getattr(preferences, "timezone", "") or ""),
+            )
+
+            endpoints = [
+                WizardLLMEndpoint(
+                    endpoint_id=endpoint.endpoint_id,
+                    model_id=endpoint.model_id,
+                    api_mode=endpoint.api_mode,
+                    base_url=endpoint.base_url,
+                    api_key=None,
+                    context_window=endpoint.context_window,
+                    max_output_tokens=endpoint.max_output_tokens,
+                    supports_reasoning=endpoint.supports_reasoning,
+                    supports_tools=endpoint.supports_tools,
+                    supports_streaming=endpoint.supports_streaming,
+                    supports_vision=endpoint.supports_vision,
+                    priority=endpoint.priority,
+                    provider=endpoint.provider,
+                    auth_kind=endpoint.auth_kind,
+                    credential_ref=endpoint.credential_ref,
+                    capabilities_blob=dict(endpoint.capabilities_blob or {}),
+                    notes=endpoint.notes,
+                )
+                for endpoint in LLMEndpointRepository().list_enabled()
+            ]
+            active_endpoint_id = RuntimeSettingRepository().get_active_llm_endpoint_id()
+            if not active_endpoint_id and endpoints:
+                active_endpoint_id = endpoints[0].endpoint_id
+
+            channel_record = next(iter(ChannelEndpointRepository().list_enabled()), None)
+            if channel_record is None:
+                channel_payload = dict(default_channel_endpoints(Path(runtime_root))[0])
+                channel = WizardChannel(
+                    endpoint_id=str(channel_payload["endpoint_id"]),
+                    channel_kind=str(channel_payload["channel_kind"]),
+                    binding_key=str(channel_payload["binding_key"]),
+                    binding_metadata=dict(channel_payload.get("binding_metadata") or {}),
+                    supports_typing=bool(channel_payload.get("supports_typing")),
+                    supports_receipt_marker=bool(channel_payload.get("supports_receipt_marker")),
+                )
+            else:
+                channel = WizardChannel(
+                    endpoint_id=channel_record.endpoint_id,
+                    channel_kind=channel_record.channel_kind,
+                    binding_key=channel_record.binding_key,
+                    binding_metadata=dict(channel_record.binding_metadata or {}),
+                    supports_typing=bool(channel_record.supports_typing),
+                    supports_receipt_marker=bool(channel_record.supports_receipt_marker),
+                )
+
+            return WizardCollectedData(
+                identity=identity,
+                endpoints=endpoints,
+                channel=channel,
+                active_endpoint_id=active_endpoint_id or "",
+            )
+        except Exception:
+            return None
+        finally:
+            database.close()
+
     def seed_from_wizard(self, registration: PalRegistration, collected: object) -> None:
         """Seed the database from wizard-collected data."""
         from pal.wizard.prompts import WizardCollectedData

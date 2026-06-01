@@ -99,6 +99,24 @@ The inline button uses the generic `control.command.run` interaction action, whi
 
 Channel endpoints render platform-specific control UX. Telegram owns command menu publication, inline keyboard rendering, callback token mapping, and message editing. PalCore and Control receive typed interaction results, not Telegram callback payloads.
 
+Channel providers are managed through `ChannelEndpointProviderManager`. Builtin providers are registered during runtime composition; runtime providers are discovered from:
+
+```text
+<runtime_root>/channel/providers/<provider_id>/provider.toml
+```
+
+The provider entrypoint exports `build_channel_provider(context)`. The manager supplies a build context and exposes the unified capability surface for provider listing, endpoint inspection, auth/backlog/health introspection, attach/detach/restart, provider reload, and provider rescan.
+
+The important boundary is:
+
+- manager owns registration, discovery, endpoint-to-provider routing, and LLM/core-facing capability entrypoints
+- provider owns endpoint lifecycle, attach/detach mechanics, platform SDK usage, provider-specific introspection, interaction rendering, and interaction result normalization
+- `channel_kind` remains the endpoint row discriminator for persistence and deserialization; core should not infer platform behavior from it
+
+`op_channel_provider_rescan` rescans runtime-root channel providers and may attach enabled endpoints, but it does not define how any concrete endpoint attaches. That remains provider-owned.
+
+Interaction is typed internally but realized per provider. Telegram may use inline keyboards, callback queries, command menu publication, message edit, reaction, and typing. Socket/CLI/Web providers may choose their own transport shape. Core and Control consume typed actions/results only.
+
 ## MCP
 
 MCP is a first-party detachable plugin backed by a manager sidecar.

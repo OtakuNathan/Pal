@@ -932,6 +932,47 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(kwargs["model"], "hosted_vllm/demo-model")
         self.assertEqual(kwargs["seed"], 11)
 
+    def test_litellm_invoker_sets_litellm_and_sdk_timeouts(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="timeout_demo",
+            provider="openai",
+            model_id="demo-model",
+            api_mode="openai_chat",
+            base_url="https://example.invalid/v1",
+            auth_kind="local_provider_auth",
+            credential_ref="",
+            priority=0,
+            enabled=True,
+        )
+        invoker = LiteLLMEndpointInvoker()
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=16,
+                metadata={"timeout_seconds": 37.0},
+            ),
+        )
+
+        self.assertEqual(kwargs["timeout"], 37)
+        self.assertEqual(kwargs["request_timeout"], 37.0)
+        self.assertEqual(kwargs["force_timeout"], 37.0)
+        self.assertEqual(kwargs["max_retries"], 0)
+
+    def test_litellm_wall_timeout_returns_without_waiting_for_stuck_call(self) -> None:
+        from pal.llm.runtime import LLMEndpointInvocationError, _run_litellm_with_wall_timeout
+
+        started_at = time.monotonic()
+        with self.assertRaises(LLMEndpointInvocationError):
+            _run_litellm_with_wall_timeout(
+                lambda: time.sleep(2.0),
+                timeout_seconds=0.05,
+                description="test litellm call",
+            )
+
+        self.assertLess(time.monotonic() - started_at, 0.5)
+
     def test_refresh_llm_endpoints_reloads_runtime_root_provider_adapters(self) -> None:
         adapters_dir = self.runtime_root / "llm" / "adapters"
         adapters_dir.mkdir(parents=True, exist_ok=True)
@@ -1008,6 +1049,52 @@ class PalV2BootstrapTests(unittest.TestCase):
             second.set_secret(ref, "bridge-token")
 
             self.assertEqual(first.get_secret(ref), "bridge-token")
+
+    def test_encrypted_file_secret_store_survives_hostname_change(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_secret_hostname_test_") as tmp:
+            secrets_path = Path(tmp) / "secrets.json"
+            ref = SecretRef(service="codex_bridge", account="api-key")
+
+            with patch("pal.llm.secret_store.socket.gethostname", return_value="before-reboot"):
+                first = EncryptedFileSecretStore(secrets_path)
+                first.set_secret(ref, "bridge-token")
+
+            with patch("pal.llm.secret_store.socket.gethostname", return_value="after-reboot"):
+                second = EncryptedFileSecretStore(secrets_path)
+
+            self.assertEqual(second.get_secret(ref), "bridge-token")
+
+    def test_encrypted_file_secret_store_migrates_legacy_hostname_key(self) -> None:
+        from cryptography.fernet import Fernet
+        from pal.llm.secret_store import _derive_fernet_key
+
+        with tempfile.TemporaryDirectory(prefix="pal_secret_legacy_hostname_test_") as tmp:
+            secrets_path = Path(tmp) / "secrets.json"
+            ref = SecretRef(service="codex_bridge", account="api-key")
+            with patch("pal.llm.secret_store.socket.gethostname", return_value="current-host"):
+                old_key = _derive_fernet_key(runtime_root=str(secrets_path.parent), include_hostname=True)
+            encrypted = Fernet(old_key).encrypt(b"bridge-token").decode()
+            secrets_path.write_text(
+                json.dumps(
+                    {
+                        "codex_bridge:api-key": {
+                            "service": "codex_bridge",
+                            "account": "api-key",
+                            "encrypted": encrypted,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("pal.llm.secret_store.socket.gethostname", return_value="current-host"):
+                migrated = EncryptedFileSecretStore(secrets_path)
+                self.assertEqual(migrated.get_secret(ref), "bridge-token")
+
+            with patch("pal.llm.secret_store.socket.gethostname", return_value="changed-host"):
+                stable = EncryptedFileSecretStore(secrets_path)
+
+            self.assertEqual(stable.get_secret(ref), "bridge-token")
 
     def test_oauth_profile_without_access_token_does_not_become_api_key(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
@@ -2361,11 +2448,13 @@ class PalV2BootstrapTests(unittest.TestCase):
                 )
 
         invoker = RetryThenFallbackInvoker()
+        events: list[dict[str, object]] = []
         runtime = LLMRuntime(
             endpoint_resolver=EndpointResolver(repository=endpoint_repository),
             settings_repository=settings_repository,
             endpoint_invoker=invoker,
             endpoint_retry_attempts=2,
+            event_sink=events.append,
         )
 
         outcome = runtime.generate(
@@ -2381,6 +2470,22 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(runtime.last_model_id, "fallback-model")
         self.assertEqual(runtime.last_request.metadata["think_level"], DEFAULT_THINK_LEVEL)
         self.assertEqual(runtime.last_request.metadata["endpoint_id"], "fallback")
+        self.assertEqual(
+            [event["phase"] for event in events],
+            [
+                "llm_endpoint_attempt_failed",
+                "llm_endpoint_retry_scheduled",
+                "llm_endpoint_attempt_failed",
+                "llm_endpoint_exhausted",
+                "llm_endpoint_fallback_started",
+                "llm_endpoint_fallback_succeeded",
+            ],
+        )
+        self.assertEqual(events[0]["endpoint_id"], "primary")
+        self.assertEqual(events[0]["attempt"], 1)
+        self.assertEqual(events[1]["next_attempt"], 2)
+        self.assertEqual(events[3]["next_endpoint_id"], "fallback")
+        self.assertEqual(events[-1]["endpoint_id"], "fallback")
 
     def test_llm_runtime_generate_stream_returns_normalized_events(self) -> None:
         endpoint_repository = LLMEndpointRepository()
@@ -2669,6 +2774,21 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(endpoint)
         self.assertEqual(endpoint.endpoint.channel_kind, "socket")
         self.assertEqual(Path(endpoint.endpoint.binding_key), self.registration.runtime.runtime_root / "pal.sock")
+
+    def test_compose_runtime_hydrates_channel_endpoints_inside_running_event_loop(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+
+        async def run() -> None:
+            handle = compose_runtime(
+                wizard=self.wizard,
+                registration=self.registration,
+                database=self.database,
+            )
+            endpoint = handle.channel_runtime.get_endpoint("socket_default")
+            self.assertIsNotNone(endpoint)
+            await handle.stop_async()
+
+        asyncio.run(run())
 
     def test_channel_endpoint_provider_reload_rebuilds_provider_without_detaching_channel_bus(self) -> None:
         self.wizard.seed_defaults(self.registration)

@@ -17,6 +17,7 @@ from pal.shared import (
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.skill.builtin_skills import (
+    PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID,
     PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID,
     PAL_PLUGIN_DEVELOPMENT_SKILL_ID,
     builtin_declared_skills,
@@ -118,6 +119,40 @@ if TYPE_CHECKING:
     priority=35,
     activation_threshold=0.2,
     metadata={"skill_trigger": True, "resident": False, "requires_user_refresh": True},
+)
+@affordance(
+    affordance_id="declared.skill.pal_channel_provider_development",
+    title="Pal channel provider development skill",
+    scenario_text=(
+        "The user wants to add, repair, test, or hot-load a Pal channel provider, channel endpoint, "
+        "runtime-root channel provider manifest, slash-command path, inline interaction rendering, or channel lifecycle."
+    ),
+    prompt_hint=(
+        "If this route is selected, inject skill `pal.channel.provider.development` before "
+        "creating provider.toml, channel provider code, endpoint metadata, or channel interaction handling."
+    ),
+    activation_terms=(
+        "channel provider",
+        "channel endpoint",
+        "channel integration",
+        "new channel",
+        "add channel",
+        "runtime channel provider",
+        "channel/providers",
+        "provider.toml",
+        "ChannelEndpointProviderManager",
+        "FactoryChannelProvider",
+        "ChannelEndpointQueueBase",
+        "slash command",
+        "inline keyboard",
+        "频道",
+        "通道",
+        "channel 接入",
+    ),
+    skill_refs=(PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID,),
+    priority=35,
+    activation_threshold=0.2,
+    metadata={"skill_trigger": True, "resident": False, "runtime_root_layout": "channel/providers"},
 )
 @dataclass
 class SkillIntrospectionProvider:

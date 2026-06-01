@@ -11,6 +11,7 @@
 - 为 `Pal Core` 创建标准 envelope
 - 根据 channel 规则发送最终回复
 - 维护用户可理解的接收中与处理中反馈
+- 提供 channel-owned interaction realization
 
 它不负责：
 
@@ -18,6 +19,7 @@
 - memory 逻辑
 - capability 执行
 - control 决策
+- 决定某个平台的交互 UI 应该长什么样
 
 ## Owns
 
@@ -29,7 +31,9 @@
 - segmented send
 - typing / status feedback
 - ingress acknowledgement UX
+- interaction rendering and callback normalization
 - optional ingress / egress delivery log
+- provider lifecycle for channel endpoints
 
 ## Does Not Own
 
@@ -39,6 +43,7 @@
 - capability routing
 - tool execution
 - conversation-owned durable route state
+- platform-specific behavior in `Pal Core`
 
 ## Attachment Ingress
 
@@ -71,8 +76,96 @@ For the full managed artifact lifecycle, see [artifact_manager.md](artifact_mana
 - `channel` 也不应反过来承担业务推理
 - 如需写 ingress / egress log，应由具体 channel 实例自己完成
 - 不再需要把 channel route durability 做成 memory 或 core 的一等真相源
+- 交互可以是统一概念，但具体 realization 必须留给 channel provider
 
 ## 核心对象
+
+### `ChannelEndpointProviderManager`
+
+`ChannelEndpointProviderManager` 是 channel 子系统对 core、execution 和 LLM 暴露的统一入口。
+
+它负责：
+
+- 注册 builtin channel provider
+- 扫描 runtime root 中的 channel provider
+- 将 endpoint 解析到负责它的 provider
+- 暴露 provider / endpoint introspection capability
+- 将 attach、detach、restart、reload 这类管理动作转发给 provider
+
+它不负责：
+
+- 直接实现 Telegram、socket、stdio 或任何具体平台行为
+- 决定某个 channel 的交互 UI 形态
+- 持有 channel secret 的业务含义
+- 绕过 provider 直接创建 platform SDK client
+
+推荐心智模型是：
+
+- manager 是统一注册表与 LLM 可见管理入口
+- provider 是 endpoint 的实际 owner
+- endpoint 是数据库中可持久化、可 attach 的 channel 实例
+
+### `ChannelProvider`
+
+每个 channel provider 必须拥有自己的 endpoint lifecycle 和 introspection 语义。
+
+Provider 至少应表达：
+
+- `provider_id`
+- `endpoint_types`
+- `list_endpoints(context)`
+- `attach_endpoint(endpoint_id, context)`
+- `detach_endpoint(endpoint_id, context)`
+- `restart_endpoint(endpoint_id, context)`
+- `inspect_endpoint(endpoint_id, context)`
+- `inspect_auth_state(endpoint_id, context)`
+- `inspect_backlog(endpoint_id, context)`
+- `inspect_health(endpoint_id, context)`
+
+这些方法返回统一 `IntrospectionResult`，但结果内容由 provider 自己决定。
+
+这条规则很重要：
+
+- manager 不能假设 endpoint 是 Telegram
+- manager 不能假设 auth/backlog/health 的字段
+- manager 不能假设 attach/detach 的具体副作用
+- provider 才知道如何解释自己的 endpoint 状态
+
+### Runtime Provider Layout
+
+Runtime root 中的动态 channel provider 使用固定目录形状：
+
+```text
+<runtime_root>/channel/providers/<provider_id>/
+  provider.toml
+  runtime.py
+```
+
+`provider.toml` 至少包含：
+
+```toml
+provider_id = "example"
+entrypoint = "runtime.py"
+version = "0.1.0"
+enabled = true
+reload_modules = []
+```
+
+`runtime.py` 必须导出：
+
+```python
+def build_channel_provider(context):
+    ...
+```
+
+`context` 包含 runtime root、provider 目录、manifest，以及 manager/runtime/repository/secret resolver 等 channel provider 需要的边界对象。
+
+`op_channel_provider_rescan` 的语义是：
+
+- 重新扫描 `runtime_root/channel/providers`
+- 加载此前没有注册的 provider
+- 可选地 attach enabled endpoints
+- 不替 provider 决定 endpoint 的具体 attach 机制
 
 ### `EndpointConfig`
 
@@ -98,6 +191,10 @@ For the full managed artifact lifecycle, see [artifact_manager.md](artifact_mana
 - `supports_message_edit`
 
 也就是说，channel 数据库中必须有“单条输出上限”这一类发送约束配置，而不应把它硬编码在 `Pal Core` 中。
+
+`channel_kind` 是 endpoint 持久化与反序列化用的类型 discriminator。
+
+它不是 channel 抽象的中心，也不应该被 core 用来推断平台行为。运行期行为应由 provider 的 `endpoint_types` 和 endpoint 归属关系决定。
 
 ### `ResponseHandle`
 
@@ -139,7 +236,7 @@ For the full managed artifact lifecycle, see [artifact_manager.md](artifact_mana
 
 ## Unified Channel Interface
 
-推荐每个 channel adapter 对外都收成同一组接口：
+推荐每个 channel endpoint 对外都收成同一组语义：
 
 - `start()`
 - `stop()`
@@ -157,7 +254,44 @@ For the full managed artifact lifecycle, see [artifact_manager.md](artifact_mana
 
 - 输入统一成 envelope
 - 输出统一成 respond/status
-- 具体平台差异留在 channel adapter 内部
+- 具体平台差异留在 channel provider / endpoint 内部
+
+## Interaction Contract
+
+Interaction 是统一语义，不是统一 UI。
+
+Core、control、minion、tasking 等模块可以产生 typed interaction intent，例如：
+
+- command list
+- confirmation
+- approval decision
+- lesson decision
+- choice action
+- status update
+
+Channel provider 负责将这些 intent 变成自己的平台 realization。
+
+例如：
+
+- Telegram 可以使用 inline keyboard、callback query、message edit、reaction、typing
+- socket channel 可以使用结构化 JSON event
+- CLI / stdio channel 可以使用文本菜单或命令回传
+- Web channel 可以使用 native button、toast、panel 或 form
+
+共同约束是：
+
+- provider 必须把平台 callback 归一化成 typed interaction result
+- core 不接收 Telegram callback payload 之类的平台 raw object
+- slash command、button callback、menu choice 都应在进入 core 前被 channel/control 解析成明确 action
+- provider 可以决定如何展示，但不能改变 action 的业务语义
+- interaction state、token mapping、message edit、delivery retry 属于 provider implementation concern
+
+换句话说：
+
+- `interaction` 是 Pal 内部的 typed contract
+- `inline keyboard` 只是 Telegram provider 的一种 realization
+- manager 不应该硬编码任何 interaction UI
+- channel provider 必须提供自己的 interaction rendering、status update 和 result normalization
 
 ## 主路径
 
@@ -304,11 +438,12 @@ Telegram 分流策略至少应考虑：
 
 当前仓库里的 Telegram 适配器实现位于：
 
-- [telegram.py](/Users/nathan/Desktop/coding/Pal/src/pal/channel/adapters/telegram.py)
+- [runtime.py](../src/pal/plugins_builtin/telegram_channel/runtime.py)
+- [telegram_endpoint.py](../src/pal/channel/endpoints/telegram_endpoint.py)
 
 当前依赖位于：
 
-- [pyproject.toml](/Users/nathan/Desktop/coding/Pal/pyproject.toml)
+- [pyproject.toml](../pyproject.toml)
 
 当前实现已明确依赖：
 
@@ -324,7 +459,8 @@ Telegram 分流策略至少应考虑：
 这说明：
 
 - Telegram 输出格式本身就是 channel-owned concern
-- 分段逻辑也应继续由 Telegram adapter 自己负责
+- 分段逻辑也应继续由 Telegram endpoint/provider 自己负责
+- inline keyboard、callback token、message edit 也属于 Telegram provider realization
 
 ## Logging Boundary
 
@@ -362,8 +498,12 @@ Telegram 分流策略至少应考虑：
 
 ## Invariants
 
-- `channel` 只做 I/O、normalize、route 和 UX feedback。
+- `channel` 只做 I/O、normalize、route、interaction realization 和 UX feedback。
+- `ChannelEndpointProviderManager` 是统一入口，不是平台行为 owner。
+- provider 拥有自己的 endpoint lifecycle、attach/detach/restart 和 introspection。
 - `ChannelEnvelope + ResponseHandle` 是 channel 与主循环之间的统一接口。
+- interaction 是 typed contract；具体 UI realization 由 channel provider 决定。
+- `channel_kind` 是 endpoint 持久化 discriminator，不是 core 推断平台行为的依据。
 - ingress accepted 后必须尽快给出 receipt-like feedback。
 - IM channel 默认采用 `receipt marker -> typing -> final reply` 的三阶段 UX。
 - Telegram 默认使用 `eyes` 作为 ingress receipt marker。
@@ -379,3 +519,4 @@ Telegram 分流策略至少应考虑：
 - 不在本文件定义具体 reaction/typing SDK 调用
 - 不在本文件定义 UI 样式
 - 不让 `channel` 承担业务解释或 agent 推理
+- 不让 manager 硬编码某个 provider 的 interaction realization

@@ -1213,12 +1213,12 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
     def test_one_task_cannot_have_two_active_work_orders(self) -> None:
         self.repository.prepare_pack_for_spawn(
-            TaskContextPack(work_order_id="wo_a", goal="same task", metadata={"task_id": "task_one"})
+            TaskContextPack(work_order_id="wo_a", goal="same task", metadata={"task_id": "task_one", "milestones": ["first"]})
         )
 
         with self.assertRaises(ValueError):
             self.repository.prepare_pack_for_spawn(
-                TaskContextPack(work_order_id="wo_b", goal="same task again", metadata={"task_id": "task_one"})
+                TaskContextPack(work_order_id="wo_b", goal="same task again", metadata={"task_id": "task_one", "milestones": ["first"]})
             )
 
     def test_task_and_work_order_search_use_minion_store(self) -> None:
@@ -1226,7 +1226,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             TaskContextPack(
                 work_order_id="wo_search",
                 goal="stabilize telegram replies",
-                metadata={"task_id": "task_telegram", "task_title": "Telegram reliability"},
+                metadata={"task_id": "task_telegram", "task_title": "Telegram reliability", "milestones": ["repair"]},
             )
         )
 
@@ -1241,7 +1241,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             TaskContextPack(
                 work_order_id="wo_recent",
                 goal="summarize recent minion state",
-                metadata={"task_id": "task_recent", "task_title": "Recent minion state"},
+                metadata={"task_id": "task_recent", "task_title": "Recent minion state", "milestones": ["summarize"]},
             )
         )
         draft = self.repository.create_work_order_draft(
@@ -1249,6 +1249,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 "title": "Recent draft",
                 "goal": "List recent work order drafts",
                 "task_id": "task_recent_draft",
+                "milestones": ["list drafts"],
             }
         )
 
@@ -1292,7 +1293,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 work_order_id="wo_structured",
                 goal="implement structured work orders",
                 workspace={"repo_path": str(self.root), "run_dir": str(self.root / "run")},
-                metadata={"task_id": "task_repo", "coder_work_order": order.to_dict()},
+                metadata={"task_id": "task_repo", "coder_work_order": order.to_dict(), "milestones": ["Add models"]},
             )
         )
         rendered = _render_task_prompt(prepared)
@@ -1492,7 +1493,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
     def test_record_clarification_answer_appends_to_work_order_metadata(self) -> None:
         self.repository.prepare_pack_for_spawn(
-            TaskContextPack(work_order_id="wo_clarify", goal="clarify", metadata={"task_id": "task_clarify"})
+            TaskContextPack(work_order_id="wo_clarify", goal="clarify", metadata={"task_id": "task_clarify", "milestones": ["clarify"]})
         )
 
         result = self.repository.record_clarification_answer(
@@ -1507,7 +1508,11 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
     def test_minion_question_answer_control_action_records_answer(self) -> None:
         self.repository.prepare_pack_for_spawn(
-            TaskContextPack(work_order_id="wo_question_answer", goal="clarify", metadata={"task_id": "task_question_answer"})
+            TaskContextPack(
+                work_order_id="wo_question_answer",
+                goal="clarify",
+                metadata={"task_id": "task_question_answer", "milestones": ["clarify"]},
+            )
         )
         provider = MinionManagerProvider(runtime_root=self.root)
 
@@ -1542,7 +1547,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 work_order_id="wo_planner_resume",
                 goal="Plan module work",
                 minion_profile="software_engineering.planner",
-                metadata={"task_id": "task_planner_resume", "planner_work_order": planner_work_order},
+                metadata={"task_id": "task_planner_resume", "planner_work_order": planner_work_order, "milestones": ["Plan module work"]},
             )
         )
         self.repository.record_minion_event(
@@ -1659,6 +1664,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 "title": "Compact draft payloads",
                 "goal": "Keep draft work-order reads compact",
                 "source_summary": huge,
+                "milestones": ["compact draft payloads"],
                 "metadata": {
                     "raw_payload": huge,
                     "payload_json": huge,
@@ -1711,7 +1717,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 instruction="stored instruction survives spawn by id",
                 workspace={"source_repo": "local-source"},
                 allowed_capabilities=["op_exec_shell"],
-                metadata={"task_id": "task_existing_pack"},
+                metadata={"task_id": "task_existing_pack", "milestones": ["stored instruction"]},
             )
         )
 
@@ -1779,7 +1785,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                     "workspace_policy": {"mode": "read_only_repo"},
                     "completion_policy": {"evidence": "text_deliverable"},
                 },
-                metadata={"task_id": "task_workspace_paths"},
+                metadata={"task_id": "task_workspace_paths", "milestones": ["prepare workspace"]},
             )
         )
         self.repository.update_work_order_workspace(
@@ -1804,7 +1810,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
     def test_promote_work_order_draft_respects_single_active_work_order_invariant(self) -> None:
         self.repository.prepare_pack_for_spawn(
-            TaskContextPack(work_order_id="wo_existing", goal="already active", metadata={"task_id": "task_collision"})
+            TaskContextPack(work_order_id="wo_existing", goal="already active", metadata={"task_id": "task_collision", "milestones": ["existing"]})
         )
         draft = self.repository.create_work_order_draft(
             {
@@ -1812,6 +1818,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 "goal": "should not promote",
                 "task_id": "task_collision",
                 "proposed_work_order_id": "wo_collision",
+                "milestones": ["collide"],
             }
         )
 
@@ -1852,7 +1859,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
     def test_git_task_environment_branch_commit_and_finalize(self) -> None:
         pack = self.repository.prepare_pack_for_spawn(
-            TaskContextPack(work_order_id="wo_git", goal="git backed work", metadata={"task_id": "task_git"})
+            TaskContextPack(work_order_id="wo_git", goal="git backed work", metadata={"task_id": "task_git", "milestones": ["git backed work"]})
         )
         prepared = prepare_git_task_environment(self.root, pack)
         repo = Path(prepared.workspace["repo_path"])
@@ -1883,7 +1890,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 work_order_id="wo_git_checkpoint_tool",
                 goal="git backed work",
                 allowed_capabilities=["op_exec_shell"],
-                metadata={"task_id": "task_git_checkpoint_tool"},
+                metadata={"task_id": "task_git_checkpoint_tool", "milestones": ["git backed work"]},
             )
         )
 
@@ -1900,7 +1907,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 work_order_id="wo_git_text_only",
                 goal="draft text deliverable",
                 allowed_capabilities=[],
-                metadata={"task_id": "task_git_text_only", "allow_text_only_completion": True},
+                metadata={"task_id": "task_git_text_only", "allow_text_only_completion": True, "milestones": ["draft text deliverable"]},
             )
         )
 
@@ -1911,7 +1918,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
     def test_commit_milestone_excludes_generated_artifacts(self) -> None:
         pack = self.repository.prepare_pack_for_spawn(
-            TaskContextPack(work_order_id="wo_generated", goal="ignore generated", metadata={"task_id": "task_generated"})
+            TaskContextPack(work_order_id="wo_generated", goal="ignore generated", metadata={"task_id": "task_generated", "milestones": ["ignore generated"]})
         )
         prepared = prepare_git_task_environment(self.root, pack)
         repo = Path(prepared.workspace["repo_path"])
@@ -2047,7 +2054,7 @@ class MinionManagerTests(unittest.TestCase):
             _ = manager
             reader, writer = await self._subscribe_events()
             try:
-                pack = TaskContextPack(work_order_id="wo_spawn", goal="finish scaffold task")
+                pack = TaskContextPack(work_order_id="wo_spawn", goal="finish scaffold task", metadata={"milestones": ["finish scaffold task"]})
                 spawned = await client.request("spawn", {"task_context_pack": pack.to_dict()})
                 self.assertEqual(spawned["work_order_id"], "wo_spawn")
                 self.assertIn(spawned["status"], {"running", "completed"})
@@ -2778,6 +2785,63 @@ class MinionManagerTests(unittest.TestCase):
             self.assertGreaterEqual(len(heartbeats), 1)
             self.assertEqual(heartbeats[0]["round"], 1)
             self.assertGreaterEqual(heartbeats[0]["heartbeat_count"], 1)
+
+        asyncio.run(scenario())
+
+    def test_runner_bridges_llm_endpoint_progress_events(self) -> None:
+        async def scenario() -> None:
+            events = []
+
+            class FakeLLM:
+                event_sink = None
+
+                async def agenerate(self, request):
+                    _ = request
+                    if callable(self.event_sink):
+                        self.event_sink(
+                            {
+                                "phase": "llm_endpoint_attempt_failed",
+                                "endpoint_id": "glm-5.1",
+                                "model_id": "glm-5.1",
+                                "provider": "zhipu",
+                                "attempt": 1,
+                                "max_attempts": 2,
+                                "error_kind": "connection",
+                                "error_message": "provider network error",
+                                "next_endpoint_id": "codex_gpt_5_4",
+                            }
+                        )
+                    await asyncio.sleep(0)
+                    return CanonicalLLMOutcome(text="endpoint progress complete")
+
+            async def write_event(event):
+                events.append(event)
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            code = await MinionRunner(
+                runtime_root=self.root,
+                pack=TaskContextPack(
+                    work_order_id="wo_endpoint_progress",
+                    goal="complete after endpoint progress",
+                    metadata={"allow_text_only_completion": True},
+                ),
+                minion_id="m_endpoint_progress",
+                run_id="r_endpoint_progress",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=FakeLLM(), execution_runtime=SimpleNamespace()),
+            ).run()
+
+            self.assertEqual(code, 0)
+            progress_events = [event["payload"] for event in events if event["event_kind"] == "progress"]
+            endpoint_event = next(event for event in progress_events if event["phase"] == "llm_endpoint_attempt_failed")
+            self.assertEqual(endpoint_event["endpoint_id"], "glm-5.1")
+            self.assertEqual(endpoint_event["attempt"], 1)
+            self.assertEqual(endpoint_event["max_attempts"], 2)
+            self.assertIn("attempt 1/2 failed", endpoint_event["summary"])
 
         asyncio.run(scenario())
 
@@ -4715,6 +4779,7 @@ class MinionIntegrationTests(unittest.TestCase):
                             "goal": "Let spawn promote draft through the unified entry",
                             "task_id": "task_spawn_from_draft",
                             "proposed_work_order_id": "wo_spawn_from_draft",
+                            "milestones": ["spawn"],
                         },
                     )
                 )
@@ -4726,6 +4791,33 @@ class MinionIntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(spawned.status, "ok")
                 self.assertEqual(spawned.structured["work_order_id"], "wo_spawn_from_draft")
+            finally:
+                handle.shutdown_sync()
+
+    def test_minion_work_order_capabilities_require_explicit_milestones(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_milestone_required_test_") as tmp:
+            core = PalCore()
+            register_execution_with_core(core.context)
+            handle = register_minion_with_core(core.context, runtime_root=Path(tmp))
+            core.publish_module_capabilities("minion")
+            try:
+                draft = core.context.execution_runtime.execute(
+                    CapabilityCall(
+                        name="op_minion_draft_work_order",
+                        args={"title": "Missing milestones", "goal": "Reject incomplete work order args"},
+                    )
+                )
+                self.assertEqual(draft.status, "invalid")
+                self.assertEqual(draft.structured["field"], "milestones")
+
+                spawn = core.context.execution_runtime.execute(
+                    CapabilityCall(
+                        name="op_minion_spawn",
+                        args={"task_context_pack": {"work_order_id": "wo_missing_milestones", "goal": "reject"}},
+                    )
+                )
+                self.assertEqual(spawn.status, "invalid")
+                self.assertEqual(spawn.structured["field"], "milestones")
             finally:
                 handle.shutdown_sync()
 
@@ -4786,7 +4878,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("Draft a minion work order candidate", draft_spec["description"])
                 self.assertIn("prompt_view", draft_spec["description"])
                 draft_required = draft_spec["parameters_schema"]["required"]
-                self.assertEqual(draft_required, ["goal"])
+                self.assertEqual(draft_required, ["goal", "milestones"])
             finally:
                 handle.shutdown_sync()
 
@@ -4927,7 +5019,11 @@ class MinionIntegrationTests(unittest.TestCase):
                         args={
                             "minion_profile": "software_engineering.coder",
                             "preferred_endpoint_id": "coder_fast",
-                            "task_context_pack": {"work_order_id": "wo_coder", "goal": "make a change"},
+                            "task_context_pack": {
+                                "work_order_id": "wo_coder",
+                                "goal": "make a change",
+                                "metadata": {"milestones": ["make a change"]},
+                            },
                         },
                     )
                 )
@@ -4964,7 +5060,11 @@ class MinionIntegrationTests(unittest.TestCase):
                         name="op_minion_spawn",
                         args={
                             "minion_profile": "missing",
-                            "task_context_pack": {"work_order_id": "wo_missing", "goal": "nope"},
+                            "task_context_pack": {
+                                "work_order_id": "wo_missing",
+                                "goal": "nope",
+                                "metadata": {"milestones": ["nope"]},
+                            },
                         },
                     )
                 )
@@ -4982,6 +5082,7 @@ class MinionIntegrationTests(unittest.TestCase):
                                 "allowed_capabilities": ["op_only_this"],
                                 "allowed_skills": ["skill.only"],
                                 "approval_policy": {"custom": True},
+                                "metadata": {"milestones": ["plan"]},
                             },
                             "spawn_bonus_skill_refs": ["bonus.skill"],
                         },
@@ -5009,21 +5110,21 @@ class MinionIntegrationTests(unittest.TestCase):
                     work_order_id="wo_query_one",
                     goal="telegram reliability repair",
                     instruction="repair telegram by reading the stored work order facts",
-                    metadata={"task_id": "task_query_one"},
+                    metadata={"task_id": "task_query_one", "milestones": ["repair"]},
                 )
             )
             repository.prepare_pack_for_spawn(
                 TaskContextPack(
                     work_order_id="wo_query_two",
                     goal="shared ambiguous work",
-                    metadata={"task_id": "task_query_two"},
+                    metadata={"task_id": "task_query_two", "milestones": ["work"]},
                 )
             )
             repository.prepare_pack_for_spawn(
                 TaskContextPack(
                     work_order_id="wo_query_three",
                     goal="shared ambiguous work extra",
-                    metadata={"task_id": "task_query_three"},
+                    metadata={"task_id": "task_query_three", "milestones": ["work"]},
                 )
             )
 

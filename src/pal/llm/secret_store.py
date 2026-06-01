@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import base64
+import getpass
+import hashlib
+import socket
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -106,18 +110,25 @@ class InMemorySecretStore:
         self.secrets.pop((ref.service, ref.account), None)
 
 
-def _derive_fernet_key(*, runtime_root: str, salt_extra: str = "pal_v2_secrets") -> bytes:
+def _derive_fernet_key(
+    *,
+    runtime_root: str,
+    salt_extra: str = "pal_v2_secrets",
+    include_hostname: bool = False,
+) -> bytes:
     """Derive a Fernet key from machine identity + runtime root path.
 
-    Deterministic per (hostname, username, runtime_root) so the same
-    deployment always decrypts its own secrets without a password prompt.
+    Deterministic per (username, runtime_root) so the same deployment always
+    decrypts its own secrets without a password prompt. Hostname is deliberately
+    excluded from the primary key because macOS hostnames may change after
+    reboot or network changes.
     """
-    import base64
-    import hashlib
-    import getpass
-    import socket
 
-    material = f"{socket.gethostname()}:{getpass.getuser()}:{runtime_root}:{salt_extra}"
+    parts = []
+    if include_hostname:
+        parts.append(socket.gethostname())
+    parts.extend([getpass.getuser(), runtime_root, salt_extra])
+    material = ":".join(parts)
     digest = hashlib.pbkdf2_hmac("sha256", material.encode(), b"pal_v2_secret_salt", 200_000)
     return base64.urlsafe_b64encode(digest)
 
@@ -137,6 +148,7 @@ class EncryptedFileSecretStore:
 
         self._path = Path(str(secrets_path))
         self._fernet: object | None = None
+        self._legacy_fernets: list[object] | None = None
         self._cache: dict[tuple[str, str], str] = {}
         self._loaded_mtime_ns: int | None = None
         self._load()
@@ -162,12 +174,20 @@ class EncryptedFileSecretStore:
     # -- internals -----------------------------------------------------------
 
     def _ensure_fernet(self):
-        if self._fernet is not None:
+        if self._fernet is not None and self._legacy_fernets is not None:
             return
         from cryptography.fernet import Fernet
 
-        key = _derive_fernet_key(runtime_root=str(self._path.parent))
-        self._fernet = Fernet(key)
+        primary_key = _derive_fernet_key(runtime_root=str(self._path.parent))
+        self._fernet = Fernet(primary_key)
+        legacy_keys = [
+            _derive_fernet_key(runtime_root=str(self._path.parent), include_hostname=True),
+        ]
+        self._legacy_fernets = [
+            Fernet(key)
+            for key in dict.fromkeys(legacy_keys)
+            if key != primary_key
+        ]
 
     def _load(self) -> None:
         import json
@@ -191,12 +211,11 @@ class EncryptedFileSecretStore:
                 continue
             encrypted = entry.get("encrypted")
             if isinstance(encrypted, str) and encrypted:
-                self._ensure_fernet()
-                try:
-                    value = self._fernet.decrypt(encrypted.encode()).decode()  # type: ignore[union-attr]
+                decrypted = self._decrypt_encrypted_value(encrypted)
+                if decrypted is not None:
+                    value, needs_rewrite = decrypted
                     self._cache[(service, account)] = value
-                except Exception:
-                    pass
+                    dirty = dirty or needs_rewrite
                 continue
             # Legacy plaintext migration
             plaintext = entry.get("value")
@@ -239,3 +258,17 @@ class EncryptedFileSecretStore:
             return
         self._cache.clear()
         self._load()
+
+    def _decrypt_encrypted_value(self, encrypted: str) -> tuple[str, bool] | None:
+        self._ensure_fernet()
+        payload = encrypted.encode()
+        try:
+            return self._fernet.decrypt(payload).decode(), False  # type: ignore[union-attr]
+        except Exception:
+            pass
+        for fernet in list(self._legacy_fernets or []):
+            try:
+                return fernet.decrypt(payload).decode(), True  # type: ignore[attr-defined]
+            except Exception:
+                continue
+        return None

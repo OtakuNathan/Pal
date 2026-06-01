@@ -391,6 +391,33 @@ Run the workflow.
         self.assertIn("Pal LLM Adapter and Endpoint Development", injected.structured["title"])
         self.assertIn("user-controlled", injected.structured["manual_text"])
 
+    def test_skill_module_declares_internal_channel_provider_skill(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        register_skill_with_core(core.context, self.service)
+        core.publish_module_capabilities("skill")
+
+        skill = self.skill_repository.get_skill("pal.channel.provider.development")
+
+        self.assertIsNotNone(skill)
+        assert skill is not None
+        self.assertEqual(skill.module_id, "skill")
+        self.assertTrue(skill.active)
+        self.assertIn("<runtime_root>/channel/providers/<provider_id>/", skill.manual_text)
+        self.assertIn("provider.toml", skill.manual_text)
+        self.assertIn("build_channel_provider", skill.manual_text)
+        self.assertIn("op_channel_provider_rescan", skill.capability_refs)
+
+        search = SkillSearchTool(service=self.service).invoke({"query": "add channel provider provider.toml slash command", "top_k": 3})
+        self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.channel.provider.development")
+        self.assertTrue(search.structured["hits"][0]["injectable"])
+
+        injected = SkillInjectTool(service=self.service).invoke({"skill_id": "pal.channel.provider.development"})
+        self.assertEqual(injected.status, "ok")
+        self.assertIn("Pal Channel Provider Development", injected.structured["title"])
+        self.assertIn("FactoryChannelProvider", injected.structured["manual_text"])
+
     def test_skill_module_declares_discoverable_affordances_for_internal_development_skills(self) -> None:
         core = PalCore()
         behavior_service = BehaviorService(repository=self.behavior_repository)
@@ -406,18 +433,26 @@ Run the workflow.
         llm_advice = asyncio.run(
             behavior_service.advise_async(BehaviorAdviceRequest(scenario="add llm adapter endpoint provider", top_k=5))
         )
+        channel_advice = asyncio.run(
+            behavior_service.advise_async(BehaviorAdviceRequest(scenario="add channel provider with provider.toml and slash command", top_k=5))
+        )
 
         plugin = next(candidate for candidate in plugin_advice.candidates if candidate.affordance_id == "declared.skill.pal_plugin_development")
         llm = next(candidate for candidate in llm_advice.candidates if candidate.affordance_id == "declared.skill.pal_llm_adapter_endpoint_development")
+        channel = next(candidate for candidate in channel_advice.candidates if candidate.affordance_id == "declared.skill.pal_channel_provider_development")
 
         self.assertEqual(plugin.skill_refs, ("pal.plugin.development",))
         self.assertEqual(llm.skill_refs, ("pal.llm.adapter_endpoint.development",))
+        self.assertEqual(channel.skill_refs, ("pal.channel.provider.development",))
         self.assertEqual(plugin.visibility_mode, "discoverable")
         self.assertEqual(llm.visibility_mode, "discoverable")
+        self.assertEqual(channel.visibility_mode, "discoverable")
         self.assertFalse(plugin.metadata["resident"])
         self.assertFalse(llm.metadata["resident"])
+        self.assertFalse(channel.metadata["resident"])
         self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_plugin_development"))
         self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_llm_adapter_endpoint_development"))
+        self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_channel_provider_development"))
 
     def test_internal_development_skill_routes_are_not_pruned_by_minion_spawn(self) -> None:
         core = PalCore()
@@ -440,11 +475,18 @@ Run the workflow.
                 BehaviorAdviceRequest(scenario="加一个 LLM adapter endpoint provider", top_k=5)
             )
         )
+        channel_advice = asyncio.run(
+            behavior_service.advise_async(
+                BehaviorAdviceRequest(scenario="给 Pal 加一个 channel provider，带 provider.toml 和 inline keyboard", top_k=5)
+            )
+        )
 
         self.assertEqual(plugin_advice.candidates[0].affordance_id, "declared.skill.pal_plugin_development")
         self.assertEqual(plugin_advice.candidates[0].skill_refs, ("pal.plugin.development",))
         self.assertEqual(llm_advice.candidates[0].affordance_id, "declared.skill.pal_llm_adapter_endpoint_development")
         self.assertEqual(llm_advice.candidates[0].skill_refs, ("pal.llm.adapter_endpoint.development",))
+        self.assertEqual(channel_advice.candidates[0].affordance_id, "declared.skill.pal_channel_provider_development")
+        self.assertEqual(channel_advice.candidates[0].skill_refs, ("pal.channel.provider.development",))
 
     def test_skill_prompt_stays_registered_but_skill_tools_are_not_resident_llm_tools(self) -> None:
         core = PalCore()

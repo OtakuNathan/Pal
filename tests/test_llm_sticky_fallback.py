@@ -61,7 +61,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
 
                 self.assertEqual(first.text, "ok:working")
                 self.assertEqual(second.text, "ok:working")
-                self.assertEqual(invoker.calls, ["broken", "broken", "working", "working"])
+                self.assertEqual(invoker.calls, ["broken", "broken", "broken", "working", "working"])
                 self.assertEqual(runtime.active_endpoint_id, "working")
                 self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "working")
             finally:

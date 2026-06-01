@@ -31,6 +31,7 @@ from pal.minion.profiles import MinionProfileRegistry
 from pal.minion.prompt import TaskingPromptFragmentProvider
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.source import MinionControlEventHandler, MinionEventSource
+from pal.minion.validation import MinionWorkOrderValidationError, normalize_milestones
 from pal.minion.work_order import build_planner_work_order, prompt_view_from_metadata
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -518,9 +519,15 @@ class MinionManagerProvider:
                                 "planner_work_order": {"type": "object"},
                                 "coder_work_order": {"type": "object"},
                                 "reviewer_work_order": {"type": "object"},
-                                "milestones": {"type": "array"},
+                                "milestones": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+                                    "description": "Required execution stages. Do not put acceptance criteria here unless they are actual phases.",
+                                },
                                 "preferred_endpoint_id": {"type": "string"},
                             },
+                            "required": ["milestones"],
                         },
                     },
                     "required": [
@@ -582,7 +589,9 @@ class MinionManagerProvider:
     def spawn(self, call: CapabilityCall) -> CapabilityResult:
         try:
             repository = self._repository()
+            _validate_spawn_args(call.args, repository=repository)
             pack = _pack_from_args(call.args, repository=repository)
+            pack = _validate_pack_milestones(pack)
             pack = _inject_spawn_bonus_skill_refs(pack, call.args)
             pack = self._inject_control_route(pack, call)
             pack = self._inject_debug_log_request(pack, call)
@@ -596,6 +605,8 @@ class MinionManagerProvider:
             result = self.client.spawn_sync(pack.to_dict())
             self.last_health = dict(result)
             return _capability_from_rpc("minion spawned", result)
+        except MinionWorkOrderValidationError as exc:
+            return _capability_invalid("minion spawn invalid", exc)
         except Exception as exc:
             return _capability_error("minion spawn failed", exc)
 
@@ -621,6 +632,8 @@ class MinionManagerProvider:
                 },
                 "milestones": {
                     "type": "array",
+                    "minItems": 1,
+                    "items": {"oneOf": [{"type": "string"}, {"type": "object"}]},
                     "description": "Ordered, concrete milestones the minion should report against.",
                 },
                 "acceptance_criteria": {
@@ -644,13 +657,17 @@ class MinionManagerProvider:
             },
             "required": [
                 "goal",
+                "milestones",
             ],
         },
     )
     def draft_work_order(self, call: CapabilityCall) -> CapabilityResult:
         try:
-            payload = self._repository().create_work_order_draft(dict(call.args))
+            args = _validate_draft_work_order_args(dict(call.args))
+            payload = self._repository().create_work_order_draft(args)
             return _capability_from_rpc("minion work order draft created", payload)
+        except MinionWorkOrderValidationError as exc:
+            return _capability_invalid("minion work order draft invalid", exc)
         except Exception as exc:
             return _capability_error("minion work order draft failed", exc)
 
@@ -671,11 +688,16 @@ class MinionManagerProvider:
     )
     def promote_work_order_draft(self, call: CapabilityCall) -> CapabilityResult:
         try:
-            payload = self._repository().promote_work_order_draft(
+            repository = self._repository()
+            reviewed_candidate = dict(call.args.get("reviewed_candidate") or {}) or None
+            _validate_promote_work_order_args(repository, str(call.args.get("draft_id") or ""), reviewed_candidate=reviewed_candidate)
+            payload = repository.promote_work_order_draft(
                 str(call.args.get("draft_id") or ""),
-                reviewed_candidate=dict(call.args.get("reviewed_candidate") or {}) or None,
+                reviewed_candidate=reviewed_candidate,
             )
             return _capability_from_rpc("minion work order draft promoted", payload)
+        except MinionWorkOrderValidationError as exc:
+            return _capability_invalid("minion work order draft promotion invalid", exc)
         except Exception as exc:
             return _capability_error("minion work order draft promotion failed", exc)
 
@@ -1446,6 +1468,49 @@ def inspect_tasking(provider: MinionManagerProvider) -> MinionSnapshot:
     return inspect_minion(provider)
 
 
+def _validate_draft_work_order_args(args: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(args)
+    milestones = normalize_milestones(normalized.get("milestones"))
+    normalized["milestones"] = milestones
+    metadata = dict(normalized.get("metadata") or {})
+    metadata["milestones"] = milestones
+    normalized["metadata"] = metadata
+    return normalized
+
+
+def _validate_promote_work_order_args(
+    repository: MinionTaskingRepository,
+    draft_id: str,
+    *,
+    reviewed_candidate: dict[str, Any] | None = None,
+) -> None:
+    snapshot = repository.read_work_order_draft(str(draft_id or ""))
+    if snapshot.get("status") == "not_found":
+        raise MinionWorkOrderValidationError(f"unknown work order draft: {draft_id}", field="draft_id")
+    base_candidate = dict(snapshot.get("work_order_candidate") or {})
+    raw_milestones = (
+        dict(reviewed_candidate or {}).get("milestones")
+        if isinstance(reviewed_candidate, dict) and "milestones" in reviewed_candidate
+        else base_candidate.get("milestones")
+    )
+    normalize_milestones(raw_milestones)
+    if reviewed_candidate is not None and "milestones" in reviewed_candidate:
+        reviewed_candidate["milestones"] = normalize_milestones(reviewed_candidate.get("milestones"))
+
+
+def _validate_spawn_args(args: dict[str, Any], *, repository: MinionTaskingRepository) -> None:
+    draft_id = str(args.get("draft_id") or "").strip()
+    if draft_id:
+        _validate_promote_work_order_args(repository, draft_id, reviewed_candidate=dict(args.get("reviewed_candidate") or {}) or None)
+
+
+def _validate_pack_milestones(pack: TaskContextPack) -> TaskContextPack:
+    metadata = dict(pack.metadata or {})
+    milestones = normalize_milestones(metadata.get("milestones"))
+    metadata["milestones"] = milestones
+    return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
+
+
 def _pack_from_args(args: dict[str, Any], *, repository: MinionTaskingRepository | None = None) -> TaskContextPack:
     if isinstance(args.get("task_context_pack"), dict):
         return TaskContextPack.from_dict(dict(args.get("task_context_pack") or {}))
@@ -1705,6 +1770,19 @@ def _runtime_status(payload: dict[str, Any]) -> str:
     if status in {item.value for item in RuntimeStatus}:
         return status
     return RuntimeStatus.OK
+
+
+def _capability_invalid(text: str, exc: MinionWorkOrderValidationError) -> CapabilityResult:
+    payload = {"error": str(exc), "error_type": exc.__class__.__name__}
+    extra = getattr(exc, "payload", None)
+    if isinstance(extra, dict):
+        payload.update(extra)
+    return CapabilityResult(
+        status=RuntimeStatus.INVALID,
+        text=text,
+        structured=payload,
+        llm_text=render_titled_structured_for_llm(text, payload),
+    )
 
 
 def _capability_error(text: str, exc: Exception) -> CapabilityResult:

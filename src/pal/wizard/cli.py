@@ -406,7 +406,8 @@ def run_dependency_doctor() -> int:
 def run_setup_wizard() -> int:
     print(_BANNER)
 
-    result = run_interactive_wizard()
+    service = WizardService()
+    result = run_interactive_wizard(existing_loader=service.load_existing_wizard_data)
     if result is None:
         print("\n  Setup cancelled.")
         return 1
@@ -417,20 +418,8 @@ def run_setup_wizard() -> int:
     # Handle existing DB
     # ------------------------------------------------------------------
     db_path = runtime_root / DEFAULT_DB_FILENAME
-    service = WizardService()
-
     if db_path.exists():
-        print(f"\n  A database already exists at {db_path}")
-        choice = ask_yes_no("  Overwrite (delete + recreate)?", default=False)
-        if choice:
-            db_path.unlink()
-            print("  Old database deleted.")
-        else:
-            update = ask_yes_no("  Update (upsert in place)?", default=True)
-            if not update:
-                print("  Aborting.")
-                return 1
-            print("  Will update existing database.")
+        print(f"\n  Updating existing database at {db_path}")
 
     # ------------------------------------------------------------------
     # Provision

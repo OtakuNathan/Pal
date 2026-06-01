@@ -5,6 +5,7 @@ from pal.skill.contracts import SkillApplicabilitySTAR, SkillDescriptor
 
 PAL_PLUGIN_DEVELOPMENT_SKILL_ID = "pal.plugin.development"
 PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID = "pal.llm.adapter_endpoint.development"
+PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID = "pal.channel.provider.development"
 
 
 PAL_PLUGIN_DEVELOPMENT_MANUAL = """# Pal Plugin Development
@@ -292,6 +293,202 @@ If the user explicitly asks you to refresh, then use the normal LLM refresh path
 """
 
 
+PAL_CHANNEL_PROVIDER_DEVELOPMENT_MANUAL = """# Pal Channel Provider Development
+
+Use this skill when Pal needs to add, review, repair, or explain a channel integration, channel endpoint, or runtime-root channel provider.
+
+## Boundary
+
+Channel providers belong to the `channel` subsystem. They are not ordinary Pal plugins, even though built-in channels can be packaged by first-party plugins. The `ChannelEndpointProviderManager` is the single LLM/core-facing management entrypoint. A provider owns the concrete endpoint lifecycle and endpoint-specific introspection.
+
+Keep these boundaries:
+
+- `channel_kind` is a persisted endpoint type discriminator used by `channel_endpoints`; it should not become the LLM-facing abstraction.
+- `ChannelEndpointProviderManager` maps endpoint type keys to providers and dispatches attach, detach, restart, inspect, auth, backlog, and health by endpoint id.
+- The provider decides how attach/detach/restart/introspection work for its channel.
+- Endpoint implementations normalize ingress, send replies, report auth/health/backlog, and render any channel-specific interactions.
+- Do not put channel transport logic in `core`, `control`, `llm`, or `memory`.
+
+## Runtime Provider Location
+
+Runtime-root channel providers live under:
+
+```text
+<runtime_root>/channel/providers/<provider_id>/
+  provider.toml
+  runtime.py
+  README.md        # optional
+```
+
+Do not create a second discovery layout unless the channel manager explicitly supports it.
+
+Minimal `provider.toml`:
+
+```toml
+provider_id = "demo_chat"
+entrypoint = "runtime.py"
+version = "0.1.0"
+enabled = true
+
+reload_modules = ["runtime"]
+```
+
+`provider_id` must be stable and unique. `entrypoint` must point to a Python file inside the provider directory. `enabled = false` keeps the provider discoverable on disk but not loaded. `reload_modules` is advisory for endpoint restart and hot-refresh diagnostics.
+
+## Provider Entrypoint
+
+The entrypoint should expose `build_channel_provider`. Pal calls it with name-aware injection. Useful argument names are:
+
+- `context`: `ChannelProviderBuildContext`
+- `manager`: the `ChannelEndpointProviderManager`
+- `runtime_root`: the Pal runtime root
+- `provider_dir`: this provider directory
+- `manifest`: the parsed `RuntimeChannelProviderManifest`
+
+Minimal `runtime.py` using `FactoryChannelProvider`:
+
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from pal.channel import ChannelEndpointQueueBase, EndpointConfig, FactoryChannelProvider
+from pal.channel.models import ChannelEndpointModel
+
+
+class DemoChatEndpoint(ChannelEndpointQueueBase):
+    def normalize_raw(self, payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            return {"text": str(payload.get("text") or "")}
+        return {"text": str(payload)}
+
+    def send_reply(self, response_handle, text: str) -> None:
+        # Replace this with the transport send path for the channel.
+        _ = response_handle, text
+
+    def inspect_health(self) -> dict[str, Any]:
+        return {
+            "healthy": True,
+            "channel_kind": self.endpoint.channel_kind,
+            "endpoint_id": self.endpoint.endpoint_id,
+        }
+
+    def inspect_auth_state(self) -> dict[str, Any]:
+        return {
+            "authorized": bool(self.paired),
+            "endpoint_id": self.endpoint.endpoint_id,
+        }
+
+
+@dataclass(frozen=True)
+class DemoChatEndpointFactory:
+    channel_kind: str = "demo_chat"
+    reload_modules: tuple[str, ...] = ("runtime",)
+
+    def create(self, record: ChannelEndpointModel, *, runtime_root: Path):
+        _ = runtime_root
+        endpoint = DemoChatEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id=record.endpoint_id,
+                channel_kind=record.channel_kind,
+                binding_key=record.binding_key,
+                send_policy=dict(record.send_policy_blob or {}),
+            )
+        )
+        endpoint.enabled = bool(record.enabled)
+        endpoint.attached = record.detached_at is None
+        endpoint.paired = bool((record.binding_metadata or {}).get("paired", False))
+        return endpoint
+
+
+def build_channel_provider(context):
+    factory = DemoChatEndpointFactory()
+    return FactoryChannelProvider(
+        provider_id=context.manifest.provider_id,
+        endpoint_types=(factory.channel_kind,),
+        factory=factory,
+        reload_modules=factory.reload_modules,
+    )
+```
+
+Use a custom `ChannelProvider` implementation instead of `FactoryChannelProvider` when the channel needs provider-owned attach/detach semantics, external sidecars, multi-step auth, pairing flows, or nonstandard introspection.
+
+## Endpoint Row
+
+The provider only handles endpoint types it declares in `endpoint_types`. A usable endpoint still needs a `channel_endpoints` row:
+
+- `endpoint_id`: stable unique id, such as `demo_chat_main`.
+- `channel_kind`: endpoint type key, such as `demo_chat`; this must match the provider's endpoint type.
+- `binding_key`: channel-specific target, path, chat id, workspace id, or account binding.
+- `enabled`: true when Pal should hydrate the endpoint.
+- `binding_metadata`: channel-owned structured metadata; do not store raw secrets unless the existing channel explicitly does so.
+- `send_policy_blob`: optional delivery/chunking policy.
+
+If there is no endpoint-management capability for the needed row, prepare a clear SQL or repository patch and ask before mutating the production database.
+
+## Interactions and Commands
+
+Control interactions are channel-neutral. Prefer the base `ChannelEndpointQueueBase` hooks first:
+
+- `apply_control_catalog`
+- `apply_interaction_status`
+- `open_or_update_interaction`
+- `resolve_interaction`
+- `emit_interaction_result`
+
+Only override channel-specific rendering, such as inline keyboards, slash-command menus, callback payloads, receipts, typing indicators, or transport-specific message editing. Avoid hard-coding Telegram-only assumptions into shared control or core code.
+
+## Lifecycle and Hot Reload
+
+Provider rescan means:
+
+1. Scan `<runtime_root>/channel/providers/*/provider.toml`.
+2. Load enabled providers not already registered.
+3. Register provider ids and endpoint type ownership in `ChannelEndpointProviderManager`.
+4. Optionally hydrate enabled, attached endpoint rows.
+5. Republish channel introspection capabilities so LLM can see new endpoint ids.
+
+Endpoint restart means rebuilding a runtime endpoint instance through its provider. Do not use endpoint restart as provider discovery.
+
+Useful operations:
+
+- `op_channel_provider_rescan`: discover runtime-root channel providers and optionally attach enabled endpoints.
+- `intro_module_channel_list`: list configured channel endpoints and provider ids.
+- `intro_endpoint_channel_inspect`: inspect one endpoint.
+- `intro_endpoint_channel_auth_state`: inspect authorization without revealing secrets.
+- `intro_endpoint_channel_health`: inspect network and delivery health.
+- `intro_endpoint_channel_backlog`: inspect queue sizes.
+- `op_channel_mgmt_attach`: attach one endpoint through its provider.
+- `op_channel_mgmt_detach`: detach one endpoint through its provider.
+- `op_channel_mgmt_reload_provider`: restart one endpoint runtime instance.
+
+## Verification Workflow
+
+Before calling a channel provider done:
+
+1. Inspect current channel provider manager and endpoint contracts.
+2. Write `provider.toml` and provider source under `<runtime_root>/channel/providers/<provider_id>/`.
+3. Compile provider source with `python -m py_compile`.
+4. Test provider loading in isolation or with a temporary runtime root first.
+5. Add or preview the `channel_endpoints` row for the provider's endpoint type.
+6. Run `op_channel_provider_rescan` and check `runtime_provider_load_errors`.
+7. Verify `intro_module_channel_list` shows `provider_id`.
+8. Verify endpoint `inspect`, `auth_state`, `health`, and `backlog`.
+9. Dogfood through the real channel if safe; for socket, send `/control` before sending LLM-consuming messages.
+10. Detach and attach the endpoint once to prove provider-owned lifecycle is reversible.
+
+## Safety Notes
+
+- Do not expose tokens or secrets in introspection payloads.
+- Do not start multiple long-polling instances for the same external account or Telegram bot token.
+- Do not silently mutate production channel endpoint rows, credentials, or live polling state without user approval.
+- Keep provider failures structured and visible through `runtime_provider_load_errors` or endpoint health.
+- Prefer small deterministic transport adapters. Put large protocol clients or sidecars behind provider-owned lifecycle code.
+"""
+
+
 def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescriptor, ...]:
     return (
         SkillDescriptor(
@@ -377,5 +574,59 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
             source_format="internal_skill",
             source_refs=("pal.skill.builtin_skills", "docs/pal_llm_contract.md"),
             metadata={"internal": True, "requires_user_refresh": True},
+        ),
+        SkillDescriptor(
+            skill_id=PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID,
+            module_id=module_id,
+            title="Pal Channel Provider Development",
+            summary="Develop and validate runtime-root channel providers, endpoint rows, and channel-specific interactions.",
+            manual_text=PAL_CHANNEL_PROVIDER_DEVELOPMENT_MANUAL,
+            activation_terms=(
+                "channel provider",
+                "channel endpoint",
+                "channel integration",
+                "new channel",
+                "add channel",
+                "runtime channel provider",
+                "channel/providers",
+                "provider.toml",
+                "ChannelEndpointProviderManager",
+                "FactoryChannelProvider",
+                "ChannelEndpointQueueBase",
+                "telegram channel",
+                "socket channel",
+            ),
+            capability_refs=(
+                "op_channel_provider_rescan",
+                "intro_module_channel_list",
+                "intro_endpoint_channel_inspect",
+                "intro_endpoint_channel_auth_state",
+                "intro_endpoint_channel_health",
+                "intro_endpoint_channel_backlog",
+                "op_channel_mgmt_attach",
+                "op_channel_mgmt_detach",
+                "op_channel_mgmt_reload_provider",
+            ),
+            applicability_star=SkillApplicabilitySTAR(
+                situation="Pal needs to add or repair a channel integration without pushing transport details into core.",
+                task="Create a runtime-root channel provider, endpoint implementation, and matching endpoint metadata.",
+                action="Use the provider.toml layout, build_channel_provider contract, lifecycle boundary, and dogfood checklist.",
+                result="The channel provider rescans, hydrates endpoints, exposes provider-owned introspection, and can be attached or detached safely.",
+            ),
+            use_when=(
+                "Use when the user asks Pal to create, review, repair, or hot-load a channel provider, channel endpoint, "
+                "slash-command handling path, inline interaction rendering, or runtime-root channel integration."
+            ),
+            avoid_when=(
+                "Avoid for ordinary Pal plugins, LLM provider adapters, or changes that only switch an existing endpoint "
+                "without adding provider or endpoint code."
+            ),
+            sanitization_notes=(
+                "Provider secrets must remain write-only.",
+                "Live polling or external account attachment needs explicit user approval.",
+            ),
+            source_format="internal_skill",
+            source_refs=("pal.skill.builtin_skills", "src/pal/channel/README.md"),
+            metadata={"internal": True, "runtime_root_layout": "channel/providers/<provider_id>/provider.toml"},
         ),
     )

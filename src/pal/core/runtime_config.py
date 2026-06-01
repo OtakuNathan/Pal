@@ -35,7 +35,7 @@ class RuntimeConfig:
     llm_base_retry_delay_ms: int = 500
     llm_max_retry_delay_ms: int = 32_000
     llm_stale_connection_settle_ms: int = 300
-    llm_endpoint_retry_attempts: int = 2
+    llm_endpoint_retry_attempts: int = 3
     llm_request_timeout_seconds: float = 180.0
     llm_compaction_timeout_seconds: float = 180.0
 

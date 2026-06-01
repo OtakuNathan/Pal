@@ -161,6 +161,23 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertIsNotNone(endpoint)
         self.assertEqual(LiteLLMCredentialResolver(secret_store=store).resolve_api_key(endpoint), "sk-test-key-123")
 
+    def test_load_existing_wizard_data_reads_current_runtime(self) -> None:
+        collected = _make_collected()
+        self.wizard.seed_from_wizard(self.registration, collected)
+
+        existing = self.wizard.load_existing_wizard_data(self.runtime_root)
+
+        self.assertIsNotNone(existing)
+        assert existing is not None
+        self.assertEqual(existing.identity.display_name, "TestPal")
+        self.assertEqual(existing.identity.language, "zh")
+        self.assertEqual(existing.identity.timezone, "Asia/Shanghai")
+        self.assertEqual(existing.endpoints[0].endpoint_id, "test-claude")
+        self.assertIsNone(existing.endpoints[0].api_key)
+        self.assertEqual(existing.active_endpoint_id, "test-claude")
+        self.assertEqual(existing.channel.endpoint_id, "socket_default")
+        self.assertEqual(existing.channel.binding_key, "/tmp/test-pal-wizard/pal.sock")
+
     def test_seed_from_wizard_sets_active_endpoint(self) -> None:
         from pal.llm import RuntimeSettingRepository
 
@@ -243,6 +260,26 @@ class TestSeedFromWizard(unittest.TestCase):
         endpoints = LLMEndpointRepository().list_enabled()
         self.assertEqual(len(endpoints), 1)
         self.assertEqual(endpoints[0].model_id, "claude-opus-4-20250514")
+
+    def test_rerun_seed_from_wizard_preserves_existing_api_key_when_blank(self) -> None:
+        from pal.llm import LLMEndpointRepository, LiteLLMCredentialResolver
+        from pal.llm.secret_store import EncryptedFileSecretStore
+
+        collected = _make_collected()
+        self.wizard.seed_from_wizard(self.registration, collected)
+
+        updated = _make_collected()
+        updated.endpoints[0].api_key = None
+        updated.endpoints[0].model_id = "claude-opus-4-20250514"
+        self.wizard.seed_from_wizard(self.registration, updated)
+
+        store = EncryptedFileSecretStore(str(self.runtime_root / "secrets.json"))
+        endpoint = LLMEndpointRepository().get_primary_enabled()
+        self.assertIsNotNone(endpoint)
+        self.assertEqual(
+            LiteLLMCredentialResolver(secret_store=store).resolve_api_key(endpoint),
+            "sk-test-key-123",
+        )
 
     def test_seed_from_wizard_multiple_endpoints(self) -> None:
         from pal.llm import LLMEndpointRepository

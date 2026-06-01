@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import random
 import re
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 from pal.llm.adapters import LLMProviderRegistry, build_runtime_provider_registry, _think_level_to_completion_reasoning_effort
 from pal.llm.codex_openai_bridge import (
@@ -106,7 +107,7 @@ def _classify_retry_error(exc: Exception) -> str:
     # HTTP status codes embedded in the error message
     if "429" in message or "rate" in message:
         return "rate_limit"
-    if any(code in message for code in ("529", "overload", "502", "503", "504", "500")):
+    if any(code in message for code in ("529", "overload", "502", "503", "504", "500", "internalservererror", "network error")):
         return "server"
 
     return "unknown"
@@ -125,6 +126,20 @@ def _endpoint_connection_failure_domain(endpoint: LLMEndpointModel) -> tuple[str
     ):
         return ("codex_cli", base_url or "codex://cli")
     return None
+
+
+def _next_endpoint_id(endpoints: list[LLMEndpointModel], index: int) -> str:
+    next_index = int(index) + 1
+    if next_index < len(endpoints):
+        return str(endpoints[next_index].endpoint_id or "")
+    return ""
+
+
+def _short_error_text(exc: Exception, limit: int = 500) -> str:
+    text = " ".join(str(exc or "").replace("\r", " ").replace("\n", " ").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def _compute_retry_delay(
@@ -224,6 +239,43 @@ class LLMEndpointInvocationError(RuntimeError):
     pass
 
 
+def _timeout_from_litellm_kwargs(kwargs: dict[str, Any]) -> float:
+    for key in ("force_timeout", "request_timeout", "timeout"):
+        value = kwargs.get(key)
+        if value is None:
+            continue
+        return _coerce_timeout_seconds(value, default=120.0)
+    return 120.0
+
+
+def _run_litellm_with_wall_timeout(
+    operation: Callable[[], Any],
+    *,
+    timeout_seconds: float,
+    description: str,
+) -> Any:
+    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+    def target() -> None:
+        try:
+            result_queue.put(("ok", operation()))
+        except BaseException as exc:  # noqa: BLE001
+            result_queue.put(("error", exc))
+
+    thread = threading.Thread(target=target, name="pal-litellm-call", daemon=True)
+    thread.start()
+    thread.join(timeout=max(0.001, float(timeout_seconds)))
+    if thread.is_alive():
+        raise LLMEndpointInvocationError(f"{description} timed out after {timeout_seconds:g}s")
+    try:
+        kind, payload = result_queue.get_nowait()
+    except queue.Empty as exc:
+        raise LLMEndpointInvocationError(f"{description} ended without returning a result") from exc
+    if kind == "error":
+        raise payload
+    return payload
+
+
 @dataclass
 class LiteLLMEndpointInvoker:
     """Unified invoker using LiteLLM, with stub:// endpoints kept local."""
@@ -321,7 +373,11 @@ class LiteLLMEndpointInvoker:
 
         kwargs, tool_name_aliases = self._build_completion_kwargs(endpoint, request)
         try:
-            response = litellm.completion(**kwargs)
+            response = _run_litellm_with_wall_timeout(
+                lambda: litellm.completion(**kwargs),
+                timeout_seconds=_timeout_from_litellm_kwargs(kwargs),
+                description=f"litellm invocation for {endpoint.endpoint_id}",
+            )
         except Exception as exc:
             raise LLMEndpointInvocationError(f"litellm invocation failed for {endpoint.endpoint_id}: {exc}") from exc
         return self._parse_litellm_response(response, tool_name_aliases=tool_name_aliases)
@@ -338,10 +394,18 @@ class LiteLLMEndpointInvoker:
 
         kwargs, tool_name_aliases = self._build_completion_kwargs(endpoint, request)
         try:
-            stream = litellm.completion(stream=True, **kwargs)
+            return _run_litellm_with_wall_timeout(
+                lambda: list(
+                    self._iter_litellm_stream(
+                        litellm.completion(stream=True, **kwargs),
+                        tool_name_aliases=tool_name_aliases,
+                    )
+                ),
+                timeout_seconds=_timeout_from_litellm_kwargs(kwargs),
+                description=f"litellm streaming invocation for {endpoint.endpoint_id}",
+            )
         except Exception as exc:
             raise LLMEndpointInvocationError(f"litellm invocation failed for {endpoint.endpoint_id}: {exc}") from exc
-        return self._iter_litellm_stream(stream, tool_name_aliases=tool_name_aliases)
 
     def _build_completion_kwargs(
         self,
@@ -363,7 +427,10 @@ class LiteLLMEndpointInvoker:
         timeout_seconds = request.metadata.get("timeout_seconds")
         if timeout_seconds is not None:
             try:
-                draft.timeout = max(1, int(float(timeout_seconds)))
+                timeout_value = max(1, int(float(timeout_seconds)))
+                draft.timeout = timeout_value
+                draft.request_timeout = float(timeout_value)
+                draft.force_timeout = float(timeout_value)
             except (TypeError, ValueError):
                 pass
         if endpoint.base_url and not str(endpoint.base_url).startswith("stub://"):
@@ -658,12 +725,13 @@ class LLMRuntime(LLMRuntimePort):
     endpoint_invoker: LLMEndpointInvokerPort | None = None
     config: Any = None
     safety_margin_tokens: int = 16384
-    endpoint_retry_attempts: int = 2
+    endpoint_retry_attempts: int = 3
     last_request: CanonicalLLMRequest | None = None
     last_endpoint_id: str | None = None
     last_model_id: str | None = None
     think_level: str = DEFAULT_THINK_LEVEL
     active_endpoint_id: str | None = None
+    event_sink: Callable[[dict[str, Any]], None] | None = None
 
     def __post_init__(self) -> None:
         if self.endpoint_invoker is None:
@@ -851,13 +919,27 @@ class LLMRuntime(LLMRuntimePort):
         last_error: Exception | None = None
         had_stale_connection = False
         failed_connection_domains: set[tuple[str, str]] = set()
-        for endpoint in enabled:
+        for endpoint_index, endpoint in enumerate(enabled):
             endpoint_domain = _endpoint_connection_failure_domain(endpoint)
             if endpoint_domain is not None and endpoint_domain in failed_connection_domains:
+                self._emit_llm_progress(
+                    "llm_endpoint_skipped",
+                    endpoint=endpoint,
+                    endpoint_index=endpoint_index,
+                    endpoint_count=len(enabled),
+                    reason="shared_connection_failure_domain",
+                )
                 continue
             if had_stale_connection:
                 time.sleep(self._retry_stale_settle_ms / 1000.0)
                 had_stale_connection = False
+            if endpoint_index > 0:
+                self._emit_llm_progress(
+                    "llm_endpoint_fallback_started",
+                    endpoint=endpoint,
+                    endpoint_index=endpoint_index,
+                    endpoint_count=len(enabled),
+                )
 
             effective_request = self._build_effective_request(request, endpoint=endpoint)
             self.last_request = effective_request
@@ -883,7 +965,8 @@ class LLMRuntime(LLMRuntimePort):
                     reserved_output_tokens=advice.reserved_output_tokens,
                 )
 
-            for attempt in range(max(1, self.endpoint_retry_attempts)):
+            attempt_count = max(1, self.endpoint_retry_attempts)
+            for attempt in range(attempt_count):
                 try:
                     result = invoke_fn(endpoint, effective_request)
                     self.last_request = effective_request
@@ -891,6 +974,13 @@ class LLMRuntime(LLMRuntimePort):
                     self.last_model_id = endpoint.model_id
                     if explicit_preferred_endpoint_id is None and endpoint.endpoint_id != self.active_endpoint_id:
                         self.set_active_endpoint(endpoint.endpoint_id)
+                    if endpoint_index > 0:
+                        self._emit_llm_progress(
+                            "llm_endpoint_fallback_succeeded",
+                            endpoint=endpoint,
+                            endpoint_index=endpoint_index,
+                            endpoint_count=len(enabled),
+                        )
                     return _EndpointInvocationResult(
                         kind="success",
                         value=result,
@@ -900,16 +990,47 @@ class LLMRuntime(LLMRuntimePort):
                 except Exception as exc:
                     last_error = exc
                     error_kind = _classify_retry_error(exc)
+                    self._emit_llm_progress(
+                        "llm_endpoint_attempt_failed",
+                        endpoint=endpoint,
+                        endpoint_index=endpoint_index,
+                        endpoint_count=len(enabled),
+                        attempt=attempt + 1,
+                        max_attempts=attempt_count,
+                        error_kind=error_kind,
+                        error_message=_short_error_text(exc),
+                        next_endpoint_id=_next_endpoint_id(enabled, endpoint_index),
+                    )
                     if error_kind == "stale_connection":
                         if endpoint_domain is not None:
                             failed_connection_domains.add(endpoint_domain)
                         had_stale_connection = True
+                        self._emit_llm_progress(
+                            "llm_endpoint_exhausted",
+                            endpoint=endpoint,
+                            endpoint_index=endpoint_index,
+                            endpoint_count=len(enabled),
+                            attempt=attempt + 1,
+                            max_attempts=attempt_count,
+                            reason=error_kind,
+                            next_endpoint_id=_next_endpoint_id(enabled, endpoint_index),
+                        )
                         break
                     if error_kind == "connection":
                         if endpoint_domain is not None:
                             failed_connection_domains.add(endpoint_domain)
+                        self._emit_llm_progress(
+                            "llm_endpoint_exhausted",
+                            endpoint=endpoint,
+                            endpoint_index=endpoint_index,
+                            endpoint_count=len(enabled),
+                            attempt=attempt + 1,
+                            max_attempts=attempt_count,
+                            reason=error_kind,
+                            next_endpoint_id=_next_endpoint_id(enabled, endpoint_index),
+                        )
                         break
-                    if attempt < max(1, self.endpoint_retry_attempts) - 1:
+                    if attempt < attempt_count - 1:
                         delay = _compute_retry_delay(
                             attempt + 1,
                             error_kind=error_kind,
@@ -917,12 +1038,51 @@ class LLMRuntime(LLMRuntimePort):
                             max_delay_ms=self._retry_max_delay_ms,
                             stale_settle_ms=self._retry_stale_settle_ms,
                         )
+                        self._emit_llm_progress(
+                            "llm_endpoint_retry_scheduled",
+                            endpoint=endpoint,
+                            endpoint_index=endpoint_index,
+                            endpoint_count=len(enabled),
+                            attempt=attempt + 1,
+                            next_attempt=attempt + 2,
+                            max_attempts=attempt_count,
+                            error_kind=error_kind,
+                            delay_seconds=round(delay, 3),
+                            next_endpoint_id=_next_endpoint_id(enabled, endpoint_index),
+                        )
                         time.sleep(delay)
+                    else:
+                        self._emit_llm_progress(
+                            "llm_endpoint_exhausted",
+                            endpoint=endpoint,
+                            endpoint_index=endpoint_index,
+                            endpoint_count=len(enabled),
+                            attempt=attempt + 1,
+                            max_attempts=attempt_count,
+                            reason=error_kind,
+                            next_endpoint_id=_next_endpoint_id(enabled, endpoint_index),
+                        )
 
         self.last_endpoint_id = None
         self.last_model_id = None
         reason = str(last_error) if last_error is not None else "unknown endpoint invocation error"
         return _EndpointInvocationResult(kind="error", error_message=reason)
+
+    def _emit_llm_progress(self, phase: str, *, endpoint: LLMEndpointModel, **payload: Any) -> None:
+        sink = self.event_sink
+        if not callable(sink):
+            return
+        event = {
+            "phase": phase,
+            "endpoint_id": endpoint.endpoint_id,
+            "model_id": endpoint.model_id,
+            "provider": endpoint.provider,
+            **payload,
+        }
+        try:
+            sink(event)
+        except Exception:
+            return
 
     def generate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
         self.refresh_runtime_settings()

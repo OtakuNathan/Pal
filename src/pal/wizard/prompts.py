@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 # ---------------------------------------------------------------------------
@@ -241,32 +241,59 @@ def _print_step(step: int, total: int, title: str) -> None:
     print(f"{'=' * 50}\n")
 
 
+def _multiline_with_default(prompt: str, default: str | None = None) -> str | None:
+    if default:
+        print("Current value:")
+        for line in str(default).splitlines():
+            print(f"  {line}")
+        print("Leave blank to keep current. Enter '<clear>' to clear.")
+    value = multiline_input(prompt)
+    if default is not None and not value.strip():
+        return default
+    if value.strip() == "<clear>":
+        return None
+    return value or None
+
+
+def _policy_with_default(prompt: str, default: list[str] | None = None) -> list[str]:
+    default_text = "\n".join(default or [])
+    text = _multiline_with_default(prompt, default_text if default else None)
+    if text is None:
+        return []
+    return [line for line in text.splitlines() if line.strip()]
+
+
+def _prompt_int(prompt: str, default: int | None, fallback: int | None = None) -> int | None:
+    raw = ask(prompt, "" if default is None else str(default))
+    if not raw:
+        return fallback
+    try:
+        return int(raw)
+    except ValueError:
+        return fallback
+
+
 def prompt_runtime_home() -> Path:
     default = str(Path.home() / ".pal")
     raw = ask("Where should Pal live?", default)
     return Path(raw).expanduser().resolve()
 
 
-def prompt_identity() -> WizardIdentity:
+def prompt_identity(current: WizardIdentity | None = None) -> WizardIdentity:
     _print_step(1, 4, "Identity")
 
-    display_name = ask("Pal's display name", "Pal")
-    language = ask("Language (en, zh, ja, ...)", "en")
-    timezone = ask("Timezone (blank for auto-detect)", "")
+    display_name = ask("Pal's display name", current.display_name if current else "Pal")
+    language = ask("Language (en, zh, ja, ...)", current.language if current else "en")
+    timezone = ask("Timezone (blank for auto-detect)", current.timezone if current and current.timezone else "")
 
     print()
-    vibe = multiline_input("Pal's personality / vibe (blank to skip)")
-    if not vibe.strip():
-        vibe = None
+    vibe = _multiline_with_default("Pal's personality / vibe (blank to skip)", current.vibe if current else None)
 
     print()
-    tone = multiline_input("Communication tone (blank to skip)")
-    if not tone.strip():
-        tone = None
+    tone = _multiline_with_default("Communication tone (blank to skip)", current.tone if current else None)
 
     print()
-    policy_text = multiline_input("Core policy rules (one per line, blank to skip)")
-    core_policy = [line for line in policy_text.splitlines() if line.strip()]
+    core_policy = _policy_with_default("Core policy rules (one per line, blank to skip)", current.core_policy if current else None)
 
     return WizardIdentity(
         display_name=display_name,
@@ -278,36 +305,37 @@ def prompt_identity() -> WizardIdentity:
     )
 
 
-def _prompt_one_endpoint(index: int) -> WizardLLMEndpoint | None:
+def _prompt_one_endpoint(index: int, current: WizardLLMEndpoint | None = None) -> WizardLLMEndpoint | None:
     print(f"\n  Endpoint #{index}:")
-    label = ask("  Label (e.g. my-claude, deepseek-chat)", "")
+    label = ask("  Label (e.g. my-claude, deepseek-chat)", current.endpoint_id if current else "")
     if not label:
         return None
 
-    mode_choice = ask("  API mode: 1) openai_chat  2) anthropic_messages", "1")
+    current_mode_choice = "2" if current and current.api_mode == "anthropic_messages" else "1"
+    mode_choice = ask("  API mode: 1) openai_chat  2) anthropic_messages", current_mode_choice)
     api_mode = "openai_chat" if mode_choice.strip() != "2" else "anthropic_messages"
 
-    model_id = ask("  Model ID", label)
+    model_id = ask("  Model ID", current.model_id if current else label)
 
     if api_mode == "openai_chat":
         default_url = "https://api.openai.com/v1"
     else:
         default_url = "https://api.anthropic.com/v1"
-    base_url = ask("  Base URL", default_url)
+    base_url = ask("  Base URL", current.base_url if current else default_url)
 
-    api_key = ask_password("  API key (hidden, blank to skip)")
+    api_key = ask_password("  API key (hidden, blank to keep current)" if current else "  API key (hidden, blank to skip)")
 
     capabilities: dict[str, Any] | None = None
     if api_key:
         print("  Querying model metadata...")
         capabilities = query_model_metadata(base_url, model_id, api_key, api_mode)
 
-    context_window: int | None = None
-    max_output_tokens: int | None = None
-    supports_reasoning = False
-    supports_tools = True
-    supports_streaming = True
-    supports_vision = False
+    context_window: int | None = current.context_window if current else None
+    max_output_tokens: int | None = current.max_output_tokens if current else None
+    supports_reasoning = current.supports_reasoning if current else False
+    supports_tools = current.supports_tools if current else True
+    supports_streaming = current.supports_streaming if current else True
+    supports_vision = current.supports_vision if current else False
 
     if capabilities:
         context_window = capabilities.get("context_length")
@@ -328,16 +356,32 @@ def _prompt_one_endpoint(index: int) -> WizardLLMEndpoint | None:
         if not ask_yes_no("  Confirm", True):
             capabilities = None
 
-    if not capabilities:
+    if current is not None and not capabilities:
+        if ask_yes_no("  Update model capability metadata", False):
+            context_window = _prompt_int("  Context window size", context_window, context_window)
+            max_output_tokens = _prompt_int("  Max output tokens (blank for current/default)", max_output_tokens, max_output_tokens)
+            supports_reasoning = ask_yes_no("  Supports reasoning / thinking", supports_reasoning)
+            supports_vision = ask_yes_no("  Supports vision (image input)", supports_vision)
+            supports_tools = ask_yes_no("  Supports tool calling", supports_tools)
+            supports_streaming = ask_yes_no("  Supports streaming", supports_streaming)
+    elif not capabilities:
         print("  Could not query metadata. Enter manually.")
-        ctx = ask("  Context window size", "32768")
-        context_window = int(ctx)
-        max_output_tokens_raw = ask("  Max output tokens (blank for default)", "")
-        max_output_tokens = int(max_output_tokens_raw) if max_output_tokens_raw else None
+        context_window = _prompt_int("  Context window size", 32768, 32768)
+        max_output_tokens = _prompt_int("  Max output tokens (blank for default)", None, None)
         supports_reasoning = ask_yes_no("  Supports reasoning / thinking", False)
         supports_vision = ask_yes_no("  Supports vision (image input)", False)
         supports_tools = ask_yes_no("  Supports tool calling", True)
         supports_streaming = ask_yes_no("  Supports streaming", True)
+
+    provider = None
+    credential_ref = None
+    capabilities_blob: dict[str, Any] = {}
+    notes = None
+    if current is not None and label == current.endpoint_id and base_url == current.base_url and api_mode == current.api_mode:
+        provider = current.provider
+        credential_ref = current.credential_ref
+        capabilities_blob = dict(current.capabilities_blob or {})
+        notes = current.notes
 
     endpoint = WizardLLMEndpoint(
         endpoint_id=label,
@@ -352,9 +396,13 @@ def _prompt_one_endpoint(index: int) -> WizardLLMEndpoint | None:
         supports_streaming=supports_streaming,
         supports_vision=supports_vision,
         priority=0,
+        provider=provider,
+        credential_ref=credential_ref,
+        capabilities_blob=capabilities_blob,
+        notes=notes,
     )
 
-    if ask_yes_no("  Run live LLM preflight now", True):
+    if ask_yes_no("  Run live LLM preflight now", current is None and bool(api_key)):
         result = run_llm_endpoint_preflight(endpoint)
         _print_llm_preflight_result(result)
         if result.status == "error":
@@ -581,13 +629,10 @@ def _infer_endpoint_provider(endpoint: WizardLLMEndpoint) -> str:
     return endpoint.endpoint_id
 
 
-def prompt_llm_endpoints() -> tuple[list[WizardLLMEndpoint], str]:
-    _print_step(2, 4, "LLM Endpoints")
-    print("(Codex uses your local Codex CLI subscription login.)")
-    print("(OpenAI and Anthropic are API formats; compatible providers also work.)\n")
-
-    endpoints: list[WizardLLMEndpoint] = []
+def _append_prompted_endpoints(endpoints: list[WizardLLMEndpoint], *, start_index: int) -> None:
     idx = 1
+    if start_index > 1:
+        idx = start_index
     while True:
         default_choice = "1" if not endpoints else "3"
         source_choice = ask(
@@ -622,6 +667,43 @@ def prompt_llm_endpoints() -> tuple[list[WizardLLMEndpoint], str]:
         if not ask_yes_no("  Add another endpoint?", True):
             break
 
+
+def prompt_llm_endpoints() -> tuple[list[WizardLLMEndpoint], str]:
+    return prompt_llm_endpoints_with_current()
+
+
+def prompt_llm_endpoints_with_current(
+    current_endpoints: list[WizardLLMEndpoint] | None = None,
+    current_active_endpoint_id: str | None = None,
+) -> tuple[list[WizardLLMEndpoint], str]:
+    _print_step(2, 4, "LLM Endpoints")
+    print("(Codex uses your local Codex CLI subscription login.)")
+    print("(OpenAI and Anthropic are API formats; compatible providers also work.)\n")
+
+    endpoints: list[WizardLLMEndpoint] = []
+    current_endpoints = list(current_endpoints or [])
+    if current_endpoints:
+        print("  Existing endpoints:")
+        for current in current_endpoints:
+            active_marker = " [active]" if current.endpoint_id == current_active_endpoint_id else ""
+            print(f"    {current.endpoint_id}: {current.model_id} ({current.provider or current.api_mode}){active_marker}")
+        for current in current_endpoints:
+            if not ask_yes_no(f"  Keep endpoint {current.endpoint_id}", True):
+                continue
+            if ask_yes_no(f"  Edit endpoint {current.endpoint_id}", False):
+                edited = _prompt_one_endpoint(len(endpoints) + 1, current)
+                if edited is not None:
+                    endpoints.append(edited)
+            else:
+                endpoints.append(current)
+        if ask_yes_no("  Add another endpoint?", False):
+            _append_prompted_endpoints(endpoints, start_index=len(endpoints) + 1)
+        if not endpoints:
+            print("  At least one endpoint is required.")
+            _append_prompted_endpoints(endpoints, start_index=1)
+    else:
+        _append_prompted_endpoints(endpoints, start_index=1)
+
     if len(endpoints) > 1:
         print("\n  Priority order (lower = higher priority):")
         for i, ep in enumerate(endpoints, 1):
@@ -643,7 +725,13 @@ def prompt_llm_endpoints() -> tuple[list[WizardLLMEndpoint], str]:
     print("\n  Which endpoint should be active?")
     for i, ep in enumerate(endpoints, 1):
         print(f"    {i}. {ep.endpoint_id} ({ep.model_id})")
-    active_idx = ask("  Choice", "1")
+    default_active_index = 1
+    if current_active_endpoint_id:
+        for i, ep in enumerate(endpoints, 1):
+            if ep.endpoint_id == current_active_endpoint_id:
+                default_active_index = i
+                break
+    active_idx = ask("  Choice", str(default_active_index))
     try:
         active_endpoint_id = endpoints[int(active_idx) - 1].endpoint_id
     except (ValueError, IndexError):
@@ -652,25 +740,39 @@ def prompt_llm_endpoints() -> tuple[list[WizardLLMEndpoint], str]:
     return endpoints, active_endpoint_id
 
 
-def prompt_channel(runtime_root: Path) -> WizardChannel:
+def prompt_channel(runtime_root: Path, current: WizardChannel | None = None) -> WizardChannel:
     _print_step(3, 4, "Channel")
+
+    if current is not None:
+        print(f"  Existing channel: {current.channel_kind} ({current.binding_key})")
+        if ask_yes_no("  Keep current channel", True):
+            if not ask_yes_no("  Edit current channel", False):
+                return current
 
     choice = ask(
         "How will you interact with Pal?\n"
         "  1) Socket (pal run + pal client)\n"
         "  2) Telegram bot",
-        "1",
+        "2" if current and current.channel_kind == "telegram" else "1",
     )
 
     if choice.strip() == "2":
-        bot_token = ""
+        endpoint_id = ask("  Endpoint ID", current.endpoint_id if current and current.channel_kind == "telegram" else "telegram_main")
+        existing_token = ""
+        if current and current.channel_kind == "telegram":
+            existing_token = str(current.binding_metadata.get("bot_token") or "")
+        bot_token = ask("  Bot token (blank to keep current)", "") if existing_token else ""
         while not bot_token:
+            if existing_token:
+                bot_token = existing_token
+                break
             bot_token = ask("  Bot token", "").strip()
             if not bot_token:
                 print("  Bot token is required for Telegram.")
-        binding_key = normalize_telegram_binding_key(ask("  Binding key (e.g. user:12345 or chat:-10012345)", "user:me"))
+        binding_default = current.binding_key if current and current.channel_kind == "telegram" else "user:me"
+        binding_key = normalize_telegram_binding_key(ask("  Binding key (e.g. user:12345 or chat:-10012345)", binding_default))
         return WizardChannel(
-            endpoint_id="telegram_main",
+            endpoint_id=endpoint_id,
             channel_kind="telegram",
             binding_key=binding_key,
             binding_metadata={"bot_token": bot_token},
@@ -678,9 +780,11 @@ def prompt_channel(runtime_root: Path) -> WizardChannel:
             supports_receipt_marker=True,
         )
 
-    socket_path = ask("  Socket path", str(runtime_root / "pal.sock"))
+    endpoint_id = ask("  Endpoint ID", current.endpoint_id if current and current.channel_kind == "socket" else "socket_default")
+    socket_default = current.binding_key if current and current.channel_kind == "socket" else str(runtime_root / "pal.sock")
+    socket_path = ask("  Socket path", socket_default)
     return WizardChannel(
-        endpoint_id="socket_default",
+        endpoint_id=endpoint_id,
         channel_kind="socket",
         binding_key=socket_path,
     )
@@ -724,13 +828,22 @@ def prompt_review(data: WizardCollectedData, runtime_root: Path) -> bool:
 # Top-level
 # ---------------------------------------------------------------------------
 
-def run_interactive_wizard() -> tuple[Path, WizardCollectedData] | None:
+def run_interactive_wizard(
+    *,
+    existing_loader: Callable[[Path], WizardCollectedData | None] | None = None,
+) -> tuple[Path, WizardCollectedData] | None:
     print("\n=== Pal Setup ===\n")
 
     runtime_root = prompt_runtime_home()
-    identity = prompt_identity()
-    endpoints, active_endpoint_id = prompt_llm_endpoints()
-    channel = prompt_channel(runtime_root)
+    current = existing_loader(runtime_root) if existing_loader is not None else None
+    if current is not None:
+        print(f"\n  Existing Pal runtime detected at {runtime_root}; current values will be used as defaults.")
+    identity = prompt_identity(current.identity if current else None)
+    endpoints, active_endpoint_id = prompt_llm_endpoints_with_current(
+        current.endpoints if current else None,
+        current.active_endpoint_id if current else None,
+    )
+    channel = prompt_channel(runtime_root, current.channel if current else None)
 
     data = WizardCollectedData(
         identity=identity,

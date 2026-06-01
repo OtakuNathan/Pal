@@ -101,6 +101,9 @@ flowchart TD
 - reply routing
 - envelope creation
 - `Pal`-owned user-facing channel runtime
+- provider registry and runtime-root provider discovery
+- provider-owned endpoint lifecycle forwarding
+- channel-owned interaction realization
 
 ### Does Not Own
 
@@ -108,14 +111,18 @@ flowchart TD
 - memory persistence
 - capability execution
 - approval policy
+- platform-specific interaction behavior in core
+- provider-specific attach/detach implementation details
 
 ### Exposes
 
 - `EndpointConfig`
 - `ResponseHandle`
-- `ChannelAdapter`
-- `ChannelNormalizer`
+- `ChannelProvider`
+- `ChannelEndpointProviderManager`
+- `FactoryChannelProvider`
 - `ChannelEnvelope`
+- runtime provider manifest contract
 
 ### Identity Rule
 
@@ -125,6 +132,38 @@ channel identity 固定为：
 
 它不等于 conversation identity，也不等于 memory identity。
 
+`channel_kind` 是 endpoint row 的持久化类型 discriminator，用于反序列化和 endpoint/provider 匹配。它不应该成为 core 推断平台行为的依据。
+
+运行期 channel 行为由 provider 下沉到具体 endpoint 类型中：
+
+- manager 通过 endpoint id 或 endpoint type 找到 provider
+- provider 决定如何 attach/detach/restart
+- provider 决定 introspection 字段
+- provider 决定 interaction 的平台 realization
+
+### Provider Rule
+
+channel provider 可以来自 builtin，也可以来自 runtime root：
+
+```text
+<runtime_root>/channel/providers/<provider_id>/
+  provider.toml
+  runtime.py
+```
+
+`ChannelEndpointProviderManager` 负责注册、扫描、rescan 和 capability 入口。
+
+Provider 自己负责：
+
+- endpoint factory or endpoint construction
+- endpoint lifecycle
+- auth/backlog/health introspection
+- slash command or menu publication when the platform supports it
+- interaction rendering
+- callback/result normalization
+
+这保持了统一管理入口，同时避免把 Telegram inline keyboard、socket JSON event、CLI 文本菜单等 realization 写进 core。
+
 ### Legacy Alignment
 
 旧版 `DeliveryRoute` 语义在新架构中拆成：
@@ -133,6 +172,8 @@ channel identity 固定为：
 - `ResponseHandle`
 
 保留“哪里来的，哪里回去”的回复路由原则，但不再让 route 成为 memory ownership 的核心抽象。
+
+旧版 `ChannelAdapter` / `ChannelNormalizer` 语言应理解为 endpoint/provider 内部实现细节。公开架构边界以 `ChannelProvider`、`ChannelEnvelope`、`ResponseHandle`、`EndpointConfig` 为准。
 
 ### IM UX Rule
 
@@ -147,6 +188,8 @@ IM channel 默认采用三阶段反馈：
 - 消息入队后立即给用户消息打 `eyes` 标记
 - 随后切换 typing
 - 最终再发送正式回复
+
+这只是 Telegram provider 的 realization。其他 channel 可以选择 JSON status event、textual ack、web UI state 或无噪音状态更新，只要 typed interaction/result contract 不变。
 
 ## llm
 
@@ -404,6 +447,8 @@ proactive task 的内部定义至少应表达：
 - `EventEnvelope`
 - `ResponseHandle`
 - `EndpointConfig`
+- `ChannelProvider`
+- `ChannelEndpointProviderManager`
 - `PalCore`
 - `ControlPlane`
 - `CapabilityDescriptor`
@@ -416,8 +461,11 @@ proactive task 的内部定义至少应表达：
 
 ## Invariants
 
-- `Channel` 只做 I/O、normalize、reply route。
+- `Channel` 只做 I/O、normalize、reply route、UX feedback 和 interaction realization。
+- `ChannelProvider` 拥有 endpoint lifecycle 与 provider-specific introspection。
+- `ChannelEndpointProviderManager` 只负责注册、扫描、路由和统一 capability 入口。
 - `Pal` 自己持有用户前台 channel。
+- 多个 channel 连接的是同一个 Pal subject，不产生独立人格或独立 memory identity。
 - `LLM` 不直接产生副作用。
 - `LLM` 内部保持 canonical shape，对外再适配 provider shape。
 - `Memory` 拥有 `L1/L2/L3` 语义，但不越过 `Execution` 做 effect。

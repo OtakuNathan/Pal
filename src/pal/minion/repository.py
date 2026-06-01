@@ -19,6 +19,7 @@ from pal.minion.work_order import (
     prompt_view_from_metadata,
     validate_final_plan_artifact,
 )
+from pal.minion.validation import normalize_milestones
 from pal.shared import TaskContextPack
 from pal.shared.text_search import compile_jieba_fts_queries, jieba_fts_text
 
@@ -1490,24 +1491,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
 
 
 def _coerce_milestones(raw: Any, acceptance_criteria: list[str], fallback: str) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    if isinstance(raw, list):
-        for index, item in enumerate(raw):
-            if isinstance(item, dict):
-                result.append(
-                    {
-                        "title": _clip_text(item.get("title") or f"Milestone {index + 1}", _WORK_ORDER_DRAFT_ITEM_TEXT_LIMIT),
-                        "summary": _clip_text(item.get("summary") or "", _WORK_ORDER_DRAFT_ITEM_TEXT_LIMIT),
-                        "acceptance": _coerce_text_list(item.get("acceptance")),
-                    }
-                )
-            elif str(item or "").strip():
-                result.append({"title": _clip_text(item, _WORK_ORDER_DRAFT_ITEM_TEXT_LIMIT), "summary": "", "acceptance": []})
-    if not result:
-        result = [{"title": item, "summary": "", "acceptance": [item]} for item in acceptance_criteria if str(item).strip()]
-    if not result:
-        result = [{"title": fallback or "Complete work order", "summary": "", "acceptance": []}]
-    return result
+    _ = acceptance_criteria, fallback
+    return normalize_milestones(raw)
 
 
 def _module_parent_milestones(artifact: PlanArtifact) -> list[dict[str, Any]]:

@@ -174,18 +174,55 @@ class _MinionLLMRuntimeAdapter:
             tool_call_count=self._state.tool_call_count,
             tool_count=len(list(request.tools or [])),
         )
+        restore_event_sink = self._install_llm_progress_sink()
         method = getattr(self._base, "agenerate", None)
-        if callable(method):
-            awaitable = method(request)
-        else:
-            sync_method = getattr(self._base, "generate")
-            awaitable = asyncio.to_thread(sync_method, request)
-        return await self._runner._await_with_progress_heartbeat(
-            awaitable,
-            phase="llm_round_waiting",
-            round=self._state.llm_round_count,
-            tool_call_count=self._state.tool_call_count,
-        )
+        try:
+            if callable(method):
+                awaitable = method(request)
+            else:
+                sync_method = getattr(self._base, "generate")
+                awaitable = asyncio.to_thread(sync_method, request)
+            return await self._runner._await_with_progress_heartbeat(
+                awaitable,
+                phase="llm_round_waiting",
+                round=self._state.llm_round_count,
+                tool_call_count=self._state.tool_call_count,
+            )
+        finally:
+            restore_event_sink()
+
+    def _install_llm_progress_sink(self) -> Callable[[], None]:
+        sentinel = object()
+        try:
+            previous = getattr(self._base, "event_sink")
+        except Exception:
+            previous = sentinel
+        loop = asyncio.get_running_loop()
+
+        def sink(event: dict[str, Any]) -> None:
+            payload = dict(event or {})
+            phase = str(payload.pop("phase", "") or "llm_endpoint_event")
+            payload.setdefault("round", self._state.llm_round_count)
+            payload.setdefault("tool_call_count", self._state.tool_call_count)
+
+            def schedule() -> None:
+                asyncio.create_task(self._runner._emit_progress(phase, **payload))
+
+            loop.call_soon_threadsafe(schedule)
+
+        try:
+            setattr(self._base, "event_sink", sink)
+        except Exception:
+            return lambda: None
+
+        def restore() -> None:
+            with contextlib.suppress(Exception):
+                if previous is sentinel:
+                    delattr(self._base, "event_sink")
+                else:
+                    setattr(self._base, "event_sink", previous)
+
+        return restore
 
     async def acompact_memory_structured(self, *args, **kwargs) -> dict[str, Any]:
         method = getattr(self._base, "acompact_memory_structured", None)
@@ -2233,6 +2270,26 @@ def _progress_summary(phase: str, payload: dict[str, Any]) -> str:
             extra = "..." if len(calls) > 4 else ""
             return f"LLM round {payload.get('round')} requested tools: {names}{extra}".strip()
         return f"LLM round {payload.get('round')} produced final text"
+    if phase_name == "llm_endpoint_attempt_failed":
+        endpoint = payload.get("endpoint_id") or payload.get("model_id") or "endpoint"
+        return f"LLM endpoint {endpoint} attempt {payload.get('attempt')}/{payload.get('max_attempts')} failed: {payload.get('error_kind') or 'error'}"
+    if phase_name == "llm_endpoint_retry_scheduled":
+        endpoint = payload.get("endpoint_id") or payload.get("model_id") or "endpoint"
+        return f"LLM endpoint {endpoint} retry {payload.get('next_attempt')}/{payload.get('max_attempts')} scheduled"
+    if phase_name == "llm_endpoint_exhausted":
+        endpoint = payload.get("endpoint_id") or payload.get("model_id") or "endpoint"
+        next_endpoint = str(payload.get("next_endpoint_id") or "").strip()
+        suffix = f"; falling back to {next_endpoint}" if next_endpoint else ""
+        return f"LLM endpoint {endpoint} exhausted after {payload.get('attempt')}/{payload.get('max_attempts')}{suffix}"
+    if phase_name == "llm_endpoint_fallback_started":
+        endpoint = payload.get("endpoint_id") or payload.get("model_id") or "endpoint"
+        return f"LLM fallback started: {endpoint}"
+    if phase_name == "llm_endpoint_fallback_succeeded":
+        endpoint = payload.get("endpoint_id") or payload.get("model_id") or "endpoint"
+        return f"LLM fallback succeeded: {endpoint}"
+    if phase_name == "llm_endpoint_skipped":
+        endpoint = payload.get("endpoint_id") or payload.get("model_id") or "endpoint"
+        return f"LLM endpoint skipped: {endpoint} ({payload.get('reason') or 'skipped'})"
     if phase_name == "tool_call_started":
         return f"Tool started: {payload.get('target_name') or payload.get('tool_name')}"
     if phase_name == "tool_call_completed":

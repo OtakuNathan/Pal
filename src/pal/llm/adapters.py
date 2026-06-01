@@ -21,6 +21,9 @@ class LiteLLMCompletionDraft:
     model: str
     messages: list[dict[str, Any]]
     timeout: int = 120
+    request_timeout: float | None = None
+    force_timeout: float | None = None
+    max_retries: int | None = 0
     api_base: str | None = None
     api_key: str | None = None
     temperature: float | None = None
@@ -33,16 +36,21 @@ class LiteLLMCompletionDraft:
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_kwargs(self) -> dict[str, Any]:
+        request_timeout = self.request_timeout if self.request_timeout is not None else self.timeout
+        force_timeout = self.force_timeout if self.force_timeout is not None else request_timeout
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": self.messages,
             "timeout": self.timeout,
+            "request_timeout": request_timeout,
+            "force_timeout": force_timeout,
         }
         optional_values = {
             "api_base": self.api_base,
             "api_key": self.api_key,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "max_retries": self.max_retries,
             "tool_choice": self.tool_choice,
             "reasoning_effort": self.reasoning_effort,
             "thinking": self.thinking,
