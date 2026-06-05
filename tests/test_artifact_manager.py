@@ -165,7 +165,8 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertIn('<runtime_context_update kind="artifact">', text_parts[0])
         self.assertIn("Available Artifacts", text_parts[1])
-        self.assertEqual(text_parts[-1], "看看这个附件")
+        self.assertEqual(text_parts[-2], "看看这个附件")
+        self.assertIn("<runtime_reminder", text_parts[-1])
 
     def test_artifact_info_exposes_local_file_metadata_for_tool_use(self) -> None:
         ref = self._register_text(name="invoice.txt", text="invoice total is 42")
@@ -437,7 +438,14 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         later_content = later_request.messages[0]["content"]
-        self.assertEqual(later_content, "try this artifact again")
+        self.assertIsInstance(later_content, list)
+        later_text_parts = [
+            str(part.get("text") or "")
+            for part in later_content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        self.assertEqual(later_text_parts[-2], "try this artifact again")
+        self.assertIn("<runtime_reminder", later_text_parts[-1])
 
         no_caption_request = compiler.build_canonical_prompt(
             PromptAssemblyContext(

@@ -58,12 +58,35 @@ def default_channel_endpoints(runtime_root: Path) -> tuple[dict[str, object], ..
             "channel_kind": "socket",
             "binding_key": str(runtime_root / DEFAULT_SOCKET_FILENAME),
             "enabled": True,
+            "detached_at": None,
             "supports_typing": False,
             "supports_receipt_marker": False,
             "binding_metadata": {},
             "send_policy_blob": {},
         },
     )
+
+
+def ensure_recovery_socket_channel(repository: ChannelEndpointRepository, runtime_root: Path) -> ChannelEndpointModel:
+    payload = dict(default_channel_endpoints(runtime_root)[0])
+    existing_binding = repository.find_by_binding(
+        channel_kind=str(payload["channel_kind"]),
+        binding_key=str(payload["binding_key"]),
+    )
+    if existing_binding is not None and existing_binding.endpoint_id != payload["endpoint_id"]:
+        payload["endpoint_id"] = existing_binding.endpoint_id
+    return repository.upsert(**payload)
+
+
+def _choose_primary_wizard_channel(records: list[ChannelEndpointModel]) -> ChannelEndpointModel | None:
+    attached = [record for record in records if record.detached_at is None]
+    return (
+        next((record for record in attached if record.channel_kind != "socket"), None)
+        or next(iter(attached), None)
+        or next((record for record in records if record.channel_kind != "socket"), None)
+        or next(iter(records), None)
+    )
+
 
 DEFAULT_LLM_ENDPOINTS = (
     {
@@ -183,8 +206,7 @@ class WizardService(WizardServicePort):
         _ = registration
         IdentityRepository().ensure_defaults()
         channel_repository = ChannelEndpointRepository()
-        for payload in default_channel_endpoints(registration.runtime.runtime_root):
-            channel_repository.upsert(**dict(payload))
+        ensure_recovery_socket_channel(channel_repository, registration.runtime.runtime_root)
         LLMEndpointRepository().ensure_defaults(DEFAULT_LLM_ENDPOINTS)
         WebSearchProviderRepository().ensure_defaults(DEFAULT_WEB_SEARCH_PROVIDERS)
         WebFetchProviderRepository().ensure_defaults(DEFAULT_WEB_FETCH_PROVIDERS)
@@ -307,7 +329,7 @@ class WizardService(WizardServicePort):
             if not active_endpoint_id and endpoints:
                 active_endpoint_id = endpoints[0].endpoint_id
 
-            channel_record = next(iter(ChannelEndpointRepository().list_enabled()), None)
+            channel_record = _choose_primary_wizard_channel(ChannelEndpointRepository().list_enabled())
             if channel_record is None:
                 channel_payload = dict(default_channel_endpoints(Path(runtime_root))[0])
                 channel = WizardChannel(
@@ -455,12 +477,15 @@ class WizardService(WizardServicePort):
             "channel_kind": ch.channel_kind,
             "binding_key": ch.binding_key,
             "enabled": True,
+            "detached_at": None,
             "supports_typing": ch.supports_typing,
             "supports_receipt_marker": ch.supports_receipt_marker,
             "binding_metadata": ch.binding_metadata,
             "send_policy_blob": {},
         }
         channel_repo.upsert(**channel_payload)
+        if not (ch.channel_kind == "socket" and ch.endpoint_id == "socket_default"):
+            ensure_recovery_socket_channel(channel_repo, runtime_root)
 
         # 5. Web search/fetch defaults (same as seed_defaults)
         WebSearchProviderRepository().ensure_defaults(DEFAULT_WEB_SEARCH_PROVIDERS)

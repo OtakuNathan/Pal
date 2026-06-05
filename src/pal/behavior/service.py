@@ -29,6 +29,7 @@ from pal.behavior.contracts import (
 )
 from pal.behavior.decorators import AffordanceBlueprint
 from pal.behavior.repository import BehaviorRepository
+from pal.behavior.text import canonicalize_affordance_prompt_hint
 from pal.foundation import HeatStateRegistry
 from pal.foundation.persistence import utc_now
 from pal.shared.text_search import jieba_search_terms
@@ -110,12 +111,13 @@ class BehaviorService:
             updates["scenario_text"] = str(updates["scenario_text"] or "").strip()
             if not updates["scenario_text"]:
                 raise ValueError("scenario_text is required")
-        if "prompt_hint" in updates:
-            updates["prompt_hint"] = str(updates["prompt_hint"] or "").strip()
-            if not updates["prompt_hint"]:
-                raise ValueError("prompt_hint is required")
         if "title" in updates:
             updates["title"] = str(updates["title"] or "").strip()
+        if "prompt_hint" in updates:
+            effective_title = str(updates.get("title") or existing.title or "").strip()
+            updates["prompt_hint"] = canonicalize_affordance_prompt_hint(effective_title, updates["prompt_hint"])
+            if not updates["prompt_hint"]:
+                raise ValueError("prompt_hint is required")
         if "source_kind" in updates:
             source_kind = str(updates["source_kind"] or "").strip()
             if source_kind not in {AFFORDANCE_SOURCE_INSTRUCTED, AFFORDANCE_SOURCE_LEARNED}:
@@ -250,8 +252,12 @@ class BehaviorService:
             AFFORDANCE_MODE_SUGGEST,
         )
         title = str(payload.get("title") or scenario_text[:80] or "Untitled affordance").strip()
+        prompt_hint = canonicalize_affordance_prompt_hint(title, prompt_hint)
+        if not prompt_hint:
+            raise ValueError("prompt_hint is required")
+        normalized_payload = {**payload, "title": title, "prompt_hint": prompt_hint}
         descriptor = AffordanceDescriptor(
-            affordance_id=str(payload.get("affordance_id") or _generated_affordance_id(payload, source_kind=source_kind)),
+            affordance_id=str(payload.get("affordance_id") or _generated_affordance_id(normalized_payload, source_kind=source_kind)),
             module_id="behavior",
             title=title,
             scenario_text=scenario_text,
@@ -499,7 +505,7 @@ def _descriptor_from_affordance_blueprint(blueprint: AffordanceBlueprint, *, mod
         module_id=module_id,
         title=blueprint.title,
         scenario_text=blueprint.scenario_text,
-        prompt_hint=blueprint.prompt_hint,
+        prompt_hint=canonicalize_affordance_prompt_hint(blueprint.title, blueprint.prompt_hint),
         visibility_mode=blueprint.visibility_mode,
         activation_kind=blueprint.activation_kind,
         activation_mode=blueprint.activation_mode,
@@ -769,6 +775,7 @@ def _split_rendered_affordance_line(value: str) -> str:
 def _affordance_matches_any_query(affordance: AffordanceDescriptor, queries: tuple[str, ...]) -> bool:
     fields = (
         _normalize_affordance_text(_affordance_match_text(affordance)),
+        _normalize_affordance_text(_rendered_affordance_text(affordance)),
         _normalize_affordance_text(affordance.prompt_hint),
         _normalize_affordance_text(affordance.scenario_text),
         _normalize_affordance_text(affordance.title),
@@ -780,6 +787,14 @@ def _affordance_matches_any_query(affordance: AffordanceDescriptor, queries: tup
             if query == field or query in field or field in query:
                 return True
     return False
+
+
+def _rendered_affordance_text(affordance: AffordanceDescriptor) -> str:
+    title = affordance.title.strip()
+    hint = affordance.prompt_hint.strip()
+    if title and hint:
+        return f"{title}: {hint}"
+    return title or hint
 
 
 def _affordance_text_hash(affordance: AffordanceDescriptor) -> str:

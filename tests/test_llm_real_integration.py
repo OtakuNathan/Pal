@@ -1086,11 +1086,12 @@ class RealLLMIntegrationTests(unittest.TestCase):
                 reviewed_instruction = review_instruction
                 coder_instruction = (
                     f"Reviewer-approved instruction: {reviewed_instruction}\n"
-                    "Hard execution requirement for this test: call op_exec_shell exactly once with cwd equal to workspace.repo_path. "
+                    "Hard execution requirement for this test: first call op_exec_shell with cwd equal to workspace.repo_path. "
                     "Use cmd exactly: "
                     "\"python -c \\\"from pathlib import Path; "
                     "Path('status.txt').write_text('MINION_TEAM_OK', encoding='utf-8')\\\"\". "
-                    "After the tool succeeds, stop with a concise milestone summary."
+                    "After the shell tool succeeds, call op_minion_checkpoint_commit for the current milestone. "
+                    "Only after the checkpoint commit succeeds, stop with a concise milestone summary."
                 )
                 coder_pack = prepare_git_task_environment(
                     runtime_root,
@@ -1099,10 +1100,10 @@ class RealLLMIntegrationTests(unittest.TestCase):
                         goal=str(plan.get("goal") or "Create the marker file."),
                         instruction=coder_instruction,
                         acceptance_criteria=["status.txt contains MINION_TEAM_OK"],
-                        allowed_capabilities=["op_exec_shell"],
+                        allowed_capabilities=["op_exec_shell", "op_minion_checkpoint_commit"],
                         approval_policy={"high_risk_capabilities": [], "decision_timeout_seconds": 1},
                         continuity={"current_milestone": {"milestone_index": 0, "milestone_id": "code", "title": "Create marker file"}},
-                        metadata={"max_tool_rounds": 4, "max_output_tokens": 900},
+                        metadata={"max_tool_rounds": 6, "max_output_tokens": 900},
                         resolved_profile={
                             "profile_id": "coder",
                             "display_name": "Coder Minion",

@@ -1,0 +1,7 @@
+server_id = "jdtls"
+display_name = "jdtls"
+command = ["jdtls"]
+extensions = [".java"]
+language_ids = ["java"]
+workspace_markers = ["pom.xml", "build.gradle", ".git"]
+install_hint = "Install jdtls."

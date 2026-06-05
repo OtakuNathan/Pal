@@ -1,9 +1,30 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from typing import Any
 
 from pal.control.contracts import ControlRoute
 from pal.shared import ChannelEnvelope
+
+
+_EXPLICIT_SCOPE_KEYS = ("control_scope_key", "scope_key")
+_IDENTITY_KEYS = (
+    "conversation_id",
+    "session_id",
+    "room_id",
+    "channel_id",
+    "user_id",
+    "account_id",
+)
+_TRANSIENT_TARGET_KEYS = {
+    "request_id",
+    "message_id",
+    "callback_id",
+    "interaction_id",
+    "event_id",
+}
 
 
 def derive_control_scope_key(
@@ -13,18 +34,53 @@ def derive_control_scope_key(
     reply_target: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
 ) -> str:
+    _ = channel_kind
     target = dict(reply_target or {})
     data = dict(payload or {})
-    if channel_kind == "telegram":
-        chat_id = str(target.get("chat_id") or data.get("chat_id") or "").strip() or "unknown"
-        thread_id = str(target.get("thread_id") or data.get("thread_id") or "").strip() or "root"
-        return f"tg:{endpoint_id}:{chat_id}:{thread_id}"
-    if channel_kind == "socket":
-        session_id = str(target.get("session_id") or data.get("session_id") or "").strip() or "default"
-        return f"socket:{endpoint_id}:{session_id}"
-    if channel_kind == "stdio":
-        return f"stdio:{endpoint_id}"
-    return f"{channel_kind}:{endpoint_id}"
+    explicit = _first_scope_value(target)
+    if explicit:
+        return explicit
+    identity = _identity_scope_part(target, data)
+    return f"channel:{_scope_piece(endpoint_id) or 'unknown_endpoint'}:{identity}"
+
+
+def _first_scope_value(*mappings: dict[str, Any]) -> str:
+    for mapping in mappings:
+        for key in _EXPLICIT_SCOPE_KEYS:
+            value = _scope_piece(mapping.get(key))
+            if value:
+                return value
+    return ""
+
+
+def _identity_scope_part(*mappings: dict[str, Any]) -> str:
+    merged: dict[str, Any] = {}
+    for mapping in mappings:
+        merged.update(mapping)
+    parts = []
+    for key in _IDENTITY_KEYS:
+        value = _scope_piece(merged.get(key))
+        if value:
+            parts.append(f"{key}={value}")
+    if parts:
+        return ",".join(parts)
+    stable_target = {
+        str(key): value
+        for key, value in merged.items()
+        if str(key) not in _TRANSIENT_TARGET_KEYS and isinstance(value, (str, int, float, bool))
+    }
+    if stable_target:
+        raw = json.dumps(stable_target, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+        return f"target={digest}"
+    return "default"
+
+
+def _scope_piece(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return re.sub(r"\s+", "_", text)[:160]
 
 
 def route_from_channel_envelope(envelope: ChannelEnvelope) -> ControlRoute:

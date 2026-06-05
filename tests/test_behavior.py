@@ -518,6 +518,25 @@ class BehaviorSubsystemTests(unittest.TestCase):
         after = core.build_canonical_prompt(PromptAssemblyContext()).messages[0]["content"]
         self.assertNotIn("Declared resident", after)
 
+    def test_declared_affordance_canonicalizes_prompt_hint_title_prefix(self) -> None:
+        @affordance(
+            affordance_id="declared.clean",
+            title="Declared clean",
+            scenario_text="declared clean scenario",
+            prompt_hint="Declared clean: Use declared clean guidance.",
+            activation_terms=("declared-clean",),
+            activation_threshold=0.0,
+        )
+        class DeclaredProvider:
+            module_id = "declared_plugin"
+
+        handle = _FakeHandle(module_id="declared_plugin", introspection_provider=DeclaredProvider())
+        self.service.register_declared_module(handle)
+
+        result = asyncio.run(self.service.advise_async(BehaviorAdviceRequest(scenario="declared-clean", top_k=5)))
+
+        self.assertEqual(result.candidates[0].prompt_hint, "Use declared clean guidance.")
+
     def test_learned_affordance_uses_weak_wording(self) -> None:
         self.repository.upsert_affordance(
             AffordanceDescriptor(
@@ -673,6 +692,21 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(advice.candidates[0].affordance_id, affordance_id)
         self.assertEqual(advice.candidates[0].availability, AFFORDANCE_AVAILABLE)
 
+    def test_submit_affordance_tool_canonicalizes_prompt_hint_title_prefix(self) -> None:
+        result = AffordanceSubmitTool(service=self.service).invoke(
+            {
+                "title": "Task routing",
+                "scenario_text": "task routing scenario",
+                "prompt_hint": "Task routing: Handle chat directly and delegate concrete implementation work.",
+                "activation_terms": ["task-routing"],
+            }
+        )
+        stored = self.repository.get_affordance(result.structured["affordance_id"])
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.structured["prompt_hint"], "Handle chat directly and delegate concrete implementation work.")
+        self.assertEqual(stored.prompt_hint, "Handle chat directly and delegate concrete implementation work.")
+
     def test_update_affordance_tool_preserves_source_metadata_and_refs(self) -> None:
         self.repository.upsert_affordance(
             AffordanceDescriptor(
@@ -708,6 +742,30 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(stored.evidence_refs, ("skill:debug.skill",))
         self.assertEqual(stored.metadata, {"generated_by": "op_skill_commit"})
         self.assertEqual(advice.candidates[0].affordance_id, "skill.route.debug")
+
+    def test_update_affordance_tool_canonicalizes_prompt_hint_title_prefix(self) -> None:
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="task.routing",
+                module_id="behavior",
+                title="Task routing",
+                scenario_text="task routing scenario",
+                prompt_hint="Old task routing hint.",
+                source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+                activation_threshold=0.0,
+            )
+        )
+
+        result = AffordanceUpdateTool(service=self.service).invoke(
+            {
+                "affordance": "Old task routing hint.",
+                "prompt_hint": "Task routing: Handle chat directly and delegate concrete implementation work.",
+            }
+        )
+        stored = self.repository.get_affordance("task.routing")
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(stored.prompt_hint, "Handle chat directly and delegate concrete implementation work.")
 
     def test_update_affordance_tool_rejects_declared_injected_guidance(self) -> None:
         descriptor = AffordanceDescriptor(
@@ -754,6 +812,31 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertEqual(result.status, "ok")
         self.assertEqual(stored.prompt_hint, "Before dispatching minion tasks, inject matching skills first.")
+
+    def test_update_affordance_tool_matches_rendered_guidance_with_colon_title(self) -> None:
+        title = "Task routing: handle social/simple work directly, delegate implementation"
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="rendered.colon.title",
+                module_id="behavior",
+                title=title,
+                scenario_text="task routing",
+                prompt_hint="Handle chat directly and delegate concrete implementation work.",
+                source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+                activation_threshold=0.0,
+            )
+        )
+
+        result = AffordanceUpdateTool(service=self.service).invoke(
+            {
+                "affordance": f"- {title}: Handle chat directly and delegate concrete implementation work.",
+                "prompt_hint": "Use the revised task routing hint.",
+            }
+        )
+        stored = self.repository.get_affordance("rendered.colon.title")
+
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(stored.prompt_hint, "Use the revised task routing hint.")
 
     def test_update_affordance_tool_matches_xml_wrapped_guidance(self) -> None:
         self.repository.upsert_affordance(
@@ -821,6 +904,24 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertEqual(result.status, "invalid")
         self.assertIn("matched multiple entries", result.structured["error"])
+
+    def test_behavior_advise_does_not_canonicalize_dirty_stored_prompt_hint(self) -> None:
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="dirty.route",
+                module_id="behavior",
+                title="Dirty route",
+                scenario_text="dirty route scenario",
+                prompt_hint="Dirty route: Use the clean hint.",
+                source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+                activation_terms=("dirty-route",),
+                activation_threshold=0.0,
+            )
+        )
+
+        result = asyncio.run(self.service.advise_async(BehaviorAdviceRequest(scenario="dirty-route", top_k=5)))
+
+        self.assertEqual(result.candidates[0].prompt_hint, "Dirty route: Use the clean hint.")
 
     def test_behavior_prompt_always_mentions_advise_inject_and_submit_tools(self) -> None:
         fragments = BehaviorPromptFragmentProvider(service=self.service).build_prompt_fragments(PromptAssemblyContext())
@@ -1126,6 +1227,58 @@ class BehaviorSubsystemTests(unittest.TestCase):
                 "knowledge_storage_boundary",
                 "resident_affordances",
             ],
+        )
+
+    def test_behavior_guidance_deduplicates_headers_and_uses_canonicalized_declared_titles(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_behavior_with_core(core.context, self.service)
+
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="resident.oled",
+                module_id="test",
+                title="OLED expression",
+                scenario_text="visible mood changed",
+                prompt_hint="Use the OLED expression capability sparingly.",
+                visibility_mode=AFFORDANCE_VISIBILITY_RESIDENT,
+                activation_kind=AFFORDANCE_ACTIVATION_DELIBERATIVE,
+                source_kind=AFFORDANCE_SOURCE_INSTRUCTED,
+            )
+        )
+
+        @affordance(
+            affordance_id="declared.task_routing",
+            title="Task routing: handle social/simple work directly, delegate implementation",
+            scenario_text="task routing",
+            prompt_hint=(
+                "Task routing: handle social/simple work directly, delegate implementation: "
+                "Handle chat directly and delegate concrete implementation work."
+            ),
+            visibility_mode=AFFORDANCE_VISIBILITY_RESIDENT,
+        )
+        class DeclaredResidentProvider:
+            module_id = "declared_resident_plugin"
+
+        handle = _FakeHandle(module_id="declared_resident_plugin", introspection_provider=DeclaredResidentProvider())
+        self.service.register_declared_module(handle)
+
+        system = core.build_canonical_prompt(PromptAssemblyContext()).messages[0]["content"]
+        guidance = system.split("<behavior_guidance>", 1)[1].split("</behavior_guidance>", 1)[0]
+
+        self.assertEqual(guidance.count("These are active behavior-routing hints"), 1)
+        self.assertEqual(guidance.count("When the current user request matches a listed scenario"), 1)
+        self.assertIn("- OLED expression: Use the OLED expression capability sparingly.", guidance)
+        self.assertIn(
+            "- Task routing: handle social/simple work directly, delegate implementation: "
+            "Handle chat directly and delegate concrete implementation work.",
+            guidance,
+        )
+        self.assertNotIn("OLED expression: OLED expression:", guidance)
+        self.assertNotIn(
+            "Task routing: handle social/simple work directly, delegate implementation: "
+            "Task routing: handle social/simple work directly, delegate implementation:",
+            guidance,
         )
 
     def test_module_capabilities_are_auto_declared_as_affordances(self) -> None:

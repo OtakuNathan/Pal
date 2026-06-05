@@ -1,0 +1,7 @@
+server_id = "csharp"
+display_name = "csharp-ls"
+command = ["csharp-ls"]
+extensions = [".cs"]
+language_ids = ["csharp"]
+workspace_markers = ["*.sln", "*.csproj", ".git"]
+install_hint = "Install csharp-ls or provide an OmniSharp runtime override."

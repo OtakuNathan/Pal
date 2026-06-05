@@ -1,0 +1,8 @@
+server_id = "json"
+display_name = "vscode-json-language-server"
+command = ["vscode-json-language-server"]
+args = ["--stdio"]
+extensions = [".json", ".jsonc"]
+language_ids = ["json"]
+workspace_markers = [".git"]
+install_hint = "Install vscode-langservers-extracted."

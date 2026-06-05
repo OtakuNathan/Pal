@@ -1,0 +1,8 @@
+server_id = "clangd"
+display_name = "clangd"
+command = ["clangd"]
+args = ["--background-index"]
+extensions = [".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".m", ".mm"]
+language_ids = ["cpp"]
+workspace_markers = ["compile_commands.json", ".clangd", ".git"]
+install_hint = "Install clangd and provide compile_commands.json for best C/C++ results."

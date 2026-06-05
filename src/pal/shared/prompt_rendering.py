@@ -20,6 +20,14 @@ def render_system_reminder(content: object) -> str:
     return render_xml_block("system-reminder", content)
 
 
+def render_runtime_reminder(content: object, *, priority: str = "high") -> str:
+    normalized_priority = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(priority or "high")).strip("_") or "high"
+    body = str(content or "").strip()
+    if not body:
+        return ""
+    return f'<runtime_reminder priority="{normalized_priority}">\n{body}\n</runtime_reminder>'
+
+
 def render_runtime_context_update(kind: object, content: object) -> str:
     raw_kind = str(kind or "runtime_context").strip() or "runtime_context"
     normalized_kind = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_kind).strip("_") or "runtime_context"

@@ -58,7 +58,7 @@ from pal.shared.prompting import (
     PromptIRBlock,
     PromptFragmentProvider,
 )
-from pal.shared.prompt_rendering import render_system_reminder, render_xml_block
+from pal.shared.prompt_rendering import render_runtime_reminder, render_system_reminder, render_xml_block
 from pal.shared.tool_protocol import (
     append_tool_protocol_messages,
     assistant_tool_message,
@@ -127,6 +127,7 @@ __all__ = [
     "QueuedStatus",
     "QueuedStreamEvent",
     "render_system_reminder",
+    "render_runtime_reminder",
     "render_xml_block",
     "RUNTIME_ONLY_SURFACES",
     "RuntimeStatus",

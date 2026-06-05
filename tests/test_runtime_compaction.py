@@ -316,7 +316,7 @@ class RuntimeCompactionTests(unittest.TestCase):
         self.assertIn("<turn_checkpoint kind=\"turn_interrupted\">", prompt_text)
         self.assertIn("This is recovery context from a previous turn, not a new user request.", prompt_text)
         self.assertIn("turn_outcome: not committed", prompt_text)
-        self.assertTrue(prompt_text.rstrip().endswith("continue"))
+        self.assertLess(prompt_text.rindex("continue"), prompt_text.rindex("<runtime_reminder"))
 
     def test_compact_after_interrupt_preserves_checkpoint_summary_for_next_turn(self) -> None:
         core = PalCore()
@@ -422,7 +422,8 @@ class RuntimeCompactionTests(unittest.TestCase):
             "</runtime_context_update>\n"
             "<conversation_summary>\ncompacted prior context\n</conversation_summary>",
         )
-        self.assertEqual(generate_requests[-1].messages[-1]["role"], "tool")
+        self.assertEqual(generate_requests[-1].messages[-1]["role"], "user")
+        self.assertIn("<runtime_reminder", _message_text(generate_requests[-1].messages[-1]))
 
     def test_generate_compact_during_tool_turn_preserves_tool_result_and_endpoint_hint(self) -> None:
         core, memory_service, scripted_llm = _build_core_with_compacting_llm(compact_on="generate")
@@ -453,7 +454,8 @@ class RuntimeCompactionTests(unittest.TestCase):
             "</runtime_context_update>\n"
             "<conversation_summary>\ncompacted prior context\n</conversation_summary>",
         )
-        self.assertEqual(generate_requests[-1].messages[-1]["role"], "tool")
+        self.assertEqual(generate_requests[-1].messages[-1]["role"], "user")
+        self.assertIn("<runtime_reminder", _message_text(generate_requests[-1].messages[-1]))
 
 
 if __name__ == "__main__":

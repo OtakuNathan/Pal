@@ -1,0 +1,271 @@
+from __future__ import annotations
+
+import contextlib
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
+from pal.execution.contracts import CapabilityCall, CapabilityResult
+from pal.foundation.sidecar import python_subprocess_env
+from pal.lsp.ipc import LspManagerClient, lsp_log_path
+from pal.shared import (
+    INTROSPECTION_NAMESPACE,
+    OPERATION_NAMESPACE,
+    IntrospectionCall,
+    IntrospectionResult,
+    RuntimeStatus,
+    capability_action,
+    capability_node,
+)
+from pal.shared.result_rendering import render_titled_structured_for_llm
+
+
+def _file_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "file": {"type": "string"},
+            "workspace_root": {"type": "string"},
+            "server_id": {"type": "string"},
+        },
+        "required": ["file"],
+    }
+
+
+def _position_schema() -> dict[str, Any]:
+    schema = _file_schema()
+    schema["properties"] = {
+        **schema["properties"],
+        "line": {"type": "integer", "description": "0-based line number"},
+        "character": {"type": "integer", "description": "0-based UTF-16 character offset"},
+    }
+    schema["required"] = ["file", "line", "character"]
+    return schema
+
+
+@capability_node(
+    namespace=INTROSPECTION_NAMESPACE,
+    scope="module",
+    kind="module",
+    source="builtin:lsp",
+    target_kind="module",
+    path_module_id="lsp",
+)
+@capability_node(
+    namespace=OPERATION_NAMESPACE,
+    scope="lsp",
+    kind="provider",
+    source="builtin:lsp",
+    target_kind="lsp_provider",
+    path_module_id="lsp",
+)
+@dataclass
+class LspManagerPluginProvider:
+    runtime_root: Path
+    client: LspManagerClient = field(init=False)
+    process: subprocess.Popen | None = None
+    last_error: str = ""
+    last_health: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.client = LspManagerClient(runtime_root=self.runtime_root)
+
+    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show LSP provider status")
+    def show(self, call: IntrospectionCall) -> IntrospectionResult:
+        _ = call
+        payload = self._status_payload()
+        return IntrospectionResult(status=RuntimeStatus.OK, text="lsp status", structured=payload, llm_text=render_titled_structured_for_llm("LSP status", payload))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="status", description="List configured LSP servers and provider health")
+    def status(self, call: CapabilityCall) -> CapabilityResult:
+        _ = call
+        return _capability_from_rpc("LSP status", self._request_or_error("status"))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="doctor", description="Check LSP server binary, workspace, initialize, and diagnostics readiness")
+    def doctor(self, call: CapabilityCall) -> CapabilityResult:
+        return _capability_from_rpc("LSP doctor", self._request_or_error("doctor", dict(call.args or {})))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="diagnostics", description="Read diagnostics for a file from the selected LSP server", args_schema=_file_schema())
+    def diagnostics(self, call: CapabilityCall) -> CapabilityResult:
+        return _capability_from_rpc("LSP diagnostics", self._request_or_error("diagnostics", dict(call.args or {})))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="hover", description="Read hover information at a file position", args_schema=_position_schema())
+    def hover(self, call: CapabilityCall) -> CapabilityResult:
+        return _capability_from_rpc("LSP hover", self._request_or_error("hover", dict(call.args or {})))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="definition", description="Find definitions at a file position", args_schema=_position_schema())
+    def definition(self, call: CapabilityCall) -> CapabilityResult:
+        return _capability_from_rpc("LSP definition", self._request_or_error("definition", dict(call.args or {})))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="implementation", description="Find implementations at a file position", args_schema=_position_schema())
+    def implementation(self, call: CapabilityCall) -> CapabilityResult:
+        return _capability_from_rpc("LSP implementation", self._request_or_error("implementation", dict(call.args or {})))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="references", description="Find references at a file position", args_schema={**_position_schema(), "properties": {**_position_schema()["properties"], "include_declaration": {"type": "boolean", "default": True}}})
+    def references(self, call: CapabilityCall) -> CapabilityResult:
+        return _capability_from_rpc("LSP references", self._request_or_error("references", dict(call.args or {})))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="prepare_call_hierarchy", description="Prepare call hierarchy items at a file position", args_schema=_position_schema())
+    def prepare_call_hierarchy(self, call: CapabilityCall) -> CapabilityResult:
+        return _capability_from_rpc("LSP prepare call hierarchy", self._request_or_error("prepare_call_hierarchy", dict(call.args or {})))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="incoming_calls", description="Find callers for the symbol at a file position using LSP call hierarchy", args_schema=_position_schema())
+    def incoming_calls(self, call: CapabilityCall) -> CapabilityResult:
+        return _capability_from_rpc("LSP incoming calls", self._request_or_error("incoming_calls", dict(call.args or {})))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="outgoing_calls", description="Find callees for the symbol at a file position using LSP call hierarchy", args_schema=_position_schema())
+    def outgoing_calls(self, call: CapabilityCall) -> CapabilityResult:
+        return _capability_from_rpc("LSP outgoing calls", self._request_or_error("outgoing_calls", dict(call.args or {})))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="document_symbols", description="List document symbols for a file", args_schema=_file_schema())
+    def document_symbols(self, call: CapabilityCall) -> CapabilityResult:
+        return _capability_from_rpc("LSP document symbols", self._request_or_error("document_symbols", dict(call.args or {})))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="workspace_symbols", description="Search workspace symbols", args_schema={"type": "object", "properties": {"query": {"type": "string"}, "workspace_root": {"type": "string"}, "server_id": {"type": "string"}}, "required": ["query"]})
+    def workspace_symbols(self, call: CapabilityCall) -> CapabilityResult:
+        return _capability_from_rpc("LSP workspace symbols", self._request_or_error("workspace_symbols", dict(call.args or {})))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="attach", description="Attach LSP manager")
+    def attach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
+        _ = call
+        try:
+            self._ensure_manager_started()
+            self.last_health = self.client.rescan_sync()
+            self.last_error = ""
+        except Exception as exc:
+            self.last_error = f"{exc.__class__.__name__}: {exc}"
+            self.last_health = {"healthy": False, "startup_error": self.last_error}
+        payload = self._status_payload()
+        return IntrospectionResult(status=RuntimeStatus.OK, text="lsp manager attached", structured=payload, llm_text=render_titled_structured_for_llm("LSP manager attached", payload))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="detach", description="Detach LSP manager")
+    def detach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
+        _ = call
+        self._stop_manager()
+        payload = self._status_payload()
+        return IntrospectionResult(status=RuntimeStatus.OK, text="lsp manager detached", structured=payload, llm_text=render_titled_structured_for_llm("LSP manager detached", payload))
+
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="management", action_name="rescan", description="Rescan LSP configs")
+    def rescan(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
+        _ = call
+        try:
+            self._ensure_manager_started()
+            payload = self.client.rescan_sync()
+            self.last_health = dict(payload)
+            return IntrospectionResult(status=RuntimeStatus.OK, text="lsp rescan", structured=payload, llm_text=render_titled_structured_for_llm("LSP rescan", payload))
+        except Exception as exc:
+            payload = {"status": RuntimeStatus.ERROR, "error": f"{exc.__class__.__name__}: {exc}", **self._status_payload()}
+            return IntrospectionResult(status=RuntimeStatus.ERROR, text="lsp rescan failed", structured=payload, llm_text=render_titled_structured_for_llm("LSP rescan failed", payload))
+
+    def _ensure_manager_started(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            try:
+                self.last_health = self.client.health_sync()
+                return
+            except Exception:
+                self._stop_process_only()
+        self._cleanup_stale_socket()
+        lsp_log_path(self.runtime_root).parent.mkdir(parents=True, exist_ok=True)
+        self.process = subprocess.Popen(
+            [sys.executable, "-m", "pal.lsp.manager_main", "--runtime-root", str(self.runtime_root)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=python_subprocess_env(),
+        )
+        for _ in range(100):
+            if self.process.poll() is not None:
+                raise RuntimeError("lsp manager exited during startup")
+            try:
+                self.last_health = self.client.health_sync()
+                return
+            except Exception:
+                time.sleep(0.1)
+        raise RuntimeError("lsp manager failed to start")
+
+    def _stop_manager(self) -> None:
+        process = self.process
+        if process is not None and process.poll() is None:
+            with contextlib.suppress(Exception):
+                self.client.shutdown_sync()
+            with contextlib.suppress(Exception):
+                process.wait(timeout=2.0)
+        self._stop_process_only()
+        self.last_health = {}
+
+    def _cleanup_stale_socket(self) -> None:
+        socket_path = self.client.socket_path
+        if not socket_path.exists():
+            return
+        try:
+            self.client.health_sync()
+        except Exception:
+            with contextlib.suppress(FileNotFoundError):
+                socket_path.unlink()
+
+    def _stop_process_only(self) -> None:
+        process = self.process
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=1.0)
+        except Exception:
+            with contextlib.suppress(Exception):
+                process.kill()
+        self.process = None
+
+    def _request_or_error(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        try:
+            self._ensure_manager_started()
+            payload = self.client.operation_sync(method, params or {})
+            self.last_health = dict(payload)
+            return payload
+        except Exception as exc:
+            return {"status": RuntimeStatus.ERROR, "error": f"{exc.__class__.__name__}: {exc}", **self._status_payload()}
+
+    def _status_payload(self) -> dict[str, Any]:
+        return {
+            "module_id": "lsp",
+            "manager_running": self.process is not None and self.process.poll() is None,
+            "log_path": str(lsp_log_path(self.runtime_root)),
+            "last_error": self.last_error,
+            **dict(self.last_health or {}),
+        }
+
+
+@dataclass
+class LspManagerPluginBundle:
+    runtime_root: Path
+    plugin_id: str = "lsp"
+    version: str = "0.1.0"
+
+    def register_with_core(self, context) -> ModuleHandle:
+        provider = LspManagerPluginProvider(runtime_root=self.runtime_root)
+        handle = ModuleHandle(
+            module_id="lsp",
+            tier=MODULE_TIER_DETACHABLE,
+            detachable=True,
+            mounted=False,
+            introspection_provider=provider,
+            supports_lifecycle_capabilities=True,
+            ports={"lsp": provider},
+            shutdown_sync=provider._stop_manager,
+        )
+        context.register_module(handle)
+        return handle
+
+
+def build_lsp_plugin(*, runtime_root: Path) -> LspManagerPluginBundle:
+    return LspManagerPluginBundle(runtime_root=runtime_root)
+
+
+def _capability_from_rpc(title: str, payload: dict[str, Any]) -> CapabilityResult:
+    status = payload.get("status") or RuntimeStatus.OK
+    if status == "unavailable":
+        status = RuntimeStatus.ERROR
+    return CapabilityResult(status=status, text=title, structured=payload, llm_text=render_titled_structured_for_llm(title, payload))

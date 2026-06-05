@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task-json", required=True)
     parser.add_argument("--minion-id", required=True)
     parser.add_argument("--run-id", required=True)
+    parser.add_argument("--manager-liveness-fd", type=int, default=-1)
     return parser
 
 
@@ -45,14 +48,60 @@ async def amain(args: argparse.Namespace) -> int:
     from pal.shared import TaskContextPack
 
     pack = TaskContextPack.from_json(args.task_json)
-    return await MinionRunner(
+    runner = MinionRunner(
         runtime_root=args.runtime_root,
         pack=pack,
         minion_id=args.minion_id,
         run_id=args.run_id,
         write_event=_write,
         read_decision=_read_decision,
-    ).run()
+    )
+    if int(args.manager_liveness_fd or -1) < 0:
+        return await runner.run()
+    runner_task = asyncio.create_task(runner.run(), name=f"minion-runner-{args.run_id}")
+    liveness_task = asyncio.create_task(
+        _watch_manager_liveness(int(args.manager_liveness_fd)),
+        name=f"minion-manager-liveness-{args.run_id}",
+    )
+    done, pending = await asyncio.wait({runner_task, liveness_task}, return_when=asyncio.FIRST_COMPLETED)
+    if liveness_task in done:
+        runner_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await runner_task
+        print("manager liveness pipe closed; minion runner exiting", file=sys.stderr, flush=True)
+        return 2
+    liveness_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await liveness_task
+    _ = pending
+    return await runner_task
+
+
+async def _watch_manager_liveness(fd: int) -> None:
+    loop = asyncio.get_running_loop()
+    gone = loop.create_future()
+    with contextlib.suppress(OSError):
+        os.set_inheritable(fd, False)
+
+    def on_ready() -> None:
+        if gone.done():
+            return
+        try:
+            data = os.read(fd, 1)
+        except OSError as exc:
+            gone.set_result(exc)
+            return
+        if data == b"":
+            gone.set_result(None)
+
+    loop.add_reader(fd, on_ready)
+    try:
+        await gone
+    finally:
+        with contextlib.suppress(Exception):
+            loop.remove_reader(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
 
 
 def main() -> int:

@@ -8,6 +8,7 @@ import mimetypes
 import os
 import json
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -42,6 +43,7 @@ from pal.llm.contracts import (
     LLMPreflightRequest,
 )
 from pal.llm.secret_store import EncryptedFileSecretStore
+from pal.lsp import build_lsp_plugin
 from pal.memory import (
     L1MessageKind,
     L1TranscriptMessage,
@@ -54,6 +56,7 @@ from pal.memory import (
     register_with_core as register_memory_with_core,
 )
 from pal.minion.git_env import commit_milestone, inspect_milestone_checkpoint
+from pal.minion.repository import MinionTaskingRepository
 from pal.minion.prompt_adapter import (
     build_minion_prompt_messages,
     build_minion_task_envelope as _minion_task_envelope,
@@ -62,11 +65,16 @@ from pal.minion.prompt_adapter import (
     prompt_view_from_pack as _prompt_view_from_pack,
 )
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
+from pal.minion.turns import apply_minion_turn_to_pack
 from pal.minion.user_interaction import (
     MinionUserInteractionPort,
     ask_user_question_summary as _ask_user_question_summary,
 )
-from pal.minion.work_order import build_planner_work_order
+from pal.minion.work_order import (
+    dispatchable_plan_validation,
+    validate_dispatchable_plan_artifact,
+    build_planner_work_order,
+)
 from pal.plugins.l3 import MockL3Plugin, SQLiteVecL3Plugin, register_with_core as register_l3_with_core
 from pal.shared import (
     ChannelEnvelope,
@@ -433,8 +441,12 @@ class MinionRunner:
     blocked_summary: str = ""
     produced_artifacts: list[dict[str, Any]] = field(default_factory=list)
     memory_candidates: list[dict[str, Any]] = field(default_factory=list)
+    shell_mutation_violations: list[dict[str, Any]] = field(default_factory=list)
+    review_tool_evidence_refs: list[dict[str, Any]] = field(default_factory=list)
     auto_accept_approvals: bool = False
     user_interaction: MinionUserInteractionPort | None = field(default=None, init=False, repr=False)
+    _memory_l3: MockL3Plugin | None = field(default=None, init=False, repr=False)
+    _memory_service: MemoryService | None = field(default=None, init=False, repr=False)
 
     async def run(self) -> int:
         bundle: MinionRuntimeBundle | None = None
@@ -456,43 +468,83 @@ class MinionRunner:
                     "prompt_scaffold_summary": _prompt_scaffold_summary(self._prompt_scaffold()),
                 },
             )
-            await self._emit("phase_started", {"phase": "milestone_started", "summary": self._current_milestone_title()})
-            final_text = await self._run_agent_loop(bundle)
-            clarification_round = 0
-            while not self.blocked_summary:
-                ask_user_question = _extract_ask_user_question_payload(final_text)
-                if not ask_user_question:
-                    break
-                if clarification_round >= self._max_clarification_rounds():
-                    self.blocked_summary = "planner asked too many clarification rounds"
-                    break
-                clarification = await self._request_clarification(ask_user_question)
-                if not clarification:
-                    self.blocked_summary = _ask_user_question_summary(ask_user_question)
-                    break
-                self._apply_clarification_response(clarification)
-                clarification_round += 1
-                await self._emit_progress("clarification_applied", round=clarification_round)
+            while True:
+                await self._emit(
+                    "phase_started",
+                    {
+                        "phase": "milestone_started",
+                        "summary": self._current_milestone_title(),
+                        "milestone_index": self._current_milestone_index(),
+                        "milestone_id": str(self._current_milestone().get("milestone_id") or ""),
+                        "current_milestone": self._current_milestone(),
+                    },
+                )
                 final_text = await self._run_agent_loop(bundle)
-            if self.blocked_summary:
-                blocked_checkpoint = {
-                    "status": "blocked",
-                    "milestone_index": self._current_milestone_index(),
-                    "summary": self.blocked_summary,
-                    **self._artifact_payload(),
-                }
-                terminal_payload = self._terminal_payload("blocked", self.blocked_summary)
-                await self._emit("checkpoint", blocked_checkpoint)
-                await self._emit("terminal", terminal_payload)
-                return 0
-            checkpoint_payload = await self._complete_current_milestone(final_text)
-            if checkpoint_payload.get("status") != "completed":
+                clarification_round = 0
+                while not self.blocked_summary:
+                    ask_user_question = _extract_ask_user_question_payload(final_text)
+                    if not ask_user_question:
+                        break
+                    if clarification_round >= self._max_clarification_rounds():
+                        self.blocked_summary = "planner asked too many clarification rounds"
+                        break
+                    clarification = await self._request_clarification(ask_user_question)
+                    if not clarification:
+                        self.blocked_summary = _ask_user_question_summary(ask_user_question)
+                        break
+                    self._apply_clarification_response(clarification)
+                    clarification_round += 1
+                    await self._emit_progress("clarification_applied", round=clarification_round)
+                    final_text = await self._run_agent_loop(bundle)
+                if self.blocked_summary:
+                    blocked_checkpoint = {
+                        "status": "blocked",
+                        "milestone_index": self._current_milestone_index(),
+                        "summary": self.blocked_summary,
+                        **self._artifact_payload(),
+                    }
+                    terminal_payload = self._terminal_payload("blocked", self.blocked_summary)
+                    await self._emit("checkpoint", blocked_checkpoint)
+                    await self._emit("terminal", terminal_payload)
+                    return 0
+                checkpoint_payload = await self._complete_current_milestone(final_text)
+                planner_repair_attempt = 0
+                while self._should_retry_planner_artifact(checkpoint_payload, planner_repair_attempt):
+                    planner_repair_attempt += 1
+                    retry_note = self._planner_artifact_repair_note(checkpoint_payload, planner_repair_attempt)
+                    await self._emit_progress(
+                        "planner_artifact_repair_retry",
+                        repair_attempt=planner_repair_attempt,
+                        retry_limit=self._planner_artifact_repair_retry_limit(),
+                        plan_validation=dict(checkpoint_payload.get("plan_validation") or {}),
+                    )
+                    final_text = await self._run_agent_loop(bundle, forced_retry_note=retry_note)
+                    checkpoint_payload = await self._complete_current_milestone(final_text)
+                if checkpoint_payload.get("status") not in {"completed", "claimed"}:
+                    await self._emit("checkpoint", checkpoint_payload)
+                    await self._emit("terminal", self._terminal_payload("blocked", checkpoint_payload.get("summary") or "milestone blocked"))
+                    return 0
+                current_index = self._current_milestone_index()
                 await self._emit("checkpoint", checkpoint_payload)
-                await self._emit("terminal", self._terminal_payload("blocked", checkpoint_payload.get("summary") or "milestone blocked"))
+                if checkpoint_payload.get("status") == "completed":
+                    await self._emit("milestone_completed", self._milestone_completed_payload(final_text, checkpoint_payload))
+                next_status, next_turn = await self._await_next_serial_module_turn(current_index)
+                if next_status == "next" and next_turn is not None:
+                    self._apply_next_milestone_turn(next_turn, checkpoint_payload=checkpoint_payload)
+                    continue
+                if next_status == "repair" and next_turn is not None:
+                    self._apply_next_milestone_turn(next_turn, checkpoint_payload={})
+                    continue
+                if next_status == "timeout":
+                    summary = "manager did not acknowledge milestone checkpoint before serial continuation timeout"
+                    await self._emit("terminal", self._terminal_payload("blocked", summary))
+                    return 0
+                if next_status == "blocked":
+                    summary = str((next_turn or {}).get("summary") or "manager blocked serial milestone continuation")
+                    await self._emit("terminal", self._terminal_payload("blocked", summary))
+                    return 0
+                await self._emit("terminal", self._terminal_payload("completed", final_text or "minion completed current milestone"))
                 return 0
-            await self._emit("checkpoint", checkpoint_payload)
-            await self._emit("terminal", self._terminal_payload("completed", final_text or "minion completed current milestone"))
-            return 0
         except Exception as exc:
             with contextlib.suppress(Exception):
                 await self._emit(
@@ -512,17 +564,21 @@ class MinionRunner:
                 await bundle.close()
             self._append_debug_log("runner_stopped", {"blocked_summary": self.blocked_summary})
 
-    async def _run_agent_loop(self, bundle: MinionRuntimeBundle) -> str:
-        memory_l3 = MockL3Plugin(provider_id=f"minion_run_{self.run_id}_l3")
-        memory_service = MemoryService(
-            l3_selector=L3ProviderSelector(
-                resolver=lambda provider_id: memory_l3,
-                active_provider_id=memory_l3.provider_id,
-            )
-        )
-        memory_l3.service = memory_service
+    async def _run_agent_loop(self, bundle: MinionRuntimeBundle, *, forced_retry_note: str = "") -> str:
+        memory_l3, memory_service = self._runner_memory()
         workspace = dict(self.pack.workspace)
+        workspace.setdefault("runtime_root", str(self.runtime_root))
+        workspace.setdefault("run_id", self.run_id)
+        workspace.setdefault("minion_id", self.minion_id)
+        workspace.setdefault("minion_profile", self.pack.minion_profile)
         workspace.setdefault("work_order_id", self.pack.work_order_id)
+        workspace.setdefault("review_tool_evidence_refs", self.review_tool_evidence_refs)
+        workspace.setdefault("shell_mutation_violations", self.shell_mutation_violations)
+        if isinstance((self.pack.metadata or {}).get("review_target"), dict):
+            review_target = dict((self.pack.metadata["review_target"] or {}))
+            workspace.setdefault("review_target_run_id", str(review_target.get("run_id") or ""))
+            workspace.setdefault("review_target_checkpoint_id", str(review_target.get("checkpoint_id") or ""))
+            workspace.setdefault("review_target_commit_sha", str(review_target.get("commit_sha") or ""))
         workspace.setdefault("current_milestone_index", self._current_milestone_index())
         workspace.setdefault("current_milestone_title", self._current_milestone_title())
         execution_runtime = MinionScopedExecutionRuntime(
@@ -541,10 +597,12 @@ class MinionRunner:
         )
         max_output_tokens = _resolve_minion_max_output_tokens(bundle.llm_runtime, self.pack)
 
+        forced_retry_note = str(forced_retry_note or "").strip()
+
         def build_context(frame: AgentLoopFrame):
+            retry_note = str(frame.retry_note or forced_retry_note or "")
             metadata = {
-                "retry_note": frame.retry_note,
-                "task_context_pack": self.pack,
+                "retry_note": retry_note,
             }
             return _minion_prompt_context(self.pack, metadata=metadata)
 
@@ -564,8 +622,9 @@ class MinionRunner:
             ]
             return L1CommitPayload(turn_id=self.run_id, transcript=transcript, tool_observations=list(observations))
 
+        turn_id = f"{self.run_id}:m{self._current_milestone_index()}"
         program = agent_turn_program(
-            turn_id=self.run_id,
+            turn_id=turn_id,
             build_assembly_context=build_context,
             render_final_text=lambda outcome: str(getattr(outcome, "text", "") or "") if outcome is not None else "",
             build_commit_payload=build_commit_payload,
@@ -573,7 +632,7 @@ class MinionRunner:
             build_retry_note=self._build_minion_retry_note,
         )
         continuation = TurnContinuation(
-            turn_id=self.run_id,
+            turn_id=turn_id,
             channel_envelope=state.channel_envelope,
             program=program,
             correlation_id=self.run_id,
@@ -606,6 +665,85 @@ class MinionRunner:
                 yielded,
                 max_output_tokens=max_output_tokens,
             )
+
+    def _runner_memory(self) -> tuple[MockL3Plugin, MemoryService]:
+        if self._memory_l3 is not None and self._memory_service is not None:
+            return self._memory_l3, self._memory_service
+        memory_l3 = MockL3Plugin(provider_id=f"minion_run_{self.run_id}_l3")
+        memory_service = MemoryService(
+            l3_selector=L3ProviderSelector(
+                resolver=lambda provider_id: memory_l3,
+                active_provider_id=memory_l3.provider_id,
+            )
+        )
+        memory_l3.service = memory_service
+        self._memory_l3 = memory_l3
+        self._memory_service = memory_service
+        return memory_l3, memory_service
+
+    async def _await_next_serial_module_turn(self, completed_milestone_index: int) -> tuple[str, dict[str, Any] | None]:
+        metadata = dict(self.pack.metadata or {})
+        module_execution = dict(metadata.get("module_execution") or {})
+        if str(module_execution.get("mode") or "") != "serial_module_milestones":
+            return "not_serial", None
+        if not bool(module_execution.get("auto_advance")):
+            return "complete", None
+        timeout = self._manager_turn_timeout_seconds()
+        message = await self.read_decision(timeout)
+        if not message:
+            return "timeout", None
+        message_type = str(message.get("type") or "").strip()
+        if message_type == "next_turn" and isinstance(message.get("turn"), dict):
+            turn = dict(message.get("turn") or {})
+            current = dict(turn.get("current_milestone") or {})
+            next_index = _coerce_int(current.get("milestone_index"), default=completed_milestone_index)
+            if next_index <= completed_milestone_index:
+                return "blocked", {"summary": "manager sent a stale milestone turn"}
+            return "next", turn
+        if message_type == "repair_turn" and isinstance(message.get("turn"), dict):
+            turn = dict(message.get("turn") or {})
+            current = dict(turn.get("current_milestone") or {})
+            repair_index = _coerce_int(current.get("milestone_index"), default=completed_milestone_index)
+            if repair_index != completed_milestone_index:
+                return "blocked", {"summary": "manager sent repair for a different milestone"}
+            return "repair", turn
+        if message_type == "complete":
+            return "complete", dict(message.get("completion") or {})
+        if message_type == "blocked":
+            return "blocked", dict(message.get("payload") or {})
+        return "timeout", None
+
+    def _manager_turn_timeout_seconds(self) -> float:
+        raw = (self.pack.metadata or {}).get("manager_turn_timeout_seconds")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = 30.0
+        return max(0.1, min(300.0, value))
+
+    def _apply_next_milestone_turn(self, turn: dict[str, Any], *, checkpoint_payload: dict[str, Any]) -> None:
+        self.produced_artifacts.clear()
+        self.blocked_summary = ""
+        self.pack = apply_minion_turn_to_pack(self.pack, turn, checkpoint_payload=checkpoint_payload)
+
+    def _milestone_completed_payload(self, final_text: str, checkpoint_payload: dict[str, Any]) -> dict[str, Any]:
+        payload = self._terminal_payload("completed", final_text or "minion completed current milestone")
+        for key in (
+            "task_id",
+            "module_id",
+            "milestone_index",
+            "milestone_id",
+            "commit_sha",
+            "git_commit",
+            "evidence",
+            "plan_ref",
+            "plan_validation",
+        ):
+            if key in checkpoint_payload:
+                payload[key] = checkpoint_payload[key]
+        payload.setdefault("milestone_index", self._current_milestone_index())
+        payload.setdefault("milestone_id", str(self._current_milestone().get("milestone_id") or ""))
+        return payload
 
     def _build_minion_retry_note(self, outcome: Any, observations: list[Any], retry_count: int) -> str:
         if self.blocked_summary:
@@ -664,6 +802,46 @@ class MinionRunner:
             "the milestone checkpoint commit. Do not stop with a report-only response. If completion is truly "
             "impossible, report a concrete blocker that explains which required input, permission, file, or contract "
             "is missing."
+        )
+
+    def _should_retry_planner_artifact(self, checkpoint_payload: dict[str, Any], repair_attempt: int) -> bool:
+        if not self._requires_planner_plan_artifact_validation():
+            return False
+        if repair_attempt >= self._planner_artifact_repair_retry_limit():
+            return False
+        if "op_minion_artifact_write" not in {str(item) for item in self.pack.allowed_capabilities}:
+            return False
+        if str(checkpoint_payload.get("status") or "").strip().lower() != "blocked":
+            return False
+        if checkpoint_payload.get("ask_user_question"):
+            return False
+        validation = dict(checkpoint_payload.get("plan_validation") or {})
+        validation_status = str(validation.get("status") or "").strip().lower()
+        return validation_status in {"invalid", "draft"}
+
+    def _planner_artifact_repair_retry_limit(self) -> int:
+        metadata = self.pack.metadata if isinstance(self.pack.metadata, dict) else {}
+        raw = metadata.get("planner_artifact_repair_retry_limit")
+        return max(0, min(5, _coerce_int(raw, default=2)))
+
+    def _planner_artifact_repair_note(self, checkpoint_payload: dict[str, Any], repair_attempt: int) -> str:
+        validation = dict(checkpoint_payload.get("plan_validation") or {})
+        errors = [str(item) for item in list(validation.get("errors") or []) if str(item).strip()]
+        error_text = "\n".join(f"- {item}" for item in errors) or f"- {checkpoint_payload.get('summary') or 'plan validation failed'}"
+        return (
+            f"Planner repair attempt {repair_attempt}/{self._planner_artifact_repair_retry_limit()}.\n"
+            "The previous planner output is not dispatchable. Do not finish with chat text and do not ask the user "
+            "unless the missing information is truly not discoverable from the task context.\n\n"
+            "Validation errors:\n"
+            f"{error_text}\n\n"
+            "Repair by calling `op_minion_artifact_write` with exactly these intent fields: "
+            "`relative_path=\"plan.json\"`, `role=\"primary\"`, `mime_type=\"application/json\"`, and `overwrite=true`. "
+            "The content must be one valid JSON object with `type=\"FinalPlanArtifact\"`.\n\n"
+            "The FinalPlanArtifact must include module-first decomposition: each module has `module_id`, `owned_area`, "
+            "`responsibility`, `provided_interfaces`, `consumed_interfaces`, and non-empty `internal_milestones` with "
+            "`milestone_id`, `task`, and `acceptance_criteria`. It must include `orchestration.execution_shape` = "
+            "`fork_join_linear` and `orchestration.topology.nodes` containing exactly one prelude node, one join node, "
+            "and module nodes whose dependencies form a valid topological order from prelude through modules to join."
         )
 
     def _build_minion_turn_executor(
@@ -926,6 +1104,17 @@ class MinionRunner:
                 llm_text=policy_error,
                 status=RuntimeStatus.ERROR,
             )
+        policy_error = self._read_only_shell_command_error(target_name, tool_call)
+        if policy_error:
+            return CanonicalToolResult(
+                name=tool_call.name,
+                ok=False,
+                text=policy_error,
+                structured={"reason": "read_only_repo_shell_policy", "capability": target_name},
+                call_id=tool_call.call_id,
+                llm_text=policy_error,
+                status=RuntimeStatus.ERROR,
+            )
         if await self._requires_approval(target_name, tool_call):
             decision = await self._request_approval(target_name, tool_call)
             if decision != "accept":
@@ -939,7 +1128,11 @@ class MinionRunner:
                     llm_text=f"approval {decision or 'timeout'}",
                     status=RuntimeStatus.ERROR,
                 )
-        return await execution_runtime.execute_tool_async(tool_call, allow_tools=True, turn_id=self.run_id)
+        before_snapshot = self._shell_audit_snapshot(target_name)
+        result = await execution_runtime.execute_tool_async(tool_call, allow_tools=True, turn_id=self.run_id)
+        self._record_shell_audit_violation(target_name, tool_call, before_snapshot)
+        self._record_review_tool_evidence(target_name, tool_call, result)
+        return result
 
     def _runner_owned_git_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
         if str(target_name or "") != "op_exec_shell":
@@ -947,7 +1140,7 @@ class MinionRunner:
         completion_policy = self._completion_policy()
         if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
             return ""
-        cmd = str((tool_call.args or {}).get("cmd") or "").strip()
+        cmd = str(_effective_tool_args(tool_call).get("cmd") or "").strip()
         if not _contains_runner_owned_git_mutation(cmd):
             return ""
         return (
@@ -955,6 +1148,75 @@ class MinionRunner:
             "shell in this minion workspace. Use `op_minion_checkpoint_commit` for milestone checkpoint commits so "
             "Pal can record structured commit evidence."
         )
+
+    def _read_only_shell_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
+        if str(target_name or "") != "op_exec_shell":
+            return ""
+        workspace_policy = dict((self.pack.workspace or {}).get("workspace_policy") or {})
+        if str(workspace_policy.get("mode") or "").strip().lower() != "read_only_repo":
+            return ""
+        scratch = str((self.pack.workspace or {}).get("review_scratch_dir") or "").strip()
+        scratch_repo = str((self.pack.workspace or {}).get("review_scratch_repo_path") or "").strip()
+        allowed_root = scratch_repo or scratch
+        allowed_label = "workspace.review_scratch_repo_path" if scratch_repo else "workspace.review_scratch_dir"
+        if not allowed_root:
+            return "read_only_repo shell requires workspace.review_scratch_dir"
+        args = _effective_tool_args(tool_call)
+        cmd = str(args.get("cmd") or "").strip()
+        repo_path = str((self.pack.workspace or {}).get("repo_path") or "").strip()
+        if repo_path and repo_path in cmd:
+            return "read_only_repo shell command must not reference the source repo path; use workspace.review_scratch_repo_path"
+        cwd = str(args.get("cwd") or args.get("workdir") or "").strip()
+        if not cwd:
+            return f"read_only_repo shell must set cwd to {allowed_label}"
+        try:
+            scratch_path = Path(allowed_root).resolve()
+            cwd_path = Path(cwd).resolve()
+        except Exception:
+            return "read_only_repo shell cwd is invalid"
+        if not _path_is_relative_to(cwd_path, scratch_path):
+            return f"read_only_repo shell cwd must be under {allowed_label}"
+        return ""
+
+    def _shell_audit_snapshot(self, target_name: str) -> dict[str, Any]:
+        if str(target_name or "") != "op_exec_shell":
+            return {}
+        completion_policy = self._completion_policy()
+        workspace_policy = dict((self.pack.workspace or {}).get("workspace_policy") or {})
+        audit_read_only_repo = str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo"
+        audit_git_commit = str(completion_policy.get("evidence") or "").strip().lower() == "git_commit"
+        if not (audit_read_only_repo or audit_git_commit):
+            return {}
+        repo_path = str((self.pack.workspace or {}).get("repo_path") or "").strip()
+        if not repo_path:
+            return {}
+        return _git_workspace_snapshot(Path(repo_path))
+
+    def _record_shell_audit_violation(self, target_name: str, tool_call: CanonicalToolCall, before_snapshot: dict[str, Any]) -> None:
+        if not before_snapshot or str(target_name or "") != "op_exec_shell":
+            return
+        repo_path = str(before_snapshot.get("repo_path") or "")
+        after_snapshot = _git_workspace_snapshot(Path(repo_path))
+        if not after_snapshot or before_snapshot == after_snapshot:
+            return
+        violation = {
+            "violation_id": f"shell_mut_{uuid4().hex[:12]}",
+            "kind": "shell_workspace_mutation",
+            "command": str(_effective_tool_args(tool_call).get("cmd") or ""),
+            "repo_path": repo_path,
+            "before": before_snapshot,
+            "after": after_snapshot,
+            "summary": "op_exec_shell changed the Git workspace; reviewer must verify this mutation before closing the milestone.",
+        }
+        self.shell_mutation_violations.append(violation)
+        self._append_debug_log("shell_mutation_violation", violation)
+
+    def _record_review_tool_evidence(self, target_name: str, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> None:
+        evidence = _review_tool_evidence_ref(target_name, tool_call, result)
+        if not evidence:
+            return
+        self.review_tool_evidence_refs.append(evidence)
+        self._append_debug_log("review_tool_evidence_ref", evidence)
 
     async def _await_with_progress_heartbeat(self, awaitable, *, phase: str, **payload: Any):
         interval = self._heartbeat_interval_seconds()
@@ -1062,12 +1324,21 @@ class MinionRunner:
         module = dict(prompt_view.get("module") or {}) if prompt_view else {}
         ask_user_question = _extract_ask_user_question_payload(final_text)
         base_payload = {
+            "checkpoint_id": f"chk_{uuid4().hex[:16]}",
             "task_id": str((self.pack.metadata or {}).get("task_id") or prompt_view.get("task_id") or ""),
             "module_id": str(module.get("module_id") or ""),
             "milestone_index": self._current_milestone_index(),
             "milestone_id": str(self._current_milestone().get("milestone_id") or ""),
+            "acceptance_criteria": _current_acceptance_criteria(self.pack, self._current_milestone()),
             "summary": self._short_summary(final_text or "minion completed current milestone"),
         }
+        if self._requires_checkpoint_review_gate():
+            repair_attempt = self._current_repair_attempt_payload()
+            if repair_attempt:
+                base_payload["repair_attempt"] = repair_attempt
+                base_payload["expected_review_gate_kind"] = "repair_verification"
+            else:
+                base_payload["expected_review_gate_kind"] = "checkpoint_verification"
         if ask_user_question:
             return {
                 **base_payload,
@@ -1079,22 +1350,25 @@ class MinionRunner:
         if evidence == "git_commit":
             await self._persist_text_deliverable_if_needed(final_text)
             checkpoint = await self._inspect_current_milestone_checkpoint()
+            checkpoint_status = "claimed" if self._requires_checkpoint_review_gate() else "completed"
             if checkpoint.get("status") == "committed":
                 return {
                     **base_payload,
-                    "status": "completed",
+                    "status": checkpoint_status,
                     "commit_sha": str(checkpoint.get("commit_sha") or ""),
                     "git_commit": checkpoint,
                     "evidence": "git_commit",
+                    "shell_mutation_violations": list(self.shell_mutation_violations),
                     **self._artifact_payload(),
                 }
             if checkpoint.get("status") == "no_changes" and self._artifact_completion_evidence_present():
                 return {
                     **base_payload,
-                    "status": "completed",
+                    "status": checkpoint_status,
                     "commit_sha": str(checkpoint.get("commit_sha") or ""),
                     "git_commit": checkpoint,
                     "evidence": "git_commit",
+                    "shell_mutation_violations": list(self.shell_mutation_violations),
                     **self._artifact_payload(),
                 }
             blocked_summary = str(
@@ -1107,6 +1381,7 @@ class MinionRunner:
                 "status": "blocked",
                 "summary": blocked_summary,
                 "git_commit": checkpoint,
+                "shell_mutation_violations": list(self.shell_mutation_violations),
                 **self._artifact_payload(),
             }
         await self._persist_text_deliverable_if_needed(final_text)
@@ -1118,7 +1393,16 @@ class MinionRunner:
                 "evidence": evidence or "text_deliverable",
                 **self._artifact_payload(),
             }
-        return {**base_payload, "status": "completed", "evidence": evidence or "text_deliverable", **self._artifact_payload()}
+        planner_payload = self._planner_plan_artifact_completion_payload()
+        if planner_payload.get("status") == "blocked":
+            return {**base_payload, **planner_payload, **self._artifact_payload()}
+        return {
+            **base_payload,
+            "status": "completed",
+            "evidence": evidence or "text_deliverable",
+            **self._artifact_payload(),
+            **planner_payload,
+        }
 
     def _completion_evidence_present(self) -> bool:
         completion_policy = self._completion_policy()
@@ -1135,6 +1419,22 @@ class MinionRunner:
             base_sha=str((self.pack.workspace or {}).get("base_sha") or ""),
         )
         return checkpoint.get("status") == "committed"
+
+    def _requires_checkpoint_review_gate(self) -> bool:
+        metadata = dict(self.pack.metadata or {})
+        module_execution = dict(metadata.get("module_execution") or {})
+        review = dict(module_execution.get("checkpoint_review") or metadata.get("checkpoint_review") or {})
+        return bool(review.get("enabled"))
+
+    def _current_repair_attempt_payload(self) -> dict[str, Any]:
+        metadata = dict(self.pack.metadata or {})
+        module_execution = dict(metadata.get("module_execution") or {})
+        last = dict(module_execution.get("last_repair_attempt") or {})
+        if not last:
+            return {}
+        if _coerce_int(last.get("milestone_index"), default=-1) != self._current_milestone_index():
+            return {}
+        return dict(last)
 
     def _artifact_completion_evidence_present(self) -> bool:
         if not self.produced_artifacts:
@@ -1342,6 +1642,141 @@ class MinionRunner:
             payload["primary_artifact"] = dict(primary)
         return payload
 
+    def _planner_plan_artifact_completion_payload(self) -> dict[str, Any]:
+        if not self._requires_planner_plan_artifact_validation():
+            return {}
+        artifact = self._select_planner_json_artifact()
+        if not artifact:
+            return {
+                "status": "blocked",
+                "summary": "planner milestone did not produce a primary plan.json artifact",
+                "plan_validation": {"status": "invalid", "errors": ["primary plan.json artifact is required"]},
+            }
+        path = self._artifact_file_path(artifact)
+        if path is None:
+            return {
+                "status": "blocked",
+                "summary": "planner plan artifact has no readable path",
+                "plan_validation": {"status": "invalid", "errors": ["plan artifact path is required"]},
+            }
+        try:
+            content = path.read_bytes()
+            digest = hashlib.sha256(content).hexdigest()
+            payload = json.loads(content.decode("utf-8"))
+        except Exception as exc:
+            return {
+                "status": "blocked",
+                "summary": f"planner plan artifact is not readable JSON: {exc}",
+                "plan_validation": {"status": "invalid", "errors": [str(exc)]},
+            }
+        if not isinstance(payload, dict):
+            return {
+                "status": "blocked",
+                "summary": "planner plan artifact must be a JSON object",
+                "plan_validation": {"status": "invalid", "errors": ["plan artifact must be an object"]},
+            }
+        expected_task_id = str((self.pack.metadata or {}).get("task_id") or "").strip()
+        declared_task_id = str(payload.get("task_id") or "").strip()
+        if expected_task_id:
+            if declared_task_id and declared_task_id != expected_task_id:
+                return {
+                    "status": "blocked",
+                    "summary": "planner plan artifact task_id does not match manager task identity",
+                    "plan_validation": {"status": "invalid", "errors": ["task_id does not match manager task identity"]},
+                }
+            payload["task_id"] = expected_task_id
+        output_type = str(payload.get("type") or payload.get("output_type") or "").strip()
+        payload_metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
+        plan_revision = _coerce_int(payload.get("plan_revision"), default=-1)
+        if plan_revision < 0:
+            plan_revision = _coerce_int(payload_metadata.get("plan_revision"), default=0)
+        expected_plan_revision = _expected_planner_plan_revision(self.pack)
+        if expected_plan_revision >= 0 and plan_revision != expected_plan_revision:
+            return {
+                "status": "blocked",
+                "summary": f"planner plan artifact plan_revision must be {expected_plan_revision}",
+                "plan_validation": {
+                    "status": "invalid",
+                    "errors": [f"plan_revision must be {expected_plan_revision}, got {plan_revision}"],
+                },
+            }
+        plan_ref = {
+            "path": str(path),
+            "sha256": digest,
+            "artifact_role": str(artifact.get("role") or ""),
+            "relative_path": str(artifact.get("relative_path") or ""),
+            "plan_revision": plan_revision,
+        }
+        if output_type == "AskUserQuestion":
+            return {
+                "status": "blocked",
+                "summary": _ask_user_question_summary(payload),
+                "ask_user_question": payload,
+                "plan_ref": plan_ref,
+                "plan_validation": {"status": "ask_user_question"},
+            }
+        if output_type == "PlanDraft":
+            return {
+                "status": "blocked",
+                "summary": "planner produced PlanDraft; a dispatchable FinalPlanArtifact is required before implementation",
+                "plan_ref": plan_ref,
+                "plan_validation": {"status": "draft"},
+            }
+        try:
+            artifact_payload = validate_dispatchable_plan_artifact(payload)
+            validation = dispatchable_plan_validation(artifact_payload)
+        except Exception as exc:
+            return {
+                "status": "blocked",
+                "summary": f"planner FinalPlanArtifact failed dispatch validation: {exc}",
+                "plan_ref": plan_ref,
+                "plan_validation": {"status": "invalid", "errors": [str(exc)]},
+            }
+        plan_ref.update(
+            {
+                "plan_id": artifact_payload.plan_id,
+                "task_id": artifact_payload.task_id,
+                "plan_revision": plan_revision,
+            }
+        )
+        return {
+            "plan_ref": plan_ref,
+            "plan_validation": validation,
+        }
+
+    def _requires_planner_plan_artifact_validation(self) -> bool:
+        metadata = dict(self.pack.metadata or {})
+        profile = dict(self.pack.resolved_profile or {})
+        profile_text = " ".join(
+            [
+                str(self.pack.minion_profile or ""),
+                str(profile.get("profile_id") or ""),
+                str(profile.get("canonical_profile_id") or ""),
+                str(profile.get("display_name") or ""),
+            ]
+        ).lower()
+        return "planner" in profile_text or isinstance(metadata.get("planner_work_order"), dict)
+
+    def _select_planner_json_artifact(self) -> dict[str, Any]:
+        candidates = [(index, dict(item)) for index, item in enumerate(self.produced_artifacts)]
+        candidates.sort(key=lambda indexed: (0 if str(indexed[1].get("role") or "") == "primary" else 1, -indexed[0]))
+        for _index, artifact in candidates:
+            relative_path = str(artifact.get("relative_path") or artifact.get("path") or "").strip().lower()
+            mime_type = str(artifact.get("mime_type") or "").strip().lower()
+            if relative_path.endswith("plan.json") or mime_type == "application/json":
+                return artifact
+        return {}
+
+    def _artifact_file_path(self, artifact: dict[str, Any]) -> Path | None:
+        raw_path = str(artifact.get("path") or "").strip()
+        if raw_path:
+            return Path(raw_path)
+        relative_path = str(artifact.get("relative_path") or "").strip()
+        artifact_dir = str((self.pack.workspace or {}).get("artifact_dir") or "").strip()
+        if relative_path and artifact_dir:
+            return Path(artifact_dir) / relative_path
+        return None
+
     def _record_produced_artifact(self, artifact: dict[str, Any]) -> None:
         path = str(artifact.get("path") or "").strip()
         relative_path = str(artifact.get("relative_path") or "").strip()
@@ -1446,7 +1881,8 @@ def build_slim_minion_runtime(runtime_root: Path) -> MinionRuntimeBundle:
             browser_manager=BrowserServiceManager(runtime_root=Path(runtime_root)),
         ),
     )
-    for module_id in ("core", "execution", "artifact", "memory", l3_plugin.module_id, "web_search", "web_fetch"):
+    build_lsp_plugin(runtime_root=Path(runtime_root)).register_with_core(core.context)
+    for module_id in ("core", "execution", "artifact", "memory", l3_plugin.module_id, "web_search", "web_fetch", "lsp"):
         core.publish_module_capabilities(module_id)
 
     async def close() -> None:
@@ -1561,6 +1997,22 @@ MINION_DISCOVERY_TOOL_SURFACE = (
 )
 
 
+MINION_CODE_INTEL_TOOL_SURFACE = (
+    "op_lsp_status",
+    "op_lsp_doctor",
+    "op_lsp_hover",
+    "op_lsp_definition",
+    "op_lsp_implementation",
+    "op_lsp_references",
+    "op_lsp_prepare_call_hierarchy",
+    "op_lsp_incoming_calls",
+    "op_lsp_outgoing_calls",
+    "op_lsp_document_symbols",
+    "op_lsp_workspace_symbols",
+    "op_lsp_diagnostics",
+)
+
+
 MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_file_read",
     "op_file_edit",
@@ -1576,6 +2028,7 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_web_search",
     "op_web_read",
     "op_memory_recall",
+    *MINION_CODE_INTEL_TOOL_SURFACE,
 )
 
 
@@ -1674,6 +2127,44 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "required": ["kind", "summary"],
         },
     },
+    "op_minion_review_gate_submit": {
+        "name": "op_minion_review_gate_submit",
+        "description": (
+            "Submit a structured reviewer gate result for a plan, checkpoint, or repair target. Reviewer minions must use this "
+            "instead of reporting gate verdict only in prose. Pass gates that cite command or LSP evidence must be backed by "
+            "actual op_exec_shell or op_lsp_* calls in this reviewer run."
+        ),
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "gate_kind": {"type": "string", "enum": ["plan_acceptance", "checkpoint_verification", "repair_verification"]},
+                "target": {"type": "object"},
+                "verdict": {"type": "string", "enum": ["pass", "fail", "partial"]},
+                "summary": {"type": "string"},
+                "findings": {"type": "array", "items": {"type": "object"}},
+                "required_fixes": {"type": "array", "items": {"type": "object"}},
+                "evidence": {"type": "array", "items": {"type": "object"}},
+                "commands_run": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "For checkpoint/repair pass verdicts, include at least one command/check entry with command, cwd, status or exit_code, output summary, and covers=[exact acceptance criteria or refs]. Non-skipped command entries must match an op_exec_shell call from this reviewer run.",
+                },
+                "api_evidence": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Source/docs/LSP/build evidence for API and call-shape claims. Pass verdicts require api_evidence or metadata.api_evidence_not_applicable=true with a reason. Include covers=[exact acceptance criteria or refs] when evidence proves milestone acceptance. LSP entries must match an op_lsp_* call from this reviewer run.",
+                },
+                "residual_risk": {"type": "array", "items": {"type": "object"}},
+                "report_artifact_ref": {"type": "object"},
+                "reviewer_profile": {"type": "string"},
+                "metadata": {
+                    "type": "object",
+                    "description": "Use metadata.api_evidence_not_applicable=true only when API evidence is genuinely not applicable. If no LSP evidence is used on a pass verdict, set metadata.lsp_evidence_not_applicable=true with a reason.",
+                },
+            },
+            "required": ["gate_kind", "target", "verdict"],
+        },
+    },
     "op_minion_checkpoint_commit": {
         "name": "op_minion_checkpoint_commit",
         "description": (
@@ -1753,6 +2244,17 @@ class MinionScopedExecutionRuntime:
         allow_tools: bool = True,
         turn_id: str | None = None,
     ) -> CanonicalToolResult:
+        allowed = set(str(item) for item in self.allowed_capabilities)
+        if call.name not in allowed or is_minion_capability_denied(call.name):
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text="capability is not allowed for this minion run",
+                structured={"reason": "capability_not_allowed", "capability": call.name},
+                call_id=call.call_id,
+                llm_text="capability is not allowed for this minion run",
+                status=RuntimeStatus.ERROR,
+            )
         if call.name == "op_tool_search":
             return _capability_result_to_tool_result(
                 call,
@@ -1768,6 +2270,8 @@ class MinionScopedExecutionRuntime:
         if call.name in WORKSPACE_TOOL_SPECS:
             if call.name == "op_minion_memory_candidate_write":
                 return _minion_memory_candidate_result(call, self.memory_l3)
+            if call.name == "op_minion_review_gate_submit":
+                return _minion_review_gate_submit_result(call, self.workspace)
             if call.name == "op_minion_checkpoint_commit":
                 return _minion_checkpoint_commit_result(call, self.workspace)
             result = _workspace_tool_result(call, self.workspace)
@@ -1875,6 +2379,219 @@ def _minion_memory_candidate_result(call: CanonicalToolCall, memory_l3: MockL3Pl
             llm_text=message,
             status=RuntimeStatus.ERROR,
         )
+
+
+def _minion_review_gate_submit_result(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult:
+    runtime_root = str(workspace.get("runtime_root") or "").strip()
+    if not runtime_root:
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text="runtime_root is missing from minion workspace",
+            structured={"reason": "runtime_root_missing"},
+            call_id=call.call_id,
+            llm_text="runtime_root is missing from minion workspace",
+            status=RuntimeStatus.ERROR,
+        )
+    try:
+        args = dict(call.args or {})
+        args.setdefault("reviewer_profile", str(workspace.get("minion_profile") or ""))
+        target = dict(args.get("target") or {})
+        target.setdefault("checkpoint_id", str(workspace.get("review_target_checkpoint_id") or ""))
+        target.setdefault("commit_sha", str(workspace.get("review_target_commit_sha") or ""))
+        target.setdefault("run_id", str(workspace.get("review_target_run_id") or ""))
+        if not isinstance(target.get("plan_ref"), dict) and isinstance(workspace.get("review_target_plan_ref"), dict):
+            target["plan_ref"] = dict(workspace.get("review_target_plan_ref") or {})
+        args["target"] = target
+        repository = MinionTaskingRepository(runtime_root=Path(runtime_root))
+        args = _with_review_tool_provenance(args, workspace, repository=repository)
+        provenance_error = _review_gate_provenance_error(args, workspace)
+        if provenance_error:
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text=provenance_error,
+                structured={"reason": "review_gate_provenance_invalid", "error": provenance_error},
+                call_id=call.call_id,
+                llm_text=provenance_error,
+                status=RuntimeStatus.INVALID,
+            )
+        payload = repository.submit_review_gate(
+            args,
+            reviewer_profile=str(args.get("reviewer_profile") or ""),
+            work_order_id=str(workspace.get("work_order_id") or ""),
+            run_id=str(workspace.get("run_id") or ""),
+        )
+        return CanonicalToolResult(
+            name=call.name,
+            ok=True,
+            text="minion review gate recorded",
+            structured=payload,
+            call_id=call.call_id,
+            llm_text="minion review gate recorded",
+            status=RuntimeStatus.OK,
+        )
+    except Exception as exc:
+        message = f"{exc.__class__.__name__}: {exc}"
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=message,
+            structured={"error": str(exc), "error_type": exc.__class__.__name__},
+            call_id=call.call_id,
+            llm_text=message,
+            status=RuntimeStatus.ERROR,
+        )
+
+
+def _with_review_tool_provenance(args: dict[str, Any], workspace: dict[str, Any], *, repository: MinionTaskingRepository) -> dict[str, Any]:
+    refs = [dict(item) for item in list(workspace.get("review_tool_evidence_refs") or []) if isinstance(item, dict)]
+    if not refs:
+        return args
+    refs = repository.record_review_tool_evidence_refs(
+        refs,
+        work_order_id=str(workspace.get("work_order_id") or ""),
+        run_id=str(workspace.get("run_id") or ""),
+        reviewer_profile=str(workspace.get("minion_profile") or ""),
+    )
+    workspace["review_tool_evidence_refs"] = refs
+    _bind_command_evidence_refs(args, refs)
+    _bind_lsp_evidence_refs(args, refs)
+    metadata = dict(args.get("metadata") or {})
+    metadata["tool_evidence_refs"] = refs
+    args["metadata"] = metadata
+    return args
+
+
+def _bind_command_evidence_refs(args: dict[str, Any], refs: list[dict[str, Any]]) -> None:
+    command_refs = {
+        _normalize_command_text(item.get("command") or ""): dict(item)
+        for item in refs
+        if str(item.get("kind") or "") == "command" and _normalize_command_text(item.get("command") or "")
+    }
+    commands: list[dict[str, Any]] = []
+    changed = False
+    for item in list(args.get("commands_run") or []):
+        if not isinstance(item, dict):
+            commands.append(item)
+            continue
+        entry = dict(item)
+        command = _normalize_command_text(entry.get("command") or entry.get("cmd") or entry.get("name") or "")
+        ref = command_refs.get(command)
+        if ref and not entry.get("evidence_ref_id"):
+            entry["evidence_ref_id"] = ref.get("evidence_ref_id")
+            changed = True
+        commands.append(entry)
+    if changed:
+        args["commands_run"] = commands
+
+
+def _bind_lsp_evidence_refs(args: dict[str, Any], refs: list[dict[str, Any]]) -> None:
+    lsp_refs = [dict(item) for item in refs if str(item.get("kind") or "") == "lsp"]
+    if not lsp_refs:
+        return
+    api_evidence: list[dict[str, Any]] = []
+    changed = False
+    for item in list(args.get("api_evidence") or []):
+        if not isinstance(item, dict):
+            api_evidence.append(item)
+            continue
+        entry = dict(item)
+        ref = _matching_lsp_ref(entry, lsp_refs)
+        if ref and not entry.get("evidence_ref_id"):
+            entry["evidence_ref_id"] = ref.get("evidence_ref_id")
+            changed = True
+        api_evidence.append(entry)
+    if changed:
+        args["api_evidence"] = api_evidence
+
+
+def _matching_lsp_ref(entry: dict[str, Any], refs: list[dict[str, Any]]) -> dict[str, Any]:
+    evidence_id = str(entry.get("evidence_id") or "").strip()
+    method = str(entry.get("method") or "").strip()
+    operation = str(entry.get("operation") or "").strip()
+    for ref in refs:
+        if evidence_id and evidence_id == str(ref.get("evidence_id") or "").strip():
+            return dict(ref)
+        if method and method == str(ref.get("method") or "").strip():
+            return dict(ref)
+        if operation and operation == str(ref.get("operation") or "").strip():
+            return dict(ref)
+    return {}
+
+
+def _review_gate_provenance_error(args: dict[str, Any], workspace: dict[str, Any]) -> str:
+    verdict = str(args.get("verdict") or "").strip().lower()
+    if verdict != "pass":
+        return ""
+    shell_violations = [dict(item) for item in list(workspace.get("shell_mutation_violations") or []) if isinstance(item, dict)]
+    if shell_violations:
+        return "reviewer shell mutated the source repository; pass verdict is blocked until the review is rerun from a clean read-only workspace"
+    evidence_refs = [dict(item) for item in list(workspace.get("review_tool_evidence_refs") or []) if isinstance(item, dict)]
+    command_refs = [item for item in evidence_refs if str(item.get("kind") or "") == "command"]
+    lsp_refs = [item for item in evidence_refs if str(item.get("kind") or "") == "lsp"]
+    command_error = _command_evidence_provenance_error(list(args.get("commands_run") or []), command_refs)
+    if command_error:
+        return command_error
+    lsp_error = _lsp_evidence_provenance_error(list(args.get("api_evidence") or []), lsp_refs)
+    if lsp_error:
+        return lsp_error
+    return ""
+
+
+def _command_evidence_provenance_error(commands_run: list[Any], command_refs: list[dict[str, Any]]) -> str:
+    if not commands_run:
+        return ""
+    normalized_refs = {_normalize_command_text(item.get("command") or "") for item in command_refs if item.get("command")}
+    for item in commands_run:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or item.get("result") or "").strip().lower()
+        command = _normalize_command_text(item.get("command") or item.get("cmd") or item.get("name") or "")
+        if status in {"skipped", "not_run", "blocked"}:
+            continue
+        if item.get("exit_code") is not None or status in {"passed", "pass", "ok", "failed", "fail"}:
+            if command and command not in normalized_refs:
+                return f"commands_run entry lacks matching op_exec_shell evidence: {command}"
+    return ""
+
+
+def _lsp_evidence_provenance_error(api_evidence: list[Any], lsp_refs: list[dict[str, Any]]) -> str:
+    if not api_evidence:
+        return ""
+    evidence_ids = {str(item.get("evidence_id") or "").strip() for item in lsp_refs if str(item.get("evidence_id") or "").strip()}
+    methods = {str(item.get("method") or "").strip() for item in lsp_refs if str(item.get("method") or "").strip()}
+    operations = {str(item.get("operation") or "").strip() for item in lsp_refs if str(item.get("operation") or "").strip()}
+    for item in api_evidence:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or item.get("source") or item.get("evidence_kind") or "").strip().lower()
+        method = str(item.get("method") or "").strip()
+        evidence_id = str(item.get("evidence_id") or "").strip()
+        operation = str(item.get("operation") or "").strip()
+        is_lsp_claim = kind == "lsp" or method.startswith("textDocument/") or method.startswith("callHierarchy/") or evidence_id.startswith("lsp_")
+        if not is_lsp_claim:
+            continue
+        if evidence_id and evidence_id in evidence_ids:
+            continue
+        if method and method in methods:
+            continue
+        if operation and operation in operations:
+            continue
+        return "api_evidence contains LSP evidence that lacks matching op_lsp_* tool provenance"
+    return ""
+
+
+def _normalize_command_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _minion_checkpoint_commit_result(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult:
@@ -2242,6 +2959,78 @@ def _effective_capability_name(tool_call: CanonicalToolCall) -> str:
     return tool_call.name
 
 
+def _effective_tool_args(tool_call: CanonicalToolCall) -> dict[str, Any]:
+    if tool_call.name == "op_tool_call" and isinstance((tool_call.args or {}).get("args"), dict):
+        return dict((tool_call.args or {}).get("args") or {})
+    return dict(tool_call.args or {})
+
+
+def _review_tool_evidence_ref(target_name: str, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> dict[str, Any]:
+    normalized_target = str(target_name or "").strip()
+    kind = _review_tool_evidence_kind(normalized_target)
+    if not kind:
+        return {}
+    args = _effective_tool_args(tool_call)
+    structured = result.structured if isinstance(result.structured, dict) else {}
+    evidence = structured.get("evidence") if isinstance(structured.get("evidence"), dict) else {}
+    ref = {
+        "evidence_ref_id": f"tev_{uuid4().hex[:12]}",
+        "kind": kind,
+        "tool_name": normalized_target,
+        "call_id": str(tool_call.call_id or ""),
+        "ok": bool(result.ok),
+        "status": str(result.status or ""),
+        "summary": _preview_text(_tool_result_text(result), limit=240),
+    }
+    if kind == "command":
+        ref["command"] = str(args.get("cmd") or args.get("command") or "").strip()
+        ref["cwd"] = str(args.get("cwd") or args.get("workdir") or "")
+        if isinstance(structured, dict):
+            for key in ("exit_code", "stdout_preview", "stderr_preview"):
+                if key in structured:
+                    ref[key] = structured.get(key)
+    if kind == "lsp":
+        ref["operation"] = normalized_target.removeprefix("op_lsp_")
+        if evidence:
+            for key in ("evidence_id", "method", "server_id", "workspace_root", "file", "file_sha256", "freshness"):
+                if evidence.get(key) is not None:
+                    ref[key] = evidence.get(key)
+    if kind == "source":
+        if "path" in args:
+            ref["path"] = str(args.get("path") or "")
+        if "query" in args:
+            ref["query"] = str(args.get("query") or "")
+    return {key: value for key, value in ref.items() if value not in ("", None)}
+
+
+def _review_tool_evidence_kind(target_name: str) -> str:
+    if target_name == "op_exec_shell":
+        return "command"
+    if target_name.startswith("op_lsp_"):
+        return "lsp"
+    if target_name in {"op_workspace_tree", "op_workspace_search", "op_workspace_read"}:
+        return "source"
+    return ""
+
+
+def _expected_planner_plan_revision(pack: TaskContextPack) -> int:
+    metadata = dict(pack.metadata or {})
+    planner_work_order = dict(metadata.get("planner_work_order") or {})
+    if not isinstance(planner_work_order.get("revision_source"), dict):
+        return -1
+    if "plan_revision" not in planner_work_order:
+        return -1
+    return _coerce_int(planner_work_order.get("plan_revision"), default=-1)
+
+
+def _current_acceptance_criteria(pack: TaskContextPack, milestone: dict[str, Any]) -> list[str]:
+    for key in ("acceptance_criteria", "acceptance"):
+        value = milestone.get(key)
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item or "").strip()]
+    return [str(item).strip() for item in list(pack.acceptance_criteria or []) if str(item or "").strip()]
+
+
 def _tool_result_text(result: CanonicalToolResult) -> str:
     return default_tool_result_text(result, fallback_ok="tool completed", fallback_error="tool failed")
 
@@ -2409,6 +3198,24 @@ _RUNNER_OWNED_GIT_MUTATION_RE = re.compile(
 
 def _contains_runner_owned_git_mutation(cmd: str) -> bool:
     return bool(_RUNNER_OWNED_GIT_MUTATION_RE.search(str(cmd or "")))
+
+
+def _git_workspace_snapshot(repo_path: Path) -> dict[str, Any]:
+    repo = Path(repo_path)
+    if not (repo / ".git").exists():
+        return {}
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True, timeout=10)
+        status = subprocess.run(["git", "status", "--porcelain", "--ignored"], cwd=str(repo), capture_output=True, text=True, timeout=10)
+    except Exception:
+        return {}
+    if head.returncode != 0 or status.returncode != 0:
+        return {}
+    return {
+        "repo_path": str(repo),
+        "head": head.stdout.strip(),
+        "status": status.stdout.strip(),
+    }
 
 
 def _extract_ask_user_question_payload(text: str) -> dict[str, Any]:

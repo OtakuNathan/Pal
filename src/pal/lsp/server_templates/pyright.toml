@@ -1,0 +1,8 @@
+server_id = "pyright"
+display_name = "pyright"
+command = ["pyright-langserver"]
+args = ["--stdio"]
+extensions = [".py", ".pyi"]
+language_ids = ["python"]
+workspace_markers = ["pyproject.toml", "setup.py", ".git"]
+install_hint = "Install pyright-langserver or provide a runtime override for pylsp."

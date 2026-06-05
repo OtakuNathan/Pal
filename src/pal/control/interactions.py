@@ -484,6 +484,69 @@ def minion_module_continue_delivery(payload: dict[str, Any], route: ControlRoute
     return delivery_for_interaction(route, "interactive_open", interaction)
 
 
+def minion_plan_acceptance_delivery(payload: dict[str, Any], route: ControlRoute) -> ControlDelivery | None:
+    interaction = build_minion_plan_acceptance_interaction(payload, route)
+    if interaction is None:
+        return None
+    return delivery_for_interaction(route, "interactive_open", interaction)
+
+
+def build_minion_plan_acceptance_interaction(payload: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec | None:
+    plan_ref = payload.get("plan_ref")
+    if not isinstance(plan_ref, dict):
+        return None
+    work_order_id = str(payload.get("work_order_id") or "").strip()
+    plan_id = str(plan_ref.get("plan_id") or "").strip()
+    target_id = work_order_id or plan_id
+    if not target_id:
+        return None
+    review_gate_ref = payload.get("review_gate_ref")
+    if not isinstance(review_gate_ref, dict):
+        review_gate_ref = {}
+    interaction_id = f"minion_plan_accept_{target_id}"
+    summary = str(payload.get("summary") or "").strip()
+    lines = [
+        "Minion plan review passed.",
+        "",
+        f"Work order: {work_order_id or '-'}",
+        f"Plan: {plan_id or '-'}",
+    ]
+    revision = plan_ref.get("plan_revision")
+    if revision is not None:
+        lines.append(f"Revision: {revision}")
+    gate_id = str(review_gate_ref.get("gate_id") or "").strip()
+    if gate_id:
+        lines.append(f"Review gate: {gate_id}")
+    if summary:
+        lines.extend(["", "Summary:", _truncate_text(summary, 900)])
+    lines.append("")
+    lines.append("Accept this reviewed plan for dispatch?")
+    return InteractionMessageSpec(
+        interaction_id=interaction_id,
+        interaction_kind="minion_plan_acceptance",
+        route=route,
+        text="\n".join(lines),
+        buttons=(
+            (
+                InteractionButtonSpec(
+                    label="Accept Plan",
+                    action_key="control.action.dispatch",
+                    action_args=_minion_interaction_action_payload(
+                        action_kind="minion_plan_accept_override",
+                        target_id=target_id,
+                        args={
+                            "work_order_id": work_order_id,
+                            "plan_ref": dict(plan_ref),
+                            "review_gate_ref": dict(review_gate_ref),
+                            "reason": "human accepted reviewer-passed plan from channel interaction",
+                        },
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
 def build_minion_module_continue_interaction(payload: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec | None:
     if not bool(payload.get("has_next_module")):
         return None

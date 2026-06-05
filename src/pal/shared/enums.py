@@ -13,6 +13,7 @@ class EventKind(StrEnum):
     MINION_CHECKPOINT = "minion.checkpoint"
     MINION_MODULE_COMPLETED = "minion.module_completed"
     MINION_CLARIFICATION_REQUEST = "minion.clarification_request"
+    MINION_PLAN_ACCEPTANCE_PENDING = "minion.plan_acceptance_pending"
     CONTROL_ACTION = "control.action"
     SLASH_COMMAND = "slash_command"
     INTERACTION_RESULT = "interaction_result"

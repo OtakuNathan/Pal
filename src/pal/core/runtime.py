@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from pal.control import interactions as control_interactions
 from pal.control.contracts import ControlAction, ControlDelivery, ControlRoute
-from pal.control.routing import derive_control_scope_key
+from pal.control.routing import derive_control_scope_key, route_from_channel_envelope
 from pal.core.contracts import CoreRuntimeState
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.dispatcher import EventDispatcher
@@ -1408,19 +1408,7 @@ class PalCore:
         channel_runtime.queue_status(envelope, kind, payload=payload)
 
     def _route_from_channel_envelope(self, channel_envelope: ChannelEnvelope) -> ControlRoute:
-        payload = channel_envelope.event.payload if isinstance(channel_envelope.event.payload, dict) else {}
-        return ControlRoute(
-            endpoint_id=channel_envelope.endpoint.endpoint_id,
-            channel_kind=channel_envelope.endpoint.channel_kind,
-            reply_target=dict(channel_envelope.response_handle.reply_target),
-            control_scope_key=derive_control_scope_key(
-                endpoint_id=channel_envelope.endpoint.endpoint_id,
-                channel_kind=channel_envelope.endpoint.channel_kind,
-                reply_target=channel_envelope.response_handle.reply_target,
-                payload=payload,
-            ),
-            correlation_id=channel_envelope.event.correlation_id or channel_envelope.event.event_id,
-        )
+        return route_from_channel_envelope(channel_envelope)
 
     def _route_to_channel_envelope(self, route: ControlRoute | None) -> ChannelEnvelope | None:
         if route is None:

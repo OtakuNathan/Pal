@@ -1,0 +1,8 @@
+server_id = "bash"
+display_name = "bash-language-server"
+command = ["bash-language-server"]
+args = ["start"]
+extensions = [".sh", ".bash", ".zsh"]
+language_ids = ["shellscript"]
+workspace_markers = [".git"]
+install_hint = "Install bash-language-server."

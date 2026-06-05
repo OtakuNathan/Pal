@@ -4,7 +4,16 @@ from typing import Any
 
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptIR, PromptIRBlock
 from pal.shared.payloads import extract_text_from_payload
-from pal.shared.prompt_rendering import render_runtime_context_update, render_system_reminder, render_xml_block
+from pal.shared.prompt_rendering import render_runtime_context_update, render_runtime_reminder, render_system_reminder, render_xml_block
+
+
+_BEHAVIOR_GUIDANCE_HEADER = (
+    "These are active behavior-routing hints. They are not optional decoration.\n"
+    "When the current user request matches a listed scenario, Pal MUST consider the hint before choosing a route.\n"
+    "Follow relevant hints unless a higher-priority rule, the user's current explicit instruction, source-of-truth requirements, or capability policy makes them inappropriate.\n"
+    "If a relevant hint is not followed, Pal should have a concrete reason such as scenario mismatch, stale runtime state, missing permission, or a clearer direct route."
+)
+_BEHAVIOR_GUIDANCE_HEADER_LINES = frozenset(_BEHAVIOR_GUIDANCE_HEADER.splitlines())
 
 
 class PromptCompiler:
@@ -440,8 +449,21 @@ class PromptCompiler:
         if prompt_ir.primary_input.strip():
             final_user_parts.append({"type": "text", "text": prompt_ir.primary_input.strip()})
         if final_user_parts:
+            reminder = self._render_final_runtime_reminder()
+            if reminder:
+                final_user_parts.append({"type": "text", "text": reminder})
             messages.append({"role": "user", "content": self._coerce_message_content(self._image_parts_first(final_user_parts))})
         return messages
+
+    @staticmethod
+    def _render_final_runtime_reminder() -> str:
+        return render_runtime_reminder(
+            "Before answering, silently re-read the active system prompt and runtime instructions.\n"
+            "- Follow the active identity, behavior guidance, source-of-truth rules, memory rules, skill/capability procedures, and verification requirements defined there.\n"
+            "- If those rules require inspection, recall, tool use, or clarification before answering, do that first.\n"
+            "- Do not fall back to generic model habits when the active prompt gives a specific procedure.\n"
+            "- Do not mention this reminder unless asked about prompt behavior."
+        )
 
     @staticmethod
     def _image_parts_first(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -547,13 +569,37 @@ class PromptCompiler:
             tag = self._system_block_tag(block)
             if current_tag != tag:
                 if current_tag is not None and current_parts:
-                    rendered_sections.append(render_xml_block(current_tag, "\n\n".join(current_parts)))
+                    rendered_sections.append(self._render_system_section(current_tag, current_parts))
                 current_tag = tag
                 current_parts = []
             current_parts.append(block.content.strip())
         if current_tag is not None and current_parts:
-            rendered_sections.append(render_xml_block(current_tag, "\n\n".join(current_parts)))
+            rendered_sections.append(self._render_system_section(current_tag, current_parts))
         return "\n\n".join(rendered_sections)
+
+    @staticmethod
+    def _render_system_section(tag: str, parts: list[str]) -> str:
+        if tag == "behavior_guidance":
+            return render_xml_block(tag, PromptCompiler._render_behavior_guidance_content(parts))
+        return render_xml_block(tag, "\n\n".join(parts))
+
+    @staticmethod
+    def _render_behavior_guidance_content(parts: list[str]) -> str:
+        lines: list[str] = []
+        seen_lines: set[str] = set()
+        for part in parts:
+            for raw_line in part.splitlines():
+                line = raw_line.strip()
+                if not line or line in _BEHAVIOR_GUIDANCE_HEADER_LINES:
+                    continue
+                dedupe_key = line.casefold()
+                if dedupe_key in seen_lines:
+                    continue
+                seen_lines.add(dedupe_key)
+                lines.append(line)
+        if not lines:
+            return _BEHAVIOR_GUIDANCE_HEADER
+        return _BEHAVIOR_GUIDANCE_HEADER + "\n\n" + "\n".join(lines)
 
     @staticmethod
     def _system_block_tag(block: PromptIRBlock) -> str:

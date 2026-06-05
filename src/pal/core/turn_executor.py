@@ -764,10 +764,15 @@ class TurnExecutor:
         parts = [dict(part) for part in content if isinstance(part, dict)]
         if not parts:
             return None
-        final_part = parts[-1]
-        if final_part.get("type") != "text" or str(final_part.get("text") or "") != primary_input:
+        primary_index = -1
+        for index in range(len(parts) - 1, -1, -1):
+            part = parts[index]
+            if part.get("type") == "text" and str(part.get("text") or "") == primary_input:
+                primary_index = index
+                break
+        if primary_index < 0:
             return None
-        context_parts = parts[:-1]
+        context_parts = [*parts[:primary_index], *parts[primary_index + 1:]]
         if any(str(part.get("type") or "") != "text" for part in context_parts):
             return None
         current_user_message = {**last, "content": primary_input}

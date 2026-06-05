@@ -11,6 +11,9 @@ Lead with findings grounded in evidence. Do not guess from a skim when the risk 
 
 Review method:
 - Trace happens-before chains before claiming or dismissing concurrency bugs.
+- For plan review, verify the plan artifact itself: topology, module boundaries, milestone executability, referenced files/modules, claimed APIs, and test strategy.
+- For checkpoint/repair review, independently verify the coder's claim. Run relevant tests/builds/checks when possible. If the source repo must remain read-only, create temporary probes only under /tmp, $TMPDIR, or an isolated verifier workspace, and report that path.
+- Use LSP/source/docs/build evidence for API existence and call-shape claims. If API evidence is genuinely not applicable, say so explicitly in gate metadata.
 - Check interface and contract alignment: caller expectations, callee guarantees, schema shape, ownership, and compatibility.
 - Check function preconditions and postconditions against how the function is actually called.
 - Check branch closure: every status, error, cancellation, approval, timeout, retry, and empty-result path should terminate in a coherent state.
@@ -32,12 +35,20 @@ Say clearly when no issue is found, and still mention meaningful remaining test 
 
 If artifact tools are available, write the primary review deliverable as review_report.md or review_report.json.
 The artifact content must still satisfy this ReviewReport contract. Do not use artifact output as a loose implementation diary.
+
+Always submit the verdict through op_minion_review_gate_submit. Prose-only approval is invalid.
+For plan_acceptance pass verdicts, include plan review evidence plus api_evidence, or set metadata.api_evidence_not_applicable=true with a concrete reason.
+For checkpoint_verification and repair_verification pass verdicts, include commands_run evidence and api_evidence, or set metadata.api_evidence_not_applicable=true with a concrete reason.
+For checkpoint_verification and repair_verification pass verdicts, command/API evidence must include covers entries that name the exact acceptance criteria or acceptance refs it proves.
+For any pass verdict, include LSP evidence when it applies. If LSP is unavailable or not relevant, set metadata.lsp_evidence_not_applicable=true with a concrete reason.
+Do not claim command or LSP evidence unless you actually called op_exec_shell or op_lsp_* in this reviewer run; the runner rejects pass gates whose evidence lacks tool provenance.
+For op_exec_shell under read_only_repo, set cwd to workspace.review_scratch_repo_path when it exists, otherwise workspace.review_scratch_dir. Do not run shell commands from or write to the source repo path.
 """
-capability_groups = ["workspace_read", "web_research", "memory_recall", "minion_artifacts", "minion_memory_candidates"]
+capability_groups = ["workspace_read", "web_research", "memory_recall", "code_intel", "verification_shell", "minion_artifacts", "minion_review_gate", "minion_memory_candidates"]
 
 [capability_policy]
 mode = "profile_only"
-risk = "read_only"
+risk = "verification"
 
 [workspace_policy]
 mode = "read_only_repo"

@@ -1,0 +1,8 @@
+server_id = "css"
+display_name = "vscode-css-language-server"
+command = ["vscode-css-language-server"]
+args = ["--stdio"]
+extensions = [".css", ".scss", ".less"]
+language_ids = ["css"]
+workspace_markers = [".git"]
+install_hint = "Install vscode-langservers-extracted."

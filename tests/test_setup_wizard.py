@@ -218,6 +218,63 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertIsNotNone(ep)
         self.assertEqual(ep.channel_kind, "telegram")
         self.assertEqual(ep.binding_metadata.get("bot_token"), "123456:ABC")
+        socket = repo.get("socket_default")
+        self.assertIsNotNone(socket)
+        self.assertEqual(socket.channel_kind, "socket")
+        self.assertEqual(socket.binding_key, str(self.runtime_root / "pal.sock"))
+        self.assertTrue(socket.enabled)
+        self.assertIsNone(socket.detached_at)
+
+    def test_seed_from_wizard_reattaches_recovery_socket_channel(self) -> None:
+        from pal.channel import ChannelEndpointRepository
+
+        repo = ChannelEndpointRepository()
+        repo.upsert(
+            endpoint_id="socket_default",
+            channel_kind="socket",
+            binding_key=str(self.runtime_root / "pal.sock"),
+            enabled=False,
+            detached_at="2026-01-01T00:00:00Z",
+            supports_typing=False,
+            supports_receipt_marker=False,
+            binding_metadata={},
+            send_policy_blob={},
+        )
+        collected = _make_collected()
+        collected.channel = WizardChannel(
+            endpoint_id="telegram_main",
+            channel_kind="telegram",
+            binding_key="chat:12345",
+            binding_metadata={"bot_token": "123456:ABC"},
+            supports_typing=True,
+            supports_receipt_marker=True,
+        )
+
+        self.wizard.seed_from_wizard(self.registration, collected)
+
+        socket = repo.get("socket_default")
+        self.assertIsNotNone(socket)
+        self.assertTrue(socket.enabled)
+        self.assertIsNone(socket.detached_at)
+
+    def test_load_existing_wizard_data_prefers_telegram_over_recovery_socket(self) -> None:
+        collected = _make_collected()
+        collected.channel = WizardChannel(
+            endpoint_id="telegram_main",
+            channel_kind="telegram",
+            binding_key="chat:12345",
+            binding_metadata={"bot_token": "123456:ABC"},
+            supports_typing=True,
+            supports_receipt_marker=True,
+        )
+        self.wizard.seed_from_wizard(self.registration, collected)
+
+        existing = self.wizard.load_existing_wizard_data(self.runtime_root)
+
+        self.assertIsNotNone(existing)
+        assert existing is not None
+        self.assertEqual(existing.channel.endpoint_id, "telegram_main")
+        self.assertEqual(existing.channel.channel_kind, "telegram")
 
     def test_seed_from_wizard_seeds_web_providers(self) -> None:
         from pal.llm import RuntimeSettingRepository

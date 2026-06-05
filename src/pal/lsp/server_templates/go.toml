@@ -1,0 +1,7 @@
+server_id = "gopls"
+display_name = "gopls"
+command = ["gopls"]
+extensions = [".go"]
+language_ids = ["go"]
+workspace_markers = ["go.mod", ".git"]
+install_hint = "Install gopls."

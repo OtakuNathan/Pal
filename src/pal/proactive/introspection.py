@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.proactive.runtime import ProactiveManager, ProactiveRunner
@@ -24,6 +26,7 @@ if TYPE_CHECKING:
 
 
 PROACTIVE_MODULE_ID = "proactive"
+_PROACTIVE_SCHEDULE_CADENCES = {"manual", "cron", "once"}
 
 
 @dataclass(frozen=True)
@@ -302,15 +305,27 @@ class ProactiveIntrospectionProvider:
                 text="proactive_id and goal are required",
                 llm_text="proactive_id and goal are required",
             )
+        skill_refs_raw = call.args.get("skill_refs") or []
+        if not isinstance(skill_refs_raw, list):
+            return _invalid_result("skill_refs must be an array")
+        out_reply_target_raw = call.args.get("out_reply_target") or {}
+        if not isinstance(out_reply_target_raw, dict):
+            return _invalid_result("out_reply_target must be an object")
+        enabled_raw = call.args.get("enabled", True)
+        if not isinstance(enabled_raw, bool):
+            return _invalid_result("enabled must be a boolean")
+        schedule, invalid = _normalize_schedule_argument(call.args.get("schedule"), required=False)
+        if invalid is not None:
+            return invalid
         definition = self.manager.create_task(
             proactive_id=proactive_id,
             goal=goal,
             method=str(call.args.get("method") or "").strip(),
-            skill_refs=[str(item).strip() for item in list(call.args.get("skill_refs") or []) if str(item).strip()],
+            skill_refs=[str(item).strip() for item in skill_refs_raw if str(item).strip()],
             out_channel_id=str(call.args.get("out_channel_id") or "").strip() or None,
-            schedule=dict(call.args.get("schedule") or {}),
-            out_reply_target=dict(call.args.get("out_reply_target") or {}),
-            enabled=bool(call.args.get("enabled", True)),
+            schedule=schedule,
+            out_reply_target=dict(out_reply_target_raw),
+            enabled=enabled_raw,
         )
         self._refresh_capabilities()
         payload = {
@@ -461,7 +476,10 @@ class ProactiveIntrospectionProvider:
                 text="target_id is required",
                 llm_text="target_id is required",
             )
-        out_reply_target = dict(call.args.get("out_reply_target") or {})
+        out_reply_target_raw = call.args.get("out_reply_target") or {}
+        if not isinstance(out_reply_target_raw, dict):
+            return _invalid_result("out_reply_target must be an object")
+        out_reply_target = dict(out_reply_target_raw)
         updated = self.manager.set_output_target(proactive_id, out_reply_target)
         if updated is None:
             return IntrospectionResult(
@@ -509,7 +527,10 @@ class ProactiveIntrospectionProvider:
                 text="schedule must be an object",
                 llm_text="schedule must be an object",
             )
-        updated = self.manager.update_schedule(proactive_id, dict(schedule))
+        normalized_schedule, invalid = _normalize_schedule_argument(schedule, required=True)
+        if invalid is not None:
+            return invalid
+        updated = self.manager.update_schedule(proactive_id, normalized_schedule)
         if updated is None:
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
@@ -615,6 +636,81 @@ class ProactiveIntrospectionProvider:
         if self.refresh_capabilities is None:
             return
         self.refresh_capabilities()
+
+
+def _normalize_schedule_argument(raw: object, *, required: bool) -> tuple[dict[str, object], IntrospectionResult | None]:
+    if raw is None:
+        if required:
+            return {}, _invalid_result("schedule is required")
+        return {"cadence": "manual", "timezone": "UTC"}, None
+    if not isinstance(raw, dict):
+        return {}, _invalid_result("schedule must be an object")
+
+    cadence = str(raw.get("cadence") or "manual").strip().lower()
+    if cadence not in _PROACTIVE_SCHEDULE_CADENCES:
+        return {}, _invalid_result(
+            "schedule.cadence must be manual, cron, or once",
+            structured={"cadence": cadence},
+        )
+
+    timezone_name = str(raw.get("timezone") or "UTC").strip() or "UTC"
+    try:
+        timezone_info = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        return {}, _invalid_result(
+            "schedule.timezone must be a valid IANA timezone",
+            structured={"timezone": timezone_name},
+        )
+
+    normalized: dict[str, object] = {"cadence": cadence, "timezone": timezone_name}
+    if cadence == "manual":
+        return normalized, None
+
+    if cadence == "cron":
+        cron_expr = str(raw.get("cron") or "").strip()
+        if not cron_expr:
+            return {}, _invalid_result("schedule.cron is required when cadence is cron")
+        try:
+            import croniter
+
+            croniter.croniter(cron_expr, datetime.now(timezone_info))
+        except Exception:
+            return {}, _invalid_result(
+                "schedule.cron must be a valid 5-field cron expression",
+                structured={"cron": cron_expr},
+            )
+        normalized["cron"] = cron_expr
+        return normalized, None
+
+    run_at_raw = str(raw.get("run_at_utc") or "").strip()
+    if not run_at_raw:
+        return {}, _invalid_result("schedule.run_at_utc is required when cadence is once")
+    try:
+        parsed = datetime.fromisoformat(run_at_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return {}, _invalid_result(
+            "schedule.run_at_utc must be an ISO datetime",
+            structured={"run_at_utc": run_at_raw},
+        )
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone_info)
+    target = parsed.astimezone(timezone.utc)
+    if target <= datetime.now(timezone.utc):
+        return {}, _invalid_result(
+            "schedule.run_at_utc must be in the future",
+            structured={"run_at_utc": run_at_raw},
+        )
+    normalized["run_at_utc"] = target.isoformat()
+    return normalized, None
+
+
+def _invalid_result(text: str, *, structured: dict[str, object] | None = None) -> IntrospectionResult:
+    return IntrospectionResult(
+        status=RuntimeStatus.INVALID,
+        text=text,
+        structured=dict(structured or {}),
+        llm_text=text,
+    )
 
 
 def inspect_proactive(provider: ProactiveIntrospectionProvider) -> ProactiveSnapshot:

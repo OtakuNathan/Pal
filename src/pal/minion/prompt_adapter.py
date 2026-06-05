@@ -38,8 +38,8 @@ def render_minion_system_prompt(scaffold: dict[str, Any]) -> str:
             "and report blocked instead of completed if tests cannot be run or cannot pass with concrete evidence.\n"
         )
     operating_rules = (
-        "Your context is the prompt_view/task context pack, the current milestone, and the listed capabilities.\n"
-        "When prompt_view is present, treat it as the complete scoped assignment; do not infer or implement other modules.\n"
+        "Your context is the prompt work view, the current milestone, and the listed capabilities.\n"
+        "Treat the prompt work view as the complete scoped assignment; do not infer or implement hidden modules or later milestones.\n"
         "Use only the listed capabilities. Report by milestone, never by percentage or ETA.\n"
         "Use `op_memory_recall` when prior Pal experience, project lessons, or user preferences may materially improve the result.\n"
         "If capability evidence is required, use a relevant listed capability before completing the milestone.\n"
@@ -122,7 +122,6 @@ def build_minion_task_envelope(pack: TaskContextPack, *, minion_id: str, run_id:
             source_kind=SourceKind.MINION,
             payload={
                 "text": render_minion_task_prompt(pack),
-                "task_context_pack": pack.to_dict(),
                 "work_order_id": pack.work_order_id,
                 "minion_profile": pack.minion_profile,
             },
@@ -149,7 +148,7 @@ def minion_primary_input(envelope: ChannelEnvelope) -> str:
     text = extract_text_from_payload(envelope.event.payload).strip()
     if text:
         return text
-    return json.dumps(envelope.event.payload, ensure_ascii=False, sort_keys=True)
+    return json.dumps({"instruction": "No sanitized minion task text was provided. Report blocked."}, ensure_ascii=False, sort_keys=True)
 
 
 def render_minion_task_prompt(pack: TaskContextPack) -> str:
@@ -158,26 +157,27 @@ def render_minion_task_prompt(pack: TaskContextPack) -> str:
         instructions = [
             "Execute only the scoped work in this prompt_view.",
             "Use module contracts instead of inferring other module internals.",
+            "Do not start later milestones or hidden plan steps; stop after this milestone and wait for manager input.",
         ]
         if str(prompt_view.get("role") or "").strip().lower() == "planner":
             instructions.append(
                 "If a question is user-answerable and materially changes the plan, return ask_user_question with evidence."
             )
         payload = {
+            "goal": pack.goal,
             "prompt_view": prompt_view,
             "instructions": instructions,
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
     payload = {
-        "work_order_id": pack.work_order_id,
         "goal": pack.goal,
         "instruction": pack.instruction,
         "acceptance_criteria": list(pack.acceptance_criteria),
-        "workspace": dict(pack.workspace),
-        "continuity": dict(pack.continuity),
-        "artifacts": list(pack.artifacts),
-        "memory_pack": dict(pack.memory_pack),
+        "workspace": _prompt_safe_workspace(pack.workspace),
+        "artifact_refs": _prompt_safe_artifact_refs(pack.metadata.get("artifact_refs") or pack.artifacts),
     }
+    if pack.memory_pack:
+        payload["memory_pack"] = dict(pack.memory_pack)
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
@@ -195,6 +195,32 @@ def prompt_view_from_pack(pack: TaskContextPack) -> dict[str, Any]:
             prompt_view["allowed_capabilities"] = list(pack.allowed_capabilities)
         return prompt_view
     return {}
+
+
+def _prompt_safe_workspace(workspace: dict[str, Any]) -> dict[str, str]:
+    allowed = {"repo_path", "source_repo", "artifact_dir", "task_repo_path", "target_repo_path"}
+    return {key: str(value) for key, value in dict(workspace or {}).items() if key in allowed and str(value or "").strip()}
+
+
+def _prompt_safe_artifact_refs(raw: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in list(raw or []):
+        if not isinstance(item, dict):
+            continue
+        safe = {
+            "kind": str(item.get("kind") or item.get("type") or "").strip(),
+            "role": str(item.get("role") or "").strip(),
+        }
+        ref = dict(item.get("ref") or {}) if isinstance(item.get("ref"), dict) else item
+        path = str(ref.get("path") or ref.get("relative_path") or "").strip()
+        if path:
+            safe["path"] = path
+        if str(item.get("module_id") or "").strip():
+            safe["module_id"] = str(item.get("module_id") or "").strip()
+        safe = {key: value for key, value in safe.items() if value}
+        if safe:
+            result.append(safe)
+    return result
 
 
 def coerce_user_content_parts(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:

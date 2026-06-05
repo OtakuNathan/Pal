@@ -74,7 +74,7 @@ def _is_stale_connection(message: str) -> bool:
 def _classify_retry_error(exc: Exception) -> str:
     """Classify an LLM invocation error into a retry category.
 
-    Returns one of: 'stale_connection', 'connection', 'rate_limit', 'server', 'unknown'.
+    Returns one of: 'stale_connection', 'timeout', 'connection', 'rate_limit', 'server', 'unknown'.
 
     'stale_connection' is a subset of 'connection' — it specifically means a
     keep-alive socket was reused after the server closed it.  These warrant
@@ -87,12 +87,16 @@ def _classify_retry_error(exc: Exception) -> str:
     if _is_stale_connection(message):
         return "stale_connection"
 
-    # Network / connection level: timeouts, connection refused, etc.
+    if (
+        any(marker in message for marker in ("timed out", "timeout"))
+        or "timeout" in error_type
+    ):
+        return "timeout"
+
+    # Network / connection level: connection refused, protocol reset, etc.
     if any(
         marker in message
         for marker in (
-            "timed out",
-            "timeout",
             "connectionerror",
             "connection refused",
             "connection aborted",
@@ -100,7 +104,7 @@ def _classify_retry_error(exc: Exception) -> str:
         )
     ) or any(
         marker in error_type
-        for marker in ("connection", "timeout", "protocol")
+        for marker in ("connection", "protocol")
     ):
         return "connection"
 
@@ -248,7 +252,7 @@ def _timeout_from_litellm_kwargs(kwargs: dict[str, Any]) -> float:
     return 120.0
 
 
-def _run_litellm_with_wall_timeout(
+def _run_with_wall_timeout(
     operation: Callable[[], Any],
     *,
     timeout_seconds: float,
@@ -274,6 +278,15 @@ def _run_litellm_with_wall_timeout(
     if kind == "error":
         raise payload
     return payload
+
+
+def _run_litellm_with_wall_timeout(
+    operation: Callable[[], Any],
+    *,
+    timeout_seconds: float,
+    description: str,
+) -> Any:
+    return _run_with_wall_timeout(operation, timeout_seconds=timeout_seconds, description=description)
 
 
 @dataclass
@@ -968,7 +981,12 @@ class LLMRuntime(LLMRuntimePort):
             attempt_count = max(1, self.endpoint_retry_attempts)
             for attempt in range(attempt_count):
                 try:
-                    result = invoke_fn(endpoint, effective_request)
+                    timeout_seconds = self._timeout_seconds_for_metadata(dict(effective_request.metadata))
+                    result = _run_with_wall_timeout(
+                        lambda: invoke_fn(endpoint, effective_request),
+                        timeout_seconds=timeout_seconds,
+                        description=f"llm endpoint invocation for {endpoint.endpoint_id}",
+                    )
                     self.last_request = effective_request
                     self.last_endpoint_id = endpoint.endpoint_id
                     self.last_model_id = endpoint.model_id
@@ -1017,6 +1035,20 @@ class LLMRuntime(LLMRuntimePort):
                         )
                         break
                     if error_kind == "connection":
+                        if endpoint_domain is not None:
+                            failed_connection_domains.add(endpoint_domain)
+                        self._emit_llm_progress(
+                            "llm_endpoint_exhausted",
+                            endpoint=endpoint,
+                            endpoint_index=endpoint_index,
+                            endpoint_count=len(enabled),
+                            attempt=attempt + 1,
+                            max_attempts=attempt_count,
+                            reason=error_kind,
+                            next_endpoint_id=_next_endpoint_id(enabled, endpoint_index),
+                        )
+                        break
+                    if error_kind == "timeout":
                         if endpoint_domain is not None:
                             failed_connection_domains.add(endpoint_domain)
                         self._emit_llm_progress(
@@ -1117,16 +1149,7 @@ class LLMRuntime(LLMRuntimePort):
         )
 
     async def agenerate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        timeout_seconds = self._timeout_seconds_for_request(request)
-        try:
-            return await asyncio.wait_for(asyncio.to_thread(self.generate, request), timeout=timeout_seconds)
-        except TimeoutError:
-            return CanonicalLLMOutcome(
-                text=f"LLM generation timed out after {timeout_seconds:.0f}s.",
-                reasoning_text="",
-                tool_calls=[],
-                finish_reason=LLMFinishReason.ERROR,
-            )
+        return await asyncio.to_thread(self.generate, request)
 
     def generate_stream(self, request: CanonicalLLMRequest) -> list[NormalizedLLMStreamEvent]:
         self.refresh_runtime_settings()
@@ -1163,19 +1186,7 @@ class LLMRuntime(LLMRuntimePort):
         ]
 
     async def agenerate_stream(self, request: CanonicalLLMRequest) -> list[NormalizedLLMStreamEvent]:
-        timeout_seconds = self._timeout_seconds_for_request(request)
-        try:
-            return await asyncio.wait_for(asyncio.to_thread(self.generate_stream, request), timeout=timeout_seconds)
-        except TimeoutError:
-            msg = f"LLM generation timed out after {timeout_seconds:.0f}s."
-            return [
-                NormalizedLLMStreamEvent(
-                    event_kind=LLMStreamEventKind.ERROR,
-                    error_text=msg,
-                    finish_reason=LLMFinishReason.ERROR,
-                ),
-                NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.ERROR),
-            ]
+        return await asyncio.to_thread(self.generate_stream, request)
 
     def summarize_compaction(
         self,
@@ -1504,6 +1515,15 @@ def _last_message_text(messages: list[dict[str, Any]]) -> str:
         content = message.get("content", "")
         if isinstance(content, str) and content.strip():
             return content
+        if isinstance(content, list):
+            parts = [
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict) and str(part.get("type") or "") == "text"
+            ]
+            text = "\n".join(part for part in parts if part).strip()
+            if text:
+                return text
     return ""
 
 

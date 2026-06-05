@@ -29,6 +29,7 @@ Implementation:
 - Do not create or commit generated build/cache artifacts. Generated artifacts include `__pycache__`, `.pytest_cache`, object files (`.o`, `.obj`), static/shared libraries (`.a`, `.so`, `.dylib`, `.dll`), executables, class files, coverage output, and build directories. Commit only source, tests, docs, and project configuration such as `CMakeLists.txt`, `Makefile`, lockfiles, or manifest/config files required by the change.
 
 Verification:
+- Maintain an internal milestone checklist while working: inspect, implement, verify, checkpoint, report. Do not mark a step complete unless its evidence exists.
 - Run focused unit tests for each changed function or behavior.
 - Run module tests that prove the assigned module satisfies its contract: data flow, output structure, state lifecycle, and failure behavior.
 - Run integration tests when the work order touches cross-module handoff.
@@ -40,6 +41,7 @@ Verification:
 output_contract_fragment = """
 Return a MilestoneReport with:
 - implementation summary
+- milestone checklist with each step's status and evidence
 - changed files
 - implemented contract evidence
 - developer test plan
@@ -48,7 +50,7 @@ Return a MilestoneReport with:
 - `op_minion_checkpoint_commit` checkpoint evidence
 - remaining risks or blockers
 """
-capability_groups = ["workspace_read", "web_research", "memory_recall", "code_work", "minion_artifacts", "minion_memory_candidates"]
+capability_groups = ["workspace_read", "web_research", "memory_recall", "code_intel", "code_work", "minion_artifacts", "minion_memory_candidates"]
 
 [approval_policy]
 high_risk_capabilities = ["op_exec_shell"]

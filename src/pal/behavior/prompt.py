@@ -10,6 +10,33 @@ if TYPE_CHECKING:
     from pal.behavior.service import BehaviorService
 
 
+def _affordance_prompt_line(item: AffordanceDescriptor) -> str:
+    title = item.title.strip()
+    hint = (item.prompt_hint.strip() or item.scenario_text.strip()).strip()
+    if title and hint:
+        return f"- {title}: {hint}"
+    if title:
+        return f"- {title}"
+    if hint:
+        return f"- {hint}"
+    return ""
+
+
+def _render_affordance_lines(affordances: tuple[AffordanceDescriptor, ...]) -> list[str]:
+    lines: list[str] = []
+    seen_lines: set[str] = set()
+    for item in affordances:
+        line = _affordance_prompt_line(item)
+        if not line:
+            continue
+        dedupe_key = line.casefold()
+        if dedupe_key in seen_lines:
+            continue
+        seen_lines.add(dedupe_key)
+        lines.append(line)
+    return lines
+
+
 @dataclass
 class BehaviorPromptFragmentProvider:
     service: BehaviorService
@@ -45,6 +72,7 @@ class BehaviorPromptFragmentProvider:
                     "Use op_behavior_save only when the user explicitly asks Pal to adopt/follow/save a future behavior rule, or clearly teaches a durable routing preference.\n"
                     "When the user asks to update existing behavior guidance, Pal MUST call op_behavior_affordance_update; pass the original rendered guidance line as affordance, not an internal ID.\n"
                     "When replacing or editing the text shown in the rendered behavior guidance block, set prompt_hint to the new guidance text. Use scenario_text only when the user explicitly asks to change the activation scenario.\n"
+                    "When writing prompt_hint, provide only the hint body; do not repeat the title as a prefix.\n"
                     "When the user asks to delete existing behavior guidance, Pal MUST call op_behavior_affordance_delete; pass the original rendered guidance line as affordance.\n"
                     "Do not claim behavior guidance was updated or deleted unless the tool result confirms it.\n"
                     "Injected/plugin behavior guidance is read-only through these tools.\n"
@@ -60,25 +88,13 @@ class BehaviorPromptFragmentProvider:
         return fragments
 
     def _resident_affordance_fragment(self) -> PromptFragment | None:
-        lines = []
-        for item in self.service.resident_affordances():
-            hint = item.prompt_hint.strip() or item.scenario_text.strip()
-            if not hint:
-                continue
-            lines.append(f"- {item.title}: {hint}")
+        lines = _render_affordance_lines(self.service.resident_affordances())
         if not lines:
             return None
-        guidance = (
-            "These are active behavior-routing hints. They are not optional decoration.\n"
-            "When the current user request matches a listed scenario, Pal MUST consider the hint before choosing a route.\n"
-            "Follow relevant hints unless a higher-priority rule, the user's current explicit instruction, source-of-truth requirements, or capability policy makes them inappropriate.\n"
-            "If a relevant hint is not followed, Pal should have a concrete reason such as scenario mismatch, stale runtime state, missing permission, or a clearer direct route.\n\n"
-            + "\n".join(lines)
-        )
         return PromptFragment(
             section="resident_affordances",
             title="Resident Affordances",
-            content=guidance,
+            content="\n".join(lines),
             priority=75,
             metadata={"module_id": self.module_id, "kind": "resident_affordances"},
         )
@@ -95,26 +111,20 @@ class DeclaredResidentAffordancePromptFragmentProvider:
 
     def build_prompt_fragments(self, context: PromptAssemblyContext) -> list[PromptFragment]:
         _ = context
-        lines = []
-        for item in sorted(self.affordances, key=lambda item: (item.priority, item.title, item.affordance_id)):
-            hint = item.prompt_hint.strip() or item.scenario_text.strip()
-            if not hint:
-                continue
-            lines.append(f"- {item.title}: {hint}")
+        sorted_affordances = tuple(
+            sorted(
+                self.affordances,
+                key=lambda item: (item.priority, item.title, item.affordance_id),
+            )
+        )
+        lines = _render_affordance_lines(sorted_affordances)
         if not lines:
             return []
-        guidance = (
-            "These are active behavior-routing hints. They are not optional decoration.\n"
-            "When the current user request matches a listed scenario, Pal MUST consider the hint before choosing a route.\n"
-            "Follow relevant hints unless a higher-priority rule, the user's current explicit instruction, source-of-truth requirements, or capability policy makes them inappropriate.\n"
-            "If a relevant hint is not followed, Pal should have a concrete reason such as scenario mismatch, stale runtime state, missing permission, or a clearer direct route.\n\n"
-            + "\n".join(lines)
-        )
         return [
             PromptFragment(
                 section="resident_affordances",
                 title="Resident Affordances",
-                content=guidance,
+                content="\n".join(lines),
                 priority=75,
                 metadata={"module_id": self.module_id, "kind": "declared_resident_affordances"},
             )

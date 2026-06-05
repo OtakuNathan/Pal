@@ -21,7 +21,9 @@ from pal.control import (
     InteractionButtonSpec,
     InteractionMessageSpec,
     InteractionResult,
+    derive_control_scope_key,
     register_with_core as register_control_with_core,
+    route_from_channel_envelope,
 )
 from pal.control import interactions as control_interactions
 from pal.core import PalCore, TurnContinuation, register_with_core as register_core_with_core
@@ -289,7 +291,7 @@ class ControlPlaneTests(unittest.TestCase):
             endpoint_id="telegram_main",
             channel_kind="telegram",
             reply_target={"chat_id": "42"},
-            control_scope_key="tg:telegram_main:42:root",
+            control_scope_key="telegram:telegram_main:42:root",
         )
 
         open_action = plane.handle_interaction(
@@ -334,7 +336,7 @@ class ControlPlaneTests(unittest.TestCase):
             endpoint_id="telegram_main",
             channel_kind="telegram",
             reply_target={"chat_id": "42"},
-            control_scope_key="tg:telegram_main:42:root",
+            control_scope_key="telegram:telegram_main:42:root",
         )
 
         action = plane.handle_interaction(
@@ -350,6 +352,40 @@ class ControlPlaneTests(unittest.TestCase):
         assert action is not None
         self.assertEqual(action.action_kind, "invalid_command")
         self.assertEqual(action.args["interaction_origin"], "button")
+
+    def test_route_prefers_provider_supplied_control_scope_key(self) -> None:
+        envelope = ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind=EventKind.USER_MESSAGE,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "hello", "chat_id": "42"},
+                correlation_id="msg-1",
+                event_id="turn-1",
+            ),
+            endpoint=EndpointConfig(endpoint_id="telegram_main", channel_kind="telegram", binding_key=""),
+            response_handle=ResponseHandle(
+                endpoint_id="telegram_main",
+                reply_target={
+                    "chat_id": "42",
+                    "message_id": "99",
+                    "control_scope_key": "telegram:telegram_main:42:root",
+                },
+            ),
+        )
+
+        route = route_from_channel_envelope(envelope)
+
+        self.assertEqual(route.control_scope_key, "telegram:telegram_main:42:root")
+
+    def test_control_scope_fallback_is_channel_neutral(self) -> None:
+        scope = derive_control_scope_key(
+            endpoint_id="demo_main",
+            channel_kind="demo_chat",
+            reply_target={"conversation_id": "conv-42", "message_id": "99"},
+            payload={"text": "hello"},
+        )
+
+        self.assertEqual(scope, "channel:demo_main:conversation_id=conv-42")
 
 
 class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -402,7 +438,11 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             endpoint=self.endpoint.endpoint,
             response_handle=ResponseHandle(
                 endpoint_id="socket_main",
-                reply_target={"session_id": session_id, "request_id": request_id},
+                reply_target={
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "control_scope_key": f"socket:socket_main:{session_id}",
+                },
             ),
         )
 
@@ -596,7 +636,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             endpoint_id="socket_main",
             channel_kind="telegram",
             reply_target={"chat_id": "42", "message_id": "12"},
-            control_scope_key="tg:telegram_main:42:root",
+            control_scope_key="telegram:telegram_main:42:root",
             correlation_id="tg-1",
         )
 
@@ -626,7 +666,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             endpoint_id="socket_main",
             channel_kind="telegram",
             reply_target={"chat_id": "42", "message_id": "12"},
-            control_scope_key="tg:telegram_main:42:root",
+            control_scope_key="telegram:telegram_main:42:root",
             correlation_id="tg-1",
         )
         self.core.state.prompt_log_enabled = True
@@ -804,15 +844,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_quiescing_scope_does_not_create_background_turn_task(self) -> None:
         scope_state = self.core._ensure_scope_state(self.route.control_scope_key)
         scope_state.quiescing = True
-        envelope = ChannelEnvelope(
-            event=EventEnvelope(
-                event_kind=EventKind.USER_MESSAGE,
-                source_kind=SourceKind.CHANNEL,
-                payload={"text": "hello", "session_id": "sess-1", "request_id": "req-1"},
-            ),
-            endpoint=self.endpoint.endpoint,
-            response_handle=ResponseHandle(endpoint_id="socket_main", reply_target={"session_id": "sess-1", "request_id": "req-1"}),
-        )
+        envelope = self._make_channel_envelope(turn_id="turn-quiescing", request_id="req-1")
 
         await self.core.schedule_channel_turn_async(envelope)
 
@@ -880,7 +912,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             endpoint_id="telegram_main",
             channel_kind="telegram",
             reply_target={"chat_id": "42", "message_id": "12"},
-            control_scope_key="tg:telegram_main:42:root",
+            control_scope_key="telegram:telegram_main:42:root",
             correlation_id="tg-1",
         )
 
@@ -909,7 +941,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             endpoint_id="telegram_main",
             channel_kind="telegram",
             reply_target={"chat_id": "42", "message_id": "13"},
-            control_scope_key="tg:telegram_main:42:root",
+            control_scope_key="telegram:telegram_main:42:root",
             correlation_id="tg-2",
         )
 

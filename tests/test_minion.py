@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -27,7 +28,7 @@ from pal.core.turns import TurnContinuation
 from pal.channel.contracts import ChannelEnvelope, EndpointConfig, ResponseHandle
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution import CapabilityCall, CapabilityDescriptor, CapabilityResult, register_with_core as register_execution_with_core
-from pal.foundation import BoundedTTLBuffer, PalV2Database
+from pal.foundation import BoundedTTLBuffer, PalV2Database, utc_now
 from pal.foundation.sidecar import (
     SidecarEndpoint,
     SidecarRpcClient,
@@ -58,7 +59,9 @@ from pal.minion import (
     ReviewerWorkOrder,
     build_planner_work_order,
     compile_coder_work_order,
+    dispatchable_plan_validation,
     validate_final_plan_artifact,
+    validate_dispatchable_plan_artifact,
     prompt_view_for_coder,
     prompt_view_for_reviewer,
     prompt_view_from_metadata,
@@ -73,13 +76,17 @@ from pal.minion.runner import (
     MinionRunner,
     MinionRuntimeBundle,
     MinionScopedExecutionRuntime,
+    WORKSPACE_TOOL_SPECS,
     _llm_tools_for_allowed,
     _minion_llm_request_metadata,
+    _minion_review_gate_submit_result,
     _resolve_minion_max_output_tokens,
     build_slim_minion_runtime,
 )
 from pal.minion.prompt_adapter import (
+    build_minion_task_envelope as _build_minion_task_envelope,
     build_minion_prompt_messages,
+    minion_primary_input as _minion_primary_input,
     prompt_view_from_pack as _prompt_view_from_pack,
     render_minion_system_prompt as _render_system_prompt,
     render_minion_task_prompt as _render_task_prompt,
@@ -96,6 +103,174 @@ def _message_text(message: dict) -> str:
     if isinstance(content, list):
         return "\n".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
     return str(content or "")
+
+
+def _external_verification_ref(root: Path, name: str = "external-verification.json", payload: dict | None = None) -> dict:
+    path = root / name
+    path.write_text(json.dumps(payload or {"status": "verified"}, sort_keys=True), encoding="utf-8")
+    return {"kind": "artifact", "path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+async def _run_fake_checkpoint_reviewer(manager: MinionManager, state: MinionRunState) -> None:
+    target = dict((state.pack.metadata or {}).get("review_target") or {})
+    checkpoint_id = str(target.get("checkpoint_id") or "")
+    gate_kind = str(target.get("gate_kind") or "checkpoint_verification")
+    coverage = [str(item) for item in list(target.get("acceptance_criteria") or []) if str(item or "").strip()]
+    command_evidence = {
+        "command": "fake-review-check",
+        "cwd": str((state.pack.workspace or {}).get("repo_path") or ""),
+        "status": "passed",
+        "summary": "test reviewer inspected checkpoint payload",
+    }
+    if coverage:
+        command_evidence["covers"] = coverage
+    manager.tasking_repository.submit_review_gate(
+        {
+            "gate_kind": gate_kind,
+            "target": {
+                "checkpoint_id": checkpoint_id,
+                "commit_sha": str(target.get("commit_sha") or ""),
+            },
+            "verdict": "pass",
+            "summary": f"fake reviewer accepted {gate_kind} checkpoint {checkpoint_id}",
+            "evidence": [{"kind": "test_fake_review", "summary": "checkpoint accepted by test reviewer"}],
+            "commands_run": [command_evidence],
+            "api_evidence": [{"kind": "not_applicable", "summary": "test fixture has no API claims"}],
+            "metadata": {
+                "lsp_evidence_not_applicable": True,
+                "lsp_evidence_not_applicable_reason": "test fixture has no language server-backed API claims",
+            },
+            "reviewer_profile": "software_engineering.reviewer",
+        },
+        reviewer_profile="software_engineering.reviewer",
+        work_order_id=state.pack.work_order_id,
+        run_id=state.run_id,
+    )
+    manager._record_event(
+        state,
+        {
+            "event_kind": "terminal",
+            "payload": {"status": "completed", "summary": "fake reviewer submitted passing gate"},
+            "created_at": utc_now(),
+        },
+    )
+
+
+def _without_checkpoint_review(pack: TaskContextPack) -> TaskContextPack:
+    payload = pack.to_dict()
+    metadata = dict(payload.get("metadata") or {})
+    module_execution = dict(metadata.get("module_execution") or {})
+    checkpoint_review = dict(module_execution.get("checkpoint_review") or {})
+    checkpoint_review["enabled"] = False
+    module_execution["checkpoint_review"] = checkpoint_review
+    metadata["module_execution"] = module_execution
+    payload["metadata"] = metadata
+    return TaskContextPack.from_dict(payload)
+
+
+def _plan_review_key_for_test(plan_ref: dict) -> str:
+    return ":".join(
+        part
+        for part in (
+            str(plan_ref.get("task_id") or "").strip(),
+            str(plan_ref.get("plan_id") or "").strip(),
+            str(plan_ref.get("plan_revision") if plan_ref.get("plan_revision") is not None else "").strip(),
+            str(plan_ref.get("sha256") or plan_ref.get("path") or "").strip(),
+        )
+        if part
+    )
+
+
+def _plan_module(module_id: str, *, title: str = "", task: str = "", acceptance: str = "") -> dict:
+    return {
+        "module_id": module_id,
+        "owned_area": [f"src/{module_id}.py"],
+        "responsibility": title or f"Implement {module_id}.",
+        "provided_interfaces": [{"name": f"{module_id}.contract", "contract": f"{module_id} owns its contract."}],
+        "consumed_interfaces": [],
+        "internal_milestones": [
+            {
+                "milestone_id": f"{module_id}_m1",
+                "title": title or f"{module_id} milestone",
+                "task": task or f"Complete {module_id} milestone.",
+                "acceptance_criteria": [acceptance or f"{module_id} acceptance is verified."],
+            }
+        ],
+        "test_plan": {"unit": [f"test {module_id}"]},
+    }
+
+
+def _dispatchable_plan_payload(
+    *,
+    plan_id: str,
+    task_id: str,
+    modules: list[dict],
+    prelude_module_id: str = "module_prelude",
+    join_module_id: str = "module_join",
+) -> dict:
+    prelude = _plan_module(
+        prelude_module_id,
+        title="Architecture and contracts",
+        task="Define module contracts and execution skeleton.",
+        acceptance="Contracts and skeleton are ready for module work.",
+    )
+    join = _plan_module(
+        join_module_id,
+        title="Integration and system verification",
+        task="Integrate module outputs and run system verification.",
+        acceptance="Integrated system behavior is verified.",
+    )
+    ordered_modules = [prelude, *[dict(item) for item in modules], join]
+    module_nodes = [
+        {"node_id": f"node_{module['module_id']}", "kind": "module", "module_id": module["module_id"], "depends_on": ["prelude"]}
+        for module in modules
+    ]
+    join_deps = [node["node_id"] for node in module_nodes] or ["prelude"]
+    return {
+        "type": "FinalPlanArtifact",
+        "plan_id": plan_id,
+        "task_id": task_id,
+        "summary": f"Dispatchable plan {plan_id}.",
+        "modules": ordered_modules,
+        "cross_module_contracts": [{"producer": prelude_module_id, "consumer": join_module_id, "interface": "plan.contracts"}],
+        "orchestration": {
+            "execution_shape": "fork_join_linear",
+            "topology": {
+                "nodes": [
+                    {"node_id": "prelude", "kind": "prelude", "module_id": prelude_module_id, "depends_on": []},
+                    *module_nodes,
+                    {"node_id": "join", "kind": "join", "module_id": join_module_id, "depends_on": join_deps},
+                ],
+                "order": ["prelude", *[node["node_id"] for node in module_nodes], "join"],
+            },
+            "coordination": "Manager executes validated topology checkpoints.",
+        },
+        "system_test_plan": [{"level": "system", "evidence": "dogfood"}],
+        "risks": [],
+    }
+
+
+def _submit_plan_review_gate(repository: MinionTaskingRepository, plan_ref: dict, *, verdict: str = "pass") -> dict:
+    payload = repository.submit_review_gate(
+        {
+            "gate_kind": "plan_acceptance",
+            "target": {"plan_ref": dict(plan_ref)},
+            "verdict": verdict,
+            "summary": f"plan review {verdict}",
+            "findings": [{"severity": "blocker", "summary": "plan is not executable"}] if verdict == "fail" else [],
+            "evidence": [{"kind": "source", "summary": "dispatchable plan validation inspected"}] if verdict == "pass" else [],
+            "api_evidence": [{"kind": "not_applicable", "summary": "test plan has no API claims"}] if verdict == "pass" else [],
+            "metadata": {
+                "lsp_evidence_not_applicable": True,
+                "lsp_evidence_not_applicable_reason": "test plan fixture has no symbol-level API claims",
+            }
+            if verdict == "pass"
+            else {},
+            "residual_risk": [{"summary": "external docs unavailable"}] if verdict == "partial" else [],
+            "reviewer_profile": "software_engineering.reviewer",
+        }
+    )
+    return dict(payload["review_gate_ref"])
 
 
 class SidecarFoundationTests(unittest.TestCase):
@@ -134,6 +309,58 @@ class SidecarFoundationTests(unittest.TestCase):
         entries = [Path(item).resolve() for item in str(env.get("PYTHONPATH") or "").split(os.pathsep) if item]
 
         self.assertIn((Path(__file__).resolve().parents[1] / "src").resolve(), entries)
+
+    def test_runner_main_liveness_watcher_resolves_when_manager_pipe_closes(self) -> None:
+        from pal.minion import runner_main
+
+        async def scenario() -> None:
+            read_fd, write_fd = os.pipe()
+            try:
+                task = asyncio.create_task(runner_main._watch_manager_liveness(read_fd))
+                await asyncio.sleep(0)
+                os.close(write_fd)
+                write_fd = -1
+                await asyncio.wait_for(task, timeout=1.0)
+            finally:
+                if write_fd >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(write_fd)
+                with contextlib.suppress(OSError):
+                    os.close(read_fd)
+
+        asyncio.run(scenario())
+
+    def test_runner_main_liveness_pipe_works_across_subprocess_pass_fds(self) -> None:
+        read_fd, write_fd = os.pipe()
+        script = (
+            "import asyncio, os, sys\n"
+            "from pal.minion.runner_main import _watch_manager_liveness\n"
+            "asyncio.run(_watch_manager_liveness(int(sys.argv[1])))\n"
+            "print('manager gone', flush=True)\n"
+        )
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "-c", script, str(read_fd)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                pass_fds=(read_fd,),
+                env=python_subprocess_env(),
+            )
+            os.close(read_fd)
+            read_fd = -1
+            os.close(write_fd)
+            write_fd = -1
+            stdout, stderr = process.communicate(timeout=10)
+        finally:
+            if read_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(read_fd)
+            if write_fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(write_fd)
+
+        self.assertEqual(process.returncode, 0, stderr.decode("utf-8", errors="replace"))
+        self.assertIn("manager gone", stdout.decode("utf-8", errors="replace"))
 
     def test_minion_runner_log_path_is_pal_log_sibling_and_sanitized(self) -> None:
         root = Path("C:/tmp/pal-runtime")
@@ -366,6 +593,48 @@ class MinionContractTests(unittest.TestCase):
         self.assertEqual(view["milestone"]["milestone_index"], 1)
         with self.assertRaises(ValueError):
             validate_final_plan_artifact({"type": "PlanDraft", "task_id": "task_valid", "modules": []})
+
+    def test_dispatchable_plan_validation_requires_fork_join_topology(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_dispatch",
+            task_id="task_dispatch",
+            modules=[_plan_module("module_dispatch", title="Dispatch module")],
+        )
+
+        artifact = validate_dispatchable_plan_artifact(plan)
+        validation = dispatchable_plan_validation(artifact)
+
+        self.assertEqual(validation["execution_shape"], "fork_join_linear")
+        self.assertEqual(validation["node_order"], ["prelude", "node_module_dispatch", "join"])
+        self.assertEqual(validation["module_order"], ["module_prelude", "module_dispatch", "module_join"])
+        broken = dict(plan)
+        broken["orchestration"] = {}
+        with self.assertRaises(ValueError):
+            validate_dispatchable_plan_artifact(broken)
+
+        module_a = _plan_module("module_a", title="A")
+        module_b = _plan_module("module_b", title="B")
+        ordered_by_topology = _dispatchable_plan_payload(
+            plan_id="plan_topology_order",
+            task_id="task_topology_order",
+            modules=[module_b, module_a],
+        )
+        ordered_by_topology["orchestration"]["topology"]["nodes"] = [
+            {"node_id": "prelude", "kind": "prelude", "module_id": "module_prelude", "depends_on": []},
+            {"node_id": "node_module_a", "kind": "module", "module_id": "module_a", "depends_on": ["prelude"]},
+            {"node_id": "node_module_b", "kind": "module", "module_id": "module_b", "depends_on": ["node_module_a"]},
+            {"node_id": "join", "kind": "join", "module_id": "module_join", "depends_on": ["node_module_b"]},
+        ]
+        ordered_by_topology["orchestration"]["topology"]["order"] = ["prelude", "node_module_a", "node_module_b", "join"]
+
+        validation = dispatchable_plan_validation(ordered_by_topology)
+
+        self.assertEqual(validation["node_order"], ["prelude", "node_module_a", "node_module_b", "join"])
+        self.assertEqual(validation["module_order"], ["module_prelude", "module_a", "module_b", "module_join"])
+        cyclic = json.loads(json.dumps(ordered_by_topology))
+        cyclic["orchestration"]["topology"]["nodes"][1]["depends_on"] = ["node_module_b"]
+        with self.assertRaises(ValueError):
+            validate_dispatchable_plan_artifact(cyclic)
 
     def test_prompt_view_roundtrip_and_task_prompt_avoid_raw_pack_dump(self) -> None:
         view = PromptView(
@@ -626,6 +895,76 @@ class MinionContractTests(unittest.TestCase):
         self.assertEqual(prompt_view_from_metadata({"prompt_view": view})["review_target"]["commit_sha"], "abc123")
         self.assertEqual(report.to_dict()["status"], "approved")
 
+    def test_minion_prompt_filters_protocol_and_manager_state(self) -> None:
+        pack = TaskContextPack(
+            work_order_id="wo_secret_internal",
+            goal="Implement the visible milestone.",
+            workspace={
+                "repo_path": "/tmp/repo",
+                "artifact_dir": "/tmp/artifacts",
+                "work_order_branch": "minion/internal",
+                "base_sha": "abc123internal",
+                "merge_target": "main",
+            },
+            metadata={
+                "prompt_view": {
+                    "role": "coder",
+                    "task_id": "task_secret_internal",
+                    "work_order_id": "wo_secret_internal",
+                    "module": {"module_id": "module_visible"},
+                    "milestone": {"milestone_id": "m1", "task": "Do only m1."},
+                    "workspace": {"repo_path": "/tmp/repo", "base_sha": "abc123internal"},
+                },
+                "artifact_refs": [
+                    {
+                        "kind": "plan",
+                        "role": "dispatch_source",
+                        "ref": {"path": "/tmp/plan.json", "sha256": "do-not-render"},
+                    }
+                ],
+            },
+        )
+
+        rendered = _render_task_prompt(pack)
+
+        self.assertIn("module_visible", rendered)
+        self.assertIn("Do only m1.", rendered)
+        self.assertNotIn("task_secret_internal", rendered)
+        self.assertNotIn("wo_secret_internal", rendered)
+        self.assertNotIn("abc123internal", rendered)
+        self.assertNotIn("minion/internal", rendered)
+        self.assertNotIn("do-not-render", rendered)
+
+    def test_task_context_pack_fallback_prompt_is_sanitized(self) -> None:
+        pack = TaskContextPack(
+            work_order_id="wo_fallback_internal",
+            goal="Generate weekly plan",
+            instruction="Create the current bounded deliverable.",
+            workspace={"repo_path": "/tmp/repo", "base_sha": "hidden-base"},
+            artifacts=[{"kind": "nutrition_log", "path": "/tmp/log.json", "sha256": "hidden-sha"}],
+        )
+
+        rendered = _render_task_prompt(pack)
+
+        self.assertIn("Generate weekly plan", rendered)
+        self.assertNotIn("wo_fallback_internal", rendered)
+        self.assertNotIn("hidden-base", rendered)
+        self.assertNotIn("hidden-sha", rendered)
+
+    def test_minion_task_envelope_does_not_carry_task_context_pack_fallback(self) -> None:
+        pack = TaskContextPack(
+            work_order_id="wo_no_pack_fallback",
+            goal="Only scoped text should be available.",
+            workspace={"repo_path": "/tmp/repo", "base_sha": "hidden-base"},
+            metadata={"plan_artifact": {"secret": "do-not-carry"}},
+        )
+
+        envelope = _build_minion_task_envelope(pack, minion_id="m_no_pack", run_id="r_no_pack")
+
+        self.assertIn("text", envelope.event.payload)
+        self.assertNotIn("task_context_pack", envelope.event.payload)
+        self.assertIn("Only scoped text should be available.", _minion_primary_input(envelope))
+
     def test_runner_marks_ask_user_question_as_blocked_report(self) -> None:
         async def write_event(_event):
             return None
@@ -701,6 +1040,28 @@ class MinionContractTests(unittest.TestCase):
                                 }
                             )
                         )
+                    if self.calls == 2:
+                        return CanonicalLLMOutcome(
+                            text="",
+                            tool_calls=[
+                                CanonicalToolCall(
+                                    name="op_minion_artifact_write",
+                                    args={
+                                        "relative_path": "plan.json",
+                                        "title": "Final plan",
+                                        "role": "primary",
+                                        "mime_type": "application/json",
+                                        "content": json.dumps(
+                                            _dispatchable_plan_payload(
+                                                plan_id="plan_planner_wait",
+                                                task_id="task_planner_wait",
+                                                modules=[_plan_module("module_planner_wait")],
+                                            )
+                                        ),
+                                    },
+                                )
+                            ],
+                        )
                     _ = request
                     return CanonicalLLMOutcome(text="final plan ready")
 
@@ -731,11 +1092,14 @@ class MinionContractTests(unittest.TestCase):
                     },
                 }
 
+            root = Path(tempfile.mkdtemp(prefix="pal_minion_planner_question_"))
             code = await MinionRunner(
-                runtime_root=Path(tempfile.mkdtemp(prefix="pal_minion_planner_question_")),
+                runtime_root=root,
                 pack=TaskContextPack(
                     work_order_id="wo_planner_wait",
                     goal="Plan module work",
+                    workspace={"artifact_dir": str(root / "artifacts")},
+                    allowed_capabilities=["op_minion_artifact_write"],
                     minion_profile="software_engineering.planner",
                     metadata={"task_id": "task_planner_wait", "planner_work_order": planner_work_order},
                 ),
@@ -753,6 +1117,131 @@ class MinionContractTests(unittest.TestCase):
             terminal = next(event for event in events if event["event_kind"] == "terminal")
             self.assertEqual(terminal["payload"]["status"], "completed")
             self.assertNotIn("ask_user_question", terminal["payload"])
+
+        asyncio.run(scenario())
+
+    def test_runner_repairs_invalid_planner_plan_artifact_once(self) -> None:
+        async def scenario() -> None:
+            events = []
+            root = Path(tempfile.mkdtemp(prefix="pal_minion_planner_repair_"))
+
+            class GlmLikePlannerLLM:
+                def __init__(self) -> None:
+                    self.calls = 0
+                    self.saw_repair_note = False
+
+                async def agenerate(self, request):
+                    self.calls += 1
+                    rendered = "\n".join(_message_text(message) for message in list(getattr(request, "messages", []) or []))
+                    if "Planner repair attempt" in rendered:
+                        self.saw_repair_note = True
+                    if self.calls == 1:
+                        bad_plan = {
+                            "type": "FinalPlanArtifact",
+                            "plan_id": "plan_glm_bad",
+                            "task_id": "task_glm_repair",
+                            "summary": "Looks structured but is not dispatchable.",
+                            "modules": [
+                                {
+                                    "module_id": "module_glm",
+                                    "internal_milestones": [
+                                        {"milestone_id": "m1", "title": "Do it", "task": "Do something."}
+                                    ],
+                                }
+                            ],
+                        }
+                        return CanonicalLLMOutcome(
+                            text="",
+                            tool_calls=[
+                                CanonicalToolCall(
+                                    name="op_minion_artifact_write",
+                                    args={
+                                        "relative_path": "plan.json",
+                                        "title": "Bad GLM plan",
+                                        "role": "primary",
+                                        "mime_type": "application/json",
+                                        "content": json.dumps(bad_plan),
+                                    },
+                                )
+                            ],
+                        )
+                    if self.calls == 2:
+                        return CanonicalLLMOutcome(text="plan written")
+                    if self.calls == 3:
+                        assert self.saw_repair_note
+                        return CanonicalLLMOutcome(
+                            text="",
+                            tool_calls=[
+                                CanonicalToolCall(
+                                    name="op_minion_artifact_write",
+                                    args={
+                                        "relative_path": "plan.json",
+                                        "title": "Repaired GLM plan",
+                                        "role": "primary",
+                                        "mime_type": "application/json",
+                                        "content": json.dumps(
+                                            _dispatchable_plan_payload(
+                                                plan_id="plan_glm_repaired",
+                                                task_id="task_glm_repair",
+                                                modules=[_plan_module("module_glm_repaired")],
+                                            )
+                                        ),
+                                    },
+                                )
+                            ],
+                        )
+                    return CanonicalLLMOutcome(text="repaired plan written")
+
+            class FakeExecution:
+                def get_capability_spec(self, name):
+                    _ = name
+                    return None
+
+            async def write_event(event):
+                events.append(event)
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            llm = GlmLikePlannerLLM()
+            try:
+                code = await MinionRunner(
+                    runtime_root=root,
+                    pack=TaskContextPack(
+                        work_order_id="wo_glm_repair",
+                        goal="Produce a dispatchable plan even if the model first writes a bad one.",
+                        workspace={"artifact_dir": str(root / "artifacts")},
+                        allowed_capabilities=["op_minion_artifact_write"],
+                        minion_profile="software_engineering.planner",
+                        metadata={
+                            "task_id": "task_glm_repair",
+                            "planner_work_order": build_planner_work_order(
+                                goal="Repair weak planner output.",
+                                task_id="task_glm_repair",
+                                work_order_id="wo_glm_repair",
+                            ),
+                        },
+                    ),
+                    minion_id="m_glm_repair",
+                    run_id="r_glm_repair",
+                    write_event=write_event,
+                    read_decision=read_decision,
+                    runtime_bundle=MinionRuntimeBundle(llm_runtime=llm, execution_runtime=FakeExecution()),
+                ).run()
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+            self.assertEqual(code, 0)
+            self.assertTrue(llm.saw_repair_note)
+            self.assertIn("planner_artifact_repair_retry", [event["payload"].get("phase") for event in events])
+            checkpoint = next(event for event in events if event["event_kind"] == "checkpoint")
+            self.assertEqual(checkpoint["payload"]["status"], "completed")
+            self.assertEqual(checkpoint["payload"]["plan_validation"]["status"], "valid")
+            self.assertEqual(checkpoint["payload"]["plan_ref"]["plan_id"], "plan_glm_repaired")
+            self.assertEqual(checkpoint["payload"]["plan_ref"]["relative_path"], "plan_2.json")
+            terminal = next(event for event in events if event["event_kind"] == "terminal")
+            self.assertEqual(terminal["payload"]["status"], "completed")
 
         asyncio.run(scenario())
 
@@ -1211,6 +1700,58 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(snapshot["task_lessons"][0]["lesson_text"], "Use the existing milestone cursor.")
         self.assertEqual(snapshot["pending_system_lesson_candidates"], [])
 
+    def test_recover_stale_running_module_releases_parent_without_completing_module(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_recover_stale",
+            task_id="task_recover_stale",
+            modules=[_plan_module("module_recover_stale")],
+        )
+        parent = self.repository.build_plan_parent_pack_from_plan(plan, work_order_id="wo_recover_parent")
+        self.repository.prepare_pack_for_spawn(parent)
+        child_pack = self.repository.next_plan_module_pack("wo_recover_parent", allow_paused=True)
+        assert child_pack is not None
+        self.repository.prepare_pack_for_spawn(child_pack)
+
+        result = self.repository.recover_stale_running_modules(
+            active_child_work_order_ids=set(),
+            work_order_id="wo_recover_parent",
+            reason="unit test stale child",
+        )
+
+        self.assertEqual(result["status"], "recovered")
+        parent_snapshot = self.repository.read_work_order("wo_recover_parent")
+        plan_execution = parent_snapshot["work_order"]["metadata"]["plan_execution"]
+        self.assertEqual(plan_execution["status"], "awaiting_continue")
+        self.assertNotIn("active_child_work_order_id", plan_execution)
+        self.assertEqual(plan_execution["last_released_child_work_order_id"], child_pack.work_order_id)
+        self.assertEqual(parent_snapshot["current_milestone"]["milestone_index"], 0)
+        child_snapshot = self.repository.read_work_order(child_pack.work_order_id)
+        self.assertEqual(child_snapshot["work_order"]["status"], "failed")
+        self.assertTrue(any(item["event_kind"] == "module_recovered" for item in parent_snapshot["recent_ledger"]))
+
+    def test_recover_stale_running_module_keeps_active_child_running(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_recover_active",
+            task_id="task_recover_active",
+            modules=[_plan_module("module_recover_active")],
+        )
+        parent = self.repository.build_plan_parent_pack_from_plan(plan, work_order_id="wo_recover_active_parent")
+        self.repository.prepare_pack_for_spawn(parent)
+        child_pack = self.repository.next_plan_module_pack("wo_recover_active_parent", allow_paused=True)
+        assert child_pack is not None
+        self.repository.prepare_pack_for_spawn(child_pack)
+
+        result = self.repository.recover_stale_running_modules(
+            active_child_work_order_ids={child_pack.work_order_id},
+            work_order_id="wo_recover_active_parent",
+        )
+
+        self.assertEqual(result["status"], "active_child_running")
+        parent_snapshot = self.repository.read_work_order("wo_recover_active_parent")
+        plan_execution = parent_snapshot["work_order"]["metadata"]["plan_execution"]
+        self.assertEqual(plan_execution["status"], "running_module")
+        self.assertEqual(plan_execution["active_child_work_order_id"], child_pack.work_order_id)
+
     def test_one_task_cannot_have_two_active_work_orders(self) -> None:
         self.repository.prepare_pack_for_spawn(
             TaskContextPack(work_order_id="wo_a", goal="same task", metadata={"task_id": "task_one", "milestones": ["first"]})
@@ -1304,23 +1845,1056 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertNotIn("Other module internals", rendered)
         self.assertNotIn("run_dir", rendered)
 
-    def test_plan_driven_module_pack_advances_to_next_milestone(self) -> None:
-        plan = {
-            "type": "FinalPlanArtifact",
-            "plan_id": "plan_serial",
-            "task_id": "task_serial",
-            "summary": "Serial module implementation.",
-            "modules": [
-                {
-                    "module_id": "module_serial",
-                    "owned_area": ["src/pal/minion/repository.py"],
-                    "internal_milestones": [
-                        {"milestone_id": "m1", "title": "First milestone", "task": "Implement first part."},
-                        {"milestone_id": "m2", "title": "Second milestone", "task": "Implement second part."},
+    def test_prepare_pack_for_spawn_scopes_plain_work_order_to_current_milestone(self) -> None:
+        prepared = self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_plain_scope",
+                goal="Implement the whole project",
+                instruction="Do milestone one and milestone two and milestone three in one go.",
+                metadata={
+                    "task_id": "task_plain_scope",
+                    "milestones": [
+                        {"title": "Milestone one", "summary": "Do only milestone one.", "acceptance": ["one done"]},
+                        {"title": "Milestone two", "summary": "Do only milestone two.", "acceptance": ["two done"]},
                     ],
-                }
-            ],
+                },
+            )
+        )
+        rendered = _render_task_prompt(prepared)
+
+        self.assertEqual(prepared.metadata["prompt_view"]["milestone"]["title"], "Milestone one")
+        self.assertIn("Do only milestone one.", rendered)
+        self.assertNotIn("Do milestone one and milestone two and milestone three in one go.", rendered)
+        self.assertNotIn("Milestone two", rendered)
+
+    def test_plan_ref_loads_dispatchable_artifact_with_hash(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_ref",
+            task_id="task_ref",
+            modules=[_plan_module("module_ref", title="Ref module")],
+        )
+        artifact_path = self.root / "plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+
+        loaded = self.repository.load_dispatchable_plan_ref({"path": str(artifact_path), "sha256": digest})
+
+        self.assertEqual(loaded["plan_ref"]["sha256"], digest)
+        self.assertEqual(loaded["plan_ref"]["plan_revision"], 0)
+        self.assertEqual(loaded["plan_artifact"]["plan_revision"], 0)
+        self.assertEqual(loaded["plan_validation"]["module_order"], ["module_prelude", "module_ref", "module_join"])
+        with self.assertRaises(ValueError):
+            self.repository.load_dispatchable_plan_ref({"path": str(artifact_path), "sha256": "bad"})
+
+    def test_plan_ref_must_be_accepted_before_dispatch(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_accept_required",
+            task_id="task_accept_required",
+            modules=[_plan_module("module_accept_required", title="Accepted module")],
+        )
+        artifact_path = self.root / "accepted-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        source_ref = {"path": str(artifact_path), "sha256": digest}
+
+        with self.assertRaisesRegex(ValueError, "not accepted"):
+            self.repository.load_accepted_plan_ref({**source_ref, "accepted": True})
+
+        review_gate_ref = _submit_plan_review_gate(self.repository, source_ref)
+        accepted = self.repository.accept_plan_ref(source_ref, reason="reviewer passed", review_gate_ref=review_gate_ref)
+        loaded = self.repository.load_accepted_plan_ref(accepted["plan_ref"])
+
+        self.assertTrue(loaded["plan_ref"]["accepted"])
+        self.assertEqual(loaded["plan_ref"]["sha256"], digest)
+        self.assertEqual(loaded["plan_validation"]["status"], "valid")
+        self.assertEqual(loaded["review_gate_ref"]["gate_id"], review_gate_ref["gate_id"])
+
+    def test_plan_ref_revision_writes_immutable_validated_artifact(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_revision",
+            task_id="task_revision",
+            modules=[_plan_module("module_revision", title="Revision module")],
+        )
+        plan["plan_revision"] = 0
+        artifact_path = self.root / "plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+        source_ref = {"path": str(artifact_path), "sha256": digest}
+
+        revised = json.loads(json.dumps(plan))
+        revised["summary"] = "Reviewed dispatchable plan."
+        revised["plan_revision"] = 1
+        result = self.repository.revise_plan_ref(source_ref, revised, revision_notes="human tightened module boundaries")
+
+        self.assertEqual(result["status"], "revised")
+        self.assertEqual(result["plan_revision"], 1)
+        self.assertEqual(result["plan_ref"]["plan_revision"], 1)
+        self.assertEqual(json.loads(artifact_path.read_text(encoding="utf-8"))["summary"], plan["summary"])
+        revision_path = Path(result["plan_ref"]["path"])
+        self.assertTrue(revision_path.exists())
+        self.assertIn("data/minion/plan_revisions/task_revision/plan_revision/plan.v1.json", str(revision_path))
+        self.assertEqual(hashlib.sha256(revision_path.read_bytes()).hexdigest(), result["plan_ref"]["sha256"])
+
+        loaded = self.repository.load_dispatchable_plan_ref(result["plan_ref"])
+        self.assertEqual(loaded["plan_artifact"]["summary"], "Reviewed dispatchable plan.")
+        self.assertEqual(loaded["plan_artifact"]["plan_revision"], 1)
+        self.assertEqual(loaded["plan_ref"]["plan_revision"], 1)
+        self.assertEqual(loaded["plan_validation"]["status"], "valid")
+
+        stale_revised = json.loads(json.dumps(revised))
+        stale_revised["summary"] = "Stale write should fail."
+        with self.assertRaisesRegex(ValueError, "stale"):
+            self.repository.revise_plan_ref(source_ref, stale_revised)
+
+    def test_failed_plan_review_gate_spawns_revision_planner_pack(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_gate_revision",
+            task_id="task_gate_revision",
+            modules=[_plan_module("module_gate_revision", title="Gate revision module")],
+        )
+        artifact_path = self.root / "gate-revision-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        source_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
+        review_gate_ref = _submit_plan_review_gate(self.repository, source_ref, verdict="fail")
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.spawned: list[dict] = []
+
+            def spawn_sync(self, payload):
+                self.spawned.append(dict(payload))
+                return {"status": "running", "run_id": "run_plan_revision"}
+
+        provider = MinionManagerProvider(runtime_root=self.root)
+        fake_client = FakeClient()
+        provider.client = fake_client
+        provider._ensure_manager_started = lambda: None  # type: ignore[method-assign]
+
+        result = provider.spawn(
+            CapabilityCall(
+                name="op_minion_spawn",
+                args={
+                    "artifact_refs": [{"kind": "plan_review_gate", "gate_id": review_gate_ref["gate_id"]}],
+                    "workspace": {"repo_path": str(self.root)},
+                },
+            )
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(len(fake_client.spawned), 1)
+        spawned = fake_client.spawned[0]
+        self.assertEqual(spawned["minion_profile"], "software_engineering.planner")
+        self.assertEqual(spawned["metadata"]["task_id"], "task_gate_revision")
+        self.assertEqual(spawned["metadata"]["planner_work_order"]["plan_revision"], 1)
+        self.assertEqual(spawned["metadata"]["source_plan_ref"]["path"], str(artifact_path))
+        self.assertEqual(spawned["metadata"]["review_gate_ref"]["gate_id"], review_gate_ref["gate_id"])
+        self.assertEqual(spawned["metadata"]["prompt_view"]["revision_source"]["review_gate"]["verdict"], "fail")
+        self.assertIn("plan_revision=1", spawned["instruction"])
+        self.assertEqual(spawned["metadata"]["plan_review"]["status"], "revision_in_progress")
+
+    def test_plan_ref_revision_rejects_identity_drift_and_bad_revision(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_identity",
+            task_id="task_identity",
+            modules=[_plan_module("module_identity", title="Identity module")],
+        )
+        artifact_path = self.root / "identity-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        source_ref = {
+            "path": str(artifact_path),
+            "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
         }
+
+        bad_revision = json.loads(json.dumps(plan))
+        bad_revision["plan_revision"] = 3
+        with self.assertRaisesRegex(ValueError, "plan_revision"):
+            self.repository.revise_plan_ref(source_ref, bad_revision)
+
+        bad_task = json.loads(json.dumps(plan))
+        bad_task["task_id"] = "other_task"
+        bad_task["plan_revision"] = 1
+        with self.assertRaisesRegex(ValueError, "task_id"):
+            self.repository.revise_plan_ref(source_ref, bad_task)
+
+        bad_plan = json.loads(json.dumps(plan))
+        bad_plan["plan_id"] = "other_plan"
+        bad_plan["plan_revision"] = 1
+        with self.assertRaisesRegex(ValueError, "plan_id"):
+            self.repository.revise_plan_ref(source_ref, bad_plan)
+
+    def test_plan_acceptance_verifies_hash_and_writes_marker(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_accept",
+            task_id="task_accept",
+            modules=[_plan_module("module_accept", title="Accept module")],
+        )
+        artifact_path = self.root / "accept-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        plan_ref = {
+            "path": str(artifact_path),
+            "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+        }
+
+        review_gate_ref = _submit_plan_review_gate(self.repository, plan_ref)
+        accepted = self.repository.accept_plan_ref(plan_ref, reason="reviewed by reviewer", review_gate_ref=review_gate_ref)
+
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertTrue(accepted["plan_ref"]["accepted"])
+        self.assertEqual(accepted["review_gate_ref"]["gate_id"], review_gate_ref["gate_id"])
+        marker_path = Path(accepted["acceptance_marker_path"])
+        self.assertTrue(marker_path.exists())
+        self.assertEqual(marker_path.name, "accepted.v0.json")
+        self.assertTrue(Path(accepted["accepted_latest_marker_path"]).exists())
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        self.assertEqual(marker["plan_ref"]["plan_id"], "plan_accept")
+        self.assertEqual(marker["reason"], "reviewed by reviewer")
+        self.assertEqual(marker["review_gate_ref"]["gate_id"], review_gate_ref["gate_id"])
+        loaded = self.repository.load_dispatchable_plan_ref(accepted["plan_ref"])
+        self.assertTrue(loaded["plan_ref"]["accepted"])
+        self.assertEqual(loaded["plan_ref"]["acceptance_marker_path"], str(marker_path))
+        self.assertEqual(loaded["plan_ref"]["accepted_latest_marker_path"], accepted["accepted_latest_marker_path"])
+
+    def test_plan_acceptance_requires_passed_review_gate_or_override(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_gate_required",
+            task_id="task_gate_required",
+            modules=[_plan_module("module_gate_required", title="Gate module")],
+        )
+        artifact_path = self.root / "gate-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        plan_ref = {
+            "path": str(artifact_path),
+            "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+        }
+
+        with self.assertRaisesRegex(ValueError, "requires passing plan review gate"):
+            self.repository.accept_plan_ref(plan_ref, reason="no gate")
+
+        failed_gate = _submit_plan_review_gate(self.repository, plan_ref, verdict="fail")
+        with self.assertRaisesRegex(ValueError, "verdict=pass"):
+            self.repository.accept_plan_ref(plan_ref, review_gate_ref=failed_gate)
+
+        partial_gate = _submit_plan_review_gate(self.repository, plan_ref, verdict="partial")
+        with self.assertRaisesRegex(ValueError, "verdict=pass"):
+            self.repository.accept_plan_ref(plan_ref, review_gate_ref=partial_gate)
+
+        accepted = self.repository.accept_plan_ref(
+            plan_ref,
+            reason="manual acceptance",
+            human_override={
+                "reason": "Nathan accepts the plan after reading it",
+                "actor": "Nathan",
+                "source": "control_action",
+                "action_kind": "minion_plan_accept_override",
+                "target_scope": "minion",
+                "target_id": "plan_gate_required",
+            },
+        )
+        self.assertEqual(accepted["human_override"]["actor"], "Nathan")
+        marker = json.loads(Path(accepted["acceptance_marker_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(marker["human_override"]["reason"], "Nathan accepts the plan after reading it")
+
+    def test_plan_acceptance_rejects_stale_review_gate(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_gate_stale",
+            task_id="task_gate_stale",
+            modules=[_plan_module("module_gate_stale", title="Stale gate module")],
+        )
+        artifact_path = self.root / "stale-gate-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        source_ref = {
+            "path": str(artifact_path),
+            "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+        }
+        stale_gate = _submit_plan_review_gate(self.repository, source_ref)
+        revised = json.loads(json.dumps(plan))
+        revised["plan_revision"] = 1
+        revised["summary"] = "Review required again."
+        revision = self.repository.revise_plan_ref(source_ref, revised, revision_notes="tightened")
+
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            self.repository.accept_plan_ref(revision["plan_ref"], review_gate_ref=stale_gate)
+
+    def test_manager_auto_spawns_plan_reviewer_and_records_plan_gate_event(self) -> None:
+        class FakePlanReviewManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started_reviewers: list[MinionRunState] = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                if state.pack.minion_profile == "software_engineering.reviewer":
+                    self.started_reviewers.append(state)
+
+        async def scenario() -> None:
+            manager = FakePlanReviewManager(runtime_root=self.root)
+            artifact = _dispatchable_plan_payload(
+                plan_id="plan_auto_review",
+                task_id="task_auto_review",
+                modules=[_plan_module("module_auto_review", title="Auto review module")],
+            )
+            plan_path = self.root / "plans" / "plan.json"
+            plan_path.parent.mkdir(parents=True)
+            plan_path.write_text(json.dumps(artifact), encoding="utf-8")
+            plan_ref = {
+                "path": str(plan_path),
+                "sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+                "plan_id": "plan_auto_review",
+                "task_id": "task_auto_review",
+                "plan_revision": 0,
+            }
+            planner_pack = MinionProfileRegistry(runtime_root=self.root).resolve_pack(
+                TaskContextPack(
+                    work_order_id="wo_auto_plan",
+                    goal="Plan auto review.",
+                    workspace={"artifact_dir": str(self.root / "planner_artifacts")},
+                    minion_profile="software_engineering.planner",
+                    metadata={
+                        "task_id": "task_auto_review",
+                        "milestones": ["Produce plan artifact"],
+                        "plan_review": {"auto_accept": True, "acceptance_reason": "test auto accepts reviewed plan"},
+                    },
+                ),
+                requested_profile="software_engineering.planner",
+            )
+            spawned = await manager.spawn(planner_pack.to_dict())
+            planner_state = manager.runs[spawned["run_id"]]
+            manager._record_event(
+                planner_state,
+                {
+                    "event_kind": "checkpoint",
+                    "payload": {
+                        "status": "completed",
+                        "summary": "planner produced valid plan",
+                        "plan_ref": dict(plan_ref),
+                        "plan_validation": {"status": "valid", "node_order": ["prelude", "module_auto_review", "join"]},
+                    },
+                    "created_at": utc_now(),
+                },
+            )
+            for _ in range(50):
+                if manager.started_reviewers:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(len(manager.started_reviewers), 1)
+            reviewer_state = manager.started_reviewers[0]
+            self.assertEqual(reviewer_state.pack.minion_profile, "software_engineering.reviewer")
+            self.assertEqual(reviewer_state.pack.workspace["review_target_plan_ref"]["plan_id"], "plan_auto_review")
+            self.assertIn("review_scratch_dir", reviewer_state.pack.workspace)
+            self.assertTrue(Path(reviewer_state.pack.workspace["review_scratch_dir"]).exists())
+            self.assertIn("review_scratch_dir", reviewer_state.pack.metadata["prompt_view"]["workspace"])
+            self.assertEqual(reviewer_state.pack.metadata["review_target"]["plan_ref"]["sha256"], plan_ref["sha256"])
+
+            gate = manager.tasking_repository.submit_review_gate(
+                {
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": dict(plan_ref)},
+                    "verdict": "pass",
+                    "summary": "plan reviewer accepted auto plan",
+                    "evidence": [{"kind": "plan_review", "summary": "topology and milestones reviewed"}],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "test plan has no API claims"}],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "test plan has no language server-backed API claims",
+                    },
+                    "reviewer_profile": "software_engineering.reviewer",
+                },
+                reviewer_profile="software_engineering.reviewer",
+                work_order_id=reviewer_state.pack.work_order_id,
+                run_id=reviewer_state.run_id,
+            )
+            self.assertEqual(gate["status"], "recorded")
+            review_key = next(iter(manager._plan_reviews_inflight))
+            await manager._reconcile_plan_review(reviewer_state, plan_ref, review_key)
+            events = [event for event in manager.event_queue if event.get("event_kind") == "plan_review_passed"]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["payload"]["review_gate_ref"]["verdict"], "pass")
+            accepted_events = [event for event in manager.event_queue if event.get("event_kind") == "plan_accepted"]
+            self.assertEqual(len(accepted_events), 1)
+            loaded = manager.tasking_repository.load_accepted_plan_ref(plan_ref)
+            self.assertTrue(loaded["plan_ref"]["accepted"])
+            snapshot = manager.tasking_repository.read_work_order("wo_auto_plan")
+            self.assertEqual(snapshot["work_order"]["metadata"]["plan_review"]["status"], "accepted")
+
+        asyncio.run(scenario())
+
+    def test_manager_plan_review_failure_records_revision_required_state(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root)
+            artifact = _dispatchable_plan_payload(
+                plan_id="plan_revision_required",
+                task_id="task_revision_required",
+                modules=[_plan_module("module_revision_required", title="Revision required module")],
+            )
+            plan_path = self.root / "plans" / "revision-required.json"
+            plan_path.parent.mkdir(parents=True)
+            plan_path.write_text(json.dumps(artifact), encoding="utf-8")
+            plan_ref = {
+                "path": str(plan_path),
+                "sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+                "plan_id": "plan_revision_required",
+                "task_id": "task_revision_required",
+                "plan_revision": 0,
+            }
+            planner_pack = MinionProfileRegistry(runtime_root=self.root).resolve_pack(
+                TaskContextPack(
+                    work_order_id="wo_revision_required_plan",
+                    goal="Plan revision required.",
+                    workspace={"artifact_dir": str(self.root / "planner_artifacts")},
+                    minion_profile="software_engineering.planner",
+                    metadata={"task_id": "task_revision_required", "milestones": ["Produce plan artifact"]},
+                ),
+                requested_profile="software_engineering.planner",
+            )
+            manager.tasking_repository.prepare_pack_for_spawn(planner_pack)
+            manager._plan_reviews_inflight.add(_plan_review_key_for_test(plan_ref))
+            reviewer_pack = TaskContextPack(
+                work_order_id="wo_revision_required_review",
+                goal="review failed plan",
+                minion_profile="software_engineering.reviewer",
+                metadata={
+                    "review_target": {"plan_ref": dict(plan_ref), "planner_work_order_id": "wo_revision_required_plan"},
+                    "plan_review_for_work_order_id": "wo_revision_required_plan",
+                    "plan_review_key": _plan_review_key_for_test(plan_ref),
+                },
+            )
+            reviewer_state = MinionRunState(
+                minion_id="m_revision_required_reviewer",
+                run_id="r_revision_required_reviewer",
+                pack=reviewer_pack,
+                status="running",
+            )
+            manager.runs[reviewer_state.run_id] = reviewer_state
+            manager.tasking_repository.submit_review_gate(
+                {
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": dict(plan_ref)},
+                    "verdict": "fail",
+                    "summary": "plan references a missing API",
+                    "findings": [{"severity": "blocker", "summary": "missing API evidence"}],
+                    "reviewer_profile": "software_engineering.reviewer",
+                },
+                reviewer_profile="software_engineering.reviewer",
+                work_order_id=reviewer_state.pack.work_order_id,
+                run_id=reviewer_state.run_id,
+            )
+            await manager._reconcile_plan_review(reviewer_state, plan_ref, _plan_review_key_for_test(plan_ref))
+
+            events = [event for event in manager.event_queue if event.get("event_kind") == "plan_revision_required"]
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["work_order_id"], "wo_revision_required_plan")
+            snapshot = manager.tasking_repository.read_work_order("wo_revision_required_plan")
+            plan_review = snapshot["work_order"]["metadata"]["plan_review"]
+            self.assertEqual(plan_review["status"], "revision_required")
+            self.assertEqual(plan_review["next_action"], "revise_plan")
+
+        asyncio.run(scenario())
+
+    def test_manager_auto_revises_failed_plan_when_bounded_policy_enabled(self) -> None:
+        class FakeAutoRevisionManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.spawned_revision_planners: list[MinionRunState] = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                if (
+                    state.pack.minion_profile == "software_engineering.planner"
+                    and state.pack.work_order_id != "wo_auto_revision_source"
+                ):
+                    self.spawned_revision_planners.append(state)
+
+        async def scenario() -> None:
+            manager = FakeAutoRevisionManager(runtime_root=self.root)
+            artifact = _dispatchable_plan_payload(
+                plan_id="plan_auto_revision",
+                task_id="task_auto_revision",
+                modules=[_plan_module("module_auto_revision", title="Auto revision module")],
+            )
+            plan_path = self.root / "plans" / "auto-revision.json"
+            plan_path.parent.mkdir(parents=True)
+            plan_path.write_text(json.dumps(artifact), encoding="utf-8")
+            plan_ref = {
+                "path": str(plan_path),
+                "sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+                "plan_id": "plan_auto_revision",
+                "task_id": "task_auto_revision",
+                "plan_revision": 0,
+            }
+            planner_pack = MinionProfileRegistry(runtime_root=self.root).resolve_pack(
+                TaskContextPack(
+                    work_order_id="wo_auto_revision_source",
+                    goal="Plan auto revision.",
+                    workspace={"artifact_dir": str(self.root / "planner_artifacts")},
+                    minion_profile="software_engineering.planner",
+                    metadata={
+                        "task_id": "task_auto_revision",
+                        "milestones": ["Produce plan artifact"],
+                        "plan_review": {"auto_revise": True, "max_auto_revision_attempts": 1},
+                    },
+                ),
+                requested_profile="software_engineering.planner",
+            )
+            manager.tasking_repository.prepare_pack_for_spawn(planner_pack)
+            manager.tasking_repository.record_minion_event(
+                {
+                    "event_kind": "checkpoint",
+                    "work_order_id": "wo_auto_revision_source",
+                    "minion_id": "m_auto_revision_source",
+                    "run_id": "r_auto_revision_source",
+                    "payload": {
+                        "checkpoint_id": "chk_auto_revision_source",
+                        "status": "completed",
+                        "milestone_index": 0,
+                        "summary": "source planner checkpoint completed",
+                    },
+                    "created_at": utc_now(),
+                }
+            )
+            manager.tasking_repository.record_minion_event(
+                {
+                    "event_kind": "terminal",
+                    "work_order_id": "wo_auto_revision_source",
+                    "minion_id": "m_auto_revision_source",
+                    "run_id": "r_auto_revision_source",
+                    "payload": {"status": "completed", "summary": "source planner completed"},
+                    "created_at": utc_now(),
+                }
+            )
+            reviewer_pack = TaskContextPack(
+                work_order_id="wo_auto_revision_review",
+                goal="review failed plan",
+                minion_profile="software_engineering.reviewer",
+                metadata={
+                    "review_target": {"plan_ref": dict(plan_ref), "planner_work_order_id": "wo_auto_revision_source"},
+                    "plan_review_for_work_order_id": "wo_auto_revision_source",
+                    "plan_review_key": _plan_review_key_for_test(plan_ref),
+                    "plan_review": {"auto_revise": True, "max_auto_revision_attempts": 1},
+                },
+            )
+            reviewer_state = MinionRunState(
+                minion_id="m_auto_revision_reviewer",
+                run_id="r_auto_revision_reviewer",
+                pack=reviewer_pack,
+                status="running",
+            )
+            manager.runs[reviewer_state.run_id] = reviewer_state
+            manager._plan_reviews_inflight.add(_plan_review_key_for_test(plan_ref))
+            manager.tasking_repository.submit_review_gate(
+                {
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": dict(plan_ref)},
+                    "verdict": "fail",
+                    "summary": "plan needs revision",
+                    "findings": [{"severity": "blocker", "summary": "missing API evidence"}],
+                    "reviewer_profile": "software_engineering.reviewer",
+                },
+                reviewer_profile="software_engineering.reviewer",
+                work_order_id=reviewer_state.pack.work_order_id,
+                run_id=reviewer_state.run_id,
+            )
+
+            await manager._reconcile_plan_review(reviewer_state, plan_ref, _plan_review_key_for_test(plan_ref))
+
+            self.assertEqual(len(manager.spawned_revision_planners), 1)
+            revision_state = manager.spawned_revision_planners[0]
+            self.assertEqual(revision_state.pack.metadata["prompt_view"]["plan_revision"], 1)
+            self.assertEqual(revision_state.pack.metadata["prompt_view"]["revision_source"]["review_gate"]["verdict"], "fail")
+            self.assertEqual(revision_state.pack.metadata["plan_review"]["auto_revision_attempt"], 1)
+            events = [event for event in manager.event_queue if event.get("event_kind") == "plan_revision_spawned"]
+            self.assertEqual(len(events), 1)
+            snapshot = manager.tasking_repository.read_work_order("wo_auto_revision_source")
+            self.assertEqual(snapshot["work_order"]["metadata"]["plan_review"]["status"], "revision_spawned")
+
+        asyncio.run(scenario())
+
+    def test_checkpoint_pass_requires_command_and_api_evidence(self) -> None:
+        checkpoint_id = "chk_missing_review_evidence"
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_missing_review_evidence",
+                "minion_id": "m_review_evidence",
+                "run_id": "r_review_evidence",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                },
+                "created_at": utc_now(),
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "commands_run"):
+            self.repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123"},
+                    "verdict": "pass",
+                    "summary": "weak pass",
+                    "evidence": [{"kind": "review", "summary": "not enough"}],
+                    "reviewer_profile": "software_engineering.reviewer",
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "api_evidence"):
+            self.repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123"},
+                    "verdict": "pass",
+                    "summary": "still weak pass",
+                    "evidence": [{"kind": "review", "summary": "not enough"}],
+                    "commands_run": [{"command": "pytest tests/test_x.py", "status": "passed"}],
+                    "reviewer_profile": "software_engineering.reviewer",
+                }
+            )
+
+    def test_checkpoint_pass_requires_evidence_coverage_for_acceptance_criteria(self) -> None:
+        checkpoint_id = "chk_missing_coverage"
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_missing_coverage",
+                "minion_id": "m_missing_coverage",
+                "run_id": "r_missing_coverage",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "acceptance_criteria": ["Feature result is verified."],
+                },
+                "created_at": utc_now(),
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "lacks evidence coverage"):
+            self.repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123"},
+                    "verdict": "pass",
+                    "summary": "coverage missing",
+                    "evidence": [{"kind": "review", "summary": "reviewed"}],
+                    "commands_run": [
+                        {
+                            "command": "pytest tests/test_feature.py",
+                            "status": "passed",
+                            "summary": "test command passed",
+                        }
+                    ],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                }
+            )
+
+        recorded = self.repository.submit_review_gate(
+            {
+                "gate_kind": "checkpoint_verification",
+                "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123"},
+                "verdict": "pass",
+                "summary": "coverage present",
+                "evidence": [{"kind": "review", "summary": "reviewed"}],
+                "commands_run": [
+                    {
+                        "command": "pytest tests/test_feature.py",
+                        "status": "passed",
+                        "summary": "test command passed",
+                        "covers": ["Feature result is verified."],
+                    }
+                ],
+                "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                "metadata": {
+                    "lsp_evidence_not_applicable": True,
+                    "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                },
+            }
+        )
+        self.assertEqual(recorded["review_gate_ref"]["verdict"], "pass")
+
+    def test_review_gate_tool_evidence_refs_must_be_ledger_backed(self) -> None:
+        checkpoint_id = "chk_fake_tool_ref"
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_fake_tool_ref",
+                "minion_id": "m_fake_tool_ref",
+                "run_id": "r_fake_tool_ref",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "acceptance_criteria": ["Feature result is verified."],
+                },
+                "created_at": utc_now(),
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "unknown review tool evidence ledger_id"):
+            self.repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123"},
+                    "verdict": "pass",
+                    "summary": "fake tool ref should fail",
+                    "evidence": [{"kind": "review", "summary": "reviewed"}],
+                    "commands_run": [
+                        {
+                            "command": "pytest tests/test_feature.py",
+                            "status": "passed",
+                            "summary": "test command passed",
+                            "covers": ["Feature result is verified."],
+                        }
+                    ],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                    "metadata": {
+                        "tool_evidence_refs": [{"kind": "command", "ledger_id": "ledger_missing"}],
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                }
+            )
+
+    def test_shell_mutation_violation_blocks_checkpoint_review_pass(self) -> None:
+        pack = TaskContextPack(
+            work_order_id="wo_shell_violation_gate",
+            goal="gate shell mutation",
+            metadata={"task_id": "task_shell_violation_gate", "milestones": ["implement"]},
+        )
+        self.repository.prepare_pack_for_spawn(pack)
+        checkpoint_id = "chk_shell_violation_gate"
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_shell_violation_gate",
+                "minion_id": "m_shell",
+                "run_id": "r_shell",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed with shell mutation",
+                    "commit_sha": "abc123",
+                    "shell_mutation_violations": [
+                        {
+                            "violation_id": "shell_mut_test",
+                            "kind": "shell_workspace_mutation",
+                            "summary": "shell created an untracked file",
+                        }
+                    ],
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "shell_mutation_violations"):
+            self.repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123"},
+                    "verdict": "pass",
+                    "summary": "attempted pass",
+                    "evidence": [{"kind": "test", "summary": "fake evidence"}],
+                    "commands_run": [
+                        {
+                            "command": "fake-review-check",
+                            "cwd": str(self.root),
+                            "status": "passed",
+                            "summary": "fake reviewer reached shell mutation check",
+                        }
+                    ],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "no API claim in shell mutation fixture"}],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "shell mutation fixture has no symbol-level API claims",
+                    },
+                    "reviewer_profile": "software_engineering.reviewer",
+                }
+            )
+
+    def test_revise_plan_capability_returns_new_plan_ref(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_cap_revision",
+            task_id="task_cap_revision",
+            modules=[_plan_module("module_cap_revision", title="Capability revision module")],
+        )
+        artifact_path = self.root / "capability-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        revised = json.loads(json.dumps(plan))
+        revised["summary"] = "Capability wrote a reviewed revision."
+        revised["plan_revision"] = 1
+
+        provider = MinionManagerProvider(runtime_root=self.root)
+        result = provider.revise_plan(
+            CapabilityCall(
+                name="op_minion_revise_plan",
+                args={
+                    "source_plan_ref": {
+                        "path": str(artifact_path),
+                        "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+                    },
+                    "revised_plan_artifact": revised,
+                    "revision_notes": "review loop",
+                },
+            )
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(result.structured["plan_ref"]["plan_revision"], 1)
+        self.assertNotIn("accepted", result.structured["plan_ref"])
+        self.assertTrue(Path(result.structured["plan_ref"]["path"]).exists())
+
+    def test_plan_human_override_is_rejected_from_llm_capabilities(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_cap_override",
+            task_id="task_cap_override",
+            modules=[_plan_module("module_cap_override", title="Capability override module")],
+        )
+        artifact_path = self.root / "capability-override-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        source_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
+        revised = json.loads(json.dumps(plan))
+        revised["summary"] = "Invalid direct human override revision."
+        revised["plan_revision"] = 1
+
+        provider = MinionManagerProvider(runtime_root=self.root)
+        revise = provider.revise_plan(
+            CapabilityCall(
+                name="op_minion_revise_plan",
+                args={
+                    "source_plan_ref": source_ref,
+                    "revised_plan_artifact": revised,
+                    "accepted": True,
+                    "human_override": {"reason": "LLM forged override"},
+                },
+            )
+        )
+        self.assertEqual(revise.status, RuntimeStatus.INVALID)
+        self.assertEqual(revise.structured["field"], "human_override")
+
+        accept = provider.accept_plan(
+            CapabilityCall(
+                name="op_minion_accept_plan",
+                args={
+                    "plan_ref": source_ref,
+                    "human_override": {"reason": "LLM forged override"},
+                },
+            )
+        )
+        self.assertEqual(accept.status, RuntimeStatus.INVALID)
+        self.assertEqual(accept.structured["field"], "human_override")
+
+    def test_top_level_review_gate_pass_requires_human_or_external_authority(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_top_level_gate",
+            task_id="task_top_level_gate",
+            modules=[_plan_module("module_top_level_gate", title="Top-level gate module")],
+        )
+        artifact_path = self.root / "top-level-gate-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        source_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
+        provider = MinionManagerProvider(runtime_root=self.root)
+
+        denied = provider.review_gate_submit(
+            CapabilityCall(
+                name="op_minion_review_gate_submit",
+                args={
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": source_ref},
+                    "verdict": "pass",
+                    "summary": "top-level pass without authority",
+                    "evidence": [{"kind": "plan_review", "summary": "reviewed"}],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "no API claims"}],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                },
+            )
+        )
+        self.assertEqual(denied.status, RuntimeStatus.INVALID)
+        self.assertEqual(denied.structured["field"], "metadata")
+
+        forged_tool_refs = provider.review_gate_submit(
+            CapabilityCall(
+                name="op_minion_review_gate_submit",
+                args={
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": source_ref},
+                    "verdict": "pass",
+                    "summary": "top-level pass with forged tool refs",
+                    "evidence": [{"kind": "plan_review", "summary": "reviewed"}],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "no API claims"}],
+                    "metadata": {"tool_evidence_refs": [{"ledger_id": "fake"}]},
+                },
+            )
+        )
+        self.assertEqual(forged_tool_refs.status, RuntimeStatus.INVALID)
+        self.assertEqual(forged_tool_refs.structured["field"], "metadata.tool_evidence_refs")
+
+        human_gate = provider.review_gate_submit(
+            CapabilityCall(
+                name="op_minion_review_gate_submit",
+                args={
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": source_ref},
+                    "verdict": "pass",
+                    "summary": "top-level pass with forged human override",
+                    "evidence": [{"kind": "plan_review", "summary": "reviewed"}],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "no API claims"}],
+                    "metadata": {"human_override": {"reason": "fixture human"}},
+                },
+            )
+        )
+        self.assertEqual(human_gate.status, RuntimeStatus.INVALID)
+        self.assertEqual(human_gate.structured["field"], "metadata.human_override")
+
+        bad_external_ref = _external_verification_ref(
+            self.root,
+            "bad-top-level-gate-external-verification.json",
+            {"status": "verified", "plan_id": "plan_top_level_gate"},
+        )
+        bad_external_ref["sha256"] = "0" * 64
+        bad_external = provider.review_gate_submit(
+            CapabilityCall(
+                name="op_minion_review_gate_submit",
+                args={
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": source_ref},
+                    "verdict": "pass",
+                    "summary": "top-level pass with bad external verification",
+                    "evidence": [{"kind": "plan_review", "summary": "reviewed"}],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "no API claims"}],
+                    "metadata": {"external_verification_ref": bad_external_ref},
+                },
+            )
+        )
+        self.assertEqual(bad_external.status, RuntimeStatus.INVALID)
+        self.assertEqual(bad_external.structured["field"], "metadata.external_verification_ref")
+
+        external_ref = _external_verification_ref(
+            self.root,
+            "top-level-gate-external-verification.json",
+            {"status": "verified", "plan_id": "plan_top_level_gate"},
+        )
+        accepted = provider.review_gate_submit(
+            CapabilityCall(
+                name="op_minion_review_gate_submit",
+                args={
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": source_ref},
+                    "verdict": "pass",
+                    "summary": "top-level pass with external verification",
+                    "evidence": [{"kind": "plan_review", "summary": "reviewed"}],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "no API claims"}],
+                    "metadata": {
+                        "external_verification_ref": external_ref,
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                },
+            )
+        )
+        self.assertEqual(accepted.status, RuntimeStatus.OK)
+        self.assertEqual(
+            accepted.structured["review_gate"]["metadata"]["external_verification_ref"]["sha256"],
+            external_ref["sha256"],
+        )
+
+    def test_checkpoint_payload_records_plan_ref_and_validation(self) -> None:
+        self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_plan_ref_record",
+                goal="plan",
+                metadata={"task_id": "task_plan_ref_record", "milestones": ["plan"]},
+            )
+        )
+        validation = {"status": "valid", "plan_id": "plan_record", "module_order": ["module_prelude", "module_join"]}
+
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_plan_ref_record",
+                "payload": {
+                    "status": "completed",
+                    "milestone_index": 0,
+                    "summary": "plan ready",
+                    "plan_ref": {"path": str(self.root / "plan.json"), "sha256": "abc"},
+                    "plan_validation": validation,
+                },
+            }
+        )
+        snapshot = self.repository.read_work_order("wo_plan_ref_record")
+
+        self.assertEqual(snapshot["work_order"]["metadata"]["plan_ref"]["sha256"], "abc")
+        self.assertEqual(snapshot["work_order"]["metadata"]["plan_validation"], validation)
+
+    def test_reactivated_work_order_clears_ended_at(self) -> None:
+        self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_reactivate",
+                goal="reactivate",
+                metadata={"task_id": "task_reactivate", "milestones": ["first", "second"]},
+            )
+        )
+        self.repository.record_minion_event(
+            {
+                "event_kind": "terminal",
+                "work_order_id": "wo_reactivate",
+                "payload": {"status": "blocked", "summary": "blocked"},
+            }
+        )
+        blocked = self.repository.read_work_order("wo_reactivate")
+        self.assertEqual(blocked["work_order"]["status"], "blocked")
+        self.assertTrue(blocked["work_order"]["ended_at"])
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_reactivate",
+                "payload": {"status": "completed", "milestone_index": 0, "summary": "first done"},
+            }
+        )
+        self.repository.record_minion_event(
+            {
+                "event_kind": "terminal",
+                "work_order_id": "wo_reactivate",
+                "payload": {"status": "completed", "summary": "first terminal"},
+            }
+        )
+        active = self.repository.read_work_order("wo_reactivate")
+
+        self.assertEqual(active["work_order"]["status"], "active")
+        self.assertEqual(active["work_order"]["ended_at"], "")
+
+    def test_plan_driven_module_pack_advances_to_next_milestone(self) -> None:
+        module = _plan_module("module_serial", title="Serial module implementation")
+        module["owned_area"] = ["src/pal/minion/repository.py"]
+        module["internal_milestones"] = [
+            {
+                "milestone_id": "m1",
+                "title": "First milestone",
+                "task": "Implement first part.",
+                "acceptance_criteria": ["First part is verified."],
+            },
+            {
+                "milestone_id": "m2",
+                "title": "Second milestone",
+                "task": "Implement second part.",
+                "acceptance_criteria": ["Second part is verified."],
+            },
+        ]
+        plan = _dispatchable_plan_payload(plan_id="plan_serial", task_id="task_serial", modules=[module])
         pack = self.repository.build_coder_module_pack_from_plan(
             plan,
             module_id="module_serial",
@@ -1368,19 +2942,9 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(pending["memory_candidates"][0]["title"], "m1 lesson")
 
     def test_plan_driven_module_completion_reports_deferred_experience(self) -> None:
-        plan = {
-            "type": "FinalPlanArtifact",
-            "plan_id": "plan_done",
-            "task_id": "task_done",
-            "modules": [
-                {
-                    "module_id": "module_done",
-                    "internal_milestones": [
-                        {"milestone_id": "m1", "title": "Only milestone", "task": "Finish it."},
-                    ],
-                }
-            ],
-        }
+        module = _plan_module("module_done", title="Only milestone", task="Finish it.")
+        module["internal_milestones"][0]["milestone_id"] = "m1"
+        plan = _dispatchable_plan_payload(plan_id="plan_done", task_id="task_done", modules=[module])
         pack = self.repository.build_coder_module_pack_from_plan(plan, module_id="module_done", work_order_id="wo_done")
         self.repository.prepare_pack_for_spawn(pack)
         self.repository.record_minion_event(
@@ -1416,30 +2980,15 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(self.repository.mark_serial_module_completed("wo_done")["status"], "already_completed")
 
     def test_plan_parent_uses_modules_as_parent_milestones(self) -> None:
-        plan = {
-            "type": "FinalPlanArtifact",
-            "plan_id": "plan_parent",
-            "task_id": "task_parent",
-            "summary": "Parent plan.",
-            "modules": [
-                {
-                    "module_id": "module_a",
-                    "responsibility": "Build A.",
-                    "internal_milestones": [{"milestone_id": "a1", "title": "A1", "task": "Do A1."}],
-                },
-                {
-                    "module_id": "module_b",
-                    "responsibility": "Build B.",
-                    "internal_milestones": [{"milestone_id": "b1", "title": "B1", "task": "Do B1."}],
-                },
-            ],
-        }
+        module_a = _plan_module("module_a", title="A1", task="Do A1.")
+        module_a["internal_milestones"][0]["milestone_id"] = "a1"
+        plan = _dispatchable_plan_payload(plan_id="plan_parent", task_id="task_parent", modules=[module_a])
         parent = self.repository.build_plan_parent_pack_from_plan(plan, work_order_id="wo_parent", workspace={"repo_path": str(self.root)})
         prepared_parent = self.repository.prepare_pack_for_spawn(parent)
 
         self.assertNotIn("prompt_view", prepared_parent.metadata)
         self.assertEqual(prepared_parent.continuity["current_milestone"]["milestone_index"], 0)
-        self.assertEqual(prepared_parent.continuity["current_milestone"]["title"], "module_a")
+        self.assertEqual(prepared_parent.continuity["current_milestone"]["title"], "module_prelude")
 
         child = self.repository.next_plan_module_pack("wo_parent", allow_paused=True)
         self.assertIsNotNone(child)
@@ -1448,19 +2997,18 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         self.assertEqual(prepared_child.metadata["parent_work_order_id"], "wo_parent")
         self.assertEqual(prepared_child.metadata["parent_milestone_index"], 0)
-        self.assertEqual(prepared_child.metadata["prompt_view"]["module"]["module_id"], "module_a")
-        self.assertEqual(prepared_child.metadata["prompt_view"]["milestone"]["milestone_id"], "a1")
+        self.assertEqual(prepared_child.metadata["prompt_view"]["module"]["module_id"], "module_prelude")
+        self.assertEqual(prepared_child.metadata["prompt_view"]["milestone"]["milestone_id"], "module_prelude_m1")
 
     def test_plan_parent_completion_advances_parent_cursor_and_waits(self) -> None:
-        plan = {
-            "type": "FinalPlanArtifact",
-            "plan_id": "plan_parent_cursor",
-            "task_id": "task_parent_cursor",
-            "modules": [
-                {"module_id": "module_a", "internal_milestones": [{"milestone_id": "a1", "title": "A1", "task": "Do A."}]},
-                {"module_id": "module_b", "internal_milestones": [{"milestone_id": "b1", "title": "B1", "task": "Do B."}]},
-            ],
-        }
+        module_b = _plan_module("module_b", title="B1", task="Do B.")
+        module_b["internal_milestones"][0]["milestone_id"] = "b1"
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_parent_cursor",
+            task_id="task_parent_cursor",
+            modules=[module_b],
+            prelude_module_id="module_a",
+        )
         parent = self.repository.build_plan_parent_pack_from_plan(plan, work_order_id="wo_parent_cursor")
         self.repository.prepare_pack_for_spawn(parent)
         child = self.repository.next_plan_module_pack("wo_parent_cursor", allow_paused=True)
@@ -1535,6 +3083,50 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         self.assertIn("recorded", message)
         self.assertEqual(snapshot["work_order"]["metadata"]["clarification_answers"][0]["answer"], "Module first")
+
+    def test_minion_plan_accept_override_control_action_accepts_and_audits_route(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_control_accept",
+            task_id="task_control_accept",
+            modules=[_plan_module("module_control_accept", title="Control accept module")],
+        )
+        artifact_path = self.root / "control-accept-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        plan_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
+        review_gate_ref = _submit_plan_review_gate(self.repository, plan_ref)
+        route = ControlRoute(endpoint_id="telegram_main", channel_kind="telegram", reply_target={"chat_id": "42"})
+        provider = MinionManagerProvider(runtime_root=self.root)
+
+        message = asyncio.run(
+            provider.handle_control_action_async(
+                ControlAction(
+                    action_kind="minion_plan_accept_override",
+                    target_scope="minion",
+                    target_id="wo_control_accept",
+                    route=route,
+                    notes="Nathan clicked accept",
+                    args={
+                        "plan_ref": plan_ref,
+                        "review_gate_ref": review_gate_ref,
+                        "reason": "Nathan accepts the reviewed plan",
+                        "actor": "Nathan",
+                        "interaction_origin": "button",
+                        "interaction_id": "minion_plan_accept_wo_control_accept",
+                        "interaction_kind": "minion_plan_acceptance",
+                    },
+                )
+            )
+        )
+        accepted = self.repository.load_accepted_plan_ref(plan_ref)
+        marker = json.loads(Path(accepted["plan_ref"]["acceptance_marker_path"]).read_text(encoding="utf-8"))
+
+        self.assertIn("accepted by human override", message)
+        self.assertEqual(accepted["plan_ref"]["accepted"], True)
+        self.assertEqual(marker["review_gate_ref"]["gate_id"], review_gate_ref["gate_id"])
+        self.assertEqual(marker["human_override"]["source"], "control_action")
+        self.assertEqual(marker["human_override"]["action_kind"], "minion_plan_accept_override")
+        self.assertEqual(marker["human_override"]["route"]["endpoint_id"], "telegram_main")
+        self.assertEqual(marker["human_override"]["interaction_kind"], "minion_plan_acceptance")
 
     def test_planner_question_answer_resumes_same_work_order_with_clarification(self) -> None:
         planner_work_order = build_planner_work_order(
@@ -2091,33 +3683,302 @@ class MinionManagerTests(unittest.TestCase):
         state = MinionRunState(minion_id="m_debug", run_id="r_debug", pack=configured)
         self.assertEqual(state.summary()["debug_log_path"], debug_log["path"])
 
-    def test_manager_serially_spawns_next_module_milestone_and_reports_completion(self) -> None:
+    def test_manager_bounds_checkpoint_repair_attempts_and_persists_count(self) -> None:
+        class FakeRepairManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.sent_messages = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+
+            async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
+                self.sent_messages.append({"run_id": state.run_id, "message": dict(message)})
+                return {"ok": True, "run_id": state.run_id, "message_type": str(message.get("type") or "")}
+
+        async def scenario() -> None:
+            manager = FakeRepairManager(runtime_root=self.root)
+            module = _plan_module("module_repair_bound", title="Repair bound module")
+            module["internal_milestones"] = [
+                {"milestone_id": "m1", "title": "First", "task": "Do first.", "acceptance_criteria": ["First is done."]},
+                {"milestone_id": "m2", "title": "Second", "task": "Do second.", "acceptance_criteria": ["Second is done."]},
+            ]
+            plan = _dispatchable_plan_payload(plan_id="plan_repair_bound", task_id="task_repair_bound", modules=[module])
+            pack = manager.tasking_repository.build_coder_module_pack_from_plan(
+                plan,
+                module_id="module_repair_bound",
+                work_order_id="wo_repair_bound",
+            )
+            self.assertEqual(pack.metadata["module_execution"]["checkpoint_review"]["max_repair_attempts"], 5)
+            payload = pack.to_dict()
+            payload["metadata"]["module_execution"]["checkpoint_review"]["max_repair_attempts"] = 1
+            pack = TaskContextPack.from_dict(payload)
+            spawned = await manager.spawn(pack.to_dict())
+            state = manager.runs[spawned["run_id"]]
+            gate = {
+                "gate_id": "gate_repair_fail_1",
+                "gate_kind": "checkpoint_verification",
+                "verdict": "fail",
+                "target": {"checkpoint_id": "chk_repair_bound", "milestone_index": 0, "milestone_id": "m1"},
+                "summary": "missing verification",
+                "findings": [{"severity": "major", "summary": "test evidence is missing"}],
+            }
+
+            await manager._send_checkpoint_repair_turn(state, gate)
+
+            self.assertEqual(manager.sent_messages[-1]["message"]["type"], "repair_turn")
+            module_execution = dict(state.pack.metadata["module_execution"])
+            self.assertEqual(module_execution["repair_attempts_by_milestone"], {"0": 1})
+            snapshot = manager.tasking_repository.read_work_order("wo_repair_bound")
+            self.assertEqual(snapshot["work_order"]["metadata"]["module_execution"]["repair_attempts_by_milestone"], {"0": 1})
+
+            second_gate = {**gate, "gate_id": "gate_repair_fail_2", "summary": "still missing verification"}
+            await manager._send_checkpoint_repair_turn(state, second_gate)
+
+            self.assertEqual(manager.sent_messages[-1]["message"]["type"], "blocked")
+            blocked = manager.sent_messages[-1]["message"]["payload"]
+            self.assertEqual(blocked["reason"], "repair_attempt_limit_exceeded")
+            self.assertEqual(blocked["repair"]["attempt"], 1)
+            self.assertEqual(blocked["repair"]["max_repair_attempts"], 1)
+            self.assertTrue(any(event.get("event_kind") == "review_repair_blocked" for event in manager.event_queue))
+
+        asyncio.run(scenario())
+
+    def test_repair_checkpoint_requires_repair_verification_gate(self) -> None:
+        class FakeRepairReviewManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started_review_gate_kinds = []
+                self.sent_messages = []
+                self.runner_tasks = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                if state.pack.minion_profile == "software_engineering.reviewer":
+                    target = dict((state.pack.metadata or {}).get("review_target") or {})
+                    self.started_review_gate_kinds.append(str(target.get("gate_kind") or ""))
+                    self.runner_tasks.append(asyncio.create_task(_run_fake_checkpoint_reviewer(self, state)))
+
+            async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
+                self.sent_messages.append({"run_id": state.run_id, "message": dict(message)})
+                return {"ok": True, "run_id": state.run_id, "message_type": str(message.get("type") or "")}
+
+        async def scenario() -> None:
+            manager = FakeRepairReviewManager(runtime_root=self.root)
+            module = _plan_module("module_repair_gate", title="Repair gate module")
+            module["internal_milestones"] = [
+                {"milestone_id": "m1", "title": "Repairable", "task": "Do repairable work.", "acceptance_criteria": ["Repairable work is done."]},
+                {"milestone_id": "m2", "title": "Next", "task": "Do next work.", "acceptance_criteria": ["Next work is done."]},
+            ]
+            plan = _dispatchable_plan_payload(plan_id="plan_repair_gate", task_id="task_repair_gate", modules=[module])
+            pack = manager.tasking_repository.build_coder_module_pack_from_plan(
+                plan,
+                module_id="module_repair_gate",
+                work_order_id="wo_repair_gate",
+            )
+            spawned = await manager.spawn(pack.to_dict())
+            state = manager.runs[spawned["run_id"]]
+            original_checkpoint_id = "chk_repair_gate_original"
+            manager.tasking_repository.record_minion_event(
+                {
+                    "event_kind": "checkpoint",
+                    "work_order_id": "wo_repair_gate",
+                    "minion_id": state.minion_id,
+                    "run_id": state.run_id,
+                    "payload": {
+                        "checkpoint_id": original_checkpoint_id,
+                        "status": "claimed",
+                        "milestone_index": 0,
+                        "milestone_id": "m1",
+                        "summary": "original claim",
+                        "commit_sha": "abc123",
+                        "expected_review_gate_kind": "checkpoint_verification",
+                    },
+                    "created_at": utc_now(),
+                },
+            )
+            fail_gate = manager.tasking_repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": original_checkpoint_id, "commit_sha": "abc123"},
+                    "verdict": "fail",
+                    "summary": "needs repair",
+                    "findings": [{"severity": "major", "summary": "missing verification"}],
+                    "reviewer_profile": "software_engineering.reviewer",
+                }
+            )
+            await manager._send_checkpoint_repair_turn(state, dict(fail_gate["review_gate"]))
+            repair_attempt = dict(state.pack.metadata["module_execution"]["last_repair_attempt"])
+            self.assertEqual(repair_attempt["milestone_index"], 0)
+
+            wrong_kind_checkpoint_id = "chk_repair_gate_fixed_wrong_kind"
+            manager.tasking_repository.record_minion_event(
+                {
+                    "event_kind": "checkpoint",
+                    "work_order_id": "wo_repair_gate",
+                    "minion_id": state.minion_id,
+                    "run_id": state.run_id,
+                    "payload": {
+                        "checkpoint_id": wrong_kind_checkpoint_id,
+                        "status": "claimed",
+                        "milestone_index": 0,
+                        "milestone_id": "m1",
+                        "summary": "repaired claim",
+                        "commit_sha": "def456",
+                        "repair_attempt": repair_attempt,
+                        "expected_review_gate_kind": "repair_verification",
+                    },
+                    "created_at": utc_now(),
+                }
+            )
+            with self.assertRaisesRegex(ValueError, "expects repair_verification"):
+                manager.tasking_repository.submit_review_gate(
+                    {
+                        "gate_kind": "checkpoint_verification",
+                        "target": {"checkpoint_id": wrong_kind_checkpoint_id, "commit_sha": "def456"},
+                        "verdict": "pass",
+                        "summary": "wrong gate kind",
+                        "evidence": [{"kind": "review", "summary": "wrong kind"}],
+                        "commands_run": [{"command": "fake-review-check", "status": "passed"}],
+                        "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                        "metadata": {
+                            "lsp_evidence_not_applicable": True,
+                            "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                        },
+                    }
+                )
+
+            repaired_checkpoint_id = "chk_repair_gate_fixed"
+            manager._record_event(
+                state,
+                {
+                    "event_kind": "checkpoint",
+                    "payload": {
+                        "checkpoint_id": repaired_checkpoint_id,
+                        "status": "claimed",
+                        "milestone_index": 0,
+                        "milestone_id": "m1",
+                        "summary": "repaired claim",
+                        "commit_sha": "def456",
+                        "repair_attempt": repair_attempt,
+                        "expected_review_gate_kind": "repair_verification",
+                    },
+                    "created_at": utc_now(),
+                },
+            )
+            for _ in range(50):
+                if "repair_verification" in manager.started_review_gate_kinds:
+                    break
+                await asyncio.sleep(0.01)
+            if manager.runner_tasks:
+                await asyncio.gather(*manager.runner_tasks)
+
+            self.assertIn("repair_verification", manager.started_review_gate_kinds)
+            snapshot = manager.tasking_repository.read_work_order("wo_repair_gate")
+            closed = [item for item in snapshot["recent_ledger"] if item.get("event_kind") == "milestone_closed"]
+            self.assertTrue(closed)
+            latest_gate = manager.tasking_repository.latest_review_gate_for_checkpoint(repaired_checkpoint_id)
+            self.assertEqual(latest_gate["review_gate_ref"]["gate_kind"], "repair_verification")
+
+        asyncio.run(scenario())
+
+    def test_reviewed_checkpoint_resume_keeps_same_work_order_after_control_disconnect(self) -> None:
+        class DisconnectAfterReviewManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.runner_tasks = []
+                self.sent_messages = []
+                self.fail_next_turn_once = True
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                if state.pack.minion_profile == "software_engineering.reviewer":
+                    self.runner_tasks.append(asyncio.create_task(_run_fake_checkpoint_reviewer(self, state)))
+
+            async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
+                self.sent_messages.append({"run_id": state.run_id, "message": dict(message)})
+                if self.fail_next_turn_once and str(message.get("type") or "") == "next_turn":
+                    self.fail_next_turn_once = False
+                    raise RuntimeError("simulated runner control pipe closed")
+                return {"ok": True, "run_id": state.run_id, "message_type": str(message.get("type") or "")}
+
+        async def scenario() -> None:
+            manager = DisconnectAfterReviewManager(runtime_root=self.root)
+            module = _plan_module("module_reviewed_resume", title="Reviewed resume module")
+            module["internal_milestones"] = [
+                {"milestone_id": "m1", "title": "First", "task": "Do first.", "acceptance_criteria": ["First is done."]},
+                {"milestone_id": "m2", "title": "Second", "task": "Do second.", "acceptance_criteria": ["Second is done."]},
+            ]
+            plan = _dispatchable_plan_payload(plan_id="plan_reviewed_resume", task_id="task_reviewed_resume", modules=[module])
+            pack = manager.tasking_repository.build_coder_module_pack_from_plan(
+                plan,
+                module_id="module_reviewed_resume",
+                work_order_id="wo_reviewed_resume",
+            )
+            spawned = await manager.spawn(pack.to_dict())
+            state = manager.runs[spawned["run_id"]]
+            checkpoint_id = "chk_reviewed_resume_m1"
+            manager._record_event(
+                state,
+                {
+                    "event_kind": "checkpoint",
+                    "payload": {
+                        "checkpoint_id": checkpoint_id,
+                        "status": "claimed",
+                        "milestone_index": 0,
+                        "milestone_id": "m1",
+                        "summary": "m1 claimed",
+                        "commit_sha": "abc123",
+                        "expected_review_gate_kind": "checkpoint_verification",
+                    },
+                    "created_at": utc_now(),
+                },
+            )
+            for _ in range(50):
+                if any(event.get("event_kind") == "manager_control_failed" for event in manager.event_queue):
+                    break
+                await asyncio.sleep(0.01)
+            if manager.runner_tasks:
+                await asyncio.gather(*manager.runner_tasks)
+
+            self.assertTrue(any(event.get("event_kind") == "manager_control_failed" for event in manager.event_queue))
+            snapshot = manager.tasking_repository.read_work_order("wo_reviewed_resume")
+            self.assertEqual(snapshot["latest_completed_checkpoint"]["status"], "completed")
+            latest_gate = manager.tasking_repository.latest_review_gate_for_checkpoint(checkpoint_id)
+            self.assertEqual(latest_gate["review_gate_ref"]["verdict"], "pass")
+            self.assertEqual(snapshot["current_milestone"]["milestone_index"], 1)
+            resume_pack = manager.tasking_repository.next_serial_module_pack("wo_reviewed_resume")
+            self.assertIsNotNone(resume_pack)
+            assert resume_pack is not None
+            self.assertEqual(resume_pack.work_order_id, "wo_reviewed_resume")
+            self.assertEqual(resume_pack.metadata["coder_work_order"]["milestone_id"], "m2")
+
+        asyncio.run(scenario())
+
+    def test_manager_serial_module_turn_advances_and_reports_completion(self) -> None:
         class FakeSerialManager(MinionManager):
             def __post_init__(self) -> None:
                 super().__post_init__()
                 self.started_milestones = []
+                self.sent_messages = []
 
             async def _start_runner(self, state: MinionRunState) -> None:
                 state.status = "running"
                 prompt_view = dict(state.pack.metadata.get("prompt_view") or {})
                 self.started_milestones.append(str((prompt_view.get("milestone") or {}).get("milestone_id") or ""))
 
+            async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
+                self.sent_messages.append({"run_id": state.run_id, "message": dict(message)})
+                return {"ok": True}
+
         async def scenario() -> None:
             manager = FakeSerialManager(runtime_root=self.root)
-            plan = {
-                "type": "FinalPlanArtifact",
-                "plan_id": "plan_manager_serial",
-                "task_id": "task_manager_serial",
-                "modules": [
-                    {
-                        "module_id": "module_manager_serial",
-                        "internal_milestones": [
-                            {"milestone_id": "m1", "title": "First", "task": "Do first."},
-                            {"milestone_id": "m2", "title": "Second", "task": "Do second."},
-                        ],
-                    }
-                ],
-            }
+            module = _plan_module("module_manager_serial", title="Manager serial module")
+            module["internal_milestones"] = [
+                {"milestone_id": "m1", "title": "First", "task": "Do first.", "acceptance_criteria": ["First is done."]},
+                {"milestone_id": "m2", "title": "Second", "task": "Do second.", "acceptance_criteria": ["Second is done."]},
+            ]
+            plan = _dispatchable_plan_payload(plan_id="plan_manager_serial", task_id="task_manager_serial", modules=[module])
             pack = manager.tasking_repository.build_coder_module_pack_from_plan(
                 plan,
                 module_id="module_manager_serial",
@@ -2137,20 +3998,24 @@ class MinionManagerTests(unittest.TestCase):
             manager._record_event(
                 first_state,
                 {
-                    "event_kind": "terminal",
-                    "payload": {"status": "completed", "summary": "m1 terminal"},
+                    "event_kind": "milestone_completed",
+                    "payload": {"status": "completed", "milestone_index": 0, "milestone_id": "m1", "summary": "m1 done"},
                     "created_at": "2026-01-01T00:00:01Z",
                 },
             )
             for _ in range(20):
-                if len(manager.started_milestones) >= 2:
+                if manager.sent_messages:
                     break
                 await asyncio.sleep(0.01)
 
-            self.assertEqual(manager.started_milestones[:2], ["m1", "m2"])
-            second_state = next(state for run_id, state in manager.runs.items() if run_id != first["run_id"])
+            self.assertEqual(manager.started_milestones, ["m1"])
+            self.assertEqual(len(manager.sent_messages), 1)
+            self.assertEqual(manager.sent_messages[0]["run_id"], first["run_id"])
+            self.assertEqual(manager.sent_messages[0]["message"]["type"], "next_turn")
+            self.assertEqual(manager.sent_messages[0]["message"]["turn"]["current_milestone"]["milestone_id"], "m2")
+            self.assertEqual(first_state.pack.metadata["prompt_view"]["milestone"]["milestone_id"], "m2")
             manager._record_event(
-                second_state,
+                first_state,
                 {
                     "event_kind": "checkpoint",
                     "payload": {"status": "completed", "milestone_index": 1, "summary": "m2 done"},
@@ -2158,12 +4023,14 @@ class MinionManagerTests(unittest.TestCase):
                 },
             )
             manager._record_event(
-                second_state,
+                first_state,
                 {
-                    "event_kind": "terminal",
+                    "event_kind": "milestone_completed",
                     "payload": {
                         "status": "completed",
-                        "summary": "m2 terminal",
+                        "milestone_index": 1,
+                        "milestone_id": "m2",
+                        "summary": "m2 done",
                         "deferred_experience": {
                             "memory_candidates": [{"kind": "case", "title": "serial done", "summary": "serial done"}],
                         },
@@ -2182,34 +4049,1194 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_manager_sends_serial_milestone_turn_to_existing_runner(self) -> None:
+        class FakeTurnManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.sent_messages = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+
+            async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
+                self.sent_messages.append({"run_id": state.run_id, "message": dict(message)})
+                return {"ok": True}
+
+        async def scenario() -> None:
+            manager = FakeTurnManager(runtime_root=self.root)
+            module = _plan_module("module_turn_serial", title="Manager turn module")
+            module["internal_milestones"] = [
+                {"milestone_id": "m1", "title": "First", "task": "Do first.", "acceptance_criteria": ["First is done."]},
+                {"milestone_id": "m2", "title": "Second", "task": "Do second.", "acceptance_criteria": ["Second is done."]},
+            ]
+            plan = _dispatchable_plan_payload(plan_id="plan_turn_serial", task_id="task_turn_serial", modules=[module])
+            pack = manager.tasking_repository.build_coder_module_pack_from_plan(
+                plan,
+                module_id="module_turn_serial",
+                work_order_id="wo_turn_serial",
+            )
+            spawned = await manager.spawn(pack.to_dict())
+            state = manager.runs[spawned["run_id"]]
+
+            self.assertNotIn("plan_artifact", state.pack.metadata)
+            self.assertNotIn("milestones", state.pack.metadata)
+            self.assertEqual(state.pack.metadata["prompt_view"]["milestone"]["milestone_id"], "m1")
+
+            manager._record_event(
+                state,
+                {
+                    "event_kind": "checkpoint",
+                    "payload": {"status": "completed", "milestone_index": 0, "summary": "m1 done"},
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            )
+            manager._record_event(
+                state,
+                {
+                    "event_kind": "milestone_completed",
+                    "payload": {"status": "completed", "milestone_index": 0, "milestone_id": "m1", "summary": "m1 done"},
+                    "created_at": "2026-01-01T00:00:01Z",
+                },
+            )
+            for _ in range(20):
+                if manager.sent_messages:
+                    break
+                await asyncio.sleep(0.01)
+
+            self.assertEqual(len(manager.sent_messages), 1)
+            sent = manager.sent_messages[0]
+            self.assertEqual(sent["run_id"], spawned["run_id"])
+            self.assertEqual(sent["message"]["type"], "next_turn")
+            turn = sent["message"]["turn"]
+            self.assertEqual(turn["current_milestone"]["milestone_id"], "m2")
+            self.assertNotIn("plan_artifact", turn["metadata_updates"])
+            self.assertNotIn("milestones", turn["metadata_updates"])
+            self.assertEqual(state.pack.metadata["prompt_view"]["milestone"]["milestone_id"], "m2")
+            self.assertNotIn("plan_artifact", state.pack.metadata)
+            self.assertNotIn("milestones", state.pack.metadata)
+            snapshot = manager.tasking_repository.read_work_order("wo_turn_serial")
+            self.assertIn("plan_artifact", snapshot["work_order"]["metadata"])
+
+        asyncio.run(scenario())
+
+    def test_manager_records_control_failure_when_runner_cannot_receive_turn(self) -> None:
+        class FailingControlManager(MinionManager):
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+
+            async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
+                _ = state, message
+                raise RuntimeError("runner stdin is closed")
+
+        async def scenario() -> None:
+            manager = FailingControlManager(runtime_root=self.root)
+            module = _plan_module("module_control_failure", title="Manager control failure module")
+            module["internal_milestones"] = [
+                {"milestone_id": "m1", "title": "First", "task": "Do first.", "acceptance_criteria": ["First is done."]},
+                {"milestone_id": "m2", "title": "Second", "task": "Do second.", "acceptance_criteria": ["Second is done."]},
+            ]
+            plan = _dispatchable_plan_payload(plan_id="plan_control_failure", task_id="task_control_failure", modules=[module])
+            pack = manager.tasking_repository.build_coder_module_pack_from_plan(
+                plan,
+                module_id="module_control_failure",
+                work_order_id="wo_control_failure",
+            )
+            spawned = await manager.spawn(pack.to_dict())
+            state = manager.runs[spawned["run_id"]]
+
+            manager._record_event(
+                state,
+                {
+                    "event_kind": "checkpoint",
+                    "payload": {"status": "completed", "milestone_index": 0, "summary": "m1 done"},
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            )
+            manager._record_event(
+                state,
+                {
+                    "event_kind": "milestone_completed",
+                    "payload": {"status": "completed", "milestone_index": 0, "milestone_id": "m1", "summary": "m1 done"},
+                    "created_at": "2026-01-01T00:00:01Z",
+                },
+            )
+            for _ in range(20):
+                if any(event.get("event_kind") == "manager_control_failed" for event in manager.event_queue):
+                    break
+                await asyncio.sleep(0.01)
+
+            failure = next(event for event in manager.event_queue if event.get("event_kind") == "manager_control_failed")
+            self.assertEqual(failure["run_id"], spawned["run_id"])
+            self.assertEqual(failure["work_order_id"], "wo_control_failure")
+            self.assertEqual(failure["payload"]["message_type"], "next_turn")
+            self.assertIn("runner stdin is closed", failure["payload"]["error"])
+            snapshot = manager.tasking_repository.read_work_order("wo_control_failure")
+            self.assertTrue(
+                any(item.get("event_kind") == "manager_control_failed" for item in snapshot.get("recent_ledger") or [])
+            )
+
+        asyncio.run(scenario())
+
+    def test_terminal_does_not_auto_advance_serial_module_without_milestone_completed(self) -> None:
+        class FakeSerialManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.sent_messages = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+
+            async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
+                self.sent_messages.append({"run_id": state.run_id, "message": dict(message)})
+                return {"ok": True}
+
+        async def scenario() -> None:
+            manager = FakeSerialManager(runtime_root=self.root)
+            module = _plan_module("module_no_terminal_fallback", title="No terminal fallback module")
+            module["internal_milestones"] = [
+                {"milestone_id": "m1", "title": "First", "task": "Do first.", "acceptance_criteria": ["First is done."]},
+                {"milestone_id": "m2", "title": "Second", "task": "Do second.", "acceptance_criteria": ["Second is done."]},
+            ]
+            plan = _dispatchable_plan_payload(plan_id="plan_no_terminal_fallback", task_id="task_no_terminal_fallback", modules=[module])
+            pack = manager.tasking_repository.build_coder_module_pack_from_plan(
+                plan,
+                module_id="module_no_terminal_fallback",
+                work_order_id="wo_no_terminal_fallback",
+            )
+            spawned = await manager.spawn(pack.to_dict())
+            state = manager.runs[spawned["run_id"]]
+
+            manager._record_event(
+                state,
+                {
+                    "event_kind": "checkpoint",
+                    "payload": {"status": "completed", "milestone_index": 0, "summary": "m1 done"},
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            )
+            manager._record_event(
+                state,
+                {
+                    "event_kind": "terminal",
+                    "payload": {"status": "completed", "summary": "terminal should not advance"},
+                    "created_at": "2026-01-01T00:00:01Z",
+                },
+            )
+            await asyncio.sleep(0.05)
+
+            self.assertEqual(manager.sent_messages, [])
+            self.assertFalse(any(event.get("event_kind") == "module_completed" for event in manager.event_queue))
+            self.assertEqual(len(manager.runs), 1)
+            snapshot = manager.tasking_repository.read_work_order("wo_no_terminal_fallback")
+            self.assertEqual(snapshot["current_milestone"]["milestone_index"], 1)
+            self.assertEqual(snapshot["current_milestone"]["title"], "Second")
+
+        asyncio.run(scenario())
+
+    def test_dogfood_plan_code_review_flow_commits_each_coder_milestone(self) -> None:
+        class FakeFileExecution:
+            def __init__(self, repo_path: Path):
+                self.repo_path = repo_path
+
+            def get_capability_spec(self, name):
+                if name != "op_file_write":
+                    return None
+                return {
+                    "name": "op_file_write",
+                    "description": "write a file in the dogfood repo",
+                    "parameters_schema": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                        "required": ["path", "content"],
+                    },
+                }
+
+            async def execute_tool_async(self, call, **kwargs):
+                _ = kwargs
+                if call.name != "op_file_write":
+                    raise AssertionError(f"unexpected tool: {call.name}")
+                raw_path = Path(str(call.args.get("path") or ""))
+                path = raw_path if raw_path.is_absolute() else self.repo_path / raw_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(str(call.args.get("content") or ""), encoding="utf-8")
+                return CanonicalToolResult(
+                    name=call.name,
+                    ok=True,
+                    text=f"wrote {path.name}",
+                    llm_text=f"wrote {path.name}",
+                    structured={"path": str(path)},
+                    status=RuntimeStatus.OK,
+                )
+
+        class DogfoodCoderLLM:
+            def __init__(self, pack: TaskContextPack):
+                _ = pack
+                self.calls_by_milestone: dict[str, int] = {}
+
+            async def agenerate(self, request):
+                rendered = "\n".join(
+                    str(message.get("content") if isinstance(message, dict) else message)
+                    for message in list(getattr(request, "messages", []) or [])
+                )
+                if '"milestone_id": "m2"' in rendered or '"milestone_id":"m2"' in rendered:
+                    milestone_id = "m2"
+                    title = "Update feature result"
+                elif '"milestone_id": "m1"' in rendered or '"milestone_id":"m1"' in rendered:
+                    milestone_id = "m1"
+                    title = "Create feature file"
+                else:
+                    raise AssertionError(f"prompt did not expose expected milestone: {rendered[:500]}")
+                call_count = self.calls_by_milestone.get(milestone_id, 0) + 1
+                self.calls_by_milestone[milestone_id] = call_count
+                if call_count == 1:
+                    if milestone_id == "m1":
+                        content = 'def status():\n    return "milestone-1"\n'
+                    elif milestone_id == "m2":
+                        content = 'def status():\n    return "milestone-2"\n'
+                    else:
+                        raise AssertionError(f"unexpected milestone_id: {milestone_id}")
+                    return CanonicalLLMOutcome(
+                        text="",
+                        tool_calls=[
+                            CanonicalToolCall(
+                                name="op_file_write",
+                                args={"path": "src/dogfood_feature.py", "content": content},
+                            )
+                        ],
+                    )
+                if call_count == 2:
+                    return CanonicalLLMOutcome(
+                        text="",
+                        tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": title})],
+                    )
+                return CanonicalLLMOutcome(
+                    text=(
+                        f"{milestone_id} completed with a checkpoint commit. "
+                        "Developer test evidence: dogfood fake file write verified by git checkpoint."
+                    )
+                )
+
+        class DogfoodManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started_milestones = []
+                self.started_milestone_indices = []
+                self.started_milestone_work_order_ids = []
+                self.started_run_ids = []
+                self.runner_tasks = []
+                self.control_queues: dict[str, asyncio.Queue] = {}
+
+            async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
+                queue = self.control_queues.get(state.run_id)
+                if queue is None:
+                    raise RuntimeError(f"missing test control queue for {state.run_id}")
+                await queue.put(dict(message))
+                return {"ok": True, "run_id": state.run_id, "message_type": str(message.get("type") or "")}
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                if state.pack.minion_profile == "software_engineering.reviewer":
+                    state.status = "running"
+                    self.runner_tasks.append(asyncio.create_task(_run_fake_checkpoint_reviewer(self, state)))
+                    return
+                state.status = "running"
+                self.started_run_ids.append(state.run_id)
+                control_queue: asyncio.Queue = asyncio.Queue()
+                self.control_queues[state.run_id] = control_queue
+
+                async def write_event(event):
+                    payload = dict(event.get("payload") or {})
+                    if event.get("event_kind") == "phase_started" and payload.get("phase") == "milestone_started":
+                        self.started_milestones.append(str(payload.get("milestone_id") or ""))
+                        self.started_milestone_indices.append(payload.get("milestone_index"))
+                        self.started_milestone_work_order_ids.append(str(event.get("work_order_id") or ""))
+                    self._record_event(state, event)
+
+                async def read_decision(timeout):
+                    try:
+                        if timeout is None:
+                            return await control_queue.get()
+                        return await asyncio.wait_for(control_queue.get(), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        return None
+
+                async def run_runner() -> None:
+                    await MinionRunner(
+                        runtime_root=self.runtime_root,
+                        pack=state.pack,
+                        minion_id=state.minion_id,
+                        run_id=state.run_id,
+                        write_event=write_event,
+                        read_decision=read_decision,
+                        runtime_bundle=MinionRuntimeBundle(
+                            llm_runtime=DogfoodCoderLLM(state.pack),
+                            execution_runtime=FakeFileExecution(Path(state.pack.workspace["repo_path"])),
+                        ),
+                    ).run()
+
+                self.runner_tasks.append(asyncio.create_task(run_runner()))
+
+        async def run_planner(plan: dict, artifact_dir: Path) -> dict:
+            events = []
+
+            class PlannerLLM:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                async def agenerate(self, request):
+                    _ = request
+                    self.calls += 1
+                    if self.calls == 1:
+                        return CanonicalLLMOutcome(
+                            text="",
+                            tool_calls=[
+                                CanonicalToolCall(
+                                    name="op_minion_artifact_write",
+                                    args={
+                                        "relative_path": "plan.json",
+                                        "title": "Dogfood plan",
+                                        "role": "primary",
+                                        "mime_type": "application/json",
+                                        "content": json.dumps(plan),
+                                    },
+                                )
+                            ],
+                        )
+                    return CanonicalLLMOutcome(text="plan.json written")
+
+            async def write_event(event):
+                events.append(event)
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            planner_pack = MinionProfileRegistry(runtime_root=self.root).resolve_pack(
+                TaskContextPack(
+                    work_order_id="wo_dogfood_plan",
+                    goal="Plan a two milestone dogfood implementation.",
+                    workspace={"artifact_dir": str(artifact_dir)},
+                    minion_profile="software_engineering.planner",
+                    metadata={"task_id": plan["task_id"], "planner_work_order": build_planner_work_order(goal="dogfood", task_id=plan["task_id"], work_order_id="wo_dogfood_plan")},
+                ),
+                requested_profile="software_engineering.planner",
+            )
+            code = await MinionRunner(
+                runtime_root=self.root,
+                pack=planner_pack,
+                minion_id="m_dogfood_planner",
+                run_id="r_dogfood_planner",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=PlannerLLM(), execution_runtime=SimpleNamespace()),
+            ).run()
+            self.assertEqual(code, 0)
+            checkpoint = next(event for event in events if event["event_kind"] == "checkpoint")
+            self.assertEqual(checkpoint["payload"]["status"], "completed")
+            self.assertEqual(checkpoint["payload"]["plan_validation"]["status"], "valid")
+            return dict(checkpoint["payload"]["plan_ref"])
+
+        async def run_reviewer(repo_path: Path, artifact_dir: Path) -> dict:
+            events = []
+
+            class ReviewerLLM:
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                async def agenerate(self, request):
+                    _ = request
+                    self.calls += 1
+                    if self.calls == 1:
+                        return CanonicalLLMOutcome(
+                            text="",
+                            tool_calls=[
+                                CanonicalToolCall(
+                                    name="op_minion_artifact_write",
+                                    args={
+                                        "relative_path": "review_report.md",
+                                        "title": "Dogfood review",
+                                        "role": "primary",
+                                        "mime_type": "text/markdown",
+                                        "content": "# Dogfood Review\n\napproved: milestone commits and module completion event verified.\n",
+                                    },
+                                )
+                            ],
+                        )
+                    return CanonicalLLMOutcome(text="review approved")
+
+            async def write_event(event):
+                events.append(event)
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            reviewer_pack = MinionProfileRegistry(runtime_root=self.root).resolve_pack(
+                TaskContextPack(
+                    work_order_id="wo_dogfood_review",
+                    goal="Review the dogfood coder output.",
+                    workspace={"repo_path": str(repo_path), "artifact_dir": str(artifact_dir)},
+                    minion_profile="software_engineering.reviewer",
+                    metadata={"task_id": "task_dogfood_review", "milestones": ["Review dogfood output"]},
+                ),
+                requested_profile="software_engineering.reviewer",
+            )
+            code = await MinionRunner(
+                runtime_root=self.root,
+                pack=reviewer_pack,
+                minion_id="m_dogfood_reviewer",
+                run_id="r_dogfood_reviewer",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=ReviewerLLM(), execution_runtime=SimpleNamespace()),
+            ).run()
+            self.assertEqual(code, 0)
+            checkpoint = next(event for event in events if event["event_kind"] == "checkpoint")
+            self.assertEqual(checkpoint["payload"]["status"], "completed")
+            self.assertEqual(checkpoint["payload"]["primary_artifact"]["relative_path"], "review_report.md")
+            return checkpoint["payload"]
+
+        async def scenario() -> None:
+            source_repo = self.root / "source_repo"
+            source_repo.mkdir(parents=True)
+            _git(source_repo, "init", check=True)
+            _git(source_repo, "checkout", "-B", "main", check=True)
+            _git(source_repo, "config", "user.email", "pal-test@example.invalid", check=True)
+            _git(source_repo, "config", "user.name", "Pal Test", check=True)
+            (source_repo / "README.md").write_text("# dogfood\n", encoding="utf-8")
+            _git(source_repo, "add", "README.md", check=True)
+            _git(source_repo, "commit", "-m", "initial dogfood repo", check=True)
+
+            module = _plan_module("module_dogfood_code", title="Dogfood code module")
+            module["owned_area"] = ["src/dogfood_feature.py"]
+            module["internal_milestones"] = [
+                {"milestone_id": "m1", "title": "Create feature file", "task": "Create the feature file only.", "acceptance_criteria": ["feature file exists"]},
+                {"milestone_id": "m2", "title": "Update feature result", "task": "Update the feature result only.", "acceptance_criteria": ["feature result changed"]},
+            ]
+            plan = _dispatchable_plan_payload(plan_id="plan_dogfood_flow", task_id="task_dogfood_flow", modules=[module])
+            plan_ref = await run_planner(plan, self.root / "planner_artifacts")
+            revised_plan = json.loads(json.dumps(plan))
+            revised_plan["plan_revision"] = 1
+            revised_plan["summary"] = "Reviewed dogfood plan revision."
+            revised_plan["modules"][1]["internal_milestones"][1]["task"] = "Update the feature result only after milestone 1 checkpoint exists."
+            provider = MinionManagerProvider(runtime_root=self.root)
+            revised = provider.revise_plan(
+                CapabilityCall(
+                    name="op_minion_revise_plan",
+                    args={
+                        "source_plan_ref": plan_ref,
+                        "revised_plan_artifact": revised_plan,
+                        "revision_notes": "dogfood review tightened milestone sequencing",
+                    },
+                )
+            )
+            self.assertEqual(revised.status, RuntimeStatus.OK)
+            self.assertEqual(revised.structured["plan_ref"]["plan_revision"], 1)
+            external_ref = _external_verification_ref(
+                self.root,
+                "dogfood-plan-review-external-verification.json",
+                {"status": "verified", "plan_id": "plan_dogfood_flow", "plan_revision": 1},
+            )
+            gate = provider.review_gate_submit(
+                CapabilityCall(
+                    name="op_minion_review_gate_submit",
+                    args={
+                        "gate_kind": "plan_acceptance",
+                        "target": {"plan_ref": dict(revised.structured["plan_ref"])},
+                        "verdict": "pass",
+                        "summary": "reviewer accepted dogfood plan revision",
+                        "evidence": [{"kind": "plan_review", "summary": "module milestones and topology inspected"}],
+                        "api_evidence": [{"kind": "not_applicable", "summary": "dogfood plan has no external API claims"}],
+                        "metadata": {
+                            "lsp_evidence_not_applicable": True,
+                            "lsp_evidence_not_applicable_reason": "dogfood plan fixture does not make symbol-level API claims",
+                            "external_verification_ref": external_ref,
+                        },
+                        "reviewer_profile": "software_engineering.reviewer",
+                    },
+                )
+            )
+            self.assertEqual(gate.status, RuntimeStatus.OK)
+            accepted = provider.accept_plan(
+                CapabilityCall(
+                    name="op_minion_accept_plan",
+                    args={
+                        "plan_ref": dict(revised.structured["plan_ref"]),
+                        "review_gate_ref": dict(gate.structured["review_gate_ref"]),
+                        "reason": "dogfood reviewer passed plan",
+                    },
+                )
+            )
+            self.assertEqual(accepted.status, RuntimeStatus.OK)
+            self.assertTrue(accepted.structured["plan_ref"]["accepted"])
+            plan_ref = dict(accepted.structured["plan_ref"])
+
+            manager = DogfoodManager(runtime_root=self.root)
+            loaded = manager.tasking_repository.load_dispatchable_plan_ref(plan_ref)
+            self.assertEqual(loaded["plan_ref"]["plan_revision"], 1)
+            self.assertTrue(loaded["plan_ref"]["accepted"])
+            self.assertEqual(loaded["plan_artifact"]["summary"], "Reviewed dogfood plan revision.")
+            coder_pack = manager.tasking_repository.build_coder_module_pack_from_plan(
+                loaded["plan_artifact"],
+                module_id="module_dogfood_code",
+                work_order_id="wo_dogfood_code",
+                workspace={"source_repo": str(source_repo)},
+                metadata={"plan_ref": plan_ref},
+            )
+
+            await manager.spawn(coder_pack.to_dict())
+            for _ in range(100):
+                if any(event.get("event_kind") == "module_completed" for event in manager.event_queue):
+                    break
+                await asyncio.sleep(0.02)
+            if manager.runner_tasks:
+                await asyncio.gather(*manager.runner_tasks)
+
+            self.assertEqual(manager.started_milestones[:2], ["m1", "m2"])
+            self.assertEqual(manager.started_milestone_indices[:2], [0, 1])
+            self.assertEqual(manager.started_milestone_work_order_ids[:2], ["wo_dogfood_code", "wo_dogfood_code"])
+            self.assertEqual(len(manager.started_run_ids), 1)
+            checkpoint_events = [
+                event
+                for event in manager.event_queue
+                if event.get("event_kind") == "checkpoint" and event.get("work_order_id") == "wo_dogfood_code"
+            ]
+            claimed_checkpoints = [event for event in checkpoint_events if event["payload"].get("status") == "claimed"]
+            self.assertEqual([event["payload"]["milestone_id"] for event in claimed_checkpoints], ["m1", "m2"])
+            self.assertEqual([event["payload"]["milestone_index"] for event in claimed_checkpoints], [0, 1])
+            gate_events = [
+                item
+                for item in manager.tasking_repository.read_work_order("wo_dogfood_code")["recent_ledger"]
+                if item.get("event_kind") == "milestone_closed"
+            ]
+            self.assertEqual([event["payload"]["milestone_index"] for event in reversed(gate_events)], [0, 1])
+            self.assertEqual([event["payload"]["status"] for event in reversed(gate_events)], ["completed", "completed"])
+            self.assertEqual({event["payload"]["task_id"] for event in claimed_checkpoints}, {"task_dogfood_flow"})
+            self.assertEqual({event["work_order_id"] for event in claimed_checkpoints}, {"wo_dogfood_code"})
+            commit_shas = [event["payload"].get("commit_sha") for event in claimed_checkpoints]
+            self.assertEqual(len(commit_shas), 2)
+            self.assertTrue(all(commit_shas))
+            self.assertNotEqual(commit_shas[0], commit_shas[1])
+            self.assertEqual({event["run_id"] for event in claimed_checkpoints}, set(manager.started_run_ids))
+
+            module_event = next(event for event in manager.event_queue if event.get("event_kind") == "module_completed")
+            self.assertEqual(module_event["payload"]["module_id"], "module_dogfood_code")
+            self.assertEqual(module_event["payload"]["status"], "completed")
+            snapshot = manager.tasking_repository.read_work_order("wo_dogfood_code")
+            self.assertEqual(snapshot["work_order"]["task_id"], "task_dogfood_flow")
+            self.assertEqual(snapshot["work_order"]["metadata"]["plan_ref"]["plan_revision"], 1)
+            self.assertEqual(snapshot["work_order"]["metadata"]["module_execution"]["plan_revision"], 1)
+            self.assertEqual(snapshot["work_order"]["metadata"]["module_execution"]["status"], "completed")
+            self.assertEqual(snapshot["work_order"]["metadata"]["module_execution"]["current_milestone_index"], 1)
+            repo_path = Path(snapshot["work_order"]["metadata"]["workspace"]["repo_path"])
+            git_log = _git(repo_path, "log", "--oneline", "-3", check=True).stdout
+            self.assertIn("complete milestone 0 - Create feature file", git_log)
+            self.assertIn("complete milestone 1 - Update feature result", git_log)
+            self.assertEqual((repo_path / "src" / "dogfood_feature.py").read_text(encoding="utf-8"), 'def status():\n    return "milestone-2"\n')
+
+            review_payload = await run_reviewer(repo_path, self.root / "review_artifacts")
+
+            self.assertEqual(review_payload["primary_artifact"]["relative_path"], "review_report.md")
+            self.assertTrue((self.root / "review_artifacts" / "review_report.md").is_file())
+
+        asyncio.run(scenario())
+
+    def test_dogfood_coder_resumes_next_milestone_after_checkpoint_crash(self) -> None:
+        class FakeFileExecution:
+            def __init__(self, repo_path: Path):
+                self.repo_path = repo_path
+
+            def get_capability_spec(self, name):
+                if name != "op_file_write":
+                    return None
+                return {
+                    "name": "op_file_write",
+                    "description": "write a file in the dogfood repo",
+                    "parameters_schema": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                        "required": ["path", "content"],
+                    },
+                }
+
+            async def execute_tool_async(self, call, **kwargs):
+                _ = kwargs
+                if call.name != "op_file_write":
+                    raise AssertionError(f"unexpected tool: {call.name}")
+                raw_path = Path(str(call.args.get("path") or ""))
+                path = raw_path if raw_path.is_absolute() else self.repo_path / raw_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(str(call.args.get("content") or ""), encoding="utf-8")
+                return CanonicalToolResult(
+                    name=call.name,
+                    ok=True,
+                    text=f"wrote {path.name}",
+                    llm_text=f"wrote {path.name}",
+                    structured={"path": str(path)},
+                    status=RuntimeStatus.OK,
+                )
+
+        class BreakpointCoderLLM:
+            def __init__(self) -> None:
+                self.calls_by_milestone: dict[str, int] = {}
+
+            async def agenerate(self, request):
+                rendered = "\n".join(
+                    str(message.get("content") if isinstance(message, dict) else message)
+                    for message in list(getattr(request, "messages", []) or [])
+                )
+                if '"milestone_id": "m2"' in rendered or '"milestone_id":"m2"' in rendered:
+                    milestone_id = "m2"
+                    title = "Resume feature result"
+                    content = 'def status():\n    return "resumed-2"\n'
+                elif '"milestone_id": "m1"' in rendered or '"milestone_id":"m1"' in rendered:
+                    milestone_id = "m1"
+                    title = "Create resumable feature"
+                    content = 'def status():\n    return "resumed-1"\n'
+                else:
+                    raise AssertionError(f"prompt did not expose expected milestone: {rendered[:500]}")
+                call_count = self.calls_by_milestone.get(milestone_id, 0) + 1
+                self.calls_by_milestone[milestone_id] = call_count
+                if call_count == 1:
+                    return CanonicalLLMOutcome(
+                        text="",
+                        tool_calls=[
+                            CanonicalToolCall(
+                                name="op_file_write",
+                                args={"path": "src/resumable_feature.py", "content": content},
+                            )
+                        ],
+                    )
+                if call_count == 2:
+                    return CanonicalLLMOutcome(
+                        text="",
+                        tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": title})],
+                    )
+                return CanonicalLLMOutcome(text=f"{milestone_id} completed with checkpoint commit.")
+
+        class BreakpointManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started_milestones = []
+                self.started_milestone_indices = []
+                self.started_work_order_ids = []
+                self.started_run_ids = []
+                self.runner_tasks = []
+                self.control_queues: dict[str, asyncio.Queue] = {}
+                self.crash_after_m1_checkpoint = True
+                self.crashed_run_id = ""
+
+            async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
+                queue = self.control_queues.get(state.run_id)
+                if queue is None:
+                    raise RuntimeError(f"missing test control queue for {state.run_id}")
+                await queue.put(dict(message))
+                return {"ok": True, "run_id": state.run_id, "message_type": str(message.get("type") or "")}
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                self.started_run_ids.append(state.run_id)
+                control_queue: asyncio.Queue = asyncio.Queue()
+                self.control_queues[state.run_id] = control_queue
+
+                async def write_event(event):
+                    payload = dict(event.get("payload") or {})
+                    if event.get("event_kind") == "phase_started" and payload.get("phase") == "milestone_started":
+                        self.started_milestones.append(str(payload.get("milestone_id") or ""))
+                        self.started_milestone_indices.append(payload.get("milestone_index"))
+                        self.started_work_order_ids.append(str(event.get("work_order_id") or ""))
+                    self._record_event(state, event)
+                    if (
+                        event.get("event_kind") == "checkpoint"
+                        and payload.get("status") == "completed"
+                        and payload.get("milestone_id") == "m1"
+                        and self.crash_after_m1_checkpoint
+                    ):
+                        self.crash_after_m1_checkpoint = False
+                        self.crashed_run_id = state.run_id
+                        state.status = "failed"
+                        state.ended_at = utc_now()
+                        raise asyncio.CancelledError()
+
+                async def read_decision(timeout):
+                    try:
+                        if timeout is None:
+                            return await control_queue.get()
+                        return await asyncio.wait_for(control_queue.get(), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        return None
+
+                async def run_runner() -> None:
+                    try:
+                        await MinionRunner(
+                            runtime_root=self.runtime_root,
+                            pack=state.pack,
+                            minion_id=state.minion_id,
+                            run_id=state.run_id,
+                            write_event=write_event,
+                            read_decision=read_decision,
+                            runtime_bundle=MinionRuntimeBundle(
+                                llm_runtime=BreakpointCoderLLM(),
+                                execution_runtime=FakeFileExecution(Path(state.pack.workspace["repo_path"])),
+                            ),
+                        ).run()
+                    except asyncio.CancelledError:
+                        return
+
+                self.runner_tasks.append(asyncio.create_task(run_runner()))
+
+        async def scenario() -> None:
+            source_repo = self.root / "breakpoint_source_repo"
+            source_repo.mkdir(parents=True)
+            _git(source_repo, "init", check=True)
+            _git(source_repo, "checkout", "-B", "main", check=True)
+            _git(source_repo, "config", "user.email", "pal-test@example.invalid", check=True)
+            _git(source_repo, "config", "user.name", "Pal Test", check=True)
+            (source_repo / "README.md").write_text("# breakpoint dogfood\n", encoding="utf-8")
+            _git(source_repo, "add", "README.md", check=True)
+            _git(source_repo, "commit", "-m", "initial breakpoint repo", check=True)
+
+            module = _plan_module("module_breakpoint_code", title="Breakpoint code module")
+            module["owned_area"] = ["src/resumable_feature.py"]
+            module["internal_milestones"] = [
+                {
+                    "milestone_id": "m1",
+                    "title": "Create resumable feature",
+                    "task": "Create the resumable feature file.",
+                    "acceptance_criteria": ["m1 has a checkpoint commit"],
+                },
+                {
+                    "milestone_id": "m2",
+                    "title": "Resume feature result",
+                    "task": "Resume from the m1 checkpoint and update the feature result.",
+                    "acceptance_criteria": ["m2 has a checkpoint commit after restart"],
+                },
+            ]
+            plan = _dispatchable_plan_payload(
+                plan_id="plan_breakpoint_resume",
+                task_id="task_breakpoint_resume",
+                modules=[module],
+            )
+            initial_plan_path = self.root / "breakpoint-plan.json"
+            initial_plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            revised_plan = json.loads(json.dumps(plan))
+            revised_plan["plan_revision"] = 1
+            revised_plan["summary"] = "Reviewed breakpoint resume plan."
+            provider = MinionManagerProvider(runtime_root=self.root)
+            revised = provider.revise_plan(
+                CapabilityCall(
+                    name="op_minion_revise_plan",
+                    args={
+                        "source_plan_ref": {
+                            "path": str(initial_plan_path),
+                            "sha256": hashlib.sha256(initial_plan_path.read_bytes()).hexdigest(),
+                        },
+                        "revised_plan_artifact": revised_plan,
+                        "revision_notes": "dogfood breakpoint resume",
+                    },
+                )
+            )
+            self.assertEqual(revised.status, RuntimeStatus.OK)
+            external_ref = _external_verification_ref(
+                self.root,
+                "breakpoint-plan-review-external-verification.json",
+                {"status": "verified", "plan_id": "plan_breakpoint_resume", "plan_revision": 1},
+            )
+            gate = provider.review_gate_submit(
+                CapabilityCall(
+                    name="op_minion_review_gate_submit",
+                    args={
+                        "gate_kind": "plan_acceptance",
+                        "target": {"plan_ref": dict(revised.structured["plan_ref"])},
+                        "verdict": "pass",
+                        "summary": "reviewer accepted breakpoint resume plan",
+                        "evidence": [{"kind": "plan_review", "summary": "resume milestones inspected"}],
+                        "api_evidence": [{"kind": "not_applicable", "summary": "breakpoint plan has no external API claims"}],
+                        "metadata": {
+                            "lsp_evidence_not_applicable": True,
+                            "lsp_evidence_not_applicable_reason": "breakpoint resume fixture has no symbol-level API claims",
+                            "external_verification_ref": external_ref,
+                        },
+                        "reviewer_profile": "software_engineering.reviewer",
+                    },
+                )
+            )
+            self.assertEqual(gate.status, RuntimeStatus.OK)
+            accepted = provider.accept_plan(
+                CapabilityCall(
+                    name="op_minion_accept_plan",
+                    args={
+                        "plan_ref": dict(revised.structured["plan_ref"]),
+                        "review_gate_ref": dict(gate.structured["review_gate_ref"]),
+                        "reason": "dogfood reviewer passed breakpoint plan",
+                    },
+                )
+            )
+            self.assertEqual(accepted.status, RuntimeStatus.OK)
+            plan_ref = dict(accepted.structured["plan_ref"])
+
+            manager = BreakpointManager(runtime_root=self.root)
+            loaded = manager.tasking_repository.load_dispatchable_plan_ref(plan_ref)
+            coder_pack = manager.tasking_repository.build_coder_module_pack_from_plan(
+                loaded["plan_artifact"],
+                module_id="module_breakpoint_code",
+                work_order_id="wo_breakpoint_code",
+                workspace={"source_repo": str(source_repo)},
+                metadata={"plan_ref": plan_ref},
+            )
+            coder_pack = _without_checkpoint_review(coder_pack)
+
+            await manager.spawn(coder_pack.to_dict())
+            await asyncio.gather(*manager.runner_tasks)
+
+            self.assertEqual(manager.started_milestones, ["m1"])
+            self.assertTrue(manager.crashed_run_id)
+            snapshot_after_crash = manager.tasking_repository.read_work_order("wo_breakpoint_code")
+            self.assertEqual(snapshot_after_crash["current_milestone"]["milestone_index"], 1)
+            self.assertEqual(snapshot_after_crash["current_milestone"]["title"], "Resume feature result")
+            self.assertEqual(snapshot_after_crash["latest_completed_checkpoint"]["run_id"], manager.crashed_run_id)
+            first_checkpoint = next(
+                event
+                for event in manager.event_queue
+                if event.get("event_kind") == "checkpoint"
+                and event.get("work_order_id") == "wo_breakpoint_code"
+                and event.get("payload", {}).get("status") == "completed"
+            )
+            self.assertEqual(first_checkpoint["run_id"], manager.crashed_run_id)
+            self.assertEqual(first_checkpoint["payload"]["milestone_id"], "m1")
+            self.assertEqual(first_checkpoint["payload"]["task_id"], "task_breakpoint_resume")
+            m1_commit = first_checkpoint["payload"]["commit_sha"]
+
+            resume_pack = manager.tasking_repository.next_serial_module_pack("wo_breakpoint_code")
+            self.assertIsNotNone(resume_pack)
+            assert resume_pack is not None
+            self.assertEqual(resume_pack.work_order_id, "wo_breakpoint_code")
+            self.assertEqual(resume_pack.metadata["coder_work_order"]["milestone_id"], "m2")
+
+            runner_task_count = len(manager.runner_tasks)
+            resumed = await manager.spawn(resume_pack.to_dict())
+            self.assertEqual(resumed["work_order_id"], "wo_breakpoint_code")
+            self.assertNotEqual(resumed["run_id"], manager.crashed_run_id)
+            await asyncio.gather(*manager.runner_tasks[runner_task_count:])
+
+            for _ in range(20):
+                if any(event.get("event_kind") == "module_completed" for event in manager.event_queue):
+                    break
+                await asyncio.sleep(0.01)
+
+            self.assertEqual(manager.started_milestones, ["m1", "m2"])
+            self.assertEqual(manager.started_milestone_indices, [0, 1])
+            self.assertEqual(manager.started_work_order_ids, ["wo_breakpoint_code", "wo_breakpoint_code"])
+            completed_checkpoints = [
+                event
+                for event in manager.event_queue
+                if event.get("event_kind") == "checkpoint"
+                and event.get("work_order_id") == "wo_breakpoint_code"
+                and event.get("payload", {}).get("status") == "completed"
+            ]
+            self.assertEqual([event["payload"]["milestone_id"] for event in completed_checkpoints], ["m1", "m2"])
+            self.assertEqual([event["payload"]["milestone_index"] for event in completed_checkpoints], [0, 1])
+            self.assertEqual({event["payload"]["task_id"] for event in completed_checkpoints}, {"task_breakpoint_resume"})
+            self.assertEqual([event["run_id"] for event in completed_checkpoints], [manager.crashed_run_id, resumed["run_id"]])
+            m2_commit = completed_checkpoints[1]["payload"]["commit_sha"]
+            self.assertTrue(m1_commit)
+            self.assertTrue(m2_commit)
+            self.assertNotEqual(m1_commit, m2_commit)
+
+            module_event = next(event for event in manager.event_queue if event.get("event_kind") == "module_completed")
+            self.assertEqual(module_event["payload"]["status"], "completed")
+            self.assertEqual(module_event["payload"]["module_id"], "module_breakpoint_code")
+            final_snapshot = manager.tasking_repository.read_work_order("wo_breakpoint_code")
+            self.assertEqual(final_snapshot["work_order"]["status"], "completed")
+            self.assertEqual(final_snapshot["work_order"]["task_id"], "task_breakpoint_resume")
+            self.assertEqual(final_snapshot["work_order"]["metadata"]["plan_ref"]["plan_revision"], 1)
+            repo_path = Path(final_snapshot["work_order"]["metadata"]["workspace"]["repo_path"])
+            git_log = _git(repo_path, "log", "--oneline", "-3", check=True).stdout
+            self.assertIn("complete milestone 0 - Create resumable feature", git_log)
+            self.assertIn("complete milestone 1 - Resume feature result", git_log)
+            self.assertEqual((repo_path / "src" / "resumable_feature.py").read_text(encoding="utf-8"), 'def status():\n    return "resumed-2"\n')
+
+        asyncio.run(scenario())
+
+    def test_dogfood_disconnected_runner_resumes_same_work_order_and_commits_next_milestone(self) -> None:
+        class FakeFileExecution:
+            def __init__(self, repo_path: Path):
+                self.repo_path = repo_path
+
+            def get_capability_spec(self, name):
+                if name != "op_file_write":
+                    return None
+                return {
+                    "name": "op_file_write",
+                    "description": "write a file in the dogfood repo",
+                    "parameters_schema": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                        "required": ["path", "content"],
+                    },
+                }
+
+            async def execute_tool_async(self, call, **kwargs):
+                _ = kwargs
+                if call.name != "op_file_write":
+                    raise AssertionError(f"unexpected tool: {call.name}")
+                raw_path = Path(str(call.args.get("path") or ""))
+                path = raw_path if raw_path.is_absolute() else self.repo_path / raw_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(str(call.args.get("content") or ""), encoding="utf-8")
+                return CanonicalToolResult(
+                    name=call.name,
+                    ok=True,
+                    text=f"wrote {path.name}",
+                    llm_text=f"wrote {path.name}",
+                    structured={"path": str(path)},
+                    status=RuntimeStatus.OK,
+                )
+
+        class DisconnectResumeLLM:
+            def __init__(self) -> None:
+                self.calls_by_milestone: dict[str, int] = {}
+
+            async def agenerate(self, request):
+                rendered = "\n".join(
+                    str(message.get("content") if isinstance(message, dict) else message)
+                    for message in list(getattr(request, "messages", []) or [])
+                )
+                if '"milestone_id": "m2"' in rendered or '"milestone_id":"m2"' in rendered:
+                    milestone_id = "m2"
+                    title = "Resume after disconnect"
+                    content = 'def status():\n    return "disconnect-2"\n'
+                elif '"milestone_id": "m1"' in rendered or '"milestone_id":"m1"' in rendered:
+                    milestone_id = "m1"
+                    title = "Create disconnect feature"
+                    content = 'def status():\n    return "disconnect-1"\n'
+                else:
+                    raise AssertionError(f"prompt did not expose expected milestone: {rendered[:500]}")
+                call_count = self.calls_by_milestone.get(milestone_id, 0) + 1
+                self.calls_by_milestone[milestone_id] = call_count
+                if call_count == 1:
+                    return CanonicalLLMOutcome(
+                        text="",
+                        tool_calls=[
+                            CanonicalToolCall(
+                                name="op_file_write",
+                                args={"path": "src/disconnect_resume.py", "content": content},
+                            )
+                        ],
+                    )
+                if call_count == 2:
+                    return CanonicalLLMOutcome(
+                        text="",
+                        tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": title})],
+                    )
+                return CanonicalLLMOutcome(text=f"{milestone_id} completed with checkpoint commit.")
+
+        class DisconnectingManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started_milestones = []
+                self.started_work_order_ids = []
+                self.started_run_ids = []
+                self.runner_tasks = []
+                self.control_queues: dict[str, asyncio.Queue] = {}
+                self.fail_next_turn_once = True
+
+            async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
+                if self.fail_next_turn_once and str(message.get("type") or "") == "next_turn":
+                    self.fail_next_turn_once = False
+                    raise RuntimeError("simulated runner control pipe closed")
+                queue = self.control_queues.get(state.run_id)
+                if queue is None:
+                    raise RuntimeError(f"missing test control queue for {state.run_id}")
+                await queue.put(dict(message))
+                return {"ok": True, "run_id": state.run_id, "message_type": str(message.get("type") or "")}
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                self.started_run_ids.append(state.run_id)
+                control_queue: asyncio.Queue = asyncio.Queue()
+                self.control_queues[state.run_id] = control_queue
+
+                async def write_event(event):
+                    payload = dict(event.get("payload") or {})
+                    if event.get("event_kind") == "phase_started" and payload.get("phase") == "milestone_started":
+                        self.started_milestones.append(str(payload.get("milestone_id") or ""))
+                        self.started_work_order_ids.append(str(event.get("work_order_id") or ""))
+                    self._record_event(state, event)
+
+                async def read_decision(timeout):
+                    try:
+                        if timeout is None:
+                            return await control_queue.get()
+                        return await asyncio.wait_for(control_queue.get(), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        return None
+
+                async def run_runner() -> None:
+                    await MinionRunner(
+                        runtime_root=self.runtime_root,
+                        pack=state.pack,
+                        minion_id=state.minion_id,
+                        run_id=state.run_id,
+                        write_event=write_event,
+                        read_decision=read_decision,
+                        runtime_bundle=MinionRuntimeBundle(
+                            llm_runtime=DisconnectResumeLLM(),
+                            execution_runtime=FakeFileExecution(Path(state.pack.workspace["repo_path"])),
+                        ),
+                    ).run()
+
+                self.runner_tasks.append(asyncio.create_task(run_runner()))
+
+        async def scenario() -> None:
+            source_repo = self.root / "disconnect_source_repo"
+            source_repo.mkdir(parents=True)
+            _git(source_repo, "init", check=True)
+            _git(source_repo, "checkout", "-B", "main", check=True)
+            _git(source_repo, "config", "user.email", "pal-test@example.invalid", check=True)
+            _git(source_repo, "config", "user.name", "Pal Test", check=True)
+            (source_repo / "README.md").write_text("# disconnect resume dogfood\n", encoding="utf-8")
+            _git(source_repo, "add", "README.md", check=True)
+            _git(source_repo, "commit", "-m", "initial disconnect repo", check=True)
+
+            module = _plan_module("module_disconnect_resume", title="Disconnect resume module")
+            module["owned_area"] = ["src/disconnect_resume.py"]
+            module["internal_milestones"] = [
+                {
+                    "milestone_id": "m1",
+                    "title": "Create disconnect feature",
+                    "task": "Create the disconnect feature file.",
+                    "acceptance_criteria": ["m1 has a checkpoint commit"],
+                },
+                {
+                    "milestone_id": "m2",
+                    "title": "Resume after disconnect",
+                    "task": "Resume from m1 checkpoint and update the disconnect feature.",
+                    "acceptance_criteria": ["m2 has a checkpoint commit on the same work order"],
+                },
+            ]
+            plan = _dispatchable_plan_payload(
+                plan_id="plan_disconnect_resume",
+                task_id="task_disconnect_resume",
+                modules=[module],
+            )
+            manager = DisconnectingManager(runtime_root=self.root)
+            coder_pack = manager.tasking_repository.build_coder_module_pack_from_plan(
+                plan,
+                module_id="module_disconnect_resume",
+                work_order_id="wo_disconnect_resume",
+                workspace={"source_repo": str(source_repo)},
+                metadata={"manager_turn_timeout_seconds": 0.2},
+            )
+            coder_pack = _without_checkpoint_review(coder_pack)
+
+            first = await manager.spawn(coder_pack.to_dict())
+            await asyncio.gather(*manager.runner_tasks)
+
+            self.assertEqual(manager.started_milestones, ["m1"])
+            self.assertTrue(any(event.get("event_kind") == "manager_control_failed" for event in manager.event_queue))
+            first_terminal = next(
+                event
+                for event in manager.event_queue
+                if event.get("event_kind") == "terminal" and event.get("run_id") == first["run_id"]
+            )
+            self.assertEqual(first_terminal["payload"]["status"], "blocked")
+            snapshot_after_disconnect = manager.tasking_repository.read_work_order("wo_disconnect_resume")
+            self.assertEqual(snapshot_after_disconnect["work_order"]["task_id"], "task_disconnect_resume")
+            self.assertEqual(snapshot_after_disconnect["current_milestone"]["milestone_index"], 1)
+
+            resume_pack = manager.tasking_repository.next_serial_module_pack("wo_disconnect_resume")
+            self.assertIsNotNone(resume_pack)
+            assert resume_pack is not None
+            self.assertEqual(resume_pack.work_order_id, "wo_disconnect_resume")
+            self.assertEqual(resume_pack.metadata["coder_work_order"]["milestone_id"], "m2")
+
+            runner_task_count = len(manager.runner_tasks)
+            resumed = await manager.spawn(resume_pack.to_dict())
+            self.assertEqual(resumed["work_order_id"], "wo_disconnect_resume")
+            self.assertNotEqual(resumed["run_id"], first["run_id"])
+            await asyncio.gather(*manager.runner_tasks[runner_task_count:])
+
+            self.assertEqual(manager.started_milestones, ["m1", "m2"])
+            self.assertEqual(manager.started_work_order_ids, ["wo_disconnect_resume", "wo_disconnect_resume"])
+            completed_checkpoints = [
+                event
+                for event in manager.event_queue
+                if event.get("event_kind") == "checkpoint"
+                and event.get("work_order_id") == "wo_disconnect_resume"
+                and event.get("payload", {}).get("status") == "completed"
+            ]
+            self.assertEqual([event["payload"]["milestone_id"] for event in completed_checkpoints], ["m1", "m2"])
+            self.assertEqual([event["payload"]["milestone_index"] for event in completed_checkpoints], [0, 1])
+            self.assertEqual({event["payload"]["task_id"] for event in completed_checkpoints}, {"task_disconnect_resume"})
+            self.assertEqual([event["run_id"] for event in completed_checkpoints], [first["run_id"], resumed["run_id"]])
+            commit_shas = [event["payload"].get("commit_sha") for event in completed_checkpoints]
+            self.assertTrue(all(commit_shas))
+            self.assertNotEqual(commit_shas[0], commit_shas[1])
+
+            module_event = next(event for event in manager.event_queue if event.get("event_kind") == "module_completed")
+            self.assertEqual(module_event["payload"]["status"], "completed")
+            final_snapshot = manager.tasking_repository.read_work_order("wo_disconnect_resume")
+            self.assertEqual(final_snapshot["work_order"]["status"], "completed")
+            self.assertEqual(final_snapshot["work_order"]["task_id"], "task_disconnect_resume")
+            repo_path = Path(final_snapshot["work_order"]["metadata"]["workspace"]["repo_path"])
+            git_log = _git(repo_path, "log", "--oneline", "-3", check=True).stdout
+            self.assertIn("complete milestone 0 - Create disconnect feature", git_log)
+            self.assertIn("complete milestone 1 - Resume after disconnect", git_log)
+            self.assertEqual((repo_path / "src" / "disconnect_resume.py").read_text(encoding="utf-8"), 'def status():\n    return "disconnect-2"\n')
+
+        asyncio.run(scenario())
+
     def test_manager_parent_plan_waits_for_continue_between_modules(self) -> None:
         class FakePlanManager(MinionManager):
             def __post_init__(self) -> None:
                 super().__post_init__()
                 self.started_modules = []
+                self.started_run_ids = []
+                self.started_work_orders = []
 
             async def _start_runner(self, state: MinionRunState) -> None:
                 state.status = "running"
+                self.started_run_ids.append(state.run_id)
+                self.started_work_orders.append(state.pack.work_order_id)
                 prompt_view = dict(state.pack.metadata.get("prompt_view") or {})
                 self.started_modules.append(str((prompt_view.get("module") or {}).get("module_id") or ""))
 
         async def scenario() -> None:
             manager = FakePlanManager(runtime_root=self.root)
-            plan = {
-                "type": "FinalPlanArtifact",
-                "plan_id": "plan_parent_manager",
-                "task_id": "task_parent_manager",
-                "modules": [
-                    {"module_id": "module_a", "internal_milestones": [{"milestone_id": "a1", "title": "A1", "task": "Do A."}]},
-                    {"module_id": "module_b", "internal_milestones": [{"milestone_id": "b1", "title": "B1", "task": "Do B."}]},
-                ],
-            }
+            module_b = _plan_module("module_b", title="B1", task="Do B.")
+            module_b["internal_milestones"][0]["milestone_id"] = "b1"
+            module_c = _plan_module("module_c", title="C1", task="Do C.")
+            module_c["internal_milestones"][0]["milestone_id"] = "c1"
+            plan = _dispatchable_plan_payload(
+                plan_id="plan_parent_manager",
+                task_id="task_parent_manager",
+                modules=[module_b, module_c],
+                prelude_module_id="module_a",
+            )
             parent = manager.tasking_repository.build_plan_parent_pack_from_plan(plan, work_order_id="wo_parent_manager")
             spawned_parent = await manager.spawn(parent.to_dict())
 
             self.assertTrue(spawned_parent["plan_parent"])
             self.assertEqual(manager.started_modules, ["module_a"])
             child_a = next(state for state in manager.runs.values() if state.pack.work_order_id != "wo_parent_manager")
+
+            duplicate_continue = await manager.continue_work_order("wo_parent_manager")
+
+            self.assertEqual(duplicate_continue["status"], "running_module")
+            self.assertEqual(duplicate_continue["reason"], "active_child_running")
+            self.assertEqual(duplicate_continue["active_child_work_order_id"], child_a.pack.work_order_id)
+            self.assertEqual(manager.started_modules, ["module_a"])
+            self.assertEqual(len(manager.started_run_ids), 1)
+
+            async def wait_for_module_completion_count(count: int) -> None:
+                for _ in range(20):
+                    if len([event for event in manager.event_queue if event.get("event_kind") == "module_completed"]) >= count:
+                        return
+                    await asyncio.sleep(0.01)
+
             manager._record_event(
                 child_a,
                 {
@@ -2221,15 +5248,12 @@ class MinionManagerTests(unittest.TestCase):
             manager._record_event(
                 child_a,
                 {
-                    "event_kind": "terminal",
-                    "payload": {"status": "completed", "summary": "module A terminal"},
+                    "event_kind": "milestone_completed",
+                    "payload": {"status": "completed", "milestone_index": 0, "summary": "module A done"},
                     "created_at": "2026-01-01T00:00:01Z",
                 },
             )
-            for _ in range(20):
-                if any(event.get("event_kind") == "module_completed" for event in manager.event_queue):
-                    break
-                await asyncio.sleep(0.01)
+            await wait_for_module_completion_count(1)
 
             self.assertEqual(manager.started_modules, ["module_a"])
             parent_snapshot = manager.tasking_repository.read_work_order("wo_parent_manager")
@@ -2243,7 +5267,42 @@ class MinionManagerTests(unittest.TestCase):
 
             self.assertEqual(continued["status"], "running_module")
             self.assertEqual(continued["module_id"], "module_b")
+            self.assertEqual(continued["child_work_order_id"], "wo_wo_parent_manager_module_b")
+            self.assertNotEqual(continued["run"]["run_id"], child_a.run_id)
             self.assertEqual(manager.started_modules, ["module_a", "module_b"])
+            self.assertEqual(manager.started_work_orders[-1], "wo_wo_parent_manager_module_b")
+
+            child_b = manager.runs[continued["run"]["run_id"]]
+            manager._record_event(
+                child_b,
+                {
+                    "event_kind": "checkpoint",
+                    "payload": {"status": "completed", "milestone_index": 0, "summary": "module B done"},
+                    "created_at": "2026-01-01T00:00:02Z",
+                },
+            )
+            manager._record_event(
+                child_b,
+                {
+                    "event_kind": "milestone_completed",
+                    "payload": {"status": "completed", "milestone_index": 0, "summary": "module B done"},
+                    "created_at": "2026-01-01T00:00:03Z",
+                },
+            )
+            await wait_for_module_completion_count(2)
+
+            self.assertEqual(manager.started_modules, ["module_a", "module_b"])
+            parent_snapshot = manager.tasking_repository.read_work_order("wo_parent_manager")
+            self.assertEqual(parent_snapshot["current_milestone"]["title"], "module_c")
+            self.assertEqual(parent_snapshot["work_order"]["metadata"]["plan_execution"]["status"], "awaiting_continue")
+
+            continued_c = await manager.continue_work_order("wo_parent_manager")
+
+            self.assertEqual(continued_c["status"], "running_module")
+            self.assertEqual(continued_c["module_id"], "module_c")
+            self.assertEqual(continued_c["child_work_order_id"], "wo_wo_parent_manager_module_c")
+            self.assertNotIn(continued_c["run"]["run_id"], {child_a.run_id, child_b.run_id})
+            self.assertEqual(manager.started_modules, ["module_a", "module_b", "module_c"])
 
         asyncio.run(scenario())
 
@@ -2517,6 +5576,124 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(terminal["payload"]["error"], "Traceback: boom")
 
         asyncio.run(scenario())
+
+    def test_manager_close_all_closes_runner_liveness_pipe(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root)
+            read_fd, write_fd = os.pipe()
+            try:
+                state = MinionRunState(
+                    minion_id="m_liveness",
+                    run_id="r_liveness",
+                    pack=TaskContextPack(work_order_id="wo_liveness", goal="liveness"),
+                    status="running",
+                    manager_liveness_write_fd=write_fd,
+                )
+
+                class FakeProcess:
+                    returncode = None
+
+                    def terminate(self):
+                        return None
+
+                    async def wait(self):
+                        self.returncode = 0
+                        return 0
+
+                    def kill(self):
+                        self.returncode = -9
+
+                state.process = FakeProcess()  # type: ignore[assignment]
+                manager.runs[state.run_id] = state
+
+                await manager.close_all()
+
+                write_fd = -1
+                self.assertIsNone(state.manager_liveness_write_fd)
+                self.assertEqual(os.read(read_fd, 1), b"")
+                terminal = manager.event_queue[-1]
+                self.assertEqual(terminal["event_kind"], "terminal")
+                self.assertEqual(terminal["payload"]["status"], "killed")
+                self.assertEqual(terminal["payload"]["reason"], "manager_shutdown")
+            finally:
+                if write_fd >= 0:
+                    with contextlib.suppress(OSError):
+                        os.close(write_fd)
+                with contextlib.suppress(OSError):
+                    os.close(read_fd)
+
+        asyncio.run(scenario())
+
+    def test_manager_destroy_work_order_run_kills_active_child_and_releases_parent(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root)
+            plan = _dispatchable_plan_payload(
+                plan_id="plan_destroy_parent",
+                task_id="task_destroy_parent",
+                modules=[_plan_module("module_destroy")],
+            )
+            parent = manager.tasking_repository.build_plan_parent_pack_from_plan(plan, work_order_id="wo_destroy_parent")
+            manager.tasking_repository.prepare_pack_for_spawn(parent)
+            child_pack = manager.tasking_repository.next_plan_module_pack("wo_destroy_parent", allow_paused=True)
+            assert child_pack is not None
+            manager.tasking_repository.prepare_pack_for_spawn(child_pack)
+
+            class FakeProcess:
+                returncode = None
+                pid = 123
+
+                def terminate(self):
+                    self.returncode = -15
+
+                async def wait(self):
+                    if self.returncode is None:
+                        self.returncode = -15
+                    return self.returncode
+
+                def kill(self):
+                    self.returncode = -9
+
+            state = MinionRunState(
+                minion_id="m_destroy",
+                run_id="r_destroy",
+                pack=child_pack,
+                status="running",
+            )
+            state.process = FakeProcess()  # type: ignore[assignment]
+            manager.runs[state.run_id] = state
+
+            result = await manager.destroy_work_order_run("wo_destroy_parent", "user requested destroy")
+
+            self.assertEqual(result["status"], "destroyed")
+            self.assertEqual(result["target_work_order_id"], child_pack.work_order_id)
+            self.assertEqual(result["release"]["status"], "released")
+            self.assertEqual(state.status, "killed")
+            parent_snapshot = manager.tasking_repository.read_work_order("wo_destroy_parent")
+            plan_execution = parent_snapshot["work_order"]["metadata"]["plan_execution"]
+            self.assertEqual(plan_execution["status"], "awaiting_continue")
+            self.assertNotIn("active_child_work_order_id", plan_execution)
+            child_snapshot = manager.tasking_repository.read_work_order(child_pack.work_order_id)
+            self.assertEqual(child_snapshot["work_order"]["status"], "killed")
+
+        asyncio.run(scenario())
+
+    def test_manager_does_not_treat_successful_tool_stderr_as_last_error(self) -> None:
+        manager = MinionManager(runtime_root=self.root)
+        state = MinionRunState(
+            minion_id="m_tool_stderr",
+            run_id="r_tool_stderr",
+            pack=TaskContextPack(work_order_id="wo_tool_stderr", goal="tool stderr"),
+            status="running",
+        )
+
+        manager._record_runner_stderr_line(state, "[tool call] turn_id=r name=op_minion_artifact_write call_id=call_1 args={}")
+        manager._record_runner_stderr_line(
+            state,
+            '[tool result] turn_id=r name=op_minion_artifact_write call_id=call_1 ok=True status=ok text="Artifact written"',
+        )
+
+        self.assertEqual(state.last_error, "")
+        self.assertEqual(len(state.stderr_tail), 2)
 
     def test_manager_reconciles_dead_runner_before_reading_status(self) -> None:
         async def scenario() -> None:
@@ -3708,6 +6885,360 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_runner_records_shell_workspace_mutation_violation(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "shell_mutation_repo"
+            repo_path.mkdir()
+            _git(repo_path, "init", check=True)
+            _git(repo_path, "checkout", "-B", "main", check=True)
+            _git(repo_path, "config", "user.email", "pal-test@example.invalid", check=True)
+            _git(repo_path, "config", "user.name", "Pal Test", check=True)
+            (repo_path / "README.md").write_text("# shell mutation\n", encoding="utf-8")
+            _git(repo_path, "add", "README.md", check=True)
+            _git(repo_path, "commit", "-m", "initial", check=True)
+            pack = TaskContextPack(
+                work_order_id="wo_shell_mutation",
+                goal="audit shell mutation",
+                allowed_capabilities=["op_exec_shell"],
+                workspace={"repo_path": str(repo_path), "completion_policy": {"evidence": "git_commit"}},
+            )
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, **kwargs):
+                    _ = call, kwargs
+                    (repo_path / "created_by_shell.txt").write_text("hidden mutation\n", encoding="utf-8")
+                    return CanonicalToolResult(
+                        name="op_exec_shell",
+                        ok=True,
+                        text="shell ok",
+                        llm_text="shell ok",
+                        structured={"exit_code": 0},
+                        status=RuntimeStatus.OK,
+                    )
+
+            async def write_event(event):
+                _ = event
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_shell_mutation",
+                run_id="r_shell_mutation",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+            result = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(
+                    name="op_exec_shell",
+                    args={"cmd": "printf hidden > created_by_shell.txt"},
+                    call_id="call_shell_mutation",
+                ),
+            )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(len(runner.shell_mutation_violations), 1)
+            violation = runner.shell_mutation_violations[0]
+            self.assertEqual(violation["kind"], "shell_workspace_mutation")
+            self.assertIn("created_by_shell.txt", violation["after"]["status"])
+            self.assertEqual(violation["command"], "printf hidden > created_by_shell.txt")
+
+        asyncio.run(scenario())
+
+    def test_reviewer_readonly_shell_mutation_blocks_review_gate_pass(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "reviewer_readonly_repo"
+            repo_path.mkdir()
+            _git(repo_path, "init", check=True)
+            _git(repo_path, "checkout", "-B", "main", check=True)
+            _git(repo_path, "config", "user.email", "pal-test@example.invalid", check=True)
+            _git(repo_path, "config", "user.name", "Pal Test", check=True)
+            (repo_path / "README.md").write_text("# reviewer readonly\n", encoding="utf-8")
+            _git(repo_path, "add", "README.md", check=True)
+            _git(repo_path, "commit", "-m", "initial", check=True)
+            pack = TaskContextPack(
+                work_order_id="wo_reviewer_readonly_shell",
+                goal="review without mutating source",
+                minion_profile="software_engineering.reviewer",
+                allowed_capabilities=["op_exec_shell", "op_minion_review_gate_submit"],
+                workspace={
+                    "repo_path": str(repo_path),
+                    "review_scratch_dir": str(self.root / "review_scratch"),
+                    "review_scratch_repo_path": str(self.root / "review_scratch" / "source"),
+                    "workspace_policy": {"mode": "read_only_repo"},
+                },
+            )
+            Path(pack.workspace["review_scratch_dir"]).mkdir(parents=True, exist_ok=True)
+            Path(pack.workspace["review_scratch_repo_path"]).mkdir(parents=True, exist_ok=True)
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, **kwargs):
+                    _ = call, kwargs
+                    (repo_path / "mutated_by_reviewer.txt").write_text("mutation\n", encoding="utf-8")
+                    return CanonicalToolResult(
+                        name="op_exec_shell",
+                        ok=True,
+                        text="shell ok",
+                        llm_text="shell ok",
+                        structured={"exit_code": 0},
+                        status=RuntimeStatus.OK,
+                    )
+
+            async def write_event(event):
+                _ = event
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_reviewer_readonly_shell",
+                run_id="r_reviewer_readonly_shell",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+            denied = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="op_exec_shell", args={"cmd": "printf mutation > mutated_by_reviewer.txt"}, call_id="call_review_shell_denied"),
+            )
+            self.assertFalse(denied.ok)
+            self.assertEqual(denied.structured["reason"], "read_only_repo_shell_policy")
+            denied_root = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(
+                    name="op_exec_shell",
+                    args={"cmd": "printf mutation > mutated_by_reviewer.txt", "cwd": pack.workspace["review_scratch_dir"]},
+                    call_id="call_review_shell_root_denied",
+                ),
+            )
+            self.assertFalse(denied_root.ok)
+            self.assertIn("review_scratch_repo_path", denied_root.text)
+            result = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(
+                    name="op_exec_shell",
+                    args={
+                        "cmd": "printf mutation > mutated_by_reviewer.txt",
+                        "cwd": pack.workspace["review_scratch_repo_path"],
+                    },
+                    call_id="call_review_shell",
+                ),
+            )
+            self.assertTrue(result.ok)
+            self.assertEqual(len(runner.shell_mutation_violations), 1)
+
+            gate = _minion_review_gate_submit_result(
+                CanonicalToolCall(
+                    name="op_minion_review_gate_submit",
+                    args={
+                        "gate_kind": "checkpoint_verification",
+                        "target": {"checkpoint_id": "chk_readonly_shell"},
+                        "verdict": "pass",
+                        "summary": "should not pass after shell mutation",
+                        "evidence": [{"kind": "review", "summary": "reviewed"}],
+                        "commands_run": [
+                            {
+                                "command": "printf mutation > mutated_by_reviewer.txt",
+                                "cwd": pack.workspace["review_scratch_repo_path"],
+                                "status": "passed",
+                                "summary": "fixture shell command ran from review scratch",
+                            }
+                        ],
+                        "api_evidence": [{"kind": "not_applicable", "summary": "no API claims"}],
+                        "metadata": {
+                            "lsp_evidence_not_applicable": True,
+                            "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                        },
+                    },
+                    call_id="call_review_gate",
+                ),
+                {
+                    "runtime_root": str(self.root),
+                    "work_order_id": "wo_reviewer_readonly_shell",
+                    "run_id": "r_reviewer_readonly_shell",
+                    "minion_profile": "software_engineering.reviewer",
+                    "review_tool_evidence_refs": runner.review_tool_evidence_refs,
+                    "shell_mutation_violations": runner.shell_mutation_violations,
+                },
+            )
+            self.assertFalse(gate.ok)
+            self.assertEqual(gate.status, RuntimeStatus.INVALID)
+            self.assertIn("shell mutated", gate.text)
+
+        asyncio.run(scenario())
+
+    def test_review_gate_submit_rejects_unbacked_command_and_lsp_evidence(self) -> None:
+        command_gate = _minion_review_gate_submit_result(
+            CanonicalToolCall(
+                name="op_minion_review_gate_submit",
+                args={
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": "chk_fake_provenance"},
+                    "verdict": "pass",
+                    "summary": "claims command evidence without calling shell",
+                    "evidence": [{"kind": "review", "summary": "reviewed"}],
+                    "commands_run": [{"command": "pytest tests/test_fake.py", "status": "passed"}],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "no API claims"}],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                },
+            ),
+            {
+                "runtime_root": str(self.root),
+                "work_order_id": "wo_fake_provenance",
+                "run_id": "r_fake_provenance",
+                "review_tool_evidence_refs": [],
+                "shell_mutation_violations": [],
+            },
+        )
+        self.assertFalse(command_gate.ok)
+        self.assertEqual(command_gate.status, RuntimeStatus.INVALID)
+        self.assertIn("lacks matching op_exec_shell evidence", command_gate.text)
+
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_lsp_provenance",
+            task_id="task_lsp_provenance",
+            modules=[_plan_module("module_lsp_provenance", title="LSP provenance module")],
+        )
+        artifact_path = self.root / "lsp-provenance-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        source_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
+        lsp_gate = _minion_review_gate_submit_result(
+            CanonicalToolCall(
+                name="op_minion_review_gate_submit",
+                args={
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": source_ref},
+                    "verdict": "pass",
+                    "summary": "claims LSP evidence without calling LSP",
+                    "evidence": [{"kind": "plan_review", "summary": "reviewed"}],
+                    "api_evidence": [{"kind": "lsp", "evidence_id": "lsp_fake", "method": "textDocument/definition"}],
+                },
+            ),
+            {
+                "runtime_root": str(self.root),
+                "work_order_id": "wo_lsp_provenance",
+                "run_id": "r_lsp_provenance",
+                "review_tool_evidence_refs": [],
+                "shell_mutation_violations": [],
+            },
+        )
+        self.assertFalse(lsp_gate.ok)
+        self.assertEqual(lsp_gate.status, RuntimeStatus.INVALID)
+        self.assertIn("lacks matching op_lsp", lsp_gate.text)
+
+    def test_runner_review_gate_records_ledger_backed_tool_evidence(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_runner_tool_evidence",
+            task_id="task_runner_tool_evidence",
+            modules=[_plan_module("module_runner_tool_evidence", title="Runner tool evidence module")],
+        )
+        artifact_path = self.root / "runner-tool-evidence-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        source_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
+        gate = _minion_review_gate_submit_result(
+            CanonicalToolCall(
+                name="op_minion_review_gate_submit",
+                args={
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": source_ref},
+                    "verdict": "pass",
+                    "summary": "runner evidence-backed plan pass",
+                    "evidence": [{"kind": "plan_review", "summary": "reviewed"}],
+                    "commands_run": [
+                        {
+                            "command": "python -m pytest tests/test_feature.py",
+                            "status": "passed",
+                            "summary": "fixture command passed",
+                        }
+                    ],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                },
+            ),
+            {
+                "runtime_root": str(self.root),
+                "work_order_id": "wo_runner_tool_evidence",
+                "run_id": "r_runner_tool_evidence",
+                "review_tool_evidence_refs": [
+                    {
+                        "kind": "command",
+                        "command": "python -m pytest tests/test_feature.py",
+                        "status": "passed",
+                        "summary": "fixture command passed",
+                    }
+                ],
+                "shell_mutation_violations": [],
+            },
+        )
+
+        self.assertTrue(gate.ok)
+        self.assertEqual(gate.status, RuntimeStatus.OK)
+        refs = gate.structured["review_gate"]["metadata"]["tool_evidence_refs"]
+        self.assertEqual(len(refs), 1)
+        self.assertTrue(str(refs[0].get("ledger_id") or "").startswith("led_"))
+
+    def test_op_tool_call_shell_git_mutation_uses_inner_command_for_policy(self) -> None:
+        async def scenario() -> None:
+            pack = TaskContextPack(
+                work_order_id="wo_tool_call_git_policy",
+                goal="block wrapped git mutation",
+                allowed_capabilities=["op_tool_call", "op_exec_shell"],
+                workspace={"completion_policy": {"evidence": "git_commit"}},
+            )
+
+            class FakeExecution:
+                called = False
+
+                async def execute_tool_async(self, call, **kwargs):
+                    self.called = True
+                    return CanonicalToolResult(name=call.name, ok=True, text="unexpected", status=RuntimeStatus.OK)
+
+            async def write_event(event):
+                _ = event
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            fake_execution = FakeExecution()
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_tool_call_git_policy",
+                run_id="r_tool_call_git_policy",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+            result = await runner._execute_allowed_tool(
+                fake_execution,
+                CanonicalToolCall(
+                    name="op_tool_call",
+                    args={"name": "op_exec_shell", "args": {"cmd": "git add ."}},
+                    call_id="call_wrapped_git",
+                ),
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.structured["reason"], "use_checkpoint_commit_capability")
+            self.assertFalse(fake_execution.called)
+
+        asyncio.run(scenario())
+
     def test_runner_truncated_llm_output_blocks_and_saves_partial_artifact(self) -> None:
         async def scenario() -> None:
             events = []
@@ -4333,6 +7864,64 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_reviewer_scoped_runtime_cannot_see_coder_write_tools(self) -> None:
+        class FakeExecution:
+            def __init__(self):
+                self.specs = {
+                    name: {
+                        "name": name,
+                        "display_name": name,
+                        "description": f"{name} description",
+                        "family": "test",
+                        "module_id": "fake",
+                        "aliases": [],
+                        "parameters_schema": {"type": "object", "properties": {}},
+                    }
+                    for name in (
+                        "op_file_read",
+                        "op_file_edit",
+                        "op_file_write",
+                        "op_exec_shell",
+                        "op_workspace_tree",
+                        "op_workspace_search",
+                        "op_workspace_read",
+                        "op_minion_artifact_write",
+                        "op_minion_review_gate_submit",
+                    )
+                }
+
+            def list_capability_specs(self):
+                return list(self.specs.values())
+
+            def get_capability_spec(self, name):
+                return self.specs.get(name)
+
+        registry = MinionProfileRegistry(runtime_root=self.root)
+        pack = registry.resolve_pack(
+            TaskContextPack(work_order_id="wo_reviewer_readonly", goal="review a checkpoint"),
+            requested_profile="software_engineering.reviewer",
+        )
+        scoped = MinionScopedExecutionRuntime(FakeExecution(), pack.allowed_capabilities)
+        visible = {item["function"]["name"] for item in _llm_tools_for_allowed(scoped, pack.allowed_capabilities)}
+        searchable = {item["name"] for item in scoped.list_capability_specs()}
+
+        self.assertEqual(pack.workspace["workspace_policy"]["mode"], "read_only_repo")
+        self.assertNotIn("op_file_edit", pack.allowed_capabilities)
+        self.assertNotIn("op_file_write", pack.allowed_capabilities)
+        self.assertIn("op_exec_shell", pack.allowed_capabilities)
+        self.assertNotIn("op_file_edit", visible)
+        self.assertNotIn("op_file_write", visible)
+        self.assertIn("op_exec_shell", visible)
+        self.assertNotIn("op_file_edit", searchable)
+        self.assertNotIn("op_file_write", searchable)
+        self.assertIn("op_exec_shell", searchable)
+        self.assertIn("op_workspace_read", searchable)
+        self.assertIn("op_minion_artifact_write", searchable)
+        self.assertIn("op_minion_review_gate_submit", searchable)
+        denied = asyncio.run(scoped.execute_tool_async(CanonicalToolCall(name="op_file_write", args={"path": "x.py", "content": "bad"})))
+        self.assertFalse(denied.ok)
+        self.assertEqual(denied.structured["reason"], "capability_not_allowed")
+
     def test_runner_tool_surface_preserves_custom_allowed_tools_with_checkpoint(self) -> None:
         class FakeExecution:
             def get_capability_spec(self, name):
@@ -4406,7 +7995,7 @@ class MinionManagerTests(unittest.TestCase):
         )
 
         self.assertIn("design top-down", prompt)
-        self.assertIn("Preserve the task_id", prompt)
+        self.assertIn("manager owns task identity", prompt)
         self.assertIn("Prefer official documentation", prompt)
         self.assertIn("module-first", prompt)
         self.assertIn("AskUserQuestion", prompt)
@@ -4473,6 +8062,47 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("Do not create or commit generated", prompt)
         self.assertIn("CMakeLists.txt", prompt)
         self.assertEqual(pack.allowed_skills, ["test_debugging"])
+
+    def test_software_engineering_profiles_expose_lsp_as_resident_tools(self) -> None:
+        class FakeExecution:
+            def get_capability_spec(self, name):
+                if str(name).startswith("op_lsp_"):
+                    return {
+                        "name": name,
+                        "description": f"{name} spec",
+                        "parameters_schema": {"type": "object", "properties": {}},
+                    }
+                return WORKSPACE_TOOL_SPECS.get(str(name))
+
+        registry = MinionProfileRegistry(runtime_root=self.root)
+        lsp_tools = {
+            "op_lsp_status",
+            "op_lsp_doctor",
+            "op_lsp_hover",
+            "op_lsp_definition",
+            "op_lsp_implementation",
+            "op_lsp_references",
+            "op_lsp_prepare_call_hierarchy",
+            "op_lsp_incoming_calls",
+            "op_lsp_outgoing_calls",
+            "op_lsp_document_symbols",
+            "op_lsp_workspace_symbols",
+            "op_lsp_diagnostics",
+        }
+        for profile_id in (
+            "software_engineering.planner",
+            "software_engineering.coder",
+            "software_engineering.reviewer",
+        ):
+            pack = registry.resolve_pack(
+                TaskContextPack(work_order_id=f"wo_lsp_{profile_id.replace('.', '_')}", goal="use code intelligence"),
+                requested_profile=profile_id,
+            )
+            scoped = MinionScopedExecutionRuntime(FakeExecution(), pack.allowed_capabilities)
+            tool_names = {item["function"]["name"] for item in _llm_tools_for_allowed(scoped, pack.allowed_capabilities)}
+
+            self.assertTrue(lsp_tools.issubset(set(pack.allowed_capabilities)), profile_id)
+            self.assertTrue(lsp_tools.issubset(tool_names), profile_id)
 
     def test_reviewer_prompt_uses_contract_lifecycle_and_severity_rubric(self) -> None:
         registry = MinionProfileRegistry(runtime_root=self.root)
@@ -4684,6 +8314,8 @@ class MinionIntegrationTests(unittest.TestCase):
                 takeover_candidates = {item.affordance_id: item for item in takeover.candidates}
                 self.assertIn("declared.minion.natural_language_takeover", takeover_candidates)
                 self.assertIn("op_minion_kill", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
+                self.assertIn("op_minion_destroy_work_order_run", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
+                self.assertIn("op_minion_recover_work_order", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
                 self.assertIn("op_minion_spawn", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
 
                 core.detach_module("minion")
@@ -4813,11 +8445,20 @@ class MinionIntegrationTests(unittest.TestCase):
                 spawn = core.context.execution_runtime.execute(
                     CapabilityCall(
                         name="op_minion_spawn",
-                        args={"task_context_pack": {"work_order_id": "wo_missing_milestones", "goal": "reject"}},
+                        args={"goal": "reject"},
                     )
                 )
                 self.assertEqual(spawn.status, "invalid")
                 self.assertEqual(spawn.structured["field"], "milestones")
+
+                legacy_spawn = core.context.execution_runtime.execute(
+                    CapabilityCall(
+                        name="op_minion_spawn",
+                        args={"task_context_pack": {"work_order_id": "wo_missing_milestones", "goal": "reject"}},
+                    )
+                )
+                self.assertEqual(legacy_spawn.status, "invalid")
+                self.assertEqual(legacy_spawn.structured["field"], "task_context_pack")
             finally:
                 handle.shutdown_sync()
 
@@ -4855,22 +8496,46 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("intro_minion_profile_list", spawn_spec["description"])
                 self.assertIn("intro_minion_profile_read", spawn_spec["description"])
                 self.assertIn("runtime_root/plugins/minion/profiles/*.toml", spawn_spec["description"])
-                self.assertIn("Do not spawn from a bare goal/profile handoff", spawn_spec["description"])
-                self.assertIn("prompt_view", spawn_spec["description"])
+                self.assertIn("small semantic request", spawn_spec["description"])
+                self.assertIn("Do not pass TaskContextPack", spawn_spec["description"])
                 self.assertIn("preferred_endpoint_id", spawn_spec["description"])
-                pack_arg = spawn_spec["parameters_schema"]["properties"]["task_context_pack"]
-                self.assertIn("goal-only packet", pack_arg["description"])
-                self.assertIn("instruction", pack_arg["required"])
-                self.assertIn("acceptance_criteria", pack_arg["required"])
-                self.assertIn("metadata", pack_arg["required"])
-                self.assertIn("prompt_view", pack_arg["properties"]["metadata"]["properties"])
+                spawn_props = spawn_spec["parameters_schema"]["properties"]
+                self.assertIn("artifact_refs", spawn_props)
+                self.assertIn("milestones", spawn_props)
+                self.assertIn("goal", spawn_props)
+                for removed in (
+                    "task_context_pack",
+                    "task_json",
+                    "prompt_view",
+                    "final_plan_artifact",
+                    "plan_ref",
+                    "module_id",
+                ):
+                    self.assertNotIn(removed, spawn_props)
                 profile_arg = spawn_spec["parameters_schema"]["properties"]["minion_profile"]
                 self.assertIn("profile_id", profile_arg["description"])
                 endpoint_arg = spawn_spec["parameters_schema"]["properties"]["preferred_endpoint_id"]
                 self.assertIn("active endpoint", endpoint_arg["description"])
                 bonus_arg = spawn_spec["parameters_schema"]["properties"]["spawn_bonus_skill_refs"]
                 self.assertIn("optional skill libraries", bonus_arg["description"])
-                self.assertIn("spawn_bonus_skill_refs", pack_arg["properties"]["metadata"]["properties"])
+                self.assertIsNotNone(core.context.execution_runtime.get_capability_spec("op_minion_recover_work_order"))
+                self.assertIsNotNone(core.context.execution_runtime.get_capability_spec("op_minion_destroy_work_order_run"))
+                revise_spec = core.context.execution_runtime.get_capability_spec("op_minion_revise_plan")
+                self.assertIsNotNone(revise_spec)
+                assert revise_spec is not None
+                self.assertIn("source_plan_ref", revise_spec["parameters_schema"]["required"])
+                self.assertIn("revised_plan_artifact", revise_spec["parameters_schema"]["required"])
+                self.assertIn("increment plan_revision by exactly one", revise_spec["description"])
+                accept_spec = core.context.execution_runtime.get_capability_spec("op_minion_accept_plan")
+                self.assertIsNotNone(accept_spec)
+                assert accept_spec is not None
+                self.assertIn("plan_ref", accept_spec["parameters_schema"]["required"])
+                self.assertIn("review_gate_ref", accept_spec["parameters_schema"]["properties"])
+                self.assertNotIn("human_override", accept_spec["parameters_schema"]["properties"])
+                review_gate_spec = core.context.execution_runtime.get_capability_spec("op_minion_review_gate_submit")
+                self.assertIsNotNone(review_gate_spec)
+                assert review_gate_spec is not None
+                self.assertIn("gate_kind", review_gate_spec["parameters_schema"]["required"])
 
                 draft_spec = core.context.execution_runtime.get_capability_spec("op_minion_draft_work_order")
                 self.assertIsNotNone(draft_spec)
@@ -5019,11 +8684,9 @@ class MinionIntegrationTests(unittest.TestCase):
                         args={
                             "minion_profile": "software_engineering.coder",
                             "preferred_endpoint_id": "coder_fast",
-                            "task_context_pack": {
-                                "work_order_id": "wo_coder",
-                                "goal": "make a change",
-                                "metadata": {"milestones": ["make a change"]},
-                            },
+                            "work_order_id": "wo_coder",
+                            "goal": "make a change",
+                            "milestones": ["make a change"],
                         },
                     )
                 )
@@ -5060,11 +8723,9 @@ class MinionIntegrationTests(unittest.TestCase):
                         name="op_minion_spawn",
                         args={
                             "minion_profile": "missing",
-                            "task_context_pack": {
-                                "work_order_id": "wo_missing",
-                                "goal": "nope",
-                                "metadata": {"milestones": ["nope"]},
-                            },
+                            "work_order_id": "wo_missing",
+                            "goal": "nope",
+                            "milestones": ["nope"],
                         },
                     )
                 )
@@ -5076,14 +8737,12 @@ class MinionIntegrationTests(unittest.TestCase):
                         name="op_minion_spawn",
                         args={
                             "minion_profile": "software_engineering.planner",
-                            "task_context_pack": {
-                                "work_order_id": "wo_explicit",
-                                "goal": "plan",
-                                "allowed_capabilities": ["op_only_this"],
-                                "allowed_skills": ["skill.only"],
-                                "approval_policy": {"custom": True},
-                                "metadata": {"milestones": ["plan"]},
-                            },
+                            "work_order_id": "wo_explicit",
+                            "goal": "plan",
+                            "allowed_capabilities": ["op_only_this"],
+                            "allowed_skills": ["skill.only"],
+                            "approval_policy": {"custom": True},
+                            "milestones": ["plan"],
                             "spawn_bonus_skill_refs": ["bonus.skill"],
                         },
                     )
@@ -5228,6 +8887,54 @@ class MinionIntegrationTests(unittest.TestCase):
         accept = interaction.buttons[0][0]
         self.assertTrue(accept.action_args["target_id"].startswith("approval_"))
         self.assertEqual(accept.action_args["args"]["approval_id"], accept.action_args["target_id"])
+
+    def test_minion_event_source_maps_plan_acceptance_pending_to_interaction(self) -> None:
+        class Provider:
+            def has_pending_events(self) -> bool:
+                return True
+
+            def drain_events_sync(self, *, limit: int = 20) -> dict:
+                _ = limit
+                return {
+                    "events": [
+                        {
+                            "event_kind": "plan_acceptance_pending",
+                            "minion_id": "m_reviewer",
+                            "run_id": "r_reviewer",
+                            "work_order_id": "wo_plan_accept_pending",
+                            "minion_profile": "software_engineering.reviewer",
+                            "payload": {
+                                "status": "pending",
+                                "summary": "reviewer passed plan",
+                                "plan_ref": {"plan_id": "plan_pending", "task_id": "task_pending", "plan_revision": 1},
+                                "review_gate_ref": {"gate_id": "gate_pending", "gate_kind": "plan_acceptance", "verdict": "pass"},
+                                "metadata": {
+                                    "control_route": {
+                                        "endpoint_id": "telegram_main",
+                                        "channel_kind": "telegram",
+                                        "reply_target": {"chat_id": "42"},
+                                    }
+                                },
+                            },
+                            "created_at": "2026-01-01T00:00:00Z",
+                        }
+                    ]
+                }
+
+        source = MinionEventSource(provider=Provider())
+        events = source.drain(context=None)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].event_kind, EventKind.MINION_PLAN_ACCEPTANCE_PENDING)
+        derived = MinionControlEventHandler().handle(events[0], context=None)
+        self.assertEqual(len(derived), 1)
+        action = derived[0].payload
+        self.assertEqual(action.action_kind, "interactive_open")
+        self.assertIsNotNone(action.delivery)
+        assert action.delivery is not None and action.delivery.interaction is not None
+        accept = action.delivery.interaction.buttons[0][0]
+        self.assertEqual(accept.action_args["action_kind"], "minion_plan_accept_override")
+        self.assertEqual(accept.action_args["args"]["review_gate_ref"]["gate_id"], "gate_pending")
 
     def test_minion_event_source_maps_runner_progress(self) -> None:
         class Provider:
@@ -5635,6 +9342,83 @@ class MinionIntegrationTests(unittest.TestCase):
         self.assertEqual([button.label for button in interaction.buttons[0]], ["Continue", "Pause"])
         self.assertEqual(interaction.buttons[0][0].action_args["action_kind"], "minion_plan_continue")
         self.assertEqual(interaction.buttons[0][0].action_args["args"]["work_order_id"], "wo_parent_continue")
+
+    def test_minion_plan_acceptance_pending_opens_accept_interaction(self) -> None:
+        event = EventEnvelope(
+            event_kind=EventKind.MINION_PLAN_ACCEPTANCE_PENDING,
+            source_kind=SourceKind.MINION,
+            payload={
+                "status": "pending",
+                "summary": "Reviewer passed the plan.",
+                "work_order_id": "wo_plan_accept_ui",
+                "plan_ref": {
+                    "path": "/tmp/plan.json",
+                    "sha256": "abc",
+                    "plan_id": "plan_accept_ui",
+                    "task_id": "task_accept_ui",
+                    "plan_revision": 1,
+                },
+                "review_gate_ref": {
+                    "gate_id": "gate_accept_ui",
+                    "gate_kind": "plan_acceptance",
+                    "verdict": "pass",
+                },
+                "minion_profile": "software_engineering.reviewer",
+                "route": {
+                    "endpoint_id": "telegram_main",
+                    "channel_kind": "telegram",
+                    "reply_target": {"chat_id": "42"},
+                },
+            },
+        )
+
+        derived = MinionControlEventHandler().handle(event, context=None)
+
+        self.assertEqual(len(derived), 1)
+        action = derived[0].payload
+        self.assertEqual(action.action_kind, "interactive_open")
+        self.assertIsNotNone(action.delivery)
+        assert action.delivery is not None and action.delivery.interaction is not None
+        interaction = action.delivery.interaction
+        self.assertEqual(interaction.interaction_kind, "minion_plan_acceptance")
+        self.assertIn("Accept this reviewed plan", interaction.text)
+        accept = interaction.buttons[0][0]
+        self.assertEqual(accept.label, "Accept Plan")
+        self.assertEqual(accept.action_args["action_kind"], "minion_plan_accept_override")
+        self.assertEqual(accept.action_args["args"]["work_order_id"], "wo_plan_accept_ui")
+        self.assertEqual(accept.action_args["args"]["plan_ref"]["plan_id"], "plan_accept_ui")
+        self.assertEqual(accept.action_args["args"]["review_gate_ref"]["gate_id"], "gate_accept_ui")
+
+    def test_minion_plan_continue_reports_active_child_without_claiming_restart(self) -> None:
+        class FakeClient:
+            def request_sync(self, method, params):
+                self.last_request = (method, params)
+                return {
+                    "status": "running_module",
+                    "reason": "active_child_running",
+                    "work_order_id": "wo_parent_continue",
+                    "active_child_work_order_id": "wo_child_active",
+                }
+
+        with tempfile.TemporaryDirectory(prefix="pal_minion_continue_test_") as tmp:
+            provider = MinionManagerProvider(runtime_root=Path(tmp))
+            provider.client = FakeClient()
+            provider._ensure_manager_started = lambda: None  # type: ignore[method-assign]
+
+            message = asyncio.run(
+                provider.handle_control_action_async(
+                    ControlAction(
+                        action_kind="minion_plan_continue",
+                        target_scope="minion",
+                        target_id="wo_parent_continue",
+                        args={"work_order_id": "wo_parent_continue"},
+                    )
+                )
+            )
+
+        self.assertIn("already has an active module", message)
+        self.assertIn("wo_child_active", message)
+        self.assertNotIn("continued", message)
 
     def test_minion_clarification_request_opens_question_interaction(self) -> None:
         event = EventEnvelope(

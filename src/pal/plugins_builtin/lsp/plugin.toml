@@ -1,0 +1,5 @@
+plugin_id = "lsp"
+entrypoint = "pal.plugins_builtin.lsp.runtime"
+version = "0.1.0"
+enabled_by_default = true
+reload_modules = ["pal.lsp"]

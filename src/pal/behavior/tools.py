@@ -36,7 +36,10 @@ AFFORDANCE_SUBMIT_ARGS_SCHEMA = {
     "type": "object",
     "properties": {
         "scenario_text": {"type": "string", "description": "Scenario that should activate this affordance."},
-        "prompt_hint": {"type": "string", "description": "Short behavioral hint Pal should remember."},
+        "prompt_hint": {
+            "type": "string",
+            "description": "Short behavioral hint body Pal should remember. Do not repeat the title as a prefix.",
+        },
         "title": {"type": "string"},
         "activation_terms": {"type": "array", "items": {"type": "string"}},
         "capability_refs": {"type": "array", "items": {"type": "string"}},
@@ -179,8 +182,8 @@ AFFORDANCE_UPDATE_ARGS_SCHEMA = {
         "prompt_hint": {
             "type": "string",
             "description": (
-                "Updated visible behavior guidance text rendered in <behavior_guidance>. Use this when the user "
-                "asks to replace, edit, or update the guidance/original text."
+                "Updated visible behavior guidance body rendered in <behavior_guidance>. Use this when the user "
+                "asks to replace, edit, or update the guidance/original text. Do not repeat the title as a prefix."
             ),
         },
         "title": {"type": "string"},

@@ -1137,7 +1137,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(prompt.messages[0]["role"], "system")
             self.assertEqual(prompt.messages[-1]["role"], "user")
             self.assertIsInstance(prompt.messages[-1]["content"], list)
-            self.assertEqual(prompt.messages[-1]["content"][-1], {"type": "text", "text": "Hello from user"})
+            self.assertEqual(prompt.messages[-1]["content"][-2], {"type": "text", "text": "Hello from user"})
+            self.assertIn("<runtime_reminder", prompt.messages[-1]["content"][-1]["text"])
+            self.assertIn("active system prompt", prompt.messages[-1]["content"][-1]["text"])
             self.assertIn("<identity>", prompt.messages[0]["content"])
             self.assertIn("<system_map>", prompt.messages[0]["content"])
             self.assertIn("<source_of_truth>", prompt.messages[0]["content"])
@@ -1240,13 +1242,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             self.assertEqual(prompt.messages[0]["role"], "system")
             self.assertEqual(prompt.messages[-1]["role"], "user")
-            self.assertIn("<proactive_trigger>", prompt.messages[-1]["content"])
-            self.assertIn("</proactive_trigger>", prompt.messages[-1]["content"])
-            self.assertIn("Goal: Summarize repository updates", prompt.messages[-1]["content"])
-            self.assertIn("Method: Review recent changes and produce a concise digest.", prompt.messages[-1]["content"])
+            proactive_text = "\n".join(part["text"] for part in prompt.messages[-1]["content"] if part.get("type") == "text")
+            self.assertIn("<proactive_trigger>", proactive_text)
+            self.assertIn("</proactive_trigger>", proactive_text)
+            self.assertIn("Goal: Summarize repository updates", proactive_text)
+            self.assertIn("Method: Review recent changes and produce a concise digest.", proactive_text)
             self.assertEqual(len(prompt.messages), 2)
-            self.assertNotIn("Remember the last digest.", prompt.messages[-1]["content"])
-            self.assertNotIn("Recent summaries", "\n".join(message["content"] for message in prompt.messages))
+            self.assertNotIn("Remember the last digest.", proactive_text)
+            self.assertNotIn("Recent summaries", prompt.messages[0]["content"] + "\n" + proactive_text)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -1769,6 +1772,19 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             register_proactive_with_core(core.context, ProactiveManager())
             core.publish_module_capabilities("proactive")
 
+            invalid = core.context.execution_runtime.execute(
+                CapabilityCall(
+                    name="op_proactive_mgmt_create",
+                    args={
+                        "proactive_id": "bad_digest",
+                        "goal": "Summarize repository updates",
+                        "schedule": {"cadence": "daily", "hour": 9, "minute": 0, "timezone": "Asia/Shanghai"},
+                    },
+                )
+            )
+            self.assertEqual(invalid.status, "invalid")
+            self.assertIn("schedule.cadence", invalid.text)
+
             created = core.context.execution_runtime.execute(
                 CapabilityCall(
                     name="op_proactive_mgmt_create",
@@ -1779,7 +1795,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                         "skill_refs": ["git", "summary"],
                         "out_channel_id": "socket_default",
                         "out_reply_target": {"session_id": "session-1", "request_id": "req-1"},
-                        "schedule": {"cadence": "daily", "hour": 9, "minute": 0, "timezone": "Asia/Shanghai"},
+                        "schedule": {"cadence": "cron", "cron": "0 9 * * *", "timezone": "Asia/Shanghai"},
                     },
                 )
             )
@@ -1816,7 +1832,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     name="op_proactive_mgmt_update_schedule",
                     args={
                         "target_id": "daily_digest",
-                        "schedule": {"cadence": "daily", "hour": 10, "minute": 15, "timezone": "Asia/Shanghai"},
+                        "schedule": {"cadence": "cron", "cron": "15 10 * * *", "timezone": "Asia/Shanghai"},
                     },
                 )
             )
@@ -1859,7 +1875,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 goal="Summarize repository updates",
                 method="Review recent changes.",
                 out_channel_id="socket_default",
-                schedule={"cadence": "daily", "hour": 9, "minute": 0, "timezone": "Asia/Shanghai"},
+                schedule={"cadence": "cron", "cron": "0 9 * * *", "timezone": "Asia/Shanghai"},
             )
             run_id = runner.begin_run(ProactiveTriggerEvent(proactive_id="daily_digest", trigger_kind="manual"))
             runner.complete_run(run_id, turn_id="turn-123", final_reply="Digest sent.")

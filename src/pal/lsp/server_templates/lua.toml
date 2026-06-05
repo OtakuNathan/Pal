@@ -1,0 +1,7 @@
+server_id = "lua"
+display_name = "lua-language-server"
+command = ["lua-language-server"]
+extensions = [".lua"]
+language_ids = ["lua"]
+workspace_markers = [".luarc.json", ".git"]
+install_hint = "Install lua-language-server."

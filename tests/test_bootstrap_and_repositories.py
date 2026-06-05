@@ -12,7 +12,7 @@ import tomllib
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from pal.bootstrap import compose_runtime
 from pal.channel import ChannelEndpointRepository, ChannelRuntime, FactoryChannelProvider
@@ -1665,6 +1665,7 @@ class PalV2BootstrapTests(unittest.TestCase):
     def test_builtin_plugin_manifests_declare_owned_reload_modules(self) -> None:
         builtin_root = Path(__file__).resolve().parents[1] / "src" / "pal" / "plugins_builtin"
         expected = {
+            "lsp": "pal.lsp",
             "mcp": "pal.mcp",
             "minion": "pal.minion",
             "sqlite_vec_l3": "pal.plugins.l3",
@@ -1687,6 +1688,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         runtime = handle.core.context.execution_runtime
         cap_registry = handle.core.context.capability_registry
         expectations = {
+            "lsp": ("pal.lsp", "intro_module_lsp_show"),
             "mcp": ("pal.mcp", "intro_module_mcp_show"),
             "minion": ("pal.minion", "intro_module_minion_show"),
             "sqlite_vec_l3": ("pal.plugins.l3", "intro_provider_memory_show::sqlite_vec_l3"),
@@ -3483,6 +3485,17 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
             pass
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
+    async def _poll_until_envelopes(self, expected_count: int = 1, *, timeout_seconds: float = 1.0):
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        envelopes = []
+        while True:
+            envelopes = self.endpoint.poll()
+            if len(envelopes) >= expected_count:
+                return envelopes
+            if asyncio.get_running_loop().time() >= deadline:
+                return envelopes
+            await asyncio.sleep(0.01)
+
     async def test_socket_endpoint_unlinks_stale_socket_before_bind(self) -> None:
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         self.socket_path.write_text("stale")
@@ -3506,9 +3519,8 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             await writer.drain()
-            await asyncio.sleep(0.05)
 
-            envelopes = self.endpoint.poll()
+            envelopes = await self._poll_until_envelopes()
             self.assertEqual(len(envelopes), 1)
             envelope = envelopes[0]
             self.assertEqual(envelope.event.payload["text"], "ping")
@@ -3540,8 +3552,7 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             await writer.drain()
-            await asyncio.sleep(0.05)
-            envelopes = self.endpoint.poll()
+            envelopes = await self._poll_until_envelopes()
             self.assertEqual(len(envelopes), 1)
             envelope = envelopes[0]
 
@@ -3590,8 +3601,7 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             await writer.drain()
-            await asyncio.sleep(0.05)
-            envelopes = self.endpoint.poll()
+            envelopes = await self._poll_until_envelopes()
             self.assertEqual(len(envelopes), 1)
             envelope = envelopes[0]
         finally:
@@ -3675,6 +3685,12 @@ class _FakeTelegramUpdater:
         self.running = False
 
 
+class _HangingTelegramUpdater(_FakeTelegramUpdater):
+    async def stop(self):
+        self.stop_count += 1
+        await asyncio.Event().wait()
+
+
 class _FakeTelegramApp:
     def __init__(self, bot: _FakeTelegramBot, *, fail_initialize: bool = False) -> None:
         self.bot = bot
@@ -3701,6 +3717,12 @@ class _FakeTelegramApp:
 
     async def shutdown(self):
         return None
+
+
+class _HangingStopTelegramApp(_FakeTelegramApp):
+    def __init__(self, bot: _FakeTelegramBot) -> None:
+        super().__init__(bot)
+        self.updater = _HangingTelegramUpdater()
 
 
 class _FakeTelegramUser:
@@ -4110,6 +4132,128 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(first_app.updater.stop_count, 1)
             self.assertTrue(endpoint.inspect_health()["polling_running"])
             self.assertEqual(endpoint.application.updater.start_kwargs[-1]["drop_pending_updates"], False)
+        finally:
+            await endpoint.stop_async()
+
+    async def test_telegram_endpoint_observes_get_updates_timeout_as_poll_error(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_observed_timeout",
+                channel_kind="telegram",
+                binding_key="user:42",
+                send_policy={},
+            ),
+            runtime_root=self.runtime_root,
+            bot_token="token-123",
+        )
+        app = endpoint._build_application()
+        get_updates_request, bot_request = app.bot._request
+
+        import httpx
+        from telegram.error import TimedOut
+
+        with patch.object(
+            get_updates_request._client,
+            "request",
+            new=AsyncMock(side_effect=httpx.ReadTimeout("read timed out")),
+        ):
+            with self.assertRaises(TimedOut):
+                await get_updates_request.do_request("https://api.telegram.org/bottoken-123/getUpdates", "POST")
+
+        try:
+            health = endpoint.inspect_health()
+            self.assertEqual(health["reason"], "polling_error")
+            self.assertIn("TimedOut", health["last_poll_error"])
+            self.assertEqual(endpoint._get_updates_in_flight_started_at, 0.0)
+        finally:
+            await get_updates_request.shutdown()
+            await bot_request.shutdown()
+
+    async def test_telegram_endpoint_reconnects_after_observed_get_updates_timeout(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_timeout_retry",
+                channel_kind="telegram",
+                binding_key="user:42",
+                send_policy={},
+            ),
+            runtime_root=self.runtime_root,
+            bot_token="token-123",
+        )
+        endpoint._reconnect_delays = (0.01, 0.01)
+        endpoint._poll_error_stale_threshold_seconds = 0.01
+        endpoint._poll_monitor_interval_seconds = 0.01
+        apps = [
+            _FakeTelegramApp(self.fake_bot),
+            _FakeTelegramApp(self.fake_bot),
+        ]
+
+        def build_app():
+            return apps.pop(0)
+
+        endpoint._build_application = build_app  # type: ignore[method-assign]
+        await endpoint.start_async()
+        first_app = endpoint.application
+        self.assertIsNotNone(first_app)
+
+        from telegram.error import TimedOut
+
+        endpoint._record_get_updates_failure(TimedOut("Timed out"))
+
+        try:
+            for _ in range(30):
+                await asyncio.sleep(0.01)
+                if endpoint.application is not first_app and endpoint.inspect_health()["polling_running"]:
+                    break
+
+            self.assertIsNot(endpoint.application, first_app)
+            self.assertGreaterEqual(first_app.updater.stop_count, 1)
+            health = endpoint.inspect_health()
+            self.assertTrue(health["polling_running"])
+            self.assertEqual(health["last_poll_error"], "")
+            self.assertEqual(endpoint.application.updater.start_kwargs[-1]["drop_pending_updates"], False)
+        finally:
+            await endpoint.stop_async()
+
+    async def test_telegram_endpoint_reconnects_even_when_old_updater_stop_hangs(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_hanging_shutdown_retry",
+                channel_kind="telegram",
+                binding_key="user:42",
+                send_policy={},
+            ),
+            runtime_root=self.runtime_root,
+            bot_token="token-123",
+        )
+        endpoint._reconnect_delays = (0.01, 0.01)
+        endpoint._poll_error_stale_threshold_seconds = 0.01
+        endpoint._poll_monitor_interval_seconds = 0.01
+        endpoint._application_shutdown_timeout_seconds = 0.01
+        apps = [
+            _HangingStopTelegramApp(self.fake_bot),
+            _FakeTelegramApp(self.fake_bot),
+        ]
+
+        def build_app():
+            return apps.pop(0)
+
+        endpoint._build_application = build_app  # type: ignore[method-assign]
+        await endpoint.start_async()
+        first_app = endpoint.application
+        self.assertIsNotNone(first_app)
+
+        endpoint._record_get_updates_failure(RuntimeError("TimedOut"))
+
+        try:
+            for _ in range(30):
+                await asyncio.sleep(0.01)
+                if endpoint.application is not first_app and endpoint.inspect_health()["polling_running"]:
+                    break
+
+            self.assertIsNot(endpoint.application, first_app)
+            self.assertEqual(first_app.updater.stop_count, 1)
+            self.assertTrue(endpoint.inspect_health()["polling_running"])
         finally:
             await endpoint.stop_async()
 

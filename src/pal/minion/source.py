@@ -9,6 +9,7 @@ from pal.control.interactions import (
     minion_approval_delivery,
     minion_lesson_approval_delivery,
     minion_module_continue_delivery,
+    minion_plan_acceptance_delivery,
     minion_question_delivery,
 )
 from pal.core.events import EventHandler, EventSource
@@ -60,6 +61,7 @@ class MinionControlEventHandler(EventHandler):
             EventKind.MINION_TERMINAL,
             EventKind.MINION_MODULE_COMPLETED,
             EventKind.MINION_CLARIFICATION_REQUEST,
+            EventKind.MINION_PLAN_ACCEPTANCE_PENDING,
         }
 
     def handle(self, event: EventEnvelope, context) -> list[EventEnvelope]:
@@ -90,6 +92,18 @@ class MinionControlEventHandler(EventHandler):
                 route=route,
                 delivery=delivery,
                 notes="minion clarification request",
+            )
+        elif event.event_kind == EventKind.MINION_PLAN_ACCEPTANCE_PENDING:
+            delivery = minion_plan_acceptance_delivery(payload, route)
+            if delivery is None:
+                return []
+            action = ControlAction(
+                action_kind="interactive_open",
+                target_scope="interaction",
+                target_id=delivery.interaction.interaction_id if delivery.interaction is not None else None,
+                route=route,
+                delivery=delivery,
+                notes="minion plan acceptance pending",
             )
         elif event.event_kind == EventKind.MINION_PROGRESS:
             # Progress is high-cardinality telemetry for the manager ledger, not a chat notification.
@@ -197,6 +211,8 @@ def _event_kind_for_minion_event(event_kind: str) -> str:
         return EventKind.MINION_MODULE_COMPLETED
     if event_kind == "checkpoint":
         return EventKind.MINION_CHECKPOINT
+    if event_kind == "plan_acceptance_pending":
+        return EventKind.MINION_PLAN_ACCEPTANCE_PENDING
     return EventKind.MINION_PROGRESS
 
 

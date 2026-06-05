@@ -180,6 +180,10 @@ Useful operations:
 - Prefer structured APIs over fragile string scraping.
 - Keep plugin state in plugin-owned storage or the runtime root, not in Pal core globals.
 - Use stable, minimal capability schemas. A small predictable tool beats a broad ambiguous one.
+- Treat hardware, local devices, OS services, subprocesses, and network listeners as high-risk side effects. They must be behind explicit capability actions, admission checks, and approval policy when appropriate.
+- `build_plugin` must not start unmanaged background work, touch hardware, mutate secrets, or perform irreversible I/O. It should construct providers and register lifecycle-owned resources only.
+- Any sidecar, device handle, watcher, thread, task, or subprocess must be owned by the plugin lifecycle and stopped through `cleanup_callbacks` or provider detach. Detach must leave no live worker behind.
+- Never leak credentials, raw device identifiers, tokens, private paths, or full hardware state into introspection. Expose minimal health/status fields and structured errors.
 
 ## Verification Checklist
 
@@ -440,6 +444,8 @@ Control interactions are channel-neutral. Prefer the base `ChannelEndpointQueueB
 
 Only override channel-specific rendering, such as inline keyboards, slash-command menus, callback payloads, receipts, typing indicators, or transport-specific message editing. Avoid hard-coding Telegram-only assumptions into shared control or core code.
 
+The shared contract is typed data, not UI widgets. Core/control may produce `InteractionMessageSpec`, `InteractionButtonSpec`, `InteractionResult`, status kinds, attachments, and text; the provider decides how those become inline keyboards, menus, edits, reactions, receipts, native commands, or no-op fallbacks. Do not introduce channel-specific callback payloads, button shapes, or slash-command parsing into `core`, `control`, `minion`, `llm`, or `memory`.
+
 ## Lifecycle and Hot Reload
 
 Provider rescan means:
@@ -486,6 +492,8 @@ Before calling a channel provider done:
 - Do not silently mutate production channel endpoint rows, credentials, or live polling state without user approval.
 - Keep provider failures structured and visible through `runtime_provider_load_errors` or endpoint health.
 - Prefer small deterministic transport adapters. Put large protocol clients or sidecars behind provider-owned lifecycle code.
+- A provider that touches hardware, local IPC, OS devices, sensors, cameras, microphones, serial ports, GPIO, Bluetooth, or other privileged resources must make that ownership explicit in introspection and cleanly release the resource on detach/reload.
+- Ingress should attach a provider-owned `control_scope_key` when it needs custom conversation grouping. Shared routing must consume that key without understanding the channel's internal identifiers.
 """
 
 

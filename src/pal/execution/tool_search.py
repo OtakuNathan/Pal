@@ -41,6 +41,16 @@ def _score(query: str, *fields: str) -> int:
     return score
 
 
+def _search_priority(spec: dict[str, object]) -> int:
+    metadata = spec.get("metadata")
+    if not isinstance(metadata, dict):
+        return 0
+    try:
+        return int(metadata.get("search_priority") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _read_name_arg(args: dict[str, object], *aliases: str) -> str:
     for key in aliases:
         raw = args.get(key)
@@ -413,7 +423,14 @@ class ToolSearchTool:
             if query and score <= 0:
                 continue
             ranked.append((score, spec))
-        ranked.sort(key=lambda item: (-item[0], str(item[1].get("module_id") or ""), str(item[1].get("name") or "")))
+        ranked.sort(
+            key=lambda item: (
+                -item[0],
+                -_search_priority(item[1]),
+                str(item[1].get("module_id") or ""),
+                str(item[1].get("name") or ""),
+            )
+        )
         all_hits = _dedupe_hits(self.runtime, [spec for _, spec in ranked])
         hits = all_hits[:top_k]
         payload = {

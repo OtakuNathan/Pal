@@ -1,0 +1,8 @@
+server_id = "html"
+display_name = "vscode-html-language-server"
+command = ["vscode-html-language-server"]
+args = ["--stdio"]
+extensions = [".html", ".htm"]
+language_ids = ["html"]
+workspace_markers = [".git"]
+install_hint = "Install vscode-langservers-extracted."

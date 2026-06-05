@@ -227,9 +227,12 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _last_poll_error_at: float = 0.0
     _poll_error_stale_threshold_seconds: float = 10.0
     _poll_monitor_interval_seconds: float = 0.5
+    _application_shutdown_timeout_seconds: float = 5.0
     _reconnect_delays: tuple[float, ...] = (1.0, 3.0, 10.0, 30.0)
     _reconnect_attempts: int = 0
     _reconnecting: bool = False
+    _last_get_updates_activity_at: float = 0.0
+    _get_updates_in_flight_started_at: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.binding.chat_id and not self.binding.user_id and self.endpoint.binding_key:
@@ -255,6 +258,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         self._ingestor = ArtifactIngestor(self.runtime_root)
         self._last_poll_error = ""
         self._last_poll_error_at = 0.0
+        self._last_get_updates_activity_at = 0.0
+        self._get_updates_in_flight_started_at = 0.0
         self._reconnect_attempts = 0
         self._reconnecting = False
         if not self._can_start():
@@ -329,10 +334,39 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     def derive_default_reply_target(self) -> dict[str, Any]:
         chat_id = self.binding.chat_id or self.binding.user_id
         if chat_id:
-            return {"chat_id": chat_id}
+            return self._build_reply_target(chat_id=chat_id)
         return {}
 
+    def _build_reply_target(
+        self,
+        *,
+        chat_id: int | str | None,
+        message_id: int | str | None = None,
+        thread_id: int | str | None = None,
+    ) -> dict[str, Any]:
+        chat = str(chat_id or "").strip()
+        thread = str(thread_id or "").strip()
+        target = {
+            "chat_id": chat,
+            "message_id": str(message_id or "").strip(),
+            "thread_id": thread,
+        }
+        if chat:
+            target["control_scope_key"] = f"telegram:{self.endpoint.endpoint_id}:{chat}:{thread or 'root'}"
+        return target
+
     def inspect_health(self) -> dict[str, Any]:
+        now = time.monotonic()
+        activity_age = (
+            max(0.0, now - self._last_get_updates_activity_at)
+            if self._last_get_updates_activity_at
+            else None
+        )
+        in_flight_age = (
+            max(0.0, now - self._get_updates_in_flight_started_at)
+            if self._get_updates_in_flight_started_at
+            else 0.0
+        )
         reason = ""
         if not self.enabled:
             reason = "endpoint_disabled"
@@ -354,6 +388,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             "authorized": bool(self.bot_token and self._authorized),
             "proxy_enabled": bool(self.proxy_url),
             "last_poll_error": self._last_poll_error,
+            "last_get_updates_activity_age_seconds": round(activity_age, 3) if activity_age is not None else None,
+            "get_updates_in_flight_seconds": round(in_flight_age, 3),
             "last_status_error": self._last_status_error,
             "last_delivery_error": self.last_delivery_error,
             "reason": reason,
@@ -392,6 +428,8 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                     self._polling_running = True
                     self._last_poll_error = ""
                     self._last_poll_error_at = 0.0
+                    self._last_get_updates_activity_at = time.monotonic()
+                    self._get_updates_in_flight_started_at = 0.0
                     self._reconnect_attempts = 0
                     self._reconnecting = False
                     logger.info("telegram polling started successfully")
@@ -427,6 +465,15 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                                     "telegram polling error persisted for %.0fs (%s), forcing reconnect",
                                     elapsed, self._last_poll_error,
                                 )
+                                self._polling_running = False
+                                break
+                        if self._get_updates_in_flight_started_at:
+                            elapsed = time.monotonic() - self._get_updates_in_flight_started_at
+                            hard_timeout = max(float(self.poll_timeout_seconds) + 45.0, 60.0)
+                            if elapsed >= hard_timeout:
+                                self._last_poll_error = f"getUpdates stuck for {elapsed:.0f}s"
+                                self._last_poll_error_at = time.monotonic()
+                                logger.warning("telegram getUpdates stuck for %.0fs, forcing reconnect", elapsed)
                                 self._polling_running = False
                                 break
                         await asyncio.sleep(self._poll_monitor_interval_seconds)
@@ -468,30 +515,79 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             return
 
     async def _shutdown_application(self, app: Any) -> None:
-        with contextlib.suppress(Exception):
-            if app.updater is not None:
-                await app.updater.stop()
-        with contextlib.suppress(Exception):
-            if app.running:
-                await app.stop()
-        with contextlib.suppress(Exception):
-            await app.shutdown()
+        updater = getattr(app, "updater", None)
+        await self._shutdown_step(
+            "updater.stop",
+            getattr(updater, "stop", None),
+            enabled=updater is not None,
+        )
+        await self._shutdown_step("app.stop", getattr(app, "stop", None), enabled=bool(getattr(app, "running", False)))
+        await self._shutdown_step("app.shutdown", getattr(app, "shutdown", None), enabled=True)
+
+    async def _shutdown_step(self, name: str, call: Any, *, enabled: bool) -> None:
+        if not enabled or call is None:
+            return
+        try:
+            await asyncio.wait_for(call(), timeout=max(0.1, float(self._application_shutdown_timeout_seconds)))
+        except asyncio.TimeoutError:
+            logger.warning("telegram shutdown step timed out: %s", name)
+        except Exception:
+            logger.exception("telegram shutdown step failed: %s", name)
+
+    def _record_get_updates_started(self) -> None:
+        self._get_updates_in_flight_started_at = time.monotonic()
+
+    def _record_get_updates_success(self) -> None:
+        self._last_get_updates_activity_at = time.monotonic()
+        self._get_updates_in_flight_started_at = 0.0
+        self._last_poll_error = ""
+        self._last_poll_error_at = 0.0
+
+    def _record_get_updates_failure(self, exc: Exception) -> None:
+        self._last_get_updates_activity_at = time.monotonic()
+        self._get_updates_in_flight_started_at = 0.0
+        message = str(exc).strip()
+        self._last_poll_error = f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+        if not self._last_poll_error_at:
+            self._last_poll_error_at = time.monotonic()
 
     def _build_application(self):
         from telegram.ext import ApplicationBuilder, TypeHandler
         from telegram import Update
+        from telegram.request import HTTPXRequest
+
+        owner = self
+
+        class _ObservedGetUpdatesRequest(HTTPXRequest):
+            async def do_request(self, *args: Any, **kwargs: Any) -> tuple[int, bytes]:
+                owner._record_get_updates_started()
+                try:
+                    result = await super().do_request(*args, **kwargs)
+                except Exception as exc:
+                    owner._record_get_updates_failure(exc)
+                    raise
+                owner._record_get_updates_success()
+                return result
+
+        bot_request = HTTPXRequest(
+            connection_pool_size=32,
+            read_timeout=30,
+            write_timeout=30,
+            connect_timeout=10,
+            pool_timeout=30,
+            proxy=self.proxy_url,
+        )
+        get_updates_request = _ObservedGetUpdatesRequest(
+            connection_pool_size=4,
+            read_timeout=float(self.poll_timeout_seconds) + 10.0,
+            write_timeout=30,
+            connect_timeout=10,
+            pool_timeout=30,
+            proxy=self.proxy_url,
+        )
 
         builder = ApplicationBuilder().token(self.bot_token).concurrent_updates(True)
-        builder = builder.connection_pool_size(32).read_timeout(30).write_timeout(30).connect_timeout(10).pool_timeout(30)
-        builder = (
-            builder.get_updates_connection_pool_size(4)
-            .get_updates_read_timeout(float(self.poll_timeout_seconds) + 10.0)
-            .get_updates_write_timeout(30)
-            .get_updates_connect_timeout(10)
-            .get_updates_pool_timeout(30)
-        )
-        if self.proxy_url:
-            builder = builder.proxy(self.proxy_url).get_updates_proxy(self.proxy_url)
+        builder = builder.request(bot_request).get_updates_request(get_updates_request)
         if self.base_url != "https://api.telegram.org":
             base = self.base_url.rstrip("/")
             builder = builder.base_url(f"{base}/bot").base_file_url(f"{base}/file/bot")
@@ -525,11 +621,11 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             if interaction_result is None:
                 return
             message = getattr(getattr(update, "callback_query", None), "message", None)
-            reply_target = {
-                "chat_id": str(_safe_int(getattr(getattr(message, "chat", None), "id", None)) or ""),
-                "message_id": str(getattr(message, "message_id", "") or ""),
-                "thread_id": str(getattr(message, "message_thread_id", "") or ""),
-            }
+            reply_target = self._build_reply_target(
+                chat_id=_safe_int(getattr(getattr(message, "chat", None), "id", None)),
+                message_id=getattr(message, "message_id", "") or "",
+                thread_id=getattr(message, "message_thread_id", "") or "",
+            )
             envelope = self.emit_interaction_result(
                 interaction_result,
                 correlation_id=str(getattr(getattr(update, "callback_query", None), "id", "") or ""),
@@ -545,11 +641,11 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             payload,
             event_kind="user.message",
             correlation_id=str(payload.get("message_id") or ""),
-            reply_target={
-                "chat_id": payload["chat_id"],
-                "message_id": payload["message_id"],
-                "thread_id": payload.get("thread_id") or "",
-            },
+            reply_target=self._build_reply_target(
+                chat_id=payload["chat_id"],
+                message_id=payload["message_id"],
+                thread_id=payload.get("thread_id") or "",
+            ),
         )
         if envelope is None:
             return
@@ -1040,6 +1136,7 @@ class TelegramChannelEndpointFactory:
             binding=TelegramBinding.parse(record.binding_key or ""),
         )
         runtime_endpoint._poll_error_stale_threshold_seconds = float(metadata.get("poll_error_stale_threshold_seconds") or 10.0)
+        runtime_endpoint._application_shutdown_timeout_seconds = float(metadata.get("application_shutdown_timeout_seconds") or 5.0)
         runtime_endpoint.enabled = bool(record.enabled)
         runtime_endpoint.attached = record.detached_at is None
         runtime_endpoint.paired = bool(record.binding_key)

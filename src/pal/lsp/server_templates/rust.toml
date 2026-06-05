@@ -1,0 +1,7 @@
+server_id = "rust_analyzer"
+display_name = "rust-analyzer"
+command = ["rust-analyzer"]
+extensions = [".rs"]
+language_ids = ["rust"]
+workspace_markers = ["Cargo.toml", ".git"]
+install_hint = "Install rust-analyzer."

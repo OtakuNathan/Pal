@@ -239,10 +239,26 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "tool_discovery": ("op_tool_search", "op_tool_read"),
     "capability_call": ("op_tool_call",),
     "minion_artifacts": ("op_minion_artifact_write", "op_minion_artifact_edit"),
+    "minion_review_gate": ("op_minion_review_gate_submit",),
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
     "web_research": ("op_web_search", "op_web_read"),
+    "code_intel": (
+        "op_lsp_status",
+        "op_lsp_doctor",
+        "op_lsp_hover",
+        "op_lsp_definition",
+        "op_lsp_implementation",
+        "op_lsp_references",
+        "op_lsp_prepare_call_hierarchy",
+        "op_lsp_incoming_calls",
+        "op_lsp_outgoing_calls",
+        "op_lsp_document_symbols",
+        "op_lsp_workspace_symbols",
+        "op_lsp_diagnostics",
+    ),
+    "verification_shell": ("op_exec_shell",),
     "code_work": ("op_file_read", "op_file_edit", "op_file_write", "op_exec_shell", "op_minion_checkpoint_commit"),
 }
 
@@ -298,6 +314,7 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
         "op_minion_artifact_write",
         "op_minion_artifact_edit",
         "op_minion_checkpoint_commit",
+        "op_minion_review_gate_submit",
         "op_minion_memory_candidate_write",
     }
 )

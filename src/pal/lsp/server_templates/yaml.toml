@@ -1,0 +1,8 @@
+server_id = "yaml"
+display_name = "yaml-language-server"
+command = ["yaml-language-server"]
+args = ["--stdio"]
+extensions = [".yaml", ".yml"]
+language_ids = ["yaml"]
+workspace_markers = [".git"]
+install_hint = "Install yaml-language-server."

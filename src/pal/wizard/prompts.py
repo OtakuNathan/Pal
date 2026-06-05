@@ -819,6 +819,9 @@ def prompt_review(data: WizardCollectedData, runtime_root: Path) -> bool:
         print(f"  Channel:     telegram ({ch.binding_key})")
     else:
         print(f"  Channel:     socket ({ch.binding_key})")
+    recovery_socket_path = str(runtime_root / "pal.sock")
+    if ch.channel_kind != "socket" or ch.binding_key != recovery_socket_path:
+        print(f"  Recovery:    socket ({recovery_socket_path})")
 
     print()
     return ask_yes_no("  Proceed?", True)

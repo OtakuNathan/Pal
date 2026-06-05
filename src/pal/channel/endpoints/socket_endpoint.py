@@ -146,7 +146,11 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                     },
                     event_kind=event_kind,
                     correlation_id=request_id,
-                    reply_target={"session_id": session_id, "request_id": request_id},
+                    reply_target={
+                        "session_id": session_id,
+                        "request_id": request_id,
+                        "control_scope_key": f"socket:{self.endpoint.endpoint_id}:{session_id}",
+                    },
                 )
         except (asyncio.IncompleteReadError, ConnectionError, OSError, ValueError):
             logger.debug("socket session %s disconnected", session_id)

@@ -1,0 +1,8 @@
+server_id = "typescript"
+display_name = "typescript-language-server"
+command = ["typescript-language-server"]
+args = ["--stdio"]
+extensions = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]
+language_ids = ["typescript"]
+workspace_markers = ["package.json", "tsconfig.json", "jsconfig.json", ".git"]
+install_hint = "Install typescript-language-server and typescript."

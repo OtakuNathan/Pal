@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +40,24 @@ def _fake_endpoint(endpoint_id: str, model_id: str):
         max_output_tokens=1024,
         context_window=8192,
     )
+
+
+class _MemorySettingsRepository:
+    def __init__(self) -> None:
+        self.think_level = "balanced"
+        self.active_endpoint_id: str | None = None
+
+    def get_think_level(self) -> str:
+        return self.think_level
+
+    def set_think_level(self, think_level: str) -> None:
+        self.think_level = str(think_level)
+
+    def get_active_llm_endpoint_id(self) -> str | None:
+        return self.active_endpoint_id
+
+    def set_active_llm_endpoint_id(self, endpoint_id: str) -> None:
+        self.active_endpoint_id = str(endpoint_id)
 
 
 class PalV2LLMStickyFallbackTests(unittest.TestCase):
@@ -120,6 +139,79 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                 self.assertEqual(invoker.calls, ["codex_a", "glm"])
             finally:
                 asyncio.run(handle.stop_async())
+
+    def test_timeout_error_exhausts_endpoint_and_falls_back(self) -> None:
+        class _Invoker:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def invoke(self, endpoint, request):
+                _ = request
+                self.calls.append(endpoint.endpoint_id)
+                if endpoint.endpoint_id == "slow":
+                    raise TimeoutError("timed out waiting for provider response")
+                return CanonicalLLMOutcome(text=f"ok:{endpoint.endpoint_id}")
+
+            def invoke_stream(self, endpoint, request):
+                raise NotImplementedError
+
+        slow = _fake_endpoint("slow", "slow-model")
+        working = _fake_endpoint("working", "working-model")
+        invoker = _Invoker()
+        events: list[dict[str, object]] = []
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(slow, working)),
+            settings_repository=_MemorySettingsRepository(),
+            endpoint_invoker=invoker,
+            endpoint_retry_attempts=3,
+            event_sink=events.append,
+        )
+
+        outcome = runtime.generate(CanonicalLLMRequest(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64))
+
+        self.assertEqual(outcome.text, "ok:working")
+        self.assertEqual(invoker.calls, ["slow", "working"])
+        self.assertEqual(events[0]["phase"], "llm_endpoint_attempt_failed")
+        self.assertEqual(events[0]["error_kind"], "timeout")
+        self.assertEqual(events[1]["phase"], "llm_endpoint_exhausted")
+        self.assertEqual(events[1]["reason"], "timeout")
+        self.assertIn("llm_endpoint_fallback_succeeded", [event["phase"] for event in events])
+
+    def test_agenerate_falls_back_when_primary_blocks_past_attempt_timeout(self) -> None:
+        class _BlockingInvoker:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def invoke(self, endpoint, request):
+                _ = request
+                self.calls.append(endpoint.endpoint_id)
+                if endpoint.endpoint_id == "blocked":
+                    time.sleep(2.0)
+                    return CanonicalLLMOutcome(text="late blocked reply")
+                return CanonicalLLMOutcome(text=f"ok:{endpoint.endpoint_id}")
+
+            def invoke_stream(self, endpoint, request):
+                raise NotImplementedError
+
+        blocked = _fake_endpoint("blocked", "blocked-model")
+        working = _fake_endpoint("working", "working-model")
+        invoker = _BlockingInvoker()
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(blocked, working)),
+            settings_repository=_MemorySettingsRepository(),
+            endpoint_invoker=invoker,
+            endpoint_retry_attempts=1,
+        )
+        request = CanonicalLLMRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            max_output_tokens=64,
+            metadata={"timeout_seconds": 1},
+        )
+
+        outcome = asyncio.run(runtime.agenerate(request))
+
+        self.assertEqual(outcome.text, "ok:working")
+        self.assertEqual(invoker.calls[:2], ["blocked", "working"])
 
     def test_set_active_endpoint_switches_runtime_preference(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
