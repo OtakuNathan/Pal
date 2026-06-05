@@ -920,7 +920,18 @@ class RealLLMIntegrationTests(unittest.TestCase):
                             "title": "Write manager marker file",
                         }
                     },
-                    metadata={"task_id": "task_real_manager_glm", "max_tool_rounds": 4, "max_output_tokens": 900},
+                    metadata={
+                        "task_id": "task_real_manager_glm",
+                        "max_tool_rounds": 4,
+                        "max_output_tokens": 900,
+                        "milestones": [
+                            {
+                                "milestone_id": "m0",
+                                "title": "Write manager marker file",
+                                "acceptance_criteria": ["status.txt contains MINION_MANAGER_GLM_OK"],
+                            }
+                        ],
+                    },
                     resolved_profile={
                         "profile_id": "manager-test",
                         "display_name": "Manager Test Minion",
