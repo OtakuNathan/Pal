@@ -3744,6 +3744,89 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_bare_coder_spawn_gets_checkpoint_review_gate(self) -> None:
+        class BareCoderReviewManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started_reviewers = []
+                self.sent_messages = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                if state.pack.minion_profile == "software_engineering.reviewer":
+                    self.started_reviewers.append(state)
+
+            async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
+                self.sent_messages.append({"run_id": state.run_id, "message": dict(message)})
+                return {"ok": True, "run_id": state.run_id, "message_type": str(message.get("type") or "")}
+
+        async def scenario() -> None:
+            manager = BareCoderReviewManager(runtime_root=self.root)
+            spawned = await manager.spawn(
+                TaskContextPack(
+                    work_order_id="wo_bare_coder_review",
+                    goal="Implement one bare coder task.",
+                    minion_profile="software_engineering.coder",
+                    metadata={"milestones": ["Implement one bare coder task."]},
+                ).to_dict()
+            )
+            state = manager.runs[spawned["run_id"]]
+            self.assertEqual(state.pack.metadata["checkpoint_review"]["scope"], "bare_coder_checkpoint")
+            self.assertEqual(state.pack.metadata["checkpoint_review"]["max_repair_attempts"], 5)
+            self.assertEqual(state.pack.metadata["manager_turn_timeout_seconds"], 300)
+            snapshot = manager.tasking_repository.read_work_order("wo_bare_coder_review")
+            self.assertEqual(snapshot["work_order"]["metadata"]["checkpoint_review"]["scope"], "bare_coder_checkpoint")
+
+            checkpoint_id = "chk_bare_coder_review"
+            manager._record_event(
+                state,
+                {
+                    "event_kind": "checkpoint",
+                    "payload": {
+                        "checkpoint_id": checkpoint_id,
+                        "status": "claimed",
+                        "milestone_index": 0,
+                        "milestone_id": "m0",
+                        "summary": "bare coder checkpoint claim",
+                        "commit_sha": "abc123",
+                        "expected_review_gate_kind": "checkpoint_verification",
+                    },
+                    "created_at": utc_now(),
+                },
+            )
+            await asyncio.sleep(0)
+            self.assertEqual(len(manager.started_reviewers), 1)
+            reviewer_state = manager.started_reviewers[0]
+            self.assertEqual(reviewer_state.pack.metadata["review_target"]["checkpoint_id"], checkpoint_id)
+            self.assertEqual(reviewer_state.pack.metadata["review_target"]["gate_kind"], "checkpoint_verification")
+
+            gate = manager.tasking_repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123"},
+                    "verdict": "pass",
+                    "summary": "bare coder checkpoint passed review",
+                    "evidence": [{"kind": "review", "summary": "checkpoint accepted"}],
+                    "commands_run": [{"command": "not run in unit fixture", "status": "not_run", "reason": "manager routing unit test"}],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                    "metadata": {
+                        "api_evidence_not_applicable": True,
+                        "api_evidence_not_applicable_reason": "fixture has no API claims",
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                    "reviewer_profile": "software_engineering.reviewer",
+                }
+            )
+            await manager._reconcile_checkpoint_review(reviewer_state, checkpoint_id, state.run_id)
+
+            self.assertEqual(manager.sent_messages[-1]["message"]["type"], "complete")
+            completion = manager.sent_messages[-1]["message"]["completion"]
+            self.assertEqual(completion["checkpoint_id"], checkpoint_id)
+            self.assertEqual(completion["review_gate_ref"]["gate_id"], gate["review_gate_ref"]["gate_id"])
+
+        asyncio.run(scenario())
+
     def test_repair_checkpoint_requires_repair_verification_gate(self) -> None:
         class FakeRepairReviewManager(MinionManager):
             def __post_init__(self) -> None:
@@ -6574,6 +6657,154 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_runner_persists_reviewer_json_deliverable_as_primary_artifact(self) -> None:
+        async def scenario() -> None:
+            events = []
+            artifact_dir = self.root / "reviewer_json_artifacts"
+            findings = [
+                {
+                    "severity": "note",
+                    "affected_area": f"area_{index}",
+                    "evidence": "verified from source inspection and test command output",
+                    "contract_impact": "none",
+                    "suggested_fix": "none",
+                    "residual_risk": "low",
+                }
+                for index in range(40)
+            ]
+            report = {
+                "approved": True,
+                "changes_requested": False,
+                "blocked": False,
+                "findings": findings,
+                "test_gaps": ["No further gap for this synthetic regression case."],
+                "residual_risk": "terminal summaries may truncate, artifact is the source of truth",
+            }
+            report_text = "```json\n" + json.dumps(report, ensure_ascii=False, indent=2) + "\n```"
+
+            class FakeLLM:
+                async def agenerate(self, request):
+                    _ = request
+                    return CanonicalLLMOutcome(text=report_text)
+
+            async def write_event(event):
+                events.append(event)
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            code = await MinionRunner(
+                runtime_root=self.root,
+                pack=TaskContextPack(
+                    work_order_id="wo_reviewer_json",
+                    goal="Review a long report delivery path.",
+                    workspace={"artifact_dir": str(artifact_dir)},
+                    continuity={"current_milestone": {"milestone_index": 0, "title": "Review output"}},
+                    minion_profile="software_engineering.reviewer",
+                    metadata={"reviewer_work_order": {"target": "long structured report"}},
+                ),
+                minion_id="m_reviewer_json",
+                run_id="r_reviewer_json",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=FakeLLM(), execution_runtime=SimpleNamespace()),
+            ).run()
+
+            self.assertEqual(code, 0)
+            checkpoint = next(event for event in events if event["event_kind"] == "checkpoint")
+            terminal = next(event for event in events if event["event_kind"] == "terminal")
+            self.assertEqual(checkpoint["payload"]["status"], "completed")
+            self.assertEqual(checkpoint["payload"]["primary_artifact"]["relative_path"], "review_report.json")
+            self.assertEqual(checkpoint["payload"]["primary_artifact"]["mime_type"], "application/json")
+            artifact_path = Path(checkpoint["payload"]["primary_artifact"]["path"])
+            saved = artifact_path.read_text(encoding="utf-8")
+            self.assertEqual(json.loads(saved), report)
+            self.assertEqual(terminal["payload"]["primary_artifact"]["relative_path"], "review_report.json")
+            self.assertLess(len(terminal["payload"]["summary"]), len(report_text))
+            self.assertLessEqual(len(terminal["payload"]["summary"]), 500)
+
+        asyncio.run(scenario())
+
+    def test_runner_bare_checkpoint_review_waits_for_manager_complete(self) -> None:
+        async def scenario() -> None:
+            events = []
+            decision_requests = []
+            repo_pack = prepare_git_task_environment(
+                self.root,
+                TaskContextPack(
+                    work_order_id="wo_bare_runner_review",
+                    goal="Implement one bare runner review task.",
+                    continuity={"current_milestone": {"milestone_index": 0, "milestone_id": "m0", "title": "Bare review"}},
+                    allowed_capabilities=["op_fake_write", "op_minion_checkpoint_commit"],
+                    minion_profile="software_engineering.coder",
+                    metadata={
+                        "checkpoint_review": {"enabled": True, "reviewer_profile": "software_engineering.reviewer"},
+                        "manager_turn_timeout_seconds": 1,
+                        "milestones": ["Bare review"],
+                    },
+                ),
+            )
+            repo = Path(repo_pack.workspace["repo_path"])
+
+            class FakeLLM:
+                def __init__(self):
+                    self.calls = 0
+
+                async def agenerate(self, request):
+                    _ = request
+                    self.calls += 1
+                    if self.calls == 1:
+                        return CanonicalLLMOutcome(text="", tool_calls=[CanonicalToolCall(name="op_fake_write", args={})])
+                    if self.calls == 2:
+                        return CanonicalLLMOutcome(
+                            text="",
+                            tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "bare checkpoint"})],
+                        )
+                    return CanonicalLLMOutcome(text="Bare checkpoint is ready for review.")
+
+            class FakeExecution:
+                def get_capability_spec(self, name):
+                    if name != "op_fake_write":
+                        return None
+                    return {"name": "op_fake_write", "description": "write", "parameters_schema": {"type": "object", "properties": {}}}
+
+                async def execute_tool_async(self, call, **kwargs):
+                    _ = call
+                    _ = kwargs
+                    (repo / "bare_review.txt").write_text("ready\n", encoding="utf-8")
+                    return CanonicalToolResult(name="op_fake_write", ok=True, text="written", llm_text="written", status=RuntimeStatus.OK)
+
+            async def write_event(event):
+                events.append(event)
+
+            async def read_decision(timeout):
+                decision_requests.append(timeout)
+                return {
+                    "type": "complete",
+                    "completion": {"status": "completed", "summary": "review passed"},
+                }
+
+            code = await MinionRunner(
+                runtime_root=self.root,
+                pack=repo_pack,
+                minion_id="m_bare_runner_review",
+                run_id="r_bare_runner_review",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=FakeLLM(), execution_runtime=FakeExecution()),
+            ).run()
+
+            self.assertEqual(code, 0)
+            checkpoint = next(event for event in events if event["event_kind"] == "checkpoint")
+            self.assertEqual(checkpoint["payload"]["status"], "claimed")
+            self.assertTrue(decision_requests)
+            self.assertFalse(any(event["event_kind"] == "milestone_completed" for event in events))
+            terminal = next(event for event in events if event["event_kind"] == "terminal")
+            self.assertEqual(terminal["payload"]["status"], "completed")
+
+        asyncio.run(scenario())
+
     def test_runner_blocks_artifact_only_git_completion_unless_allowed(self) -> None:
         async def scenario() -> None:
             events = []
@@ -8126,7 +8357,10 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("preconditions and postconditions", prompt)
         self.assertIn("exception escape", prompt)
         self.assertIn("lifecycle management", prompt)
-        self.assertIn("review_report.md or review_report.json", prompt)
+        self.assertIn("write the primary review deliverable as an artifact. This is mandatory", prompt)
+        self.assertIn("review_report.json", prompt)
+        self.assertIn("review_report.md", prompt)
+        self.assertIn("terminal summaries may be truncated", prompt)
         self.assertIn("blocker: correctness/security/data loss/API breakage", prompt)
         self.assertIn("note: residual risk or observation", prompt)
 

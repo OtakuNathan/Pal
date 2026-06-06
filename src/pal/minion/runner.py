@@ -536,7 +536,7 @@ class MinionRunner:
                     self._apply_next_milestone_turn(next_turn, checkpoint_payload={})
                     continue
                 if next_status == "timeout":
-                    summary = "manager did not acknowledge milestone checkpoint before serial continuation timeout"
+                    summary = "manager did not acknowledge milestone checkpoint before continuation timeout"
                     await self._emit("terminal", self._terminal_payload("blocked", summary))
                     return 0
                 if next_status == "blocked":
@@ -684,9 +684,11 @@ class MinionRunner:
     async def _await_next_serial_module_turn(self, completed_milestone_index: int) -> tuple[str, dict[str, Any] | None]:
         metadata = dict(self.pack.metadata or {})
         module_execution = dict(metadata.get("module_execution") or {})
-        if str(module_execution.get("mode") or "") != "serial_module_milestones":
+        is_serial = str(module_execution.get("mode") or "") == "serial_module_milestones"
+        review_required = self._requires_checkpoint_review_gate()
+        if not is_serial and not review_required:
             return "not_serial", None
-        if not bool(module_execution.get("auto_advance")):
+        if is_serial and not bool(module_execution.get("auto_advance")):
             return "complete", None
         timeout = self._manager_turn_timeout_seconds()
         message = await self.read_decision(timeout)
@@ -1470,6 +1472,20 @@ class MinionRunner:
             return
         suffix = ".partial" if partial else ""
         title = self._current_milestone_title()
+        reviewer_json = "" if partial else self._reviewer_json_deliverable(text)
+        if reviewer_json:
+            artifact = _write_minion_artifact(
+                self.pack.workspace,
+                {
+                    "relative_path": "review_report.json",
+                    "title": "Review report",
+                    "role": "primary",
+                    "mime_type": "application/json",
+                    "content": reviewer_json,
+                },
+            )
+            self._record_produced_artifact(artifact)
+            return
         header_lines = [
             f"# {title}",
             "",
@@ -1490,14 +1506,60 @@ class MinionRunner:
         artifact = _write_minion_artifact(
             self.pack.workspace,
             {
-                "relative_path": f"milestone_{self._current_milestone_index()}_{self._safe_path_part(self.pack.minion_profile)}{suffix}.md",
-                "title": title if not partial else f"{title} (partial truncated output)",
+                "relative_path": self._default_text_artifact_path(suffix=suffix, partial=partial),
+                "title": self._default_text_artifact_title(title, partial=partial),
                 "role": "primary" if not partial else "partial",
                 "mime_type": "text/markdown",
                 "content": "\n".join([*header_lines, text, ""]),
             },
         )
         self._record_produced_artifact(artifact)
+
+    def _default_text_artifact_path(self, *, suffix: str = "", partial: bool = False) -> str:
+        if self._is_reviewer_profile() and not partial:
+            return "review_report.md"
+        return f"milestone_{self._current_milestone_index()}_{self._safe_path_part(self.pack.minion_profile)}{suffix}.md"
+
+    def _default_text_artifact_title(self, title: str, *, partial: bool = False) -> str:
+        if partial:
+            return f"{title} (partial truncated output)"
+        if self._is_reviewer_profile():
+            return "Review report"
+        return title
+
+    def _is_reviewer_profile(self) -> bool:
+        metadata = dict(self.pack.metadata or {})
+        profile = dict(self.pack.resolved_profile or {})
+        profile_text = " ".join(
+            [
+                str(self.pack.minion_profile or ""),
+                str(profile.get("profile_id") or ""),
+                str(profile.get("canonical_profile_id") or ""),
+                str(profile.get("display_name") or ""),
+            ]
+        ).lower()
+        return (
+            "reviewer" in profile_text
+            or isinstance(metadata.get("reviewer_work_order"), dict)
+            or isinstance(metadata.get("review_gate_ref"), dict)
+            or isinstance(metadata.get("review_target"), dict)
+        )
+
+    def _reviewer_json_deliverable(self, text: str) -> str:
+        if not self._is_reviewer_profile():
+            return ""
+        candidate = _strip_single_json_code_fence(text)
+        if not candidate.startswith("{"):
+            return ""
+        try:
+            parsed, end = json.JSONDecoder().raw_decode(candidate)
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(parsed, dict):
+            return ""
+        if candidate[end:].strip():
+            return ""
+        return candidate
 
     def _truncated_output_blocked_summary(self, finish_reason: str) -> str:
         reason = str(finish_reason or "unknown").strip() or "unknown"
@@ -3295,6 +3357,21 @@ def _compact_preview_text(value: str) -> str:
             blank_pending = False
         lines.append(line)
     return "\n".join(lines).strip()
+
+
+def _strip_single_json_code_fence(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw.startswith("```"):
+        return raw
+    lines = raw.splitlines()
+    if not lines or not lines[0].strip().startswith("```"):
+        return raw
+    opener = lines[0].strip().lower()
+    if opener not in {"```", "```json", "```jsonc"}:
+        return raw
+    if len(lines) < 2 or not lines[-1].strip().startswith("```"):
+        return raw
+    return "\n".join(lines[1:-1]).strip()
 
 
 def _lesson_heading_kind(text: str) -> str:

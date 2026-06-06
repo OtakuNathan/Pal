@@ -358,6 +358,29 @@ class MinionManager:
         )
         return detail
 
+    def _with_default_coder_checkpoint_review(self, pack: TaskContextPack) -> tuple[TaskContextPack, dict[str, Any]]:
+        metadata = dict(pack.metadata or {})
+        module_execution = dict(metadata.get("module_execution") or {})
+        if module_execution.get("checkpoint_review") is not None or metadata.get("checkpoint_review") is not None:
+            return pack, {}
+        if not _is_coder_pack(pack):
+            return pack, {}
+        completion_policy = dict((pack.workspace or {}).get("completion_policy") or {})
+        if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
+            return pack, {}
+        checkpoint_review = {
+            "enabled": True,
+            "reviewer_profile": "software_engineering.reviewer",
+            "max_repair_attempts": 5,
+            "scope": "bare_coder_checkpoint",
+        }
+        metadata["checkpoint_review"] = checkpoint_review
+        updates: dict[str, Any] = {"checkpoint_review": checkpoint_review}
+        if metadata.get("manager_turn_timeout_seconds") is None:
+            metadata["manager_turn_timeout_seconds"] = 300
+            updates["manager_turn_timeout_seconds"] = 300
+        return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata}), updates
+
     async def spawn(self, pack_payload: dict[str, Any]) -> dict[str, Any]:
         pack = TaskContextPack.from_dict(pack_payload)
         if not pack.resolved_profile:
@@ -380,6 +403,9 @@ class MinionManager:
         metadata["minion_id"] = minion_id
         pack = TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
         pack = prepare_task_workspace(self.runtime_root, pack, run_id=run_id)
+        pack, metadata_updates = self._with_default_coder_checkpoint_review(pack)
+        if metadata_updates:
+            self.tasking_repository.merge_work_order_metadata(pack.work_order_id, metadata_updates)
         self.tasking_repository.update_work_order_workspace(pack.work_order_id, dict(pack.workspace))
         pack = self._with_runner_debug_log(pack)
         pack = sanitize_runner_session_pack(pack)
@@ -1124,8 +1150,6 @@ class MinionManager:
             return
         metadata = dict(state.pack.metadata or {})
         module_execution = dict(metadata.get("module_execution") or {})
-        if str(module_execution.get("mode") or "") != "serial_module_milestones":
-            return
         review_policy = dict(module_execution.get("checkpoint_review") or metadata.get("checkpoint_review") or {})
         if review_policy.get("enabled") is not True:
             return
@@ -1572,7 +1596,28 @@ class MinionManager:
                 payload = dict(closure.get("payload") or {})
                 if not payload:
                     payload = {"status": "completed", "checkpoint_id": checkpoint_id, **dict(gate.get("target") or {})}
-                await self._send_serial_module_turn(coder_state, {"work_order_id": coder_state.pack.work_order_id, "payload": payload}, f"{coder_state.pack.work_order_id}:{checkpoint_id}:review_pass")
+                metadata = dict(coder_state.pack.metadata or {})
+                module_execution = dict(metadata.get("module_execution") or {})
+                if str(module_execution.get("mode") or "") == "serial_module_milestones":
+                    await self._send_serial_module_turn(
+                        coder_state,
+                        {"work_order_id": coder_state.pack.work_order_id, "payload": payload},
+                        f"{coder_state.pack.work_order_id}:{checkpoint_id}:review_pass",
+                    )
+                else:
+                    await self._send_runner_control_or_record(
+                        coder_state,
+                        {
+                            "type": "complete",
+                            "completion": {
+                                "status": "completed",
+                                "summary": gate.get("summary") or "checkpoint review passed",
+                                "checkpoint_id": checkpoint_id,
+                                "review_gate": gate,
+                                "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                            },
+                        },
+                    )
                 return
             if verdict == "fail":
                 await self._send_checkpoint_repair_turn(coder_state, gate)
@@ -1588,6 +1633,15 @@ class MinionManager:
         current = dict((coder_state.pack.continuity or {}).get("current_milestone") or {})
         if not current:
             current = dict((coder_state.pack.metadata.get("prompt_view") or {}).get("milestone") or {})
+        if not current:
+            target = _review_gate_target(gate)
+            milestone_index = _coerce_int(target.get("milestone_index"), 0)
+            current = {
+                "milestone_index": milestone_index,
+                "milestone_id": str(target.get("milestone_id") or f"m{milestone_index}"),
+                "title": "Repair checkpoint",
+                "task": "Repair the checkpoint according to reviewer findings.",
+            }
         repair_state = self._claim_checkpoint_repair_attempt(coder_state, gate, current)
         if str(repair_state.get("status") or "") == "blocked":
             payload = {
@@ -1873,6 +1927,19 @@ def _is_plan_parent_pack(pack: TaskContextPack) -> bool:
     metadata = dict(pack.metadata or {})
     plan_execution = dict(metadata.get("plan_execution") or {})
     return str(plan_execution.get("mode") or "") == "module_parent_milestones"
+
+
+def _is_coder_pack(pack: TaskContextPack) -> bool:
+    profile = dict(pack.resolved_profile or {})
+    profile_text = " ".join(
+        [
+            str(pack.minion_profile or ""),
+            str(profile.get("profile_id") or ""),
+            str(profile.get("canonical_profile_id") or ""),
+            str(profile.get("display_name") or ""),
+        ]
+    ).lower()
+    return "coder" in profile_text
 
 
 def _plan_auto_revision_allowed(policy: dict[str, Any], *, spawned_count: int) -> bool:

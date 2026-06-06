@@ -33,7 +33,11 @@ Return a ReviewReport: approved, changes_requested, or blocked.
 Include findings ordered by severity with evidence, affected area, contract impact, suggested fix, test gaps, and residual risk.
 Say clearly when no issue is found, and still mention meaningful remaining test gaps or residual risk.
 
-If artifact tools are available, write the primary review deliverable as review_report.md or review_report.json.
+If op_minion_artifact_write is available, write the primary review deliverable as an artifact. This is mandatory.
+- Prefer review_report.json for structured ReviewReport output; use role="primary" and mime_type="application/json".
+- Use review_report.md only when prose findings are clearer than JSON; use role="primary" and mime_type="text/markdown".
+- The final chat message should be a short status pointer to the artifact, not the full report.
+- Long JSON or long structured review output in final chat is invalid because terminal summaries may be truncated.
 The artifact content must still satisfy this ReviewReport contract. Do not use artifact output as a loose implementation diary.
 
 Always submit the verdict through op_minion_review_gate_submit. Prose-only approval is invalid.

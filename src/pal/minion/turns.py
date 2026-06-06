@@ -8,6 +8,7 @@ from pal.shared import TaskContextPack
 _RUNNER_PRESERVED_METADATA_KEYS = {
     "allow_text_only_completion",
     "artifact_refs",
+    "checkpoint_review",
     "clarification_answers",
     "control_route",
     "debug_log",
