@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import contextlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -15,6 +13,7 @@ from pal.minion.contracts import (
     SERIAL_MILESTONE_MODES,
     SERIAL_MODULE_MILESTONES_MODE,
 )
+from pal.minion.plan_store import MinionPlanStore
 from pal.minion.review_gate_store import MinionReviewGateStore, compact_review_gate_ref
 from pal.minion.work_order import (
     PlanArtifact,
@@ -45,9 +44,6 @@ _WORK_ORDER_DRAFT_ITEM_TEXT_LIMIT = 1000
 _WORK_ORDER_DRAFT_METADATA_VALUE_LIMIT = 12000
 _RUN_WORKSPACE_KEYS = {"run_dir", "artifact_dir", "log_dir"}
 _RAW_WORK_ORDER_METADATA_KEY_PARTS = ("payload", "raw", "transcript", "messages", "full_context", "conversation")
-_PLAN_REVISION_DIR_PARTS = ("data", "minion", "plan_revisions")
-
-
 def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
     columns = {
         str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
@@ -71,52 +67,6 @@ def _canonical_profile_id(group: str, name: str) -> str:
     resolved_group = str(group or "general").strip().replace("/", ".") or "general"
     resolved_name = str(name or "generic").strip() or "generic"
     return resolved_name if resolved_group == "general" else f"{resolved_group}.{resolved_name}"
-
-
-def _iter_plan_json_files(runtime_root: Path) -> list[Path]:
-    roots = [
-        Path(runtime_root) / "data" / "minion" / "plan_revisions",
-        Path(runtime_root) / "data" / "minion",
-        Path(runtime_root) / "artifacts",
-    ]
-    seen: set[Path] = set()
-    result: list[Path] = []
-    for root in roots:
-        if not root.exists():
-            continue
-        for path in sorted(root.rglob("*.json")):
-            resolved = path.resolve()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            result.append(resolved)
-            if len(result) >= 2000:
-                return result
-    return result
-
-
-def _plan_search_text(plan_payload: dict[str, Any], plan_ref: dict[str, Any]) -> str:
-    parts = [
-        str(plan_ref.get("task_id") or ""),
-        str(plan_ref.get("plan_id") or ""),
-        str(plan_payload.get("task_id") or ""),
-        str(plan_payload.get("plan_id") or ""),
-        str(plan_payload.get("summary") or ""),
-    ]
-    for module in list(plan_payload.get("modules") or []):
-        if not isinstance(module, dict):
-            continue
-        parts.extend(
-            [
-                str(module.get("module_id") or ""),
-                str(module.get("owned_area") or ""),
-                str(module.get("responsibility") or ""),
-            ]
-        )
-        for milestone in list(module.get("internal_milestones") or []):
-            if isinstance(milestone, dict):
-                parts.extend([str(milestone.get("milestone_id") or ""), str(milestone.get("task") or "")])
-    return "\n".join(part for part in parts if part)
 
 
 class TaskingRepositoryPort(Protocol):
@@ -148,9 +98,11 @@ class TaskingRepositoryPort(Protocol):
 @dataclass
 class MinionTaskingRepository(TaskingRepositoryPort):
     runtime_root: Path
+    plans: MinionPlanStore = field(init=False, repr=False)
     review_gates: MinionReviewGateStore = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.plans = MinionPlanStore(self)
         self.review_gates = MinionReviewGateStore(self)
 
     @property
@@ -601,120 +553,16 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         )
 
     def load_dispatchable_plan_ref(self, plan_ref: Any) -> dict[str, Any]:
-        ref = _coerce_plan_ref(plan_ref)
-        path = _resolve_plan_ref_path(ref, runtime_root=self.runtime_root)
-        content = path.read_bytes()
-        digest = hashlib.sha256(content).hexdigest()
-        expected = str(ref.get("sha256") or "").strip()
-        if expected and expected != digest:
-            raise ValueError(f"plan_ref sha256 mismatch for {path}")
-        try:
-            payload = json.loads(content.decode("utf-8"))
-        except Exception as exc:
-            raise ValueError(f"plan_ref is not valid JSON: {path}") from exc
-        artifact = validate_dispatchable_plan_artifact(payload)
-        validation = dispatchable_plan_validation(artifact)
-        plan_revision = _plan_revision_from_payload(payload, ref)
-        payload_metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
-        normalized_ref = {
-            "path": str(path),
-            "sha256": digest,
-            "plan_id": artifact.plan_id,
-            "task_id": artifact.task_id,
-            "plan_revision": plan_revision,
-        }
-        revision_of = payload_metadata.get("revision_of")
-        if isinstance(revision_of, dict):
-            normalized_ref["revision_of"] = dict(revision_of)
-        for key in ("accepted", "accepted_at", "acceptance_marker_path", "accepted_latest_marker_path"):
-            if key in ref:
-                normalized_ref[key] = ref[key]
-        return {
-            "plan_artifact": _plan_artifact_payload(artifact, plan_revision=plan_revision),
-            "plan_ref": normalized_ref,
-            "plan_validation": validation,
-        }
+        return self.plans.load_dispatchable_plan_ref(plan_ref)
 
     def load_accepted_plan_ref(self, plan_ref: Any) -> dict[str, Any]:
-        loaded = self.load_dispatchable_plan_ref(plan_ref)
-        ref = dict(loaded.get("plan_ref") or {})
-        marker = _load_accepted_plan_marker(self.runtime_root, ref)
-        marker_ref = dict(marker.get("plan_ref") or {})
-        expected_sha = str(ref.get("sha256") or "").strip()
-        marker_sha = str(marker_ref.get("sha256") or "").strip()
-        if expected_sha and marker_sha and expected_sha != marker_sha:
-            raise ValueError("plan_ref acceptance marker sha256 mismatch")
-        expected_revision = _plan_revision_from_payload(loaded.get("plan_artifact"), ref)
-        marker_revision = _plan_revision_from_payload(None, marker_ref)
-        if marker_revision != expected_revision:
-            raise ValueError("plan_ref acceptance marker revision mismatch")
-        if marker.get("review_gate_ref"):
-            self._validate_plan_acceptance_gate(marker.get("review_gate_ref"), loaded)
-        elif not marker.get("human_override"):
-            raise ValueError("plan_ref acceptance marker lacks review_gate_ref or human_override")
-        accepted_ref = dict(ref)
-        accepted_ref.update(
-            {
-                "accepted": True,
-                "accepted_at": str(marker.get("accepted_at") or ""),
-                "acceptance_marker_path": str(marker.get("acceptance_marker_path") or ""),
-                "accepted_latest_marker_path": str(marker.get("accepted_latest_marker_path") or ""),
-            }
-        )
-        loaded["plan_ref"] = accepted_ref
-        loaded["review_gate_ref"] = dict(marker.get("review_gate_ref") or {})
-        loaded["human_override"] = dict(marker.get("human_override") or {})
-        return loaded
+        return self.plans.load_accepted_plan_ref(plan_ref)
 
     def read_plan_ref(self, plan_ref: Any) -> dict[str, Any]:
-        loaded = self.load_dispatchable_plan_ref(plan_ref)
-        accepted: dict[str, Any] = {}
-        try:
-            accepted = self.load_accepted_plan_ref(loaded.get("plan_ref") or plan_ref)
-        except Exception:
-            accepted = {}
-        payload = dict(loaded)
-        if accepted:
-            payload["plan_ref"] = dict(accepted.get("plan_ref") or loaded.get("plan_ref") or {})
-            payload["accepted"] = True
-        else:
-            payload["accepted"] = False
-        return {"status": "ok", **payload}
+        return self.plans.read_plan_ref(plan_ref)
 
     def search_plan_refs(self, query: str = "", *, limit: int = 10) -> dict[str, Any]:
-        self.ensure_schema()
-        terms = [item.lower() for item in str(query or "").split() if item.strip()]
-        items: list[dict[str, Any]] = []
-        for path in _iter_plan_json_files(self.runtime_root):
-            try:
-                loaded = self.load_dispatchable_plan_ref({"path": str(path)})
-            except Exception:
-                continue
-            artifact = dict(loaded.get("plan_artifact") or {})
-            haystack = _plan_search_text(artifact, loaded.get("plan_ref") or {}).lower()
-            if terms and not all(term in haystack for term in terms):
-                continue
-            accepted = False
-            accepted_ref: dict[str, Any] = {}
-            with contextlib.suppress(Exception):
-                accepted_loaded = self.load_accepted_plan_ref(loaded.get("plan_ref") or {})
-                accepted = True
-                accepted_ref = dict(accepted_loaded.get("plan_ref") or {})
-            ref = accepted_ref or dict(loaded.get("plan_ref") or {})
-            items.append(
-                {
-                    "plan_ref": ref,
-                    "accepted": accepted,
-                    "plan_id": str(ref.get("plan_id") or artifact.get("plan_id") or ""),
-                    "task_id": str(ref.get("task_id") or artifact.get("task_id") or ""),
-                    "plan_revision": _plan_revision_from_payload(artifact, ref),
-                    "summary": str(artifact.get("summary") or ""),
-                    "path": str(path),
-                }
-            )
-            if len(items) >= max(1, int(limit or 10)):
-                break
-        return {"status": "ok", "items": items, "count": len(items)}
+        return self.plans.search_plan_refs(query, limit=limit)
 
     def submit_review_gate(
         self,
@@ -883,44 +731,14 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         review_gate_ref: Any = None,
         human_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        source = self.load_dispatchable_plan_ref(plan_ref)
-        source_ref = dict(source.get("plan_ref") or {})
-        source_revision = _plan_revision_from_payload(source.get("plan_artifact"), source_ref)
-        if not isinstance(revised_plan_artifact, dict):
-            raise ValueError("revised_plan_artifact must be an object")
-        revised_payload = dict(revised_plan_artifact or {})
-        expected_revision = source_revision + 1
-        declared_revision = _coerce_int(revised_payload.get("plan_revision"))
-        if declared_revision is not None and declared_revision != expected_revision:
-            raise ValueError(
-                f"revised plan_revision must be {expected_revision} when revising source revision {source_revision}"
-            )
-        artifact = validate_dispatchable_plan_artifact(revised_payload)
-        if artifact.plan_id != str(source_ref.get("plan_id") or ""):
-            raise ValueError("revised plan_id must match source plan_ref")
-        if artifact.task_id != str(source_ref.get("task_id") or ""):
-            raise ValueError("revised task_id must match source plan_ref")
-        latest_revision = _latest_plan_revision(self.runtime_root, task_id=artifact.task_id, plan_id=artifact.plan_id)
-        if latest_revision > source_revision:
-            raise ValueError(
-                f"source plan_ref is stale: latest revision is {latest_revision}, source revision is {source_revision}"
-            )
-        result = self._write_plan_revision(
-            artifact,
-            revision=expected_revision,
-            source_plan_ref=source_ref,
+        return self.plans.revise_plan_ref(
+            plan_ref,
+            revised_plan_artifact,
             revision_notes=revision_notes,
+            accepted=accepted,
+            review_gate_ref=review_gate_ref,
+            human_override=human_override,
         )
-        if accepted:
-            acceptance = self.accept_plan_ref(
-                result["plan_ref"],
-                reason=revision_notes or f"accepted plan revision {expected_revision}",
-                review_gate_ref=review_gate_ref,
-                human_override=human_override,
-            )
-            result["acceptance"] = acceptance
-            result["plan_ref"] = dict(acceptance.get("plan_ref") or result["plan_ref"])
-        return result
 
     def submit_plan_ref(
         self,
@@ -928,42 +746,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         *,
         submission_notes: str = "",
     ) -> dict[str, Any]:
-        artifact = validate_dispatchable_plan_artifact(plan_artifact)
-        plan_revision = _plan_revision_from_payload(plan_artifact)
-        payload = _plan_artifact_payload(artifact, plan_revision=plan_revision)
-        metadata = dict(payload.get("metadata") or {})
-        metadata["plan_revision"] = plan_revision
-        if submission_notes:
-            metadata["submission_notes"] = str(submission_notes)
-        payload["metadata"] = metadata
-        validation = dispatchable_plan_validation(artifact)
-        plan_dir = _plan_revision_dir(self.runtime_root, task_id=artifact.task_id, plan_id=artifact.plan_id)
-        plan_dir.mkdir(parents=True, exist_ok=True)
-        path = plan_dir / f"plan.v{plan_revision}.json"
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-        if path.exists():
-            existing_digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            new_digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-            if existing_digest != new_digest:
-                raise ValueError(f"plan revision already exists with different content: {path}")
-        else:
-            with path.open("x", encoding="utf-8") as handle:
-                handle.write(encoded)
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        plan_ref = {
-            "path": str(path),
-            "sha256": digest,
-            "plan_id": artifact.plan_id,
-            "task_id": artifact.task_id,
-            "plan_revision": plan_revision,
-        }
-        return {
-            "status": "submitted",
-            "plan_ref": plan_ref,
-            "plan_artifact": payload,
-            "plan_validation": validation,
-            "plan_revision": plan_revision,
-        }
+        return self.plans.submit_plan_ref(plan_artifact, submission_notes=submission_notes)
 
     def accept_plan_ref(
         self,
@@ -973,103 +756,12 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         review_gate_ref: Any = None,
         human_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        loaded = self.load_dispatchable_plan_ref(plan_ref)
-        ref = dict(loaded.get("plan_ref") or {})
-        plan_revision = _plan_revision_from_payload(loaded.get("plan_artifact"), ref)
-        gate_payload: dict[str, Any] | None = None
-        override_payload: dict[str, Any] | None = None
-        if review_gate_ref:
-            gate_payload = self._validate_plan_acceptance_gate(review_gate_ref, loaded)
-            override_payload = _validate_human_override(human_override)
-        else:
-            override_payload = _validate_human_override(human_override)
-            if override_payload is None:
-                raise ValueError("plan acceptance requires passing plan review gate or explicit human_override.reason")
-        accepted_at = utc_now()
-        marker = {
-            "status": "accepted",
-            "accepted_at": accepted_at,
-            "reason": str(reason or "").strip(),
-            "plan_ref": ref,
-            "plan_validation": dict(loaded.get("plan_validation") or {}),
-        }
-        if gate_payload is not None:
-            marker["review_gate_ref"] = compact_review_gate_ref(gate_payload)
-        if override_payload is not None:
-            marker["human_override"] = dict(override_payload)
-        marker_dir = _plan_revision_dir(self.runtime_root, task_id=str(ref.get("task_id") or ""), plan_id=str(ref.get("plan_id") or ""))
-        marker_dir.mkdir(parents=True, exist_ok=True)
-        marker_json = json.dumps(marker, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-        marker_path = marker_dir / f"accepted.v{plan_revision}.json"
-        if not marker_path.exists():
-            with marker_path.open("x", encoding="utf-8") as handle:
-                handle.write(marker_json)
-        latest_marker_path = marker_dir / "accepted.json"
-        latest_marker_path.write_text(marker_json, encoding="utf-8")
-        accepted_ref = dict(ref)
-        accepted_ref.update(
-            {
-                "accepted": True,
-                "accepted_at": accepted_at,
-                "acceptance_marker_path": str(marker_path),
-                "accepted_latest_marker_path": str(latest_marker_path),
-            }
+        return self.plans.accept_plan_ref(
+            plan_ref,
+            reason=reason,
+            review_gate_ref=review_gate_ref,
+            human_override=human_override,
         )
-        return {
-            "status": "accepted",
-            "plan_ref": accepted_ref,
-            "plan_artifact": loaded.get("plan_artifact"),
-            "plan_validation": loaded.get("plan_validation"),
-            "review_gate_ref": marker.get("review_gate_ref") or {},
-            "human_override": marker.get("human_override") or {},
-            "acceptance_marker_path": str(marker_path),
-            "accepted_latest_marker_path": str(latest_marker_path),
-            "plan_revision": plan_revision,
-        }
-
-    def _write_plan_revision(
-        self,
-        artifact: PlanArtifact,
-        *,
-        revision: int,
-        source_plan_ref: dict[str, Any],
-        revision_notes: str = "",
-    ) -> dict[str, Any]:
-        plan_revision = max(0, int(revision))
-        payload = _plan_artifact_payload(artifact, plan_revision=plan_revision)
-        metadata = dict(payload.get("metadata") or {})
-        metadata["plan_revision"] = plan_revision
-        metadata["revision_of"] = {
-            "path": str(source_plan_ref.get("path") or ""),
-            "sha256": str(source_plan_ref.get("sha256") or ""),
-            "plan_revision": _plan_revision_from_payload(None, source_plan_ref),
-        }
-        if revision_notes:
-            metadata["revision_notes"] = str(revision_notes)
-        payload["metadata"] = metadata
-        validation = dispatchable_plan_validation(artifact)
-        revision_dir = _plan_revision_dir(self.runtime_root, task_id=artifact.task_id, plan_id=artifact.plan_id)
-        revision_dir.mkdir(parents=True, exist_ok=True)
-        path = revision_dir / f"plan.v{plan_revision}.json"
-        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-        with path.open("x", encoding="utf-8") as handle:
-            handle.write(encoded)
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        plan_ref = {
-            "path": str(path),
-            "sha256": digest,
-            "plan_id": artifact.plan_id,
-            "task_id": artifact.task_id,
-            "plan_revision": plan_revision,
-            "revision_of": metadata["revision_of"],
-        }
-        return {
-            "status": "revised",
-            "plan_ref": plan_ref,
-            "plan_artifact": payload,
-            "plan_validation": validation,
-            "plan_revision": plan_revision,
-        }
 
     def next_plan_module_pack(self, work_order_id: str, *, allow_paused: bool = False) -> TaskContextPack | None:
         snapshot = self.read_work_order(str(work_order_id))
@@ -2747,70 +2439,6 @@ def _role_from_profile(profile: str) -> str:
     return parts[-1] if parts else "minion"
 
 
-def _coerce_plan_ref(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        ref = dict(value)
-    else:
-        ref = {"path": str(value or "").strip()}
-    path = str(ref.get("path") or ref.get("artifact_path") or ref.get("relative_path") or "").strip()
-    if not path:
-        raise ValueError("plan_ref.path is required")
-    ref["path"] = path
-    return ref
-
-
-def _resolve_plan_ref_path(plan_ref: dict[str, Any], *, runtime_root: Path) -> Path:
-    raw = Path(str(plan_ref.get("path") or ""))
-    path = raw if raw.is_absolute() else runtime_root / raw
-    resolved = path.resolve()
-    root = runtime_root.resolve()
-    if not resolved.is_relative_to(root):
-        raise ValueError(f"plan_ref must be under runtime_root: {resolved}")
-    if not resolved.exists():
-        raise FileNotFoundError(f"plan_ref does not exist: {resolved}")
-    if not resolved.is_file():
-        raise ValueError(f"plan_ref is not a file: {resolved}")
-    return resolved
-
-
-def _load_accepted_plan_marker(runtime_root: Path, plan_ref: dict[str, Any]) -> dict[str, Any]:
-    revision = _plan_revision_from_payload(None, plan_ref)
-    task_id = str(plan_ref.get("task_id") or "").strip()
-    plan_id = str(plan_ref.get("plan_id") or "").strip()
-    candidates: list[Path] = []
-    for key in ("acceptance_marker_path", "accepted_latest_marker_path"):
-        raw = str(plan_ref.get(key) or "").strip()
-        if raw:
-            candidates.append(Path(raw))
-    if task_id and plan_id:
-        marker_dir = _plan_revision_dir(runtime_root, task_id=task_id, plan_id=plan_id)
-        candidates.append(marker_dir / f"accepted.v{revision}.json")
-        candidates.append(marker_dir / "accepted.json")
-    root = runtime_root.resolve()
-    for candidate in candidates:
-        path = candidate if candidate.is_absolute() else runtime_root / candidate
-        resolved = path.resolve()
-        if not resolved.is_relative_to(root) or not resolved.is_file():
-            continue
-        try:
-            payload = json.loads(resolved.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(payload, dict) or str(payload.get("status") or "") != "accepted":
-            continue
-        marker_ref = dict(payload.get("plan_ref") or {})
-        if str(marker_ref.get("sha256") or "") != str(plan_ref.get("sha256") or ""):
-            continue
-        if _plan_revision_from_payload(None, marker_ref) != revision:
-            continue
-        result = dict(payload)
-        result["acceptance_marker_path"] = str(resolved)
-        latest = _plan_revision_dir(runtime_root, task_id=task_id, plan_id=plan_id) / "accepted.json" if task_id and plan_id else resolved
-        result["accepted_latest_marker_path"] = str(latest)
-        return result
-    raise ValueError("plan_ref is not accepted for dispatch")
-
-
 def _compact_work_order_search_item(snapshot: dict[str, Any]) -> dict[str, Any]:
     work_order = dict(snapshot.get("work_order") or {})
     task = dict(snapshot.get("task") or {})
@@ -3204,27 +2832,6 @@ def _safe_id(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(value or "").strip())[:80] or uuid4().hex[:12]
 
 
-def _plan_revision_dir(runtime_root: Path, *, task_id: str, plan_id: str) -> Path:
-    path = Path(runtime_root)
-    for part in _PLAN_REVISION_DIR_PARTS:
-        path = path / part
-    return path / _safe_id(task_id) / _safe_id(plan_id)
-
-
-def _latest_plan_revision(runtime_root: Path, *, task_id: str, plan_id: str) -> int:
-    revision_dir = _plan_revision_dir(runtime_root, task_id=task_id, plan_id=plan_id)
-    latest = -1
-    if not revision_dir.exists():
-        return latest
-    for path in revision_dir.glob("plan.v*.json"):
-        stem = path.stem
-        raw = stem.removeprefix("plan.v")
-        value = _coerce_int(raw)
-        if value is not None:
-            latest = max(latest, int(value))
-    return latest
-
-
 def _plan_revision_from_payload(payload: Any, ref: Any | None = None) -> int:
     payload_dict = dict(payload) if isinstance(payload, dict) else {}
     ref_dict = dict(ref) if isinstance(ref, dict) else {}
@@ -3260,34 +2867,6 @@ def _plan_revision_gate_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "residual_risk": [dict(item) for item in list(payload.get("residual_risk") or []) if isinstance(item, dict)],
         "report_artifact_ref": dict(payload.get("report_artifact_ref") or {}),
     }
-
-def _validate_human_override(value: Any) -> dict[str, Any] | None:
-    if value in (None, "", False):
-        return None
-    if not isinstance(value, dict):
-        raise ValueError("human_override must be an object with reason")
-    payload = dict(value or {})
-    reason = str(payload.get("reason") or "").strip()
-    if not reason:
-        raise ValueError("human_override.reason is required")
-    if str(payload.get("source") or "").strip() != "control_action":
-        raise ValueError("human_override.source must be control_action")
-    if not str(payload.get("action_kind") or "").strip():
-        raise ValueError("human_override.action_kind is required")
-    return {
-        "reason": reason,
-        "actor": str(payload.get("actor") or payload.get("by") or "human").strip() or "human",
-        "source": "control_action",
-        "action_kind": str(payload.get("action_kind") or "").strip(),
-        "target_scope": str(payload.get("target_scope") or "").strip(),
-        "target_id": str(payload.get("target_id") or "").strip(),
-        "interaction_origin": str(payload.get("interaction_origin") or "").strip(),
-        "interaction_id": str(payload.get("interaction_id") or "").strip(),
-        "interaction_kind": str(payload.get("interaction_kind") or "").strip(),
-        "route": dict(payload.get("route") or {}) if isinstance(payload.get("route"), dict) else {},
-        "created_at": utc_now(),
-    }
-
 
 def _plan_artifact_payload(artifact: PlanArtifact, *, plan_revision: int = 0) -> dict[str, Any]:
     revision = max(0, int(plan_revision or 0))
