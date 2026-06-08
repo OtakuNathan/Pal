@@ -2729,6 +2729,48 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(transcript[0].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[1].tool_call_id, "call_1")
 
+    def test_l1_transcript_normalizes_orphan_tool_result_as_context(self) -> None:
+        service = MemoryService()
+
+        service.l1_store.append(
+            [
+                L1TranscriptMessage(role="user", content="question"),
+                L1TranscriptMessage(role="tool", content="orphan result", tool_call_id="call_missing"),
+            ]
+        )
+
+        transcript = service.l1_store.items[0]
+
+        self.assertEqual([item.role for item in transcript], ["user", "user"])
+        self.assertEqual(transcript[1].kind, L1MessageKind.RUNTIME_CONTEXT_MEMORY)
+        self.assertIn("historical_tool_result", transcript[1].content)
+        self.assertIn("orphan result", transcript[1].content)
+        self.assertIsNone(transcript[1].tool_call_id)
+
+    def test_l1_transcript_preserves_complete_batch_and_normalizes_extra_tool_result(self) -> None:
+        service = MemoryService()
+
+        service.l1_store.append(
+            [
+                L1TranscriptMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "op_probe", "arguments": "{}"}}],
+                ),
+                L1TranscriptMessage(role="tool", content="probe result", tool_call_id="call_1"),
+                L1TranscriptMessage(role="tool", content="extra result", tool_call_id="call_extra"),
+            ]
+        )
+
+        transcript = service.l1_store.items[0]
+
+        self.assertEqual([item.role for item in transcript], ["assistant", "tool", "user"])
+        self.assertEqual(transcript[0].tool_calls[0]["id"], "call_1")
+        self.assertEqual(transcript[1].tool_call_id, "call_1")
+        self.assertEqual(transcript[2].kind, L1MessageKind.RUNTIME_CONTEXT_MEMORY)
+        self.assertIn("historical_tool_result", transcript[2].content)
+        self.assertIn("extra result", transcript[2].content)
+
     def test_memory_prompt_preserves_complete_tool_protocol_batch(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
 
