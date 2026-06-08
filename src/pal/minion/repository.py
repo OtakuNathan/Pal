@@ -15,7 +15,7 @@ from pal.minion.contracts import (
 )
 from pal.minion.ledger_store import MinionLedgerStore
 from pal.minion.plan_store import MinionPlanStore
-from pal.minion.review_gate_store import MinionReviewGateStore, compact_review_gate_ref
+from pal.minion.review_gate_store import MinionReviewGateStore
 from pal.minion.schema import ensure_minion_schema
 from pal.minion.search_store import MinionSearchStore
 from pal.minion.work_order import (
@@ -456,52 +456,6 @@ class MinionTaskingRepository(TaskingRepositoryPort):
     def load_review_gate(self, review_gate_ref: Any) -> dict[str, Any]:
         return self.review_gates.load_review_gate(review_gate_ref)
 
-    def _validate_review_gate_target(self, gate: ReviewGateResult) -> tuple[str, str, dict[str, Any]]:
-        target = dict(gate.target)
-        if gate.gate_kind == "plan_acceptance":
-            loaded = self.load_dispatchable_plan_ref(target.get("plan_ref"))
-            plan_ref = dict(loaded.get("plan_ref") or {})
-            target["plan_ref"] = plan_ref
-            target["plan_validation"] = dict(loaded.get("plan_validation") or {})
-            return "plan_ref", _plan_target_key(plan_ref), target
-        if gate.gate_kind in {"checkpoint_verification", "repair_verification"}:
-            checkpoint_id = str(target.get("checkpoint_id") or "").strip()
-            if checkpoint_id:
-                with self._connect() as db:
-                    row = self._fetch_one(
-                        db,
-                        "SELECT * FROM minion_worker_checkpoints WHERE checkpoint_id = ?",
-                        (checkpoint_id,),
-                    )
-                if row is None:
-                    raise ValueError(f"unknown checkpoint_id for review gate: {checkpoint_id}")
-                payload = _loads(row["payload_json"])
-                expected_gate_kind = str(payload.get("expected_review_gate_kind") or "").strip().lower()
-                if expected_gate_kind and gate.gate_kind != expected_gate_kind:
-                    raise ValueError(f"review gate kind mismatch: checkpoint expects {expected_gate_kind}")
-                if gate.gate_kind == "repair_verification" and not (expected_gate_kind == "repair_verification" or isinstance(payload.get("repair_attempt"), dict)):
-                    raise ValueError("repair_verification requires a repair checkpoint target")
-                if gate.verdict == "pass" and list(payload.get("shell_mutation_violations") or []):
-                    raise ValueError("checkpoint has unresolved shell_mutation_violations; review gate cannot pass")
-                commit_sha = str(target.get("commit_sha") or "").strip()
-                row_commit = str(payload.get("commit_sha") or payload.get("git_commit", {}).get("commit_sha") or "").strip()
-                if commit_sha and row_commit and commit_sha != row_commit:
-                    raise ValueError("review gate checkpoint commit_sha mismatch")
-                target.setdefault("work_order_id", str(row["work_order_id"] or ""))
-                target.setdefault("run_id", str(row["run_id"] or ""))
-                target.setdefault("minion_id", str(row["minion_id"] or ""))
-                target.setdefault("milestone_index", _coerce_int(row["milestone_index"]) or 0)
-                target.setdefault("milestone_id", str(payload.get("milestone_id") or ""))
-                target.setdefault("acceptance_criteria", [str(item) for item in list(payload.get("acceptance_criteria") or []) if str(item or "").strip()])
-                if row_commit:
-                    target.setdefault("commit_sha", row_commit)
-                return "checkpoint", checkpoint_id, target
-            commit_sha = str(target.get("commit_sha") or "").strip()
-            if not commit_sha:
-                raise ValueError("checkpoint review gate requires checkpoint_id or commit_sha")
-            return "commit", commit_sha, target
-        raise ValueError(f"unsupported review gate kind: {gate.gate_kind}")
-
     def latest_review_gate_for_checkpoint(self, checkpoint_id: str) -> dict[str, Any]:
         return self.review_gates.latest_review_gate_for_checkpoint(checkpoint_id)
 
@@ -510,66 +464,6 @@ class MinionTaskingRepository(TaskingRepositoryPort):
 
     def close_checkpoint_from_review_gate(self, review_gate_ref: Any) -> dict[str, Any]:
         return self.review_gates.close_checkpoint_from_review_gate(review_gate_ref)
-
-    def _close_checkpoint_from_review_gate_locked(
-        self,
-        db: sqlite3.Connection,
-        *,
-        checkpoint_id: str,
-        gate_payload: dict[str, Any],
-        created_at: str,
-    ) -> dict[str, Any]:
-        row = self._fetch_one(db, "SELECT * FROM minion_worker_checkpoints WHERE checkpoint_id = ?", (str(checkpoint_id),))
-        if row is None:
-            raise ValueError(f"unknown checkpoint_id for closure: {checkpoint_id}")
-        work_order_id = str(row["work_order_id"] or "")
-        milestone_index = int(row["milestone_index"])
-        existing = self._fetch_one(
-            db,
-            """
-            SELECT * FROM minion_worker_checkpoints
-            WHERE work_order_id = ? AND milestone_index = ? AND status = 'completed'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (work_order_id, milestone_index),
-        )
-        if existing is not None:
-            return {
-                "status": "already_closed",
-                "checkpoint_id": str(existing["checkpoint_id"] or ""),
-                "work_order_id": work_order_id,
-                "milestone_index": milestone_index,
-            }
-        claim_payload = _loads(row["payload_json"])
-        closure_payload = {
-            **claim_payload,
-            "checkpoint_id": f"chk_{uuid4().hex[:16]}",
-            "status": "completed",
-            "claimed_checkpoint_id": str(checkpoint_id),
-            "review_gate_ref": compact_review_gate_ref(gate_payload),
-            "review_gate": gate_payload,
-            "summary": str(gate_payload.get("summary") or claim_payload.get("summary") or "checkpoint review passed"),
-        }
-        self.ledger.insert_checkpoint(db, work_order_id, closure_payload, str(row["minion_id"] or ""), str(row["run_id"] or ""), created_at)
-        self.ledger.insert_ledger(
-            db,
-            work_order_id,
-            "milestone_closed",
-            str(closure_payload["summary"]),
-            closure_payload,
-            str(row["minion_id"] or ""),
-            str(row["run_id"] or ""),
-            created_at,
-        )
-        return {
-            "status": "closed",
-            "work_order_id": work_order_id,
-            "milestone_index": milestone_index,
-            "claimed_checkpoint_id": str(checkpoint_id),
-            "commit_sha": str(closure_payload.get("commit_sha") or ""),
-            "payload": closure_payload,
-        }
 
     def _validate_plan_acceptance_gate(self, review_gate_ref: Any, loaded_plan: dict[str, Any]) -> dict[str, Any]:
         return self.review_gates.validate_plan_acceptance_gate(review_gate_ref, loaded_plan)
@@ -2558,19 +2452,6 @@ def _plan_revision_from_payload(payload: Any, ref: Any | None = None) -> int:
         if coerced is not None and coerced >= 0:
             return int(coerced)
     return 0
-
-
-def _plan_target_key(plan_ref: dict[str, Any]) -> str:
-    ref = dict(plan_ref or {})
-    return ":".join(
-        [
-            "plan",
-            _safe_id(str(ref.get("task_id") or "")),
-            _safe_id(str(ref.get("plan_id") or "")),
-            f"v{_plan_revision_from_payload(None, ref)}",
-            str(ref.get("sha256") or "").strip(),
-        ]
-    )
 
 
 def _plan_revision_gate_summary(payload: dict[str, Any]) -> dict[str, Any]:

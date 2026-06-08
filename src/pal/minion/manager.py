@@ -4,10 +4,8 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
 import signal
 import sqlite3
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,40 +17,22 @@ from pal.foundation.sidecar import (
     pack_sidecar_message,
     read_sidecar_message,
 )
-from pal.minion.contracts import SERIAL_MILESTONE_MODES
+from pal.minion.event_delivery import MinionEventDelivery
 from pal.minion.git_env import finalize_work_order_branch, prepare_task_workspace
 from pal.minion.inflight import InflightTracker
 from pal.minion.ipc import cleanup_manager_endpoint, minion_log_path, minion_runner_log_path, start_manager_server
-from pal.minion.ipc import python_subprocess_env
 from pal.minion.lifecycle import ACTIVE_RUN_STATUSES as _ACTIVE_RUN_STATUSES
-from pal.minion.lifecycle import TERMINAL_RUN_STATUSES as _TERMINAL_RUN_STATUSES
 from pal.minion.lifecycle import transition_run_status
 from pal.minion.profiles import MinionProfileRegistry
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.review_orchestrator import ReviewOrchestrator
-from pal.minion.turns import apply_minion_turn_to_pack, sanitize_runner_session_pack
+from pal.minion.runner_process import RunnerProcessSupervisor
+from pal.minion.serial_scheduler import SerialMilestoneScheduler
+from pal.minion.turns import sanitize_runner_session_pack
 from pal.minion.utils import coerce_int as _coerce_int
 from pal.minion.utils import dedupe_strings as _dedupe_strings
 from pal.minion.utils import string_list as _string_list
 from pal.shared import MinionApprovalDecision, TaskContextPack
-
-
-def _runner_stderr_line_is_error(line: str) -> bool:
-    text = str(line or "").strip()
-    if not text:
-        return False
-    if text.startswith("[tool call]"):
-        return False
-    if text.startswith("[tool result]"):
-        return " ok=False " in text or " status=error " in text or " status=failed " in text
-    lowered = text.lower()
-    return (
-        text.startswith("Traceback")
-        or "traceback (most recent call last)" in lowered
-        or lowered.startswith("error:")
-        or " error " in lowered
-        or "exception" in lowered
-    )
 
 
 @dataclass
@@ -123,9 +103,10 @@ class MinionManager:
     endpoint_info: dict[str, Any] = field(default_factory=dict)
     runs: dict[str, MinionRunState] = field(default_factory=dict)
     started_at: str = field(default_factory=utc_now)
-    event_queue: list[dict[str, Any]] = field(default_factory=list)
-    event_subscribers: list[asyncio.StreamWriter] = field(default_factory=list)
+    events: MinionEventDelivery = field(init=False)
     reviews: ReviewOrchestrator = field(init=False)
+    runner_process: RunnerProcessSupervisor = field(init=False)
+    serial_scheduler: SerialMilestoneScheduler = field(init=False)
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _serial_turns_inflight: InflightTracker = field(default_factory=InflightTracker)
@@ -133,7 +114,18 @@ class MinionManager:
     def __post_init__(self) -> None:
         self.tasking_repository = MinionTaskingRepository(runtime_root=self.runtime_root)
         self.tasking_repository.ensure_schema()
+        self.events = MinionEventDelivery()
         self.reviews = ReviewOrchestrator(self)
+        self.runner_process = RunnerProcessSupervisor(self)
+        self.serial_scheduler = SerialMilestoneScheduler(self)
+
+    @property
+    def event_queue(self) -> list[dict[str, Any]]:
+        return self.events.queue
+
+    @property
+    def event_subscribers(self) -> list[asyncio.StreamWriter]:
+        return self.events.subscribers
 
     def _transition_run_status(self, state: MinionRunState, status: str) -> None:
         state.status = transition_run_status(state.status, status)
@@ -158,7 +150,7 @@ class MinionManager:
                 with contextlib.suppress(asyncio.CancelledError):
                     await serve_task
                 await self.close_all()
-                await self._close_event_subscribers()
+                await self.events.close()
                 await cleanup_manager_endpoint(self.runtime_root)
                 self.logger.info("minion manager stopped")
 
@@ -186,34 +178,7 @@ class MinionManager:
         return await dispatch_sidecar_request(request, self._call_method, error_kind=lambda exc: "manager", logger=self.logger)
 
     async def _handle_event_subscription(self, request: dict[str, Any], reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        request_id = str(request.get("id") or "")
-        backlog = list(self.event_queue)
-        self.event_queue.clear()
-        self.event_subscribers.append(writer)
-        try:
-            writer.write(
-                pack_sidecar_message(
-                    {
-                        "type": "response",
-                        "id": request_id,
-                        "ok": True,
-                        "result": {"subscribed": True, "backlog_count": len(backlog)},
-                    }
-                )
-            )
-            for event in backlog:
-                writer.write(pack_sidecar_message({"type": "event", "event": event}))
-            await writer.drain()
-            while not self._shutdown_event.is_set():
-                try:
-                    message = await read_sidecar_message(reader)
-                except asyncio.IncompleteReadError:
-                    return
-                if str(message.get("method") or "") == "unsubscribe_events":
-                    return
-        finally:
-            with contextlib.suppress(ValueError):
-                self.event_subscribers.remove(writer)
+        await self.events.handle_subscription(request, reader, writer, shutdown_event=self._shutdown_event)
 
     async def _call_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self._reconcile_runs()
@@ -612,69 +577,10 @@ class MinionManager:
         return result, unresolved
 
     async def close_all(self) -> None:
-        for state in list(self.runs.values()):
-            self._close_liveness_pipe(state)
-            if state.process is not None and state.process.returncode is None:
-                with contextlib.suppress(Exception):
-                    state.process.terminate()
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(state.process.wait(), timeout=1.0)
-                if state.process.returncode is None:
-                    with contextlib.suppress(Exception):
-                        state.process.kill()
-                    with contextlib.suppress(Exception):
-                        await state.process.wait()
-            with contextlib.suppress(Exception):
-                await self._wait_for_stream_tasks(state)
-            if state.status in _ACTIVE_RUN_STATUSES:
-                self._record_event(
-                    state,
-                    {
-                        "event_kind": "terminal",
-                        "payload": {"status": "killed", "summary": "minion manager shutdown", "reason": "manager_shutdown"},
-                        "created_at": utc_now(),
-                    },
-                )
+        await self.runner_process.close_all()
 
     async def _start_runner(self, state: MinionRunState) -> None:
-        log_dir = self.runtime_root / "data" / "minion" / "runs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        read_fd, write_fd = os.pipe()
-        try:
-            process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-m",
-                "pal.minion.runner_main",
-                "--runtime-root",
-                str(self.runtime_root),
-                "--task-json",
-                state.pack.to_json(),
-                "--minion-id",
-                state.minion_id,
-                "--run-id",
-                state.run_id,
-                "--manager-liveness-fd",
-                str(read_fd),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=python_subprocess_env(),
-                pass_fds=(read_fd,),
-            )
-        except Exception:
-            with contextlib.suppress(OSError):
-                os.close(read_fd)
-            with contextlib.suppress(OSError):
-                os.close(write_fd)
-            raise
-        with contextlib.suppress(OSError):
-            os.close(read_fd)
-        state.process = process
-        state.manager_liveness_write_fd = write_fd
-        self._transition_run_status(state, "running")
-        state.stdout_task = asyncio.create_task(self._read_runner_stdout(state), name=f"minion-stdout-{state.run_id}")
-        state.stderr_task = asyncio.create_task(self._read_runner_stderr(state), name=f"minion-stderr-{state.run_id}")
-        state.wait_task = asyncio.create_task(self._wait_runner(state), name=f"minion-wait-{state.run_id}")
+        await self.runner_process.start_runner(state)
 
     def _with_runner_debug_log(self, pack: TaskContextPack) -> TaskContextPack:
         if not _debug_log_requested(pack):
@@ -692,146 +598,34 @@ class MinionManager:
         return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
 
     async def _read_runner_stdout(self, state: MinionRunState) -> None:
-        process = state.process
-        if process is None or process.stdout is None:
-            return
-        try:
-            while True:
-                payload = await read_sidecar_message(process.stdout)
-                if str(payload.get("type") or "") != "event":
-                    continue
-                self._record_event(state, payload)
-        except asyncio.IncompleteReadError:
-            return
-        except Exception as exc:
-            state.last_error = f"{exc.__class__.__name__}: {exc}"
-            self.logger.exception("failed to read minion stdout: %s", state.run_id)
+        await self.runner_process.read_runner_stdout(state)
 
     async def _read_runner_stderr(self, state: MinionRunState) -> None:
-        process = state.process
-        if process is None or process.stderr is None:
-            return
-        try:
-            while True:
-                line = await process.stderr.readline()
-                if not line:
-                    return
-                line_text = line.decode("utf-8", errors="replace").rstrip()
-                self._record_runner_stderr_line(state, line_text)
-                self.logger.info("minion %s stderr: %s", state.run_id, line_text)
-        except Exception:
-            return
+        await self.runner_process.read_runner_stderr(state)
 
     async def _wait_runner(self, state: MinionRunState) -> None:
-        process = state.process
-        if process is None:
-            return
-        returncode = await process.wait()
-        await self._wait_for_stream_tasks(state)
-        self._record_runner_exit(state, returncode)
+        await self.runner_process.wait_runner(state)
 
     async def _wait_for_stream_tasks(self, state: MinionRunState) -> None:
-        current = asyncio.current_task()
-        tasks = [
-            task
-            for task in (state.stdout_task, state.stderr_task)
-            if task is not None and task is not current and not task.done()
-        ]
-        if tasks:
-            done, _pending = await asyncio.wait(tasks, timeout=1.0)
-            for task in done:
-                self._consume_task_result(state, task, "stream")
+        await self.runner_process.wait_for_stream_tasks(state)
 
     def _record_runner_exit(self, state: MinionRunState, returncode: int | None) -> None:
-        self._close_liveness_pipe(state)
-        if state.status in _TERMINAL_RUN_STATUSES:
-            return
-        status = "completed" if returncode == 0 else "failed"
-        payload: dict[str, Any] = {
-            "status": status,
-            "summary": f"minion exited with code {returncode}",
-            "returncode": returncode,
-        }
-        if state.last_error:
-            payload["error"] = state.last_error
-        if state.stderr_tail:
-            payload["stderr_tail"] = list(state.stderr_tail[-20:])
-        self._record_event(
-            state,
-            {
-                "event_kind": "terminal",
-                "payload": payload,
-                "created_at": utc_now(),
-            },
-        )
+        self.runner_process.record_runner_exit(state, returncode)
 
     def _reconcile_runs(self) -> None:
-        for state in list(self.runs.values()):
-            for task_name, task in (
-                ("stdout", state.stdout_task),
-                ("stderr", state.stderr_task),
-                ("wait", state.wait_task),
-            ):
-                self._consume_task_result(state, task, task_name)
-                if task is not None and task.done():
-                    setattr(state, f"{task_name}_task", None)
-            process = state.process
-            returncode = getattr(process, "returncode", None) if process is not None else None
-            if returncode is not None and state.status in _ACTIVE_RUN_STATUSES:
-                self._record_runner_exit(state, returncode)
+        self.runner_process.reconcile_runs()
 
     def _active_runner_work_order_ids(self) -> set[str]:
-        return {
-            str(state.pack.work_order_id)
-            for state in self.runs.values()
-            if state.status in _ACTIVE_RUN_STATUSES
-            and state.process is not None
-            and state.process.returncode is None
-            and str(state.pack.work_order_id or "").strip()
-        }
+        return self.runner_process.active_runner_work_order_ids()
 
     def _find_active_run_for_work_order(self, work_order_id: str) -> MinionRunState | None:
-        wanted = str(work_order_id or "").strip()
-        if not wanted:
-            return None
-        for state in self.runs.values():
-            if str(state.pack.work_order_id or "") != wanted:
-                continue
-            if state.status in _ACTIVE_RUN_STATUSES and state.process is not None and state.process.returncode is None:
-                return state
-        return None
+        return self.runner_process.find_active_run_for_work_order(work_order_id)
 
     def _consume_task_result(self, state: MinionRunState, task: asyncio.Task[None] | None, task_name: str) -> None:
-        if task is None or not task.done():
-            return
-        try:
-            task.result()
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            state.last_error = f"{exc.__class__.__name__}: {exc}"
-            self.logger.exception("minion %s background %s task failed", state.run_id, task_name)
-            if task_name == "wait" and state.status in _ACTIVE_RUN_STATUSES:
-                self._record_event(
-                    state,
-                    {
-                        "event_kind": "terminal",
-                        "payload": {
-                            "status": "failed",
-                            "summary": "minion wait task failed",
-                            "error": state.last_error,
-                        },
-                        "created_at": utc_now(),
-                    },
-        )
+        self.runner_process.consume_task_result(state, task, task_name)
 
     def _close_liveness_pipe(self, state: MinionRunState) -> None:
-        fd = state.manager_liveness_write_fd
-        if fd is None:
-            return
-        state.manager_liveness_write_fd = None
-        with contextlib.suppress(OSError):
-            os.close(fd)
+        self.runner_process.close_liveness_pipe(state)
 
     def _install_signal_handlers(self):
         try:
@@ -852,14 +646,7 @@ class MinionManager:
         return remove
 
     def _record_runner_stderr_line(self, state: MinionRunState, line: str) -> None:
-        normalized = str(line or "").strip()
-        if not normalized:
-            return
-        state.stderr_tail.append(normalized)
-        if len(state.stderr_tail) > 20:
-            del state.stderr_tail[:-20]
-        if _runner_stderr_line_is_error(normalized):
-            state.last_error = normalized
+        self.runner_process.record_runner_stderr_line(state, line)
 
     def _record_event(self, state: MinionRunState, payload: dict[str, Any]) -> None:
         event_kind = str(payload.get("event_kind") or "")
@@ -935,96 +722,7 @@ class MinionManager:
         if event_kind == "terminal":
             self.reviews.schedule_reviewer_terminal_reconciliation(state, event)
         if event_kind == "milestone_completed":
-            self._schedule_serial_module_turn(state, event)
-
-    def _schedule_serial_module_turn(self, state: MinionRunState, event: dict[str, Any]) -> None:
-        payload = dict(event.get("payload") or {})
-        if str(payload.get("status") or "").strip().lower() != "completed":
-            return
-        metadata = dict(state.pack.metadata or {})
-        module_execution = dict(metadata.get("module_execution") or {})
-        if str(module_execution.get("mode") or "") not in SERIAL_MILESTONE_MODES:
-            return
-        if not bool(module_execution.get("auto_advance")):
-            return
-        work_order_id = str(event.get("work_order_id") or state.pack.work_order_id)
-        milestone_index = str(payload.get("milestone_index") if payload.get("milestone_index") is not None else "")
-        inflight_key = f"{work_order_id}:{milestone_index or state.run_id}"
-        if not work_order_id or not self._serial_turns_inflight.claim(inflight_key):
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self._serial_turns_inflight.release(inflight_key)
-            return
-        loop.create_task(
-            self._send_serial_module_turn(state, event, inflight_key),
-            name=f"minion-serial-turn-{work_order_id}-{milestone_index or 'next'}",
-        )
-
-    async def _send_serial_module_turn(self, state: MinionRunState, event: dict[str, Any], inflight_key: str) -> None:
-        work_order_id = str(event.get("work_order_id") or state.pack.work_order_id)
-        payload = dict(event.get("payload") or {})
-        try:
-            turn = self.tasking_repository.next_serial_module_turn(work_order_id)
-            if turn is not None:
-                state.pack = apply_minion_turn_to_pack(state.pack, turn, checkpoint_payload=payload)
-                with contextlib.suppress(Exception):
-                    self.tasking_repository.update_work_order_workspace(work_order_id, dict(state.pack.workspace))
-                await self._send_runner_control_or_record(state, {"type": "next_turn", "turn": turn})
-                self.logger.info(
-                    "minion serial module sent next turn run=%s work_order=%s milestone=%s",
-                    state.run_id,
-                    work_order_id,
-                    str((turn.get("current_milestone") or {}).get("milestone_id") or ""),
-                )
-                return
-            completion = self.tasking_repository.mark_serial_module_completed(work_order_id)
-            event_payload: dict[str, Any] = {**payload, **dict(completion)}
-            event_work_order_id = work_order_id
-            if str(completion.get("status") or "") == "completed":
-                parent_completion = self.tasking_repository.record_plan_module_completion(work_order_id, completion)
-                if str(parent_completion.get("status") or "") in {"awaiting_continue", "completed"}:
-                    event_work_order_id = str(parent_completion.get("parent_work_order_id") or work_order_id)
-                    event_payload = {**completion, **parent_completion}
-            elif str(completion.get("status") or "") == "already_completed":
-                event_payload = {**completion, "summary": completion.get("summary") or "serial module was already completed"}
-            if str(completion.get("status") or "") in {"completed", "already_completed"}:
-                module_event = {
-                    "event_kind": "module_completed",
-                    "minion_id": "",
-                    "run_id": state.run_id,
-                    "work_order_id": event_work_order_id,
-                    "minion_profile": state.pack.minion_profile,
-                    "payload": event_payload,
-                    "created_at": utc_now(),
-                }
-                self._queue_event_delivery(module_event)
-                self.tasking_repository.record_minion_event(module_event)
-                if str(event_payload.get("status") or "") in {"completed", "already_completed"}:
-                    completed_event = {
-                        "event_kind": "work_order_completed",
-                        "minion_id": "",
-                        "run_id": state.run_id,
-                        "work_order_id": event_work_order_id,
-                        "minion_profile": state.pack.minion_profile,
-                        "payload": {
-                            **event_payload,
-                            "status": "completed" if str(event_payload.get("status") or "") == "completed" else str(event_payload.get("status") or "completed"),
-                            "plan_ref": dict((state.pack.metadata or {}).get("plan_ref") or {}),
-                            "profile_group": state.pack.profile_group,
-                            "profile_name": state.pack.profile_name,
-                        },
-                        "created_at": utc_now(),
-                    }
-                    self._queue_event_delivery(completed_event)
-                    self.tasking_repository.record_minion_event(completed_event)
-            await self._send_runner_control_or_record(state, {"type": "complete", "completion": event_payload})
-            self.logger.info("minion serial module sent completion run=%s work_order=%s", state.run_id, work_order_id)
-        except Exception:
-            self.logger.exception("failed to send serial minion turn: %s", work_order_id)
-        finally:
-            self._serial_turns_inflight.release(inflight_key)
+            self.serial_scheduler.schedule(state, event)
 
     async def _send_runner_control_or_record(self, state: MinionRunState, message: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -1046,37 +744,10 @@ class MinionManager:
             raise
 
     def _queue_event_delivery(self, event: dict[str, Any]) -> None:
-        if not self.event_subscribers:
-            self.event_queue.append(event)
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            self.event_queue.append(event)
-            return
-        loop.create_task(self._push_event_to_subscribers(dict(event)))
+        self.events.queue_event(event)
 
-    async def _push_event_to_subscribers(self, event: dict[str, Any]) -> None:
-        delivered = False
-        for writer in list(self.event_subscribers):
-            try:
-                writer.write(pack_sidecar_message({"type": "event", "event": event}))
-                await writer.drain()
-                delivered = True
-            except Exception:
-                with contextlib.suppress(ValueError):
-                    self.event_subscribers.remove(writer)
-                with contextlib.suppress(Exception):
-                    writer.close()
-        if not delivered:
-            self.event_queue.append(event)
-
-    async def _close_event_subscribers(self) -> None:
-        for writer in list(self.event_subscribers):
-            with contextlib.suppress(Exception):
-                writer.close()
-                await asyncio.wait_for(writer.wait_closed(), timeout=0.2)
-        self.event_subscribers.clear()
+    async def _send_serial_module_turn(self, state: MinionRunState, event: dict[str, Any], inflight_key: str) -> None:
+        await self.serial_scheduler._send_serial_module_turn(state, event, inflight_key)
 
     def _update_progress_state(self, state: MinionRunState, event: dict[str, Any]) -> None:
         payload = dict(event.get("payload") or {})
