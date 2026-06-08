@@ -60,13 +60,14 @@ class MinionControlEventHandler(EventHandler):
             EventKind.MINION_CHECKPOINT,
             EventKind.MINION_TERMINAL,
             EventKind.MINION_MODULE_COMPLETED,
+            EventKind.MINION_WORK_ORDER_COMPLETED,
             EventKind.MINION_CLARIFICATION_REQUEST,
             EventKind.MINION_PLAN_ACCEPTANCE_PENDING,
         }
 
     def handle(self, event: EventEnvelope, context) -> list[EventEnvelope]:
         payload = dict(event.payload or {}) if isinstance(event.payload, dict) else {}
-        if event.event_kind in {EventKind.MINION_TERMINAL, EventKind.MINION_MODULE_COMPLETED}:
+        if event.event_kind in {EventKind.MINION_TERMINAL, EventKind.MINION_MODULE_COMPLETED, EventKind.MINION_WORK_ORDER_COMPLETED}:
             _record_minion_observation(self.provider, context, payload)
         route = _route_from_payload(payload.get("route"))
         if route is None:
@@ -122,7 +123,7 @@ class MinionControlEventHandler(EventHandler):
                 delivery=delivery_for_reply(route, text),
                 notes="minion event notification",
             )
-        elif event.event_kind in {EventKind.MINION_TERMINAL, EventKind.MINION_MODULE_COMPLETED}:
+        elif event.event_kind in {EventKind.MINION_TERMINAL, EventKind.MINION_MODULE_COMPLETED, EventKind.MINION_WORK_ORDER_COMPLETED}:
             text = _render_minion_event_notification(event.event_kind, payload)
             if not text:
                 return []
@@ -209,6 +210,8 @@ def _event_kind_for_minion_event(event_kind: str) -> str:
         return EventKind.MINION_TERMINAL
     if event_kind == "module_completed":
         return EventKind.MINION_MODULE_COMPLETED
+    if event_kind == "work_order_completed":
+        return EventKind.MINION_WORK_ORDER_COMPLETED
     if event_kind == "checkpoint":
         return EventKind.MINION_CHECKPOINT
     if event_kind == "plan_acceptance_pending":
@@ -268,6 +271,22 @@ def _render_minion_event_notification(event_kind: str, payload: dict[str, Any]) 
         lines = [f"Minion module completed: {status}", f"Profile: {profile}"]
         if module_id:
             lines.append(f"Module: {module_id}")
+        if work_order_id:
+            lines.append(f"Work order: {work_order_id}")
+        completed_count = payload.get("completed_milestone_count")
+        if completed_count is not None:
+            lines.append(f"Milestones: {completed_count}")
+        if summary:
+            lines.append("Summary:")
+            lines.append(_preview_text(summary, limit=500))
+        return "\n".join(lines)
+    if event_kind == EventKind.MINION_WORK_ORDER_COMPLETED:
+        status = str(payload.get("status") or "completed")
+        summary = str(payload.get("summary") or "").strip()
+        task_id = str(payload.get("task_id") or "").strip()
+        lines = [f"Minion work order completed: {status}", f"Profile: {profile}"]
+        if task_id:
+            lines.append(f"Task: {task_id}")
         if work_order_id:
             lines.append(f"Work order: {work_order_id}")
         completed_count = payload.get("completed_milestone_count")

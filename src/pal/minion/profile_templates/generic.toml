@@ -16,5 +16,12 @@ mode = "none"
 [completion_policy]
 evidence = "text_deliverable"
 
+[gate_policy]
+after_each_milestone = []
+terminal_gates = []
+
+[output_policy]
+milestone_completion = "text_deliverable"
+
 [metadata]
 builtin = true

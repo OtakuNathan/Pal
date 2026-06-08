@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -10,6 +11,10 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from pal.foundation import utc_now
+from pal.minion.contracts import (
+    SERIAL_MILESTONE_MODES,
+    SERIAL_MODULE_MILESTONES_MODE,
+)
 from pal.minion.work_order import (
     PlanArtifact,
     ReviewGateResult,
@@ -21,6 +26,7 @@ from pal.minion.work_order import (
     plan_module_order_for_execution,
     plan_milestone_id_at,
     plan_module_id_at,
+    prompt_view_for_coder,
     prompt_view_from_metadata,
     validate_dispatchable_plan_artifact,
     validate_review_gate_result,
@@ -40,6 +46,77 @@ _WORK_ORDER_DRAFT_METADATA_VALUE_LIMIT = 12000
 _RUN_WORKSPACE_KEYS = {"run_dir", "artifact_dir", "log_dir"}
 _RAW_WORK_ORDER_METADATA_KEY_PARTS = ("payload", "raw", "transcript", "messages", "full_context", "conversation")
 _PLAN_REVISION_DIR_PARTS = ("data", "minion", "plan_revisions")
+
+
+def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+    columns = {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+        for row in connection.execute(f"PRAGMA table_info({table_name})")
+    }
+    if column_name not in columns:
+        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+
+def _profile_ref_parts_from_canonical(value: str) -> tuple[str, str]:
+    raw = str(value or "").strip()
+    if raw and "." in raw:
+        group, name = raw.rsplit(".", 1)
+        return group.strip() or "general", name.strip() or "generic"
+    if raw:
+        return "general", raw
+    return "general", "generic"
+
+
+def _canonical_profile_id(group: str, name: str) -> str:
+    resolved_group = str(group or "general").strip().replace("/", ".") or "general"
+    resolved_name = str(name or "generic").strip() or "generic"
+    return resolved_name if resolved_group == "general" else f"{resolved_group}.{resolved_name}"
+
+
+def _iter_plan_json_files(runtime_root: Path) -> list[Path]:
+    roots = [
+        Path(runtime_root) / "data" / "minion" / "plan_revisions",
+        Path(runtime_root) / "data" / "minion",
+        Path(runtime_root) / "artifacts",
+    ]
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in sorted(root.rglob("*.json")):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            result.append(resolved)
+            if len(result) >= 2000:
+                return result
+    return result
+
+
+def _plan_search_text(plan_payload: dict[str, Any], plan_ref: dict[str, Any]) -> str:
+    parts = [
+        str(plan_ref.get("task_id") or ""),
+        str(plan_ref.get("plan_id") or ""),
+        str(plan_payload.get("task_id") or ""),
+        str(plan_payload.get("plan_id") or ""),
+        str(plan_payload.get("summary") or ""),
+    ]
+    for module in list(plan_payload.get("modules") or []):
+        if not isinstance(module, dict):
+            continue
+        parts.extend(
+            [
+                str(module.get("module_id") or ""),
+                str(module.get("owned_area") or ""),
+                str(module.get("responsibility") or ""),
+            ]
+        )
+        for milestone in list(module.get("internal_milestones") or []):
+            if isinstance(milestone, dict):
+                parts.extend([str(milestone.get("milestone_id") or ""), str(milestone.get("task") or "")])
+    return "\n".join(part for part in parts if part)
 
 
 class TaskingRepositoryPort(Protocol):
@@ -100,6 +177,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                     instruction TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'active',
                     minion_profile TEXT NOT NULL DEFAULT 'generic',
+                    profile_group TEXT NOT NULL DEFAULT 'general',
+                    profile_name TEXT NOT NULL DEFAULT 'generic',
                     metadata_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -220,16 +299,25 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 );
                 """
             )
+            _ensure_column(db, "minion_work_orders", "profile_group", "TEXT NOT NULL DEFAULT 'general'")
+            _ensure_column(db, "minion_work_orders", "profile_name", "TEXT NOT NULL DEFAULT 'generic'")
 
     def prepare_pack_for_spawn(self, pack: TaskContextPack) -> TaskContextPack:
         self.ensure_work_order_from_pack(pack)
         pack = self._hydrate_pack_from_work_order(pack)
         continuity = self.build_continuity(pack.work_order_id)
         metadata = dict(pack.metadata)
+        metadata = _normalize_plan_backed_milestones(metadata)
+        milestones = _plan_truth_milestones(metadata, pack.acceptance_criteria, pack.instruction or pack.goal)
+        metadata = _normalize_milestone_execution_metadata(metadata, milestones)
         metadata.setdefault("task_id", continuity.get("task_id") or "")
         prompt_view = prompt_view_from_metadata(metadata, workspace=dict(pack.workspace))
         plan_execution = dict(metadata.get("plan_execution") or {})
-        if not prompt_view and str(plan_execution.get("mode") or "") != "module_parent_milestones":
+        if (
+            not prompt_view
+            and str(plan_execution.get("mode") or "") != "module_parent_milestones"
+            and isinstance(metadata.get("plan_artifact"), dict)
+        ):
             prompt_view = _prompt_view_from_current_milestone(pack, continuity=continuity, metadata=metadata)
         if prompt_view:
             metadata["prompt_view"] = prompt_view
@@ -264,28 +352,19 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         resolved_work_order_id = str(work_order_id or new_work_id("wo")).strip()
         milestone_id = plan_milestone_id_at(artifact, module_id=resolved_module_id, milestone_index=0)
         resolved_workspace = dict(workspace or {})
-        order = compile_coder_work_order(
-            artifact,
-            module_id=resolved_module_id,
-            milestone_id=milestone_id,
-            work_order_id=resolved_work_order_id,
-            allowed_capabilities=list(allowed_capabilities or []),
-            workspace=resolved_workspace,
-        )
         milestones = module_milestone_records(artifact, module_id=resolved_module_id)
+        resolved_profile = str(minion_profile or "software_engineering.coder")
+        profile_group, profile_name = _profile_ref_parts_from_canonical(resolved_profile)
         module_execution = {
-            "mode": "serial_module_milestones",
+            "mode": SERIAL_MODULE_MILESTONES_MODE,
             "plan_id": artifact.plan_id,
             "plan_revision": plan_revision,
             "module_id": resolved_module_id,
+            "profile_role": _role_from_profile(resolved_profile),
+            "uses_coder_contract": _profile_uses_coder_contract(resolved_profile),
             "current_milestone_index": 0,
             "milestone_count": len(milestones),
             "auto_advance": True,
-            "checkpoint_review": {
-                "enabled": True,
-                "reviewer_profile": "software_engineering.reviewer",
-                "max_repair_attempts": 5,
-            },
             "defer_experience_until_module_complete": True,
             "status": "active",
             "pending_experience": {
@@ -305,22 +384,47 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "plan_validation": validation,
                 "module_id": resolved_module_id,
                 "module_execution": module_execution,
-                "coder_work_order": order.to_dict(),
                 "milestones": milestones,
             }
         )
         pack_metadata.pop("prompt_view", None)
+        if _profile_uses_coder_contract(resolved_profile):
+            order = compile_coder_work_order(
+                artifact,
+                module_id=resolved_module_id,
+                milestone_id=milestone_id,
+                work_order_id=resolved_work_order_id,
+                allowed_capabilities=list(allowed_capabilities or []),
+                workspace=resolved_workspace,
+            )
+            pack_metadata["coder_work_order"] = order.to_dict()
+        else:
+            pack_metadata["prompt_view"] = _plan_milestone_prompt_view(
+                artifact,
+                module_id=resolved_module_id,
+                milestone_id=milestone_id,
+                work_order_id=resolved_work_order_id,
+                role=_role_from_profile(resolved_profile),
+                allowed_capabilities=list(allowed_capabilities or []),
+                workspace=resolved_workspace,
+            )
         return TaskContextPack.from_dict(
             {
                 "work_order_id": resolved_work_order_id,
                 "goal": str(goal or artifact.summary or f"Implement module {resolved_module_id}"),
                 "instruction": str(
                     instruction
-                    or f"Implement module {resolved_module_id} according to the structured coder work order."
+                    or (
+                        f"Implement module {resolved_module_id} according to the structured coder work order."
+                        if _profile_uses_coder_contract(resolved_profile)
+                        else f"Complete module {resolved_module_id} one plan milestone at a time."
+                    )
                 ),
                 "acceptance_criteria": [item for milestone in milestones for item in _coerce_text_list(milestone.get("acceptance"))],
                 "workspace": resolved_workspace,
-                "minion_profile": str(minion_profile or "software_engineering.coder"),
+                "profile_group": profile_group,
+                "profile_name": profile_name,
+                "minion_profile": resolved_profile,
                 "metadata": pack_metadata,
             }
         )
@@ -334,6 +438,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         metadata: dict[str, Any] | None = None,
         goal: str = "",
         instruction: str = "",
+        profile_group: str = "",
+        profile_name: str = "",
     ) -> TaskContextPack:
         artifact = validate_dispatchable_plan_artifact(plan_payload)
         plan_revision = _plan_revision_from_payload(plan_payload)
@@ -342,6 +448,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         module_order = plan_module_order_for_execution(artifact)
         milestones = _module_parent_milestones(artifact, module_order=module_order)
         pack_metadata = dict(metadata or {})
+        dispatch_profile_group = str(profile_group or pack_metadata.get("dispatch_profile_group") or "software_engineering").strip() or "software_engineering"
+        dispatch_profile_name = str(profile_name or pack_metadata.get("dispatch_profile_name") or "coder").strip() or "coder"
         plan_execution = dict(pack_metadata.get("plan_execution") or {})
         plan_execution.update(
             {
@@ -363,6 +471,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "work_order_title": str(pack_metadata.get("work_order_title") or artifact.summary or "Plan implementation"),
                 "plan_artifact": _plan_artifact_payload(artifact, plan_revision=plan_revision),
                 "plan_validation": validation,
+                "dispatch_profile_group": dispatch_profile_group,
+                "dispatch_profile_name": dispatch_profile_name,
                 "plan_execution": plan_execution,
                 "milestones": milestones,
             }
@@ -375,7 +485,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "instruction": str(instruction or "Execute the structured plan one module milestone at a time."),
                 "acceptance_criteria": [item for milestone in milestones for item in _coerce_text_list(milestone.get("acceptance"))],
                 "workspace": dict(workspace or {}),
-                "minion_profile": "software_engineering.coder",
+                "profile_group": dispatch_profile_group,
+                "profile_name": dispatch_profile_name,
                 "metadata": pack_metadata,
             }
         )
@@ -479,7 +590,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "instruction": planner_instruction,
                 "acceptance_criteria": [item for milestone in milestones for item in _coerce_text_list(milestone.get("acceptance"))],
                 "workspace": resolved_workspace,
-                "minion_profile": "software_engineering.planner",
+                "profile_group": "software_engineering",
+                "profile_name": "planner",
                 "metadata": pack_metadata,
             }
         )
@@ -549,6 +661,56 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         loaded["review_gate_ref"] = dict(marker.get("review_gate_ref") or {})
         loaded["human_override"] = dict(marker.get("human_override") or {})
         return loaded
+
+    def read_plan_ref(self, plan_ref: Any) -> dict[str, Any]:
+        loaded = self.load_dispatchable_plan_ref(plan_ref)
+        accepted: dict[str, Any] = {}
+        try:
+            accepted = self.load_accepted_plan_ref(loaded.get("plan_ref") or plan_ref)
+        except Exception:
+            accepted = {}
+        payload = dict(loaded)
+        if accepted:
+            payload["plan_ref"] = dict(accepted.get("plan_ref") or loaded.get("plan_ref") or {})
+            payload["accepted"] = True
+        else:
+            payload["accepted"] = False
+        return {"status": "ok", **payload}
+
+    def search_plan_refs(self, query: str = "", *, limit: int = 10) -> dict[str, Any]:
+        self.ensure_schema()
+        terms = [item.lower() for item in str(query or "").split() if item.strip()]
+        items: list[dict[str, Any]] = []
+        for path in _iter_plan_json_files(self.runtime_root):
+            try:
+                loaded = self.load_dispatchable_plan_ref({"path": str(path)})
+            except Exception:
+                continue
+            artifact = dict(loaded.get("plan_artifact") or {})
+            haystack = _plan_search_text(artifact, loaded.get("plan_ref") or {}).lower()
+            if terms and not all(term in haystack for term in terms):
+                continue
+            accepted = False
+            accepted_ref: dict[str, Any] = {}
+            with contextlib.suppress(Exception):
+                accepted_loaded = self.load_accepted_plan_ref(loaded.get("plan_ref") or {})
+                accepted = True
+                accepted_ref = dict(accepted_loaded.get("plan_ref") or {})
+            ref = accepted_ref or dict(loaded.get("plan_ref") or {})
+            items.append(
+                {
+                    "plan_ref": ref,
+                    "accepted": accepted,
+                    "plan_id": str(ref.get("plan_id") or artifact.get("plan_id") or ""),
+                    "task_id": str(ref.get("task_id") or artifact.get("task_id") or ""),
+                    "plan_revision": _plan_revision_from_payload(artifact, ref),
+                    "summary": str(artifact.get("summary") or ""),
+                    "path": str(path),
+                }
+            )
+            if len(items) >= max(1, int(limit or 10)):
+                break
+        return {"status": "ok", "items": items, "count": len(items)}
 
     def submit_review_gate(
         self,
@@ -973,6 +1135,49 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             result["plan_ref"] = dict(acceptance.get("plan_ref") or result["plan_ref"])
         return result
 
+    def submit_plan_ref(
+        self,
+        plan_artifact: dict[str, Any] | PlanArtifact,
+        *,
+        submission_notes: str = "",
+    ) -> dict[str, Any]:
+        artifact = validate_dispatchable_plan_artifact(plan_artifact)
+        plan_revision = _plan_revision_from_payload(plan_artifact)
+        payload = _plan_artifact_payload(artifact, plan_revision=plan_revision)
+        metadata = dict(payload.get("metadata") or {})
+        metadata["plan_revision"] = plan_revision
+        if submission_notes:
+            metadata["submission_notes"] = str(submission_notes)
+        payload["metadata"] = metadata
+        validation = dispatchable_plan_validation(artifact)
+        plan_dir = _plan_revision_dir(self.runtime_root, task_id=artifact.task_id, plan_id=artifact.plan_id)
+        plan_dir.mkdir(parents=True, exist_ok=True)
+        path = plan_dir / f"plan.v{plan_revision}.json"
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        if path.exists():
+            existing_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            new_digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+            if existing_digest != new_digest:
+                raise ValueError(f"plan revision already exists with different content: {path}")
+        else:
+            with path.open("x", encoding="utf-8") as handle:
+                handle.write(encoded)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        plan_ref = {
+            "path": str(path),
+            "sha256": digest,
+            "plan_id": artifact.plan_id,
+            "task_id": artifact.task_id,
+            "plan_revision": plan_revision,
+        }
+        return {
+            "status": "submitted",
+            "plan_ref": plan_ref,
+            "plan_artifact": payload,
+            "plan_validation": validation,
+            "plan_revision": plan_revision,
+        }
+
     def accept_plan_ref(
         self,
         plan_ref: Any,
@@ -1126,6 +1331,14 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             "parent_milestone_index": int(milestone_index),
             "parent_module_id": module_id,
         }
+        dispatch_profile_group = str(metadata.get("dispatch_profile_group") or "software_engineering").strip() or "software_engineering"
+        dispatch_profile_name = str(metadata.get("dispatch_profile_name") or "coder").strip() or "coder"
+        child_metadata["dispatch_profile_group"] = dispatch_profile_group
+        child_metadata["dispatch_profile_name"] = dispatch_profile_name
+        if isinstance(metadata.get("plan_ref"), dict):
+            child_metadata["plan_ref"] = dict(metadata.get("plan_ref") or {})
+        if isinstance(metadata.get("plan_validation"), dict):
+            child_metadata["plan_validation"] = dict(metadata.get("plan_validation") or {})
         for key in ("control_route", "preferred_endpoint_id", "minion_debug_log_enabled", "debug_log"):
             if key in metadata:
                 child_metadata[key] = metadata[key]
@@ -1148,7 +1361,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             metadata=child_metadata,
             goal=f"Implement module {module_id}",
             instruction=f"Implement module {module_id}; this is parent work-order milestone {milestone_index}.",
-            minion_profile="software_engineering.coder",
+            minion_profile=_canonical_profile_id(dispatch_profile_group, dispatch_profile_name),
         )
 
     def record_plan_module_completion(self, child_work_order_id: str, completion: dict[str, Any]) -> dict[str, Any]:
@@ -1382,7 +1595,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         work_order = dict(snapshot.get("work_order") or {})
         metadata = _loads_or_dict(work_order.get("metadata"))
         module_execution = dict(metadata.get("module_execution") or {})
-        if str(module_execution.get("mode") or "") != "serial_module_milestones":
+        mode = str(module_execution.get("mode") or "")
+        if mode not in SERIAL_MILESTONE_MODES:
             return None
         if not bool(module_execution.get("auto_advance")):
             return None
@@ -1396,26 +1610,41 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             return None
         plan_payload = metadata.get("plan_artifact")
         if not isinstance(plan_payload, dict):
-            return None
+            raise ValueError("serial milestone execution requires plan_artifact")
         artifact = PlanArtifact.from_dict(plan_payload)
         module_id = str(module_execution.get("module_id") or metadata.get("module_id") or "").strip()
         if not module_id:
             module_id = plan_module_id_at(artifact)
         milestone_id = plan_milestone_id_at(artifact, module_id=module_id, milestone_index=milestone_index)
         workspace = _loads_or_dict(metadata.get("workspace"))
-        order = compile_coder_work_order(
-            artifact,
-            module_id=module_id,
-            milestone_id=milestone_id,
-            work_order_id=str(work_order_id),
-            allowed_capabilities=_coerce_text_list(metadata.get("coder_allowed_capabilities")),
-            workspace=workspace,
-        )
+        profile = str(work_order.get("minion_profile") or metadata.get("minion_profile") or "generic")
         module_execution["current_milestone_index"] = int(milestone_index)
+        module_execution["profile_role"] = _role_from_profile(profile)
+        module_execution["uses_coder_contract"] = _profile_uses_coder_contract(profile)
         module_execution["status"] = "active"
         metadata["module_execution"] = module_execution
-        metadata["coder_work_order"] = order.to_dict()
         metadata.pop("prompt_view", None)
+        if _profile_uses_coder_contract(profile):
+            order = compile_coder_work_order(
+                artifact,
+                module_id=module_id,
+                milestone_id=milestone_id,
+                work_order_id=str(work_order_id),
+                allowed_capabilities=_coerce_text_list(metadata.get("coder_allowed_capabilities")),
+                workspace=workspace,
+            )
+            metadata["coder_work_order"] = order.to_dict()
+        else:
+            metadata.pop("coder_work_order", None)
+            metadata["prompt_view"] = _plan_milestone_prompt_view(
+                artifact,
+                module_id=module_id,
+                milestone_id=milestone_id,
+                work_order_id=str(work_order_id),
+                role=_role_from_profile(profile),
+                allowed_capabilities=_coerce_text_list(metadata.get("allowed_capabilities")),
+                workspace=workspace,
+            )
         return TaskContextPack.from_dict(
             {
                 "work_order_id": str(work_order_id),
@@ -1446,7 +1675,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         task = dict(snapshot.get("task") or {})
         metadata = _loads_or_dict(work_order.get("metadata"))
         module_execution = dict(metadata.get("module_execution") or {})
-        if str(module_execution.get("mode") or "") != "serial_module_milestones":
+        if str(module_execution.get("mode") or "") not in SERIAL_MILESTONE_MODES:
             return {"status": "skipped", "reason": "not_serial_module", "work_order_id": str(work_order_id)}
         if bool(module_execution.get("completion_reported")):
             return {"status": "already_completed", "work_order_id": str(work_order_id)}
@@ -1490,12 +1719,22 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             metadata["artifacts"] = [dict(item) for item in pack.artifacts]
         if pack.acceptance_criteria:
             metadata["acceptance_criteria"] = list(pack.acceptance_criteria)
-        milestones = _coerce_milestones(metadata.get("milestones"), pack.acceptance_criteria, pack.instruction or pack.goal)
+        metadata = _normalize_plan_backed_milestones(metadata)
+        milestones = _plan_truth_milestones(metadata, pack.acceptance_criteria, pack.instruction or pack.goal)
+        metadata = _normalize_milestone_execution_metadata(metadata, milestones)
         with self._connect() as db:
             existing = self._fetch_one(db, "SELECT * FROM minion_work_orders WHERE work_order_id = ?", (pack.work_order_id,))
             if existing is not None:
                 stored_metadata = _loads(existing["metadata_json"])
-                stored_metadata.update(metadata)
+                stored_metadata = _merge_existing_work_order_metadata(stored_metadata, metadata)
+                stored_metadata = _normalize_plan_backed_milestones(stored_metadata)
+                stored_milestones = _plan_truth_milestones(
+                    stored_metadata,
+                    pack.acceptance_criteria,
+                    pack.instruction or pack.goal,
+                )
+                stored_metadata = _normalize_milestone_execution_metadata(stored_metadata, stored_milestones)
+                stored_metadata = _strip_raw_milestone_metadata_without_plan(stored_metadata)
                 next_goal = str(pack.goal or existing["goal"] or "").strip()
                 next_instruction = str(pack.instruction or existing["instruction"] or next_goal).strip()
                 next_title = str(
@@ -1506,10 +1745,12 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                     or next_instruction
                 ).strip()
                 next_profile = str(pack.minion_profile or existing["minion_profile"] or "generic").strip() or "generic"
+                next_profile_group = str(pack.profile_group or existing["profile_group"] or "general").strip() or "general"
+                next_profile_name = str(pack.profile_name or existing["profile_name"] or "generic").strip() or "generic"
                 db.execute(
                     """
                     UPDATE minion_work_orders
-                    SET title = ?, goal = ?, instruction = ?, minion_profile = ?, metadata_json = ?, updated_at = ?
+                    SET title = ?, goal = ?, instruction = ?, minion_profile = ?, profile_group = ?, profile_name = ?, metadata_json = ?, updated_at = ?
                     WHERE work_order_id = ?
                     """,
                     (
@@ -1517,6 +1758,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                         next_goal,
                         next_instruction,
                         next_profile,
+                        next_profile_group,
+                        next_profile_name,
                         _json(stored_metadata),
                         now,
                         pack.work_order_id,
@@ -1525,8 +1768,9 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 task_id = str(existing["task_id"])
                 self._sync_task_fts(db, task_id)
                 self._sync_work_order_fts(db, pack.work_order_id)
-                self._ensure_milestones(db, pack.work_order_id, milestones)
+                self._ensure_milestones(db, pack.work_order_id, stored_milestones)
                 return dict(existing)
+            metadata = _strip_raw_milestone_metadata_without_plan(metadata)
             task_id = str(metadata.get("task_id") or new_work_id("task")).strip()
             title = str(metadata.get("task_title") or pack.goal or pack.instruction or task_id).strip()
             task = self._fetch_one(db, "SELECT * FROM minion_tasks WHERE task_id = ?", (task_id,))
@@ -1561,9 +1805,9 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 """
                 INSERT INTO minion_work_orders(
                     work_order_id, task_id, title, goal, instruction, status, minion_profile,
-                    metadata_json, created_at, updated_at
+                    profile_group, profile_name, metadata_json, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pack.work_order_id,
@@ -1573,6 +1817,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                     pack.instruction,
                     "active",
                     pack.minion_profile,
+                    pack.profile_group,
+                    pack.profile_name,
                     _json(metadata),
                     now,
                     now,
@@ -1591,6 +1837,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 return
             metadata = _loads(row["metadata_json"])
             metadata["workspace"] = _persistent_workspace_metadata(workspace)
+            metadata = _strip_raw_milestone_metadata_without_plan(metadata)
             db.execute(
                 "UPDATE minion_work_orders SET metadata_json = ?, updated_at = ? WHERE work_order_id = ?",
                 (_json(metadata), utc_now(), str(work_order_id)),
@@ -1607,6 +1854,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 return {"status": "not_found", "work_order_id": normalized}
             metadata = _loads(row["metadata_json"])
             metadata = _deep_merge_dict(metadata, dict(updates or {}))
+            metadata = _strip_raw_milestone_metadata_without_plan(metadata)
             db.execute(
                 "UPDATE minion_work_orders SET metadata_json = ?, updated_at = ? WHERE work_order_id = ?",
                 (_json(metadata), utc_now(), normalized),
@@ -1756,6 +2004,10 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             elif event_kind == "module_completed":
                 event_status = str(payload.get("status") or "").strip().lower()
                 self._update_work_order_status(db, work_order_id, "completed" if event_status == "completed" else "active")
+                self._record_payload_artifacts(db, work_order_id, payload)
+            elif event_kind == "work_order_completed":
+                self._update_work_order_status(db, work_order_id, "completed")
+                self._record_deferred_experience(db, work_order_id, payload)
                 self._record_payload_artifacts(db, work_order_id, payload)
             elif event_kind == "milestone_completed":
                 self._record_deferred_experience(db, work_order_id, payload)
@@ -2440,6 +2692,170 @@ def _coerce_milestones(raw: Any, acceptance_criteria: list[str], fallback: str) 
     return normalize_milestones(raw)
 
 
+def _plan_truth_milestones(metadata: dict[str, Any], acceptance_criteria: list[str], fallback: str) -> list[dict[str, Any]]:
+    data = dict(metadata or {})
+    module_execution = dict(data.get("module_execution") or {}) if isinstance(data.get("module_execution"), dict) else {}
+    plan_execution = dict(data.get("plan_execution") or {}) if isinstance(data.get("plan_execution"), dict) else {}
+    if str(module_execution.get("mode") or "") in SERIAL_MILESTONE_MODES and not isinstance(data.get("plan_artifact"), dict):
+        raise ValueError("serial milestone execution requires plan_artifact")
+    if str(plan_execution.get("mode") or "") == "module_parent_milestones" and not isinstance(data.get("plan_artifact"), dict):
+        raise ValueError("module parent milestone execution requires plan_artifact")
+    if not isinstance(data.get("plan_artifact"), dict):
+        return []
+    return _coerce_milestones(data.get("milestones"), acceptance_criteria, fallback)
+
+
+def _strip_raw_milestone_metadata_without_plan(metadata: dict[str, Any]) -> dict[str, Any]:
+    data = dict(metadata or {})
+    if isinstance(data.get("plan_artifact"), dict):
+        return data
+    data.pop("milestones", None)
+    module_execution = dict(data.get("module_execution") or {}) if isinstance(data.get("module_execution"), dict) else {}
+    if str(module_execution.get("mode") or "") in SERIAL_MILESTONE_MODES:
+        data.pop("module_execution", None)
+    return data
+
+
+def _merge_existing_work_order_metadata(stored: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    result = dict(stored or {})
+    updates = dict(incoming or {})
+    if _has_plan_truth_source(result):
+        incoming_module_execution = updates.pop("module_execution", None)
+        incoming_coder_work_order = updates.pop("coder_work_order", None)
+        plan_binding_matches = (
+            _module_execution_binding_matches(dict(result.get("module_execution") or {}), dict(incoming_module_execution or {}))
+            if isinstance(incoming_module_execution, dict)
+            else False
+        )
+        for key in (
+            "plan_artifact",
+            "plan_ref",
+            "plan_validation",
+            "milestones",
+            "plan_execution",
+            "planner_work_order",
+            "reviewer_work_order",
+            "module_id",
+        ):
+            updates.pop(key, None)
+        if isinstance(incoming_module_execution, dict):
+            merged_execution = _merge_existing_module_execution(
+                dict(result.get("module_execution") or {}),
+                dict(incoming_module_execution or {}),
+            )
+            if merged_execution:
+                result["module_execution"] = merged_execution
+        if plan_binding_matches and isinstance(incoming_coder_work_order, dict):
+            result["coder_work_order"] = dict(incoming_coder_work_order)
+    result.update(updates)
+    return result
+
+
+def _merge_existing_module_execution(stored: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    if not stored:
+        return {}
+    if not _module_execution_binding_matches(stored, incoming):
+        return stored
+    result = dict(stored)
+    for key in (
+        "current_milestone_index",
+        "status",
+        "auto_advance",
+        "checkpoint_review",
+        "last_checkpoint_id",
+        "last_checkpoint_review_gate_id",
+        "pending_experience",
+        "completion_reported",
+        "completed_at",
+        "status_reason",
+    ):
+        if key in incoming:
+            result[key] = incoming[key]
+    return result
+
+
+def _module_execution_binding_matches(stored: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    if not stored or not incoming:
+        return False
+    for key in ("plan_id", "module_id"):
+        incoming_value = str(incoming.get(key) or "").strip()
+        stored_value = str(stored.get(key) or "").strip()
+        if incoming_value and stored_value and incoming_value != stored_value:
+            return False
+    incoming_revision = _coerce_int(incoming.get("plan_revision"))
+    stored_revision = _coerce_int(stored.get("plan_revision"))
+    if incoming_revision is not None and stored_revision is not None and incoming_revision != stored_revision:
+        return False
+    return True
+
+
+def _has_plan_truth_source(metadata: dict[str, Any]) -> bool:
+    if isinstance(metadata.get("plan_artifact"), dict):
+        return True
+    plan_execution = dict(metadata.get("plan_execution") or {}) if isinstance(metadata.get("plan_execution"), dict) else {}
+    if str(plan_execution.get("plan_id") or "").strip():
+        return True
+    module_execution = dict(metadata.get("module_execution") or {}) if isinstance(metadata.get("module_execution"), dict) else {}
+    return bool(str(module_execution.get("plan_id") or "").strip())
+
+
+def _normalize_plan_backed_milestones(metadata: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(metadata or {})
+    plan_execution = dict(normalized.get("plan_execution") or {}) if isinstance(normalized.get("plan_execution"), dict) else {}
+    if str(plan_execution.get("mode") or "") == "module_parent_milestones":
+        return normalized
+    plan_payload = normalized.get("plan_artifact")
+    if not isinstance(plan_payload, dict):
+        return normalized
+    artifact = validate_dispatchable_plan_artifact(plan_payload)
+    module_execution = dict(normalized.get("module_execution") or {}) if isinstance(normalized.get("module_execution"), dict) else {}
+    requested_module_id = str(module_execution.get("module_id") or normalized.get("module_id") or "").strip()
+    resolved_module_id = plan_module_id_at(artifact, module_id=requested_module_id)
+    milestones = module_milestone_records(artifact, module_id=resolved_module_id)
+    plan_revision = _plan_revision_from_payload(plan_payload, normalized.get("plan_ref"))
+    module_execution.update(
+        {
+            "mode": SERIAL_MODULE_MILESTONES_MODE,
+            "plan_id": artifact.plan_id,
+            "plan_revision": plan_revision,
+            "module_id": resolved_module_id,
+            "milestone_count": len(milestones),
+        }
+    )
+    module_execution.setdefault("current_milestone_index", 0)
+    module_execution.setdefault("auto_advance", True)
+    module_execution.setdefault("status", "active")
+    normalized["module_id"] = resolved_module_id
+    normalized["milestones"] = milestones
+    normalized["module_execution"] = module_execution
+    return normalized
+
+
+def _normalize_milestone_execution_metadata(metadata: dict[str, Any], milestones: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized = dict(metadata or {})
+    normalized_milestones = [dict(item) for item in list(milestones or []) if isinstance(item, dict)]
+    if not normalized_milestones:
+        return normalized
+    normalized["milestones"] = normalized_milestones
+    plan_execution = dict(normalized.get("plan_execution") or {})
+    if str(plan_execution.get("mode") or "") == "module_parent_milestones":
+        return normalized
+    module_execution = dict(normalized.get("module_execution") or {})
+    if not isinstance(normalized.get("plan_artifact"), dict):
+        if str(module_execution.get("mode") or "") in SERIAL_MILESTONE_MODES:
+            raise ValueError("serial milestone execution requires plan_artifact")
+        normalized.pop("milestones", None)
+        normalized.pop("module_execution", None)
+        return normalized
+    module_execution["mode"] = SERIAL_MODULE_MILESTONES_MODE
+    module_execution.setdefault("current_milestone_index", 0)
+    module_execution["milestone_count"] = len(normalized_milestones)
+    module_execution.setdefault("auto_advance", True)
+    module_execution.setdefault("status", "active")
+    normalized["module_execution"] = module_execution
+    return normalized
+
+
 def _module_parent_milestones(artifact: PlanArtifact, *, module_order: list[str] | None = None) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     modules_by_id = {module.module_id: module for module in artifact.modules if module.module_id}
@@ -2501,6 +2917,42 @@ def _prompt_view_from_current_milestone(
         "output_contract": dict(metadata.get("output_contract") or {}),
         "workspace": _prompt_safe_workspace(pack.workspace),
     }
+
+
+def _plan_milestone_prompt_view(
+    artifact: PlanArtifact,
+    *,
+    module_id: str,
+    milestone_id: str,
+    work_order_id: str,
+    role: str,
+    allowed_capabilities: list[str],
+    workspace: dict[str, Any],
+) -> dict[str, Any]:
+    order = compile_coder_work_order(
+        artifact,
+        module_id=module_id,
+        milestone_id=milestone_id,
+        work_order_id=work_order_id,
+        allowed_capabilities=allowed_capabilities,
+        workspace=workspace,
+    )
+    view = prompt_view_for_coder(order).to_dict()
+    view["role"] = str(role or "minion")
+    view["output_contract"] = {
+        "must_return": [
+            "summary",
+            "milestone_report",
+            "artifacts_or_outputs",
+            "verification_or_blockers",
+        ]
+    }
+    return view
+
+
+def _profile_uses_coder_contract(profile: str) -> bool:
+    normalized = str(profile or "").replace("/", ".").strip().lower()
+    return normalized == "software_engineering.coder" or normalized.endswith(".coder")
 
 
 def _role_from_profile(profile: str) -> str:
@@ -2648,6 +3100,8 @@ def _pack_from_work_order_snapshot(snapshot: dict[str, Any]) -> TaskContextPack:
             "acceptance_criteria": acceptance,
             "workspace": workspace,
             "artifacts": artifacts,
+            "profile_group": str(work_order.get("profile_group") or ""),
+            "profile_name": str(work_order.get("profile_name") or ""),
             "minion_profile": str(work_order.get("minion_profile") or "generic"),
             "metadata": metadata,
         }
@@ -2659,7 +3113,8 @@ def _merge_pack_overrides(base: TaskContextPack, overrides: dict[str, Any]) -> T
     metadata = dict(data.get("metadata") or {})
     override_metadata = _loads_or_dict(overrides.get("metadata"))
     if override_metadata:
-        metadata.update(override_metadata)
+        metadata = _merge_existing_work_order_metadata(metadata, override_metadata)
+    metadata = _strip_raw_milestone_metadata_without_plan(metadata)
     for key in (
         "goal",
         "instruction",
@@ -2670,14 +3125,12 @@ def _merge_pack_overrides(base: TaskContextPack, overrides: dict[str, Any]) -> T
         "allowed_capabilities",
         "allowed_skills",
         "approval_policy",
-        "minion_profile",
-        "resolved_profile",
+        "profile_group",
+        "profile_name",
         "continuity",
     ):
         value = overrides.get(key)
         if isinstance(value, str):
-            if key == "minion_profile" and value.strip() == "generic" and str(data.get("minion_profile") or "generic") != "generic":
-                continue
             if value.strip():
                 data[key] = value
             continue

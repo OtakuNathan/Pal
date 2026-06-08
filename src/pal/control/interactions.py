@@ -542,6 +542,34 @@ def build_minion_plan_acceptance_interaction(payload: dict[str, Any], route: Con
                         },
                     ),
                 ),
+                InteractionButtonSpec(
+                    label="Reject Plan",
+                    action_key="control.action.dispatch",
+                    action_args=_minion_interaction_action_payload(
+                        action_kind="minion_plan_reject",
+                        target_id=target_id,
+                        args={
+                            "work_order_id": work_order_id,
+                            "plan_ref": dict(plan_ref),
+                            "review_gate_ref": dict(review_gate_ref),
+                            "reason": "human rejected reviewer-passed plan from channel interaction",
+                        },
+                    ),
+                ),
+                InteractionButtonSpec(
+                    label="Edit Plan",
+                    action_key="control.action.dispatch",
+                    action_args=_minion_interaction_action_payload(
+                        action_kind="minion_plan_edit",
+                        target_id=target_id,
+                        args={
+                            "work_order_id": work_order_id,
+                            "plan_ref": dict(plan_ref),
+                            "review_gate_ref": dict(review_gate_ref),
+                            "reason": "human requested edits for reviewer-passed plan from channel interaction",
+                        },
+                    ),
+                ),
             ),
         ),
     )

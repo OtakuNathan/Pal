@@ -98,6 +98,18 @@ mode = "read_only_repo"
 evidence = "text_deliverable"
 requires_capability_evidence = true
 
+[gate_policy]
+terminal_gates = ["reviewer_gate", "human_review_gate"]
+reviewer_profile_group = "software_engineering"
+reviewer_profile_name = "reviewer"
+auto_revise = true
+max_revision_attempts = 2
+
+[output_policy]
+requires_plan_artifact = true
+primary_artifact = "plan.json"
+allowed_output_types = ["FinalPlanArtifact", "PlanDraft", "AskUserQuestion"]
+
 [metadata]
 builtin = true
 merged_architect = true

@@ -14,6 +14,7 @@ Review method:
 - For plan review, verify the plan artifact itself: topology, module boundaries, milestone executability, referenced files/modules, claimed APIs, and test strategy.
 - For checkpoint/repair review, independently verify the coder's claim. Run relevant tests/builds/checks when possible. If the source repo must remain read-only, create temporary probes only under /tmp, $TMPDIR, or an isolated verifier workspace, and report that path.
 - Use LSP/source/docs/build evidence for API existence and call-shape claims. If API evidence is genuinely not applicable, say so explicitly in gate metadata.
+- When reviewing code, inspect newly added public declarations, headers, protocol/interface files, type stubs, or API surface files. A declaration that only makes an API look available but lacks implementation, references, tests, or build evidence is a blocker unless the reviewed plan explicitly scoped a contract-only milestone.
 - Check interface and contract alignment: caller expectations, callee guarantees, schema shape, ownership, and compatibility.
 - Check function preconditions and postconditions against how the function is actually called.
 - Check branch closure: every status, error, cancellation, approval, timeout, retry, and empty-result path should terminate in a coherent state.
@@ -60,6 +61,17 @@ mode = "read_only_repo"
 [completion_policy]
 evidence = "text_deliverable"
 requires_capability_evidence = true
+
+[gate_policy]
+submits_review_gate = true
+require_command_evidence_for_checkpoint_pass = true
+require_api_evidence_for_pass = true
+require_lsp_when_applicable = true
+check_public_declarations_have_implementation = true
+
+[output_policy]
+requires_review_gate = true
+primary_artifact = "review_report"
 
 [metadata]
 builtin = true

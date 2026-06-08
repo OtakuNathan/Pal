@@ -93,6 +93,9 @@ ON channel_endpoints(channel_kind, binding_key);
 -- Local model capability truth source.
 -- Not relying on provider online discovery.
 -- Priority drives fallback order.
+-- Lower numbers are tried first. This is a routing priority, not a
+-- quality weight. Keep values non-negative and small unless there is a
+-- concrete migration reason to do otherwise.
 CREATE TABLE IF NOT EXISTS llm_endpoints (
   endpoint_id       TEXT PRIMARY KEY,
   provider          TEXT NOT NULL,              -- openai | anthropic | custom
@@ -116,7 +119,7 @@ CREATE TABLE IF NOT EXISTS llm_endpoints (
   output_modalities_blob TEXT,                 -- JSON array
 
   -- Routing
-  priority          INTEGER NOT NULL DEFAULT 0, -- lower = higher priority
+  priority          INTEGER NOT NULL DEFAULT 0, -- lower = higher priority; non-negative by policy
   enabled           INTEGER NOT NULL DEFAULT 1,
 
   -- Extended

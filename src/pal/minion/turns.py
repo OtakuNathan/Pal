@@ -7,7 +7,6 @@ from pal.shared import TaskContextPack
 
 _RUNNER_PRESERVED_METADATA_KEYS = {
     "allow_text_only_completion",
-    "artifact_refs",
     "checkpoint_review",
     "clarification_answers",
     "control_route",
@@ -31,6 +30,7 @@ _RUNNER_PRESERVED_METADATA_KEYS = {
     "reviewer_work_order",
     "skill_manual_context",
     "spawn_bonus_skill_refs",
+    "supporting_artifacts",
     "task_id",
     "task_title",
     "unresolved_skill_refs",

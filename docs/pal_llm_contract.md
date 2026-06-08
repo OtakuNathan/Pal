@@ -274,8 +274,20 @@ provider stream 的 chunk 不应直接进入 `Pal Core` 主循环。
   - `oauth`
   - `local_provider_auth`
 - `credential_ref` 指向 keychain ref、oauth account ref 或 provider-specific auth handle
-- `priority` 用于构造 fallback 顺序
+- `priority` 用于构造 fallback 顺序。它是 routing priority，不是模型质量权重：数字越小越先尝试。
 - `capabilities_blob` 用于承接额外 provider-specific 元信息，但不替代核心列
+
+### Priority Semantics
+
+`llm_endpoints.priority` 必须按升序解释：
+
+- `0` 比 `1` 更优先。
+- 相同 `priority` 下使用稳定次级排序，例如 `endpoint_id`。
+- 推荐使用非负小整数，避免用负数表达“强行置顶”。
+- 推荐把常用主链放在 `0..4`，高可信备用或本地代理放在 `5..9`，低优先级兜底放在 `10+`。
+- Codex/Codex proxy 这类本地认证 endpoint 如果作为备用链，推荐使用 `5..9` 这样的正常正数区间，而不是 `-100` 这类特殊值。
+
+这条语义必须在 setup、wizard、手动 DB 更新、endpoint refresh 和 runtime fallback 中保持一致。不要把 `priority` 当成“越大越强”的模型权重字段。
 
 ## Setup / Refresh 流程
 
@@ -321,7 +333,7 @@ fallback 的真相源是本地 registry，不是代码里硬编码的 provider �
    - 是否要求 `tools`
    - 是否要求 `reasoning`
    - 是否要求某种 `api_mode`
-3. 按 `priority` 排序
+3. 按 `priority` 升序排序，数字越小越先尝试
 4. 生成本轮 `LLMRouteCandidate[]`
 
 然后：

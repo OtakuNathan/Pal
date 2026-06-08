@@ -33,7 +33,7 @@ from pal.minion.prompt import TaskingPromptFragmentProvider
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.source import MinionControlEventHandler, MinionEventSource
 from pal.minion.validation import MinionWorkOrderValidationError, normalize_milestones
-from pal.minion.work_order import build_planner_work_order, new_work_id, prompt_view_from_metadata
+from pal.minion.work_order import build_planner_work_order, prompt_view_from_metadata
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -126,7 +126,7 @@ class MinionIntrospection(Protocol):
         "Consider Minion when the task is professional, async-friendly, and can be bounded by SPEC/work order/milestones. "
         "Pal remains responsible for user interaction, fact checks, progress reporting, and confirmation. "
         "Before spawning, inspect registered profiles with intro_minion_profile_list/read unless the user already named a valid profile; "
-        "use only registered canonical_profile_id values and do not invent role names. "
+        "use only registered profile_group/profile_name values and do not invent role names. "
         "For brainstorming or early module-boundary discussion, capture a work-order draft first and let a planner review it; "
         "do not let planner invent boundaries from chat history. Do not use Minion for casual chat, simple Q&A, one-call capabilities, "
         "memory/preference correction, or tasks needing continuous user interaction."
@@ -159,6 +159,8 @@ class MinionIntrospection(Protocol):
         "intro_minion_work_order_draft_read",
         "intro_minion_profile_list",
         "intro_minion_profile_read",
+        "intro_minion_plan_search",
+        "intro_minion_plan_read",
         "op_minion_spawn",
         "op_minion_revise_plan",
         "op_minion_accept_plan",
@@ -390,7 +392,7 @@ class MinionManagerProvider:
             "runtime_profile_dir": str(Path(self.runtime_root) / "plugins" / "minion" / "profiles"),
             "runtime_profile_pattern": "runtime_root/plugins/minion/profiles/**/*.toml",
             "profile_source_order": ["builtin package TOML", "runtime TOML", "mounted provider declarations"],
-            "usage": "Use registered canonical_profile_id values as op_minion_spawn.minion_profile; do not invent profile ids.",
+            "usage": "Use profile_group + profile_name values as op_minion_spawn profile refs; do not invent profile ids.",
         }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -404,13 +406,26 @@ class MinionManagerProvider:
         scope="minion",
         action_name="profile_read",
         description="Read one minion profile",
-        args_schema={"type": "object", "properties": {"profile_id": {"type": "string"}}, "required": ["profile_id"]},
+        args_schema={
+            "type": "object",
+            "properties": {
+                "profile_group": {"type": "string"},
+                "profile_name": {"type": "string"},
+                "profile_id": {"type": "string", "description": "Legacy/internal canonical lookup string; prefer profile_group/profile_name."},
+            },
+        },
     )
     def read_profile(self, call: IntrospectionCall) -> IntrospectionResult:
+        profile_group = str(call.args.get("profile_group") or "").strip()
+        profile_name = str(call.args.get("profile_name") or "").strip()
         profile_id = str(call.args.get("profile_id") or "").strip()
-        profile = self._profile_registry().get(profile_id)
+        profile = (
+            self._profile_registry().get_ref(profile_group, profile_name)
+            if profile_group or profile_name
+            else self._profile_registry().get(profile_id)
+        )
         if profile is None:
-            payload = {"profile_id": profile_id, "error": "unknown minion profile"}
+            payload = {"profile_group": profile_group, "profile_name": profile_name, "profile_id": profile_id, "error": "unknown minion profile"}
             return IntrospectionResult(
                 status=RuntimeStatus.NOT_FOUND,
                 text="minion profile not found",
@@ -424,6 +439,43 @@ class MinionManagerProvider:
             structured=payload,
             llm_text=render_titled_structured_for_llm("Minion profile", payload),
         )
+
+    @capability_action(
+        namespace=INTROSPECTION_NAMESPACE,
+        scope="minion",
+        action_name="plan_search",
+        description="Search first-class minion plan refs by task, plan, module, or summary text",
+        args_schema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 10}},
+        },
+    )
+    def search_plans(self, call: IntrospectionCall) -> IntrospectionResult:
+        payload = self._repository().search_plan_refs(
+            str(call.args.get("query") or ""),
+            limit=int(call.args.get("limit") or 10),
+        )
+        return _introspection_from_rpc("Minion plans", payload)
+
+    @capability_action(
+        namespace=INTROSPECTION_NAMESPACE,
+        scope="minion",
+        action_name="plan_read",
+        description="Read and validate a first-class minion plan_ref",
+        args_schema={"type": "object", "properties": {"plan_ref": {"type": "object"}}, "required": ["plan_ref"]},
+    )
+    def read_plan(self, call: IntrospectionCall) -> IntrospectionResult:
+        try:
+            payload = self._repository().read_plan_ref(call.args.get("plan_ref"))
+            return _introspection_from_rpc("Minion plan", payload)
+        except Exception as exc:
+            payload = {"status": "invalid", "error": f"{exc.__class__.__name__}: {exc}"}
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="minion plan invalid",
+                structured=payload,
+                llm_text=render_titled_structured_for_llm("Minion plan invalid", payload),
+            )
 
     @capability_action(namespace=OPERATION_NAMESPACE, scope="minion", family="minion", action_name="attach", description="Attach minion manager")
     def attach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
@@ -470,15 +522,17 @@ class MinionManagerProvider:
         family="minion",
         action_name="spawn",
         description=(
-            "Dispatch a minion worker from a small semantic request. Pal provides a stored work_order_id, reviewed draft_id, "
-            "task_query, accepted typed artifact_refs, or a bounded goal/instruction with explicit milestones. "
-            "Do not pass TaskContextPack, prompt_view, role-specific work-order blobs, or inline plan artifacts; "
+            "Dispatch a minion worker only from an existing dispatch source. For new work, Pal must pass an already accepted "
+            "top-level plan_ref, or first create a small FinalPlanArtifact with op_minion_submit_plan and get it accepted. "
+            "Existing work_order_id/task_query are resume/reattach paths for stored work orders; they are not a way to invent new "
+            "milestones. "
+            "Do not pass TaskContextPack, prompt_view, role-specific work-order blobs, inline plan artifacts, or artifact_refs; "
             "the minion manager validates refs and compiles the runner context itself. "
             "For repo work, workspace should include repo_path; cwd with type=local_repo is accepted and normalized but repo_path is preferred. "
             "If the user explicitly asks for a specific LLM model or endpoint for this minion, resolve it to an enabled llm endpoint_id "
             "and pass preferred_endpoint_id. If the user does not specify one, omit preferred_endpoint_id so the minion uses the current "
             "Pal active endpoint at request time. "
-            "Before choosing minion_profile, call intro_minion_profile_list and intro_minion_profile_read unless the user already named "
+            "Before choosing profile_group/profile_name, call intro_minion_profile_list and intro_minion_profile_read unless the user already named "
             "a valid registered profile. Runtime profile TOML files are loaded from runtime_root/plugins/minion/profiles/*.toml; profile truth is "
             "the live registry, not DB or chat memory. Do not invent profile ids."
         ),
@@ -496,9 +550,21 @@ class MinionManagerProvider:
         args_schema={
             "type": "object",
             "properties": {
-                "minion_profile": {
+                "profile_group": {
                     "type": "string",
-                    "description": "Registered minion canonical_profile_id, such as software_engineering.planner. Discover with intro_minion_profile_list/read before use.",
+                    "description": "Registered minion profile group, such as software_engineering or general. Discover with intro_minion_profile_list/read before use.",
+                },
+                "profile_name": {
+                    "type": "string",
+                    "description": "Registered minion profile name within profile_group, such as coder, planner, reviewer, or generic.",
+                },
+                "plan_ref": {
+                    "type": "object",
+                    "description": "Accepted plan_ref returned by op_minion_submit_plan/op_minion_accept_plan or planner completion. Required for new execution dispatch.",
+                },
+                "feedback_gate_ref": {
+                    "type": "object",
+                    "description": "Failing or partial plan_acceptance review/human gate ref used to dispatch a planner revision.",
                 },
                 "preferred_endpoint_id": {
                     "type": "string",
@@ -517,7 +583,7 @@ class MinionManagerProvider:
                 },
                 "draft_id": {"type": "string", "description": "Reviewed work-order draft to promote and spawn."},
                 "work_order_id": {"type": "string", "description": "Existing stored work order to hydrate and spawn."},
-                "artifact_refs": {
+                "supporting_artifacts": {
                     "type": "array",
                     "items": {
                         "type": "object",
@@ -525,11 +591,11 @@ class MinionManagerProvider:
                             "kind": {
                                 "type": "string",
                                 "description": (
-                                    "Typed artifact kind, such as plan, plan_review_gate, review_report, research_report, "
-                                    "nutrition_log, or checkpoint. Use plan_review_gate to revise a plan from a failed/partial plan review."
+                                    "Typed supporting artifact kind, such as review_report, research_report, nutrition_log, checkpoint, or review_gate. "
+                                    "Do not put executable plans here; use top-level plan_ref."
                                 ),
                             },
-                            "role": {"type": "string", "description": "How the manager should use this artifact, such as dispatch_source, repair_source, or context."},
+                            "role": {"type": "string", "description": "How the manager should use this supporting artifact as context."},
                             "path": {"type": "string", "description": "Runtime-root relative or absolute artifact path."},
                             "sha256": {"type": "string"},
                             "module_id": {"type": "string", "description": "Optional plan module hint for explicit module dispatch."},
@@ -538,23 +604,23 @@ class MinionManagerProvider:
                         },
                         "required": ["kind"],
                     },
-                    "description": "Typed artifact references. Accepted plan refs, failed/partial plan review gates, and review reports belong here; do not pass inline artifacts.",
+                    "description": "Typed supporting artifact references. They are auxiliary context only and never a dispatch source.",
                 },
                 "goal": {
                     "type": "string",
-                    "description": "Overall bounded goal. Required for a new ad-hoc dispatch without work_order_id, draft_id, task_query, or artifact_refs.",
+                    "description": "Optional goal override for an accepted plan/work_order dispatch. This is not a new-task fallback; create/accept a plan first.",
                 },
-                "instruction": {"type": "string", "description": "Current bounded instruction for ad-hoc dispatch or a work-order override."},
-                "title": {"type": "string", "description": "Optional human title for a new ad-hoc work order."},
-                "milestones": {
+                "instruction": {
+                    "type": "string",
+                    "description": "Optional instruction override for an accepted plan/work_order dispatch. Do not use this to bypass plan milestones.",
+                },
+                "title": {"type": "string", "description": "Optional display title override for an accepted plan/work_order dispatch."},
+                "acceptance_criteria": {
                     "type": "array",
-                    "minItems": 1,
-                    "items": {"oneOf": [{"type": "string"}, {"type": "object"}]},
-                    "description": "Explicit manager-visible milestones for a new ad-hoc dispatch.",
+                    "items": {"type": "string"},
+                    "description": "Optional additional acceptance context for an accepted dispatch; executable milestones still come only from the accepted plan.",
                 },
-                "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
                 "workspace": {"type": "object", "description": "Source workspace facts such as repo_path/source_repo/artifact_dir. Manager prepares runner branches/workspaces."},
-                "allowed_capabilities": {"type": "array", "items": {"type": "string"}},
                 "allowed_skills": {"type": "array", "items": {"type": "string"}},
                 "approval_policy": {"type": "object"},
                 "reviewed_candidate": {"type": "object", "description": "Optional reviewed draft edits when dispatching a draft_id."},
@@ -579,7 +645,8 @@ class MinionManagerProvider:
             pack = self._inject_preferred_endpoint(pack, call)
             pack = self._profile_registry().resolve_pack(
                 pack,
-                requested_profile=str(call.args.get("minion_profile") or ""),
+                requested_profile_group=str(call.args.get("profile_group") or ""),
+                requested_profile_name=str(call.args.get("profile_name") or ""),
             )
             pack = repository.prepare_pack_for_spawn(pack)
             self._ensure_manager_started()
@@ -590,6 +657,53 @@ class MinionManagerProvider:
             return _capability_invalid("minion spawn invalid", exc)
         except Exception as exc:
             return _capability_error("minion spawn failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
+        family="minion",
+        action_name="submit_plan",
+        description=(
+            "Write and validate a FinalPlanArtifact as an immutable plan file, returning a plan_ref. "
+            "Use this when Pal itself acts as a fallback planner. The returned plan_ref is not accepted for dispatch until "
+            "a reviewer gate or human control action accepts it; pass accepted plan refs to op_minion_spawn.plan_ref."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "plan_artifact": {
+                    "type": "object",
+                    "description": (
+                        "Complete FinalPlanArtifact with task_id, plan_id, modules, module internal_milestones, "
+                        "and fork_join_linear orchestration topology."
+                    ),
+                },
+                "submission_notes": {"type": "string"},
+            },
+            "required": ["plan_artifact"],
+        },
+    )
+    def submit_plan(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            plan_artifact = call.args.get("plan_artifact")
+            if not isinstance(plan_artifact, dict):
+                raise MinionWorkOrderValidationError("plan_artifact must be a complete object", field="plan_artifact")
+            if isinstance(call.args.get("human_override"), dict):
+                raise MinionWorkOrderValidationError(
+                    "human_override is only accepted through minion control/UI actions",
+                    field="human_override",
+                )
+            payload = self._repository().submit_plan_ref(
+                plan_artifact,
+                submission_notes=str(call.args.get("submission_notes") or ""),
+            )
+            return _capability_from_rpc("minion plan submitted", payload)
+        except MinionWorkOrderValidationError as exc:
+            return _capability_invalid("minion plan submit invalid", exc)
+        except ValueError as exc:
+            return _capability_invalid("minion plan submit invalid", MinionWorkOrderValidationError(str(exc), field="plan_artifact"))
+        except Exception as exc:
+            return _capability_error("minion plan submit failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -1011,6 +1125,8 @@ class MinionManagerProvider:
             return await self._handle_question_answer_async(action)
         if action.action_kind == "minion_plan_accept_override":
             return await self._handle_plan_accept_override_async(action)
+        if action.action_kind in {"minion_plan_reject", "minion_plan_edit"}:
+            return await self._handle_plan_review_decision_async(action)
         if action.action_kind in {"minion_plan_continue", "minion_plan_pause", "minion_plan_finish"}:
             return await self._handle_plan_control_async(action)
         if action.action_kind != "minion_approval_decision":
@@ -1059,8 +1175,90 @@ class MinionManagerProvider:
             review_gate_ref=action.args.get("review_gate_ref"),
             human_override=human_override,
         )
+        work_order_id = str(action.args.get("work_order_id") or action.target_id or "").strip()
+        if work_order_id:
+            accepted_ref = dict(payload.get("plan_ref") or {})
+            review_gate_ref = dict(action.args.get("review_gate_ref") or {}) if isinstance(action.args.get("review_gate_ref"), dict) else {}
+            self._repository().merge_work_order_metadata(
+                work_order_id,
+                {
+                    "plan_review": {
+                        "status": "accepted",
+                        "plan_ref": accepted_ref,
+                        "review_gate_ref": review_gate_ref,
+                        "acceptance": payload,
+                        "updated_at": utc_now(),
+                        "next_action": "spawn_plan",
+                        "human_decision": human_override,
+                    }
+                },
+            )
+            self._repository().record_minion_event(
+                {
+                    "event_kind": "plan_accepted",
+                    "work_order_id": work_order_id,
+                    "minion_id": "",
+                    "run_id": "",
+                    "minion_profile": "control",
+                    "payload": {
+                        "status": "accepted",
+                        "summary": "human accepted reviewed plan",
+                        "plan_ref": accepted_ref,
+                        "review_gate_ref": review_gate_ref,
+                    },
+                }
+            )
         plan_id = str((payload.get("plan_ref") or {}).get("plan_id") or "")
         return f"Minion plan accepted by human override{f' ({plan_id})' if plan_id else ''}."
+
+    async def _handle_plan_review_decision_async(self, action: ControlAction) -> str:
+        plan_ref = action.args.get("plan_ref")
+        if not isinstance(plan_ref, dict):
+            return "Minion plan decision is missing plan_ref."
+        work_order_id = str(action.args.get("work_order_id") or action.target_id or "").strip()
+        if not work_order_id:
+            return "Minion plan decision is missing work_order_id."
+        decision = "rejected" if action.action_kind == "minion_plan_reject" else "edit_requested"
+        review_gate_ref = dict(action.args.get("review_gate_ref") or {}) if isinstance(action.args.get("review_gate_ref"), dict) else {}
+        review_state = {
+            "status": decision,
+            "plan_ref": dict(plan_ref),
+            "review_gate_ref": review_gate_ref,
+            "updated_at": utc_now(),
+            "next_action": "revise_plan",
+            "human_decision": {
+                "action_kind": action.action_kind,
+                "actor": str(action.args.get("actor") or "human").strip() or "human",
+                "reason": str(action.args.get("reason") or action.notes or "").strip(),
+            },
+        }
+        edit_instruction = str(action.args.get("edit_instruction") or "").strip()
+        if edit_instruction:
+            review_state["edit_instruction"] = edit_instruction
+        for key in ("interaction_origin", "interaction_id", "interaction_kind"):
+            if str(action.args.get(key) or "").strip():
+                review_state["human_decision"][key] = str(action.args.get(key) or "").strip()
+        self._repository().merge_work_order_metadata(work_order_id, {"plan_review": review_state})
+        self._repository().record_minion_event(
+            {
+                "event_kind": "plan_rejected" if decision == "rejected" else "plan_edit_requested",
+                "work_order_id": work_order_id,
+                "minion_id": "",
+                "run_id": "",
+                "minion_profile": "control",
+                "payload": {
+                    "status": decision,
+                    "summary": "human rejected reviewed plan" if decision == "rejected" else "human requested plan edit",
+                    "plan_ref": dict(plan_ref),
+                    "review_gate_ref": review_gate_ref,
+                    "next_action": "revise_plan",
+                },
+            }
+        )
+        plan_id = str(plan_ref.get("plan_id") or "")
+        if decision == "rejected":
+            return f"Minion plan rejected{f' ({plan_id})' if plan_id else ''}; revise the plan before dispatch."
+        return f"Minion plan edit requested{f' ({plan_id})' if plan_id else ''}; submit a revised plan before dispatch."
 
     async def _handle_plan_control_async(self, action: ControlAction) -> str:
         work_order_id = str(action.args.get("work_order_id") or action.target_id or "").strip()
@@ -1679,6 +1877,7 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
             EventKind.MINION_CHECKPOINT: [event_handler],
             EventKind.MINION_TERMINAL: [event_handler],
             EventKind.MINION_MODULE_COMPLETED: [event_handler],
+            EventKind.MINION_WORK_ORDER_COMPLETED: [event_handler],
             EventKind.MINION_CLARIFICATION_REQUEST: [event_handler],
         },
         control_action_handlers={
@@ -1688,6 +1887,9 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
             "minion_question_nav": provider.handle_control_action_async,
             "minion_question_submit": provider.handle_control_action_async,
             "minion_question_answer": provider.handle_control_action_async,
+            "minion_plan_accept_override": provider.handle_control_action_async,
+            "minion_plan_reject": provider.handle_control_action_async,
+            "minion_plan_edit": provider.handle_control_action_async,
             "minion_plan_continue": provider.handle_control_action_async,
             "minion_plan_pause": provider.handle_control_action_async,
             "minion_plan_finish": provider.handle_control_action_async,
@@ -1702,6 +1904,7 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
     context.event_handler_registry.register(EventKind.MINION_CHECKPOINT, event_handler, module_id="minion")
     context.event_handler_registry.register(EventKind.MINION_TERMINAL, event_handler, module_id="minion")
     context.event_handler_registry.register(EventKind.MINION_MODULE_COMPLETED, event_handler, module_id="minion")
+    context.event_handler_registry.register(EventKind.MINION_WORK_ORDER_COMPLETED, event_handler, module_id="minion")
     context.event_handler_registry.register(EventKind.MINION_CLARIFICATION_REQUEST, event_handler, module_id="minion")
     context.prompt_fragment_registry.register(prompt_provider)
     return handle
@@ -1755,15 +1958,21 @@ def _validate_spawn_args(args: dict[str, Any], *, repository: MinionTaskingRepos
     draft_id = str(args.get("draft_id") or "").strip()
     if draft_id:
         _validate_promote_work_order_args(repository, draft_id, reviewed_candidate=dict(args.get("reviewed_candidate") or {}) or None)
-    if args.get("artifact_refs") is not None:
-        _normalize_artifact_refs(args.get("artifact_refs"), repository=repository)
-    if not any(str(args.get(key) or "").strip() for key in ("draft_id", "work_order_id", "task_query", "query")) and not args.get("artifact_refs"):
-        if not str(args.get("goal") or args.get("instruction") or "").strip():
-            raise MinionWorkOrderValidationError(
-                "goal or instruction is required for ad-hoc minion dispatch",
-                field="goal",
-            )
-        normalize_milestones(args.get("milestones"))
+    if args.get("supporting_artifacts") is not None:
+        _normalize_supporting_artifacts(args.get("supporting_artifacts"), repository=repository)
+    if args.get("plan_ref") is not None:
+        repository.load_accepted_plan_ref(args.get("plan_ref"))
+    if args.get("feedback_gate_ref") is not None:
+        _validate_plan_revision_gate_ref(args.get("feedback_gate_ref"), repository=repository)
+    if (
+        not any(str(args.get(key) or "").strip() for key in ("draft_id", "work_order_id", "task_query", "query"))
+        and args.get("plan_ref") is None
+        and args.get("feedback_gate_ref") is None
+    ):
+        raise MinionWorkOrderValidationError(
+            "op_minion_spawn requires plan_ref, feedback_gate_ref, draft_id, work_order_id, or task_query",
+            field="dispatch_source",
+        )
 
 
 def _normalize_top_level_review_gate_args(args: dict[str, Any], *, repository: MinionTaskingRepository) -> dict[str, Any]:
@@ -1822,10 +2031,12 @@ def _has_external_verification_ref(value: Any) -> bool:
 
 _LEGACY_PUBLIC_SPAWN_FIELDS = frozenset(
     {
+        "artifact_refs",
+        "minion_profile",
         "task_context_pack",
         "task_json",
         "final_plan_artifact",
-        "plan_ref",
+        "milestones",
         "module_id",
         "metadata",
         "prompt_view",
@@ -1836,14 +2047,19 @@ _LEGACY_PUBLIC_SPAWN_FIELDS = frozenset(
         "plan_validation",
         "module_execution",
         "plan_execution",
+        "allowed_capabilities",
+        "resolved_profile",
     }
 )
 
 
 def _validate_pack_milestones(pack: TaskContextPack) -> TaskContextPack:
     metadata = dict(pack.metadata or {})
-    milestones = normalize_milestones(metadata.get("milestones"))
-    metadata["milestones"] = milestones
+    if isinstance(metadata.get("plan_artifact"), dict):
+        milestones = normalize_milestones(metadata.get("milestones"))
+        metadata["milestones"] = milestones
+    else:
+        metadata.pop("milestones", None)
     return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
 
 
@@ -1854,40 +2070,43 @@ def _pack_from_args(args: dict[str, Any], *, repository: MinionTaskingRepository
             draft_id,
             reviewed_candidate=dict(args.get("reviewed_candidate") or {}) or None,
         )
-        return TaskContextPack.from_dict(dict(promoted.get("task_context_pack") or {}))
-    artifact_refs = _normalize_artifact_refs(args.get("artifact_refs"), repository=repository) if args.get("artifact_refs") is not None else []
-    plan_review_gate_ref = next((item for item in artifact_refs if item.get("kind") == "plan_review_gate"), None)
-    if plan_review_gate_ref is not None:
+        return _apply_spawn_pack_overrides(
+            TaskContextPack.from_dict(dict(promoted.get("task_context_pack") or {})),
+            args,
+            supporting_artifacts=[],
+        )
+    supporting_artifacts = (
+        _normalize_supporting_artifacts(args.get("supporting_artifacts"), repository=repository)
+        if args.get("supporting_artifacts") is not None
+        else []
+    )
+    feedback_gate_ref = dict(args.get("feedback_gate_ref") or {}) if isinstance(args.get("feedback_gate_ref"), dict) else {}
+    if feedback_gate_ref:
         if repository is None:
-            raise ValueError("repository is required to spawn from artifact_refs")
-        metadata = _dispatch_metadata_from_args(args, artifact_refs=artifact_refs)
+            raise ValueError("repository is required to spawn from feedback_gate_ref")
+        gate_ref = _validate_plan_revision_gate_ref(feedback_gate_ref, repository=repository)
+        metadata = _dispatch_metadata_from_args(args, supporting_artifacts=supporting_artifacts)
+        metadata["feedback_gate_ref"] = dict(gate_ref)
         return repository.build_planner_revision_pack_from_review_gate(
-            plan_review_gate_ref.get("ref") or plan_review_gate_ref,
+            gate_ref,
             work_order_id=str(args.get("work_order_id") or ""),
             workspace=dict(args.get("workspace") or {}),
             metadata=metadata,
             goal=str(args.get("goal") or ""),
             instruction=str(args.get("instruction") or ""),
         )
-    plan_artifact_ref = next((item for item in artifact_refs if item.get("kind") == "plan"), None)
-    if plan_artifact_ref is not None:
+    if args.get("plan_ref") is not None:
         if repository is None:
-            raise ValueError("repository is required to spawn from artifact_refs")
-        loaded = repository.load_accepted_plan_ref(plan_artifact_ref.get("ref") or plan_artifact_ref)
-        metadata = _dispatch_metadata_from_args(args, artifact_refs=artifact_refs)
+            raise ValueError("repository is required to spawn from plan_ref")
+        loaded = repository.load_accepted_plan_ref(args.get("plan_ref"))
+        metadata = _dispatch_metadata_from_args(args, supporting_artifacts=supporting_artifacts)
         metadata.update({"plan_ref": loaded["plan_ref"], "plan_validation": loaded["plan_validation"]})
-        module_id = str(plan_artifact_ref.get("module_id") or "").strip()
-        if module_id:
-            return repository.build_coder_module_pack_from_plan(
-                dict(loaded.get("plan_artifact") or {}),
-                module_id=module_id,
-                work_order_id=str(args.get("work_order_id") or ""),
-                workspace=dict(args.get("workspace") or {}),
-                metadata=metadata,
-                goal=str(args.get("goal") or ""),
-                instruction=str(args.get("instruction") or ""),
-                minion_profile=str(args.get("minion_profile") or "software_engineering.coder"),
-            )
+        profile_group = str(args.get("profile_group") or "").strip()
+        profile_name = str(args.get("profile_name") or "").strip()
+        if profile_group:
+            metadata["dispatch_profile_group"] = profile_group
+        if profile_name:
+            metadata["dispatch_profile_name"] = profile_name
         return repository.build_plan_parent_pack_from_plan(
             dict(loaded.get("plan_artifact") or {}),
             work_order_id=str(args.get("work_order_id") or ""),
@@ -1895,17 +2114,17 @@ def _pack_from_args(args: dict[str, Any], *, repository: MinionTaskingRepository
             metadata=metadata,
             goal=str(args.get("goal") or ""),
             instruction=str(args.get("instruction") or ""),
+            profile_group=str(args.get("profile_group") or ""),
+            profile_name=str(args.get("profile_name") or ""),
         )
     work_order_id = str(args.get("work_order_id") or "").strip()
     if work_order_id:
-        if repository is not None:
-            try:
-                return repository.pack_for_work_order(work_order_id, overrides=_dispatch_pack_overrides(args, artifact_refs=artifact_refs))
-            except KeyError:
-                if str(args.get("goal") or args.get("instruction") or "").strip():
-                    return TaskContextPack.from_dict(_dispatch_pack_payload(args, artifact_refs=artifact_refs))
-                raise
-        return TaskContextPack.from_dict(_dispatch_pack_payload(args, artifact_refs=artifact_refs))
+        if repository is None:
+            raise ValueError("repository is required to spawn from work_order_id")
+        try:
+            return repository.pack_for_work_order(work_order_id, overrides=_dispatch_pack_overrides(args, supporting_artifacts=supporting_artifacts))
+        except KeyError:
+            raise MinionWorkOrderValidationError(f"unknown work order: {work_order_id}", field="work_order_id")
     query = str(args.get("task_query") or args.get("query") or "").strip()
     if query and repository is not None:
         result = repository.search_work_orders(query, limit=5)
@@ -1914,122 +2133,115 @@ def _pack_from_args(args: dict[str, Any], *, repository: MinionTaskingRepository
             work_order_id = str(candidates[0].get("work_order_id") or "")
             return repository.pack_for_work_order(
                 work_order_id,
-                overrides=_dispatch_pack_overrides(args, artifact_refs=artifact_refs, metadata_extra={"resolved_from_task_query": query}),
+                overrides=_dispatch_pack_overrides(args, supporting_artifacts=supporting_artifacts, metadata_extra={"resolved_from_task_query": query}),
             )
         raise MinionSpawnResolutionError(query=query, candidates=candidates)
-    return TaskContextPack.from_dict(_dispatch_pack_payload(args, artifact_refs=artifact_refs))
-
-
-def _dispatch_pack_payload(args: dict[str, Any], *, artifact_refs: list[dict[str, Any]]) -> dict[str, Any]:
-    goal = str(args.get("goal") or args.get("instruction") or "").strip()
-    instruction = str(args.get("instruction") or goal).strip()
-    milestones = normalize_milestones(args.get("milestones"))
-    metadata = _dispatch_metadata_from_args(args, artifact_refs=artifact_refs)
-    metadata["milestones"] = milestones
-    return {
-        "work_order_id": str(args.get("work_order_id") or new_work_id("wo")),
-        "goal": goal,
-        "instruction": instruction,
-        "acceptance_criteria": _string_list(args.get("acceptance_criteria")),
-        "workspace": dict(args.get("workspace") or {}),
-        "artifacts": [],
-        "minion_profile": str(args.get("minion_profile") or "generic"),
-        "allowed_capabilities": _string_list(args.get("allowed_capabilities")),
-        "allowed_skills": _string_list(args.get("allowed_skills")),
-        "approval_policy": dict(args.get("approval_policy") or {}),
-        "metadata": metadata,
-    }
-
+    raise MinionWorkOrderValidationError(
+        "op_minion_spawn requires plan_ref, feedback_gate_ref, draft_id, work_order_id, or task_query",
+        field="dispatch_source",
+    )
 
 def _dispatch_pack_overrides(
     args: dict[str, Any],
     *,
-    artifact_refs: list[dict[str, Any]],
+    supporting_artifacts: list[dict[str, Any]],
     metadata_extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     overrides: dict[str, Any] = {}
-    for key in ("goal", "instruction", "acceptance_criteria", "workspace", "allowed_capabilities", "allowed_skills", "approval_policy", "minion_profile"):
+    for key in ("goal", "instruction", "acceptance_criteria", "workspace", "allowed_skills", "approval_policy", "profile_group", "profile_name"):
         if key in args and args.get(key):
             overrides[key] = args[key]
-    metadata = _dispatch_metadata_from_args(args, artifact_refs=artifact_refs)
+    metadata = _dispatch_metadata_from_args(args, supporting_artifacts=supporting_artifacts)
     metadata.update(dict(metadata_extra or {}))
     if metadata:
         overrides["metadata"] = metadata
     return overrides
 
 
-def _dispatch_metadata_from_args(args: dict[str, Any], *, artifact_refs: list[dict[str, Any]]) -> dict[str, Any]:
+def _apply_spawn_pack_overrides(pack: TaskContextPack, args: dict[str, Any], *, supporting_artifacts: list[dict[str, Any]]) -> TaskContextPack:
+    payload = pack.to_dict()
+    overrides = _dispatch_pack_overrides(args, supporting_artifacts=supporting_artifacts)
+    metadata = dict(payload.get("metadata") or {})
+    override_metadata = dict(overrides.pop("metadata", {}) or {})
+    if override_metadata:
+        metadata.update(override_metadata)
+    for key, value in overrides.items():
+        if value:
+            payload[key] = value
+    payload["metadata"] = metadata
+    return TaskContextPack.from_dict(payload)
+
+
+def _dispatch_metadata_from_args(args: dict[str, Any], *, supporting_artifacts: list[dict[str, Any]]) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     title = str(args.get("title") or "").strip()
     if title:
         metadata["task_title"] = title
         metadata["work_order_title"] = title
-    if artifact_refs:
-        metadata["artifact_refs"] = [dict(item) for item in artifact_refs]
+    if supporting_artifacts:
+        metadata["supporting_artifacts"] = [dict(item) for item in supporting_artifacts]
     return metadata
 
 
-def _normalize_artifact_refs(raw: Any, *, repository: MinionTaskingRepository | None) -> list[dict[str, Any]]:
+def _normalize_supporting_artifacts(raw: Any, *, repository: MinionTaskingRepository | None) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
-        raise MinionWorkOrderValidationError("artifact_refs must be an array", field="artifact_refs")
+        raise MinionWorkOrderValidationError("supporting_artifacts must be an array", field="supporting_artifacts")
     result: list[dict[str, Any]] = []
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
-            raise MinionWorkOrderValidationError(f"artifact_refs[{index}] must be an object", field="artifact_refs")
+            raise MinionWorkOrderValidationError(f"supporting_artifacts[{index}] must be an object", field="supporting_artifacts")
         kind = str(item.get("kind") or item.get("type") or "").strip().lower()
         if not kind:
-            raise MinionWorkOrderValidationError(f"artifact_refs[{index}].kind is required", field="artifact_refs")
-        if kind in {"final_plan_artifact", "plan_ref"}:
-            kind = "plan"
+            raise MinionWorkOrderValidationError(f"supporting_artifacts[{index}].kind is required", field="supporting_artifacts")
+        if kind in {"final_plan_artifact", "plan", "plan_ref"}:
+            raise MinionWorkOrderValidationError(
+                f"supporting_artifacts[{index}] cannot contain executable plans; use top-level plan_ref",
+                field="supporting_artifacts",
+            )
         normalized = {"kind": kind, "role": str(item.get("role") or "").strip()}
-        if kind == "plan":
-            ref = _artifact_ref_payload(item)
-            if repository is not None:
-                try:
-                    repository.load_accepted_plan_ref(ref)
-                except Exception as exc:
-                    raise MinionWorkOrderValidationError(str(exc), field="artifact_refs") from exc
-            normalized["ref"] = ref
-            if str(item.get("module_id") or "").strip():
-                normalized["module_id"] = str(item.get("module_id") or "").strip()
-        elif kind in {"review_report", "research_report", "nutrition_log"}:
-            normalized.update(_validated_file_artifact_ref(item, repository=repository, field=f"artifact_refs[{index}]"))
+        if kind in {"review_report", "research_report", "nutrition_log", "spec_doc", "source_report"}:
+            normalized.update(_validated_file_artifact_ref(item, repository=repository, field=f"supporting_artifacts[{index}]"))
         elif kind == "checkpoint":
             checkpoint_id = str(item.get("checkpoint_id") or item.get("id") or "").strip()
             if not checkpoint_id:
-                raise MinionWorkOrderValidationError(f"artifact_refs[{index}].checkpoint_id is required", field="artifact_refs")
+                raise MinionWorkOrderValidationError(f"supporting_artifacts[{index}].checkpoint_id is required", field="supporting_artifacts")
             normalized["checkpoint_id"] = checkpoint_id
-        elif kind in {"plan_review_gate", "review_gate_ref"}:
-            kind = "plan_review_gate"
+        elif kind in {"review_gate", "plan_review_gate", "review_gate_ref"}:
+            kind = "review_gate"
             gate_id = str(item.get("gate_id") or item.get("id") or "").strip()
             ref = dict(item.get("ref") or {}) if isinstance(item.get("ref"), dict) else {}
             if gate_id and "gate_id" not in ref:
                 ref["gate_id"] = gate_id
             if not str(ref.get("gate_id") or "").strip():
-                raise MinionWorkOrderValidationError(f"artifact_refs[{index}].gate_id is required", field="artifact_refs")
+                raise MinionWorkOrderValidationError(f"supporting_artifacts[{index}].gate_id is required", field="supporting_artifacts")
             if repository is not None:
                 try:
                     gate = repository.load_review_gate(ref)
                 except Exception as exc:
-                    raise MinionWorkOrderValidationError(str(exc), field="artifact_refs") from exc
-                payload = dict(gate.get("review_gate") or {})
-                if str(payload.get("gate_kind") or "").strip().lower() != "plan_acceptance":
-                    raise MinionWorkOrderValidationError(
-                        f"artifact_refs[{index}] must reference a plan_acceptance review gate",
-                        field="artifact_refs",
-                    )
-                if str(payload.get("verdict") or "").strip().lower() == "pass":
-                    raise MinionWorkOrderValidationError(
-                        f"artifact_refs[{index}] must reference a failing or partial plan review gate for revision dispatch",
-                        field="artifact_refs",
-                    )
+                    raise MinionWorkOrderValidationError(str(exc), field="supporting_artifacts") from exc
                 ref = dict(gate.get("review_gate_ref") or ref)
-            normalized["kind"] = "plan_review_gate"
+            normalized["kind"] = "review_gate"
             normalized["ref"] = ref
         else:
-            raise MinionWorkOrderValidationError(f"unsupported artifact_refs[{index}].kind: {kind}", field="artifact_refs")
+            raise MinionWorkOrderValidationError(f"unsupported supporting_artifacts[{index}].kind: {kind}", field="supporting_artifacts")
         result.append(normalized)
     return result
+
+
+def _validate_plan_revision_gate_ref(value: Any, *, repository: MinionTaskingRepository) -> dict[str, Any]:
+    ref = dict(value or {}) if isinstance(value, dict) else {}
+    if not str(ref.get("gate_id") or "").strip():
+        raise MinionWorkOrderValidationError("feedback_gate_ref.gate_id is required", field="feedback_gate_ref")
+    try:
+        gate = repository.load_review_gate(ref)
+    except Exception as exc:
+        raise MinionWorkOrderValidationError(str(exc), field="feedback_gate_ref") from exc
+    payload = dict(gate.get("review_gate") or {})
+    if str(payload.get("gate_kind") or "").strip().lower() != "plan_acceptance":
+        raise MinionWorkOrderValidationError("feedback_gate_ref must reference a plan_acceptance gate", field="feedback_gate_ref")
+    if str(payload.get("verdict") or "").strip().lower() == "pass":
+        raise MinionWorkOrderValidationError("feedback_gate_ref must reference a failing or partial gate", field="feedback_gate_ref")
+    return dict(gate.get("review_gate_ref") or ref)
 
 
 def _artifact_ref_payload(item: dict[str, Any]) -> dict[str, Any]:
@@ -2043,7 +2255,7 @@ def _artifact_ref_payload(item: dict[str, Any]) -> dict[str, Any]:
 def _validated_file_artifact_ref(item: dict[str, Any], *, repository: MinionTaskingRepository | None, field: str) -> dict[str, Any]:
     path_text = str(item.get("path") or item.get("artifact_path") or item.get("relative_path") or "").strip()
     if not path_text:
-        raise MinionWorkOrderValidationError(f"{field}.path is required", field="artifact_refs")
+        raise MinionWorkOrderValidationError(f"{field}.path is required", field="supporting_artifacts")
     payload = {"path": path_text}
     sha256 = str(item.get("sha256") or "").strip()
     if sha256:
@@ -2055,12 +2267,12 @@ def _validated_file_artifact_ref(item: dict[str, Any], *, repository: MinionTask
     resolved = resolved.resolve()
     root = repository.runtime_root.resolve()
     if not resolved.is_relative_to(root):
-        raise MinionWorkOrderValidationError(f"{field}.path must be under runtime_root", field="artifact_refs")
+        raise MinionWorkOrderValidationError(f"{field}.path must be under runtime_root", field="supporting_artifacts")
     if not resolved.is_file():
-        raise MinionWorkOrderValidationError(f"{field}.path does not exist", field="artifact_refs")
+        raise MinionWorkOrderValidationError(f"{field}.path does not exist", field="supporting_artifacts")
     digest = _sha256_file(resolved)
     if sha256 and sha256 != digest:
-        raise MinionWorkOrderValidationError(f"{field}.sha256 mismatch", field="artifact_refs")
+        raise MinionWorkOrderValidationError(f"{field}.sha256 mismatch", field="supporting_artifacts")
     payload["path"] = str(resolved)
     payload["sha256"] = digest
     return payload

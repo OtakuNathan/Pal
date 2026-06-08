@@ -37,6 +37,7 @@ Event delivery is split by audience:
 - `progress` is high-cardinality telemetry for manager/tasking state. It is not a chat notification.
 - `checkpoint` is the milestone cursor fact. It is recorded in the tasking store and notifies no one directly.
 - `terminal` is the user-facing completion path. It sends a short route reply to the original control route when one exists, and synchronizes a recent completion observation into Pal's prompt context.
+- `work_order_completed` is the work-order completion path. It is emitted when manager ledger state closes the active work order, so Pal and the user do not need to poll to discover that the order finished.
 
 Terminal notifications should name the status, profile, work order, and up to a few artifact paths. Large plans, review reports, and writeups belong in minion artifact files, not in chat text.
 
@@ -65,7 +66,7 @@ One task can have only one active work order. This is enforced by the minion rep
 
 ## Work Order Drafts
 
-Work order drafts are minion-owned planning artifacts. They capture user brainstorming, module boundaries, proposed milestones, acceptance criteria, and workspace hints before the subsystem creates a formal work order.
+Work order drafts are minion-owned planning artifacts. They capture user brainstorming, module boundaries, proposed milestones, acceptance criteria, and workspace hints before the subsystem creates a formal work order. Draft milestones are review input only; they are not an executable milestone truth source.
 
 Drafts are not progress facts and are not PalCore state. They are searchable so Pal can say "use that draft" without relying on chat context.
 
@@ -74,20 +75,22 @@ The intended route is:
 1. Pal captures user brainstorming with `op_minion_draft_work_order`.
 2. Planner reviews the draft as a bounded input.
 3. Pal/user confirms the reviewed candidate.
-4. `op_minion_promote_work_order_draft` records the formal work order.
-5. `op_minion_spawn` can then start the selected profile from that work order.
+4. The reviewed output is written as a `FinalPlanArtifact` and accepted as a `plan_ref`.
+5. `op_minion_spawn` starts the selected profile from the accepted plan or from a work order already bound to an accepted plan.
 
 Planner must not invent task boundaries from raw chat history when a draft exists. The draft is the bounded source for review.
 
 ## Checkpoint Cursor
 
-Work orders contain ordered milestones.
+Executable milestones come from one source: an accepted `FinalPlanArtifact`.
+
+Work orders contain the materialized milestone cursor derived from that plan. They do not define their own raw executable milestones.
 
 A checkpoint is the cursor fact. There is no separate resume cursor field.
 
 - `status=completed` advances the derived current milestone.
 - `status=partial` and `status=blocked` record the scene but do not advance the cursor.
-- The current milestone is derived as the first milestone without a completed checkpoint.
+- The current milestone is derived as the first plan-derived milestone without a completed checkpoint.
 
 Pal must not infer work order progress from chat text, progress text, or terminal summaries. The fact source is the minion tasking store.
 
@@ -153,8 +156,13 @@ The minion module exposes:
 - `intro_minion_read`
 - `intro_minion_profile_list`
 - `intro_minion_profile_read`
+- `intro_minion_plan_search`
+- `intro_minion_plan_read`
 - `op_minion_draft_work_order`
 - `op_minion_promote_work_order_draft`
+- `op_minion_submit_plan`
+- `op_minion_accept_plan`
+- `op_minion_revise_plan`
 - `op_minion_spawn`
 - `op_minion_kill`
 - `op_minion_finalize`
@@ -165,7 +173,13 @@ The minion module exposes:
 
 `op_minion_spawn` may accept `task_query` instead of `work_order_id`. The minion repository resolves it through work order search only when there is exactly one candidate. Multiple candidates or no candidates return facts for Pal to show or ask about; Pal must not guess.
 
-`op_minion_spawn` may also accept `draft_id`. In that case the minion subsystem promotes the draft into a formal work order first, then spawns from the resolved work order. This keeps the LLM-facing entry point small while keeping draft promotion explicit and testable.
+`op_minion_spawn` may also accept `draft_id` for the existing draft promotion path. Draft milestones are review input and should be converted into an accepted plan before new execution work. This path is not a replacement for plan-first dispatch.
+
+For new planned work, Pal must not hand-write spawn milestones. If no planner minion has produced a plan, Pal acts as a fallback planner by writing a small `FinalPlanArtifact` through `op_minion_submit_plan`. That operation writes an immutable plan file and returns a `plan_ref`. The plan file is the only milestone truth source, including for generic, reviewer, lifestyle, and other non-coder profiles. `op_minion_spawn` consumes an accepted top-level `plan_ref`; auxiliary files, review reports, checkpoints, and research outputs go in `supporting_artifacts` and never drive execution.
+
+`op_minion_spawn` does not accept public `artifact_refs`, `minion_profile`, `allowed_capabilities`, `resolved_profile`, `milestones`, inline `plan_artifact`, `TaskContextPack`, `module_execution`, or `prompt_view`. Public profile selection uses `profile_group` plus `profile_name`; the manager resolves the runtime profile snapshot and allowed capabilities. Raw work-order milestones without a plan are ignored for execution and must not create serial milestone state. Missing dispatch source, unknown work order id, unaccepted plan ref, bad plan schema, or invalid topology is an invalid/blocking state, not a fallback opportunity.
+
+Plan refs are not dispatchable just because they are valid JSON. A plan must pass review and then be accepted through explicit control before implementation spawn can consume it. Review pass opens a plan acceptance interaction with Accept, Reject, and Edit actions. Accept writes a separate acceptance marker. Reject and Edit record decision state and require an explicit revision path. Revisions use `op_minion_revise_plan`, which writes a new immutable plan revision instead of mutating the old file.
 
 `op_minion_spawn` may accept optional `preferred_endpoint_id`. Pal should set it only when the user explicitly asks for a specific model or LLM endpoint for that minion, after resolving the request to an enabled endpoint id. If omitted, the runner follows the normal Pal active endpoint setting from the runtime database.
 
@@ -190,13 +204,15 @@ The manager repeats this preparation before launching the runner, so reattach/re
 
 Minion profiles are declarative. Builtin profiles are package TOML templates, and runtime profiles are loaded from `runtime_root/plugins/minion/profiles/*.toml`.
 
-Current builtin profiles are `generic`, `planner`, `coder`, and `reviewer`. `planner` owns both planning and architecture review: work-order decomposition, module/interface boundaries, design tradeoffs, risks, migration notes, and verification steps.
+Current builtin profiles are `generic`, `planner`, `coder`, and `reviewer`. Public calls identify them as `profile_group` plus `profile_name`, such as `software_engineering` / `coder`; canonical internal ids such as `software_engineering.coder` remain runtime metadata. `planner` owns both planning and architecture review: work-order decomposition, module/interface boundaries, design tradeoffs, risks, migration notes, and verification steps.
 
 Profile resolution order is builtin templates, runtime profile files, then currently mounted provider declarations. Later declarations with the same `profile_id` override earlier ones.
 
 Profiles may declare capability groups. `core_minion_read` includes scoped discovery/read/call plus read-only `op_memory_recall`, so runners can recall relevant experience without memory-write access. `web_research` expands to `op_web_search` and `op_web_read`, so research-capable minions reuse Pal's existing web tools instead of owning a second web integration.
 
-Profiles may also use `capability_policy.mode = "inherit_filtered"`. In that mode, spawn starts from Pal's current capability registry, adds profile defaults and provider hook results, then applies the minion deny policy. Explicit `TaskContextPack.allowed_capabilities` still wins for tightly scoped runs.
+Profiles may also use `capability_policy.mode = "inherit_filtered"`. In that mode, spawn starts from the manager-visible capability surface, adds profile defaults and provider hook results, then applies the minion deny policy. For `profile_only`, the profile is the upper bound; public spawn cannot expand it with ad hoc `allowed_capabilities`.
+
+Profiles may declare `gate_policy` and `output_policy`. `gate_policy.after_each_milestone = ["reviewer_gate"]` makes the manager insert a reviewer gate after each coder milestone. Reviewer requirements such as command/test evidence, API evidence, LSP evidence, and public declaration implementation checks are profile policy, not LLM prompt folklore. LSP stays a reviewer evidence tool rather than a separate manager gate.
 
 The runner consumes only the resolved profile snapshot in `TaskContextPack`. It does not query PalCore for profile policy after spawn.
 

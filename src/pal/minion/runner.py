@@ -44,6 +44,7 @@ from pal.llm.contracts import (
 )
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.lsp import build_lsp_plugin
+from pal.minion.contracts import SERIAL_MILESTONE_MODES
 from pal.memory import (
     L1MessageKind,
     L1TranscriptMessage,
@@ -684,7 +685,7 @@ class MinionRunner:
     async def _await_next_serial_module_turn(self, completed_milestone_index: int) -> tuple[str, dict[str, Any] | None]:
         metadata = dict(self.pack.metadata or {})
         module_execution = dict(metadata.get("module_execution") or {})
-        is_serial = str(module_execution.get("mode") or "") == "serial_module_milestones"
+        is_serial = str(module_execution.get("mode") or "") in SERIAL_MILESTONE_MODES
         review_required = self._requires_checkpoint_review_gate()
         if not is_serial and not review_required:
             return "not_serial", None

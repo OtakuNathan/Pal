@@ -27,6 +27,8 @@ class MinionProfile:
     workspace_policy: dict[str, Any] = field(default_factory=dict)
     completion_policy: dict[str, Any] = field(default_factory=dict)
     capability_policy: dict[str, Any] = field(default_factory=dict)
+    gate_policy: dict[str, Any] = field(default_factory=dict)
+    output_policy: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -52,6 +54,8 @@ class MinionProfile:
             "workspace_policy": dict(self.workspace_policy),
             "completion_policy": dict(self.completion_policy),
             "capability_policy": dict(self.capability_policy),
+            "gate_policy": dict(self.gate_policy),
+            "output_policy": dict(self.output_policy),
             "metadata": dict(self.metadata),
         }
 
@@ -90,6 +94,8 @@ class MinionProfile:
             workspace_policy=_dict(payload.get("workspace_policy")),
             completion_policy=_dict(payload.get("completion_policy")),
             capability_policy=_dict(payload.get("capability_policy")),
+            gate_policy=_dict(payload.get("gate_policy")),
+            output_policy=_dict(payload.get("output_policy")),
             metadata=_dict(payload.get("metadata")),
         )
 
@@ -142,20 +148,42 @@ class MinionProfileRegistry:
         matches = [profile for profile in profiles if profile.profile_id == normalized]
         return matches[0] if len(matches) == 1 else None
 
-    def resolve_pack(self, pack: TaskContextPack, *, requested_profile: str = "") -> TaskContextPack:
-        profile_id = str(requested_profile or pack.minion_profile or "generic").strip() or "generic"
-        profile = self.get(profile_id)
+    def get_ref(self, profile_group: str, profile_name: str) -> MinionProfile | None:
+        key = (_profile_scope(profile_group), str(profile_name or "generic").strip() or "generic")
+        for profile in self.list_profiles():
+            if _profile_key(profile) == key:
+                return profile
+        return None
+
+    def resolve_pack(
+        self,
+        pack: TaskContextPack,
+        *,
+        requested_profile: str = "",
+        requested_profile_group: str = "",
+        requested_profile_name: str = "",
+    ) -> TaskContextPack:
+        if requested_profile_group or requested_profile_name:
+            profile = self.get_ref(requested_profile_group or pack.profile_group, requested_profile_name or pack.profile_name)
+            profile_id = canonical_profile_id(requested_profile_group or pack.profile_group, requested_profile_name or pack.profile_name)
+        else:
+            profile_id = str(requested_profile or pack.minion_profile or "generic").strip() or "generic"
+            profile = self.get(profile_id)
         if profile is None:
             raise KeyError(f"unknown minion profile: {profile_id}")
         capability_policy = dict(profile.capability_policy)
+        base_capabilities = _expand_capabilities([*profile.capability_groups, *profile.default_allowed_capabilities])
+        if _should_inherit_ambient_capabilities(capability_policy) and self.ambient_capabilities:
+            base_capabilities = _dedupe([*self.ambient_capabilities, *base_capabilities])
         if pack.allowed_capabilities:
-            allowed_capabilities = list(pack.allowed_capabilities)
-        else:
-            base_capabilities = _expand_capabilities([*profile.capability_groups, *profile.default_allowed_capabilities])
-            if _should_inherit_ambient_capabilities(capability_policy) and self.ambient_capabilities:
-                allowed_capabilities = _dedupe([*self.ambient_capabilities, *base_capabilities])
+            requested_capabilities = _dedupe(list(pack.allowed_capabilities))
+            if str(capability_policy.get("mode") or "").strip().lower() == "profile_only":
+                base_set = set(base_capabilities)
+                allowed_capabilities = [item for item in requested_capabilities if item in base_set]
             else:
-                allowed_capabilities = base_capabilities
+                allowed_capabilities = requested_capabilities
+        else:
+            allowed_capabilities = base_capabilities
         allowed_skills = _dedupe(list(pack.allowed_skills) or list(profile.skill_refs or profile.default_allowed_skills))
         approval_policy = dict(profile.default_approval_policy)
         approval_policy.update(dict(pack.approval_policy))
@@ -168,6 +196,12 @@ class MinionProfileRegistry:
         completion_policy = dict(profile.completion_policy)
         if isinstance(pack.workspace.get("completion_policy"), dict):
             completion_policy.update(dict(pack.workspace.get("completion_policy") or {}))
+        gate_policy = dict(profile.gate_policy)
+        if isinstance(pack.workspace.get("gate_policy"), dict):
+            gate_policy.update(dict(pack.workspace.get("gate_policy") or {}))
+        output_policy = dict(profile.output_policy)
+        if isinstance(pack.workspace.get("output_policy"), dict):
+            output_policy.update(dict(pack.workspace.get("output_policy") or {}))
         hook_capabilities = self._hook_capabilities(profile, pack)
         if hook_capabilities:
             allowed_capabilities = _dedupe([*allowed_capabilities, *hook_capabilities])
@@ -182,6 +216,8 @@ class MinionProfileRegistry:
         resolved_profile["effective_workspace_policy"] = dict(workspace_policy)
         resolved_profile["effective_completion_policy"] = dict(completion_policy)
         resolved_profile["effective_capability_policy"] = dict(capability_policy)
+        resolved_profile["effective_gate_policy"] = dict(gate_policy)
+        resolved_profile["effective_output_policy"] = dict(output_policy)
         workspace = dict(pack.workspace)
         if checkpoint_policy:
             workspace["checkpoint_policy"] = dict(checkpoint_policy)
@@ -189,9 +225,15 @@ class MinionProfileRegistry:
             workspace["workspace_policy"] = dict(workspace_policy)
         if completion_policy:
             workspace["completion_policy"] = dict(completion_policy)
+        if gate_policy:
+            workspace["gate_policy"] = dict(gate_policy)
+        if output_policy:
+            workspace["output_policy"] = dict(output_policy)
         return TaskContextPack.from_dict(
             {
                 **pack.to_dict(),
+                "profile_group": profile.profile_group,
+                "profile_name": profile.profile_id,
                 "minion_profile": profile.canonical_profile_id,
                 "resolved_profile": resolved_profile,
                 "allowed_capabilities": allowed_capabilities,

@@ -174,7 +174,7 @@ def render_minion_task_prompt(pack: TaskContextPack) -> str:
         "instruction": pack.instruction,
         "acceptance_criteria": list(pack.acceptance_criteria),
         "workspace": _prompt_safe_workspace(pack.workspace),
-        "artifact_refs": _prompt_safe_artifact_refs(pack.metadata.get("artifact_refs") or pack.artifacts),
+        "supporting_artifacts": _prompt_safe_artifact_refs(pack.metadata.get("supporting_artifacts") or pack.artifacts),
     }
     if pack.memory_pack:
         payload["memory_pack"] = dict(pack.memory_pack)

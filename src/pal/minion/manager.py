@@ -20,6 +20,7 @@ from pal.foundation.sidecar import (
     pack_sidecar_message,
     read_sidecar_message,
 )
+from pal.minion.contracts import SERIAL_MILESTONE_MODES
 from pal.minion.git_env import finalize_work_order_branch, prepare_task_workspace
 from pal.minion.ipc import cleanup_manager_endpoint, minion_log_path, minion_runner_log_path, start_manager_server
 from pal.minion.ipc import python_subprocess_env
@@ -358,24 +359,37 @@ class MinionManager:
         )
         return detail
 
-    def _with_default_coder_checkpoint_review(self, pack: TaskContextPack) -> tuple[TaskContextPack, dict[str, Any]]:
+    def _with_profile_gate_policy(self, pack: TaskContextPack) -> tuple[TaskContextPack, dict[str, Any]]:
         metadata = dict(pack.metadata or {})
         module_execution = dict(metadata.get("module_execution") or {})
         if module_execution.get("checkpoint_review") is not None or metadata.get("checkpoint_review") is not None:
             return pack, {}
-        if not _is_coder_pack(pack):
+        profile = dict(pack.resolved_profile or {})
+        gate_policy = dict(profile.get("effective_gate_policy") or profile.get("gate_policy") or {})
+        gates = {str(item).strip().lower() for item in list(gate_policy.get("after_each_milestone") or [])}
+        if "reviewer_gate" not in gates:
             return pack, {}
-        completion_policy = dict((pack.workspace or {}).get("completion_policy") or {})
-        if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
-            return pack, {}
+        reviewer_group = str(gate_policy.get("reviewer_profile_group") or "software_engineering").strip() or "software_engineering"
+        reviewer_name = str(gate_policy.get("reviewer_profile_name") or "reviewer").strip() or "reviewer"
+        scope = str(gate_policy.get("scope") or "").strip()
+        if not scope:
+            scope = "module_checkpoint" if str(module_execution.get("mode") or "").strip() else "bare_coder_checkpoint"
         checkpoint_review = {
             "enabled": True,
-            "reviewer_profile": "software_engineering.reviewer",
-            "max_repair_attempts": 5,
-            "scope": "bare_coder_checkpoint",
+            "scope": scope,
+            "reviewer_profile_group": reviewer_group,
+            "reviewer_profile_name": reviewer_name,
+            "reviewer_profile": f"{reviewer_group}.{reviewer_name}",
+            "max_repair_attempts": _coerce_int(gate_policy.get("max_repair_attempts"), 5),
+            "require_test_or_blocker": bool(gate_policy.get("require_test_or_blocker")),
+            "require_api_evidence": bool(gate_policy.get("require_api_evidence")),
+            "require_lsp_when_applicable": bool(gate_policy.get("require_lsp_when_applicable")),
+            "check_public_declarations_have_implementation": bool(gate_policy.get("check_public_declarations_have_implementation")),
+            "source": "profile_gate_policy",
         }
-        metadata["checkpoint_review"] = checkpoint_review
-        updates: dict[str, Any] = {"checkpoint_review": checkpoint_review}
+        module_execution["checkpoint_review"] = checkpoint_review
+        metadata["module_execution"] = module_execution
+        updates: dict[str, Any] = {"module_execution": module_execution}
         if metadata.get("manager_turn_timeout_seconds") is None:
             metadata["manager_turn_timeout_seconds"] = 300
             updates["manager_turn_timeout_seconds"] = 300
@@ -383,9 +397,10 @@ class MinionManager:
 
     async def spawn(self, pack_payload: dict[str, Any]) -> dict[str, Any]:
         pack = TaskContextPack.from_dict(pack_payload)
-        if not pack.resolved_profile:
-            pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
+        profile_registry = MinionProfileRegistry(runtime_root=self.runtime_root)
+        pack = profile_registry.resolve_pack(pack)
         pack = self.tasking_repository.prepare_pack_for_spawn(pack)
+        pack = profile_registry.resolve_pack(pack)
         if _is_plan_parent_pack(pack):
             continued = await self.continue_work_order(pack.work_order_id)
             return {
@@ -403,7 +418,7 @@ class MinionManager:
         metadata["minion_id"] = minion_id
         pack = TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
         pack = prepare_task_workspace(self.runtime_root, pack, run_id=run_id)
-        pack, metadata_updates = self._with_default_coder_checkpoint_review(pack)
+        pack, metadata_updates = self._with_profile_gate_policy(pack)
         if metadata_updates:
             self.tasking_repository.merge_work_order_metadata(pack.work_order_id, metadata_updates)
         self.tasking_repository.update_work_order_workspace(pack.work_order_id, dict(pack.workspace))
@@ -591,8 +606,7 @@ class MinionManager:
                 "reason": "active_child_running" if status == "running_module" and active_child_work_order_id else "no_next_module",
                 "active_child_work_order_id": active_child_work_order_id,
             }
-        if not pack.resolved_profile:
-            pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
+        pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
         run = await self.spawn(pack.to_dict())
         return {
             "status": "running_module",
@@ -1121,12 +1135,12 @@ class MinionManager:
                         "workspace_policy": {"mode": "read_only_repo"},
                         "review_target_plan_ref": dict(plan_ref),
                     },
-                    "minion_profile": "software_engineering.reviewer",
+                    "profile_group": "software_engineering",
+                    "profile_name": "reviewer",
                     "metadata": metadata,
                 }
             )
-            if not pack.resolved_profile:
-                pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
+            pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
             await self.spawn(pack.to_dict())
         except Exception:
             self.logger.exception("failed to spawn plan reviewer: %s", review_key)
@@ -1183,6 +1197,9 @@ class MinionManager:
                 "repo_path": repo_path,
                 "summary": str(payload.get("summary") or ""),
             }
+            review_policy = dict((coder_state.pack.metadata.get("module_execution") or {}).get("checkpoint_review") or coder_state.pack.metadata.get("checkpoint_review") or {})
+            reviewer_group = str(review_policy.get("reviewer_profile_group") or "software_engineering").strip() or "software_engineering"
+            reviewer_name = str(review_policy.get("reviewer_profile_name") or "reviewer").strip() or "reviewer"
             review_work_order_id = f"wo_review_{_safe_token(checkpoint_id)}"
             review_scratch = _prepare_review_scratch(self.runtime_root, review_work_order_id, repo_path=repo_path)
             review_target.update(review_scratch)
@@ -1232,12 +1249,12 @@ class MinionManager:
                         **review_scratch,
                         "workspace_policy": {"mode": "read_only_repo"},
                     },
-                    "minion_profile": "software_engineering.reviewer",
+                    "profile_group": reviewer_group,
+                    "profile_name": reviewer_name,
                     "metadata": metadata,
                 }
             )
-            if not pack.resolved_profile:
-                pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
+            pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
             await self.spawn(pack.to_dict())
         except Exception:
             self.logger.exception("failed to spawn checkpoint reviewer: %s", checkpoint_id)
@@ -1384,48 +1401,6 @@ class MinionManager:
                 }.get(verdict, "inspect_review"),
             }
             plan_review_policy = dict(metadata.get("plan_review") or {})
-            if verdict == "pass" and _coerce_bool(plan_review_policy.get("auto_accept") or plan_review_policy.get("auto_accept_reviewed_plan")):
-                try:
-                    acceptance = self.tasking_repository.accept_plan_ref(
-                        plan_ref,
-                        review_gate_ref=latest.get("review_gate_ref") or {},
-                        reason=str(plan_review_policy.get("acceptance_reason") or "plan reviewer gate passed"),
-                    )
-                    payload["acceptance"] = acceptance
-                    review_state["status"] = "accepted"
-                    review_state["accepted_plan_ref"] = dict(acceptance.get("plan_ref") or {})
-                    review_state["acceptance"] = acceptance
-                    self._record_work_order_event(
-                        work_order_id=source_work_order_id,
-                        event_kind="plan_accepted",
-                        minion_id=reviewer_state.minion_id,
-                        run_id=reviewer_state.run_id,
-                        minion_profile=reviewer_state.pack.minion_profile,
-                        payload={
-                            "status": "accepted",
-                            "summary": "plan reviewer gate passed and manager accepted the plan",
-                            "plan_ref": dict(acceptance.get("plan_ref") or {}),
-                            "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
-                        },
-                    )
-                except Exception as exc:
-                    payload["acceptance_error"] = f"{exc.__class__.__name__}: {exc}"
-                    review_state["status"] = "acceptance_failed"
-                    review_state["acceptance_error"] = payload["acceptance_error"]
-                    self._record_work_order_event(
-                        work_order_id=source_work_order_id,
-                        event_kind="plan_acceptance_failed",
-                        minion_id=reviewer_state.minion_id,
-                        run_id=reviewer_state.run_id,
-                        minion_profile=reviewer_state.pack.minion_profile,
-                        payload={
-                            "status": "failed",
-                            "summary": "manager could not accept reviewed plan",
-                            "plan_ref": dict(plan_ref),
-                            "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
-                            "error": payload["acceptance_error"],
-                        },
-                    )
             self._merge_plan_review_state(source_work_order_id, review_state)
             event = {
                 "event_kind": event_kind,
@@ -1541,8 +1516,7 @@ class MinionManager:
                     if str(value or "").strip()
                 },
             )
-            if not pack.resolved_profile:
-                pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
+            pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
             await self.spawn(pack.to_dict())
             return {
                 "status": "spawned",
@@ -1595,10 +1569,16 @@ class MinionManager:
                 closure = self.tasking_repository.close_checkpoint_from_review_gate(latest.get("review_gate_ref") or gate)
                 payload = dict(closure.get("payload") or {})
                 if not payload:
-                    payload = {"status": "completed", "checkpoint_id": checkpoint_id, **dict(gate.get("target") or {})}
+                    payload = {
+                        "status": "completed",
+                        "checkpoint_id": checkpoint_id,
+                        **dict(gate.get("target") or {}),
+                        "review_gate": gate,
+                        "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                    }
                 metadata = dict(coder_state.pack.metadata or {})
                 module_execution = dict(metadata.get("module_execution") or {})
-                if str(module_execution.get("mode") or "") == "serial_module_milestones":
+                if str(module_execution.get("mode") or "") in SERIAL_MILESTONE_MODES:
                     await self._send_serial_module_turn(
                         coder_state,
                         {"work_order_id": coder_state.pack.work_order_id, "payload": payload},
@@ -1747,7 +1727,7 @@ class MinionManager:
             return
         metadata = dict(state.pack.metadata or {})
         module_execution = dict(metadata.get("module_execution") or {})
-        if str(module_execution.get("mode") or "") != "serial_module_milestones":
+        if str(module_execution.get("mode") or "") not in SERIAL_MILESTONE_MODES:
             return
         if not bool(module_execution.get("auto_advance")):
             return
@@ -1784,7 +1764,7 @@ class MinionManager:
                 )
                 return
             completion = self.tasking_repository.mark_serial_module_completed(work_order_id)
-            event_payload: dict[str, Any] = dict(completion)
+            event_payload: dict[str, Any] = {**payload, **dict(completion)}
             event_work_order_id = work_order_id
             if str(completion.get("status") or "") == "completed":
                 parent_completion = self.tasking_repository.record_plan_module_completion(work_order_id, completion)
@@ -1805,6 +1785,24 @@ class MinionManager:
                 }
                 self._queue_event_delivery(module_event)
                 self.tasking_repository.record_minion_event(module_event)
+                if str(event_payload.get("status") or "") in {"completed", "already_completed"}:
+                    completed_event = {
+                        "event_kind": "work_order_completed",
+                        "minion_id": "",
+                        "run_id": state.run_id,
+                        "work_order_id": event_work_order_id,
+                        "minion_profile": state.pack.minion_profile,
+                        "payload": {
+                            **event_payload,
+                            "status": "completed" if str(event_payload.get("status") or "") == "completed" else str(event_payload.get("status") or "completed"),
+                            "plan_ref": dict((state.pack.metadata or {}).get("plan_ref") or {}),
+                            "profile_group": state.pack.profile_group,
+                            "profile_name": state.pack.profile_name,
+                        },
+                        "created_at": utc_now(),
+                    }
+                    self._queue_event_delivery(completed_event)
+                    self.tasking_repository.record_minion_event(completed_event)
             await self._send_runner_control_or_record(state, {"type": "complete", "completion": event_payload})
             self.logger.info("minion serial module sent completion run=%s work_order=%s", state.run_id, work_order_id)
         except Exception:

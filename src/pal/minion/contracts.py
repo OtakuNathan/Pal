@@ -5,6 +5,9 @@ from typing import Protocol
 
 from pal.shared import CheckpointEvent, EventKind, MinionProgressEvent, MinionTerminalEvent, TaskContextPack
 
+SERIAL_MODULE_MILESTONES_MODE = "serial_module_milestones"
+SERIAL_MILESTONE_MODES = frozenset({SERIAL_MODULE_MILESTONES_MODE})
+
 
 @dataclass(frozen=True)
 class MinionIPCHandlers:

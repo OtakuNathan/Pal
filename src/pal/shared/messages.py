@@ -22,6 +22,8 @@ class TaskContextPack:
     allowed_capabilities: list[str] = field(default_factory=list)
     allowed_skills: list[str] = field(default_factory=list)
     approval_policy: dict[str, Any] = field(default_factory=dict)
+    profile_group: str = "general"
+    profile_name: str = "generic"
     minion_profile: str = "generic"
     resolved_profile: dict[str, Any] = field(default_factory=dict)
     continuity: dict[str, Any] = field(default_factory=dict)
@@ -30,6 +32,10 @@ class TaskContextPack:
     def __post_init__(self) -> None:
         if not self.instruction and self.goal:
             object.__setattr__(self, "instruction", self.goal)
+        group, name = _profile_ref_parts(self.profile_group, self.profile_name, self.minion_profile)
+        object.__setattr__(self, "profile_group", group)
+        object.__setattr__(self, "profile_name", name)
+        object.__setattr__(self, "minion_profile", _canonical_profile_id(group, name))
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -45,6 +51,8 @@ class TaskContextPack:
             "allowed_capabilities": list(self.allowed_capabilities),
             "allowed_skills": list(self.allowed_skills),
             "approval_policy": dict(self.approval_policy),
+            "profile_group": self.profile_group or "general",
+            "profile_name": self.profile_name or "generic",
             "minion_profile": self.minion_profile or "generic",
             "resolved_profile": dict(self.resolved_profile),
             "continuity": dict(self.continuity),
@@ -72,6 +80,8 @@ class TaskContextPack:
             allowed_capabilities=allowed_capabilities,
             allowed_skills=_string_list(payload.get("allowed_skills")),
             approval_policy=_dict(payload.get("approval_policy")),
+            profile_group=str(payload.get("profile_group") or ""),
+            profile_name=str(payload.get("profile_name") or ""),
             minion_profile=str(payload.get("minion_profile") or "generic"),
             resolved_profile=_dict(payload.get("resolved_profile")),
             continuity=_dict(payload.get("continuity")),
@@ -284,3 +294,29 @@ def _dict(value: Any) -> dict[str, Any]:
 
 def _string_list(value: Any) -> list[str]:
     return [str(item) for item in list(value or []) if str(item).strip()]
+
+
+def _profile_ref_parts(group: str, name: str, canonical: str) -> tuple[str, str]:
+    resolved_group = str(group or "").strip()
+    resolved_name = str(name or "").strip()
+    has_explicit_parts = bool(
+        resolved_group
+        and resolved_name
+        and (resolved_group != "general" or resolved_name != "generic")
+    )
+    if resolved_group and resolved_name:
+        if has_explicit_parts:
+            return resolved_group, resolved_name
+    raw = str(canonical or "").strip()
+    if raw and "." in raw:
+        left, right = raw.rsplit(".", 1)
+        return left.strip() or "general", right.strip() or "generic"
+    if raw and not has_explicit_parts:
+        return resolved_group or "general", raw
+    return resolved_group or "general", resolved_name or "generic"
+
+
+def _canonical_profile_id(group: str, name: str) -> str:
+    resolved_group = str(group or "general").strip().replace("/", ".") or "general"
+    resolved_name = str(name or "generic").strip() or "generic"
+    return resolved_name if resolved_group == "general" else f"{resolved_group}.{resolved_name}"

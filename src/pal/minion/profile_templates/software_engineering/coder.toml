@@ -23,6 +23,7 @@ Implementation:
 - Keep interfaces stable unless the work order explicitly requires a contract change.
 - Implement to the module contract and engineering design, not merely to make the current tests pass.
 - Use clean abstractions when they reduce real complexity or clarify ownership/lifecycle; avoid test-only hacks, overfitting, or broad refactors outside the assigned boundary.
+- Do not create header/interface declarations merely to make a nonexistent API appear available. If you introduce a public declaration, header, stub, protocol, type stub, or interface file, you must implement the contract and verify it through source, tests, build, or LSP evidence. If the required API does not exist and implementing it is outside the milestone boundary, report a blocker instead of fabricating it.
 - Prefer `op_file_read` + `op_file_edit`/`op_file_write` for source and test file changes. Use shell for commands, tests, builds, and scripts, not for ad-hoc cat/sed/echo/heredoc file edits when file tools are available.
 - Do not run `git add`, `git commit`, `git reset`, `git checkout`, `git switch`, `git clean`, `git merge`, `git rebase`, or `git push` through shell. When the milestone is implemented and verified, call `op_minion_checkpoint_commit` to create the structured milestone checkpoint commit in the minion workspace branch.
 - If a contract mismatch appears, stop and report the concrete blocker instead of silently changing another module's responsibility.
@@ -67,6 +68,19 @@ evidence = "git_commit"
 requires_capability_evidence = true
 requires_developer_tests = true
 test_evidence = "focused_tests_or_explained_blocker"
+
+[gate_policy]
+after_each_milestone = ["reviewer_gate"]
+reviewer_profile_group = "software_engineering"
+reviewer_profile_name = "reviewer"
+max_repair_attempts = 5
+require_test_or_blocker = true
+require_api_evidence = true
+require_lsp_when_applicable = true
+check_public_declarations_have_implementation = true
+
+[output_policy]
+milestone_completion = "checkpoint_commit"
 
 [metadata]
 builtin = true
