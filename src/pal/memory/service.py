@@ -368,43 +368,47 @@ def _normalize_l1_transcript(item: list[L1TranscriptMessage] | list[dict[str, ob
     normalized: list[L1TranscriptMessage] = []
     for entry in list(item or []):
         if isinstance(entry, L1TranscriptMessage):
-            if entry.content.strip():
-                role = str(entry.role or "").strip()
-                content = entry.content.strip()
-                tool_calls = entry.tool_calls
-                tool_call_id = entry.tool_call_id
-                normalized.append(L1TranscriptMessage(
-                    role=role,
-                    content=content,
-                    kind=_normalize_l1_message_kind(
-                        entry.kind,
+            role = str(entry.role or "").strip()
+            content = entry.content.strip()
+            tool_calls = entry.tool_calls
+            tool_call_id = entry.tool_call_id
+            if content or (role == "assistant" and tool_calls) or (role == "tool" and tool_call_id):
+                normalized.append(
+                    L1TranscriptMessage(
                         role=role,
+                        content=content,
+                        kind=_normalize_l1_message_kind(
+                            entry.kind,
+                            role=role,
+                            tool_calls=tool_calls,
+                            tool_call_id=tool_call_id,
+                        ),
+                        tool_trace=entry.tool_trace,
                         tool_calls=tool_calls,
                         tool_call_id=tool_call_id,
-                    ),
-                    tool_trace=entry.tool_trace,
-                    tool_calls=tool_calls,
-                    tool_call_id=tool_call_id,
-                ))
+                    )
+                )
             continue
         if isinstance(entry, dict):
             role = str(entry.get("role") or "").strip()
             content = str(entry.get("content") or "").strip()
-            if role and content:
-                tool_calls = entry.get("tool_calls")
-                tool_call_id = entry.get("tool_call_id")
-                normalized.append(L1TranscriptMessage(
-                    role=role,
-                    content=content,
-                    kind=_normalize_l1_message_kind(
-                        entry.get("kind"),
+            tool_calls = entry.get("tool_calls")
+            tool_call_id = entry.get("tool_call_id")
+            if role and (content or (role == "assistant" and tool_calls) or (role == "tool" and tool_call_id)):
+                normalized.append(
+                    L1TranscriptMessage(
                         role=role,
+                        content=content,
+                        kind=_normalize_l1_message_kind(
+                            entry.get("kind"),
+                            role=role,
+                            tool_calls=tool_calls,
+                            tool_call_id=tool_call_id,
+                        ),
                         tool_calls=tool_calls,
                         tool_call_id=tool_call_id,
-                    ),
-                    tool_calls=tool_calls,
-                    tool_call_id=tool_call_id,
-                ))
+                    )
+                )
     return normalized
 
 

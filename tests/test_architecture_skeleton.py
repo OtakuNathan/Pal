@@ -51,6 +51,7 @@ from pal.memory import (
     L3RecallView,
     L3ProviderSelector,
     MemoryCompactRequest,
+    MemoryPack,
     MemoryQuery,
     MemoryService,
     register_with_core as register_memory_with_core,
@@ -2706,6 +2707,88 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         cleared = _build_cleared_tool_indices(messages, keep_recent=1)
 
         self.assertEqual(cleared, set())
+
+    def test_l1_transcript_preserves_empty_assistant_tool_call_headers(self) -> None:
+        service = MemoryService()
+
+        service.l1_store.append(
+            [
+                L1TranscriptMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "op_probe", "arguments": "{}"}}],
+                ),
+                L1TranscriptMessage(role="tool", content="probe result", tool_call_id="call_1"),
+            ]
+        )
+
+        transcript = service.l1_store.items[0]
+
+        self.assertEqual([item.role for item in transcript], ["assistant", "tool"])
+        self.assertEqual(transcript[0].content, "")
+        self.assertEqual(transcript[0].tool_calls[0]["id"], "call_1")
+        self.assertEqual(transcript[1].tool_call_id, "call_1")
+
+    def test_memory_prompt_preserves_complete_tool_protocol_batch(self) -> None:
+        from pal.memory.prompt import MemoryPromptFragmentProvider
+
+        pack = MemoryPack(
+            l1_recent_context=[
+                L1TranscriptMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "op_probe", "arguments": "{}"}}],
+                ),
+                L1TranscriptMessage(role="tool", content="probe result", tool_call_id="call_1"),
+            ]
+        )
+
+        fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext(metadata={"memory_pack": pack}))
+        l1_fragments = [fragment for fragment in fragments if str(fragment.metadata.get("block_id") or "").startswith("l1_recent_context")]
+
+        self.assertEqual([fragment.metadata.get("role") for fragment in l1_fragments], ["assistant", "tool"])
+        self.assertEqual(l1_fragments[0].metadata.get("tool_calls")[0]["id"], "call_1")
+        self.assertEqual(l1_fragments[1].metadata.get("tool_call_id"), "call_1")
+        self.assertEqual(l1_fragments[1].content, "probe result")
+
+    def test_memory_prompt_renders_orphan_tool_result_as_context_not_tool_role(self) -> None:
+        from pal.memory.prompt import MemoryPromptFragmentProvider
+
+        pack = MemoryPack(
+            l1_recent_context=[
+                L1TranscriptMessage(role="tool", content="orphan result", tool_call_id="call_missing"),
+            ]
+        )
+
+        fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext(metadata={"memory_pack": pack}))
+        l1_fragments = [fragment for fragment in fragments if str(fragment.metadata.get("block_id") or "").startswith("l1_recent_context")]
+
+        self.assertEqual(len(l1_fragments), 1)
+        self.assertEqual(l1_fragments[0].metadata.get("role"), "user")
+        self.assertIn("historical_tool_result", l1_fragments[0].content)
+        self.assertIn("orphan result", l1_fragments[0].content)
+
+    def test_memory_prompt_renders_incomplete_tool_call_header_as_context_not_protocol(self) -> None:
+        from pal.memory.prompt import MemoryPromptFragmentProvider
+
+        pack = MemoryPack(
+            l1_recent_context=[
+                L1TranscriptMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[{"id": "call_missing", "type": "function", "function": {"name": "op_probe", "arguments": "{}"}}],
+                ),
+            ]
+        )
+
+        fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext(metadata={"memory_pack": pack}))
+        l1_fragments = [fragment for fragment in fragments if str(fragment.metadata.get("block_id") or "").startswith("l1_recent_context")]
+
+        self.assertEqual(len(l1_fragments), 1)
+        self.assertEqual(l1_fragments[0].metadata.get("role"), "user")
+        self.assertIn("historical_tool_call", l1_fragments[0].content)
+        self.assertIn("op_probe", l1_fragments[0].content)
+        self.assertNotIn("tool_calls", l1_fragments[0].metadata)
 
     def test_memory_prompt_dedupes_working_memory_entries_by_identity(self) -> None:
         from pal.memory import MemoryPack
