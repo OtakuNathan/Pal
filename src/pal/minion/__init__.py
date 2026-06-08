@@ -14,7 +14,7 @@ from pal.minion.contracts import (
     WorkOrderServicePort,
 )
 from pal.minion.ipc import MinionManagerClient, MinionManagerRpcError
-from pal.minion.introspection import (
+from pal.minion.provider import (
     MinionManagerProvider,
     MinionIntrospection,
     MinionSnapshot,
