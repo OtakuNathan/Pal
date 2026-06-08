@@ -61,16 +61,18 @@ class _MemorySettingsRepository:
 
 
 class PalV2LLMStickyFallbackTests(unittest.TestCase):
-    def test_fallback_sticks_to_working_endpoint(self) -> None:
+    def test_fallback_does_not_overwrite_configured_active_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             handle = open_runtime(Path(tmpdir))
             try:
                 broken = _fake_endpoint("broken", "broken-model")
                 working = _fake_endpoint("working", "working-model")
+                settings_repository = RuntimeSettingRepository()
+                settings_repository.set_active_llm_endpoint_id("broken")
                 invoker = _FailoverInvoker()
                 runtime = LLMRuntime(
                     endpoint_resolver=EndpointResolver(endpoints=(broken, working)),
-                    settings_repository=RuntimeSettingRepository(),
+                    settings_repository=settings_repository,
                     endpoint_invoker=invoker,
                 )
                 request = CanonicalLLMRequest(messages=[{"role": "user", "content": "hi"}], max_output_tokens=64)
@@ -80,9 +82,13 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
 
                 self.assertEqual(first.text, "ok:working")
                 self.assertEqual(second.text, "ok:working")
-                self.assertEqual(invoker.calls, ["broken", "broken", "broken", "working", "working"])
-                self.assertEqual(runtime.active_endpoint_id, "working")
-                self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "working")
+                self.assertEqual(
+                    invoker.calls,
+                    ["broken", "broken", "broken", "working", "broken", "broken", "broken", "working"],
+                )
+                self.assertEqual(runtime.active_endpoint_id, "broken")
+                self.assertEqual(runtime.last_endpoint_id, "working")
+                self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "broken")
             finally:
                 asyncio.run(handle.stop_async())
 

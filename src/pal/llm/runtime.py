@@ -990,8 +990,6 @@ class LLMRuntime(LLMRuntimePort):
                     self.last_request = effective_request
                     self.last_endpoint_id = endpoint.endpoint_id
                     self.last_model_id = endpoint.model_id
-                    if explicit_preferred_endpoint_id is None and endpoint.endpoint_id != self.active_endpoint_id:
-                        self.set_active_endpoint(endpoint.endpoint_id)
                     if endpoint_index > 0:
                         self._emit_llm_progress(
                             "llm_endpoint_fallback_succeeded",
