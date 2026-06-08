@@ -69,7 +69,9 @@ from pal.minion import (
 )
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice
 from pal.minion.git_env import _git, commit_milestone, finalize_work_order_branch, prepare_git_task_environment, prepare_task_workspace
+from pal.minion.inflight import InflightTracker
 from pal.minion.ipc import minion_runner_log_path, open_manager_connection, python_subprocess_env
+from pal.minion.lifecycle import RunStatusTransitionError, transition_run_status
 from pal.minion.manager import MinionRunState
 from pal.minion.runner import (
     MinionAgentLoopState,
@@ -1449,6 +1451,50 @@ class MinionContractTests(unittest.TestCase):
         self.assertNotIn("default_allowed_skills", profile.to_dict())
         self.assertEqual(pack.allowed_skills, ["legacy_skill"])
 
+    def test_profile_string_fields_are_not_split_into_characters(self) -> None:
+        profile = MinionProfile.from_dict(
+            {
+                "profile_id": "string_fields",
+                "display_name": "String Fields",
+                "identity_fragment": "String field profile.",
+                "skill_refs": "single_skill",
+                "capability_groups": "web_research",
+                "default_allowed_capabilities": "op_workspace_read",
+            }
+        )
+
+        self.assertEqual(profile.skill_refs, ("single_skill",))
+        self.assertEqual(profile.capability_groups, ("web_research",))
+        self.assertEqual(profile.default_allowed_capabilities, ("op_workspace_read",))
+
+    def test_inflight_tracker_claims_once_and_releases_after_task(self) -> None:
+        async def scenario() -> None:
+            tracker = InflightTracker()
+            release = asyncio.Event()
+
+            async def work() -> str:
+                await release.wait()
+                return "ok"
+
+            task = tracker.create_task("same-key", work, name="test-inflight")
+            self.assertIsNotNone(task)
+            self.assertFalse(tracker.claim("same-key"))
+            self.assertTrue(tracker.contains("same-key"))
+            release.set()
+            self.assertEqual(await task, "ok")
+            self.assertFalse(tracker.contains("same-key"))
+            self.assertTrue(tracker.claim("same-key"))
+
+        asyncio.run(scenario())
+
+    def test_run_status_transitions_are_explicit(self) -> None:
+        self.assertEqual(transition_run_status("starting", "running"), "running")
+        self.assertEqual(transition_run_status("running", "approval_pending"), "approval_pending")
+        self.assertEqual(transition_run_status("approval_pending", "running"), "running")
+        self.assertEqual(transition_run_status("running", "completed"), "completed")
+        with self.assertRaises(RunStatusTransitionError):
+            transition_run_status("completed", "running")
+
     def test_profile_resolution_filters_minion_denied_capabilities(self) -> None:
         registry = MinionProfileRegistry()
         pack = registry.resolve_pack(
@@ -2290,8 +2336,8 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 run_id=reviewer_state.run_id,
             )
             self.assertEqual(gate["status"], "recorded")
-            review_key = next(iter(manager._plan_reviews_inflight))
-            await manager._reconcile_plan_review(reviewer_state, plan_ref, review_key)
+            review_key = _plan_review_key_for_test(plan_ref)
+            await manager.reviews._reconcile_plan_review(reviewer_state, plan_ref, review_key)
             events = [event for event in manager.event_queue if event.get("event_kind") == "plan_review_passed"]
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["payload"]["review_gate_ref"]["verdict"], "pass")
@@ -2335,7 +2381,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 requested_profile="software_engineering.planner",
             )
             manager.tasking_repository.prepare_pack_for_spawn(planner_pack)
-            manager._plan_reviews_inflight.add(_plan_review_key_for_test(plan_ref))
+            manager.reviews.plan_reviews.claim(_plan_review_key_for_test(plan_ref))
             reviewer_pack = TaskContextPack(
                 work_order_id="wo_revision_required_review",
                 goal="review failed plan",
@@ -2366,7 +2412,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 work_order_id=reviewer_state.pack.work_order_id,
                 run_id=reviewer_state.run_id,
             )
-            await manager._reconcile_plan_review(reviewer_state, plan_ref, _plan_review_key_for_test(plan_ref))
+            await manager.reviews._reconcile_plan_review(reviewer_state, plan_ref, _plan_review_key_for_test(plan_ref))
 
             events = [event for event in manager.event_queue if event.get("event_kind") == "plan_revision_required"]
             self.assertEqual(len(events), 1)
@@ -2467,7 +2513,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 status="running",
             )
             manager.runs[reviewer_state.run_id] = reviewer_state
-            manager._plan_reviews_inflight.add(_plan_review_key_for_test(plan_ref))
+            manager.reviews.plan_reviews.claim(_plan_review_key_for_test(plan_ref))
             manager.tasking_repository.submit_review_gate(
                 {
                     "gate_kind": "plan_acceptance",
@@ -2482,7 +2528,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 run_id=reviewer_state.run_id,
             )
 
-            await manager._reconcile_plan_review(reviewer_state, plan_ref, _plan_review_key_for_test(plan_ref))
+            await manager.reviews._reconcile_plan_review(reviewer_state, plan_ref, _plan_review_key_for_test(plan_ref))
 
             self.assertEqual(len(manager.spawned_revision_planners), 1)
             revision_state = manager.spawned_revision_planners[0]
@@ -3980,7 +4026,7 @@ class MinionManagerTests(unittest.TestCase):
                 "findings": [{"severity": "major", "summary": "test evidence is missing"}],
             }
 
-            await manager._send_checkpoint_repair_turn(state, gate)
+            await manager.reviews._send_checkpoint_repair_turn(state, gate)
 
             self.assertEqual(manager.sent_messages[-1]["message"]["type"], "repair_turn")
             module_execution = dict(state.pack.metadata["module_execution"])
@@ -3989,7 +4035,7 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(snapshot["work_order"]["metadata"]["module_execution"]["repair_attempts_by_milestone"], {"0": 1})
 
             second_gate = {**gate, "gate_id": "gate_repair_fail_2", "summary": "still missing verification"}
-            await manager._send_checkpoint_repair_turn(state, second_gate)
+            await manager.reviews._send_checkpoint_repair_turn(state, second_gate)
 
             self.assertEqual(manager.sent_messages[-1]["message"]["type"], "blocked")
             blocked = manager.sent_messages[-1]["message"]["payload"]
@@ -4075,7 +4121,7 @@ class MinionManagerTests(unittest.TestCase):
                     "reviewer_profile": "software_engineering.reviewer",
                 }
             )
-            await manager._reconcile_checkpoint_review(reviewer_state, checkpoint_id, state.run_id)
+            await manager.reviews._reconcile_checkpoint_review(reviewer_state, checkpoint_id, state.run_id)
 
             self.assertEqual(manager.sent_messages[-1]["message"]["type"], "complete")
             completion = manager.sent_messages[-1]["message"]["completion"]
@@ -4147,7 +4193,7 @@ class MinionManagerTests(unittest.TestCase):
                     "reviewer_profile": "software_engineering.reviewer",
                 }
             )
-            await manager._send_checkpoint_repair_turn(state, dict(fail_gate["review_gate"]))
+            await manager.reviews._send_checkpoint_repair_turn(state, dict(fail_gate["review_gate"]))
             repair_attempt = dict(state.pack.metadata["module_execution"]["last_repair_attempt"])
             self.assertEqual(repair_attempt["milestone_index"], 0)
 

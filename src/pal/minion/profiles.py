@@ -6,6 +6,9 @@ from pathlib import Path
 import tomllib
 from typing import Any, Protocol
 
+from pal.minion.utils import dedupe_strings as _dedupe
+from pal.minion.utils import dict_from as _dict
+from pal.minion.utils import string_list as _string_list
 from pal.shared import TaskContextPack
 
 
@@ -464,26 +467,6 @@ def _profile_key(profile: MinionProfile) -> tuple[str, str]:
 
 def _profile_scope(profile_group: str) -> str:
     return str(profile_group or "general").strip().replace("/", ".") or "general"
-
-
-def _dict(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
-
-
-def _string_list(value: Any) -> list[str]:
-    return [str(item).strip() for item in list(value or []) if str(item).strip()]
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        item = str(value or "").strip()
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        result.append(item)
-    return result
 
 
 BUILTIN_MINION_PROFILES = load_builtin_minion_profiles()
