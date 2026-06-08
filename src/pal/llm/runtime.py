@@ -1597,6 +1597,10 @@ def _coerce_tools_for_litellm(
 
 
 def _message_content_chars(content: Any) -> int:
+    return len(_message_content_text(content))
+
+
+def _message_content_text(content: Any) -> str:
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:
@@ -1604,8 +1608,8 @@ def _message_content_chars(content: Any) -> int:
                 continue
             if str(item.get("type") or "") == "text":
                 parts.append(str(item.get("text") or ""))
-        return len("\n".join(part for part in parts if part))
-    return len(str(content or ""))
+        return "\n".join(part for part in parts if part)
+    return str(content or "")
 
 
 def _estimate_tools_schema_chars(tools: list[dict[str, Any]]) -> int:
@@ -1651,7 +1655,89 @@ def _coerce_messages_for_litellm(
                 coerced_calls.append(tool_payload)
             payload["tool_calls"] = coerced_calls
         normalized.append(payload)
-    return normalized
+    return _sanitize_openai_tool_protocol_messages(normalized)
+
+
+def _sanitize_openai_tool_protocol_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep OpenAI-compatible chat history valid after memory/history compaction."""
+    sanitized: list[dict[str, Any]] = []
+    index = 0
+    while index < len(messages):
+        message = dict(messages[index])
+        role = str(message.get("role") or "").strip()
+        tool_calls = list(message.get("tool_calls") or [])
+        if role == "assistant" and tool_calls:
+            expected_ids = _tool_call_ids(tool_calls)
+            group: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            cursor = index + 1
+            while cursor < len(messages) and str(messages[cursor].get("role") or "").strip() == "tool":
+                tool_message = dict(messages[cursor])
+                tool_call_id = str(tool_message.get("tool_call_id") or "").strip()
+                if tool_call_id in expected_ids and tool_call_id not in seen_ids:
+                    group.append(tool_message)
+                    seen_ids.add(tool_call_id)
+                else:
+                    break
+                cursor += 1
+            if expected_ids and seen_ids == expected_ids:
+                sanitized.append(message)
+                sanitized.extend(group)
+                index = cursor
+                continue
+            sanitized.append(_tool_protocol_context_message(_render_historical_tool_call_context(message)))
+            index += 1
+            continue
+        if role == "tool":
+            sanitized.append(_tool_protocol_context_message(_render_orphan_tool_result_context(message)))
+            index += 1
+            continue
+        sanitized.append(message)
+        index += 1
+    return sanitized
+
+
+def _tool_call_ids(tool_calls: list[dict[str, Any]]) -> set[str]:
+    ids: set[str] = set()
+    for item in tool_calls:
+        if not isinstance(item, dict):
+            continue
+        call_id = str(item.get("id") or "").strip()
+        if call_id:
+            ids.add(call_id)
+    return ids
+
+
+def _tool_protocol_context_message(content: str) -> dict[str, Any]:
+    return {"role": "user", "content": content}
+
+
+def _render_historical_tool_call_context(message: dict[str, Any]) -> str:
+    content = _message_content_text(message.get("content")).strip()
+    tool_calls = message.get("tool_calls") or []
+    parts = ["<historical_tool_call>"]
+    if content:
+        parts.append(f"assistant_content: {content}")
+    parts.append(f"tool_calls: {_safe_json_dumps(tool_calls)}")
+    parts.append("</historical_tool_call>")
+    return "\n".join(parts)
+
+
+def _render_orphan_tool_result_context(message: dict[str, Any]) -> str:
+    tool_call_id = str(message.get("tool_call_id") or "").strip()
+    content = _message_content_text(message.get("content")).strip()
+    header = "<historical_tool_result"
+    if tool_call_id:
+        header += f' tool_call_id="{tool_call_id}"'
+    header += ">"
+    return f"{header}\n{content}\n</historical_tool_result>"
+
+
+def _safe_json_dumps(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return str(value)
 
 
 def _coerce_content_parts_for_litellm(

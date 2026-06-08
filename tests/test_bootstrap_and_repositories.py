@@ -2407,6 +2407,62 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertNotIn("reasoning_effort", kwargs)
 
+    def test_litellm_invoker_sanitizes_orphan_historical_tool_messages(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="deepseek-strict",
+            provider="deepseek",
+            model_id="deepseek-v4-pro",
+            api_mode="openai_chat",
+            base_url="https://api.deepseek.com",
+            credential_ref="deepseek-prod",
+            enabled=True,
+        )
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=InMemorySecretStore())
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[
+                    {"role": "user", "content": "old question"},
+                    {"role": "tool", "content": "orphan result", "tool_call_id": "call_missing"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "op_probe", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "content": "paired result", "tool_call_id": "call_1"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_incomplete",
+                                "type": "function",
+                                "function": {"name": "op_probe", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {"role": "user", "content": "current question"},
+                ],
+                max_output_tokens=64,
+            ),
+        )
+
+        messages = kwargs["messages"]
+        self.assertEqual([message["role"] for message in messages], ["user", "user", "assistant", "tool", "user", "user"])
+        self.assertIn("historical_tool_result", messages[1]["content"])
+        self.assertEqual(messages[2]["tool_calls"][0]["id"], "call_1")
+        self.assertEqual(messages[3]["tool_call_id"], "call_1")
+        self.assertIn("historical_tool_call", messages[4]["content"])
+
     def test_llm_runtime_retries_primary_then_falls_back_to_next_endpoint(self) -> None:
         endpoint_repository = LLMEndpointRepository()
         settings_repository = RuntimeSettingRepository()
