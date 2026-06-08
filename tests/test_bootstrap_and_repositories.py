@@ -32,6 +32,7 @@ from pal.llm import (
     EndpointResolver,
     InMemorySecretStore,
     LLMEndpointRepository,
+    LLMEndpointInvocationError,
     LLMPreflightRequest,
     LLMRuntime,
     LiteLLMCredentialResolver,
@@ -2645,6 +2646,135 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(outcome.text, "pong")
         self.assertEqual(outcome.reasoning_text, "thinking")
+
+    def test_litellm_response_parser_rejects_empty_assistant_without_tool_calls(self) -> None:
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=InMemorySecretStore())
+        )
+
+        class FakeResponse:
+            def to_dict(self):
+                return {
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {
+                                "content": "",
+                                "tool_calls": [],
+                            },
+                        }
+                    ]
+                }
+
+        with self.assertRaises(LLMEndpointInvocationError):
+            invoker._parse_litellm_response(FakeResponse())
+
+    def test_llm_runtime_treats_empty_assistant_without_tool_calls_as_endpoint_failure(self) -> None:
+        endpoint_repository = LLMEndpointRepository()
+        settings_repository = RuntimeSettingRepository()
+        endpoint_repository.ensure_defaults(
+            [
+                {
+                    "endpoint_id": "empty-primary",
+                    "provider": "stub",
+                    "model_id": "empty-primary-model",
+                    "api_mode": "openai_chat",
+                    "base_url": "stub://local/empty-primary",
+                    "credential_ref": "stub-empty-primary",
+                    "priority": 0,
+                    "enabled": True,
+                },
+                {
+                    "endpoint_id": "fallback",
+                    "provider": "stub",
+                    "model_id": "fallback-model",
+                    "api_mode": "openai_chat",
+                    "base_url": "stub://local/fallback",
+                    "credential_ref": "stub-fallback",
+                    "priority": 1,
+                    "enabled": True,
+                },
+            ]
+        )
+
+        class EmptyThenFallbackInvoker:
+            def invoke(self, endpoint, request):
+                _ = request
+                if endpoint.endpoint_id == "empty-primary":
+                    return CanonicalLLMOutcome(text="", tool_calls=[], finish_reason=LLMFinishReason.STOP)
+                return CanonicalLLMOutcome(text="fallback reply", finish_reason=LLMFinishReason.STOP)
+
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
+            settings_repository=settings_repository,
+            endpoint_invoker=EmptyThenFallbackInvoker(),
+            endpoint_retry_attempts=1,
+        )
+
+        outcome = runtime.generate(
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=128,
+            )
+        )
+
+        self.assertEqual(outcome.text, "fallback reply")
+        self.assertEqual(runtime.last_endpoint_id, "fallback")
+
+    def test_llm_runtime_treats_empty_stream_without_tool_calls_as_endpoint_failure(self) -> None:
+        endpoint_repository = LLMEndpointRepository()
+        settings_repository = RuntimeSettingRepository()
+        endpoint_repository.ensure_defaults(
+            [
+                {
+                    "endpoint_id": "empty-primary",
+                    "provider": "stub",
+                    "model_id": "empty-primary-model",
+                    "api_mode": "openai_chat",
+                    "base_url": "stub://local/empty-primary",
+                    "credential_ref": "stub-empty-primary",
+                    "priority": 0,
+                    "enabled": True,
+                },
+                {
+                    "endpoint_id": "fallback",
+                    "provider": "stub",
+                    "model_id": "fallback-model",
+                    "api_mode": "openai_chat",
+                    "base_url": "stub://local/fallback",
+                    "credential_ref": "stub-fallback",
+                    "priority": 1,
+                    "enabled": True,
+                },
+            ]
+        )
+
+        class EmptyThenFallbackStreamInvoker:
+            def invoke_stream(self, endpoint, request):
+                _ = request
+                if endpoint.endpoint_id == "empty-primary":
+                    return [NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.STOP)]
+                return [
+                    NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="fallback stream"),
+                    NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.STOP),
+                ]
+
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
+            settings_repository=settings_repository,
+            endpoint_invoker=EmptyThenFallbackStreamInvoker(),
+            endpoint_retry_attempts=1,
+        )
+
+        events = runtime.generate_stream(
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=128,
+            )
+        )
+
+        self.assertEqual("".join(event.text for event in events), "fallback stream")
+        self.assertEqual(runtime.last_endpoint_id, "fallback")
 
     def test_llm_runtime_returns_error_outcome_when_all_endpoints_fail(self) -> None:
         endpoint_repository = LLMEndpointRepository()

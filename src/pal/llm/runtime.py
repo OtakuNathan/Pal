@@ -485,18 +485,50 @@ class LiteLLMEndpointInvoker:
         payload = response.model_dump() if hasattr(response, "model_dump") else response.to_dict() if hasattr(response, "to_dict") else response
         choices = list((payload or {}).get("choices") or [])
         if not choices:
-            return CanonicalLLMOutcome(text="", reasoning_text="", tool_calls=[], finish_reason=LLMFinishReason.STOP)
+            raise LLMEndpointInvocationError("llm response contained no choices")
         first = choices[0] or {}
         message = first.get("message") or {}
         text = _message_text(message)
         reasoning_text = _message_reasoning_text(message)
-        return CanonicalLLMOutcome(
+        outcome = CanonicalLLMOutcome(
             text=text,
             reasoning_text=reasoning_text,
             tool_calls=_parse_tool_calls(message, tool_name_aliases=tool_name_aliases),
             finish_reason=str(first.get("finish_reason") or LLMFinishReason.STOP),
             response_mode=_coerce_response_mode(((payload or {}).get("metadata") or {}).get("response_mode")),
         )
+        _ensure_llm_invocation_result_has_payload(outcome)
+        return outcome
+
+
+def _ensure_llm_invocation_result_has_payload(result: Any) -> None:
+    if isinstance(result, CanonicalLLMOutcome):
+        if _is_empty_successful_llm_outcome(result):
+            raise LLMEndpointInvocationError("llm response contained no assistant content or tool calls")
+        return
+    if isinstance(result, list) and all(isinstance(item, NormalizedLLMStreamEvent) for item in result):
+        if _is_empty_successful_stream_result(result):
+            raise LLMEndpointInvocationError("llm stream ended without assistant content or tool calls")
+
+
+def _is_empty_successful_llm_outcome(outcome: CanonicalLLMOutcome) -> bool:
+    finish_reason = str(outcome.finish_reason or "").strip()
+    if finish_reason in {LLMFinishReason.ERROR, LLMFinishReason.COMPACT_REQUIRED}:
+        return False
+    return not str(outcome.text or "").strip() and not list(outcome.tool_calls or [])
+
+
+def _is_empty_successful_stream_result(events: list[NormalizedLLMStreamEvent]) -> bool:
+    saw_terminal_error = False
+    saw_payload = False
+    for event in events:
+        if event.event_kind in {LLMStreamEventKind.ERROR, LLMStreamEventKind.COMPACT_REQUIRED}:
+            saw_terminal_error = True
+        elif event.event_kind == LLMStreamEventKind.TEXT_DELTA and str(event.text or "").strip():
+            saw_payload = True
+        elif event.event_kind == LLMStreamEventKind.TOOL_CALL and event.tool_call is not None:
+            saw_payload = True
+    return not saw_terminal_error and not saw_payload
 
 
 @dataclass
@@ -987,6 +1019,7 @@ class LLMRuntime(LLMRuntimePort):
                         timeout_seconds=timeout_seconds,
                         description=f"llm endpoint invocation for {endpoint.endpoint_id}",
                     )
+                    _ensure_llm_invocation_result_has_payload(result)
                     self.last_request = effective_request
                     self.last_endpoint_id = endpoint.endpoint_id
                     self.last_model_id = endpoint.model_id
