@@ -12,7 +12,7 @@ from pal.artifact.contracts import (
     ArtifactSearchResult,
     ArtifactTranscriberPort,
 )
-from pal.artifact.introspection import ArtifactIntrospectionProvider, register_with_core
+from pal.artifact.capabilities import ArtifactIntrospectionProvider, register_with_core
 from pal.artifact.models import ArtifactHotStateModel, ArtifactRecordModel, ArtifactRepresentationModel
 from pal.artifact.repository import ArtifactRepository
 from pal.artifact.service import ArtifactManager, NoopArtifactTranscriber

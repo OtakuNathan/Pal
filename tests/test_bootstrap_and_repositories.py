@@ -19,7 +19,7 @@ from pal.channel import ChannelEndpointRepository, ChannelRuntime, FactoryChanne
 from pal.channel.contracts import EndpointConfig, ResponseHandle
 from pal.channel.endpoints import SocketChannelEndpoint, TelegramChannelEndpoint, TelegramChannelEndpointFactory
 from pal.channel.endpoints.socket_protocol import pack_socket_message, read_socket_message
-from pal.channel.introspection import ChannelIntrospectionProvider
+from pal.channel.capabilities import ChannelIntrospectionProvider
 from pal.control import InteractionButtonSpec, InteractionMessageSpec
 from pal.execution import CapabilityCall
 from pal.core.runtime_config import RuntimeConfig

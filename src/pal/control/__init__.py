@@ -12,7 +12,7 @@ from pal.control.contracts import (
     ControlRoute,
 )
 from pal.control.handler import ControlEventHandler
-from pal.control.introspection import ControlIntrospectionProvider, ControlSnapshot, inspect_control, register_with_core
+from pal.control.capabilities import ControlIntrospectionProvider, ControlSnapshot, inspect_control, register_with_core
 from pal.control.routing import derive_control_scope_key, route_from_channel_envelope
 from pal.control.service import ControlPlane
 

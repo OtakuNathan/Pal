@@ -34,7 +34,7 @@ from pal.memory.embedding import (
     OllamaEmbeddingProvider,
     SentenceTransformerBGEEmbedder,
 )
-from pal.memory.introspection import MemoryIntrospectionProvider, MemorySnapshot, inspect_memory, register_with_core
+from pal.memory.capabilities import MemoryIntrospectionProvider, MemorySnapshot, inspect_memory, register_with_core
 from pal.memory.models import MemoryCaseModel, MemoryEmbeddingModel, MemoryEmbeddingVecModel, MemoryFactModel, MemoryTopicModel
 from pal.memory.repository import L3ProviderSelector, MemoryDurableRepository
 from pal.memory.schema import ensure_memory_schema, ensure_sqlite_vec_loaded

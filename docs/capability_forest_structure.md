@@ -488,8 +488,8 @@ plugin 节点负责：
    看 `PalCore` 怎么 publish / withdraw / detach / reattach
 
 6. 具体 provider 样例：
-   - [channel/introspection.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/channel/introspection.py)
-   - [llm/introspection.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/llm/introspection.py)
+   - [channel/capabilities.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/channel/capabilities.py)
+   - [llm/capabilities.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/llm/capabilities.py)
    - [plugins/l3/stubs.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/plugins/l3/stubs.py)
 
 ## 当前第一版已经做到什么

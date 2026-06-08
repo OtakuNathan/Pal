@@ -93,7 +93,7 @@ from pal.minion.prompt_adapter import (
     render_minion_system_prompt as _render_system_prompt,
     render_minion_task_prompt as _render_task_prompt,
 )
-from pal.minion.provider import _control_route_payload_for_turn, _prompt_log_enabled_for_turn
+from pal.minion.capabilities import _control_route_payload_for_turn, _prompt_log_enabled_for_turn
 from pal.minion.prompt import TaskingPromptFragmentProvider
 from pal.memory import MemoryCompactRequest, MemoryService
 from pal.foundation import EventEnvelope

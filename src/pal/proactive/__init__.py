@@ -6,7 +6,7 @@ from pal.proactive.contracts import (
     ProactiveTriggerEvent,
 )
 from pal.proactive.input_builder import build_proactive_trigger_input
-from pal.proactive.introspection import ProactiveIntrospectionProvider, ProactiveSnapshot, inspect_proactive, register_with_core
+from pal.proactive.capabilities import ProactiveIntrospectionProvider, ProactiveSnapshot, inspect_proactive, register_with_core
 from pal.proactive.models import ProactiveDefinitionModel, ProactiveRunModel
 from pal.proactive.repository import ProactiveRepository, ProactiveRepositoryPort, StoredProactiveDefinition, StoredProactiveRun
 from pal.proactive.scheduling import compute_next_proactive_run_at_utc, normalize_proactive_schedule

@@ -9,7 +9,7 @@ from pal.web_fetch.contracts import (
     WebScreenshotRequest,
     WebScreenshotResult,
 )
-from pal.web_fetch.introspection import WebFetchIntrospectionProvider, WebFetchModuleSnapshot, inspect_web_fetch, register_with_core
+from pal.web_fetch.capabilities import WebFetchIntrospectionProvider, WebFetchModuleSnapshot, inspect_web_fetch, register_with_core
 from pal.web_fetch.models import WebFetchProviderModel
 from pal.web_fetch.repository import WebFetchProviderRepository
 from pal.web_fetch.service import WebFetchService

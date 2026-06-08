@@ -28,7 +28,7 @@ from pal.llm.adapters import (
     unregister_llm_provider_adapter,
 )
 from pal.llm.credentials import LiteLLMCredentialResolver, ResolvedLLMAuth, default_env_var_for_endpoint
-from pal.llm.introspection import (
+from pal.llm.capabilities import (
     LLMActiveModelSnapshot,
     LLMIntrospectionProvider,
     LLMModelListItem,

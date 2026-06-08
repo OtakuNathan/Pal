@@ -18,7 +18,7 @@ from pal.channel.factory import (
 from pal.foundation.artifact import ArtifactIngestor, StoredArtifact
 from pal.foundation.attachment import AttachmentSpec
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointBase, ChannelEndpointQueueBase
-from pal.channel.introspection import ChannelIntrospectionProvider, ChannelSnapshot, inspect_channel, register_with_core
+from pal.channel.capabilities import ChannelIntrospectionProvider, ChannelSnapshot, inspect_channel, register_with_core
 from pal.channel.models import ChannelEndpointModel
 from pal.channel.provider_manager import (
     ChannelProviderBuildContext,

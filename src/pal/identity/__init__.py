@@ -1,4 +1,4 @@
-from pal.identity.introspection import IdentityIntrospectionProvider, IdentitySnapshot, inspect_identity, register_with_core
+from pal.identity.capabilities import IdentityIntrospectionProvider, IdentitySnapshot, inspect_identity, register_with_core
 from pal.identity.contracts import (
     PalPersonaProfile,
     PalPreferencesProfile,

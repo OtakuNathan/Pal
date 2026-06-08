@@ -11,7 +11,7 @@ from pal.failure.contracts import (
     VerificationResult,
 )
 from pal.failure.handler import FailureEventHandler
-from pal.failure.introspection import FailureIntrospectionProvider, register_with_core
+from pal.failure.capabilities import FailureIntrospectionProvider, register_with_core
 from pal.failure.runtime import FailureRuntime
 
 __all__ = [

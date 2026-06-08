@@ -20,7 +20,7 @@ from pal.behavior.contracts import (
     SkillInjectRequest,
 )
 from pal.behavior.decorators import AffordanceBlueprint, SkillBlueprint, affordance, skill
-from pal.behavior.introspection import BehaviorIntrospectionProvider, register_with_core
+from pal.behavior.capabilities import BehaviorIntrospectionProvider, register_with_core
 from pal.behavior.models import BehaviorAffordanceModel, BehaviorSkillModel
 from pal.behavior.repository import BehaviorRepository
 from pal.behavior.service import BehaviorService

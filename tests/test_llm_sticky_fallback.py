@@ -11,7 +11,7 @@ from pal.core import PalCore
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
 from pal.llm import EndpointResolver, LLMRuntime, RuntimeSettingRepository
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
-from pal.llm.introspection import LLMIntrospectionProvider, register_with_core as register_llm_with_core
+from pal.llm.capabilities import LLMIntrospectionProvider, register_with_core as register_llm_with_core
 from pal.runtime_app import open_runtime
 
 

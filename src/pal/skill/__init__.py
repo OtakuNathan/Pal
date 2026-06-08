@@ -71,7 +71,7 @@ def __getattr__(name: str):
 
         return getattr(tools, name)
     if name in {"SkillIntrospectionProvider", "register_with_core"}:
-        from pal.skill.introspection import SkillIntrospectionProvider, register_with_core
+        from pal.skill.capabilities import SkillIntrospectionProvider, register_with_core
 
         return {"SkillIntrospectionProvider": SkillIntrospectionProvider, "register_with_core": register_with_core}[name]
     raise AttributeError(name)

@@ -352,5 +352,5 @@ Rules:
 - `src/pal/behavior/repository.py`
 - `src/pal/behavior/service.py`
 - `src/pal/behavior/tools.py`
-- `src/pal/behavior/introspection.py`
+- `src/pal/behavior/capabilities.py`
 - `src/pal/behavior/prompt.py`

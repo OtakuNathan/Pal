@@ -4,7 +4,7 @@ from pal.web_search.contracts import (
     WebSearchQuery,
     WebSearchQueryResult,
 )
-from pal.web_search.introspection import WebSearchIntrospectionProvider, WebSearchModuleSnapshot, inspect_web_search, register_with_core
+from pal.web_search.capabilities import WebSearchIntrospectionProvider, WebSearchModuleSnapshot, inspect_web_search, register_with_core
 from pal.web_search.models import WebSearchProviderModel
 from pal.web_search.repository import WebSearchProviderRepository
 from pal.web_search.service import WebSearchService

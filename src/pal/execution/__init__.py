@@ -46,7 +46,7 @@ def __getattr__(name: str):
 
         return ExecutionRuntime
     if name in {"ExecutionIntrospectionProvider", "ExecutionSnapshot", "inspect_execution", "register_with_core"}:
-        from pal.execution.introspection import (
+        from pal.execution.capabilities import (
             ExecutionIntrospectionProvider,
             ExecutionSnapshot,
             inspect_execution,
@@ -93,7 +93,7 @@ def __getattr__(name: str):
 
         return FileWriteTool
     if name == "get_file_state_cache":
-        from pal.execution.introspection import get_file_state_cache
+        from pal.execution.capabilities import get_file_state_cache
 
         return get_file_state_cache
     raise AttributeError(name)

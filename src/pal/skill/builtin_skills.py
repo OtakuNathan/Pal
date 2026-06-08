@@ -26,7 +26,7 @@ Put community plugins under the runtime root:
 <runtime_root>/plugins/community/<plugin_id>/
   plugin.toml
   runtime.py
-  introspection.py        # optional, but recommended for capability providers
+  capabilities.py        # optional, but recommended for capability providers
   README.md              # optional human notes
 ```
 
@@ -44,7 +44,7 @@ enabled_by_default = true
 Optional:
 
 ```toml
-reload_modules = ["runtime", "introspection"]
+reload_modules = ["runtime", "capabilities"]
 ```
 
 For community plugins, Pal clears modules loaded from the plugin directory during refresh. `reload_modules` is still useful when the plugin imports helper modules through stable names.
@@ -64,7 +64,7 @@ Example `runtime.py`:
 from dataclasses import dataclass
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
-from introspection import DemoProvider
+from capabilities import DemoProvider
 
 
 @dataclass
@@ -93,7 +93,7 @@ def build_plugin(context=None, runtime_root=None, plugin_dir=None):
 
 Expose operations by combining `@capability_node` on the provider class and `@capability_action` on methods. Use `CapabilityCall` for operation calls and return `CapabilityResult` with non-empty `llm_text`.
 
-Example `introspection.py`:
+Example `capabilities.py`:
 
 ```python
 from dataclasses import dataclass
