@@ -13,8 +13,11 @@ from pal.minion.contracts import (
     SERIAL_MILESTONE_MODES,
     SERIAL_MODULE_MILESTONES_MODE,
 )
+from pal.minion.ledger_store import MinionLedgerStore
 from pal.minion.plan_store import MinionPlanStore
 from pal.minion.review_gate_store import MinionReviewGateStore, compact_review_gate_ref
+from pal.minion.schema import ensure_minion_schema
+from pal.minion.search_store import MinionSearchStore
 from pal.minion.work_order import (
     PlanArtifact,
     ReviewGateResult,
@@ -33,7 +36,7 @@ from pal.minion.work_order import (
 from pal.minion.turns import build_minion_turn_from_pack
 from pal.minion.validation import normalize_milestones
 from pal.shared import TaskContextPack
-from pal.shared.text_search import compile_jieba_fts_queries, jieba_fts_text
+from pal.shared.text_search import jieba_fts_text
 
 
 ACTIVE_WORK_ORDER_STATUSES = ("active", "running", "blocked", "approval_pending")
@@ -44,15 +47,6 @@ _WORK_ORDER_DRAFT_ITEM_TEXT_LIMIT = 1000
 _WORK_ORDER_DRAFT_METADATA_VALUE_LIMIT = 12000
 _RUN_WORKSPACE_KEYS = {"run_dir", "artifact_dir", "log_dir"}
 _RAW_WORK_ORDER_METADATA_KEY_PARTS = ("payload", "raw", "transcript", "messages", "full_context", "conversation")
-def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
-    columns = {
-        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
-        for row in connection.execute(f"PRAGMA table_info({table_name})")
-    }
-    if column_name not in columns:
-        connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
-
-
 def _profile_ref_parts_from_canonical(value: str) -> tuple[str, str]:
     raw = str(value or "").strip()
     if raw and "." in raw:
@@ -98,165 +92,24 @@ class TaskingRepositoryPort(Protocol):
 @dataclass
 class MinionTaskingRepository(TaskingRepositoryPort):
     runtime_root: Path
+    ledger: MinionLedgerStore = field(init=False, repr=False)
     plans: MinionPlanStore = field(init=False, repr=False)
     review_gates: MinionReviewGateStore = field(init=False, repr=False)
+    search: MinionSearchStore = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.ledger = MinionLedgerStore(self)
         self.plans = MinionPlanStore(self)
         self.review_gates = MinionReviewGateStore(self)
+        self.search = MinionSearchStore(self)
 
     @property
     def db_path(self) -> Path:
         return self.runtime_root / "pal.sqlite3"
 
     def ensure_schema(self) -> None:
-        self.runtime_root.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
-            db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS minion_tasks (
-                    task_id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL DEFAULT '',
-                    goal TEXT NOT NULL DEFAULT '',
-                    summary TEXT NOT NULL DEFAULT '',
-                    status TEXT NOT NULL DEFAULT 'active',
-                    metadata_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS minion_work_orders (
-                    work_order_id TEXT PRIMARY KEY,
-                    task_id TEXT NOT NULL,
-                    title TEXT NOT NULL DEFAULT '',
-                    goal TEXT NOT NULL DEFAULT '',
-                    instruction TEXT NOT NULL DEFAULT '',
-                    status TEXT NOT NULL DEFAULT 'active',
-                    minion_profile TEXT NOT NULL DEFAULT 'generic',
-                    profile_group TEXT NOT NULL DEFAULT 'general',
-                    profile_name TEXT NOT NULL DEFAULT 'generic',
-                    metadata_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    ended_at TEXT NOT NULL DEFAULT ''
-                );
-
-                CREATE TABLE IF NOT EXISTS minion_work_order_drafts (
-                    draft_id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL DEFAULT '',
-                    goal TEXT NOT NULL DEFAULT '',
-                    source_summary TEXT NOT NULL DEFAULT '',
-                    status TEXT NOT NULL DEFAULT 'draft',
-                    minion_profile TEXT NOT NULL DEFAULT 'software_engineering.planner',
-                    task_id TEXT NOT NULL DEFAULT '',
-                    proposed_work_order_id TEXT NOT NULL DEFAULT '',
-                    payload_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE UNIQUE INDEX IF NOT EXISTS minion_one_active_work_order
-                ON minion_work_orders(task_id)
-                WHERE status IN ('active', 'running', 'blocked', 'approval_pending');
-
-                CREATE TABLE IF NOT EXISTS minion_work_order_milestones (
-                    milestone_id TEXT PRIMARY KEY,
-                    work_order_id TEXT NOT NULL,
-                    milestone_index INTEGER NOT NULL,
-                    title TEXT NOT NULL DEFAULT '',
-                    summary TEXT NOT NULL DEFAULT '',
-                    acceptance_json TEXT NOT NULL DEFAULT '[]',
-                    created_at TEXT NOT NULL,
-                    UNIQUE(work_order_id, milestone_index)
-                );
-
-                CREATE TABLE IF NOT EXISTS minion_worker_checkpoints (
-                    checkpoint_id TEXT PRIMARY KEY,
-                    work_order_id TEXT NOT NULL,
-                    milestone_index INTEGER NOT NULL,
-                    status TEXT NOT NULL,
-                    summary TEXT NOT NULL DEFAULT '',
-                    payload_json TEXT NOT NULL DEFAULT '{}',
-                    minion_id TEXT NOT NULL DEFAULT '',
-                    run_id TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS minion_review_gates (
-                    gate_id TEXT PRIMARY KEY,
-                    gate_kind TEXT NOT NULL,
-                    target_kind TEXT NOT NULL DEFAULT '',
-                    target_key TEXT NOT NULL DEFAULT '',
-                    verdict TEXT NOT NULL,
-                    summary TEXT NOT NULL DEFAULT '',
-                    payload_json TEXT NOT NULL DEFAULT '{}',
-                    reviewer_profile TEXT NOT NULL DEFAULT '',
-                    work_order_id TEXT NOT NULL DEFAULT '',
-                    run_id TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS minion_review_gates_target
-                ON minion_review_gates(gate_kind, target_kind, target_key, created_at);
-
-                CREATE TABLE IF NOT EXISTS minion_worker_ledger (
-                    ledger_id TEXT PRIMARY KEY,
-                    work_order_id TEXT NOT NULL,
-                    event_kind TEXT NOT NULL,
-                    summary TEXT NOT NULL DEFAULT '',
-                    payload_json TEXT NOT NULL DEFAULT '{}',
-                    minion_id TEXT NOT NULL DEFAULT '',
-                    run_id TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS minion_task_lessons (
-                    lesson_id TEXT PRIMARY KEY,
-                    task_id TEXT NOT NULL,
-                    work_order_id TEXT NOT NULL,
-                    lesson_text TEXT NOT NULL,
-                    minion_id TEXT NOT NULL DEFAULT '',
-                    run_id TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS minion_system_lesson_candidates (
-                    candidate_id TEXT PRIMARY KEY,
-                    task_id TEXT NOT NULL,
-                    work_order_id TEXT NOT NULL,
-                    lesson_text TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
-                    minion_id TEXT NOT NULL DEFAULT '',
-                    run_id TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE VIRTUAL TABLE IF NOT EXISTS minion_tasks_fts USING fts5(
-                    task_id UNINDEXED,
-                    title,
-                    goal,
-                    summary
-                );
-
-                CREATE VIRTUAL TABLE IF NOT EXISTS minion_work_orders_fts USING fts5(
-                    work_order_id UNINDEXED,
-                    task_id UNINDEXED,
-                    title,
-                    goal,
-                    instruction
-                );
-
-                CREATE VIRTUAL TABLE IF NOT EXISTS minion_work_order_drafts_fts USING fts5(
-                    draft_id UNINDEXED,
-                    title,
-                    goal,
-                    source_summary,
-                    payload_text
-                );
-                """
-            )
-            _ensure_column(db, "minion_work_orders", "profile_group", "TEXT NOT NULL DEFAULT 'general'")
-            _ensure_column(db, "minion_work_orders", "profile_name", "TEXT NOT NULL DEFAULT 'generic'")
+            ensure_minion_schema(self.runtime_root, db)
 
     def prepare_pack_for_spawn(self, pack: TaskContextPack) -> TaskContextPack:
         self.ensure_work_order_from_pack(pack)
@@ -698,8 +551,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             "review_gate": gate_payload,
             "summary": str(gate_payload.get("summary") or claim_payload.get("summary") or "checkpoint review passed"),
         }
-        self._insert_checkpoint(db, work_order_id, closure_payload, str(row["minion_id"] or ""), str(row["run_id"] or ""), created_at)
-        self._insert_ledger(
+        self.ledger.insert_checkpoint(db, work_order_id, closure_payload, str(row["minion_id"] or ""), str(row["run_id"] or ""), created_at)
+        self.ledger.insert_ledger(
             db,
             work_order_id,
             "milestone_closed",
@@ -885,8 +738,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "child_completion": dict(completion),
             }
             if already_completed is None:
-                self._insert_checkpoint(db, parent_work_order_id, checkpoint_payload, "", "", created_at)
-                self._insert_ledger(db, parent_work_order_id, "module_checkpoint", summary, checkpoint_payload, "", "", created_at)
+                self.ledger.insert_checkpoint(db, parent_work_order_id, checkpoint_payload, "", "", created_at)
+                self.ledger.insert_ledger(db, parent_work_order_id, "module_checkpoint", summary, checkpoint_payload, "", "", created_at)
             rows = db.execute(
                 "SELECT milestone_index FROM minion_work_order_milestones WHERE work_order_id = ? ORDER BY milestone_index",
                 (parent_work_order_id,),
@@ -1472,12 +1325,12 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         run_id = str(event.get("run_id") or payload.get("run_id") or "")
         summary = str(payload.get("summary") or payload.get("title") or event_kind)
         with self._connect() as db:
-            self._insert_ledger(db, work_order_id, event_kind, summary, payload, minion_id, run_id, created_at)
+            self.ledger.insert_ledger(db, work_order_id, event_kind, summary, payload, minion_id, run_id, created_at)
             if event_kind == "checkpoint":
-                self._insert_checkpoint(db, work_order_id, payload, minion_id, run_id, created_at)
+                self.ledger.insert_checkpoint(db, work_order_id, payload, minion_id, run_id, created_at)
                 self._record_payload_artifacts(db, work_order_id, payload)
             elif event_kind == "terminal":
-                self._record_terminal(db, work_order_id, payload, minion_id, run_id, created_at)
+                self.ledger.record_terminal(db, work_order_id, payload, minion_id, run_id, created_at)
                 self._record_deferred_experience(db, work_order_id, payload)
                 self._record_payload_artifacts(db, work_order_id, payload)
             elif event_kind == "module_completed":
@@ -1592,7 +1445,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
     def search_tasks(self, query: str, *, limit: int = 10) -> dict[str, Any]:
         self.ensure_schema()
         with self._connect() as db:
-            items = self._search_fts(
+            items = self.search.search_fts(
                 db,
                 table_name="minion_tasks_fts",
                 id_column="task_id",
@@ -1610,7 +1463,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
     def search_work_orders(self, query: str, *, limit: int = 10) -> dict[str, Any]:
         self.ensure_schema()
         with self._connect() as db:
-            items = self._search_fts(
+            items = self.search.search_fts(
                 db,
                 table_name="minion_work_orders_fts",
                 id_column="work_order_id",
@@ -1634,7 +1487,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
     def search_work_order_drafts(self, query: str, *, limit: int = 10) -> dict[str, Any]:
         self.ensure_schema()
         with self._connect() as db:
-            items = self._search_fts(
+            items = self.search.search_fts(
                 db,
                 table_name="minion_work_order_drafts_fts",
                 id_column="draft_id",
@@ -1809,81 +1662,6 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 ),
             )
 
-    def _insert_ledger(
-        self,
-        db: sqlite3.Connection,
-        work_order_id: str,
-        event_kind: str,
-        summary: str,
-        payload: dict[str, Any],
-        minion_id: str,
-        run_id: str,
-        created_at: str,
-    ) -> str:
-        ledger_id = f"led_{uuid4().hex[:16]}"
-        db.execute(
-            """
-            INSERT INTO minion_worker_ledger(
-                ledger_id, work_order_id, event_kind, summary, payload_json, minion_id, run_id, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (ledger_id, work_order_id, event_kind, summary, _json(payload), minion_id, run_id, created_at),
-        )
-        return ledger_id
-
-    def _insert_checkpoint(
-        self,
-        db: sqlite3.Connection,
-        work_order_id: str,
-        payload: dict[str, Any],
-        minion_id: str,
-        run_id: str,
-        created_at: str,
-    ) -> None:
-        milestone_index = _coerce_int(payload.get("milestone_index"))
-        if milestone_index is None:
-            milestone_index = self._derive_current_milestone_index(db, work_order_id)
-        status = str(payload.get("status") or "partial").strip().lower()
-        if status not in {"completed", "claimed", "partial", "blocked", "failed"}:
-            status = "partial"
-        checkpoint_id = str(payload.get("checkpoint_id") or "").strip() or f"chk_{uuid4().hex[:16]}"
-        db.execute(
-            """
-            INSERT INTO minion_worker_checkpoints(
-                checkpoint_id, work_order_id, milestone_index, status, summary, payload_json, minion_id, run_id, created_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                checkpoint_id,
-                work_order_id,
-                int(milestone_index or 0),
-                status,
-                str(payload.get("summary") or ""),
-                _json(payload),
-                minion_id,
-                run_id,
-                created_at,
-            ),
-        )
-
-    def _record_terminal(
-        self,
-        db: sqlite3.Connection,
-        work_order_id: str,
-        payload: dict[str, Any],
-        minion_id: str,
-        run_id: str,
-        created_at: str,
-    ) -> None:
-        status = str(payload.get("status") or "completed").strip().lower()
-        if status not in {"completed", "failed", "blocked", "killed"}:
-            status = "completed"
-        if status == "completed" and self._has_incomplete_milestones(db, work_order_id):
-            status = "active"
-        self._update_work_order_status(db, work_order_id, status)
-
     def _record_deferred_experience(self, db: sqlite3.Connection, work_order_id: str, payload: dict[str, Any]) -> None:
         deferred = _experience_payload(payload.get("deferred_experience"))
         if not deferred["task_lessons"] and not deferred["system_lessons"] and not deferred["memory_candidates"]:
@@ -1933,8 +1711,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                     "parent_work_order_id": parent_id,
                     "child_work_order_id": child_id,
                 }
-                self._insert_ledger(db, child_id, "terminal", str(child_payload["summary"]), child_payload, "", "", now)
-                self._record_terminal(db, child_id, child_payload, "", "", now)
+                self.ledger.insert_ledger(db, child_id, "terminal", str(child_payload["summary"]), child_payload, "", "", now)
+                self.ledger.record_terminal(db, child_id, child_payload, "", "", now)
                 child_terminal_recorded = True
         plan_execution["status"] = "awaiting_continue"
         plan_execution["status_reason"] = reason
@@ -1956,7 +1734,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             "child_terminal_status": normalized_child_status,
             "child_terminal_recorded": child_terminal_recorded,
         }
-        self._insert_ledger(db, parent_id, "module_recovered", str(parent_payload["summary"]), parent_payload, "", "", now)
+        self.ledger.insert_ledger(db, parent_id, "module_recovered", str(parent_payload["summary"]), parent_payload, "", "", now)
         return {
             "parent_work_order_id": parent_id,
             "child_work_order_id": child_id,
@@ -2106,66 +1884,6 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             ),
         )
 
-    def _search_fts(
-        self,
-        db: sqlite3.Connection,
-        *,
-        table_name: str,
-        id_column: str,
-        query: str,
-        limit: int,
-        fallback_sql: str,
-    ) -> list[dict[str, Any]]:
-        normalized = str(query or "").strip()
-        resolved_limit = max(1, min(int(limit or 10), 50))
-        if not normalized:
-            rows = [
-                {"id": str(row[0]), "score": float(row[1])}
-                for row in db.execute(fallback_sql, ("%%", resolved_limit)).fetchall()
-            ]
-            ordered: list[dict[str, Any]] = []
-            seen: set[str] = set()
-            for row in rows:
-                if row["id"] in seen:
-                    continue
-                seen.add(row["id"])
-                ordered.append(row)
-                if len(ordered) >= resolved_limit:
-                    break
-            return ordered
-        rows: list[dict[str, Any]] = []
-        for fts_query, query_weight in _compile_fts_queries(normalized):
-            try:
-                cursor = db.execute(
-                    f"""
-                    SELECT {id_column}, -bm25({table_name}) AS score
-                    FROM {table_name}
-                    WHERE {table_name} MATCH ?
-                    ORDER BY bm25({table_name})
-                    LIMIT ?
-                    """,
-                    (fts_query, resolved_limit),
-                )
-            except sqlite3.OperationalError:
-                continue
-            rows.extend({"id": str(row[0]), "score": float(row[1]) * float(query_weight)} for row in cursor.fetchall())
-            if rows:
-                break
-        if not rows:
-            like = f"%{normalized.lower()}%"
-            rows.extend({"id": str(row[0]), "score": float(row[1])} for row in db.execute(fallback_sql, (like, resolved_limit)).fetchall())
-        seen: set[str] = set()
-        ordered: list[dict[str, Any]] = []
-        for row in sorted(rows, key=lambda item: (-float(item["score"]), item["id"])):
-            if row["id"] in seen:
-                continue
-            seen.add(row["id"])
-            ordered.append(row)
-            if len(ordered) >= resolved_limit:
-                break
-        return ordered
-
-
 def _coerce_milestones(raw: Any, acceptance_criteria: list[str], fallback: str) -> list[dict[str, Any]]:
     _ = acceptance_criteria, fallback
     return normalize_milestones(raw)
@@ -2228,7 +1946,6 @@ def _merge_existing_work_order_metadata(stored: dict[str, Any], incoming: dict[s
             result["coder_work_order"] = dict(incoming_coder_work_order)
     result.update(updates)
     return result
-
 
 def _merge_existing_module_execution(stored: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     if not stored:
@@ -2924,7 +2641,3 @@ def _compact_work_order_draft_metadata(metadata: dict[str, Any]) -> dict[str, An
         if len(encoded) <= _WORK_ORDER_DRAFT_METADATA_VALUE_LIMIT:
             result[normalized_key] = value
     return result
-
-
-def _compile_fts_queries(text: str) -> list[tuple[str, float]]:
-    return compile_jieba_fts_queries(text)

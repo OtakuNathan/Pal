@@ -77,13 +77,15 @@ from pal.minion.runner import (
     MinionAgentLoopState,
     MinionRunner,
     MinionRuntimeBundle,
-    MinionScopedExecutionRuntime,
-    WORKSPACE_TOOL_SPECS,
     _llm_tools_for_allowed,
     _minion_llm_request_metadata,
-    _minion_review_gate_submit_result,
     _resolve_minion_max_output_tokens,
     build_slim_minion_runtime,
+)
+from pal.minion.scoped_execution import (
+    MinionScopedExecutionRuntime,
+    WORKSPACE_TOOL_SPECS,
+    _minion_review_gate_submit_result,
 )
 from pal.minion.prompt_adapter import (
     build_minion_task_envelope as _build_minion_task_envelope,

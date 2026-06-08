@@ -66,7 +66,7 @@ class MinionReviewGateStore:
                 ),
             )
             ledger_work_order_id = normalized_work_order_id or str(normalized_payload.get("target", {}).get("plan_ref", {}).get("plan_id") or "plan_review")
-            repo._insert_ledger(
+            repo.ledger.insert_ledger(
                 db,
                 ledger_work_order_id,
                 "review_gate",
@@ -126,7 +126,7 @@ class MinionReviewGateStore:
                     "evidence_ref": ref,
                     "reviewer_profile": str(reviewer_profile or ""),
                 }
-                ledger_id = repo._insert_ledger(
+                ledger_id = repo.ledger.insert_ledger(
                     db,
                     str(work_order_id or "review_tool_evidence"),
                     "review_tool_evidence",
