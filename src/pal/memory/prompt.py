@@ -4,11 +4,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pal.memory.contracts import MemoryPack
-from pal.memory.l1_protocol import (
-    complete_tool_protocol_indices as _complete_tool_protocol_indices,
-    render_incomplete_tool_call_context as _render_incomplete_tool_call_context,
-    render_orphan_tool_result_context as _render_orphan_tool_result_context,
-)
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
 
 if TYPE_CHECKING:
@@ -40,7 +35,6 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
             if not _is_synthetic_compaction_summary(message, summary_text)
         ]
         cleared_indices = _build_cleared_tool_indices(messages, keep_recent=self._keep_recent)
-        complete_tool_call_indices, paired_tool_indices = _complete_tool_protocol_indices(messages)
 
         block_index = 0
         for i, message in enumerate(messages):
@@ -52,21 +46,6 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
 
             if i in cleared_indices:
                 if role == "tool":
-                    if i not in paired_tool_indices:
-                        fragments.append(
-                            PromptFragment(
-                                section="memory",
-                                title="Recent Context",
-                                content=_render_orphan_tool_result_context("[old tool result cleared]", tool_call_id=tool_call_id),
-                                priority=40 + block_index,
-                                metadata={
-                                    "block_id": f"l1_recent_context_{block_index}",
-                                    "role": "user",
-                                },
-                            )
-                        )
-                        block_index += 1
-                        continue
                     fragments.append(
                         PromptFragment(
                             section="memory",
@@ -82,21 +61,6 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                     )
                     block_index += 1
                 elif role == "assistant" and tool_calls:
-                    if i not in complete_tool_call_indices:
-                        fragments.append(
-                            PromptFragment(
-                                section="memory",
-                                title="Recent Context",
-                                content=_render_incomplete_tool_call_context(content, tool_calls=tool_calls),
-                                priority=40 + block_index,
-                                metadata={
-                                    "block_id": f"l1_recent_context_{block_index}",
-                                    "role": "user",
-                                },
-                            )
-                        )
-                        block_index += 1
-                        continue
                     fragments.append(
                         PromptFragment(
                             section="memory",
@@ -114,21 +78,6 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                 continue
 
             if role == "tool" and (content or tool_call_id):
-                if i not in paired_tool_indices:
-                    fragments.append(
-                        PromptFragment(
-                            section="memory",
-                            title="Recent Context",
-                            content=_render_orphan_tool_result_context(content, tool_call_id=tool_call_id),
-                            priority=40 + block_index,
-                            metadata={
-                                "block_id": f"l1_recent_context_{block_index}",
-                                "role": "user",
-                            },
-                        )
-                    )
-                    block_index += 1
-                    continue
                 fragments.append(
                     PromptFragment(
                         section="memory",
@@ -144,21 +93,6 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                 )
                 block_index += 1
             elif role == "assistant" and tool_calls:
-                if i not in complete_tool_call_indices:
-                    fragments.append(
-                        PromptFragment(
-                            section="memory",
-                            title="Recent Context",
-                            content=_render_incomplete_tool_call_context(content, tool_calls=tool_calls),
-                            priority=40 + block_index,
-                            metadata={
-                                "block_id": f"l1_recent_context_{block_index}",
-                                "role": "user",
-                            },
-                        )
-                    )
-                    block_index += 1
-                    continue
                 fragments.append(
                     PromptFragment(
                         section="memory",

@@ -32,7 +32,6 @@ from pal.memory.contracts import (
     MemoryPackRequest,
     MemoryServicePort,
 )
-from pal.memory.l1_protocol import normalize_l1_tool_protocol
 from pal.memory.repository import L3ProviderSelector
 from pal.shared import RuntimeStatus
 
@@ -410,7 +409,7 @@ def _normalize_l1_transcript(item: list[L1TranscriptMessage] | list[dict[str, ob
                         tool_call_id=tool_call_id,
                     )
                 )
-    return normalize_l1_tool_protocol(normalized)
+    return normalized
 
 
 def _flatten_recent_l1_context(items: list[list[L1TranscriptMessage]]) -> list[L1TranscriptMessage]:

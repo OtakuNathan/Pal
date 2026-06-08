@@ -2729,7 +2729,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(transcript[0].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[1].tool_call_id, "call_1")
 
-    def test_l1_transcript_normalizes_orphan_tool_result_as_context(self) -> None:
+    def test_l1_transcript_preserves_orphan_tool_result_without_rewriting(self) -> None:
         service = MemoryService()
 
         service.l1_store.append(
@@ -2741,13 +2741,12 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         transcript = service.l1_store.items[0]
 
-        self.assertEqual([item.role for item in transcript], ["user", "user"])
-        self.assertEqual(transcript[1].kind, L1MessageKind.RUNTIME_CONTEXT_MEMORY)
-        self.assertIn("historical_tool_result", transcript[1].content)
+        self.assertEqual([item.role for item in transcript], ["user", "tool"])
+        self.assertEqual(transcript[1].kind, L1MessageKind.TOOL_RESULT)
         self.assertIn("orphan result", transcript[1].content)
-        self.assertIsNone(transcript[1].tool_call_id)
+        self.assertEqual(transcript[1].tool_call_id, "call_missing")
 
-    def test_l1_transcript_preserves_complete_batch_and_normalizes_extra_tool_result(self) -> None:
+    def test_l1_transcript_preserves_complete_batch_and_extra_tool_result_without_rewriting(self) -> None:
         service = MemoryService()
 
         service.l1_store.append(
@@ -2764,11 +2763,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         transcript = service.l1_store.items[0]
 
-        self.assertEqual([item.role for item in transcript], ["assistant", "tool", "user"])
+        self.assertEqual([item.role for item in transcript], ["assistant", "tool", "tool"])
         self.assertEqual(transcript[0].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[1].tool_call_id, "call_1")
-        self.assertEqual(transcript[2].kind, L1MessageKind.RUNTIME_CONTEXT_MEMORY)
-        self.assertIn("historical_tool_result", transcript[2].content)
+        self.assertEqual(transcript[2].kind, L1MessageKind.TOOL_RESULT)
+        self.assertEqual(transcript[2].tool_call_id, "call_extra")
         self.assertIn("extra result", transcript[2].content)
 
     def test_memory_prompt_preserves_complete_tool_protocol_batch(self) -> None:
@@ -2793,7 +2792,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(l1_fragments[1].metadata.get("tool_call_id"), "call_1")
         self.assertEqual(l1_fragments[1].content, "probe result")
 
-    def test_memory_prompt_renders_orphan_tool_result_as_context_not_tool_role(self) -> None:
+    def test_memory_prompt_preserves_orphan_tool_result_without_rewriting(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
 
         pack = MemoryPack(
@@ -2806,11 +2805,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         l1_fragments = [fragment for fragment in fragments if str(fragment.metadata.get("block_id") or "").startswith("l1_recent_context")]
 
         self.assertEqual(len(l1_fragments), 1)
-        self.assertEqual(l1_fragments[0].metadata.get("role"), "user")
-        self.assertIn("historical_tool_result", l1_fragments[0].content)
+        self.assertEqual(l1_fragments[0].metadata.get("role"), "tool")
+        self.assertEqual(l1_fragments[0].metadata.get("tool_call_id"), "call_missing")
         self.assertIn("orphan result", l1_fragments[0].content)
 
-    def test_memory_prompt_renders_incomplete_tool_call_header_as_context_not_protocol(self) -> None:
+    def test_memory_prompt_preserves_incomplete_tool_call_header_without_rewriting(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
 
         pack = MemoryPack(
@@ -2827,10 +2826,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         l1_fragments = [fragment for fragment in fragments if str(fragment.metadata.get("block_id") or "").startswith("l1_recent_context")]
 
         self.assertEqual(len(l1_fragments), 1)
-        self.assertEqual(l1_fragments[0].metadata.get("role"), "user")
-        self.assertIn("historical_tool_call", l1_fragments[0].content)
-        self.assertIn("op_probe", l1_fragments[0].content)
-        self.assertNotIn("tool_calls", l1_fragments[0].metadata)
+        self.assertEqual(l1_fragments[0].metadata.get("role"), "assistant")
+        self.assertEqual(l1_fragments[0].metadata.get("tool_calls")[0]["id"], "call_missing")
+        self.assertEqual(l1_fragments[0].content, "")
 
     def test_memory_prompt_dedupes_working_memory_entries_by_identity(self) -> None:
         from pal.memory import MemoryPack
