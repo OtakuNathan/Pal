@@ -809,6 +809,73 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(kwargs["model"], "zai/glm-5.1")
         self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "disabled"}})
 
+    def test_litellm_invoker_maps_deepseek_think_level_to_reasoning_and_thinking_body(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="deepseek-v4-pro",
+            provider="deepseek",
+            model_id="deepseek-v4-pro",
+            api_mode="openai_chat",
+            base_url="https://api.deepseek.com",
+            auth_kind="api_key_ref",
+            credential_ref="deepseek-prod:api-key",
+            priority=0,
+            enabled=True,
+            supports_reasoning=True,
+            capabilities_blob={"supports_thinking": True},
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "deepseek-token")
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=64,
+                metadata={"think_level": "xhigh"},
+            ),
+        )
+
+        self.assertEqual(kwargs["api_key"], "deepseek-token")
+        self.assertEqual(kwargs["model"], "deepseek/deepseek-v4-pro")
+        self.assertEqual(kwargs["reasoning_effort"], "high")
+        self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "enabled"}})
+
+    def test_litellm_invoker_maps_deepseek_off_to_disabled_thinking_without_reasoning_effort(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="deepseek-v4-pro-off",
+            provider="deepseek",
+            model_id="deepseek-v4-pro",
+            api_mode="openai_chat",
+            base_url="https://api.deepseek.com",
+            auth_kind="api_key_ref",
+            credential_ref="deepseek-prod:api-key",
+            priority=0,
+            enabled=True,
+            supports_reasoning=True,
+            capabilities_blob={"supports_thinking": True},
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "deepseek-token")
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=64,
+                metadata={"think_level": "off"},
+            ),
+        )
+
+        self.assertEqual(kwargs["model"], "deepseek/deepseek-v4-pro")
+        self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertNotIn("reasoning_effort", kwargs)
+
     def test_llm_provider_registry_can_register_runtime_provider(self) -> None:
         class DemoProvider(LLMProviderAdapter):
             provider_names = frozenset({"demo_provider"})
@@ -2383,21 +2450,21 @@ class PalV2BootstrapTests(unittest.TestCase):
         hot_ids = [eid for eid, state in service.l2_store.heat_registry.items() if state.heat_level == L2HeatLevel.HOT]
         self.assertEqual(len(hot_ids), 10)
 
-    def test_litellm_invoker_does_not_map_think_level_to_reasoning_effort_for_openai_chat(self) -> None:
+    def test_litellm_invoker_does_not_map_think_level_to_reasoning_effort_for_plain_openai_chat(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
-            endpoint_id="deepseek",
-            provider="deepseek",
-            model_id="deepseek/deepseek-chat",
+            endpoint_id="plain-openai-chat",
+            provider="openai_compatible",
+            model_id="gpt-test",
             api_mode="openai_chat",
-            base_url="https://api.deepseek.com/v1",
-            credential_ref="deepseek-prod",
+            base_url="https://example.test/v1",
+            credential_ref="openai-compatible-prod",
             enabled=True,
         )
         invoker = LiteLLMEndpointInvoker(
             credentials=LiteLLMCredentialResolver(secret_store=InMemorySecretStore())
         )
 
-        kwargs = invoker._build_completion_kwargs(
+        kwargs, _ = invoker._build_completion_kwargs(
             endpoint,
             CanonicalLLMRequest(
                 messages=[{"role": "user", "content": "hello"}],

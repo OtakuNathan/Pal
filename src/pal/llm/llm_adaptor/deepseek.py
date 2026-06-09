@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+from typing import Any
+
+from pal.llm.contracts import CanonicalLLMRequest
+from pal.llm.models import LLMEndpointModel
+
+from pal.llm.llm_adaptor.base import LLMProviderAdapter, LiteLLMCompletionDraft, _capabilities, _normalize_key
+
+
+class DeepSeekProvider(LLMProviderAdapter):
+    provider_names = frozenset({"deepseek"})
+    adapter_names = frozenset({"deepseek"})
+    litellm_provider = "deepseek"
+    model_provider_aliases = frozenset({"openai", "deepseek"})
+
+    @classmethod
+    def matches_endpoint(cls, endpoint: LLMEndpointModel) -> bool:
+        return _is_deepseek_identifier(endpoint)
+
+    def apply_request(self, request: CanonicalLLMRequest, draft: LiteLLMCompletionDraft) -> None:
+        if not _supports_deepseek_thinking(self.endpoint):
+            return
+        thinking = _think_level_to_deepseek_thinking(request.metadata.get("think_level"))
+        if thinking is not None:
+            draft.extra_body["thinking"] = thinking
+        effort = _think_level_to_deepseek_reasoning_effort(request.metadata.get("think_level"))
+        if effort is not None:
+            draft.reasoning_effort = effort
+
+
+def _supports_deepseek_thinking(endpoint: LLMEndpointModel) -> bool:
+    capabilities = _capabilities(endpoint)
+    if capabilities.get("supports_thinking") is False or capabilities.get("thinking") is False:
+        return False
+    return bool(
+        capabilities.get("supports_thinking")
+        or capabilities.get("thinking")
+        or getattr(endpoint, "supports_reasoning", False)
+        or _is_deepseek_identifier(endpoint)
+    )
+
+
+def _think_level_to_deepseek_thinking(value: Any) -> dict[str, str] | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    if text == "off":
+        return {"type": "disabled"}
+    return {"type": "enabled"}
+
+
+def _think_level_to_deepseek_reasoning_effort(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    mapping = {
+        "off": None,
+        "minimal": "low",
+        "low": "low",
+        "balanced": "medium",
+        "medium": "medium",
+        "deep": "high",
+        "high": "high",
+        "xhigh": "high",
+    }
+    return mapping.get(text, "medium" if text else None)
+
+
+def _is_deepseek_identifier(endpoint: LLMEndpointModel) -> bool:
+    capabilities = _capabilities(endpoint)
+    adapter = _normalize_key(capabilities.get("adapter") or capabilities.get("llm_adapter") or "")
+    provider = _normalize_key(getattr(endpoint, "provider", "") or "")
+    model_id = _normalize_key(getattr(endpoint, "model_id", "") or "")
+    base_url = _normalize_key(getattr(endpoint, "base_url", "") or "")
+    return bool(
+        adapter == "deepseek"
+        or provider == "deepseek"
+        or model_id.startswith("deepseek-")
+        or model_id.startswith("deepseek/")
+        or "/deepseek-" in model_id
+        or "deepseek.com" in base_url
+    )
