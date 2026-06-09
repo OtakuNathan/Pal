@@ -2829,6 +2829,40 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(l1_fragments[1].metadata.get("tool_call_id"), "call_1")
         self.assertEqual(l1_fragments[1].content, "probe result")
 
+    def test_prompt_compiler_preserves_empty_assistant_tool_call_headers(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        service = MemoryService()
+        service.l1_store.append(
+            [
+                L1TranscriptMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "op_probe", "arguments": "{}"}}],
+                ),
+                L1TranscriptMessage(role="tool", content="probe result", tool_call_id="call_1"),
+            ]
+        )
+        register_memory_with_core(core.context, service)
+
+        prompt = core.build_canonical_prompt(
+            PromptAssemblyContext(
+                core_mode="default",
+                event=EventEnvelope(
+                    event_kind="user.message",
+                    source_kind="channel",
+                    payload={"text": "current question"},
+                ),
+            )
+        )
+        protocol_messages = [message for message in prompt.messages if message["role"] in {"assistant", "tool"}]
+
+        self.assertEqual([message["role"] for message in protocol_messages], ["assistant", "tool"])
+        self.assertEqual(protocol_messages[0]["content"], "")
+        self.assertEqual(protocol_messages[0]["tool_calls"][0]["id"], "call_1")
+        self.assertEqual(protocol_messages[1]["tool_call_id"], "call_1")
+        self.assertEqual(protocol_messages[1]["content"], "probe result")
+
     def test_memory_prompt_preserves_orphan_tool_result_without_rewriting(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
 

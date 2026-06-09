@@ -39,7 +39,7 @@ class PromptCompiler:
         for fragment in fragments:
             normalized_section = self._normalize_prompt_section(fragment.section)
             rendered_body = str(fragment.content).strip()
-            if not rendered_body:
+            if not rendered_body and not self._preserve_empty_protocol_fragment(fragment):
                 continue
             if normalized_section == "identity":
                 system_blocks.append(
@@ -352,6 +352,16 @@ class PromptCompiler:
         if lowered in {"control", "observation", "finalization"}:
             return "runtime"
         return lowered
+
+    @staticmethod
+    def _preserve_empty_protocol_fragment(fragment: PromptFragment) -> bool:
+        metadata = dict(fragment.metadata or {})
+        role = str(metadata.get("role") or "").strip()
+        return (
+            role == "assistant" and bool(metadata.get("tool_calls"))
+        ) or (
+            role == "tool" and bool(str(metadata.get("tool_call_id") or "").strip())
+        )
 
     def _build_runtime_overlay_blocks(self, assembly_context: PromptAssemblyContext) -> list[PromptIRBlock]:
         blocks: list[PromptIRBlock] = []
