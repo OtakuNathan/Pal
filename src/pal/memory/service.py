@@ -84,7 +84,7 @@ class InMemoryL1Store(L1Store):
 
     def append(self, item: list[L1TranscriptMessage] | str) -> None:
         normalized = _normalize_l1_transcript(item)
-        if normalized:
+        if normalized and _validate_l1_tool_protocol(normalized).ok:
             self.items.append(normalized)
 
 
@@ -258,6 +258,13 @@ class MemoryService(MemoryServicePort):
         committed_transcript = _normalize_l1_transcript(request.transcript)
         if not committed_transcript:
             return MemoryCommitResult(status=RuntimeStatus.SKIPPED, committed_transcript=[])
+        validation = _validate_l1_tool_protocol(committed_transcript)
+        if not validation.ok:
+            return MemoryCommitResult(
+                status=RuntimeStatus.INVALID,
+                committed_transcript=[],
+                metadata={"turn_id": request.turn_id, "error": validation.reason},
+            )
         try:
             self.l1_store.append(committed_transcript)
         except Exception:
@@ -412,10 +419,92 @@ def _normalize_l1_transcript(item: list[L1TranscriptMessage] | list[dict[str, ob
     return normalized
 
 
+@dataclass(frozen=True)
+class _L1ToolProtocolValidation:
+    ok: bool
+    reason: str = ""
+
+
+def _validate_l1_tool_protocol(messages: list[L1TranscriptMessage]) -> _L1ToolProtocolValidation:
+    pending_tool_ids: set[str] = set()
+    pending_assistant_index: int | None = None
+    for index, message in enumerate(messages):
+        role = str(message.role or "").strip()
+        if pending_tool_ids and role != "tool":
+            return _L1ToolProtocolValidation(
+                ok=False,
+                reason=(
+                    f"assistant tool_calls at index {pending_assistant_index} missing tool results: "
+                    f"{', '.join(sorted(pending_tool_ids))}"
+                ),
+            )
+        if role == "assistant" and message.tool_calls:
+            tool_call_ids = _extract_l1_tool_call_ids(message.tool_calls)
+            if not tool_call_ids:
+                return _L1ToolProtocolValidation(
+                    ok=False,
+                    reason=f"assistant tool_calls at index {index} do not have complete ids",
+                )
+            if len(tool_call_ids) != len(set(tool_call_ids)):
+                return _L1ToolProtocolValidation(
+                    ok=False,
+                    reason=f"assistant tool_calls at index {index} contain duplicate ids",
+                )
+            pending_tool_ids = set(tool_call_ids)
+            pending_assistant_index = index
+            continue
+        if role == "tool":
+            tool_call_id = str(message.tool_call_id or "").strip()
+            if not tool_call_id:
+                return _L1ToolProtocolValidation(
+                    ok=False,
+                    reason=f"tool message at index {index} is missing tool_call_id",
+                )
+            if not pending_tool_ids:
+                return _L1ToolProtocolValidation(
+                    ok=False,
+                    reason=f"tool message at index {index} has no preceding assistant tool_calls",
+                )
+            if tool_call_id not in pending_tool_ids:
+                return _L1ToolProtocolValidation(
+                    ok=False,
+                    reason=f"tool message at index {index} has unexpected tool_call_id {tool_call_id}",
+                )
+            pending_tool_ids.remove(tool_call_id)
+            continue
+    if pending_tool_ids:
+        return _L1ToolProtocolValidation(
+            ok=False,
+            reason=(
+                f"assistant tool_calls at index {pending_assistant_index} missing tool results: "
+                f"{', '.join(sorted(pending_tool_ids))}"
+            ),
+        )
+    return _L1ToolProtocolValidation(ok=True)
+
+
+def _extract_l1_tool_call_ids(tool_calls: object) -> list[str]:
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return []
+    ids: list[str] = []
+    for tool_call in tool_calls:
+        call_id = ""
+        if isinstance(tool_call, dict):
+            call_id = str(tool_call.get("id") or "").strip()
+        else:
+            call_id = str(getattr(tool_call, "id", "") or getattr(tool_call, "call_id", "") or "").strip()
+        if not call_id:
+            return []
+        ids.append(call_id)
+    return ids
+
+
 def _flatten_recent_l1_context(items: list[list[L1TranscriptMessage]]) -> list[L1TranscriptMessage]:
     flattened: list[L1TranscriptMessage] = []
     for transcript in items:
-        flattened.extend(_normalize_l1_transcript(transcript))
+        normalized = _normalize_l1_transcript(transcript)
+        if normalized and _validate_l1_tool_protocol(normalized).ok:
+            flattened.extend(normalized)
     return flattened
 
 

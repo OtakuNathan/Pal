@@ -233,24 +233,11 @@ class TurnManager:
         if user_text:
             transcript.append(L1TranscriptMessage(role="user", content=user_text, kind=L1MessageKind.USER_REQUEST))
 
-        protocol_assistant_contents: list[str] = []
-        for msg in continuation.tool_protocol_messages:
-            role = str(msg.get("role", "") or "").strip()
-            content = str(msg.get("content", "") or "")
-            if role == "tool":
-                content = self._truncate_tool_result_for_l1(content)
-            tool_calls = msg.get("tool_calls")
-            if role == "assistant" and tool_calls:
-                protocol_assistant_contents.append(content.strip())
-            transcript.append(
-                L1TranscriptMessage(
-                    role=role,
-                    content=content,
-                    kind=L1MessageKind.TOOL_RESULT if role == "tool" else L1MessageKind.ASSISTANT_TOOL_CALL,
-                    tool_calls=tool_calls if isinstance(tool_calls, list) else None,
-                    tool_call_id=msg.get("tool_call_id"),
-                )
-            )
+        protocol_transcript, protocol_assistant_contents = self._build_l1_tool_protocol_transcript(
+            continuation,
+            diagnostic_kind="memory.exit_checkpoint.tool_protocol_invalid",
+        )
+        transcript.extend(protocol_transcript)
 
         for text in continuation.emitted_reply_texts:
             rendered = str(text or "").strip()
@@ -306,6 +293,100 @@ class TurnManager:
         lines.append("turn_outcome: not committed")
         lines.append("</turn_checkpoint>")
         return "\n".join(lines)
+
+    def _build_l1_tool_protocol_transcript(
+        self,
+        continuation: TurnContinuation,
+        *,
+        diagnostic_kind: str,
+    ) -> tuple[list[L1TranscriptMessage], list[str]]:
+        messages = list(continuation.tool_protocol_messages)
+        if not messages:
+            return [], []
+        validation_error = self._tool_protocol_validation_error(messages)
+        if validation_error:
+            self.state.diagnostics.append(
+                {
+                    "kind": diagnostic_kind,
+                    "turn_id": continuation.turn_id,
+                    "error": validation_error,
+                }
+            )
+            return [], []
+        transcript: list[L1TranscriptMessage] = []
+        protocol_assistant_contents: list[str] = []
+        for msg in messages:
+            role = str(msg.get("role", "") or "").strip()
+            content = str(msg.get("content", "") or "")
+            if role == "tool":
+                content = self._truncate_tool_result_for_l1(content)
+            tool_calls = msg.get("tool_calls")
+            if role == "assistant" and tool_calls:
+                protocol_assistant_contents.append(content.strip())
+            transcript.append(
+                L1TranscriptMessage(
+                    role=role,
+                    content=content,
+                    kind=L1MessageKind.TOOL_RESULT if role == "tool" else L1MessageKind.ASSISTANT_TOOL_CALL,
+                    tool_calls=tool_calls if isinstance(tool_calls, list) else None,
+                    tool_call_id=msg.get("tool_call_id"),
+                )
+            )
+        return transcript, protocol_assistant_contents
+
+    @staticmethod
+    def _tool_protocol_validation_error(messages: list[dict[str, Any]]) -> str:
+        pending_tool_ids: set[str] = set()
+        pending_assistant_index: int | None = None
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                return f"tool protocol message at index {index} is not an object"
+            role = str(message.get("role", "") or "").strip()
+            if pending_tool_ids and role != "tool":
+                return (
+                    f"assistant tool_calls at index {pending_assistant_index} missing tool results: "
+                    f"{', '.join(sorted(pending_tool_ids))}"
+                )
+            if role == "assistant" and message.get("tool_calls"):
+                tool_call_ids = TurnManager._extract_tool_protocol_call_ids(message.get("tool_calls"))
+                if not tool_call_ids:
+                    return f"assistant tool_calls at index {index} do not have complete ids"
+                if len(tool_call_ids) != len(set(tool_call_ids)):
+                    return f"assistant tool_calls at index {index} contain duplicate ids"
+                pending_tool_ids = set(tool_call_ids)
+                pending_assistant_index = index
+                continue
+            if role == "tool":
+                tool_call_id = str(message.get("tool_call_id") or "").strip()
+                if not tool_call_id:
+                    return f"tool message at index {index} is missing tool_call_id"
+                if not pending_tool_ids:
+                    return f"tool message at index {index} has no preceding assistant tool_calls"
+                if tool_call_id not in pending_tool_ids:
+                    return f"tool message at index {index} has unexpected tool_call_id {tool_call_id}"
+                pending_tool_ids.remove(tool_call_id)
+                continue
+            return f"tool protocol message at index {index} has unexpected role {role}"
+        if pending_tool_ids:
+            return (
+                f"assistant tool_calls at index {pending_assistant_index} missing tool results: "
+                f"{', '.join(sorted(pending_tool_ids))}"
+            )
+        return ""
+
+    @staticmethod
+    def _extract_tool_protocol_call_ids(tool_calls: object) -> list[str]:
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return []
+        ids: list[str] = []
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                return []
+            call_id = str(tool_call.get("id") or "").strip()
+            if not call_id:
+                return []
+            ids.append(call_id)
+        return ids
 
     def _truncate_tool_result_for_l1(self, content: str) -> str:
         max_chars = max(0, int(getattr(self.config, "l1_tool_result_max_chars", 8_000) or 0))
@@ -1486,22 +1567,11 @@ class PalCore:
         new_transcript: list[L1TranscriptMessage] = []
         if user_msg:
             new_transcript.append(user_msg)
-        for msg in continuation.tool_protocol_messages:
-            content = str(msg.get("content", ""))
-            if msg.get("role") == "tool":
-                content = self._truncate_tool_result_for_l1(content)
-            new_transcript.append(L1TranscriptMessage(
-                role=str(msg.get("role", "")),
-                content=content,
-                kind=L1MessageKind.TOOL_RESULT if msg.get("role") == "tool" else L1MessageKind.ASSISTANT_TOOL_CALL,
-                tool_calls=msg.get("tool_calls"),
-                tool_call_id=msg.get("tool_call_id"),
-            ))
-        protocol_assistant_contents = [
-            str(msg.get("content", "")).strip()
-            for msg in continuation.tool_protocol_messages
-            if str(msg.get("role", "") or "").strip() == "assistant" and msg.get("tool_calls")
-        ]
+        protocol_transcript, protocol_assistant_contents = self.turn_manager._build_l1_tool_protocol_transcript(
+            continuation,
+            diagnostic_kind="memory.commit.tool_protocol_invalid",
+        )
+        new_transcript.extend(protocol_transcript)
         assistant_msgs = [m for m in original if m.role == "assistant"]
         for m in assistant_msgs:
             content = str(m.content or "").strip()

@@ -50,8 +50,10 @@ from pal.memory import (
     L2Entry,
     L3RecallView,
     L3ProviderSelector,
+    MemoryCommitRequest,
     MemoryCompactRequest,
     MemoryPack,
+    MemoryPackRequest,
     MemoryQuery,
     MemoryService,
     register_with_core as register_memory_with_core,
@@ -2729,46 +2731,81 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(transcript[0].tool_calls[0]["id"], "call_1")
         self.assertEqual(transcript[1].tool_call_id, "call_1")
 
-    def test_l1_transcript_preserves_orphan_tool_result_without_rewriting(self) -> None:
+    def test_l1_commit_rejects_orphan_tool_result_without_rewriting(self) -> None:
         service = MemoryService()
 
-        service.l1_store.append(
+        result = service.commit_l1(
+            MemoryCommitRequest(
+                turn_id="turn_1",
+                transcript=[
+                    L1TranscriptMessage(role="user", content="question"),
+                    L1TranscriptMessage(role="tool", content="orphan result", tool_call_id="call_missing"),
+                ],
+            )
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.INVALID)
+        self.assertEqual(result.committed_transcript, [])
+        self.assertEqual(service.l1_store.items, [])
+        self.assertIn("no preceding assistant", result.metadata.get("error", ""))
+
+    def test_l1_commit_rejects_complete_batch_plus_extra_tool_result_without_rewriting(self) -> None:
+        service = MemoryService()
+
+        result = service.commit_l1(
+            MemoryCommitRequest(
+                turn_id="turn_1",
+                transcript=[
+                    L1TranscriptMessage(
+                        role="assistant",
+                        content="",
+                        tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "op_probe", "arguments": "{}"}}],
+                    ),
+                    L1TranscriptMessage(role="tool", content="probe result", tool_call_id="call_1"),
+                    L1TranscriptMessage(role="tool", content="extra result", tool_call_id="call_extra"),
+                ],
+            )
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.INVALID)
+        self.assertEqual(result.committed_transcript, [])
+        self.assertEqual(service.l1_store.items, [])
+        self.assertIn("no preceding assistant", result.metadata.get("error", ""))
+
+    def test_l1_commit_rejects_incomplete_tool_call_header_without_rewriting(self) -> None:
+        service = MemoryService()
+
+        result = service.commit_l1(
+            MemoryCommitRequest(
+                turn_id="turn_1",
+                transcript=[
+                    L1TranscriptMessage(
+                        role="assistant",
+                        content="",
+                        tool_calls=[{"id": "call_missing", "type": "function", "function": {"name": "op_probe", "arguments": "{}"}}],
+                    ),
+                ],
+            )
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.INVALID)
+        self.assertEqual(result.committed_transcript, [])
+        self.assertEqual(service.l1_store.items, [])
+        self.assertIn("missing tool results", result.metadata.get("error", ""))
+
+    def test_memory_pack_skips_malformed_l1_tool_protocol_without_rewriting(self) -> None:
+        service = MemoryService()
+        service.l1_store.items.append(
             [
-                L1TranscriptMessage(role="user", content="question"),
+                L1TranscriptMessage(role="user", content="valid context"),
                 L1TranscriptMessage(role="tool", content="orphan result", tool_call_id="call_missing"),
             ]
         )
+        service.l1_store.append([L1TranscriptMessage(role="user", content="fresh valid context")])
 
-        transcript = service.l1_store.items[0]
+        pack = service.build_pack(MemoryPackRequest(turn_kind="chat"))
 
-        self.assertEqual([item.role for item in transcript], ["user", "tool"])
-        self.assertEqual(transcript[1].kind, L1MessageKind.TOOL_RESULT)
-        self.assertIn("orphan result", transcript[1].content)
-        self.assertEqual(transcript[1].tool_call_id, "call_missing")
-
-    def test_l1_transcript_preserves_complete_batch_and_extra_tool_result_without_rewriting(self) -> None:
-        service = MemoryService()
-
-        service.l1_store.append(
-            [
-                L1TranscriptMessage(
-                    role="assistant",
-                    content="",
-                    tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "op_probe", "arguments": "{}"}}],
-                ),
-                L1TranscriptMessage(role="tool", content="probe result", tool_call_id="call_1"),
-                L1TranscriptMessage(role="tool", content="extra result", tool_call_id="call_extra"),
-            ]
-        )
-
-        transcript = service.l1_store.items[0]
-
-        self.assertEqual([item.role for item in transcript], ["assistant", "tool", "tool"])
-        self.assertEqual(transcript[0].tool_calls[0]["id"], "call_1")
-        self.assertEqual(transcript[1].tool_call_id, "call_1")
-        self.assertEqual(transcript[2].kind, L1MessageKind.TOOL_RESULT)
-        self.assertEqual(transcript[2].tool_call_id, "call_extra")
-        self.assertIn("extra result", transcript[2].content)
+        self.assertEqual([item.content for item in pack.l1_recent_context], ["fresh valid context"])
 
     def test_memory_prompt_preserves_complete_tool_protocol_batch(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
