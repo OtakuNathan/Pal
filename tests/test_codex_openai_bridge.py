@@ -29,6 +29,9 @@ from pal.llm.codex_openai_bridge import (
     _parse_max_concurrency,
     _openai_tools_to_dynamic_tools,
     _parse_model_list,
+    _responses_payload,
+    _responses_payload_to_codex_input,
+    _responses_tools_to_dynamic_tools,
     _request_authorized,
     _stream_done_payload,
     _stream_tool_call_payload,
@@ -304,6 +307,61 @@ class OpenAICodexBridgeMappingTests(unittest.TestCase):
             ],
         )
 
+    def test_responses_payload_maps_directly_to_codex_input(self) -> None:
+        developer, input_items = _responses_payload_to_codex_input(
+            {
+                "instructions": "Use Pal policy.",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Analyze this."},
+                            {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                        ],
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "probe result",
+                    },
+                ],
+            }
+        )
+
+        self.assertIn("Pal owns memory", developer)
+        self.assertIn("Use Pal policy.", developer)
+        self.assertEqual(
+            input_items,
+            [
+                {"type": "text", "text": "User:\nAnalyze this."},
+                {"type": "image", "url": "data:image/png;base64,abc"},
+                {"type": "text", "text": "Tool result (call_1):\nprobe result"},
+            ],
+        )
+
+    def test_responses_tools_map_to_codex_dynamic_tools(self) -> None:
+        tools = _responses_tools_to_dynamic_tools(
+            [
+                {
+                    "type": "function",
+                    "name": "pal_probe",
+                    "description": "Probe Pal.",
+                    "parameters": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+                }
+            ]
+        )
+
+        self.assertEqual(
+            tools,
+            [
+                {
+                    "name": "pal_probe",
+                    "description": "Probe Pal.",
+                    "inputSchema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+                }
+            ],
+        )
+
     def test_completion_payload_renders_openai_tool_call_shape(self) -> None:
         payload = _completion_payload(
             CodexCompletion(
@@ -317,6 +375,22 @@ class OpenAICodexBridgeMappingTests(unittest.TestCase):
         self.assertIsNone(choice["message"]["content"])
         self.assertEqual(choice["message"]["tool_calls"][0]["function"]["name"], "pal_probe")
         self.assertEqual(choice["message"]["tool_calls"][0]["function"]["arguments"], "{\"ok\": true}")
+
+    def test_responses_payload_renders_function_call_shape(self) -> None:
+        payload = _responses_payload(
+            CodexCompletion(
+                model="gpt-5.4",
+                tool_call=CodexToolCall(call_id="call_1", name="pal_probe", arguments={"ok": True}),
+            )
+        )
+
+        self.assertEqual(payload["object"], "response")
+        self.assertEqual(payload["status"], "completed")
+        call = payload["output"][0]
+        self.assertEqual(call["type"], "function_call")
+        self.assertEqual(call["call_id"], "call_1")
+        self.assertEqual(call["name"], "pal_probe")
+        self.assertEqual(call["arguments"], "{\"ok\": true}")
 
     def test_stream_tool_call_payload_uses_openai_delta_shape(self) -> None:
         payload = _stream_tool_call_payload(

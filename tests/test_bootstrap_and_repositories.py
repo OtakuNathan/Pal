@@ -696,8 +696,72 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(kwargs["api_key"], "local-provider-auth")
         self.assertEqual(kwargs["api_base"], "http://127.0.0.1:8765/v1")
+        self.assertIn("input", kwargs)
+        self.assertNotIn("messages", kwargs)
 
-    def test_litellm_invoker_forwards_generation_controls_for_codex_bridge(self) -> None:
+    def test_litellm_invoker_renders_openai_provider_as_responses_shape(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="openai-responses",
+            provider="openai",
+            model_id="gpt-5.4",
+            api_mode="openai_chat",
+            base_url="https://api.openai.com/v1",
+            auth_kind="api_key_ref",
+            credential_ref="openai-prod:api-key",
+            priority=0,
+            enabled=True,
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="openai-prod", account="api-key"), "openai-token")
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        )
+
+        shape, kwargs, _ = invoker._build_litellm_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[
+                    {"role": "system", "content": "system rules"},
+                    {"role": "user", "content": "hello"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "probe", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "content": "probe result", "tool_call_id": "call_1"},
+                ],
+                max_output_tokens=64,
+                metadata={"think_level": "deep"},
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "probe",
+                            "description": "Probe.",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+            ),
+        )
+
+        self.assertEqual(shape, "responses")
+        self.assertEqual(kwargs["api_key"], "openai-token")
+        self.assertEqual(kwargs["model"], "openai/gpt-5.4")
+        self.assertEqual(kwargs["instructions"], "system rules")
+        self.assertEqual(kwargs["reasoning"], {"effort": "high"})
+        self.assertEqual(kwargs["tools"][0]["name"], "probe")
+        self.assertNotIn("messages", kwargs)
+        self.assertIn({"type": "function_call", "name": "probe", "arguments": "{}", "call_id": "call_1"}, kwargs["input"])
+        self.assertIn({"type": "function_call_output", "call_id": "call_1", "output": "probe result"}, kwargs["input"])
+
+    def test_litellm_invoker_forwards_generation_controls_for_codex_bridge_responses(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="codex_bridge",
             provider="codex_bridge",
@@ -716,7 +780,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             credentials=LiteLLMCredentialResolver(secret_store=secret_store)
         )
 
-        kwargs, _ = invoker._build_completion_kwargs(
+        shape, kwargs, _ = invoker._build_litellm_kwargs(
             endpoint,
             CanonicalLLMRequest(
                 messages=[{"role": "user", "content": "hello"}],
@@ -736,12 +800,15 @@ class PalV2BootstrapTests(unittest.TestCase):
             ),
         )
 
+        self.assertEqual(shape, "responses")
         self.assertEqual(kwargs["api_key"], "bridge-token")
-        self.assertEqual(kwargs["model"], "hosted_vllm/gpt-5.4")
+        self.assertEqual(kwargs["model"], "openai/gpt-5.4")
+        self.assertIn("input", kwargs)
+        self.assertNotIn("messages", kwargs)
         self.assertIn("tools", kwargs)
         self.assertEqual(kwargs["temperature"], 0.7)
         self.assertEqual(kwargs["tool_choice"], "auto")
-        self.assertEqual(kwargs["reasoning_effort"], "xhigh")
+        self.assertEqual(kwargs["reasoning"], {"effort": "xhigh"})
         self.assertNotIn("extra_body", kwargs)
 
     def test_litellm_invoker_maps_glm_think_level_to_thinking_body(self) -> None:
@@ -1003,7 +1070,7 @@ class PalV2BootstrapTests(unittest.TestCase):
     def test_litellm_invoker_sets_litellm_and_sdk_timeouts(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="timeout_demo",
-            provider="openai",
+            provider="openai_compatible",
             model_id="demo-model",
             api_mode="openai_chat",
             base_url="https://example.invalid/v1",
@@ -2713,6 +2780,40 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(outcome.text, "pong")
         self.assertEqual(outcome.reasoning_text, "thinking")
+
+    def test_litellm_responses_parser_extracts_text_and_tool_calls(self) -> None:
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=InMemorySecretStore())
+        )
+
+        class FakeResponse:
+            def to_dict(self):
+                return {
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "pong"}],
+                        },
+                        {
+                            "type": "function_call",
+                            "call_id": "call_1",
+                            "name": "probe_alias",
+                            "arguments": "{\"ok\": true}",
+                        },
+                    ]
+                }
+
+        outcome = invoker._parse_litellm_responses_response(
+            FakeResponse(),
+            tool_name_aliases={"probe": "probe_alias"},
+        )
+
+        self.assertEqual(outcome.text, "pong")
+        self.assertEqual(outcome.finish_reason, LLMFinishReason.TOOL_CALLS)
+        self.assertEqual(outcome.tool_calls[0].name, "probe")
+        self.assertEqual(outcome.tool_calls[0].args, {"ok": True})
+        self.assertEqual(outcome.tool_calls[0].call_id, "call_1")
 
     def test_litellm_response_parser_rejects_empty_assistant_without_tool_calls(self) -> None:
         invoker = LiteLLMEndpointInvoker(

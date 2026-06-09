@@ -82,6 +82,10 @@ def _chat_completion_id() -> str:
     return f"chatcmpl-pal-codex-{int(time.time())}"
 
 
+def _response_id() -> str:
+    return f"resp_pal_codex_{int(time.time())}"
+
+
 def _strip_openai_prefix(model: str) -> str:
     text = str(model or "").strip()
     for prefix in ("openai/", "hosted_vllm/", "lm_studio/", "llamafile/"):
@@ -346,6 +350,122 @@ def _openai_tools_to_dynamic_tools(tools: Any) -> list[dict[str, Any]]:
     return dynamic_tools
 
 
+def _responses_tools_to_dynamic_tools(tools: Any) -> list[dict[str, Any]]:
+    dynamic_tools: list[dict[str, Any]] = []
+    for tool in list(tools or []):
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        name = str(tool.get("name") or "").strip()
+        if not name:
+            continue
+        dynamic_tools.append(
+            {
+                "name": name,
+                "description": str(tool.get("description") or name),
+                "inputSchema": tool.get("parameters") or {"type": "object"},
+            }
+        )
+    return dynamic_tools
+
+
+def _responses_payload_to_codex_input(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    developer_parts = [_BRIDGE_DEVELOPER_GUARD]
+    instructions = str(payload.get("instructions") or "").strip()
+    if instructions:
+        developer_parts.append(instructions)
+    transcript: list[str] = []
+    input_items: list[dict[str, Any]] = []
+
+    def flush_text() -> None:
+        text = "\n\n".join(part for part in transcript if part).strip()
+        if text:
+            input_items.append({"type": "text", "text": text})
+        transcript.clear()
+
+    raw_input = payload.get("input")
+    if isinstance(raw_input, str):
+        transcript.append(f"User:\n{raw_input}")
+    else:
+        for item in list(raw_input or []):
+            if isinstance(item, str):
+                transcript.append(f"User:\n{item}")
+                continue
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip()
+            role = str(item.get("role") or "").strip()
+            if role in {"system", "developer"}:
+                text, _ = _responses_content_text_and_images(item.get("content"))
+                if text:
+                    developer_parts.append(text)
+                continue
+            if item_type == "function_call_output":
+                transcript.append(
+                    f"Tool result ({item.get('call_id') or 'tool'}):\n{item.get('output') or ''}"
+                )
+                continue
+            if item_type == "function_call":
+                transcript.append(
+                    "Assistant requested tool calls:\n"
+                    f"- {item.get('name')}: {item.get('arguments')}"
+                )
+                continue
+            text, image_items = _responses_content_text_and_images(item.get("content"))
+            if role == "assistant" or item_type == "message" and role == "assistant":
+                if text:
+                    transcript.append(f"Assistant:\n{text}")
+            else:
+                if text:
+                    transcript.append(f"User:\n{text}")
+                if image_items:
+                    flush_text()
+                    input_items.extend(image_items)
+    flush_text()
+    if not input_items:
+        input_items.append({"type": "text", "text": "Continue."})
+    return "\n\n".join(developer_parts), input_items
+
+
+def _responses_content_text_and_images(content: Any) -> tuple[str, list[dict[str, Any]]]:
+    if content is None:
+        return "", []
+    if isinstance(content, str):
+        return content, []
+    if not isinstance(content, list):
+        return str(content), []
+    text_parts: list[str] = []
+    image_items: list[dict[str, Any]] = []
+    for item in content:
+        if isinstance(item, str):
+            text_parts.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("type") or "")
+        if kind in {"text", "input_text", "output_text"}:
+            text_parts.append(str(item.get("text") or ""))
+            continue
+        if kind in {"image_url", "input_image"}:
+            image = item.get("image_url")
+            if isinstance(image, dict):
+                image = image.get("url")
+            if image:
+                image_items.append({"type": "image", "url": str(image)})
+    return "\n".join(part for part in text_parts if part), image_items
+
+
+def _responses_input_tool_messages(raw_input: Any) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    for item in list(raw_input or []):
+        if not isinstance(item, dict) or item.get("type") != "function_call_output":
+            continue
+        call_id = str(item.get("call_id") or "").strip()
+        if not call_id:
+            continue
+        messages.append({"role": "tool", "tool_call_id": call_id, "content": str(item.get("output") or "")})
+    return messages
+
+
 def _request_api_key(headers: Any) -> str:
     authorization = str(headers.get("Authorization") or headers.get("authorization") or "").strip()
     if authorization.lower().startswith("bearer "):
@@ -388,6 +508,47 @@ def _completion_payload(completion: CodexCompletion) -> dict[str, Any]:
         "created": created,
         "model": completion.model,
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+    }
+
+
+def _responses_payload(completion: CodexCompletion) -> dict[str, Any]:
+    created = int(time.time())
+    response_id = _response_id()
+    output: list[dict[str, Any]] = []
+    if completion.tool_call is not None:
+        output.append(
+            {
+                "id": f"fc_{completion.tool_call.call_id}",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": completion.tool_call.call_id,
+                "name": completion.tool_call.name,
+                "arguments": json.dumps(completion.tool_call.arguments, ensure_ascii=False),
+            }
+        )
+    else:
+        output.append(
+            {
+                "id": f"msg_{created}",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": completion.text,
+                        "annotations": [],
+                    }
+                ],
+            }
+        )
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": created,
+        "status": "completed",
+        "model": completion.model,
+        "output": output,
     }
 
 
@@ -517,6 +678,20 @@ class CodexCliBridge:
             dynamic_tools=dynamic_tools,
             effort=effort,
             messages=messages,
+        )
+
+    def invoke_responses(self, payload: dict[str, Any]) -> CodexCompletion:
+        model = _strip_openai_prefix(str(payload.get("model") or ""))
+        developer_instructions, input_items = _responses_payload_to_codex_input(payload)
+        dynamic_tools = _responses_tools_to_dynamic_tools(payload.get("tools"))
+        effort = _codex_effort_from_payload(payload)
+        return self.invoke_turn(
+            model=model,
+            developer_instructions=developer_instructions,
+            input_items=input_items,
+            dynamic_tools=dynamic_tools,
+            effort=effort,
+            messages=_responses_input_tool_messages(payload.get("input")),
         )
 
     def invoke_turn(
@@ -1097,7 +1272,8 @@ def _make_handler(
             _log(f"POST {self.path}")
             if not self._require_authorized():
                 return
-            if self.path.rstrip("/") != "/v1/chat/completions":
+            path = self.path.rstrip("/")
+            if path not in {"/v1/chat/completions", "/v1/responses"}:
                 _send_json(self, 404, {"error": {"message": "not found"}})
                 return
             try:
@@ -1105,6 +1281,17 @@ def _make_handler(
                 _log(f"reading request body bytes={length}")
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 _log(f"request parsed stream={bool(payload.get('stream'))} model={payload.get('model')}")
+                if path == "/v1/responses":
+                    if payload.get("stream"):
+                        _send_json(self, 400, {"error": {"message": "streaming responses are not supported yet"}})
+                        return
+                    _log("waiting for codex concurrency slot")
+                    with semaphore or contextlib.nullcontext():
+                        _log("starting codex responses invocation")
+                        completion = bridge.invoke_responses(payload)
+                    _log("codex responses invocation completed")
+                    _send_json(self, 200, _responses_payload(completion))
+                    return
                 if payload.get("stream"):
                     _send_sse_headers(self)
                     try:

@@ -14,6 +14,8 @@ from pal.llm.models import LLMEndpointModel
 LLM_PROVIDER_ADAPTER_ENTRY_POINT_GROUP = "pal.llm_provider_adapters"
 RUNTIME_PROVIDER_ADAPTER_DIR = "llm/adapters"
 LEGACY_RUNTIME_PROVIDER_ADAPTER_DIR = "llm_provider_adapters"
+LITELLM_CHAT_COMPLETIONS_SHAPE = "chat_completions"
+LITELLM_RESPONSES_SHAPE = "responses"
 
 
 @dataclass
@@ -72,6 +74,7 @@ class LLMProviderAdapter:
     adapter_names: ClassVar[frozenset[str]] = frozenset()
     litellm_provider: ClassVar[str] = "openai"
     model_provider_aliases: ClassVar[frozenset[str]] = frozenset()
+    request_shape: ClassVar[str] = LITELLM_CHAT_COMPLETIONS_SHAPE
 
     @classmethod
     def matches_endpoint(cls, endpoint: LLMEndpointModel) -> bool:
@@ -212,6 +215,7 @@ def build_default_provider_registry(*, load_entry_points: bool = False) -> LLMPr
     from pal.llm.llm_adaptor.anthropic_api import AnthropicMessagesProvider
     from pal.llm.llm_adaptor.deepseek import DeepSeekProvider
     from pal.llm.llm_adaptor.openai_chat import CodexBridgeProvider, OpenAIChatProvider
+    from pal.llm.llm_adaptor.openai_responses import OpenAIResponsesProvider
     from pal.llm.llm_adaptor.zai_glm import ZaiGLMProvider
 
     registry = LLMProviderRegistry()
@@ -219,6 +223,7 @@ def build_default_provider_registry(*, load_entry_points: bool = False) -> LLMPr
     registry.register(DeepSeekProvider)
     registry.register(ZaiGLMProvider)
     registry.register(AnthropicMessagesProvider)
+    registry.register(OpenAIResponsesProvider)
     registry.register(OpenAIChatProvider)
     if load_entry_points:
         registry.load_entry_points()

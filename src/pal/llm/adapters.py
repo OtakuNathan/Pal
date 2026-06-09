@@ -23,7 +23,7 @@ from pal.llm.llm_adaptor.base import (
 )
 from pal.llm.llm_adaptor.deepseek import DeepSeekProvider
 from pal.llm.llm_adaptor.openai_chat import CodexBridgeProvider, OpenAIChatProvider
-from pal.llm.llm_adaptor.openai_responses import OpenAIResponsesDraft
+from pal.llm.llm_adaptor.openai_responses import OpenAIResponsesDraft, OpenAIResponsesProvider
 from pal.llm.llm_adaptor.zai_glm import ZaiGLMProvider
 
 __all__ = [
@@ -38,6 +38,7 @@ __all__ = [
     "LiteLLMCompletionDraft",
     "OpenAIChatProvider",
     "OpenAIResponsesDraft",
+    "OpenAIResponsesProvider",
     "ZaiGLMProvider",
     "build_default_provider_registry",
     "build_runtime_provider_registry",

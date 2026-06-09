@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
 from pal.llm.adapters import LLMProviderRegistry, build_runtime_provider_registry, _think_level_to_completion_reasoning_effort
+from pal.llm.llm_adaptor.base import LITELLM_RESPONSES_SHAPE
+from pal.llm.llm_adaptor.openai_responses import OpenAIResponsesDraft, chat_tools_to_responses_tools
 from pal.llm.codex_openai_bridge import (
     DEFAULT_CODEX_BRIDGE_MAX_CONCURRENCY,
     CodexCliBridge,
@@ -384,8 +386,15 @@ class LiteLLMEndpointInvoker:
         except Exception as exc:
             raise LLMEndpointInvocationError("litellm is not installed in the current runtime") from exc
 
-        kwargs, tool_name_aliases = self._build_completion_kwargs(endpoint, request)
+        request_shape, kwargs, tool_name_aliases = self._build_litellm_kwargs(endpoint, request)
         try:
+            if request_shape == LITELLM_RESPONSES_SHAPE:
+                response = _run_litellm_with_wall_timeout(
+                    lambda: litellm.responses(**kwargs),
+                    timeout_seconds=_timeout_from_litellm_kwargs(kwargs),
+                    description=f"litellm responses invocation for {endpoint.endpoint_id}",
+                )
+                return self._parse_litellm_responses_response(response, tool_name_aliases=tool_name_aliases)
             response = _run_litellm_with_wall_timeout(
                 lambda: litellm.completion(**kwargs),
                 timeout_seconds=_timeout_from_litellm_kwargs(kwargs),
@@ -405,7 +414,19 @@ class LiteLLMEndpointInvoker:
         except Exception as exc:
             raise LLMEndpointInvocationError("litellm is not installed in the current runtime") from exc
 
-        kwargs, tool_name_aliases = self._build_completion_kwargs(endpoint, request)
+        request_shape, kwargs, tool_name_aliases = self._build_litellm_kwargs(endpoint, request)
+        if request_shape == LITELLM_RESPONSES_SHAPE:
+            outcome = self._invoke_litellm(endpoint, request)
+            events: list[NormalizedLLMStreamEvent] = []
+            for tool_call in outcome.tool_calls:
+                events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TOOL_CALL, tool_call=tool_call))
+            if outcome.tool_calls:
+                events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.TOOL_CALLS))
+                return events
+            if outcome.text:
+                events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=outcome.text))
+            events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=outcome.finish_reason))
+            return events
         try:
             return _run_litellm_with_wall_timeout(
                 lambda: list(
@@ -425,6 +446,14 @@ class LiteLLMEndpointInvoker:
         endpoint: LLMEndpointModel,
         request: CanonicalLLMRequest,
     ) -> tuple[dict[str, Any], dict[str, str]]:
+        _, kwargs, tool_name_aliases = self._build_litellm_kwargs(endpoint, request)
+        return kwargs, tool_name_aliases
+
+    def _build_litellm_kwargs(
+        self,
+        endpoint: LLMEndpointModel,
+        request: CanonicalLLMRequest,
+    ) -> tuple[str, dict[str, Any], dict[str, str]]:
         tool_name_aliases = _build_tool_name_aliases(request.tools)
         image_url_format = _image_url_format(endpoint)
         messages = _coerce_messages_for_litellm(
@@ -436,14 +465,17 @@ class LiteLLMEndpointInvoker:
         )
         adapter = self.provider_registry.resolve(endpoint)
         self.last_payload_summary = _summarize_provider_payload(endpoint, messages, image_url_format=image_url_format)
+        request_shape = str(getattr(adapter, "request_shape", "") or "").strip() or "chat_completions"
         draft = adapter.new_draft(messages)
         timeout_seconds = request.metadata.get("timeout_seconds")
         if timeout_seconds is not None:
             try:
                 timeout_value = max(1, int(float(timeout_seconds)))
                 draft.timeout = timeout_value
-                draft.request_timeout = float(timeout_value)
-                draft.force_timeout = float(timeout_value)
+                if hasattr(draft, "request_timeout"):
+                    draft.request_timeout = float(timeout_value)
+                if hasattr(draft, "force_timeout"):
+                    draft.force_timeout = float(timeout_value)
             except (TypeError, ValueError):
                 pass
         if endpoint.base_url and not str(endpoint.base_url).startswith("stub://"):
@@ -458,13 +490,21 @@ class LiteLLMEndpointInvoker:
         if request.temperature is not None:
             draft.temperature = request.temperature
         if request.max_output_tokens is not None:
-            draft.max_tokens = request.max_output_tokens
-        tools = _coerce_tools_for_litellm(request.tools, tool_name_aliases=tool_name_aliases)
+            if isinstance(draft, OpenAIResponsesDraft):
+                draft.max_output_tokens = request.max_output_tokens
+            else:
+                draft.max_tokens = request.max_output_tokens
+        if isinstance(draft, OpenAIResponsesDraft):
+            tools = chat_tools_to_responses_tools(
+                _coerce_tools_for_litellm(request.tools, tool_name_aliases=tool_name_aliases)
+            )
+        else:
+            tools = _coerce_tools_for_litellm(request.tools, tool_name_aliases=tool_name_aliases)
         if tools:
             draft.tools = tools
             draft.tool_choice = "auto"
         adapter.apply_request(request, draft)
-        return draft.to_kwargs(), tool_name_aliases
+        return request_shape, draft.to_kwargs(), tool_name_aliases
 
     def _iter_litellm_stream(
         self,
@@ -496,6 +536,60 @@ class LiteLLMEndpointInvoker:
             tool_calls=_parse_tool_calls(message, tool_name_aliases=tool_name_aliases),
             finish_reason=str(first.get("finish_reason") or LLMFinishReason.STOP),
             response_mode=_coerce_response_mode(((payload or {}).get("metadata") or {}).get("response_mode")),
+        )
+        _ensure_llm_invocation_result_has_payload(outcome)
+        return outcome
+
+    def _parse_litellm_responses_response(
+        self,
+        response: Any,
+        *,
+        tool_name_aliases: dict[str, str] | None = None,
+    ) -> CanonicalLLMOutcome:
+        payload = response.model_dump() if hasattr(response, "model_dump") else response.to_dict() if hasattr(response, "to_dict") else response
+        if isinstance(payload, dict) and payload.get("choices"):
+            return self._parse_litellm_response(payload, tool_name_aliases=tool_name_aliases)
+        output_items = list((payload or {}).get("output") or []) if isinstance(payload, dict) else []
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_calls: list[CanonicalToolCall] = []
+        for item in output_items:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip()
+            if item_type == "message":
+                for content in list(item.get("content") or []):
+                    if not isinstance(content, dict):
+                        continue
+                    if content.get("type") == "output_text":
+                        text = str(content.get("text") or "")
+                        if text:
+                            text_parts.append(text)
+                continue
+            if item_type == "function_call":
+                name = _canonical_tool_name(str(item.get("name") or ""), tool_name_aliases)
+                args = _coerce_tool_args(item.get("arguments"))
+                if name:
+                    tool_calls.append(
+                        CanonicalToolCall(
+                            name=name,
+                            args=args,
+                            call_id=str(item.get("call_id") or item.get("id") or "") or None,
+                        )
+                    )
+                continue
+            if item_type == "reasoning":
+                for summary in list(item.get("summary") or []):
+                    if isinstance(summary, dict):
+                        text = str(summary.get("text") or "")
+                        if text:
+                            reasoning_parts.append(text)
+        outcome = CanonicalLLMOutcome(
+            text="".join(text_parts),
+            reasoning_text="\n".join(reasoning_parts),
+            tool_calls=tool_calls,
+            finish_reason=LLMFinishReason.TOOL_CALLS if tool_calls else LLMFinishReason.STOP,
+            response_mode=_coerce_response_mode(((payload or {}).get("metadata") or {}).get("response_mode")) if isinstance(payload, dict) else None,
         )
         _ensure_llm_invocation_result_has_payload(outcome)
         return outcome
