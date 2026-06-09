@@ -84,7 +84,7 @@ class InMemoryL1Store(L1Store):
 
     def append(self, item: list[L1TranscriptMessage] | str) -> None:
         normalized = _normalize_l1_transcript(item)
-        if normalized and _validate_l1_tool_protocol(normalized).ok:
+        if normalized:
             self.items.append(normalized)
 
 
@@ -502,9 +502,7 @@ def _extract_l1_tool_call_ids(tool_calls: object) -> list[str]:
 def _flatten_recent_l1_context(items: list[list[L1TranscriptMessage]]) -> list[L1TranscriptMessage]:
     flattened: list[L1TranscriptMessage] = []
     for transcript in items:
-        normalized = _normalize_l1_transcript(transcript)
-        if normalized and _validate_l1_tool_protocol(normalized).ok:
-            flattened.extend(normalized)
+        flattened.extend(_normalize_l1_transcript(transcript))
     return flattened
 
 

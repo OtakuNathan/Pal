@@ -2793,7 +2793,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(service.l1_store.items, [])
         self.assertIn("missing tool results", result.metadata.get("error", ""))
 
-    def test_memory_pack_skips_malformed_l1_tool_protocol_without_rewriting(self) -> None:
+    def test_memory_pack_preserves_existing_l1_protocol_shape_without_rewriting(self) -> None:
         service = MemoryService()
         service.l1_store.items.append(
             [
@@ -2805,7 +2805,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         pack = service.build_pack(MemoryPackRequest(turn_kind="chat"))
 
-        self.assertEqual([item.content for item in pack.l1_recent_context], ["fresh valid context"])
+        self.assertEqual([item.role for item in pack.l1_recent_context], ["user", "tool", "user"])
+        self.assertEqual([item.content for item in pack.l1_recent_context], ["valid context", "orphan result", "fresh valid context"])
+        self.assertEqual(pack.l1_recent_context[1].tool_call_id, "call_missing")
 
     def test_memory_prompt_preserves_complete_tool_protocol_batch(self) -> None:
         from pal.memory.prompt import MemoryPromptFragmentProvider
