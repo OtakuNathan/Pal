@@ -84,7 +84,6 @@ class OpenAIResponsesProvider(LLMProviderAdapter):
 
 
 def chat_messages_to_responses_input(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
-    instructions: list[str] = []
     input_items: list[dict[str, Any]] = []
     for message in list(messages or []):
         if not isinstance(message, dict):
@@ -94,7 +93,7 @@ def chat_messages_to_responses_input(messages: list[dict[str, Any]]) -> tuple[st
         if role in {"system", "developer"}:
             text = _content_text(content)
             if text:
-                instructions.append(text)
+                input_items.append({"role": "developer", "content": text})
             continue
         if role == "tool":
             call_id = str(message.get("tool_call_id") or "").strip()
@@ -121,8 +120,7 @@ def chat_messages_to_responses_input(messages: list[dict[str, Any]]) -> tuple[st
             input_items.append({"role": "user", "content": input_content})
     if not input_items:
         input_items.append({"role": "user", "content": "Continue."})
-    rendered_instructions = "\n\n".join(instructions).strip()
-    return rendered_instructions or None, input_items
+    return None, input_items
 
 
 def chat_tools_to_responses_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

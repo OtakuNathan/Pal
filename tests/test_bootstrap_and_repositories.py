@@ -755,12 +755,53 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(shape, "responses")
         self.assertEqual(kwargs["api_key"], "openai-token")
         self.assertEqual(kwargs["model"], "openai/gpt-5.4")
-        self.assertEqual(kwargs["instructions"], "system rules")
+        self.assertNotIn("instructions", kwargs)
+        self.assertEqual(kwargs["input"][0], {"role": "developer", "content": "system rules"})
         self.assertEqual(kwargs["reasoning"], {"effort": "high"})
         self.assertEqual(kwargs["tools"][0]["name"], "probe")
         self.assertNotIn("messages", kwargs)
         self.assertIn({"type": "function_call", "name": "probe", "arguments": "{}", "call_id": "call_1"}, kwargs["input"])
         self.assertIn({"type": "function_call_output", "call_id": "call_1", "output": "probe result"}, kwargs["input"])
+
+    def test_litellm_invoker_wraps_chat_developer_instructions_as_user_context(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="deepseek",
+            provider="deepseek",
+            model_id="deepseek-v4-pro",
+            api_mode="openai_chat",
+            base_url="https://api.deepseek.com",
+            auth_kind="api_key_ref",
+            credential_ref="deepseek-prod:api-key",
+            priority=0,
+            enabled=True,
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "deepseek-token")
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        )
+
+        shape, kwargs, _ = invoker._build_litellm_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[
+                    {"role": "system", "content": "initial rules"},
+                    {"role": "user", "content": "hello"},
+                    {"role": "developer", "content": "runtime guidance"},
+                    {"role": "system", "content": "late system guidance"},
+                ],
+                max_output_tokens=64,
+            ),
+        )
+
+        self.assertEqual(shape, "chat_completions")
+        self.assertEqual(kwargs["messages"][0], {"role": "system", "content": "initial rules"})
+        self.assertEqual(kwargs["messages"][2]["role"], "user")
+        self.assertIn("<developer-instruction>", kwargs["messages"][2]["content"])
+        self.assertIn("runtime guidance", kwargs["messages"][2]["content"])
+        self.assertEqual(kwargs["messages"][3]["role"], "user")
+        self.assertIn("<system-instruction>", kwargs["messages"][3]["content"])
+        self.assertIn("late system guidance", kwargs["messages"][3]["content"])
 
     def test_litellm_invoker_forwards_generation_controls_for_codex_bridge_responses(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
@@ -872,7 +913,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["max_retries"], 0)
         self.assertEqual(calls[1][0], "create")
         self.assertEqual(calls[1][1]["model"], "gpt-5.4")
-        self.assertEqual(calls[1][1]["instructions"], "rules")
+        self.assertNotIn("instructions", calls[1][1])
+        self.assertEqual(calls[1][1]["input"][0], {"role": "developer", "content": "rules"})
         self.assertEqual(calls[1][1]["reasoning"], {"effort": "high"})
         self.assertIn("input", calls[1][1])
         self.assertNotIn("messages", calls[1][1])
@@ -927,7 +969,12 @@ class PalV2BootstrapTests(unittest.TestCase):
             outcome = invoker.invoke(
                 endpoint,
                 CanonicalLLMRequest(
-                    messages=[{"role": "system", "content": "rules"}, {"role": "user", "content": "hello"}],
+                    messages=[
+                        {"role": "system", "content": "rules"},
+                        {"role": "user", "content": "hello"},
+                        {"role": "developer", "content": "runtime guidance"},
+                        {"role": "system", "content": "late system guidance"},
+                    ],
                     max_output_tokens=4096,
                     metadata={"think_level": "deep"},
                     tools=[
@@ -955,6 +1002,13 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(calls[1][0], "create")
         self.assertEqual(calls[1][1]["model"], "claude-sonnet-4-5")
         self.assertEqual(calls[1][1]["system"], "rules")
+        rendered_messages = calls[1][1]["messages"]
+        self.assertEqual(rendered_messages[1]["role"], "user")
+        self.assertIn("<developer-instruction>", rendered_messages[1]["content"][0]["text"])
+        self.assertIn("runtime guidance", rendered_messages[1]["content"][0]["text"])
+        self.assertEqual(rendered_messages[2]["role"], "user")
+        self.assertIn("<system-instruction>", rendered_messages[2]["content"][0]["text"])
+        self.assertIn("late system guidance", rendered_messages[2]["content"][0]["text"])
         self.assertEqual(calls[1][1]["tools"][0]["name"], "probe_alias")
         self.assertEqual(calls[1][1]["thinking"], {"type": "enabled", "budget_tokens": 2048})
 

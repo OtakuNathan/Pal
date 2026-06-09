@@ -7,7 +7,11 @@ from typing import Any
 from pal.llm.contracts import CanonicalLLMRequest
 from pal.llm.models import LLMEndpointModel
 
-from pal.llm.llm_adaptor.base import LLMProviderAdapter, LiteLLMCompletionDraft
+from pal.llm.llm_adaptor.base import (
+    LLMProviderAdapter,
+    LiteLLMCompletionDraft,
+    render_instruction_fallback_text,
+)
 
 
 class AnthropicMessagesProvider(LLMProviderAdapter):
@@ -30,15 +34,22 @@ class AnthropicMessagesProvider(LLMProviderAdapter):
 def chat_messages_to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str | None, list[dict[str, Any]]]:
     system_parts: list[str] = []
     rendered_messages: list[dict[str, Any]] = []
+    seen_conversation = False
     for message in list(messages or []):
         if not isinstance(message, dict):
             continue
         role = str(message.get("role") or "user").strip() or "user"
         content = message.get("content")
-        if role in {"system", "developer"}:
+        if role == "system" and not seen_conversation:
             text = _content_text(content)
             if text:
                 system_parts.append(text)
+            continue
+        if role in {"system", "developer"}:
+            text = render_instruction_fallback_text(role, content)
+            if text:
+                rendered_messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
+                seen_conversation = True
             continue
         if role == "tool":
             call_id = str(message.get("tool_call_id") or "").strip()
@@ -55,6 +66,7 @@ def chat_messages_to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple
                         ],
                     }
                 )
+                seen_conversation = True
             continue
         if role == "assistant":
             blocks = _anthropic_text_blocks(content)
@@ -64,10 +76,12 @@ def chat_messages_to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple
                     blocks.append(block)
             if blocks:
                 rendered_messages.append({"role": "assistant", "content": blocks})
+                seen_conversation = True
             continue
         blocks = _anthropic_user_blocks(content)
         if blocks:
             rendered_messages.append({"role": "user", "content": blocks})
+            seen_conversation = True
     if not rendered_messages:
         rendered_messages.append({"role": "user", "content": [{"type": "text", "text": "Continue."}]})
     system = "\n\n".join(system_parts).strip()

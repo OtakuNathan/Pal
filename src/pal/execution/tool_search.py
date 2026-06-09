@@ -15,7 +15,6 @@ from pal.shared import (
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
 _DESCRIPTION_PREVIEW_CHARS = 360
-_EMPTY_QUERY_HIT_LIMIT = 25
 
 
 def inspect_tools(provider) -> list[dict[str, object]]:
@@ -24,6 +23,24 @@ def inspect_tools(provider) -> list[dict[str, object]]:
 
 def _query_terms(query: str) -> list[str]:
     return [term for term in str(query).lower().split() if term]
+
+
+def _normalize_namespace(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"intro", INTROSPECTION_NAMESPACE}:
+        return INTROSPECTION_NAMESPACE
+    if text in {"op", OPERATION_NAMESPACE}:
+        return OPERATION_NAMESPACE
+    return text
+
+
+def _namespace_from_query(query: str) -> str:
+    terms = set(_query_terms(query))
+    if INTROSPECTION_NAMESPACE in terms or "intro" in terms:
+        return INTROSPECTION_NAMESPACE
+    if OPERATION_NAMESPACE in terms or "op" in terms:
+        return OPERATION_NAMESPACE
+    return ""
 
 
 def _score(query: str, *fields: str) -> int:
@@ -49,6 +66,28 @@ def _search_priority(spec: dict[str, object]) -> int:
         return int(metadata.get("search_priority") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _bool_arg(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _spec_namespace(spec: dict[str, object]) -> str:
+    metadata = spec.get("metadata")
+    if isinstance(metadata, dict):
+        namespace = str(metadata.get("namespace") or "").strip().lower()
+        if namespace:
+            return namespace
+    name = str(spec.get("canonical_path") or spec.get("name") or "").strip().lower()
+    if name.startswith("intro_") or str(spec.get("family") or "").strip().lower() == "introspection":
+        return INTROSPECTION_NAMESPACE
+    if name.startswith("op_"):
+        return OPERATION_NAMESPACE
+    return ""
 
 
 def _read_name_arg(args: dict[str, object], *aliases: str) -> str:
@@ -86,32 +125,54 @@ def _compact_capability_hit(runtime: object, spec: dict[str, object]) -> dict[st
 
 
 def _dedupe_hits(runtime: object, specs: list[dict[str, object]]) -> list[dict[str, object]]:
-    hits: list[dict[str, object]] = []
+    return [_compact_capability_hit(runtime, spec) for spec in _dedupe_specs(specs)]
+
+
+def _dedupe_specs(specs: list[dict[str, object]]) -> list[dict[str, object]]:
+    deduped: list[dict[str, object]] = []
     by_name: dict[str, dict[str, object]] = {}
     for spec in specs:
-        hit = _compact_capability_hit(runtime, spec)
-        name = str(hit.get("name") or "").strip()
+        name = str(spec.get("canonical_path") or spec.get("name") or "").strip()
         if not name:
             continue
         existing = by_name.get(name)
         if existing is None:
-            by_name[name] = hit
-            hits.append(hit)
-    return hits
+            by_name[name] = spec
+            deduped.append(spec)
+    return deduped
 
 
 def _capability_facets(specs: list[dict[str, object]]) -> dict[str, object]:
     modules: dict[str, int] = {}
     families: dict[str, int] = {}
+    namespaces: dict[str, int] = {}
     for spec in specs:
+        namespace = _spec_namespace(spec) or "unknown"
         module_id = str(spec.get("module_id") or "").strip() or "unknown"
         family = str(spec.get("family") or "").strip() or "unknown"
+        namespaces[namespace] = namespaces.get(namespace, 0) + 1
         modules[module_id] = modules.get(module_id, 0) + 1
         families[family] = families.get(family, 0) + 1
     return {
+        "namespaces": [{"namespace": key, "count": namespaces[key]} for key in sorted(namespaces)],
         "modules": [{"module_id": key, "count": modules[key]} for key in sorted(modules)],
         "families": [{"family": key, "count": families[key]} for key in sorted(families)],
     }
+
+
+def _applied_filters(*, query: str, namespace: str, family: str, module_id: str, tags: list[str]) -> dict[str, object]:
+    filters: dict[str, object] = {}
+    if query:
+        filters["query"] = query
+    if namespace:
+        filters["namespace"] = namespace
+    if family:
+        filters["family"] = family
+    if module_id:
+        filters["module_id"] = module_id
+    if tags:
+        filters["tags"] = tags
+    return filters
 
 
 def _required_params_from_schema(schema: object) -> list[str]:
@@ -254,17 +315,29 @@ class ExecutionDiscoveryCapabilityMixin:
         scope="module",
         family="discovery",
         action_name="search",
-        description="Search execution capabilities by query, module_id, or family. Empty calls return module/family counts only so the caller can narrow before listing.",
+        description=(
+            "Search execution capabilities by query text. Use namespace='intro' for inspect/list/show capabilities "
+            "and namespace='op' for actions that mutate, execute, or call external services. Set facets=true only for broad searches that need narrowing statistics."
+        ),
         aliases=("tool_search",),
         args_schema={
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
-                "family": {"type": "string"},
-                "module_id": {"type": "string"},
-                "tags": {"type": "array", "items": {"type": "string"}},
-                "top_k": {"type": "integer", "minimum": 1},
+                "query": {
+                    "type": "string",
+                    "description": "Natural-language search text or partial capability name, for example 'llm endpoint config' or 'send attachment'.",
+                },
+                "namespace": {
+                    "type": "string",
+                    "description": "Root capability namespace. Use intro/introspection to inspect state; use op/operation to perform actions.",
+                    "enum": ["intro", "introspection", "op", "operation"],
+                },
+                "family": {"type": "string", "description": "Optional family filter such as management, lifecycle, endpoint, or search."},
+                "module_id": {"type": "string", "description": "Optional module filter such as llm, memory, channel, artifact, minion, or web_search."},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags that every result must include."},
+                "top_k": {"type": "integer", "minimum": 1, "description": "Maximum number of compact hits to return."},
                 "limit": {"type": "integer", "minimum": 1, "description": "Alias for top_k."},
+                "facets": {"type": "boolean", "description": "Default false. Set true to include namespace/module/family counts for broad-search narrowing."},
             },
         },
         result_schema={
@@ -286,8 +359,9 @@ class ExecutionDiscoveryCapabilityMixin:
                 "returned_count": {"type": "integer"},
                 "top_k": {"type": "integer"},
                 "truncated": {"type": "boolean"},
-                "facets": {"type": "object"},
-                "usage_hint": {"type": "string"},
+                "applied_filters": {"type": "object"},
+                "facets": {"type": "object", "description": "Only present when requested with facets=true; counts deduplicated candidates."},
+                "usage_hint": {"type": "string", "description": "Only present for broad facet responses that need narrowing guidance."},
             },
         },
         metadata={"canonical_path": "op_tool_search"},
@@ -320,7 +394,10 @@ class ToolSearchTool:
     name: str = "tool_search"
     display_name: str = "Tool Search"
     family: str = "discovery"
-    description: str = "Search capability definitions by query, family, or module_id. Empty calls return module/family counts only; narrow by module_id before listing broad surfaces."
+    description: str = (
+        "Search capability definitions by query text. Use namespace='intro' for inspect/list/show capabilities "
+        "and namespace='op' for actions that mutate, execute, or call external services. Set facets=true only for broad searches that need narrowing statistics."
+    )
     tags: tuple[str, ...] = ("discovery", "search")
     keywords: tuple[str, ...] = ("find", "lookup", "discover", "tool")
     args_schema: dict[str, object] = None  # type: ignore[assignment]
@@ -331,12 +408,21 @@ class ToolSearchTool:
             self.args_schema = {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string"},
-                    "family": {"type": "string"},
-                    "module_id": {"type": "string"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                    "top_k": {"type": "integer", "minimum": 1},
+                    "query": {
+                        "type": "string",
+                        "description": "Natural-language search text or partial capability name, for example 'llm endpoint config' or 'send attachment'.",
+                    },
+                    "namespace": {
+                        "type": "string",
+                        "description": "Root capability namespace. Use intro/introspection to inspect state; use op/operation to perform actions.",
+                        "enum": ["intro", "introspection", "op", "operation"],
+                    },
+                    "family": {"type": "string", "description": "Optional family filter such as management, lifecycle, endpoint, or search."},
+                    "module_id": {"type": "string", "description": "Optional module filter such as llm, memory, channel, artifact, minion, or web_search."},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags that every result must include."},
+                    "top_k": {"type": "integer", "minimum": 1, "description": "Maximum number of compact hits to return."},
                     "limit": {"type": "integer", "minimum": 1, "description": "Alias for top_k."},
+                    "facets": {"type": "boolean", "description": "Default false. Set true to include namespace/module/family counts for broad-search narrowing."},
                 },
             }
         if self.result_schema is None:
@@ -359,15 +445,23 @@ class ToolSearchTool:
                     "returned_count": {"type": "integer"},
                     "top_k": {"type": "integer"},
                     "truncated": {"type": "boolean"},
-                    "facets": {"type": "object"},
-                    "usage_hint": {"type": "string"},
+                    "applied_filters": {"type": "object"},
+                    "facets": {"type": "object", "description": "Only present when requested with facets=true; counts deduplicated candidates."},
+                    "usage_hint": {"type": "string", "description": "Only present for broad facet responses that need narrowing guidance."},
                 },
             }
 
     def invoke(self, args: dict[str, object]) -> CapabilityResult:
-        query = str(args.get("query") or "").strip()
+        query = _read_name_arg(args, "query", "name")
+        namespace = _normalize_namespace(args.get("namespace")) or _namespace_from_query(query)
         family = str(args.get("family") or "").strip().lower()
         module_id = str(args.get("module_id") or "").strip().lower()
+        tags = [
+            str(item).strip().lower()
+            for item in list(args.get("tags") or [])
+            if str(item).strip()
+        ]
+        include_facets = _bool_arg(args.get("facets") if "facets" in args else args.get("include_facets"))
         try:
             top_k = max(1, int(args.get("top_k", args.get("limit", 10))))
         except (TypeError, ValueError):
@@ -381,32 +475,19 @@ class ToolSearchTool:
                 and "execution tools" in str(spec.get("description") or "").lower()
             )
         ]
-        filters_active = bool(query or family or module_id)
-        if not filters_active:
-            all_hits = _dedupe_hits(self.runtime, all_specs)
-            hits = all_hits[:top_k] if len(all_hits) <= min(top_k, _EMPTY_QUERY_HIT_LIMIT) else []
-            payload = {
-                "hits": hits,
-                "total_count": len(all_hits),
-                "returned_count": len(hits),
-                "top_k": top_k,
-                "truncated": len(hits) < len(all_hits),
-                "facets": _capability_facets(all_specs),
-                "usage_hint": "Provide query, module_id, or family. For broad inventory, first inspect facets, then call tool_search with module_id.",
-            }
-            return CapabilityResult(
-                status=RuntimeStatus.OK,
-                text="capability search facets",
-                structured=payload,
-                llm_text=render_titled_structured_for_llm("Capability search facets", payload),
-            )
 
-        ranked: list[tuple[int, dict[str, object]]] = []
-        for spec in all_specs:
+        ranked: list[tuple[int, int, dict[str, object]]] = []
+        for index, spec in enumerate(all_specs):
+            if namespace and _spec_namespace(spec) != namespace:
+                continue
             if family and str(spec.get("family") or "").lower() != family:
                 continue
             if module_id and str(spec.get("module_id") or "").lower() != module_id:
                 continue
+            if tags:
+                spec_tags = {str(item).strip().lower() for item in list(spec.get("tags") or []) if str(item).strip()}
+                if not set(tags).issubset(spec_tags):
+                    continue
             aliases = list(spec.get("aliases") or [])
             call_names = list(spec.get("call_names") or [])
             score = _score(
@@ -422,16 +503,18 @@ class ToolSearchTool:
             )
             if query and score <= 0:
                 continue
-            ranked.append((score, spec))
+            ranked.append((score, index, spec))
         ranked.sort(
             key=lambda item: (
                 -item[0],
-                -_search_priority(item[1]),
-                str(item[1].get("module_id") or ""),
-                str(item[1].get("name") or ""),
+                -_search_priority(item[2]),
+                str(item[2].get("module_id") or "") if query else "",
+                str(item[2].get("name") or "") if query else "",
+                item[1],
             )
         )
-        all_hits = _dedupe_hits(self.runtime, [spec for _, spec in ranked])
+        deduped_specs = _dedupe_specs([spec for _, _, spec in ranked])
+        all_hits = [_compact_capability_hit(self.runtime, spec) for spec in deduped_specs]
         hits = all_hits[:top_k]
         payload = {
             "hits": hits,
@@ -439,8 +522,20 @@ class ToolSearchTool:
             "returned_count": len(hits),
             "top_k": top_k,
             "truncated": len(all_hits) > len(hits),
-            "facets": _capability_facets([spec for _, spec in ranked]),
+            "applied_filters": _applied_filters(
+                query=query,
+                namespace=namespace,
+                family=family,
+                module_id=module_id,
+                tags=tags,
+            ),
         }
+        if include_facets:
+            payload["facets"] = _capability_facets(deduped_specs)
+            if len(all_hits) > len(hits):
+                payload["usage_hint"] = (
+                    "Narrow with namespace, module_id, family, or tags; facets count the deduplicated candidate set."
+                )
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="capability search results",

@@ -37,7 +37,7 @@ class ToolSearchTests(unittest.TestCase):
         self.assertNotIn("module_id", hit)
         self.assertNotIn("call_names", hit)
 
-    def test_empty_search_returns_facets_only_for_broad_surface(self) -> None:
+    def test_empty_search_returns_top_hits_without_facets_by_default(self) -> None:
         class FakeRuntime:
             def list_capability_specs(self):
                 return [
@@ -55,12 +55,57 @@ class ToolSearchTests(unittest.TestCase):
 
         result = ToolSearchTool(FakeRuntime()).invoke({"top_k": 10})
 
-        self.assertEqual(result.structured["hits"], [])
+        self.assertEqual(len(result.structured["hits"]), 10)
         self.assertEqual(result.structured["total_count"], 30)
-        self.assertEqual(result.structured["returned_count"], 0)
+        self.assertEqual(result.structured["returned_count"], 10)
         self.assertTrue(result.structured["truncated"])
-        self.assertIn({"module_id": "demo", "count": 20}, result.structured["facets"]["modules"])
-        self.assertIn("module_id", result.structured["usage_hint"])
+        self.assertEqual(result.structured["applied_filters"], {})
+        self.assertNotIn("facets", result.structured)
+
+    def test_search_returns_deduped_facets_when_requested(self) -> None:
+        class FakeRuntime:
+            def list_capability_specs(self):
+                return [
+                    {
+                        "name": "intro_module_demo_show",
+                        "canonical_path": "intro_module_demo_show",
+                        "description": "Show demo public metadata",
+                        "family": "introspection",
+                        "module_id": "demo",
+                        "aliases": [],
+                        "call_names": ["intro_module_demo_show"],
+                        "target_id": f"endpoint_{index}",
+                    }
+                    for index in range(3)
+                ]
+
+        result = ToolSearchTool(FakeRuntime()).invoke({"query": "demo public", "top_k": 10, "facets": True})
+
+        self.assertEqual(result.structured["total_count"], 1)
+        self.assertEqual(result.structured["returned_count"], 1)
+        self.assertIn({"module_id": "demo", "count": 1}, result.structured["facets"]["modules"])
+        self.assertIn({"family": "introspection", "count": 1}, result.structured["facets"]["families"])
+        self.assertIn({"namespace": "introspection", "count": 1}, result.structured["facets"]["namespaces"])
+
+    def test_search_accepts_name_and_include_facets_aliases(self) -> None:
+        class FakeRuntime:
+            def list_capability_specs(self):
+                return [
+                    {
+                        "name": "intro_module_demo_show",
+                        "canonical_path": "intro_module_demo_show",
+                        "description": "Show demo public metadata",
+                        "family": "introspection",
+                        "module_id": "demo",
+                        "aliases": [],
+                        "call_names": ["intro_module_demo_show"],
+                    }
+                ]
+
+        result = ToolSearchTool(FakeRuntime()).invoke({"name": "demo public", "include_facets": True})
+
+        self.assertEqual(result.structured["applied_filters"]["query"], "demo public")
+        self.assertIn("facets", result.structured)
 
     def test_module_filter_lists_one_module_without_query(self) -> None:
         class FakeRuntime:
@@ -94,6 +139,68 @@ class ToolSearchTests(unittest.TestCase):
         self.assertEqual(result.structured["hits"][0]["required_params"], ["value"])
         self.assertNotIn("module_id", result.structured["hits"][0])
         self.assertNotIn("call_names", result.structured["hits"][0])
+
+    def test_namespace_filter_separates_introspection_from_operations(self) -> None:
+        class FakeRuntime:
+            def list_capability_specs(self):
+                return [
+                    {
+                        "name": "intro_module_llm_active",
+                        "canonical_path": "intro_module_llm_active",
+                        "description": "Show active llm endpoint metadata",
+                        "family": "introspection",
+                        "module_id": "llm",
+                        "aliases": [],
+                        "call_names": ["intro_module_llm_active"],
+                    },
+                    {
+                        "name": "op_llm_mgmt_set_active_endpoint",
+                        "canonical_path": "op_llm_mgmt_set_active_endpoint",
+                        "description": "Switch the active llm endpoint",
+                        "family": "management",
+                        "module_id": "llm",
+                        "aliases": [],
+                        "call_names": ["op_llm_mgmt_set_active_endpoint"],
+                        "metadata": {"namespace": "operation"},
+                    },
+                ]
+
+        result = ToolSearchTool(FakeRuntime()).invoke(
+            {"query": "llm endpoint", "namespace": "intro", "top_k": 10}
+        )
+
+        self.assertEqual([item["name"] for item in result.structured["hits"]], ["intro_module_llm_active"])
+        self.assertEqual(result.structured["applied_filters"]["namespace"], "introspection")
+
+    def test_namespace_is_inferred_from_query_terms(self) -> None:
+        class FakeRuntime:
+            def list_capability_specs(self):
+                return [
+                    {
+                        "name": "intro_module_llm_active",
+                        "canonical_path": "intro_module_llm_active",
+                        "description": "Show active llm endpoint metadata",
+                        "family": "introspection",
+                        "module_id": "llm",
+                        "aliases": [],
+                        "call_names": ["intro_module_llm_active"],
+                    },
+                    {
+                        "name": "op_llm_mgmt_set_active_endpoint",
+                        "canonical_path": "op_llm_mgmt_set_active_endpoint",
+                        "description": "Switch the active llm endpoint",
+                        "family": "management",
+                        "module_id": "llm",
+                        "aliases": [],
+                        "call_names": ["op_llm_mgmt_set_active_endpoint"],
+                        "metadata": {"namespace": "operation"},
+                    },
+                ]
+
+        result = ToolSearchTool(FakeRuntime()).invoke({"query": "llm endpoint config introspection", "top_k": 10})
+
+        self.assertEqual([item["name"] for item in result.structured["hits"]], ["intro_module_llm_active"])
+        self.assertEqual(result.structured["applied_filters"]["namespace"], "introspection")
 
     def test_management_lifecycle_and_maintenance_capabilities_are_visible_to_discovery(self) -> None:
         visible_create = {

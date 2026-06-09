@@ -687,7 +687,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("module_id", shell_hit)
         self.assertNotIn("call_names", shell_hit)
         self.assertGreaterEqual(result.structured["total_count"], result.structured["returned_count"])
-        self.assertIn("facets", result.structured)
+        self.assertNotIn("facets", result.structured)
 
     def test_file_tools_are_published_as_llm_capabilities(self) -> None:
         core = PalCore()

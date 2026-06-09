@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from importlib import metadata
+import json
 from pathlib import Path
 import re
 import sys
@@ -81,7 +82,10 @@ class LLMProviderAdapter:
         return False
 
     def new_draft(self, messages: list[dict[str, Any]]) -> LiteLLMCompletionDraft:
-        return LiteLLMCompletionDraft(model=self.litellm_model(), messages=messages)
+        return LiteLLMCompletionDraft(
+            model=self.litellm_model(),
+            messages=chat_messages_to_openai_compatible_messages(messages),
+        )
 
     def litellm_model(self) -> str:
         model_id = str(self.endpoint.model_id or "").strip()
@@ -343,6 +347,90 @@ def _think_level_to_completion_reasoning_effort(value: Any) -> str | None:
         "xhigh": "xhigh",
     }
     return mapping.get(text, "medium" if text else None)
+
+
+def chat_messages_to_openai_compatible_messages(
+    messages: list[dict[str, Any]],
+    *,
+    supports_developer: bool = False,
+) -> list[dict[str, Any]]:
+    rendered: list[dict[str, Any]] = []
+    seen_conversation = False
+    for message in list(messages or []):
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "user").strip() or "user"
+        if role == "system" and not seen_conversation:
+            rendered.append(dict(message))
+            continue
+        if role == "developer" and supports_developer:
+            rendered.append(dict(message))
+            continue
+        if role in {"system", "developer"}:
+            fallback = _instruction_fallback_user_message(role, message.get("content"))
+            if fallback is not None:
+                rendered.append(fallback)
+                seen_conversation = True
+            continue
+        rendered.append(dict(message))
+        seen_conversation = True
+    if not rendered:
+        rendered.append({"role": "user", "content": "Continue."})
+    return rendered
+
+
+def render_instruction_fallback_text(role: str, content: Any) -> str:
+    normalized_role = str(role or "developer").strip().lower()
+    tag = "system-instruction" if normalized_role == "system" else "developer-instruction"
+    label = "system" if normalized_role == "system" else "developer"
+    body = _message_content_text(content).strip()
+    if not body:
+        body = "(empty instruction)"
+    return (
+        f"<{tag}>\n"
+        f"This is a Pal {label} instruction for the current turn, not the user's request. "
+        "Apply it as runtime guidance while preserving the surrounding conversation order.\n\n"
+        f"{body}\n"
+        f"</{tag}>"
+    )
+
+
+def _instruction_fallback_user_message(role: str, content: Any) -> dict[str, Any] | None:
+    text = render_instruction_fallback_text(role, content)
+    if not text.strip():
+        return None
+    return {"role": "user", "content": text}
+
+
+def _message_content_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                if item:
+                    parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                rendered = str(item).strip()
+                if rendered:
+                    parts.append(rendered)
+                continue
+            part_type = str(item.get("type") or "").strip()
+            if part_type in {"text", "input_text", "output_text"}:
+                text = str(item.get("text") or "")
+                if text:
+                    parts.append(text)
+                continue
+            if part_type in {"image_url", "input_image"}:
+                parts.append("[image content]")
+                continue
+            parts.append(json.dumps(item, ensure_ascii=False))
+        return "\n".join(parts)
+    return str(content)
 
 
 default_provider_registry = build_default_provider_registry()
