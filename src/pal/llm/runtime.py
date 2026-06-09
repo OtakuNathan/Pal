@@ -13,6 +13,11 @@ from typing import Any, Callable, Iterable, Protocol
 
 from pal.llm.adapters import LLMProviderRegistry, build_runtime_provider_registry, _think_level_to_completion_reasoning_effort
 from pal.llm.llm_adaptor.base import LITELLM_RESPONSES_SHAPE
+from pal.llm.llm_adaptor.anthropic_api import (
+    chat_messages_to_anthropic_messages,
+    chat_tools_to_anthropic_tools,
+    think_level_to_anthropic_thinking,
+)
 from pal.llm.llm_adaptor.openai_responses import OpenAIResponsesDraft, chat_tools_to_responses_tools
 from pal.llm.codex_openai_bridge import (
     DEFAULT_CODEX_BRIDGE_MAX_CONCURRENCY,
@@ -626,6 +631,258 @@ def _is_empty_successful_stream_result(events: list[NormalizedLLMStreamEvent]) -
 
 
 @dataclass
+class OpenAIResponsesEndpointInvoker:
+    credentials: LiteLLMCredentialResolver = field(default_factory=LiteLLMCredentialResolver)
+    artifact_manager: Any = None
+    runtime_root: str | Path | None = None
+    provider_registry: LLMProviderRegistry = field(default_factory=build_runtime_provider_registry)
+    _renderer: LiteLLMEndpointInvoker = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._renderer = LiteLLMEndpointInvoker(
+            credentials=self.credentials,
+            artifact_manager=self.artifact_manager,
+            runtime_root=self.runtime_root,
+            provider_registry=self.provider_registry,
+        )
+
+    @staticmethod
+    def supports_endpoint(endpoint: LLMEndpointModel) -> bool:
+        capabilities = dict(getattr(endpoint, "capabilities_blob", None) or {})
+        provider = str(getattr(endpoint, "provider", "") or "").strip().lower()
+        adapter = str(capabilities.get("adapter") or capabilities.get("llm_adapter") or "").strip().lower()
+        return bool(
+            provider in {"openai", "codex_bridge"}
+            or adapter in {"openai_responses", "responses", "codex_bridge"}
+            or capabilities.get("openai_responses")
+            or capabilities.get("responses_api")
+            or capabilities.get("codex_bridge")
+        )
+
+    def refresh_credentials(self) -> bool:
+        return self._renderer.refresh_credentials()
+
+    def refresh_provider_registry(self) -> bool:
+        return self._renderer.refresh_provider_registry()
+
+    def invoke(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
+        try:
+            import openai  # type: ignore
+        except Exception as exc:
+            raise LLMEndpointInvocationError("openai SDK is not installed in the current runtime") from exc
+
+        request_shape, kwargs, tool_name_aliases = self._renderer._build_litellm_kwargs(endpoint, request)
+        if request_shape != LITELLM_RESPONSES_SHAPE:
+            raise LLMEndpointInvocationError(f"endpoint {endpoint.endpoint_id} did not render a Responses request")
+        client_kwargs, request_kwargs = _split_openai_responses_sdk_kwargs(kwargs)
+        try:
+            client = openai.OpenAI(**client_kwargs)
+            response = _run_with_wall_timeout(
+                lambda: client.responses.create(**request_kwargs),
+                timeout_seconds=_timeout_from_litellm_kwargs(kwargs),
+                description=f"openai responses invocation for {endpoint.endpoint_id}",
+            )
+        except Exception as exc:
+            raise LLMEndpointInvocationError(f"openai responses invocation failed for {endpoint.endpoint_id}: {exc}") from exc
+        return self._renderer._parse_litellm_responses_response(response, tool_name_aliases=tool_name_aliases)
+
+    def invoke_stream(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> Iterable[NormalizedLLMStreamEvent]:
+        yield from _stream_events_from_outcome(self.invoke(endpoint, request))
+
+
+@dataclass
+class AnthropicMessagesEndpointInvoker:
+    credentials: LiteLLMCredentialResolver = field(default_factory=LiteLLMCredentialResolver)
+    artifact_manager: Any = None
+    last_payload_summary: dict[str, Any] = field(default_factory=dict, init=False)
+
+    @staticmethod
+    def supports_endpoint(endpoint: LLMEndpointModel) -> bool:
+        provider = str(getattr(endpoint, "provider", "") or "").strip().lower()
+        api_mode = str(getattr(endpoint, "api_mode", "") or "").strip().lower()
+        return bool(provider == "anthropic" or api_mode == "anthropic_messages")
+
+    def refresh_credentials(self) -> bool:
+        refresh = getattr(self.credentials, "refresh", None)
+        if callable(refresh):
+            refresh()
+            return True
+        clear_cache = getattr(self.credentials, "clear_cache", None)
+        if callable(clear_cache):
+            clear_cache()
+            return True
+        return False
+
+    def invoke(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
+        try:
+            import anthropic  # type: ignore
+        except Exception as exc:
+            raise LLMEndpointInvocationError("anthropic SDK is not installed in the current runtime") from exc
+
+        client_kwargs, request_kwargs, tool_name_aliases = self._build_messages_kwargs(endpoint, request)
+        try:
+            client = anthropic.Anthropic(**client_kwargs)
+            response = _run_with_wall_timeout(
+                lambda: client.messages.create(**request_kwargs),
+                timeout_seconds=_coerce_timeout_seconds(client_kwargs.get("timeout"), default=120.0),
+                description=f"anthropic messages invocation for {endpoint.endpoint_id}",
+            )
+        except Exception as exc:
+            raise LLMEndpointInvocationError(f"anthropic messages invocation failed for {endpoint.endpoint_id}: {exc}") from exc
+        return _parse_anthropic_messages_response(response, tool_name_aliases=tool_name_aliases)
+
+    def invoke_stream(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> Iterable[NormalizedLLMStreamEvent]:
+        yield from _stream_events_from_outcome(self.invoke(endpoint, request))
+
+    def _build_messages_kwargs(
+        self,
+        endpoint: LLMEndpointModel,
+        request: CanonicalLLMRequest,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
+        tool_name_aliases = _build_tool_name_aliases(request.tools)
+        image_url_format = _image_url_format(endpoint)
+        messages = _coerce_messages_for_litellm(
+            list(request.messages),
+            tool_name_aliases=tool_name_aliases,
+            artifact_manager=self.artifact_manager,
+            supports_vision=bool(endpoint.supports_vision),
+            image_url_format=image_url_format,
+        )
+        self.last_payload_summary = _summarize_provider_payload(endpoint, messages, image_url_format=image_url_format)
+        system, anthropic_messages = chat_messages_to_anthropic_messages(messages)
+        timeout = _coerce_timeout_seconds(request.metadata.get("timeout_seconds"), default=120.0)
+        client_kwargs: dict[str, Any] = {
+            "timeout": timeout,
+            "max_retries": 0,
+        }
+        api_key = self.credentials.resolve_api_key(endpoint)
+        if api_key:
+            client_kwargs["api_key"] = api_key
+        if endpoint.base_url and not str(endpoint.base_url).startswith("stub://"):
+            client_kwargs["base_url"] = _litellm_api_base(str(endpoint.base_url))
+        request_kwargs: dict[str, Any] = {
+            "model": _strip_model_provider_prefix(str(request.model_hint or endpoint.model_id or ""), {"anthropic"}),
+            "messages": anthropic_messages,
+            "max_tokens": request.max_output_tokens,
+        }
+        if system:
+            request_kwargs["system"] = system
+        if request.temperature is not None:
+            request_kwargs["temperature"] = request.temperature
+        tools = chat_tools_to_anthropic_tools(
+            _coerce_tools_for_litellm(request.tools, tool_name_aliases=tool_name_aliases)
+        )
+        if tools:
+            request_kwargs["tools"] = tools
+        thinking = think_level_to_anthropic_thinking(
+            request.metadata.get("think_level"),
+            request.max_output_tokens,
+        )
+        if thinking is not None:
+            request_kwargs["thinking"] = thinking
+        return client_kwargs, request_kwargs, tool_name_aliases
+
+
+def _stream_events_from_outcome(outcome: CanonicalLLMOutcome) -> Iterable[NormalizedLLMStreamEvent]:
+    for tool_call in outcome.tool_calls:
+        yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TOOL_CALL, tool_call=tool_call)
+    if outcome.tool_calls:
+        yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.TOOL_CALLS)
+        return
+    if outcome.reasoning_text:
+        yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.REASONING_DELTA, reasoning_text=outcome.reasoning_text)
+    if outcome.text:
+        yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=outcome.text)
+    yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=outcome.finish_reason)
+
+
+def _split_openai_responses_sdk_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    request_kwargs = dict(kwargs)
+    api_key = request_kwargs.pop("api_key", None)
+    api_base = request_kwargs.pop("api_base", None)
+    timeout = request_kwargs.pop("timeout", None)
+    max_retries = request_kwargs.pop("max_retries", 0)
+    request_kwargs.pop("request_timeout", None)
+    request_kwargs.pop("force_timeout", None)
+    request_kwargs["model"] = _strip_model_provider_prefix(
+        str(request_kwargs.get("model") or ""),
+        {"openai", "hosted_vllm", "lm_studio", "llamafile"},
+    )
+    client_kwargs: dict[str, Any] = {"max_retries": int(max_retries or 0)}
+    if api_key:
+        client_kwargs["api_key"] = api_key
+    if api_base:
+        client_kwargs["base_url"] = api_base
+    if timeout is not None:
+        client_kwargs["timeout"] = timeout
+    return client_kwargs, request_kwargs
+
+
+def _strip_model_provider_prefix(model: str, providers: set[str]) -> str:
+    text = str(model or "").strip()
+    if "/" not in text:
+        return text
+    provider, name = text.split("/", 1)
+    if provider.strip().lower() in providers:
+        return name
+    return text
+
+
+def _parse_anthropic_messages_response(
+    response: Any,
+    *,
+    tool_name_aliases: dict[str, str] | None = None,
+) -> CanonicalLLMOutcome:
+    payload = response.model_dump() if hasattr(response, "model_dump") else response.to_dict() if hasattr(response, "to_dict") else response
+    content_blocks = list((payload or {}).get("content") or []) if isinstance(payload, dict) else []
+    text_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_calls: list[CanonicalToolCall] = []
+    for block in content_blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "").strip()
+        if block_type == "text":
+            text = str(block.get("text") or "")
+            if text:
+                text_parts.append(text)
+            continue
+        if block_type == "thinking":
+            text = str(block.get("thinking") or block.get("text") or "")
+            if text:
+                reasoning_parts.append(text)
+            continue
+        if block_type == "tool_use":
+            name = _canonical_tool_name(str(block.get("name") or ""), tool_name_aliases)
+            if name:
+                tool_calls.append(
+                    CanonicalToolCall(
+                        name=name,
+                        args=_coerce_tool_args(block.get("input")),
+                        call_id=str(block.get("id") or "").strip() or None,
+                    )
+                )
+    stop_reason = str((payload or {}).get("stop_reason") or "") if isinstance(payload, dict) else ""
+    finish_reason = LLMFinishReason.TOOL_CALLS if tool_calls else _anthropic_finish_reason(stop_reason)
+    outcome = CanonicalLLMOutcome(
+        text="".join(text_parts),
+        reasoning_text="\n".join(reasoning_parts),
+        tool_calls=tool_calls,
+        finish_reason=finish_reason,
+    )
+    _ensure_llm_invocation_result_has_payload(outcome)
+    return outcome
+
+
+def _anthropic_finish_reason(stop_reason: str) -> str:
+    if stop_reason in {"end_turn", "stop_sequence"}:
+        return LLMFinishReason.STOP
+    if stop_reason == "tool_use":
+        return LLMFinishReason.TOOL_CALLS
+    return stop_reason or LLMFinishReason.STOP
+
+
+@dataclass
 class CodexCliEndpointInvoker:
     """Native Codex CLI invoker that returns Pal canonical outcomes."""
 
@@ -716,16 +973,23 @@ class RoutingLLMEndpointInvoker:
 
     litellm_invoker: LiteLLMEndpointInvoker = field(default_factory=LiteLLMEndpointInvoker)
     codex_invoker: CodexCliEndpointInvoker = field(default_factory=CodexCliEndpointInvoker)
+    openai_invoker: OpenAIResponsesEndpointInvoker = field(default_factory=OpenAIResponsesEndpointInvoker)
+    anthropic_invoker: AnthropicMessagesEndpointInvoker = field(default_factory=AnthropicMessagesEndpointInvoker)
 
     @property
     def provider_registry(self) -> LLMProviderRegistry:
         return self.litellm_invoker.provider_registry
 
     def refresh_credentials(self) -> bool:
-        return bool(self.litellm_invoker.refresh_credentials())
+        refreshed = bool(self.litellm_invoker.refresh_credentials())
+        refreshed = bool(self.openai_invoker.refresh_credentials()) or refreshed
+        refreshed = bool(self.anthropic_invoker.refresh_credentials()) or refreshed
+        return refreshed
 
     def refresh_provider_registry(self) -> bool:
-        return bool(self.litellm_invoker.refresh_provider_registry())
+        refreshed = bool(self.litellm_invoker.refresh_provider_registry())
+        refreshed = bool(self.openai_invoker.refresh_provider_registry()) or refreshed
+        return refreshed
 
     def invoke(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
         return self._select(endpoint).invoke(endpoint, request)
@@ -736,6 +1000,10 @@ class RoutingLLMEndpointInvoker:
     def _select(self, endpoint: LLMEndpointModel) -> LLMEndpointInvokerPort:
         if self.codex_invoker.supports_endpoint(endpoint):
             return self.codex_invoker
+        if self.openai_invoker.supports_endpoint(endpoint):
+            return self.openai_invoker
+        if self.anthropic_invoker.supports_endpoint(endpoint):
+            return self.anthropic_invoker
         return self.litellm_invoker
 
 
@@ -745,11 +1013,24 @@ def build_default_endpoint_invoker(
     artifact_manager: Any = None,
     runtime_root: str | Path | None = None,
 ) -> RoutingLLMEndpointInvoker:
+    resolver = credentials or LiteLLMCredentialResolver()
+    provider_registry = build_runtime_provider_registry()
     return RoutingLLMEndpointInvoker(
         litellm_invoker=LiteLLMEndpointInvoker(
-            credentials=credentials or LiteLLMCredentialResolver(),
+            credentials=resolver,
             artifact_manager=artifact_manager,
             runtime_root=runtime_root,
+            provider_registry=provider_registry,
+        ),
+        openai_invoker=OpenAIResponsesEndpointInvoker(
+            credentials=resolver,
+            artifact_manager=artifact_manager,
+            runtime_root=runtime_root,
+            provider_registry=provider_registry,
+        ),
+        anthropic_invoker=AnthropicMessagesEndpointInvoker(
+            credentials=resolver,
+            artifact_manager=artifact_manager,
         ),
         codex_invoker=CodexCliEndpointInvoker(artifact_manager=artifact_manager),
     )

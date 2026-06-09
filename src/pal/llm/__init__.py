@@ -41,12 +41,14 @@ from pal.llm.models import LLMEndpointModel, PalRuntimeSettingModel
 from pal.llm.repository import DEFAULT_THINK_LEVEL, LLMEndpointRepository, RuntimeSettingRepository
 from pal.llm.secret_store import EncryptedFileSecretStore, InMemorySecretStore, KeyringSecretStore, SecretRef, SecretStorePort
 from pal.llm.runtime import (
+    AnthropicMessagesEndpointInvoker,
     CodexCliEndpointInvoker,
     EndpointResolver,
     LLMEndpointInvocationError,
     LLMEndpointInvokerPort,
     LiteLLMEndpointInvoker,
     LLMRuntime,
+    OpenAIResponsesEndpointInvoker,
     RoutingLLMEndpointInvoker,
     build_default_endpoint_invoker,
 )
@@ -57,6 +59,7 @@ __all__ = [
     "CanonicalLLMRequest",
     "CanonicalToolCall",
     "CanonicalToolResult",
+    "AnthropicMessagesEndpointInvoker",
     "CodexAuthMessages",
     "CodexClientInfo",
     "CodexCliBridge",
@@ -78,6 +81,7 @@ __all__ = [
     "LLMEndpointInvocationError",
     "LLMEndpointInvokerPort",
     "LiteLLMEndpointInvoker",
+    "OpenAIResponsesEndpointInvoker",
     "RoutingLLMEndpointInvoker",
     "LLMProviderAdapter",
     "LLMProviderRegistry",

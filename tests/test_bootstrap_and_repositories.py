@@ -39,6 +39,7 @@ from pal.llm import (
     LiteLLMEndpointInvoker,
     RuntimeSettingRepository,
     SecretRef,
+    build_default_endpoint_invoker,
 )
 from pal.llm.adapters import LLMProviderAdapter, LLMProviderRegistry, build_default_provider_registry
 from pal.memory import HashingEmbedder, L3CommitRequest, L3CorrectRequest, L3ProviderSelector, MemoryPackRequest, MemoryQuery, MemoryService
@@ -810,6 +811,152 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(kwargs["tool_choice"], "auto")
         self.assertEqual(kwargs["reasoning"], {"effort": "xhigh"})
         self.assertNotIn("extra_body", kwargs)
+
+    def test_routing_invoker_uses_native_openai_responses_sdk(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="openai-native",
+            provider="openai",
+            model_id="gpt-5.4",
+            api_mode="openai_chat",
+            base_url="https://api.openai.com/v1",
+            auth_kind="api_key_ref",
+            credential_ref="openai-prod:api-key",
+            priority=0,
+            enabled=True,
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="openai-prod", account="api-key"), "openai-token")
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        class FakeResponse:
+            def to_dict(self):
+                return {
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "pong"}],
+                        }
+                    ]
+                }
+
+        class FakeResponses:
+            def create(self, **kwargs):
+                calls.append(("create", dict(kwargs)))
+                return FakeResponse()
+
+        class FakeOpenAIClient:
+            def __init__(self, **kwargs):
+                calls.append(("client", dict(kwargs)))
+                self.responses = FakeResponses()
+
+        fake_openai = types.SimpleNamespace(OpenAI=FakeOpenAIClient)
+        invoker = build_default_endpoint_invoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        )
+
+        with patch.dict(sys.modules, {"openai": fake_openai}):
+            outcome = invoker.invoke(
+                endpoint,
+                CanonicalLLMRequest(
+                    messages=[{"role": "system", "content": "rules"}, {"role": "user", "content": "hello"}],
+                    max_output_tokens=64,
+                    metadata={"think_level": "deep"},
+                ),
+            )
+
+        self.assertEqual(outcome.text, "pong")
+        self.assertEqual(calls[0][0], "client")
+        self.assertEqual(calls[0][1]["api_key"], "openai-token")
+        self.assertEqual(calls[0][1]["base_url"], "https://api.openai.com/v1")
+        self.assertEqual(calls[0][1]["max_retries"], 0)
+        self.assertEqual(calls[1][0], "create")
+        self.assertEqual(calls[1][1]["model"], "gpt-5.4")
+        self.assertEqual(calls[1][1]["instructions"], "rules")
+        self.assertEqual(calls[1][1]["reasoning"], {"effort": "high"})
+        self.assertIn("input", calls[1][1])
+        self.assertNotIn("messages", calls[1][1])
+
+    def test_routing_invoker_uses_native_anthropic_messages_sdk(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="anthropic-native",
+            provider="anthropic",
+            model_id="anthropic/claude-sonnet-4-5",
+            api_mode="anthropic_messages",
+            base_url="https://api.anthropic.com/v1/messages",
+            auth_kind="api_key_ref",
+            credential_ref="anthropic-prod:api-key",
+            priority=0,
+            enabled=True,
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="anthropic-prod", account="api-key"), "anthropic-token")
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        class FakeResponse:
+            def to_dict(self):
+                return {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {"type": "text", "text": "thinking done"},
+                        {
+                            "type": "tool_use",
+                            "id": "call_1",
+                            "name": "probe_alias",
+                            "input": {"ok": True},
+                        },
+                    ],
+                }
+
+        class FakeMessages:
+            def create(self, **kwargs):
+                calls.append(("create", dict(kwargs)))
+                return FakeResponse()
+
+        class FakeAnthropicClient:
+            def __init__(self, **kwargs):
+                calls.append(("client", dict(kwargs)))
+                self.messages = FakeMessages()
+
+        fake_anthropic = types.SimpleNamespace(Anthropic=FakeAnthropicClient)
+        invoker = build_default_endpoint_invoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        )
+
+        with patch.dict(sys.modules, {"anthropic": fake_anthropic}):
+            outcome = invoker.invoke(
+                endpoint,
+                CanonicalLLMRequest(
+                    messages=[{"role": "system", "content": "rules"}, {"role": "user", "content": "hello"}],
+                    max_output_tokens=4096,
+                    metadata={"think_level": "deep"},
+                    tools=[
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "probe.alias",
+                                "description": "Probe.",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ],
+                ),
+            )
+
+        self.assertEqual(outcome.text, "thinking done")
+        self.assertEqual(outcome.finish_reason, LLMFinishReason.TOOL_CALLS)
+        self.assertEqual(outcome.tool_calls[0].name, "probe.alias")
+        self.assertEqual(outcome.tool_calls[0].args, {"ok": True})
+        self.assertEqual(outcome.tool_calls[0].call_id, "call_1")
+        self.assertEqual(calls[0][0], "client")
+        self.assertEqual(calls[0][1]["api_key"], "anthropic-token")
+        self.assertEqual(calls[0][1]["base_url"], "https://api.anthropic.com")
+        self.assertEqual(calls[0][1]["max_retries"], 0)
+        self.assertEqual(calls[1][0], "create")
+        self.assertEqual(calls[1][1]["model"], "claude-sonnet-4-5")
+        self.assertEqual(calls[1][1]["system"], "rules")
+        self.assertEqual(calls[1][1]["tools"][0]["name"], "probe_alias")
+        self.assertEqual(calls[1][1]["thinking"], {"type": "enabled", "budget_tokens": 2048})
 
     def test_litellm_invoker_maps_glm_think_level_to_thinking_body(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
