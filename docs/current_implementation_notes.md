@@ -41,7 +41,7 @@ Current memory-context blocks:
 - `<recalled_memories view="summary">`
 - `<advisor_hints>`
 
-Recalled memories render as `[mem_ref]: text`. `mem_ref` is operational metadata for `op_memory_update` and `op_memory_delete`; it is not user-facing content and should not be copied into new memories.
+Recalled memories render as `[mem_ref]: text`. `mem_ref` is operational metadata for `memory_update` and `memory_delete`; it is not user-facing content and should not be copied into new memories.
 
 If memory has been recalled or is present in the prompt, Pal is instructed to treat it as reference context before decisions or actions. This is a prompt-level governance rule; runtime still cannot inspect the model's private reasoning.
 
@@ -65,19 +65,19 @@ The direct LLM tool surface is configured by `src/pal/core/tool_surface.toml`.
 
 Resident artifact tools are intentionally limited to:
 
-- `op_artifact_info`
-- `op_artifact_read`
+- `artifact_info`
+- `artifact_read`
 
 Other artifact tools remain discoverable.
 
 Resident file tools are available for ordinary UTF-8 source/text editing:
 
-- `op_file_read`
-- `op_file_edit`
-- `op_file_write`
-- `op_file_state`
+- `file_read`
+- `file_edit`
+- `file_write`
+- `file_state`
 
-`op_exec_shell` remains resident, but it is not the default file read/write/edit path. Dedicated Pal capabilities should be preferred for reading, writing, searching, inspecting, or editing files; shell is for commands, tests, builds, scripts, and cases where no dedicated capability is sufficient.
+`shell` remains resident, but it is not the default file read/write/edit path. Dedicated Pal capabilities should be preferred for reading, writing, searching, inspecting, or editing files; shell is for commands, tests, builds, scripts, and cases where no dedicated capability is sufficient.
 
 MCP-projected tools and prompt render capabilities are not resident by default.
 
@@ -113,7 +113,7 @@ The important boundary is:
 - provider owns endpoint lifecycle, attach/detach mechanics, platform SDK usage, provider-specific introspection, interaction rendering, and interaction result normalization
 - `channel_kind` remains the endpoint row discriminator for persistence and deserialization; core should not infer platform behavior from it
 
-`op_channel_provider_rescan` rescans runtime-root channel providers and may attach enabled endpoints, but it does not define how any concrete endpoint attaches. That remains provider-owned.
+`channel_provider_rescan` rescans runtime-root channel providers and may attach enabled endpoints, but it does not define how any concrete endpoint attaches. That remains provider-owned.
 
 Interaction is typed internally but realized per provider. Telegram may use inline keyboards, callback queries, command menu publication, message edit, reaction, and typing. Socket/CLI/Web providers may choose their own transport shape. Core and Control consume typed actions/results only.
 
@@ -160,41 +160,41 @@ The manager sidecar pushes events through the `subscribe_events` IPC stream. The
 
 Current capability surface:
 
-- `intro_task_search`
-- `intro_task_read`
-- `intro_work_order_search`
-- `intro_work_order_read`
-- `intro_work_order_draft_search`
-- `intro_work_order_draft_read`
-- `intro_minion_list`
-- `intro_minion_read`
-- `intro_minion_profile_list`
-- `intro_minion_profile_read`
-- `op_minion_draft_work_order`
-- `op_minion_promote_work_order_draft`
-- `op_minion_spawn`
-- `op_minion_kill`
-- `op_minion_finalize`
+- `task_search`
+- `task_read`
+- `work_order_search`
+- `work_order_read`
+- `work_order_draft_search`
+- `work_order_draft_read`
+- `minion_list`
+- `minion_read`
+- `minion_profile_list`
+- `minion_profile_read`
+- `minion_draft_work_order`
+- `minion_promote_work_order_draft`
+- `minion_spawn`
+- `minion_kill`
+- `minion_finalize`
 
-Work order drafts are minion-owned planning artifacts for user brainstorming and module-boundary discussion. They are searchable, but they are not progress truth. The route is draft -> planner review -> user/Pal confirmation -> formal work order. Promotion is explicit through `op_minion_promote_work_order_draft`; `op_minion_spawn` can also accept `draft_id` and let the minion subsystem promote before spawning through the same main entry.
+Work order drafts are minion-owned planning artifacts for user brainstorming and module-boundary discussion. They are searchable, but they are not progress truth. The route is draft -> planner review -> user/Pal confirmation -> formal work order. Promotion is explicit through `minion_promote_work_order_draft`; `minion_spawn` can also accept `draft_id` and let the minion subsystem promote before spawning through the same main entry.
 
 Checkpoint is the milestone cursor fact. Completed checkpoints advance the derived current milestone; partial or blocked checkpoints do not.
 
 Progress and checkpoint events are manager/tasking telemetry. They are written to the minion ledger and checkpoint tables, but they are not direct chat notifications. Pal should answer progress questions by inspecting active runs and work order snapshots. Terminal events are the user-facing completion notification path and also synchronize a recent completion observation into Pal's prompt context.
 
-Minion deliverables are file-first. Coder profiles keep their Git task repo/branch and write reports under `minion_outputs/{work_order_id}`. Planner, reviewer, generic, and other one-shot profiles get a manager-allocated folder workspace under `data/minion/workspaces/{run_id}_{profile}` with `work_order.json`, `metadata.json`, `logs/`, and `deliverables/`. The runner exposes `op_minion_artifact_write`, scoped only to `workspace.artifact_dir`, and terminal/checkpoint payloads carry `artifacts[]` plus `primary_artifact`. Large reports should be read from those files instead of being pushed as chat text.
+Minion deliverables are file-first. Coder profiles keep their Git task repo/branch and write reports under `minion_outputs/{work_order_id}`. Planner, reviewer, generic, and other one-shot profiles get a manager-allocated folder workspace under `data/minion/workspaces/{run_id}_{profile}` with `work_order.json`, `metadata.json`, `logs/`, and `deliverables/`. The runner exposes `artifact_write`, scoped only to `workspace.artifact_dir`, and terminal/checkpoint payloads carry `artifacts[]` plus `primary_artifact`. Large reports should be read from those files instead of being pushed as chat text.
 
-Terminal event summaries are cleaned before display: `Task Lesson` and `System Lesson` sections are extracted into structured fields and removed from the final completion text. When lessons are present, Pal opens a separate `minion_lesson_approval` interaction with `Accept`, `Reject`, and `Edit` buttons. Accept stores task lessons as tasking continuity, stores system lessons as accepted candidates, and attempts a durable memory commit through `op_memory_write` when it is available. Reject discards them. Edit pauses absorption and asks for revised lesson text.
+Terminal event summaries are cleaned before display: `Task Lesson` and `System Lesson` sections are extracted into structured fields and removed from the final completion text. When lessons are present, Pal opens a separate `minion_lesson_approval` interaction with `Accept`, `Reject`, and `Edit` buttons. Accept stores task lessons as tasking continuity, stores system lessons as accepted candidates, and attempts a durable memory commit through `memory_write` when it is available. Reject discards them. Edit pauses absorption and asks for revised lesson text.
 
 Coder minion task execution is Git-backed by design. A task owns or resolves a task repo, each work order runs on its own branch, and each completed milestone should correspond to a commit on that branch. A completed checkpoint should carry the milestone index, commit SHA, and artifact references. User acceptance/finalization can later squash milestone commits and merge/apply them to the target branch.
 
-Minion profiles are declarative TOML templates plus optional runtime overrides in `runtime_root/plugins/minion/profiles/*.toml`. Builtin profiles use `capability_policy.mode = "inherit_filtered"`: spawn starts from Pal's current capability registry, adds profile defaults/provider hooks, then applies the minion deny policy. `core_minion_read` includes scoped discovery/read/call and read-only `op_memory_recall`; `web_research` ensures `op_web_search` and `op_web_read` are available when the slim runner runtime supports them.
+Minion profiles are declarative TOML templates plus optional runtime overrides in `runtime_root/plugins/minion/profiles/*.toml`. Builtin profiles use `capability_policy.mode = "inherit_filtered"`: spawn starts from Pal's current capability registry, adds profile defaults/provider hooks, then applies the minion deny policy. `core_minion_read` includes scoped discovery/read/call and read-only `memory_recall`; `web_research` ensures `web_search` and `web_read` are available when the slim runner runtime supports them.
 
 Runner capability exposure has a default deny policy. The runner can use task tools, report through events, and request approval, but it does not see `intro_*`, `op_minion_*`, memory-write, behavior/skill mutation, channel/plugin management, or lifecycle attach/detach/rescan style operations. This keeps recursive minion spawning and Pal state mutation out of the runner context.
 
-The internal allowed pool can be broad, but the LLM-facing tool surface stays small. Normal minion runs expose scoped discovery/read/call plus direct work tools when allowed: `op_file_read`, `op_file_edit`, `op_file_write`, `op_exec_shell`, `op_web_search`, `op_web_read`, and `op_memory_recall`. Discovery and read are backed by a scoped runtime view that returns only allowed and non-denied capabilities.
+The internal allowed pool can be broad, but the LLM-facing tool surface stays small. Normal minion runs expose scoped discovery/read/call plus direct work tools when allowed: `file_read`, `file_edit`, `file_write`, `shell`, `web_search`, `web_read`, and `memory_recall`. Discovery and read are backed by a scoped runtime view that returns only allowed and non-denied capabilities.
 
-The runner prompt requires `op_memory_recall` after a failed tool/capability call when recall is allowed, before retrying, debugging further, or reporting the milestone blocked.
+The runner prompt requires `memory_recall` after a failed tool/capability call when recall is allowed, before retrying, debugging further, or reporting the milestone blocked.
 
 ## Capability Boundary
 

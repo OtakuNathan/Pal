@@ -44,7 +44,8 @@ install_hint = "install pyright"
         self.assertEqual(config.config.install_hint, "install pyright")
 
     def test_builtin_templates_cover_expected_language_servers(self) -> None:
-        server_ids = {item.config.server_id for item in load_builtin_lsp_templates()}
+        templates = load_builtin_lsp_templates()
+        server_ids = {item.config.server_id for item in templates}
 
         self.assertTrue(
             {
@@ -60,6 +61,15 @@ install_hint = "install pyright"
                 "css",
             }.issubset(server_ids)
         )
+        pyright = next(item.config for item in templates if item.config.server_id == "pyright")
+        self.assertEqual(pyright.command, ("npx",))
+        self.assertEqual(pyright.args, ("--yes", "--package", "pyright", "pyright-langserver", "--stdio"))
+        self.assertEqual(pyright.startup_timeout_ms, 60_000)
+        self.assertEqual(pyright.diagnostics_timeout_ms, 10_000)
+        clangd = next(item.config for item in templates if item.config.server_id == "clangd")
+        self.assertEqual(clangd.command, ("clangd",))
+        self.assertEqual(clangd.startup_timeout_ms, 30_000)
+        self.assertEqual(clangd.diagnostics_timeout_ms, 10_000)
 
     def test_runtime_lsp_config_root_mirrors_minion_profile_layout(self) -> None:
         self.assertEqual(lsp_config_root(self.root), self.root / "plugins" / "lsp" / "servers")

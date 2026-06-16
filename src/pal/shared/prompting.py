@@ -27,6 +27,7 @@ class PromptIRBlock:
 class PromptIR:
     system_blocks: tuple[PromptIRBlock, ...] = ()
     user_context_blocks: tuple[PromptIRBlock, ...] = ()
+    runtime_reminder_blocks: tuple[PromptIRBlock, ...] = ()
     primary_input: str = ""
     turn_kind: str = "chat"
 

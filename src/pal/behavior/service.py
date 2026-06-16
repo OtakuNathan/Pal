@@ -658,7 +658,7 @@ def _reason_for(affordance: AffordanceDescriptor, *, relevance: float) -> str:
 
 
 def _would_recurse(affordance: AffordanceDescriptor, already_considered: set[str]) -> bool:
-    recursive_refs = {"op_behavior_advise", "behavior_advise", "behavior:advise"}
+    recursive_refs = {"op_behavior_advise", "op_behavior_advise", "behavior:advise"}
     refs = {affordance.affordance_id, *affordance.capability_refs, *affordance.skill_refs}
     return bool((refs & recursive_refs) or (refs & already_considered))
 

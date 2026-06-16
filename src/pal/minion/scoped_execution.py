@@ -13,6 +13,7 @@ from pal.minion.git_env import commit_milestone, inspect_milestone_checkpoint
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.utils import coerce_int as _coerce_int
+from pal.minion.workspace_file_tools import WORKSPACE_FILE_TOOL_SPECS, workspace_file_tool_result
 from pal.minion.workspace_tools import _append_unique_artifact, _workspace_tool_result
 from pal.plugins.l3 import MockL3Plugin
 from pal.shared import RuntimeStatus, default_tool_result_text
@@ -41,14 +42,14 @@ MINION_CODE_INTEL_TOOL_SURFACE = (
 
 
 MINION_DIRECT_WORK_TOOL_SURFACE = (
-    "op_file_read",
-    "op_file_edit",
-    "op_file_write",
+    "op_workspace_file_read",
+    "op_workspace_file_edit",
+    "op_workspace_file_write",
+    "op_workspace_file_delete",
     "op_exec_shell",
     "op_minion_checkpoint_commit",
     "op_workspace_tree",
     "op_workspace_search",
-    "op_workspace_read",
     "op_minion_artifact_write",
     "op_minion_artifact_edit",
     "op_minion_memory_candidate_write",
@@ -87,7 +88,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_workspace_read": {
         "name": "op_workspace_read",
-        "description": "Read a workspace-relative text file without modifying anything. This is for inspection only; if you intend to edit the file with op_file_edit, call op_file_read on the absolute file path first so file_edit has the required file state.",
+        "description": "Read a workspace-relative text file without modifying anything.",
         "parameters_schema": {
             "type": "object",
             "properties": {
@@ -174,7 +175,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "commands_run": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "For checkpoint/repair pass verdicts, include at least one command/check entry with command, cwd, status or exit_code, output summary, and covers=[exact acceptance criteria or refs]. Non-skipped command entries must match an op_exec_shell call from this reviewer run.",
+                    "description": "For checkpoint/repair pass verdicts, include at least one command/check entry with command, cwd, status or exit_code, output summary, and covers=[exact acceptance criteria or refs]. Non-skipped command entries must match an op_exec_shell call from this reviewer run. The command field must be copied exactly from one op_exec_shell args.cmd string; do not summarize, shorten, normalize, or combine commands.",
                 },
                 "api_evidence": {
                     "type": "array",
@@ -192,6 +193,40 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "required": ["gate_kind", "target", "verdict"],
         },
     },
+    "op_minion_review_checkpoint": {
+        "name": "op_minion_review_checkpoint",
+        "description": (
+            "Submit a checkpoint or repair review verdict using the current reviewer workspace target. Prefer this over "
+            "op_minion_review_gate_submit for checkpoint/repair reviews: Pal fills target binding, gate kind, tool provenance, "
+            "and metadata while preserving the same review gate validation."
+        ),
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "checkpoint_id": {"type": "string", "description": "Optional checkpoint id. Defaults to the current review target checkpoint."},
+                "commit_sha": {"type": "string", "description": "Optional checkpoint commit SHA. Defaults to the current review target commit."},
+                "gate_kind": {"type": "string", "enum": ["checkpoint_verification", "repair_verification"]},
+                "verdict": {"type": "string", "enum": ["pass", "fail", "partial"]},
+                "summary": {"type": "string"},
+                "findings": {"type": "array", "items": {"type": "object"}},
+                "required_fixes": {"type": "array", "items": {"type": "object"}},
+                "checks": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Command/check evidence with command, status or exit_code, output_summary, and covers entries. Commands must match op_exec_shell calls from this reviewer run.",
+                },
+                "api_checks": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Source/docs/LSP/build evidence for API and call-shape claims, with covers entries when it proves acceptance criteria.",
+                },
+                "residual_risk": {"type": "array", "items": {"type": "object"}},
+                "api_evidence_not_applicable_reason": {"type": "string"},
+                "lsp_evidence_not_applicable_reason": {"type": "string"},
+            },
+            "required": ["verdict", "summary"],
+        },
+    },
     "op_minion_checkpoint_commit": {
         "name": "op_minion_checkpoint_commit",
         "description": (
@@ -207,6 +242,32 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         },
     },
 }
+WORKSPACE_TOOL_SPECS.update(WORKSPACE_FILE_TOOL_SPECS)
+
+_REPAIR_EDIT_TOOL_NAMES = {
+    "op_workspace_file_edit",
+    "op_workspace_file_write",
+    "op_workspace_file_delete",
+}
+
+_PRE_EDIT_VERIFICATION_COMMAND_MARKERS = (
+    "--collect-only",
+    "pytest",
+    "unittest",
+    "py_compile",
+    "mypy",
+    "pyright",
+    "ruff",
+    "cargo test",
+    "go test",
+    "ctest",
+    "make test",
+    "npm test",
+    "pnpm test",
+    "yarn test",
+    "tox",
+    "nox",
+)
 
 
 @dataclass
@@ -268,6 +329,9 @@ class MinionScopedExecutionRuntime:
                 llm_text="capability is not allowed for this minion run",
                 status=RuntimeStatus.ERROR,
             )
+        repair_guard = _repair_pre_edit_tool_guard(call, self.workspace)
+        if repair_guard is not None:
+            return repair_guard
         if call.name == "op_tool_search":
             return _capability_result_to_tool_result(
                 call,
@@ -285,14 +349,31 @@ class MinionScopedExecutionRuntime:
                 return _minion_memory_candidate_result(call, self.memory_l3)
             if call.name == "op_minion_review_gate_submit":
                 return _minion_review_gate_submit_result(call, self.workspace)
+            if call.name == "op_minion_review_checkpoint":
+                return _minion_review_checkpoint_result(call, self.workspace)
             if call.name == "op_minion_checkpoint_commit":
                 return _minion_checkpoint_commit_result(call, self.workspace)
+            if call.name in WORKSPACE_FILE_TOOL_SPECS:
+                result = await workspace_file_tool_result(
+                    call,
+                    self.workspace,
+                    self.base_runtime,
+                    allow_tools=allow_tools,
+                    turn_id=turn_id,
+                )
+                _mark_repair_workspace_edit(self.workspace, call, result)
+                return result
             result = _workspace_tool_result(call, self.workspace)
             if call.name in {"op_minion_artifact_write", "op_minion_artifact_edit"} and result.ok:
                 artifact = dict((result.structured or {}).get("artifact") or result.structured or {})
                 if artifact:
                     _append_unique_artifact(self.produced_artifacts, artifact)
             return result
+        if call.name.startswith("op_lsp_"):
+            normalized = _normalize_minion_lsp_call(call, self.workspace)
+            if isinstance(normalized, CanonicalToolResult):
+                return normalized
+            call = normalized
         return await self.base_runtime.execute_tool_async(call, allow_tools=allow_tools, turn_id=turn_id)
 
     async def _execute_scoped_tool_call(
@@ -330,6 +411,172 @@ class MinionScopedExecutionRuntime:
             allow_tools=allow_tools,
             turn_id=turn_id,
         )
+
+
+def _repair_pre_edit_tool_guard(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult | None:
+    if not _is_checkpoint_repair_workspace(workspace) or _repair_workspace_has_successful_edit(workspace):
+        return None
+    if not _repair_requires_successful_edit_before_verification(workspace):
+        return None
+    target_name = _effective_capability_name(call)
+    if not target_name:
+        return None
+    args = _effective_tool_args(call)
+    if target_name.startswith("op_lsp_"):
+        return _repair_requires_first_edit_result(call, target_name, workspace)
+    if target_name == "op_minion_checkpoint_commit":
+        return _repair_requires_first_edit_result(call, target_name, workspace)
+    if target_name == "op_exec_shell" and _is_pre_edit_verification_shell_command(args):
+        return _repair_requires_first_edit_result(call, target_name, workspace)
+    return None
+
+
+def _is_checkpoint_repair_workspace(workspace: dict[str, Any]) -> bool:
+    if not isinstance(workspace, dict):
+        return False
+    return isinstance(workspace.get("current_repair_attempt"), dict) or isinstance(workspace.get("checkpoint_repair"), dict)
+
+
+def _repair_workspace_has_successful_edit(workspace: dict[str, Any]) -> bool:
+    if not isinstance(workspace, dict):
+        return False
+    return bool(workspace.get("repair_workspace_changed") or workspace.get("repair_first_edit_completed"))
+
+
+def _is_pre_edit_verification_shell_command(args: dict[str, Any]) -> bool:
+    command = " ".join(str(args.get("cmd") or args.get("command") or "").strip().lower().split())
+    if not command:
+        return False
+    return any(marker in command for marker in _PRE_EDIT_VERIFICATION_COMMAND_MARKERS)
+
+
+def _repair_requires_first_edit_result(call: CanonicalToolCall, target_name: str, workspace: dict[str, Any]) -> CanonicalToolResult:
+    text = (
+        "Repair checklist has not had a successful workspace edit yet. "
+        "First complete a repair_checklist item with op_workspace_file_edit, "
+        "op_workspace_file_write, or op_workspace_file_delete. LSP, broad verification, "
+        "and checkpointing are available after the first successful repair edit."
+    )
+    return CanonicalToolResult(
+        name=call.name,
+        ok=False,
+        text=text,
+        structured={
+            "reason": "repair_requires_checklist_edit_first",
+            "target_capability": target_name,
+            "allowed_first_tools": sorted(_REPAIR_EDIT_TOOL_NAMES),
+            "repair_checklist": _active_repair_checklist(workspace),
+        },
+        call_id=call.call_id,
+        llm_text=text,
+        status=RuntimeStatus.INVALID,
+    )
+
+
+def _active_repair_checklist(workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = workspace.get("checkpoint_repair")
+    if not isinstance(payload, dict):
+        payload = {}
+    checklist = payload.get("repair_checklist")
+    if not isinstance(checklist, list):
+        return []
+    return [dict(item) for item in checklist[:8] if isinstance(item, dict)]
+
+
+def _repair_requires_successful_edit_before_verification(workspace: dict[str, Any]) -> bool:
+    checklist = _active_repair_checklist(workspace)
+    if not checklist:
+        return True
+    for item in checklist:
+        impact = " ".join(str(item.get(key) or "") for key in ("contract_impact", "impact")).strip().lower()
+        if impact and impact not in {"none", "no impact", "not applicable", "n/a", "na"}:
+            return True
+        text = " ".join(
+            str(item.get(key) or "")
+            for key in ("action", "title", "summary", "suggested_fix", "area")
+        ).lower()
+        if any(
+            marker in text
+            for marker in (
+                "fix",
+                "change",
+                "correct",
+                "edit",
+                "enforce",
+                "implement",
+                "modify",
+                "raise",
+                "reject",
+                "render",
+                "replace",
+                "return",
+                "update",
+                "validate",
+            )
+        ):
+            return True
+    return False
+
+
+def _mark_repair_workspace_edit(workspace: dict[str, Any], call: CanonicalToolCall, result: CanonicalToolResult) -> None:
+    if call.name not in _REPAIR_EDIT_TOOL_NAMES or not result.ok or not _is_checkpoint_repair_workspace(workspace):
+        return
+    workspace["repair_workspace_changed"] = True
+    workspace["repair_first_edit_completed"] = True
+    edits = workspace.get("repair_workspace_edits")
+    if not isinstance(edits, list):
+        edits = []
+    entry = {
+        "tool": call.name,
+        "path": str((call.args or {}).get("path") or ""),
+        "call_id": str(call.call_id or ""),
+    }
+    edits.append({key: value for key, value in entry.items() if value})
+    workspace["repair_workspace_edits"] = edits[-20:]
+
+
+def _normalize_minion_lsp_call(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolCall | CanonicalToolResult:
+    root = _effective_lsp_workspace_root(workspace)
+    if root is None:
+        return call
+    args = dict(call.args or {})
+    args["workspace_root"] = str(root)
+    raw_file = str(args.get("file") or args.get("path") or "").strip()
+    if raw_file:
+        file_path = Path(raw_file).expanduser()
+        if not file_path.is_absolute():
+            file_path = root / file_path
+        file_path = file_path.resolve()
+        if not _path_is_relative_to(file_path, root):
+            text = (
+                "LSP file path must stay inside the minion workspace root "
+                f"({root}); got {file_path}"
+            )
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text=text,
+                structured={
+                    "reason": "lsp_path_outside_workspace",
+                    "workspace_root": str(root),
+                    "file": str(file_path),
+                },
+                call_id=call.call_id,
+                llm_text=text,
+                status=RuntimeStatus.ERROR,
+            )
+        args["file"] = str(file_path)
+        if "path" in args:
+            args["path"] = str(file_path)
+    return CanonicalToolCall(name=call.name, args=args, call_id=call.call_id)
+
+
+def _effective_lsp_workspace_root(workspace: dict[str, Any]) -> Path | None:
+    for key in ("review_scratch_repo_path", "repo_path"):
+        raw = str((workspace or {}).get(key) or "").strip()
+        if raw:
+            return Path(raw).expanduser().resolve()
+    return None
 
 
 def _capability_result_to_tool_result(call: CanonicalToolCall, result: CapabilityResult) -> CanonicalToolResult:
@@ -413,6 +660,8 @@ def _minion_review_gate_submit_result(call: CanonicalToolCall, workspace: dict[s
         target.setdefault("checkpoint_id", str(workspace.get("review_target_checkpoint_id") or ""))
         target.setdefault("commit_sha", str(workspace.get("review_target_commit_sha") or ""))
         target.setdefault("run_id", str(workspace.get("review_target_run_id") or ""))
+        if not isinstance(target.get("source_contract"), dict) and isinstance(workspace.get("review_target_source_contract"), dict):
+            target["source_contract"] = dict(workspace.get("review_target_source_contract") or {})
         if not isinstance(target.get("plan_ref"), dict) and isinstance(workspace.get("review_target_plan_ref"), dict):
             target["plan_ref"] = dict(workspace.get("review_target_plan_ref") or {})
         args["target"] = target
@@ -457,22 +706,110 @@ def _minion_review_gate_submit_result(call: CanonicalToolCall, workspace: dict[s
         )
 
 
-def _with_review_tool_provenance(args: dict[str, Any], workspace: dict[str, Any], *, repository: MinionTaskingRepository) -> dict[str, Any]:
-    refs = [dict(item) for item in list(workspace.get("review_tool_evidence_refs") or []) if isinstance(item, dict)]
-    if not refs:
-        return args
-    refs = repository.record_review_tool_evidence_refs(
-        refs,
-        work_order_id=str(workspace.get("work_order_id") or ""),
-        run_id=str(workspace.get("run_id") or ""),
-        reviewer_profile=str(workspace.get("minion_profile") or ""),
+def _minion_review_checkpoint_result(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult:
+    args = dict(call.args or {})
+    gate_kind = str(args.get("gate_kind") or workspace.get("review_target_gate_kind") or "checkpoint_verification").strip()
+    if gate_kind not in {"checkpoint_verification", "repair_verification"}:
+        message = "op_minion_review_checkpoint gate_kind must be checkpoint_verification or repair_verification"
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=message,
+            structured={"reason": "invalid_gate_kind"},
+            call_id=call.call_id,
+            llm_text=message,
+            status=RuntimeStatus.INVALID,
+        )
+    target = {
+        "checkpoint_id": str(args.get("checkpoint_id") or workspace.get("review_target_checkpoint_id") or ""),
+        "commit_sha": str(args.get("commit_sha") or workspace.get("review_target_commit_sha") or ""),
+        "run_id": str(workspace.get("review_target_run_id") or ""),
+    }
+    gate_args: dict[str, Any] = {
+        "gate_kind": gate_kind,
+        "target": target,
+        "verdict": str(args.get("verdict") or "").strip(),
+        "summary": str(args.get("summary") or "").strip(),
+        "findings": list(args.get("findings") or []),
+        "required_fixes": list(args.get("required_fixes") or []),
+        "commands_run": _review_checkpoint_checks(args.get("checks")),
+        "api_evidence": _review_checkpoint_checks(args.get("api_checks")),
+        "residual_risk": list(args.get("residual_risk") or []),
+    }
+    metadata: dict[str, Any] = {}
+    api_reason = str(args.get("api_evidence_not_applicable_reason") or "").strip()
+    if api_reason:
+        metadata["api_evidence_not_applicable"] = True
+        metadata["api_evidence_not_applicable_reason"] = api_reason
+    lsp_reason = str(args.get("lsp_evidence_not_applicable_reason") or "").strip()
+    if lsp_reason:
+        metadata["lsp_evidence_not_applicable"] = True
+        metadata["lsp_evidence_not_applicable_reason"] = lsp_reason
+    if metadata:
+        gate_args["metadata"] = metadata
+    result = _minion_review_gate_submit_result(
+        CanonicalToolCall(name="op_minion_review_gate_submit", args=gate_args, call_id=call.call_id),
+        workspace,
     )
-    workspace["review_tool_evidence_refs"] = refs
-    _bind_command_evidence_refs(args, refs)
-    _bind_lsp_evidence_refs(args, refs)
+    if not result.ok:
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=result.text,
+            structured=result.structured,
+            call_id=call.call_id,
+            llm_text=result.llm_text,
+            status=result.status,
+        )
+    return CanonicalToolResult(
+        name=call.name,
+        ok=True,
+        text="minion checkpoint review gate recorded",
+        structured=result.structured,
+        call_id=call.call_id,
+        llm_text="minion checkpoint review gate recorded",
+        status=RuntimeStatus.OK,
+    )
+
+
+def _review_checkpoint_checks(raw: Any) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+    for item in list(raw or []):
+        if not isinstance(item, dict):
+            continue
+        check = dict(item)
+        if "output_summary" not in check:
+            for alias in ("output summary", "outputSummary", "summary", "message"):
+                if str(check.get(alias) or "").strip():
+                    check["output_summary"] = str(check.get(alias) or "")
+                    break
+        checks.append(check)
+    return checks
+
+
+def _with_review_tool_provenance(args: dict[str, Any], workspace: dict[str, Any], *, repository: MinionTaskingRepository) -> dict[str, Any]:
+    workspace_refs = workspace.get("review_tool_evidence_refs")
+    refs = [dict(item) for item in list(workspace_refs or []) if isinstance(item, dict)]
     metadata = dict(args.get("metadata") or {})
-    metadata["tool_evidence_refs"] = refs
-    args["metadata"] = metadata
+    if refs:
+        refs = repository.record_review_tool_evidence_refs(
+            refs,
+            work_order_id=str(workspace.get("work_order_id") or ""),
+            run_id=str(workspace.get("run_id") or ""),
+            reviewer_profile=str(workspace.get("minion_profile") or ""),
+        )
+        if isinstance(workspace_refs, list):
+            workspace_refs[:] = refs
+            refs = workspace_refs
+        else:
+            workspace["review_tool_evidence_refs"] = refs
+        _bind_command_evidence_refs(args, refs)
+        _bind_lsp_evidence_refs(args, refs)
+        metadata["tool_evidence_refs"] = refs
+        _default_lsp_not_applicable_from_status(args, refs, metadata)
+    _default_lsp_not_applicable_from_workspace_setup(args, workspace, metadata)
+    if metadata:
+        args["metadata"] = metadata
     return args
 
 
@@ -519,6 +856,79 @@ def _bind_lsp_evidence_refs(args: dict[str, Any], refs: list[dict[str, Any]]) ->
         args["api_evidence"] = api_evidence
 
 
+def _default_lsp_not_applicable_from_status(args: dict[str, Any], refs: list[dict[str, Any]], metadata: dict[str, Any]) -> None:
+    if str(args.get("verdict") or "").strip().lower() != "pass":
+        return
+    if _metadata_bool(metadata, "lsp_evidence_not_applicable"):
+        return
+    if _has_lsp_api_evidence(list(args.get("api_evidence") or [])):
+        return
+    for ref in refs:
+        if str(ref.get("kind") or "") != "lsp":
+            continue
+        if str(ref.get("operation") or "") != "status":
+            continue
+        reason = str(ref.get("unavailable_reason") or "").strip()
+        if not reason:
+            continue
+        metadata["lsp_evidence_not_applicable"] = True
+        metadata["lsp_evidence_not_applicable_reason"] = reason
+        return
+
+
+def _default_lsp_not_applicable_from_workspace_setup(args: dict[str, Any], workspace: dict[str, Any], metadata: dict[str, Any]) -> None:
+    if str(args.get("verdict") or "").strip().lower() != "pass":
+        return
+    if _metadata_bool(metadata, "lsp_evidence_not_applicable"):
+        return
+    if _has_lsp_api_evidence(list(args.get("api_evidence") or [])):
+        return
+    lsp_setup = workspace.get("lsp_setup")
+    if not isinstance(lsp_setup, dict):
+        return
+    languages = _string_list(lsp_setup.get("languages") or workspace.get("languages"))
+    servers = _string_list(lsp_setup.get("servers"))
+    skipped = _string_list(lsp_setup.get("skipped"))
+    if not languages or servers or not skipped:
+        return
+    metadata["lsp_evidence_not_applicable"] = True
+    metadata["lsp_evidence_not_applicable_reason"] = (
+        "workspace LSP setup did not prepare a language server for "
+        + ", ".join(languages)
+        + ": "
+        + "; ".join(skipped[:3])
+    )
+
+
+def _metadata_bool(metadata: dict[str, Any], key: str) -> bool:
+    value = dict(metadata or {}).get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if not isinstance(value, list | tuple | set):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _has_lsp_api_evidence(api_evidence: list[Any]) -> bool:
+    for item in api_evidence:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or item.get("source") or item.get("evidence_kind") or "").strip().lower()
+        method = str(item.get("method") or "").strip()
+        evidence_id = str(item.get("evidence_id") or "").strip().lower()
+        if kind == "lsp" or method.startswith("textDocument/") or method.startswith("callHierarchy/") or evidence_id.startswith("lsp_"):
+            return True
+    return False
+
+
 def _matching_lsp_ref(entry: dict[str, Any], refs: list[dict[str, Any]]) -> dict[str, Any]:
     evidence_id = str(entry.get("evidence_id") or "").strip()
     method = str(entry.get("method") or "").strip()
@@ -539,7 +949,7 @@ def _review_gate_provenance_error(args: dict[str, Any], workspace: dict[str, Any
         return ""
     shell_violations = [dict(item) for item in list(workspace.get("shell_mutation_violations") or []) if isinstance(item, dict)]
     if shell_violations:
-        return "reviewer shell mutated the source repository; pass verdict is blocked until the review is rerun from a clean read-only workspace"
+        return "reviewer shell mutated the audited workspace; pass verdict is blocked until the review is rerun from a clean read-only workspace"
     evidence_refs = [dict(item) for item in list(workspace.get("review_tool_evidence_refs") or []) if isinstance(item, dict)]
     command_refs = [item for item in evidence_refs if str(item.get("kind") or "") == "command"]
     lsp_refs = [item for item in evidence_refs if str(item.get("kind") or "") == "lsp"]
@@ -565,7 +975,7 @@ def _command_evidence_provenance_error(commands_run: list[Any], command_refs: li
             continue
         if item.get("exit_code") is not None or status in {"passed", "pass", "ok", "failed", "fail"}:
             if command and command not in normalized_refs:
-                return f"commands_run entry lacks matching op_exec_shell evidence: {command}"
+                return f"commands_run entry lacks matching shell evidence: {command}"
     return ""
 
 
@@ -624,6 +1034,27 @@ def _minion_checkpoint_commit_result(call: CanonicalToolCall, workspace: dict[st
         if status == "no_changes":
             inspected = inspect_milestone_checkpoint(repo, base_sha=str(workspace.get("base_sha") or ""))
             if inspected.get("status") == "committed":
+                repair_attempt = dict(workspace.get("current_repair_attempt") or {})
+                failed_commit_sha = str(repair_attempt.get("failed_commit_sha") or "").strip()
+                commit_sha = str(inspected.get("commit_sha") or "").strip()
+                if failed_commit_sha and commit_sha == failed_commit_sha:
+                    text = (
+                        "Repair checkpoint is unchanged: create a new commit that addresses the reviewer finding "
+                        f"before resubmitting failed commit {failed_commit_sha}."
+                    )
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=False,
+                        text=text,
+                        structured={
+                            **inspected,
+                            "reason": "repair_reused_failed_checkpoint",
+                            "repair_attempt": repair_attempt,
+                        },
+                        call_id=call.call_id,
+                        llm_text=text,
+                        status=RuntimeStatus.ERROR,
+                    )
                 payload = {**inspected, "already_committed": True}
                 return CanonicalToolResult(
                     name=call.name,
@@ -673,7 +1104,8 @@ def _minion_checkpoint_commit_result(call: CanonicalToolCall, workspace: dict[st
 
 def _effective_capability_name(tool_call: CanonicalToolCall) -> str:
     if tool_call.name == "op_tool_call":
-        return str(tool_call.args.get("name") or tool_call.name).strip()
+        args = dict(tool_call.args or {})
+        return str(args.get("name") or args.get("capability") or args.get("tool") or tool_call.name).strip()
     return tool_call.name
 
 
@@ -709,6 +1141,13 @@ def _review_tool_evidence_ref(target_name: str, tool_call: CanonicalToolCall, re
                     ref[key] = structured.get(key)
     if kind == "lsp":
         ref["operation"] = normalized_target.removeprefix("op_lsp_")
+        if ref["operation"] == "status":
+            for key in ("attached_count", "server_count"):
+                if structured.get(key) is not None:
+                    ref[key] = structured.get(key)
+            unavailable_reason = _lsp_status_unavailable_reason(structured)
+            if unavailable_reason:
+                ref["unavailable_reason"] = unavailable_reason
         if evidence:
             for key in ("evidence_id", "method", "server_id", "workspace_root", "file", "file_sha256", "freshness"):
                 if evidence.get(key) is not None:
@@ -726,9 +1165,27 @@ def _review_tool_evidence_kind(target_name: str) -> str:
         return "command"
     if target_name.startswith("op_lsp_"):
         return "lsp"
-    if target_name in {"op_workspace_tree", "op_workspace_search", "op_workspace_read"}:
+    if target_name in {"op_workspace_tree", "op_workspace_search", "op_workspace_read", "op_workspace_file_read"}:
         return "source"
     return ""
+
+
+def _lsp_status_unavailable_reason(structured: dict[str, Any]) -> str:
+    attached = _coerce_int(structured.get("attached_count"), default=-1)
+    if attached != 0:
+        return ""
+    server_count = _coerce_int(structured.get("server_count"), default=0)
+    statuses: set[str] = set()
+    for item in list(structured.get("servers") or []):
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or item.get("binary_status") or "").strip()
+        if status:
+            statuses.add(status)
+    if statuses:
+        rendered = ", ".join(sorted(statuses)[:4])
+        return f"op_lsp_status reported no attached language server ({server_count} configured; statuses: {rendered})"
+    return f"op_lsp_status reported no attached language server ({server_count} configured)"
 
 def _tool_result_text(result: CanonicalToolResult) -> str:
     return default_tool_result_text(result, fallback_ok="tool completed", fallback_error="tool failed")

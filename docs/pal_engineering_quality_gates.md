@@ -57,18 +57,18 @@ LSP should not provide v1 write operations such as rename, code actions, formatt
 V1 operations:
 
 ```text
-op_lsp_status
-op_lsp_doctor
-op_lsp_hover
-op_lsp_definition
-op_lsp_implementation
-op_lsp_references
-op_lsp_prepare_call_hierarchy
-op_lsp_incoming_calls
-op_lsp_outgoing_calls
-op_lsp_document_symbols
-op_lsp_workspace_symbols
-op_lsp_diagnostics
+lsp_status
+lsp_doctor
+lsp_hover
+lsp_definition
+lsp_implementation
+lsp_references
+lsp_prepare_call_hierarchy
+lsp_incoming_calls
+lsp_outgoing_calls
+lsp_document_symbols
+lsp_workspace_symbols
+lsp_diagnostics
 ```
 
 Every LSP result used as evidence should carry enough metadata to judge freshness:
@@ -152,7 +152,7 @@ workspace_markers = ["compile_commands.json", ".clangd", ".git"]
 install_hint = "Install clangd and provide compile_commands.json for best C/C++ results."
 ```
 
-`op_lsp_doctor` should check:
+`lsp_doctor` should check:
 
 - binary availability
 - workspace root detection
@@ -217,8 +217,8 @@ Planner:
 Coder:
 
 - May run shell for tests, builds, status, and diagnostics.
-- Must write code through `op_file_edit` / `op_file_write`.
-- Must create milestone checkpoint through `op_minion_checkpoint_commit`.
+- Must write code through `file_edit` / `file_write`.
+- Must create milestone checkpoint through `checkpoint_commit`.
 - Shell-based git mutation should remain disallowed; checkpoint commit is the structured path.
 
 Reviewer/verifier:

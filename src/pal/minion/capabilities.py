@@ -805,7 +805,7 @@ class MinionManagerProvider:
                 "commands_run": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "For checkpoint/repair pass verdicts, include at least one command/check entry with command, cwd, status or exit_code, output summary, and covers=[exact acceptance criteria or refs].",
+                    "description": "For checkpoint/repair pass verdicts, include at least one command/check entry with command, cwd, status or exit_code, output summary, and covers=[exact acceptance criteria or refs]. The command field must be copied exactly from one op_exec_shell args.cmd string in this reviewer run; do not summarize, shorten, normalize, or combine commands.",
                 },
                 "api_evidence": {
                     "type": "array",
@@ -1740,6 +1740,7 @@ class MinionManagerProvider:
             return pack
         metadata = dict(pack.metadata)
         metadata["preferred_endpoint_id"] = preferred_endpoint_id
+        metadata["preferred_endpoint_source"] = "user"
         return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
 
     def _resume_planner_after_question_answer(self, work_order_id: str, action: ControlAction) -> dict[str, Any]:

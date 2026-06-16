@@ -130,6 +130,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             prompt_view = _prompt_view_from_current_milestone(pack, continuity=continuity, metadata=metadata)
         if prompt_view:
             metadata["prompt_view"] = prompt_view
+        metadata = _normalize_preferred_endpoint_metadata(metadata)
         return TaskContextPack.from_dict({**pack.to_dict(), "continuity": continuity, "metadata": metadata})
 
     def pack_for_work_order(self, work_order_id: str, *, overrides: dict[str, Any] | None = None) -> TaskContextPack:
@@ -565,7 +566,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             child_metadata["plan_ref"] = dict(metadata.get("plan_ref") or {})
         if isinstance(metadata.get("plan_validation"), dict):
             child_metadata["plan_validation"] = dict(metadata.get("plan_validation") or {})
-        for key in ("control_route", "preferred_endpoint_id", "minion_debug_log_enabled", "debug_log"):
+        for key in ("control_route", "preferred_endpoint_id", "preferred_endpoint_source", "minion_debug_log_enabled", "debug_log"):
             if key in metadata:
                 child_metadata[key] = metadata[key]
         plan_execution["child_work_order_ids"] = child_ids
@@ -1946,6 +1947,15 @@ def _normalize_milestone_execution_metadata(metadata: dict[str, Any], milestones
     return normalized
 
 
+def _normalize_preferred_endpoint_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(metadata or {})
+    preferred_endpoint_id = str(normalized.get("preferred_endpoint_id") or "").strip()
+    if preferred_endpoint_id:
+        normalized["preferred_endpoint_id"] = preferred_endpoint_id
+        normalized.setdefault("preferred_endpoint_source", "explicit")
+    return normalized
+
+
 def _module_parent_milestones(artifact: PlanArtifact, *, module_order: list[str] | None = None) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     modules_by_id = {module.module_id: module for module in artifact.modules if module.module_id}
@@ -2219,7 +2229,7 @@ def _persistent_workspace_metadata(workspace: dict[str, Any]) -> dict[str, Any]:
 
 
 def _prompt_safe_workspace(workspace: dict[str, Any]) -> dict[str, str]:
-    allowed = {"repo_path", "source_repo", "artifact_dir", "task_repo_path", "target_repo_path"}
+    allowed = {"repo_path", "artifact_dir", "task_repo_path", "target_repo_path"}
     return {key: str(value) for key, value in dict(workspace or {}).items() if key in allowed and str(value or "").strip()}
 
 

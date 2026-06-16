@@ -125,7 +125,7 @@ class FileStateTool:
     """Inspect the shared read-before-edit file cache."""
 
     cache: FileStateCache = field(default_factory=FileStateCache)
-    name: str = "file_state"
+    name: str = "op_file_state"
     display_name: str = "File State"
     family: str = "system"
     description: str = (

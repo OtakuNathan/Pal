@@ -203,7 +203,37 @@ def python_subprocess_env() -> dict[str, str]:
         src_text = str(src_root)
         if src_text not in existing:
             env["PYTHONPATH"] = os.pathsep.join([src_text, *existing])
+    node_bins = _node_bin_path_candidates(Path.home())
+    if node_bins:
+        existing_path = [item for item in str(env.get("PATH") or "").split(os.pathsep) if item]
+        entries: list[str] = []
+        seen: set[str] = set()
+        for item in [*(str(path) for path in node_bins), *existing_path]:
+            if item in seen:
+                continue
+            seen.add(item)
+            entries.append(item)
+        env["PATH"] = os.pathsep.join(entries)
     return env
+
+
+def _node_bin_path_candidates(home: Path) -> list[Path]:
+    candidates: list[Path] = []
+    nvm_root = Path(home) / ".nvm" / "versions" / "node"
+    if nvm_root.exists():
+        candidates.extend(sorted((path / "bin" for path in nvm_root.iterdir()), key=_node_bin_sort_key, reverse=True))
+    return [path for path in candidates if path.is_dir()]
+
+
+def _node_bin_sort_key(path: Path) -> tuple[int, ...]:
+    text = path.parent.name.lstrip("v")
+    parts: list[int] = []
+    for item in text.split("."):
+        try:
+            parts.append(int(item))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
 
 
 async def handle_sidecar_client(reader, writer, dispatch: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]) -> None:

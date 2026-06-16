@@ -1,160 +1,161 @@
 # Turn Runtime Structure
 
-这份文档专门描述 `PalV2` 里新加的 turn runtime 骨架，方便顺着代码找入口。
+This document describes the current turn-runtime skeleton and the code paths to
+read when debugging a Pal conversation turn.
 
-## 1. 从哪里开始看
+## Reading Order
 
-最推荐的阅读顺序：
+Recommended entry points:
 
-1. `src/pal/core/runtime.py`
-   这里是 `PalCore`、`TurnManager`、`MainLoop` 的主编排层。
-2. `src/pal/core/turns.py`
-   这里定义了 turn computation 本体，以及它会 `yield` 的 effect。
-3. `src/pal/channel/runtime.py`
-   这里是 channel side 的 mailbox/outbox 交界面。
-4. `src/pal/core/tool_stagnation.py`
-   这里是工具循环卡死检测。
-5. `src/pal/llm/contracts.py` 与 `src/pal/memory/contracts.py`
-   这里是 `preflight / compact / commit` 这些 turn-time contract。
+1. [core/runtime.py](../src/pal/core/runtime.py)
+   - `PalCore`
+   - `TurnManager`
+   - `MainLoop`
+2. [core/turns.py](../src/pal/core/turns.py)
+   - turn programs
+   - effect requests/results
+   - channel turn program
+3. [channel/runtime.py](../src/pal/channel/runtime.py)
+   - mailbox
+   - outbox
+   - reply delivery boundary
+4. [core/tool_stagnation.py](../src/pal/core/tool_stagnation.py)
+   - repeated-tool-loop detection
+   - finalization-only transition
+5. [llm/contracts.py](../src/pal/llm/contracts.py) and
+   [memory/contracts.py](../src/pal/memory/contracts.py)
+   - turn-time preflight, compact, and commit contracts
 
-## 2. 现在的主数据流
+## Main Data Flow
 
-当前一条用户消息的主路径是：
+A normal user message follows this path:
 
-1. `channel` 完成 normalize
-2. normalize 后的 `ChannelEnvelope` 被写入 `channel mailbox`
-3. `MainLoop` 轮询 mailbox-backed source
-4. `TurnEventHandler` 只把真正的 conversational ingress 交给
-   `PalCore.process_channel_turn(...)`
-5. slash command 这类 control-plane ingress 会在 runtime 内部被单独处理：
-   - 不进入 LLM
-   - 不进入 prompt assembly
-   - 不写入 L1
-6. `TurnManager` 创建并驱动 generator 风格的 `TurnProgram`
-7. `TurnProgram` 依次 `yield`：
-   - `llm.preflight`
-   - `memory.compact`（必要时）
-   - `llm.request`
-   - `tool.call`（必要时，按顺序）
-   - `mailbox.reply`
-8. `mailbox.reply` 成功写入 `channel outbox` 后，turn 算 egress 完成
-9. `PalCore` 触发 post-turn `memory.commit_l1`
-10. 后续真正发送成功或失败，由 `channel` 产出 `reply.delivered/reply.failed`
+1. A channel provider normalizes platform input.
+2. The normalized `ChannelEnvelope` enters the channel mailbox.
+3. `MainLoop` polls mailbox-backed sources.
+4. `TurnEventHandler` passes conversational ingress to
+   `PalCore.process_channel_turn(...)`.
+5. Runtime-private control ingress, such as slash commands, is handled
+   deterministically and does not enter the LLM prompt or L1.
+6. `TurnManager` creates and drives a generator-style `TurnProgram`.
+7. The turn program yields effects such as:
+   - LLM preflight
+   - memory compaction when required
+   - LLM request
+   - tool calls
+   - mailbox reply
+8. A successful `mailbox.reply` write completes the turn egress boundary.
+9. `PalCore` performs post-turn L1 commit.
+10. Actual channel delivery later emits `reply.delivered` or `reply.failed`.
 
-要点：
+Important consequences:
 
-- turn 不等真正送达，只等 outbox 接收成功
-- delivery 事件只用于 channel-side diagnostics
-- tool loop 的“继续还是强制收口”由 stagnation guard 决定
-- slash command 不是 conversational input；LLM 只能看到其治理结果，不能
-  看到命令本身
+- A turn waits for the channel outbox to accept the final reply, not for remote
+  platform delivery.
+- Delivery events are channel-side diagnostics.
+- Slash commands are not conversational input.
+- The LLM can observe governance state, not raw control command text.
 
-## 3. 关键文件与职责
+## Key Responsibilities
 
 ### `src/pal/core/runtime.py`
 
-这里是 runtime 总调度器。
+Owns runtime orchestration:
 
-- `MainLoop`
-  - 轮询各个 source
-  - 拉取 mailbox 事件
-  - 分发给 handler
-- `TurnManager`
-  - 创建 `TurnContinuation`
-  - suspend / resume generator
-  - 持有 `ToolStagnationGuardProcess`
-- `PalCore`
-  - 驱动 turn effect
-  - 做 prompt assembly
-  - 调 `llm.preflight`
-  - 调 `memory.compact`
-  - 调 `Execution.execute_tool`
-  - 把 final reply 写入 `channel outbox`
-  - 做 post-turn `memory.commit_l1`
+- polling sources
+- dispatching mailbox events
+- driving turn continuations
+- assembling prompts
+- invoking LLM, memory, and execution effects
+- queueing final replies
+- committing L1 after the turn
 
 ### `src/pal/core/turns.py`
 
-这里是 turn computation 的 contract 和默认 channel turn program。
+Defines the turn computation contract:
 
 - `TurnProgram`
-  - 一个 generator，表达完整 turn 调用链
 - `TurnContinuation`
-  - 运行时恢复句柄，不是业务状态大对象
-- `EffectRequest / EffectResult`
-  - turn 和 runtime 之间的 effect 协议
+- `EffectRequest`
+- `EffectResult`
 - `channel_turn_program(...)`
-  - 当前默认的用户消息 turn 实现
+
+The turn program expresses the ordered effect chain without owning concrete
+runtime services.
 
 ### `src/pal/channel/runtime.py`
 
-这里是 channel runtime 的 ingress / egress 边界。
+Defines the channel ingress/egress boundary:
 
-- `mailbox`
-  - 持有已经 normalize 完成的内部事件
-- `outbox`
-  - 持有待实际发送的 reply
-- `queue_reply(...)`
-  - 只负责把 final reply 放进 outbox
-- `flush_outbox(...)`
-  - 真正尝试发送，并产出 `reply.delivered/reply.failed`
+- mailbox stores normalized internal events
+- outbox stores final replies pending delivery
+- `queue_reply(...)` writes completed replies
+- `flush_outbox(...)` attempts real platform delivery
 
 ### `src/pal/core/tool_stagnation.py`
 
-这里是工具循环卡死检测。
+Detects tool-loop stagnation:
 
-- `canonical_tool_signature_hash(...)`
-  - `tool_name + canonicalized args (+ provider)` 的稳定 hash
-- `canonical_result_fingerprint(...)`
-  - 归一化后的结果 fingerprint
-- `ToolStagnationGuardProcess`
-  - 判断：
-    - `repeat_stagnation`
-    - `oscillation_stagnation`
+- repeated same tool call with same canonical arguments/result
+- oscillation between equivalent failed attempts
+- need to terminate tool use and force finalization
 
-### `src/pal/llm/contracts.py` / `src/pal/llm/runtime.py`
+## Tool Call Loop Semantics
 
-- `LLMPreflightRequest`
-- `LLMPreflightAdvice`
-- `LLMRuntime.preflight(...)`
+When the model emits tool calls, Pal preserves the provider protocol shape:
 
-这一层负责预算感知，而不是直接 orchestrate compact。
+1. The assistant tool-call header is kept in the transcript, even if its text
+   content is empty.
+2. Tool calls from the same assistant message are executed by Pal.
+3. Tool results are appended after execution.
+4. The next LLM request receives the assistant tool-call header plus all tool
+   results for that batch.
 
-### `src/pal/memory/contracts.py` / `src/pal/memory/service.py`
+This avoids orphan tool results and preserves the exact causal relationship
+between assistant tool intent and tool output.
 
-- `MemoryCompactRequest / Result`
-- `MemoryCommitRequest / Result`
+Current execution is sequential inside a tool-call batch. The transcript update
+is batch-shaped: Pal flushes back to the LLM after the batch's pending tool
+results are available.
 
-这一层只执行 compact / commit，不决定什么时候做。
+## Finalization-Only Mode
 
-## 4. Finalization-Only 是什么
+If `ToolStagnationGuardProcess` decides that the tool loop is stuck, Pal switches
+the current turn to `finalization_only`.
 
-当 `ToolStagnationGuardProcess` 返回 `terminate_tool_loop` 时，`PalCore` 会把当前 turn 切到 `finalization_only`。
+Effects:
 
-这时会发生几件事：
+1. The next LLM request has tools physically removed.
+2. Prompt assembly adds a finalization directive.
+3. Execution rejects new tool calls for that finalization attempt.
+4. The model gets one text-only chance to conclude.
+5. If it still fails to conclude, Pal produces a runtime fallback final reply.
 
-1. 下一次 `llm.request` 的 `tools` 被物理清空
-2. prompt 里会注入 finalization directive
-3. `Execution.execute_tool(..., allow_tools=False)` 会拒绝执行任何新工具
-4. 只允许最后一次 text-only finalization attempt
-5. 如果模型仍不收口，就走 runtime fallback final reply
+This guarantees that a turn can close even when the model/tool loop becomes
+unproductive.
 
-这套设计的目的，是保证 turn 最终一定能安全收口。
+## Current Non-Stub Areas
 
-## 5. 现在有哪些还是骨架
+The runtime is no longer just a skeleton:
 
-以下部分目前还是第一版骨架：
+- LLM generation and streaming use real endpoint invocation paths.
+- Tool call/results are persisted into the turn transcript in protocol order.
+- Memory compaction and L1 commit are active runtime effects.
+- Channel mailbox/outbox boundaries are implemented.
+- Control slash commands bypass the LLM path.
 
-- `TurnProgram` 只实现了 channel turn 主链
-- `LLMRuntime.generate(...)` 仍是 stub
-- `LLMRuntime.preflight(...)` 还是简化预算估算
-- `memory.compact(...)` 目前只是最小摘要压缩
-- `memory.commit_l1(...)` 目前是最小 append/重试骨架
-- approval 还只是 execution-wrapped tool 的约束方向，没有完整审批流
+Remaining areas may still be intentionally minimal or provider-dependent:
 
-## 6. 读代码时最容易混淆的点
+- detailed approval UX
+- provider-specific channel delivery behavior
+- full cross-provider streaming parity
+- richer memory compaction policies
 
-- `active_turns` 里现在放的是 `TurnContinuation`，不是完整业务 turn state
-- `reply.delivered/reply.failed` 不影响 turn 是否完成
-- `PromptFragmentRegistry` 仍然是 prompt 的唯一输入源
-- `channel inbox` 现在本质上是 mailbox 视图，不再是原始 adapter 输入队列
-- `stagnation guard` 是独立 process，不是写死在 turn loop 里的 if/else
+## Common Confusions
+
+- `active_turns` stores continuations, not the full business state for a turn.
+- `reply.delivered` and `reply.failed` do not decide whether the turn completed.
+- Prompt assembly still goes through prompt fragment providers.
+- Channel inbox is a normalized mailbox view, not the raw adapter input queue.
+- The stagnation guard is a separate process, not hard-coded inline branching.
+- Provider wire shape is rendered by `llm_adaptor`, not by changing L1 records.

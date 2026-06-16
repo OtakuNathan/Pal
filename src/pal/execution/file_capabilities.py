@@ -21,7 +21,7 @@ class FileCapabilityMixin:
         action_name="read",
         description=(
             "Read a UTF-8 text file and return a line-numbered slice. "
-            "A successful read caches the full file for subsequent op_file_edit calls."
+            "A successful read caches the full file for subsequent file_edit calls."
         ),
         aliases=("file_read",),
         args_schema={
@@ -49,7 +49,7 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_file_read"},
     )
     def file_read(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(self.runtime, "file_read", call.args)
+        return _tool_capability_result(self.runtime, "op_file_read", call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -83,7 +83,7 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_file_edit"},
     )
     def file_edit(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(self.runtime, "file_edit", call.args)
+        return _tool_capability_result(self.runtime, "op_file_edit", call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -92,6 +92,7 @@ class FileCapabilityMixin:
         action_name="write",
         description=(
             "Create, overwrite, or append to a UTF-8 text file. "
+            "Create mode creates missing parent directories. "
             "Overwrite and append require a current prior op_file_read snapshot."
         ),
         aliases=("file_write",),
@@ -106,8 +107,9 @@ class FileCapabilityMixin:
                     "default": "create",
                     "description": (
                         "Write mode. 'create' creates a new file and fails if it exists. "
-                        "'overwrite' replaces the full existing file after op_file_read. "
-                        "'append' adds content to the end of an existing file after op_file_read."
+                        "Create mode also creates missing parent directories. "
+                        "'overwrite' replaces the full existing file after file_read. "
+                        "'append' adds content to the end of an existing file after file_read."
                     ),
                 },
             },
@@ -127,7 +129,42 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_file_write"},
     )
     def file_write(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(self.runtime, "file_write", call.args)
+        return _tool_capability_result(self.runtime, "op_file_write", call.args)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="file",
+        action_name="delete",
+        description=(
+            "Delete a regular file. The file must first be read with op_file_read so Pal can detect stale deletes, "
+            "or expected_sha256 must match the current file bytes."
+        ),
+        aliases=("file_delete",),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "Path to the file to delete."},
+                "expected_sha256": {
+                    "type": "string",
+                    "description": "Optional current SHA-256 digest. If supplied, a prior file_read snapshot is not required.",
+                },
+            },
+            "required": ["file_path"],
+        },
+        result_schema={
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string"},
+                "deleted": {"type": "boolean"},
+                "sha256": {"type": "string"},
+                "error_code": {"type": "string"},
+            },
+        },
+        metadata={"canonical_path": "op_file_delete"},
+    )
+    def file_delete(self, call: IntrospectionCall) -> IntrospectionResult:
+        return _tool_capability_result(self.runtime, "op_file_delete", call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -161,4 +198,4 @@ class FileCapabilityMixin:
         metadata={"canonical_path": "op_file_state"},
     )
     def file_state(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(self.runtime, "file_state", call.args)
+        return _tool_capability_result(self.runtime, "op_file_state", call.args)

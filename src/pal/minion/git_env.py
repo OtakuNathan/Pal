@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pal.minion.workspace_environment import prepare_workspace_environment
 from pal.shared import TaskContextPack
 
 
@@ -75,8 +76,9 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
     if not source_repo:
         source_repo = str(workspace.get("repo_path") or "").strip()
     repo_path = _task_repo_path(runtime_root, workspace, task_id)
+    created_repo = not (repo_path / ".git").exists()
 
-    if not (repo_path / ".git").exists():
+    if created_repo:
         if source_repo and not _same_local_path(source_repo, repo_path):
             _clone_repo(source_repo, repo_path)
         else:
@@ -87,6 +89,16 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
     if not _has_head(repo_path):
         _git(repo_path, "commit", "--allow-empty", "-m", "minion: initialize task repo", check=True)
     _ensure_local_git_excludes(repo_path)
+    environment = prepare_workspace_environment(repo_path, pack, workspace, write_files=created_repo, runtime_root=runtime_root)
+    if environment:
+        workspace["languages"] = list(environment.get("languages") or [])
+        workspace["lsp_setup"] = dict(environment.get("lsp_setup") or {})
+        created_files = [str(item) for item in list(environment.get("created_files") or []) if str(item).strip()]
+        if created_files:
+            _git(repo_path, "add", "--", *created_files, check=True)
+            if _has_staged_changes(repo_path):
+                _git(repo_path, "commit", "-m", "minion: prepare workspace environment", check=True)
+                workspace["lsp_setup"]["baseline_commit_sha"] = _current_head(repo_path)
 
     base_ref = str(workspace.get("base_ref") or _current_branch(repo_path) or "HEAD").strip() or "HEAD"
     if not _git(repo_path, "rev-parse", "--verify", base_ref).ok:

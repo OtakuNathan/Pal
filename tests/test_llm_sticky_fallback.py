@@ -37,8 +37,10 @@ def _fake_endpoint(endpoint_id: str, model_id: str):
         base_url="",
         capabilities_blob={},
         supports_streaming=False,
+        supports_vision=False,
         max_output_tokens=1024,
         context_window=8192,
+        input_modalities_blob=[],
     )
 
 
@@ -85,6 +87,77 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                 self.assertEqual(RuntimeSettingRepository().get_active_llm_endpoint_id(), "working")
             finally:
                 asyncio.run(handle.stop_async())
+
+    def test_profile_preferred_missing_falls_back_to_active_endpoint_first(self) -> None:
+        settings = _MemorySettingsRepository()
+        settings.active_endpoint_id = "active"
+        active = _fake_endpoint("active", "active-model")
+        other = _fake_endpoint("other", "other-model")
+        invoker = _FailoverInvoker()
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(other, active)),
+            settings_repository=settings,
+            endpoint_invoker=invoker,
+        )
+
+        outcome = runtime.generate(
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                max_output_tokens=64,
+                metadata={"preferred_endpoint_id": "missing", "preferred_endpoint_source": "profile"},
+            )
+        )
+
+        self.assertEqual(outcome.text, "ok:active")
+        self.assertEqual(invoker.calls, ["active"])
+        self.assertEqual(runtime.active_endpoint_id, "active")
+
+    def test_profile_preferred_failure_falls_back_to_active_endpoint_next(self) -> None:
+        settings = _MemorySettingsRepository()
+        settings.active_endpoint_id = "active"
+        active = _fake_endpoint("active", "active-model")
+        broken = _fake_endpoint("broken", "broken-model")
+        other = _fake_endpoint("other", "other-model")
+        invoker = _FailoverInvoker()
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(active, broken, other)),
+            settings_repository=settings,
+            endpoint_invoker=invoker,
+            endpoint_retry_attempts=1,
+        )
+
+        outcome = runtime.generate(
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                max_output_tokens=64,
+                metadata={"preferred_endpoint_id": "broken", "preferred_endpoint_source": "profile"},
+            )
+        )
+
+        self.assertEqual(outcome.text, "ok:active")
+        self.assertEqual(invoker.calls, ["broken", "active"])
+        self.assertEqual(runtime.active_endpoint_id, "active")
+
+    def test_profile_preferred_missing_resolves_budget_from_active_endpoint(self) -> None:
+        settings = _MemorySettingsRepository()
+        settings.active_endpoint_id = "active"
+        active = _fake_endpoint("active", "active-model")
+        active.max_output_tokens = 777
+        other = _fake_endpoint("other", "other-model")
+        other.max_output_tokens = 555
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(other, active)),
+            settings_repository=settings,
+            endpoint_invoker=_FailoverInvoker(),
+        )
+
+        self.assertEqual(
+            runtime.resolve_max_output_tokens(preferred_endpoint_id="missing", preferred_endpoint_source="profile"),
+            777,
+        )
+        facts = runtime.resolve_endpoint_facts(preferred_endpoint_id="missing", preferred_endpoint_source="profile")
+        self.assertEqual(facts["endpoint_id"], "active")
+        self.assertEqual(facts["max_output_tokens"], 777)
 
     def test_codex_cli_connection_failure_skips_same_failure_domain(self) -> None:
         class _Invoker:
@@ -256,10 +329,10 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                 )
                 self.assertEqual(search.status, "ok")
                 hit_names = [item["name"] for item in search.structured["hits"]]
-                self.assertIn("op_llm_mgmt_set_active_endpoint", hit_names)
+                self.assertIn("llm_set_active_endpoint", hit_names)
 
                 read = core.context.execution_runtime.execute(
-                    CapabilityCall(name="op_tool_read", args={"name": "op_llm_mgmt_set_active_endpoint"})
+                    CapabilityCall(name="op_tool_read", args={"name": "llm_set_active_endpoint"})
                 )
                 self.assertEqual(read.status, "ok")
                 self.assertEqual(read.structured["capability"]["required_params"], ["active_endpoint_id"])
@@ -267,7 +340,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
                 call = core.context.execution_runtime.execute(
                     CapabilityCall(
                         name="op_tool_call",
-                        args={"name": "op_llm_mgmt_set_active_endpoint", "args": {"active_endpoint_id": "beta"}},
+                        args={"name": "llm_set_active_endpoint", "args": {"active_endpoint_id": "beta"}},
                     )
                 )
                 self.assertEqual(call.status, "ok")

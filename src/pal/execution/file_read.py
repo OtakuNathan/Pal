@@ -44,7 +44,7 @@ class FileReadTool:
     :class:`FileEditTool` can verify "read-before-edit" safety.
     """
 
-    name: str = "file_read"
+    name: str = "op_file_read"
     display_name: str = "File Read"
     family: str = "system"
     description: str = (
@@ -206,7 +206,8 @@ class FileReadTool:
 
         return _result(RuntimeStatus.OK, content, **structured)
 
-    async def ainvoke(self, args: dict[str, Any]) -> CapabilityResult:
+    async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
+        _ = kwargs
         return self.invoke(args)
 
 

@@ -19,7 +19,6 @@ from pal.execution.file_write import (
     ERR_MISSING_CONTENT,
     ERR_MISSING_FILE_PATH,
     ERR_NOT_READ,
-    ERR_PARENT_DIR_NOT_FOUND,
     ERR_PARENT_NOT_DIRECTORY,
     ERR_STALE_FILE,
     FileWriteTool,
@@ -62,14 +61,15 @@ class CreateModeTests(_TempFileMixin, unittest.TestCase):
         self.assertEqual(result.structured["error_code"], ERR_FILE_EXISTS)
         self.assertEqual(path.read_text(encoding="utf-8"), "original\n")
 
-    def test_create_requires_existing_parent_directory(self) -> None:
+    def test_create_makes_missing_parent_directory(self) -> None:
         path = self._path("missing/new.txt")
 
         result = self.tool.invoke({"file_path": str(path), "content": "hello\n"})
 
-        self.assertEqual(result.status, RuntimeStatus.INVALID)
-        self.assertEqual(result.structured["error_code"], ERR_PARENT_DIR_NOT_FOUND)
-        self.assertFalse(path.exists())
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertTrue(result.structured["created"])
+        self.assertEqual(path.read_text(encoding="utf-8"), "hello\n")
+        self.assertTrue(path.parent.is_dir())
 
     def test_parent_must_be_directory(self) -> None:
         parent = self._path("parent.txt")
@@ -259,7 +259,7 @@ class ToolProtocolTests(unittest.TestCase):
     def test_tool_attributes(self) -> None:
         tool = FileWriteTool()
 
-        self.assertEqual(tool.name, "file_write")
+        self.assertEqual(tool.name, "op_file_write")
         self.assertEqual(tool.family, "system")
         self.assertIn("file_path", tool.args_schema.get("required", []))
         self.assertIn("content", tool.args_schema.get("required", []))

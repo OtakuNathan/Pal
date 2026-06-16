@@ -7,6 +7,7 @@ from pal.shared import TaskContextPack
 
 _RUNNER_PRESERVED_METADATA_KEYS = {
     "allow_text_only_completion",
+    "checkpoint_repair",
     "checkpoint_review",
     "clarification_answers",
     "control_route",
@@ -22,6 +23,7 @@ _RUNNER_PRESERVED_METADATA_KEYS = {
     "pack_allowed_skill_refs",
     "plan_ref",
     "preferred_endpoint_id",
+    "preferred_endpoint_source",
     "profile_skill_refs",
     "prompt_log_enabled",
     "prompt_view",
@@ -39,6 +41,7 @@ _RUNNER_PRESERVED_METADATA_KEYS = {
 }
 
 _TURN_METADATA_KEYS = {
+    "checkpoint_repair",
     "module_execution",
     "module_id",
     "plan_ref",

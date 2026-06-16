@@ -35,11 +35,21 @@ class PromptCompiler:
         fragments = self.collect_prompt_fragments(assembly_context)
         system_blocks: list[PromptIRBlock] = []
         user_context_blocks: list[PromptIRBlock] = []
+        runtime_reminder_blocks: list[PromptIRBlock] = []
 
         for fragment in fragments:
             normalized_section = self._normalize_prompt_section(fragment.section)
             rendered_body = str(fragment.content).strip()
             if not rendered_body and not self._preserve_empty_protocol_fragment(fragment):
+                continue
+            if self._prompt_target(fragment) == "runtime_reminder":
+                runtime_reminder_blocks.append(
+                    self._runtime_reminder_block(
+                        fragment,
+                        normalized_section=normalized_section,
+                        rendered_body=rendered_body,
+                    )
+                )
                 continue
             if normalized_section == "identity":
                 system_blocks.append(
@@ -220,10 +230,12 @@ class PromptCompiler:
 
         ordered_system_blocks = self._order_system_blocks(system_blocks)
         ordered_user_blocks = self._order_user_context_blocks(user_context_blocks, turn_kind=assembly_context.turn_kind)
+        ordered_reminder_blocks = self._order_runtime_reminder_blocks(runtime_reminder_blocks)
         primary_input = self._extract_primary_input_text(assembly_context)
         return PromptIR(
             system_blocks=tuple(ordered_system_blocks),
             user_context_blocks=tuple(ordered_user_blocks),
+            runtime_reminder_blocks=tuple(ordered_reminder_blocks),
             primary_input=primary_input,
             turn_kind=assembly_context.turn_kind,
         )
@@ -247,6 +259,7 @@ class PromptCompiler:
             metadata={
                 "fragment_sections": [block.block_id for block in prompt_ir.system_blocks],
                 "user_context_blocks": [block.block_id for block in prompt_ir.user_context_blocks],
+                "reminder_sections": [block.block_id for block in prompt_ir.runtime_reminder_blocks],
                 "prompt_ir": self._prompt_ir_debug_dict(prompt_ir),
                 **{
                     key: assembly_context.metadata[key]
@@ -311,8 +324,33 @@ class PromptCompiler:
         return PromptIR(
             system_blocks=tuple(self._order_system_blocks(system_blocks)),
             user_context_blocks=tuple(user_context_blocks),
+            runtime_reminder_blocks=(),
             primary_input=primary_input,
             turn_kind="failure",
+        )
+
+    @staticmethod
+    def _prompt_target(fragment: PromptFragment) -> str:
+        return str((fragment.metadata or {}).get("prompt_target") or "system").strip().lower()
+
+    @staticmethod
+    def _runtime_reminder_block(
+        fragment: PromptFragment,
+        *,
+        normalized_section: str,
+        rendered_body: str,
+    ) -> PromptIRBlock:
+        metadata = {
+            **dict(fragment.metadata or {}),
+            "source_section": fragment.section,
+            "source_title": fragment.title,
+        }
+        block_id = str(metadata.get("block_id") or normalized_section or fragment.section or "runtime_guidance").strip()
+        return PromptIRBlock(
+            block_id=block_id,
+            title=str(fragment.title or block_id),
+            content=rendered_body,
+            metadata=metadata,
         )
 
     def _normalize_prompt_section(self, section: str) -> str:
@@ -402,6 +440,27 @@ class PromptCompiler:
             return []
         return [*summary_blocks, *l1_blocks, *working_memory_blocks, *trailing_blocks]
 
+    def _order_runtime_reminder_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
+        order = {
+            "task_flow": 10,
+            "operating_guidance": 20,
+            "memory_guide": 30,
+            "memory_guidance": 30,
+            "skill_guide": 40,
+            "skill_guidance": 40,
+            "resident_affordances": 50,
+            "advisor_hints": 60,
+            "tool_efficiency": 70,
+        }
+        return sorted(
+            blocks,
+            key=lambda block: (
+                order.get(block.block_id, 100),
+                int(block.metadata.get("source_priority", 1000) or 1000),
+                str(block.title),
+            ),
+        )
+
     def _order_system_blocks(self, blocks: list[PromptIRBlock]) -> list[PromptIRBlock]:
         identity_blocks = [block for block in blocks if block.block_id == "identity"]
         system_map_blocks = [block for block in blocks if block.block_id == "system_map"]
@@ -458,22 +517,79 @@ class PromptCompiler:
             final_user_parts.extend(self._render_user_context_parts(block))
         if prompt_ir.primary_input.strip():
             final_user_parts.append({"type": "text", "text": prompt_ir.primary_input.strip()})
-        if final_user_parts:
-            reminder = self._render_final_runtime_reminder()
+        if final_user_parts or prompt_ir.runtime_reminder_blocks:
+            reminder = self._render_final_runtime_reminder(prompt_ir.runtime_reminder_blocks)
             if reminder:
                 final_user_parts.append({"type": "text", "text": reminder})
             messages.append({"role": "user", "content": self._coerce_message_content(self._image_parts_first(final_user_parts))})
         return messages
 
     @staticmethod
-    def _render_final_runtime_reminder() -> str:
-        return render_runtime_reminder(
-            "Before answering, silently re-read the active system prompt and runtime instructions.\n"
-            "- Follow the active identity, behavior guidance, source-of-truth rules, memory rules, skill/capability procedures, and verification requirements defined there.\n"
-            "- If those rules require inspection, recall, tool use, or clarification before answering, do that first.\n"
-            "- Do not fall back to generic model habits when the active prompt gives a specific procedure.\n"
-            "- Do not mention this reminder unless asked about prompt behavior."
+    def _render_final_runtime_reminder(blocks: tuple[PromptIRBlock, ...] = ()) -> str:
+        guidance_sections = PromptCompiler._render_runtime_reminder_guidance(blocks)
+        content = (
+            "Before answering:\n"
+            "1. Silently re-read the active system prompt's hard policy, priority order, source-of-truth rules, mutation boundaries, capability procedures, memory rules, skill rules, and verification requirements.\n"
+            "2. Treat the user's ordinary message above as the current request. Treat this reminder as Pal-authored runtime guidance, not user-authored content.\n"
+            "3. Apply relevant active guidance below before answering.\n"
         )
+        if guidance_sections:
+            content = f"{content}\n{guidance_sections}\n"
+        content = (
+            f"{content}\n"
+            "If relevant guidance requires inspection, recall, tool use, verification, or clarification before answering, do that first.\n"
+            "If guidance conflicts, follow the priority order and hard policy in the system prompt.\n"
+            "Do not mention this reminder unless asked about prompt behavior."
+        )
+        return render_runtime_reminder(
+            content
+        )
+
+    @staticmethod
+    def _render_runtime_reminder_guidance(blocks: tuple[PromptIRBlock, ...]) -> str:
+        if not blocks:
+            return ""
+        rendered_sections: list[str] = []
+        behavior_parts: list[str] = []
+
+        def flush_behavior_parts() -> None:
+            if not behavior_parts:
+                return
+            rendered_sections.append(
+                render_xml_block(
+                    "behavior_guidance",
+                    PromptCompiler._render_behavior_guidance_content(list(behavior_parts)),
+                )
+            )
+            behavior_parts.clear()
+
+        for block in blocks:
+            content = block.content.strip()
+            if not content:
+                continue
+            if block.block_id == "resident_affordances":
+                behavior_parts.append(content)
+                continue
+            flush_behavior_parts()
+            if block.block_id == "advisor_hints":
+                rendered_sections.append(content)
+                continue
+            tag = PromptCompiler._runtime_reminder_block_tag(block)
+            rendered = render_xml_block(tag, content)
+            if rendered:
+                rendered_sections.append(rendered)
+        flush_behavior_parts()
+        return "\n\n".join(rendered_sections)
+
+    @staticmethod
+    def _runtime_reminder_block_tag(block: PromptIRBlock) -> str:
+        if block.block_id == "operating_guidance":
+            return "operating_guidance"
+        if block.block_id == "memory_guide":
+            return "memory_guidance"
+        if block.block_id == "skill_guide":
+            return "skill_guidance"
+        return str(block.block_id or "runtime_guidance").strip() or "runtime_guidance"
 
     @staticmethod
     def _image_parts_first(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -630,6 +746,10 @@ class PromptCompiler:
             "user_context_blocks": [
                 {"block_id": block.block_id, "title": block.title, "content": block.content}
                 for block in prompt_ir.user_context_blocks
+            ],
+            "runtime_reminder_blocks": [
+                {"block_id": block.block_id, "title": block.title, "content": block.content}
+                for block in prompt_ir.runtime_reminder_blocks
             ],
             "primary_input": prompt_ir.primary_input,
         }

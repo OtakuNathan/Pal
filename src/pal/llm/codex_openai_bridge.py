@@ -21,7 +21,7 @@ _BRIDGE_DEVELOPER_GUARD = (
     "Pal owns memory, capability lookup, tool execution, approvals, scheduling, and plugin policy. "
     "Do not use built-in Codex tools to read local files, execute shell commands, edit files, or browse. "
     "Those actions are available only through Pal-provided dynamic tools when present. "
-    "If a dynamic tool such as op_exec_shell is provided, it is the authorized shell path for this turn; use it instead of claiming shell access is unavailable. "
+    "If a dynamic tool such as shell is provided, it is the authorized shell path for this turn; use it instead of claiming shell access is unavailable. "
     "If a needed dynamic tool is absent, use Pal discovery tools when provided, or state that the specific Pal capability is unavailable only after checking the current tool surface. "
     "Answer from the provided conversation or request one of the provided dynamic tools."
 )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,10 +34,18 @@ class MinionReviewGateStore:
             gate = ReviewGateResult.from_dict(payload)
         target_kind, target_key, target_binding = self._validate_review_gate_target(gate)
         self._validate_review_gate_tool_evidence_refs(gate)
+        self._validate_pass_gate_findings(gate)
         self._validate_bound_review_gate_evidence(gate, target_binding)
+        detected_contract_violations = _numeric_range_evidence_violations(
+            gate,
+            _review_target_numeric_range_criteria(target_binding),
+            require_coverage=gate.verdict == "pass",
+        )
         created_at = utc_now()
         normalized_payload = gate.to_dict()
         normalized_payload["target"] = dict(target_binding)
+        if detected_contract_violations:
+            _annotate_detected_contract_violations(normalized_payload, detected_contract_violations)
         normalized_payload["created_at"] = created_at
         normalized_payload["target_kind"] = target_kind
         normalized_payload["target_key"] = target_key
@@ -419,7 +428,7 @@ class MinionReviewGateStore:
     def _validate_bound_review_gate_evidence(self, gate: ReviewGateResult, target_binding: dict[str, Any]) -> None:
         if gate.verdict != "pass" or gate.gate_kind not in {"checkpoint_verification", "repair_verification"}:
             return
-        criteria = [str(item).strip() for item in list(target_binding.get("acceptance_criteria") or []) if str(item or "").strip()]
+        criteria = _review_target_acceptance_criteria(target_binding)
         if not criteria:
             return
         covered = _review_gate_coverage_tokens(gate)
@@ -434,6 +443,349 @@ class MinionReviewGateStore:
                 "checkpoint pass review gate lacks evidence coverage for acceptance criteria: "
                 + "; ".join(missing[:3])
             )
+        self._validate_numeric_range_evidence(gate, _review_target_numeric_range_criteria(target_binding))
+
+    def _validate_numeric_range_evidence(self, gate: ReviewGateResult, criteria: list[str]) -> None:
+        for violation in _numeric_range_evidence_violations(gate, criteria, require_coverage=True):
+            raise ValueError(str(violation.get("summary") or "checkpoint pass review gate evidence violates acceptance criterion"))
+
+    def _validate_pass_gate_findings(self, gate: ReviewGateResult) -> None:
+        if gate.verdict != "pass":
+            return
+        if gate.required_fixes:
+            raise ValueError("pass review gate cannot include required_fixes; submit fail/partial until required fixes are resolved")
+        blocking = _blocking_pass_findings(gate)
+        if not blocking:
+            return
+        rendered = "; ".join(_finding_title(item) for item in blocking[:3])
+        raise ValueError(
+            "pass review gate cannot include unresolved contract findings: "
+            + rendered
+            + ". Submit fail/partial with required_fixes, or move non-contract observations to residual_risk/note with contract_impact=none."
+        )
+
+
+def _review_target_acceptance_criteria(target_binding: dict[str, Any]) -> list[str]:
+    criteria: list[str] = []
+    seen: set[str] = set()
+    sources = [target_binding.get("acceptance_criteria")]
+    source_contract = target_binding.get("source_contract")
+    if isinstance(source_contract, dict):
+        sources.append(source_contract.get("acceptance_criteria"))
+    for source in sources:
+        for item in list(source or []):
+            criterion = str(item or "").strip()
+            if not criterion:
+                continue
+            key = _coverage_token(criterion)
+            if key in seen:
+                continue
+            seen.add(key)
+            criteria.append(criterion)
+    return criteria
+
+
+def _review_target_numeric_range_criteria(target_binding: dict[str, Any]) -> list[str]:
+    criteria = list(_review_target_acceptance_criteria(target_binding))
+    seen = {_coverage_token(item) for item in criteria}
+    source_contract = target_binding.get("source_contract")
+    if isinstance(source_contract, dict):
+        for key in ("instruction", "goal", "task", "summary"):
+            for clause in _numeric_range_contract_clauses(str(source_contract.get(key) or "")):
+                token = _coverage_token(clause)
+                if token and token not in seen:
+                    seen.add(token)
+                    criteria.append(clause)
+    return criteria
+
+
+_NON_BLOCKING_FINDING_SEVERITIES = {"note", "info", "informational", "nit", "nitpick", "observation"}
+_BLOCKING_FINDING_SEVERITIES = {"blocker", "critical", "major", "high", "error", "fail", "failure"}
+
+
+def _blocking_pass_findings(gate: ReviewGateResult) -> list[dict[str, Any]]:
+    blocking: list[dict[str, Any]] = []
+    for finding in [dict(item) for item in list(gate.findings or []) if isinstance(item, dict)]:
+        severity = _finding_severity(finding)
+        contract_impact = _contract_impact_text(finding)
+        if contract_impact:
+            blocking.append(finding)
+            continue
+        if severity in _BLOCKING_FINDING_SEVERITIES:
+            blocking.append(finding)
+            continue
+        if _truthy(finding.get("non_blocking")) and severity not in _NON_BLOCKING_FINDING_SEVERITIES:
+            blocking.append(finding)
+    return blocking
+
+
+def _finding_severity(finding: dict[str, Any]) -> str:
+    return str(finding.get("severity") or "finding").strip().lower()
+
+
+def _finding_title(finding: dict[str, Any]) -> str:
+    return (
+        _finding_text(finding, "title", "summary", "message", "description", "area")
+        or "review finding"
+    )
+
+
+def _finding_text(finding: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = finding.get(key)
+        if isinstance(value, (dict, list, tuple, set)):
+            continue
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _contract_impact_text(finding: dict[str, Any]) -> str:
+    text = _finding_text(finding, "contract_impact", "contract impact", "impact")
+    lowered = text.strip().lower()
+    if lowered in {"none", "n/a", "na", "not applicable", "no impact", "no contract impact"}:
+        return ""
+    if lowered.startswith(("none;", "none,", "n/a;", "n/a,", "not applicable;", "not applicable,")):
+        return ""
+    return text
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+_TEST_COUNT_RANGE_RE = re.compile(r"\b(\d+)\s*(?:-|to)\s*(\d+)\b", re.IGNORECASE)
+_PYTEST_COUNT_RE = re.compile(
+    r"\b(?:(\d+)\s+passed|(\d+)\s+tests?\s+collected|collected\s+(\d+)\s+items?)\b",
+    re.IGNORECASE,
+)
+
+
+def _test_count_range_from_criterion(criterion: str) -> tuple[int, int] | None:
+    text = str(criterion or "")
+    lowered = text.lower()
+    if "test" not in lowered:
+        return None
+    match = None
+    for candidate in _TEST_COUNT_RANGE_RE.finditer(text):
+        if _range_match_is_line_reference(text, candidate):
+            continue
+        match = candidate
+        break
+    if match is None:
+        return None
+    lower = int(match.group(1))
+    upper = int(match.group(2))
+    if lower > upper:
+        lower, upper = upper, lower
+    return lower, upper
+
+
+def _range_match_is_line_reference(text: str, match: re.Match[str]) -> bool:
+    prefix = text[max(0, match.start() - 24) : match.start()].lower()
+    suffix = text[match.end() : min(len(text), match.end() + 24)].lower()
+    return bool(re.search(r"\blines?\s*$", prefix) or re.search(r"^\s*(?:in|of)?\s*lines?\b", suffix))
+
+
+def _observed_pytest_pass_counts(gate: ReviewGateResult, criterion: str) -> list[int]:
+    return _observed_pytest_pass_counts_for_items(gate, criterion, require_coverage=True)
+
+
+def _numeric_range_evidence_violations(
+    gate: ReviewGateResult,
+    criteria: list[str],
+    *,
+    require_coverage: bool,
+) -> list[dict[str, Any]]:
+    violations: list[dict[str, Any]] = []
+    seen: set[tuple[int, int, int]] = set()
+    for criterion in criteria:
+        bounds = _test_count_range_from_criterion(criterion)
+        if bounds is None:
+            continue
+        lower, upper = bounds
+        for count in _observed_pytest_pass_counts_for_items(gate, criterion, require_coverage=require_coverage):
+            if lower <= count <= upper:
+                continue
+            key = (lower, upper, count)
+            if key in seen:
+                continue
+            seen.add(key)
+            violations.append(
+                {
+                    "kind": "numeric_range_violation",
+                    "severity": "blocker",
+                    "criterion": criterion,
+                    "observed_count": count,
+                    "required_min": lower,
+                    "required_max": upper,
+                    "summary": (
+                        "checkpoint review gate evidence violates acceptance criterion "
+                        f"{criterion!r}: observed {count} passed tests outside required range {lower}-{upper}"
+                    ),
+                }
+            )
+    return violations
+
+
+def _observed_pytest_pass_counts_for_items(gate: ReviewGateResult, criterion: str, *, require_coverage: bool) -> list[int]:
+    result: list[int] = []
+    bounds = _test_count_range_from_criterion(criterion)
+    if bounds is None:
+        return result
+    lower, upper = bounds
+    tool_ref_text_by_id = _tool_ref_text_by_id(gate)
+    for item in [*gate.commands_run, *gate.evidence, *gate.api_evidence]:
+        if not isinstance(item, dict):
+            continue
+        text = _evidence_text_for_numeric_checks(item)
+        evidence_ref_id = str(item.get("evidence_ref_id") or "").strip()
+        if evidence_ref_id and tool_ref_text_by_id.get(evidence_ref_id):
+            text = "\n".join(part for part in (text, tool_ref_text_by_id[evidence_ref_id]) if part)
+        matches = list(_PYTEST_COUNT_RE.finditer(text))
+        if not matches:
+            continue
+        if require_coverage and not _item_relevant_to_test_count_range(item, criterion, lower, upper):
+            continue
+        for match in matches:
+            for group in match.groups():
+                if group:
+                    result.append(int(group))
+                    break
+    return result
+
+
+def _tool_ref_text_by_id(gate: ReviewGateResult) -> dict[str, str]:
+    metadata = dict(gate.metadata or {})
+    result: dict[str, str] = {}
+    for ref in list(metadata.get("tool_evidence_refs") or []):
+        if not isinstance(ref, dict):
+            continue
+        evidence_ref_id = str(ref.get("evidence_ref_id") or "").strip()
+        if not evidence_ref_id:
+            continue
+        result[evidence_ref_id] = _evidence_text_for_numeric_checks(ref)
+    return result
+
+
+def _item_relevant_to_test_count_range(item: dict[str, Any], criterion: str, lower: int, upper: int) -> bool:
+    criterion_token = _coverage_token(criterion)
+    item_tokens = _coverage_tokens_from_item(item)
+    if criterion_token in item_tokens:
+        return True
+    for token in item_tokens:
+        if _test_count_range_from_criterion(token) == (lower, upper):
+            return True
+    command = str(item.get("command") or item.get("cmd") or item.get("name") or "").lower()
+    if "pytest" in command:
+        return True
+    text = "\n".join((_coverage_text_from_item(item), _evidence_text_for_numeric_checks(item))).lower()
+    return "pytest" in text and "test" in text
+
+
+def _annotate_detected_contract_violations(payload: dict[str, Any], violations: list[dict[str, Any]]) -> None:
+    metadata = dict(payload.get("metadata") or {})
+    existing = [dict(item) for item in list(metadata.get("detected_contract_violations") or []) if isinstance(item, dict)]
+    existing.extend(dict(item) for item in violations)
+    metadata["detected_contract_violations"] = existing
+    payload["metadata"] = metadata
+    if str(payload.get("verdict") or "").strip().lower() == "pass":
+        return
+    findings = [dict(item) for item in list(payload.get("findings") or []) if isinstance(item, dict)]
+    existing_text = "\n".join(str(item.get("summary") or item.get("message") or "") for item in findings).lower()
+    for violation in violations:
+        summary = str(violation.get("summary") or "").strip()
+        if not summary or summary.lower() in existing_text:
+            continue
+        findings.append(
+            {
+                "severity": "blocker",
+                "summary": summary,
+                "contract_impact": str(violation.get("criterion") or ""),
+                "suggested_fix": "Adjust the implementation or tests so observed evidence satisfies the binding numeric range.",
+                "source": "system_detected",
+            }
+        )
+    payload["findings"] = findings
+
+
+def _evidence_text_for_numeric_checks(item: dict[str, Any]) -> str:
+    fields = (
+        "output_summary",
+        "output summary",
+        "outputSummary",
+        "summary",
+        "description",
+        "message",
+        "detail",
+        "evidence",
+        "text",
+        "llm_text",
+        "stdout_preview",
+        "stderr_preview",
+        "output",
+    )
+    parts = [str(item.get(key) or "") for key in fields if str(item.get(key) or "").strip()]
+    return "\n".join(parts)
+
+
+def _coverage_text_from_item(item: dict[str, Any]) -> str:
+    if not isinstance(item, dict):
+        return ""
+    raw_values: list[Any] = []
+    for key in ("covers", "coverage", "acceptance_criteria", "acceptance_criteria_refs", "acceptance_refs"):
+        if key in item:
+            raw_values.append(item.get(key))
+    if isinstance(item.get("coverage"), dict):
+        raw_values.extend(item["coverage"].values())
+    parts: list[str] = []
+    for value in raw_values:
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, (int, float)):
+            parts.append(str(int(value)))
+        elif isinstance(value, dict):
+            parts.extend(str(nested) for nested in value.values() if str(nested or "").strip())
+        elif isinstance(value, (list, tuple, set)):
+            parts.extend(str(nested) for nested in value if str(nested or "").strip())
+    return "\n".join(parts)
+
+
+def _numeric_range_contract_clauses(text: str) -> list[str]:
+    clauses: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip(" -\t")
+        if _test_count_range_from_criterion(line) is None:
+            continue
+        clauses.append(_compact_numeric_range_clause(line))
+    if clauses:
+        return clauses
+    for match in _TEST_COUNT_RANGE_RE.finditer(str(text or "")):
+        start = max(0, match.start() - 120)
+        end = min(len(text), match.end() + 160)
+        snippet = str(text[start:end]).replace("\n", " ").strip(" -\t,.;")
+        if _test_count_range_from_criterion(snippet) is not None:
+            clauses.append(_compact_numeric_range_clause(snippet))
+    return clauses
+
+
+def _compact_numeric_range_clause(text: str, *, limit: int = 260) -> str:
+    clause = " ".join(str(text or "").split())
+    if len(clause) <= limit:
+        return clause
+    match = _TEST_COUNT_RANGE_RE.search(clause)
+    if not match:
+        return clause[:limit].rstrip()
+    half = limit // 2
+    start = max(0, match.start() - half)
+    end = min(len(clause), start + limit)
+    start = max(0, end - limit)
+    return clause[start:end].strip(" -\t,.;")
 
 
 def compact_review_gate_ref(payload: dict[str, Any]) -> dict[str, Any]:

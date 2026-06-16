@@ -180,7 +180,7 @@ def _workspace_path(root: Path, raw_path: Any = "") -> Path:
     relative = str(raw_path or ".").strip() or "."
     candidate = (root / relative).resolve()
     if candidate != root and root not in candidate.parents:
-        raise ValueError("workspace path escapes repo_path")
+        raise ValueError("workspace path must be relative to workspace.repo_path; absolute paths and clone-source paths are not accepted")
     return candidate
 
 

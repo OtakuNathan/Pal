@@ -20,6 +20,7 @@ class MinionProfile:
     profile_group: str = "general"
     behavior_fragment: str = ""
     output_contract_fragment: str = ""
+    preferred_endpoint_id: str = ""
     capability_groups: tuple[str, ...] = ()
     default_allowed_capabilities: tuple[str, ...] = ()
     skill_refs: tuple[str, ...] = ()
@@ -48,6 +49,7 @@ class MinionProfile:
             "identity_fragment": self.identity_fragment,
             "behavior_fragment": self.behavior_fragment,
             "output_contract_fragment": self.output_contract_fragment,
+            "preferred_endpoint_id": self.preferred_endpoint_id,
             "capability_groups": list(self.capability_groups),
             "default_allowed_capabilities": list(self.default_allowed_capabilities),
             "skill_refs": list(self.skill_refs or self.default_allowed_skills),
@@ -70,6 +72,7 @@ class MinionProfile:
         if not profile_id:
             raise ValueError("MinionProfile.profile_id is required")
         display_name = str(payload.get("display_name") or profile_id).strip()
+        metadata = _dict(payload.get("metadata"))
         skill_refs = tuple(
             _string_list(
                 payload.get("skill_refs")
@@ -82,10 +85,11 @@ class MinionProfile:
         return cls(
             profile_id=profile_id,
             display_name=display_name,
-            profile_group=str(payload.get("profile_group") or _dict(payload.get("metadata")).get("profile_group") or "general").strip() or "general",
+            profile_group=str(payload.get("profile_group") or metadata.get("profile_group") or "general").strip() or "general",
             identity_fragment=str(payload.get("identity_fragment") or ""),
             behavior_fragment=str(payload.get("behavior_fragment") or ""),
             output_contract_fragment=str(payload.get("output_contract_fragment") or ""),
+            preferred_endpoint_id=str(payload.get("preferred_endpoint_id") or metadata.get("preferred_endpoint_id") or "").strip(),
             capability_groups=tuple(_string_list(payload.get("capability_groups"))),
             default_allowed_capabilities=tuple(
                 _string_list(payload.get("default_allowed_capabilities") or payload.get("allowed_capabilities"))
@@ -99,7 +103,7 @@ class MinionProfile:
             capability_policy=_dict(payload.get("capability_policy")),
             gate_policy=_dict(payload.get("gate_policy")),
             output_policy=_dict(payload.get("output_policy")),
-            metadata=_dict(payload.get("metadata")),
+            metadata=metadata,
         )
 
 
@@ -232,6 +236,13 @@ class MinionProfileRegistry:
             workspace["gate_policy"] = dict(gate_policy)
         if output_policy:
             workspace["output_policy"] = dict(output_policy)
+        metadata = dict(pack.metadata)
+        preferred_endpoint_id = str(metadata.get("preferred_endpoint_id") or "").strip()
+        if preferred_endpoint_id:
+            metadata.setdefault("preferred_endpoint_source", "explicit")
+        elif profile.preferred_endpoint_id:
+            metadata["preferred_endpoint_id"] = profile.preferred_endpoint_id
+            metadata["preferred_endpoint_source"] = "profile"
         return TaskContextPack.from_dict(
             {
                 **pack.to_dict(),
@@ -243,6 +254,7 @@ class MinionProfileRegistry:
                 "allowed_skills": allowed_skills,
                 "approval_policy": approval_policy,
                 "workspace": workspace,
+                "metadata": metadata,
             }
         )
 
@@ -284,7 +296,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "tool_discovery": ("op_tool_search", "op_tool_read"),
     "capability_call": ("op_tool_call",),
     "minion_artifacts": ("op_minion_artifact_write", "op_minion_artifact_edit"),
-    "minion_review_gate": ("op_minion_review_gate_submit",),
+    "minion_review_gate": ("op_minion_review_gate_submit", "op_minion_review_checkpoint"),
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
@@ -304,7 +316,14 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
         "op_lsp_diagnostics",
     ),
     "verification_shell": ("op_exec_shell",),
-    "code_work": ("op_file_read", "op_file_edit", "op_file_write", "op_exec_shell", "op_minion_checkpoint_commit"),
+    "code_work": (
+        "op_workspace_file_read",
+        "op_workspace_file_edit",
+        "op_workspace_file_write",
+        "op_workspace_file_delete",
+        "op_exec_shell",
+        "op_minion_checkpoint_commit",
+    ),
 }
 
 
@@ -360,6 +379,7 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
         "op_minion_artifact_edit",
         "op_minion_checkpoint_commit",
         "op_minion_review_gate_submit",
+        "op_minion_review_checkpoint",
         "op_minion_memory_candidate_write",
     }
 )

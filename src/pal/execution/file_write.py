@@ -1,8 +1,9 @@
 """Structured file write tool for UTF-8 text files.
 
-``FileWriteTool`` supports whole-file creation, replacement, and append. Writes
-to existing files require a current :class:`FileStateCache` snapshot so Pal does
-not modify content it has not read.
+``FileWriteTool`` supports whole-file creation, replacement, and append. Create
+mode creates missing parent directories. Writes to existing files require a
+current :class:`FileStateCache` snapshot so Pal does not modify content it has
+not read.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ _ERROR_LLMS: dict[str, str] = {
     ERR_MISSING_CONTENT: "content is required and must be a string.",
     ERR_MISSING_FILE_PATH: "file_path is required.",
     ERR_NOT_A_FILE: "The specified path is not a regular file.",
-    ERR_NOT_READ: "File has not been read yet. Read it first with op_file_read before overwriting or appending.",
+    ERR_NOT_READ: "File has not been read yet. Read it first with file_read before overwriting or appending.",
     ERR_PARENT_DIR_NOT_FOUND: "The parent directory does not exist.",
     ERR_PARENT_NOT_DIRECTORY: "The parent path exists but is not a directory.",
     ERR_STALE_FILE: "File has been modified since read. Read it again before writing.",
@@ -55,11 +56,12 @@ _ERROR_LLMS: dict[str, str] = {
 class FileWriteTool:
     """Create, overwrite, or append to a UTF-8 text file."""
 
-    name: str = "file_write"
+    name: str = "op_file_write"
     display_name: str = "File Write"
     family: str = "system"
     description: str = (
         "Create, overwrite, or append to a UTF-8 text file. "
+        "Create mode creates missing parent directories. "
         "Overwrite and append require a current prior file_read snapshot."
     )
     tags: tuple[str, ...] = ("file", "write", "create", "append", "overwrite", "system")
@@ -87,8 +89,9 @@ class FileWriteTool:
                         "default": "create",
                         "description": (
                             "Write mode. 'create' creates a new file and fails if it exists. "
-                            "'overwrite' replaces the full existing file after op_file_read. "
-                            "'append' adds content to the end of an existing file after op_file_read."
+                            "Create mode also creates missing parent directories. "
+                            "'overwrite' replaces the full existing file after file_read. "
+                            "'append' adds content to the end of an existing file after file_read."
                         ),
                     },
                 },
@@ -143,7 +146,10 @@ class FileWriteTool:
             return _err(RuntimeStatus.INVALID, ERR_FILE_EXISTS, file_path=str(resolved))
         parent = resolved.parent
         if not parent.exists():
-            return _err(RuntimeStatus.INVALID, ERR_PARENT_DIR_NOT_FOUND, file_path=str(resolved))
+            try:
+                parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                return _err(RuntimeStatus.ERROR, ERR_WRITE_FAILED, file_path=str(resolved), details=str(exc))
         if not parent.is_dir():
             return _err(RuntimeStatus.INVALID, ERR_PARENT_NOT_DIRECTORY, file_path=str(resolved))
 

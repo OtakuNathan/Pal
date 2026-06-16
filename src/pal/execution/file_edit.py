@@ -55,7 +55,7 @@ class FileEditTool:
         externally (e.g. by a file-read tool) *before* ``invoke`` is called.
     """
 
-    name: str = "file_edit"
+    name: str = "op_file_edit"
     display_name: str = "File Edit"
     family: str = "system"
     description: str = (

@@ -191,7 +191,7 @@ op_fs_stat(path)
 
 The safety value comes from the structured boundary, not from whether the implementation uses Python stdlib or shell internally.
 
-`op_exec_shell` remains the general command escape hatch and should default to stronger approval. Structured file capabilities such as `op_file_read`, `op_file_edit`, and `op_file_write` are preferred for ordinary UTF-8 file work.
+`shell` remains the general command escape hatch and should default to stronger approval. Structured file capabilities such as `file_read`, `file_edit`, and `file_write` are preferred for ordinary UTF-8 file work.
 
 ## Interaction Lifecycle Reuse
 

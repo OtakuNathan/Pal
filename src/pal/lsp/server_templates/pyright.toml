@@ -1,8 +1,10 @@
 server_id = "pyright"
 display_name = "pyright"
-command = ["pyright-langserver"]
-args = ["--stdio"]
+command = ["npx"]
+args = ["--yes", "--package", "pyright", "pyright-langserver", "--stdio"]
 extensions = [".py", ".pyi"]
 language_ids = ["python"]
 workspace_markers = ["pyproject.toml", "setup.py", ".git"]
-install_hint = "Install pyright-langserver or provide a runtime override for pylsp."
+install_hint = "Install Node.js/npx or provide a runtime override for pyright-langserver."
+startup_timeout_ms = 60000
+diagnostics_timeout_ms = 10000

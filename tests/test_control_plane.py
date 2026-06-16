@@ -576,7 +576,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["reload"])
         self.assertIn("Tool surface refreshed.", self.endpoint.outbox[-1].text)
         self.assertIn("Resident tools for future turns: 2", self.endpoint.outbox[-1].text)
-        self.assertIn("op_tool_search, op_tool_call", self.endpoint.outbox[-1].text)
+        self.assertIn("tool_search, tool_call", self.endpoint.outbox[-1].text)
 
     async def test_slash_command_with_telegram_bot_suffix_runs_end_to_end(self) -> None:
         self.core.bind_async_wakeup_sources()
@@ -1058,7 +1058,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                         {
                             "id": "call_1",
                             "type": "function",
-                            "function": {"name": "op_exec_shell", "arguments": "{\"cmd\": \"date\"}"},
+                            "function": {"name": "shell", "arguments": "{\"cmd\": \"date\"}"},
                         }
                     ],
                 },
@@ -1070,7 +1070,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         continuation.tool_observations.append(
-            ToolObservation(tool_name="op_exec_shell", ok=True, summary="shell result before interrupt")
+            ToolObservation(tool_name="shell", ok=True, summary="shell result before interrupt")
         )
         continuation.emitted_reply_texts.append("I found a runtime clue before interruption.")
 
@@ -1089,7 +1089,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(L1MessageKind.TURN_INTERRUPTED, kinds)
         summary = next(item.content for item in checkpoint if item.kind == L1MessageKind.TURN_INTERRUPTED)
         self.assertIn("This is recovery context", summary)
-        self.assertIn("op_exec_shell", summary)
+        self.assertIn("shell", summary)
         self.assertIn("turn_outcome: not committed", summary)
         with self.assertRaises(asyncio.CancelledError):
             await task

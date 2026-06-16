@@ -364,7 +364,7 @@ class SQLiteVecL3Plugin:
             "properties": {
                 "mem_ref": {
                     "type": "string",
-                    "description": "Opaque memory ref returned by op_memory_recall, such as fact:fact_abc or case:case_abc.",
+                    "description": "Opaque memory ref returned by memory_recall, such as fact:fact_abc or case:case_abc.",
                 },
                 "title": {"type": "string", "description": "Updated short label"},
                 "summary": {"type": "string", "description": "Updated concise summary"},
@@ -418,7 +418,7 @@ class SQLiteVecL3Plugin:
             "properties": {
                 "mem_ref": {
                     "type": "string",
-                    "description": "Opaque memory ref returned by op_memory_recall, such as fact:fact_abc or case:case_abc.",
+                    "description": "Opaque memory ref returned by memory_recall, such as fact:fact_abc or case:case_abc.",
                 },
                 "reason": {"type": "string", "description": "Brief reason for deletion"},
             },

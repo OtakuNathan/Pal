@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import contextlib
 import os
+import select
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,12 +35,23 @@ async def _read_decision(timeout: float | None = None) -> dict[str, Any] | None:
     from pal.foundation.sidecar import read_sidecar_message_sync
 
     try:
-        pending = asyncio.to_thread(read_sidecar_message_sync, sys.stdin.buffer)
         if timeout is None:
-            return await pending
-        return await asyncio.wait_for(pending, timeout=timeout)
+            return await asyncio.to_thread(read_sidecar_message_sync, sys.stdin.buffer)
+        if not await asyncio.to_thread(_stdin_readable, timeout):
+            return None
+        return read_sidecar_message_sync(sys.stdin.buffer)
     except (asyncio.TimeoutError, EOFError, ValueError):
         return None
+
+
+def _stdin_readable(timeout: float | None) -> bool:
+    try:
+        fd = sys.stdin.buffer.fileno()
+    except Exception:
+        return True
+    wait_seconds = max(0.0, float(timeout or 0.0))
+    readable, _, _ = select.select([fd], [], [], wait_seconds)
+    return bool(readable)
 
 
 async def amain(args: argparse.Namespace) -> int:

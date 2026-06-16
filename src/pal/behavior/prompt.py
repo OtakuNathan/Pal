@@ -52,14 +52,19 @@ class BehaviorPromptFragmentProvider:
                 content=(
                     "1. Casual chat needing no facts, tools, memory, design judgment, or runtime state -> answer directly.\n"
                     "2. Clear single-capability action -> resolve the capability contract when needed, then call it.\n"
-                    "3. Ambiguous, risky, multi-step, unfamiliar, route-unclear, design, debugging, project analysis, or recovery work -> call op_behavior_advise before acting.\n"
+                    "3. Ambiguous, risky, multi-step, unfamiliar, route-unclear, design, debugging, project analysis, or recovery work -> call behavior_advise before acting.\n"
                     "4. Advisor output is a resource package, not an order. Evaluate capability refs, skill refs, memory hints, and route hints against the current request.\n"
                     "5. Follow relevant guidance; ignore irrelevant guidance.\n"
                     "6. For recovery work, if the failure may have Pal-specific, project-specific, or capability-specific prior history, recall memory with targeted queries before retrying.\n"
                     "7. Skip advisor when the route is already established, the user gives a direct implementation command for a clear already-routed action, or the failure is an obvious local/schema/input mistake."
                 ),
                 priority=70,
-                metadata={"module_id": self.module_id, "kind": "task_flow"},
+                metadata={
+                    "module_id": self.module_id,
+                    "kind": "task_flow",
+                    "prompt_target": "runtime_reminder",
+                    "source_priority": 70,
+                },
             ),
             PromptFragment(
                 section="behavior_guidance_guide",
@@ -69,11 +74,11 @@ class BehaviorPromptFragmentProvider:
                     "Use behavior guidance for future routing rules and recurring decision hints.\n"
                     "It is not durable factual memory and not a step-by-step procedure.\n\n"
                     "For normal reasoning, treat it as behavior guidance; internal IDs are runtime metadata.\n\n"
-                    "Use op_behavior_save only when the user explicitly asks Pal to adopt/follow/save a future behavior rule, or clearly teaches a durable routing preference.\n"
-                    "When the user asks to update existing behavior guidance, Pal MUST call op_behavior_affordance_update; pass the original rendered guidance line as affordance, not an internal ID.\n"
+                    "Use behavior_save only when the user explicitly asks Pal to adopt/follow/save a future behavior rule, or clearly teaches a durable routing preference.\n"
+                    "When the user asks to update existing behavior guidance, Pal MUST call behavior_affordance_update; pass the original rendered guidance line as affordance, not an internal ID.\n"
                     "When replacing or editing the text shown in the rendered behavior guidance block, set prompt_hint to the new guidance text. Use scenario_text only when the user explicitly asks to change the activation scenario.\n"
                     "When writing prompt_hint, provide only the hint body; do not repeat the title as a prefix.\n"
-                    "When the user asks to delete existing behavior guidance, Pal MUST call op_behavior_affordance_delete; pass the original rendered guidance line as affordance.\n"
+                    "When the user asks to delete existing behavior guidance, Pal MUST call behavior_affordance_delete; pass the original rendered guidance line as affordance.\n"
                     "Do not claim behavior guidance was updated or deleted unless the tool result confirms it.\n"
                     "Injected/plugin behavior guidance is read-only through these tools.\n"
                     "Do not save ordinary facts, preferences, runtime state, or reusable procedures as behavior guidance."
@@ -96,7 +101,12 @@ class BehaviorPromptFragmentProvider:
             title="Resident Affordances",
             content="\n".join(lines),
             priority=75,
-            metadata={"module_id": self.module_id, "kind": "resident_affordances"},
+            metadata={
+                "module_id": self.module_id,
+                "kind": "resident_affordances",
+                "prompt_target": "runtime_reminder",
+                "source_priority": 75,
+            },
         )
 
 
@@ -126,7 +136,12 @@ class DeclaredResidentAffordancePromptFragmentProvider:
                 title="Resident Affordances",
                 content="\n".join(lines),
                 priority=75,
-                metadata={"module_id": self.module_id, "kind": "declared_resident_affordances"},
+                metadata={
+                    "module_id": self.module_id,
+                    "kind": "declared_resident_affordances",
+                    "prompt_target": "runtime_reminder",
+                    "source_priority": 75,
+                },
             )
         ]
 

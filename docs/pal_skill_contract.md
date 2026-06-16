@@ -36,7 +36,7 @@ Core fields:
 
 `status` values are `draft`, `active`, `disabled`, `deprecated`, and `needs_review`.
 
-Only `active` skills can be returned as usable `skill_refs` or injected through `op_skill_inject`.
+Only `active` skills can be returned as usable `skill_refs` or injected through `skill_inject`.
 
 ## STAR Applicability
 
@@ -62,7 +62,7 @@ V1 source formats:
 - `plain_text`
 - `skill_md`
 
-V1 does not accept artifact id or file path directly. If the source is in a file or artifact, Pal must first read it with the appropriate existing tool and then pass text into `op_skill_assimilate`.
+V1 does not accept artifact id or file path directly. If the source is in a file or artifact, Pal must first read it with the appropriate existing tool and then pass text into `skill_assimilate`.
 
 Assimilation includes parsing, prompt-injection risk scan, no-tool LLM sanitization, semantic compression, STAR generation, `use_when` / `avoid_when` generation, duplicate/conflict detection, and thin affordance candidate generation.
 
@@ -85,19 +85,19 @@ Skill storage is two-layer:
 - SQLite stores normalized searchable skill metadata and manual text.
 - `runtime_root/SKILL/<skill_id>/skill.json` mirrors the normalized skill for owner inspection and backup.
 
-Raw external source is not injected. `op_skill_inject` only reads normalized skill data.
+Raw external source is not injected. `skill_inject` only reads normalized skill data.
 
 ## Tools
 
-- `op_skill_assimilate`: creates a sanitized skill candidate and does not commit.
-- `op_skill_commit`: commits a candidate, writes normalized skill storage, and upserts a thin affordance.
-- `op_skill_update`: updates a normalized skill and refreshes its thin affordance.
-- `op_skill_disable`: disables a skill without deleting history.
-- `op_skill_search`: searches active skills for the current scenario or explicit skill name, without returning manuals.
-- `op_skill_read`: reads normalized skill metadata and optionally manual text.
-- `op_skill_inject`: injects an active normalized skill manual and never executes capabilities.
+- `skill_assimilate`: creates a sanitized skill candidate and does not commit.
+- `skill_commit`: commits a candidate, writes normalized skill storage, and upserts a thin affordance.
+- `skill_update`: updates a normalized skill and refreshes its thin affordance.
+- `skill_disable`: disables a skill without deleting history.
+- `skill_search`: searches active skills for the current scenario or explicit skill name, without returning manuals.
+- `skill_read`: reads normalized skill metadata and optionally manual text.
+- `skill_inject`: injects an active normalized skill manual and never executes capabilities.
 
-`op_skill_inject` returns structured failure for missing, disabled, deprecated, or over-budget skills.
+`skill_inject` returns structured failure for missing, disabled, deprecated, or over-budget skills.
 
 ## Affordance Relationship
 
@@ -122,7 +122,7 @@ Commit rejects unresolved exact duplicates unless the caller explicitly chooses 
 
 ## Prompt Rules
 
-Use `op_skill_search` before `op_skill_inject` when the user explicitly asks Pal to use a named skill. Do not guess `skill_id` from raw text.
+Use `skill_search` before `skill_inject` when the user explicitly asks Pal to use a named skill. Do not guess `skill_id` from raw text.
 
 Use skill assimilation when the user explicitly asks Pal to learn a skill, summarize a reusable workflow, sanitize an external skill, import SKILL.md content, or remember how to do a class of future tasks.
 

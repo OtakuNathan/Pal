@@ -56,8 +56,8 @@ async def send_message(socket_path: Path, text: str) -> SocketClientTranscript:
                     transcript.text_parts.append(chunk)
                     print(chunk, end="", flush=True)
                 continue
-            if payload_type == "tool_call":
-                tool_call = dict(payload.get("tool_call") or {})
+            if payload_type == "op_tool_call":
+                tool_call = dict(payload.get("op_tool_call") or {})
                 transcript.tool_calls.append(tool_call)
                 tool_name = str(tool_call.get("name") or "tool")
                 print(f"\n[tool] {tool_name}", file=sys.stderr, flush=True)
@@ -148,8 +148,8 @@ async def _read_response(reader: asyncio.StreamReader, request_id: str) -> Socke
                 transcript.text_parts.append(chunk)
                 print(chunk, end="", flush=True)
             continue
-        if payload_type == "tool_call":
-            tool_call = dict(payload.get("tool_call") or {})
+        if payload_type == "op_tool_call":
+            tool_call = dict(payload.get("op_tool_call") or {})
             transcript.tool_calls.append(tool_call)
             tool_name = str(tool_call.get("name") or "tool")
             print(f"\n[tool] {tool_name}", file=sys.stderr, flush=True)

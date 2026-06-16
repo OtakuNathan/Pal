@@ -44,7 +44,7 @@ class ChannelSendAttachmentTool:
         _ = args
         return CapabilityResult(
             status=RuntimeStatus.INVALID,
-            text="op_channel_send_attachment requires async turn context",
+            text="channel_send_attachment requires async turn context",
             llm_text="Could not send attachment: this tool requires async turn context.",
             structured={"reason": "async_required"},
         )

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -220,12 +223,25 @@ class ReviewOrchestrator:
                 "repo_path": repo_path,
                 "summary": str(payload.get("summary") or ""),
             }
+            source_contract = _source_contract_from_pack(coder_state.pack)
+            if source_contract:
+                review_target["source_contract"] = source_contract
+            checkpoint_git_context = _checkpoint_git_context(repo_path, str(payload.get("commit_sha") or ""))
+            if checkpoint_git_context:
+                review_target["checkpoint_git"] = checkpoint_git_context
             review_policy = dict((coder_state.pack.metadata.get("module_execution") or {}).get("checkpoint_review") or coder_state.pack.metadata.get("checkpoint_review") or {})
             reviewer_group = str(review_policy.get("reviewer_profile_group") or "software_engineering").strip() or "software_engineering"
             reviewer_name = str(review_policy.get("reviewer_profile_name") or "reviewer").strip() or "reviewer"
             review_work_order_id = f"wo_review_{safe_token(checkpoint_id)}"
             review_scratch = prepare_review_scratch(self.runtime_root, review_work_order_id, repo_path=repo_path)
             review_target.update(review_scratch)
+            environment_workspace = _checkpoint_review_environment_workspace(workspace)
+            reviewer_workspace = {
+                "repo_path": repo_path,
+                **review_scratch,
+                **environment_workspace,
+                "workspace_policy": {"mode": "read_only_repo"},
+            }
             reviewer_order = ReviewerWorkOrder(
                 work_order_id=review_work_order_id,
                 task_id=f"review_{safe_token(checkpoint_id)}",
@@ -234,17 +250,11 @@ class ReviewOrchestrator:
                     "Verify the checkpoint matches the milestone contract.",
                     "Run or inspect relevant tests when possible.",
                     "Verify claimed APIs with source, LSP, docs, build, or explicit not-verified findings.",
-                    f"Submit op_minion_review_gate_submit with gate_kind={review_gate_kind}.",
+                    f"Submit op_minion_review_checkpoint; Pal will bind gate_kind={review_gate_kind} from the review target.",
                 ],
                 allowed_capabilities=[],
-                output_contract={"must_submit": "op_minion_review_gate_submit"},
-                metadata={
-                    "workspace": {
-                        "repo_path": repo_path,
-                        **review_scratch,
-                        "workspace_policy": {"mode": "read_only_repo"},
-                    }
-                },
+                output_contract={"must_submit": "op_minion_review_checkpoint"},
+                metadata={"workspace": reviewer_workspace},
             )
             metadata = {
                 "task_id": reviewer_order.task_id,
@@ -265,12 +275,10 @@ class ReviewOrchestrator:
                     "goal": f"Review checkpoint {checkpoint_id}",
                     "instruction": (
                         "Review the referenced milestone checkpoint. Do not modify the coder workspace. "
-                        f"You must submit a structured gate through op_minion_review_gate_submit with gate_kind={review_gate_kind} before completing."
+                        f"You must submit a structured gate through op_minion_review_checkpoint before completing; the review target gate kind is {review_gate_kind}."
                     ),
                     "workspace": {
-                        "repo_path": repo_path,
-                        **review_scratch,
-                        "workspace_policy": {"mode": "read_only_repo"},
+                        **reviewer_workspace,
                     },
                     "profile_group": reviewer_group,
                     "profile_name": reviewer_name,
@@ -451,7 +459,7 @@ class ReviewOrchestrator:
                     minion_profile=reviewer_state.pack.minion_profile,
                     payload={
                         "status": "pending",
-                        "summary": "plan review passed; op_minion_accept_plan or explicit policy is required before dispatch",
+                        "summary": "plan review passed; minion_accept_plan or explicit policy is required before dispatch",
                         "plan_ref": dict(plan_ref),
                         "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
                     },
@@ -628,7 +636,7 @@ class ReviewOrchestrator:
                         },
                     )
                 return
-            if verdict == "fail":
+            if _checkpoint_gate_requires_repair(gate):
                 await self._send_checkpoint_repair_turn(coder_state, gate)
                 return
             await self.manager._send_runner_control_or_record(
@@ -671,19 +679,38 @@ class ReviewOrchestrator:
             await self.manager._send_runner_control_or_record(coder_state, {"type": "blocked", "payload": payload})
             return
         summary = str(gate.get("summary") or "checkpoint review failed; repair the current milestone").strip()
+        repair_payload = _checkpoint_repair_payload(gate, repair_state)
         repair_note = review_gate_repair_note(gate)
+        repair_payload_json = _json_dumps_compact(repair_payload)
         module_execution = dict(repair_state.get("module_execution") or {})
         turn = {
             "type": "repair_turn",
-            "turn_kind": "milestone_repair",
+            "turn_kind": "checkpoint_repair",
             "work_order_id": coder_state.pack.work_order_id,
             "goal": coder_state.pack.goal,
-            "instruction": f"Repair the current milestone according to reviewer findings.\n\n{repair_note}",
+            "instruction": (
+                "Repair the current milestone according to the structured reviewer findings below. "
+                "Treat repair_checklist as the complete scope. Complete repair_checklist items in order; do not replace them "
+                "with your own diagnosis, do not search for review artifacts, and do not broaden scope. When the next "
+                "checklist item requires a source/test/doc contract fix, before the first successful workspace edit for this "
+                "repair attempt do not call op_lsp_* and do not run broad test/static-check commands. First inspect only the "
+                "directly relevant files and make the required edit with op_workspace_file_edit, op_workspace_file_write, or "
+                "op_workspace_file_delete. If the checklist item is purely missing verification evidence, run that focused "
+                "verification instead of inventing an edit. "
+                "After that first repair edit, use LSP when it helps verify types, symbols, or call shapes, and rerun focused "
+                "verification. Before calling op_minion_checkpoint_commit, reread source_contract, failed_acceptance_criteria, "
+                "and binding_constraints_to_recheck; self-check exact output literals, fallback/default branches, numeric bounds, "
+                "declared type/container contracts, and tests that may encode the wrong expectation.\n\n"
+                f"{repair_note}\n\n"
+                "Structured repair payload:\n"
+                f"```json\n{repair_payload_json}\n```"
+            ),
             "acceptance_criteria": list(coder_state.pack.acceptance_criteria),
             "current_milestone": current,
             "prompt_view": dict((coder_state.pack.metadata.get("prompt_view") or {})),
             "metadata_updates": {
-                "review_feedback": gate,
+                "checkpoint_repair": repair_payload,
+                "review_feedback": repair_payload,
                 "module_execution": module_execution,
             },
             "workspace_updates": dict(coder_state.pack.workspace or {}),
@@ -731,6 +758,8 @@ class ReviewOrchestrator:
             "max_repair_attempts": limit,
             "milestone_index": milestone_index,
             "milestone_id": milestone_id,
+            "failed_checkpoint_id": str(target.get("checkpoint_id") or "").strip(),
+            "failed_commit_sha": str(target.get("commit_sha") or "").strip(),
             "review_gate_ref": {
                 key: gate.get(key)
                 for key in ("gate_id", "gate_kind", "verdict", "target_kind", "target_key")
@@ -749,6 +778,381 @@ class ReviewOrchestrator:
             "milestone_id": milestone_id,
             "module_execution": module_execution,
         }
+
+
+def _checkpoint_gate_requires_repair(gate: dict[str, Any]) -> bool:
+    verdict = str(gate.get("verdict") or "").strip().lower()
+    if verdict == "fail":
+        return True
+    if verdict != "partial":
+        return False
+    if _has_required_repair_fixes(gate):
+        return True
+    for finding in list(gate.get("findings") or []):
+        if not isinstance(finding, dict):
+            continue
+        severity = str(finding.get("severity") or "").strip().lower()
+        if severity in {"blocker", "critical", "major", "high", "error", "fail", "failure"}:
+            return True
+        if _has_material_contract_impact(_first_text(finding, "contract_impact", fallback="")):
+            return True
+    return _has_material_contract_impact(str(gate.get("contract_impact") or ""))
+
+
+def _has_required_repair_fixes(gate: dict[str, Any]) -> bool:
+    for item in list(gate.get("required_fixes") or []):
+        if isinstance(item, dict) and any(value not in (None, "", [], {}) for value in item.values()):
+            return True
+        if isinstance(item, str) and item.strip():
+            return True
+    return False
+
+
+def _has_material_contract_impact(value: str) -> bool:
+    normalized = re.sub(r"[\s_\-]+", " ", str(value or "").strip().lower())
+    if not normalized:
+        return False
+    return normalized not in {
+        "n/a",
+        "na",
+        "none",
+        "no impact",
+        "no contract impact",
+        "not applicable",
+        "not applicable none",
+    }
+
+
+def _checkpoint_repair_payload(gate: dict[str, Any], repair_state: dict[str, Any]) -> dict[str, Any]:
+    target = review_gate_target(gate)
+    raw_findings = _repair_actionable_findings(gate)
+    findings = [_compact_repair_finding(item) for item in raw_findings]
+    raw_required_fixes = [dict(item) for item in list(gate.get("required_fixes") or []) if isinstance(item, dict)]
+    required_fixes = [
+        _compact_required_fix(item)
+        for item in raw_required_fixes
+    ]
+    repair_checklist = _repair_checklist(raw_findings, raw_required_fixes)
+    failed_acceptance = _failed_acceptance_criteria(gate, target)
+    payload: dict[str, Any] = {
+        "turn_kind": "checkpoint_repair",
+        "attempt": repair_state.get("attempt"),
+        "max_repair_attempts": repair_state.get("max_repair_attempts"),
+        "review_gate_ref": _compact_gate_ref(gate),
+        "failed_checkpoint": {
+            key: value
+            for key, value in {
+                "checkpoint_id": target.get("checkpoint_id"),
+                "commit_sha": target.get("commit_sha"),
+                "milestone_index": target.get("milestone_index"),
+                "milestone_id": target.get("milestone_id"),
+            }.items()
+            if value not in (None, "", [])
+        },
+        "summary": _compact_repair_text(str(gate.get("summary") or ""), limit=700),
+        "repair_checklist": repair_checklist[:8],
+        "findings": findings[:8],
+        "required_fixes": required_fixes[:8],
+        "failed_acceptance_criteria": failed_acceptance[:12],
+        "binding_constraints_to_recheck": _repair_hard_constraints_from_target(target)[:8],
+        "reviewer_evidence_summary": _reviewer_evidence_summary(gate),
+        "review_artifact_ref": _compact_artifact_ref(gate.get("report_artifact_ref")),
+        "repair_order": [
+            "Read repair_checklist plus source_contract/failed_acceptance_criteria/binding_constraints_to_recheck.",
+            "For each repair_checklist item in order, inspect only directly relevant files and make the needed source/test/doc edit.",
+            "When a checklist item requires a source/test/doc contract fix, do not call op_lsp_* or run broad tests/static checks before the first successful repair edit. Use LSP after the edit when it helps verify types, symbols, or call shapes.",
+            "When the only checklist item is missing verification evidence, run the requested focused verification instead of inventing an edit.",
+            "Run focused verification only after the checklist edit is made, then checkpoint.",
+        ],
+        "pre_checkpoint_self_check": [
+            "Reread source_contract and failed_acceptance_criteria before op_minion_checkpoint_commit.",
+            "Check exact literals and fallback/default branches; `...-or-` contracts require the literal fallback branch unless the contract says otherwise.",
+            "Check numeric bounds, declared return/field/container types, and tests that might encode the implementation's wrong expectation.",
+        ],
+        "repair_instruction": (
+            "Complete repair_checklist in order. Make exactly the source/test/doc edits needed by each checklist item. "
+            "Before the first successful workspace edit for a contract-fix checklist item, do not use LSP or broad verification as a substitute for fixing the checklist item. "
+            "For a verification-only checklist item, run the requested focused verification instead of inventing unrelated edits. "
+            "After changing source/tests, rerun focused verification, reread the binding contract fields, then submit a new op_minion_checkpoint_commit."
+        ),
+    }
+    return _drop_empty(payload)
+
+
+def _json_dumps_compact(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+def _compact_gate_ref(gate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: gate.get(key)
+        for key in ("gate_id", "gate_kind", "verdict", "target_kind", "target_key", "created_at")
+        if gate.get(key) not in (None, "", [])
+    }
+
+
+def _repair_actionable_findings(gate: dict[str, Any]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for item in list(gate.get("findings") or []):
+        if not isinstance(item, dict):
+            continue
+        if _is_noisy_system_detected_line_range(item):
+            continue
+        findings.append(dict(item))
+    return findings
+
+
+def _is_noisy_system_detected_line_range(item: dict[str, Any]) -> bool:
+    if str(item.get("source") or "").strip().lower() != "system_detected":
+        return False
+    text = " ".join(
+        str(item.get(key) or "")
+        for key in ("summary", "title", "contract_impact", "criterion")
+        if str(item.get(key) or "").strip()
+    )
+    return bool(re.search(r"(?i)\blines?\s+\d+\s*(?:-|–|—|to)\s*\d+\b", text))
+
+
+def _repair_checklist(findings: list[dict[str, Any]], required_fixes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    if required_fixes:
+        for index, fix in enumerate(required_fixes[:8], start=1):
+            finding = _repair_fix_finding(fix, findings)
+            action = _first_text(fix, "description", "summary", "fix", "message", fallback="required repair fix")
+            items.append(_repair_checklist_item(index, action=action, finding=finding, source="required_fix", raw_fix=fix))
+        return items
+    actionable = [
+        item
+        for item in findings
+        if _first_text(item, "suggested_fix", "fix", fallback="")
+        or str(item.get("severity") or "").strip().lower() in {"blocker", "critical", "major", "high", "error", "fail", "failure"}
+        or _first_text(item, "contract_impact", fallback="")
+    ]
+    for index, finding in enumerate(actionable[:8], start=1):
+        action = _first_text(finding, "suggested_fix", "fix", fallback="")
+        if not action:
+            title = _first_text(finding, "title", "summary", "message", "description", fallback="reviewer finding")
+            action = f"Address reviewer finding: {title}"
+        items.append(_repair_checklist_item(index, action=action, finding=finding, source="finding", raw_fix={}))
+    return items
+
+
+def _repair_fix_finding(fix: dict[str, Any], findings: list[dict[str, Any]]) -> dict[str, Any]:
+    raw_index = fix.get("finding_index")
+    if isinstance(raw_index, int) and 0 <= raw_index < len(findings):
+        return findings[raw_index]
+    if isinstance(raw_index, str) and raw_index.strip().isdigit():
+        index = int(raw_index.strip())
+        if 0 <= index < len(findings):
+            return findings[index]
+    if len(findings) == 1:
+        return findings[0]
+    return {}
+
+
+def _repair_checklist_item(
+    index: int,
+    *,
+    action: str,
+    finding: dict[str, Any],
+    source: str,
+    raw_fix: dict[str, Any],
+) -> dict[str, Any]:
+    verify = _first_text(raw_fix, "verification", "verify", "test", fallback="")
+    if not verify:
+        title = _first_text(finding, "title", "summary", "message", "description", fallback="")
+        verify = f"Run focused verification that proves this fix is complete{': ' + title if title else ''}."
+    return _drop_empty(
+        {
+            "id": f"R{index}",
+            "status": "pending",
+            "source": source,
+            "finding_index": raw_fix.get("finding_index"),
+            "action": _compact_repair_text(action, limit=420),
+            "area": _compact_repair_text(_first_text(finding, "area", "path", fallback=""), limit=220),
+            "contract_impact": _compact_repair_text(_first_text(finding, "contract_impact", fallback=""), limit=260),
+            "evidence": _compact_repair_text(_first_text(finding, "evidence", fallback=""), limit=260),
+            "verify": _compact_repair_text(verify, limit=260),
+        }
+    )
+
+
+def _compact_repair_finding(item: dict[str, Any]) -> dict[str, Any]:
+    return _drop_empty(
+        {
+            "severity": _first_text(item, "severity", fallback="finding"),
+            "title": _first_text(item, "title", "summary", "message", "description", fallback="reviewer finding"),
+            "area": _first_text(item, "area", "path", fallback=""),
+            "evidence": _compact_repair_text(_first_text(item, "evidence", fallback=""), limit=520),
+            "suggested_fix": _compact_repair_text(_first_text(item, "suggested_fix", "fix", fallback=""), limit=420),
+            "contract_impact": _compact_repair_text(_first_text(item, "contract_impact", fallback=""), limit=360),
+            "test_gap": _compact_repair_text(_first_text(item, "test_gap", fallback=""), limit=260),
+            "failed_acceptance_criteria": _string_items(
+                item.get("failed_acceptance_criteria") or item.get("acceptance_criteria") or item.get("covers"),
+                limit=6,
+                text_limit=220,
+            ),
+        }
+    )
+
+
+def _compact_required_fix(item: dict[str, Any]) -> dict[str, Any]:
+    return _drop_empty(
+        {
+            "finding_index": item.get("finding_index"),
+            "description": _compact_repair_text(
+                _first_text(item, "description", "summary", "fix", "message", fallback="required repair fix"),
+                limit=420,
+            ),
+        }
+    )
+
+
+def _failed_acceptance_criteria(gate: dict[str, Any], target: dict[str, Any]) -> list[str]:
+    result: list[str] = []
+    for item in list(gate.get("findings") or []):
+        if not isinstance(item, dict):
+            continue
+        result.extend(
+            _string_items(
+                item.get("failed_acceptance_criteria") or item.get("acceptance_criteria") or item.get("covers"),
+                limit=8,
+                text_limit=260,
+            )
+        )
+    if not result:
+        result.extend(_string_items(target.get("acceptance_criteria"), limit=12, text_limit=260))
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in result:
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _reviewer_evidence_summary(gate: dict[str, Any]) -> dict[str, Any]:
+    commands: list[dict[str, Any]] = []
+    for item in list(gate.get("commands_run") or [])[:6]:
+        if not isinstance(item, dict):
+            continue
+        commands.append(
+            _drop_empty(
+                {
+                    "command": _compact_repair_text(str(item.get("command") or ""), limit=360),
+                    "status": item.get("status") or ("passed" if item.get("exit_code") == 0 else ""),
+                    "exit_code": item.get("exit_code"),
+                    "output_summary": _compact_repair_text(
+                        _first_text(item, "output_summary", "summary", fallback=""),
+                        limit=420,
+                    ),
+                    "covers": _string_items(item.get("covers"), limit=4, text_limit=180),
+                }
+            )
+        )
+    api_evidence: list[dict[str, Any]] = []
+    for item in list(gate.get("api_evidence") or [])[:6]:
+        if not isinstance(item, dict):
+            continue
+        api_evidence.append(
+            _drop_empty(
+                {
+                    "source": _first_text(item, "source", "path", fallback=""),
+                    "summary": _compact_repair_text(
+                        _first_text(item, "finding", "summary", "description", fallback=""),
+                        limit=360,
+                    ),
+                    "covers": _string_items(item.get("covers"), limit=4, text_limit=180),
+                }
+            )
+        )
+    return _drop_empty({"commands_run": commands, "api_evidence": api_evidence})
+
+
+def _compact_artifact_ref(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    ref = dict(raw.get("ref") or raw)
+    return {
+        key: ref.get(key)
+        for key in ("path", "relative_path", "sha256", "role", "mime_type", "kind")
+        if ref.get(key) not in (None, "", [])
+    }
+
+
+def _string_items(raw: Any, *, limit: int, text_limit: int) -> list[str]:
+    if isinstance(raw, str):
+        iterable = [raw]
+    else:
+        iterable = list(raw or [])
+    result: list[str] = []
+    for item in iterable:
+        text = _compact_repair_text(str(item or ""), limit=text_limit)
+        if text:
+            result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _drop_empty(payload: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in payload.items():
+        if value in (None, "", [], {}):
+            continue
+        result[key] = value
+    return result
+
+
+def _source_contract_from_pack(pack: TaskContextPack) -> dict[str, Any]:
+    contract: dict[str, Any] = {}
+    goal = str(pack.goal or "").strip()
+    instruction = str(pack.instruction or "").strip()
+    acceptance = [str(item).strip() for item in list(pack.acceptance_criteria or []) if str(item or "").strip()]
+    if goal:
+        contract["goal"] = goal
+    if instruction:
+        contract["instruction"] = instruction
+    if acceptance:
+        contract["acceptance_criteria"] = acceptance
+    return contract
+
+
+def _checkpoint_git_context(repo_path: str, commit_sha: str) -> dict[str, Any]:
+    repo = Path(str(repo_path or "")).expanduser()
+    commit = str(commit_sha or "").strip()
+    if not commit or not (repo / ".git").exists():
+        return {}
+    stat = _git_text(repo, "show", "--stat", "--oneline", "--no-renames", "--format=short", commit)
+    changed = _git_text(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", commit)
+    parent = _git_text(repo, "rev-parse", f"{commit}^")
+    context: dict[str, Any] = {
+        "commit_sha": commit,
+        "changed_files": [line.strip() for line in changed.splitlines() if line.strip()][:200],
+    }
+    if parent:
+        context["parent_commit_sha"] = parent.splitlines()[0].strip()
+    if stat:
+        context["stat"] = stat[:8000]
+    return {key: value for key, value in context.items() if value not in ("", [], {})}
+
+
+def _git_text(repo: Path, *args: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
 
 
 def prepare_review_scratch(runtime_root: Path, work_order_id: str, *, repo_path: str = "") -> dict[str, str]:
@@ -789,31 +1193,194 @@ def review_scratch_ignore(directory: str, names: list[str]) -> set[str]:
 
 def review_gate_repair_note(gate: dict[str, Any]) -> str:
     parts = [f"Reviewer verdict: {str(gate.get('verdict') or 'fail')}"]
+    target = review_gate_target(gate)
+    failed_commit_sha = str(target.get("commit_sha") or "").strip()
     summary = str(gate.get("summary") or "").strip()
     if summary:
         parts.append(f"Summary: {summary}")
-    findings = [dict(item) for item in list(gate.get("findings") or []) if isinstance(item, dict)]
+    hard_constraints = _repair_hard_constraints_from_target(target)
+    if hard_constraints:
+        parts.append(
+            "Binding source-contract constraints to re-check before checkpoint:\n"
+            + "\n".join(f"- {item}" for item in hard_constraints[:8])
+        )
+    findings = _repair_actionable_findings(gate)
     fixes = [dict(item) for item in list(gate.get("required_fixes") or []) if isinstance(item, dict)]
+    checklist = _repair_checklist(findings, fixes)
+    if checklist:
+        parts.append("Repair checklist:\n" + "\n".join(_render_repair_checklist_item(item) for item in checklist))
     if findings:
-        rendered = []
-        for item in findings[:8]:
-            rendered.append(
-                "- "
-                + str(item.get("severity") or "finding")
-                + ": "
-                + str(item.get("summary") or item.get("message") or item)
-            )
+        rendered = [_render_repair_finding(item) for item in findings[:8]]
         parts.append("Findings:\n" + "\n".join(rendered))
     if fixes:
-        rendered = ["- " + str(item.get("summary") or item.get("fix") or item) for item in fixes[:8]]
+        rendered = [_render_required_repair_fix(item) for item in fixes[:8]]
         parts.append("Required fixes:\n" + "\n".join(rendered))
-    parts.append("After repairing, rerun relevant verification and call op_minion_checkpoint_commit again.")
+    parts.append(
+        "Repair scope control:\n"
+        "- Address only the required fixes above; do not broaden scope or add polish work.\n"
+        "- Complete every repair checklist item before doing any other work.\n"
+        "- Do not perform performance tuning, cleanup, or optional refactors unless a checklist item explicitly asks for it.\n"
+        "- Do not add new tests, files, or features unless a required fix explicitly needs them.\n"
+        "- If a required fix says to reduce a count or satisfy a numeric range, remove/merge items until the count is inside the range; do not add more items in that category.\n"
+        "- Before checkpointing, run a direct local check for every numeric/file/test bound you can verify and include that evidence in the checkpoint summary."
+    )
+    repair_rules = [
+        "Change the workspace so the reviewer finding is actually addressed.",
+        "Do not use a verification-only artifact as the repair; minion_outputs is excluded from checkpoint commits.",
+        "Rerun relevant verification before submitting a new checkpoint.",
+        "Call op_minion_checkpoint_commit only after the workspace has a repair change.",
+        "If no source, test, or README change is needed, stop as blocked and explain why instead of claiming the repair is complete.",
+    ]
+    if failed_commit_sha:
+        repair_rules.append(f"Do not resubmit the failed checkpoint commit {failed_commit_sha}.")
+    parts.append("Repair checkpoint rules:\n" + "\n".join(f"- {item}" for item in repair_rules))
     return "\n\n".join(parts)
+
+
+def _render_repair_checklist_item(item: dict[str, Any]) -> str:
+    pieces = [f"- [ ] {str(item.get('id') or 'R?')}: {_compact_repair_text(str(item.get('action') or ''), limit=320)}"]
+    area = str(item.get("area") or "").strip()
+    verify = str(item.get("verify") or "").strip()
+    if area:
+        pieces.append(f"area={area}")
+    if verify:
+        pieces.append(f"verify={verify}")
+    return "; ".join(pieces)
+
+
+def _render_repair_finding(item: dict[str, Any]) -> str:
+    severity = str(item.get("severity") or "finding").strip()
+    title = _first_text(
+        item,
+        "summary",
+        "message",
+        "title",
+        "description",
+        fallback="reviewer finding",
+    )
+    area = _first_text(item, "area", "path", fallback="")
+    suggested_fix = _first_text(item, "suggested_fix", "fix", fallback="")
+    evidence = _first_text(item, "evidence", fallback="")
+    pieces = [f"- {severity}: {title}"]
+    if area:
+        pieces.append(f"area={area}")
+    if suggested_fix:
+        pieces.append(f"fix={suggested_fix}")
+    if evidence:
+        pieces.append(f"evidence={_compact_repair_text(evidence, limit=320)}")
+    return "; ".join(pieces)
+
+
+def _render_required_repair_fix(item: dict[str, Any]) -> str:
+    description = _first_text(
+        item,
+        "description",
+        "summary",
+        "fix",
+        "message",
+        fallback="required repair fix",
+    )
+    finding_index = item.get("finding_index")
+    prefix = "- "
+    if finding_index is not None:
+        prefix = f"- finding_index={finding_index}: "
+    return prefix + _compact_repair_text(description, limit=420)
+
+
+def _first_text(payload: dict[str, Any], *keys: str, fallback: str = "") -> str:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, (dict, list)):
+            continue
+        text = str(value or "").strip()
+        if text:
+            return text
+    return fallback
+
+
+_REPAIR_NUMERIC_BOUND_RE = re.compile(
+    r"(?i)\b(?:"
+    r"\d+\s*(?:-|–|—|to)\s*\d+|"
+    r"at\s+most\s+\d+|no\s+more\s+than\s+\d+|"
+    r"at\s+least\s+\d+|no\s+fewer\s+than\s+\d+|"
+    r"exactly\s+\d+|"
+    r"\d+\s+(?:files?|tests?|commands?|checks?|milestones?|modules?)"
+    r")\b"
+)
+_REPAIR_BOUND_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:test|pytest|file|changed file|commit|command|check|bound|range|limit|must|required|hard requirement|acceptance)\b"
+)
+
+
+def _repair_hard_constraints_from_target(target: dict[str, Any]) -> list[str]:
+    source_contract = dict(target.get("source_contract") or {}) if isinstance(target.get("source_contract"), dict) else {}
+    clauses: list[str] = []
+    for key in ("goal", "instruction", "summary", "task"):
+        clauses.extend(_numeric_constraint_clauses(str(source_contract.get(key) or "")))
+    for key in ("acceptance_criteria", "criteria"):
+        for item in list(source_contract.get(key) or []):
+            clauses.extend(_numeric_constraint_clauses(str(item or "")))
+    seen: set[str] = set()
+    result: list[str] = []
+    for clause in clauses:
+        normalized = " ".join(clause.split())
+        if not normalized or normalized.lower() in seen:
+            continue
+        seen.add(normalized.lower())
+        result.append(normalized)
+    return result
+
+
+def _numeric_constraint_clauses(text: str) -> list[str]:
+    raw = str(text or "")
+    if not raw.strip():
+        return []
+    candidates: list[str] = []
+    for line in raw.splitlines():
+        cleaned = line.strip(" -\t")
+        if cleaned:
+            candidates.append(cleaned)
+    for sentence in re.split(r"(?<=[.!?。！？])\s+", raw):
+        cleaned = sentence.strip(" -\t")
+        if cleaned:
+            candidates.append(cleaned)
+    result: list[str] = []
+    for candidate in candidates:
+        if _REPAIR_NUMERIC_BOUND_RE.search(candidate) and _REPAIR_BOUND_CONTEXT_RE.search(candidate):
+            result.append(_compact_repair_text(candidate, limit=360))
+    return result
+
+
+def _compact_repair_text(text: str, *, limit: int = 260) -> str:
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: max(0, limit - 1)].rstrip() + "…"
 
 
 def review_gate_target(gate: dict[str, Any]) -> dict[str, Any]:
     target = gate.get("target")
     return dict(target or {}) if isinstance(target, dict) else {}
+
+
+def _checkpoint_review_environment_workspace(workspace: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    languages = workspace.get("languages")
+    if isinstance(languages, list):
+        normalized = [str(item).strip() for item in languages if str(item).strip()]
+        if normalized:
+            result["languages"] = normalized
+    lsp_setup = workspace.get("lsp_setup")
+    if isinstance(lsp_setup, dict):
+        safe = {
+            key: value
+            for key, value in dict(lsp_setup).items()
+            if key in {"languages", "servers", "created_files", "skipped", "baseline_commit_sha"}
+            and isinstance(value, (str, int, float, bool, list, tuple))
+        }
+        if safe:
+            result["lsp_setup"] = {key: list(value) if isinstance(value, tuple) else value for key, value in safe.items()}
+    return result
 
 
 def plan_auto_revision_allowed(policy: dict[str, Any], *, spawned_count: int) -> bool:

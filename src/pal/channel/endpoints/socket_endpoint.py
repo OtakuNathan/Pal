@@ -51,7 +51,7 @@ def _stream_payload(response_handle: ResponseHandle, event: NormalizedLLMStreamE
     if event.reasoning_text:
         payload["reasoning_text"] = event.reasoning_text
     if event.tool_call is not None:
-        payload["tool_call"] = {
+        payload["op_tool_call"] = {
             "name": event.tool_call.name,
             "args": dict(event.tool_call.args),
         }

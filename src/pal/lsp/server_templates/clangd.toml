@@ -6,3 +6,5 @@ extensions = [".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".m", ".mm"]
 language_ids = ["cpp"]
 workspace_markers = ["compile_commands.json", ".clangd", ".git"]
 install_hint = "Install clangd and provide compile_commands.json for best C/C++ results."
+startup_timeout_ms = 30000
+diagnostics_timeout_ms = 10000

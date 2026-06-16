@@ -107,7 +107,7 @@ class MemoryIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="active_provider",
-        description="Show the current active memory provider used by op_memory_recall, op_memory_write, op_memory_update, and op_memory_delete",
+        description="Show the current active memory provider used by memory_recall, memory_write, memory_update, and memory_delete",
     )
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -138,7 +138,7 @@ class MemoryIntrospectionProvider:
         action_name="recall",
         description=(
             "Recall durable memory records from the active memory provider. "
-            "The result renders each item as [mem_ref]: text. Use mem_ref only for op_memory_update or op_memory_delete."
+            "The result renders each item as [mem_ref]: text. Use mem_ref only for memory_update or memory_delete."
         ),
         metadata={"omit_family_in_canonical": True},
         args_schema={
@@ -184,9 +184,9 @@ class MemoryIntrospectionProvider:
         action_name="write",
         description=(
             "Commit a new durable memory record to the active memory provider only when no existing recalled memory covers it. "
-            "Before using this tool, call op_memory_recall with the candidate summary/search_text, limit 3-5. "
+            "Before using this tool, call memory_recall with the candidate summary/search_text, limit 3-5. "
             "If a recalled [mem_ref] is semantically the same record, an older version, or the memory being corrected, "
-            "use op_memory_update with that mem_ref instead. "
+            "use memory_update with that mem_ref instead. "
             "Do not write duplicate memories. Do not invent mem_ref values. "
             "Use summary for prompt-ready memory text and search_text for source-of-truth retrieval text."
         ),
@@ -253,13 +253,13 @@ class MemoryIntrospectionProvider:
         action_name="update",
         description=(
             "Update an existing durable memory record in the active memory provider. "
-            "mem_ref is the opaque ref returned by op_memory_recall; do not invent it."
+            "mem_ref is the opaque ref returned by memory_recall; do not invent it."
         ),
         metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
-                "mem_ref": {"type": "string", "description": "Opaque memory ref returned by op_memory_recall."},
+                "mem_ref": {"type": "string", "description": "Opaque memory ref returned by memory_recall."},
                 "summary": {"type": "string"},
                 "search_text": {"type": "string"},
                 "payload_patch": {"type": "object"},
@@ -303,14 +303,14 @@ class MemoryIntrospectionProvider:
         action_name="delete",
         description=(
             "Delete an existing durable memory record from the active memory provider. "
-            "mem_ref is the opaque ref returned by op_memory_recall; do not invent it. "
+            "mem_ref is the opaque ref returned by memory_recall; do not invent it. "
             "Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record."
         ),
         metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
-                "mem_ref": {"type": "string", "description": "Opaque memory ref returned by op_memory_recall."},
+                "mem_ref": {"type": "string", "description": "Opaque memory ref returned by memory_recall."},
                 "reason": {"type": "string"},
             },
             "required": ["mem_ref"],

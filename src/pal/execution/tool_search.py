@@ -367,7 +367,7 @@ class ExecutionDiscoveryCapabilityMixin:
         metadata={"canonical_path": "op_tool_search"},
     )
     def search(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(self.runtime, "tool_search", call.args)
+        return _tool_capability_result(self.runtime, "op_tool_search", call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -385,13 +385,13 @@ class ExecutionDiscoveryCapabilityMixin:
         metadata={"canonical_path": "op_tool_read"},
     )
     def read(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(self.runtime, "tool_read", call.args)
+        return _tool_capability_result(self.runtime, "op_tool_read", call.args)
 
 
 @dataclass
 class ToolSearchTool:
     runtime: object
-    name: str = "tool_search"
+    name: str = "op_tool_search"
     display_name: str = "Tool Search"
     family: str = "discovery"
     description: str = (
@@ -547,7 +547,7 @@ class ToolSearchTool:
 @dataclass
 class ToolReadTool:
     runtime: object
-    name: str = "tool_read"
+    name: str = "op_tool_read"
     display_name: str = "Tool Read"
     family: str = "discovery"
     description: str = "Read the full definition for a capability by canonical path or alias."

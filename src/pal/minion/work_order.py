@@ -527,6 +527,24 @@ def planner_requirements() -> dict[str, Any]:
         "required_execution_shape": "fork_join_linear",
         "require_topology_nodes": True,
         "topology_node_kinds": ["prelude", "module", "join"],
+        "require_language_metadata": True,
+        "language_metadata_field": "metadata.languages",
+        "canonical_language_ids": [
+            "python",
+            "cpp",
+            "c",
+            "objc",
+            "objcpp",
+            "typescript",
+            "javascript",
+            "rust",
+            "go",
+            "shell",
+            "json",
+            "yaml",
+            "html",
+            "css",
+        ],
         "test_plan_levels": ["unit", "module", "integration", "system"],
         "ask_user_policy": ask_user_policy(),
     }
@@ -1135,19 +1153,38 @@ def _validate_topology_groups(value: Any, *, known_node_ids: set[str]) -> list[d
 
 
 def _prompt_workspace(workspace: dict[str, Any]) -> dict[str, Any]:
-    allowed = {
+    path_fields = {
         "repo_path",
-        "source_repo",
         "artifact_dir",
         "review_scratch_dir",
         "review_scratch_repo_path",
         "task_repo_path",
         "target_repo_path",
     }
-    return {key: str(value) for key, value in dict(workspace or {}).items() if key in allowed and str(value or "").strip()}
+    data = dict(workspace or {})
+    result = {key: str(value) for key, value in data.items() if key in path_fields and str(value or "").strip()}
+    languages = data.get("languages")
+    if isinstance(languages, list):
+        normalized_languages = [str(item).strip() for item in languages if str(item).strip()]
+        if normalized_languages:
+            result["languages"] = normalized_languages
+    lsp_setup = data.get("lsp_setup")
+    if isinstance(lsp_setup, dict):
+        safe_lsp_setup = {
+            key: value
+            for key, value in dict(lsp_setup).items()
+            if key in {"languages", "servers", "created_files", "skipped", "baseline_commit_sha"}
+            and isinstance(value, (str, int, float, bool, list, tuple))
+        }
+        if safe_lsp_setup:
+            result["lsp_setup"] = {
+                key: list(value) if isinstance(value, tuple) else value
+                for key, value in safe_lsp_setup.items()
+            }
+    return result
 
 
-def _merge_prompt_workspace(existing: Any, workspace: dict[str, Any]) -> dict[str, str]:
+def _merge_prompt_workspace(existing: Any, workspace: dict[str, Any]) -> dict[str, Any]:
     merged = _prompt_workspace(existing if isinstance(existing, dict) else {})
     merged.update(_prompt_workspace(workspace))
     return merged

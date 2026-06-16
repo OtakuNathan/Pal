@@ -389,7 +389,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         budget: ToolCallBudget,
     ) -> CanonicalToolResult:
-        if call.name != "shell_exec":
+        if call.name != "op_exec_shell":
             return result
         structured = dict(result.structured or {})
         max_lines = budget.max_lines_to_read

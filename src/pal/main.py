@@ -146,14 +146,14 @@ async def _run_async(args: argparse.Namespace) -> int:
             call = CanonicalToolCall(name=str(args.name), args=_parse_json_object(args.args))
             _print_json(
                 {
-                    "mode": "tool_call",
+                    "mode": "op_tool_call",
                     "request": {"name": call.name, "args": dict(call.args)},
                 }
             )
             result = handle.core.context.execution_runtime.execute_tool(call)
             _print_json(
                 {
-                    "mode": "tool_call",
+                    "mode": "op_tool_call",
                     "request": {"name": call.name, "args": dict(call.args)},
                     "result": _canonical_tool_result_debug_payload(result),
                 }

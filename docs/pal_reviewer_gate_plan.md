@@ -47,7 +47,7 @@ plan_revised
 plan_override_accepted
 ```
 
-`op_minion_accept_plan` should require a passing plan-review gate unless `human_override` is explicitly provided with a reason.
+`minion_accept_plan` should require a passing plan-review gate unless `human_override` is explicitly provided with a reason.
 
 ### Milestone States
 
@@ -108,7 +108,7 @@ Rules:
 Prefer one generic structured capability over several ad-hoc ones:
 
 ```text
-op_minion_review_gate_submit
+review_gate_submit
 ```
 
 Inputs:
@@ -155,12 +155,12 @@ Overrides must be visible in the acceptance marker and ledger.
 For each coder milestone:
 
 1. Manager sends exactly one milestone turn to the coder runner.
-2. Coder implements and calls `op_minion_checkpoint_commit`.
+2. Coder implements and calls `checkpoint_commit`.
 3. Runner emits `coder_checkpoint_claimed`.
 4. Manager records the claim and does not advance the milestone cursor yet.
 5. Manager spawns or schedules a reviewer run with a scoped review work order.
 6. Reviewer inspects plan, diff, checkpoint commit, tests, and evidence.
-7. Reviewer calls `op_minion_review_gate_submit`.
+7. Reviewer calls `review_gate_submit`.
 8. Manager handles verdict:
    - `pass`: write milestone closure, advance cursor, send next milestone to same coder runner if available.
    - `fail`: send same coder runner a repair turn with `review_gate_ref` and required fixes.
@@ -207,7 +207,7 @@ Optional human-readable companion:
 review_report.md
 ```
 
-The JSON report must contain the same gate fields submitted through `op_minion_review_gate_submit`.
+The JSON report must contain the same gate fields submitted through `review_gate_submit`.
 
 ## Coder Repair Turn
 
@@ -251,7 +251,7 @@ Plan reviewer verdict:
 - `fail`: plan must be revised
 - `partial`: plan needs human decision or missing external truth source
 
-`op_minion_revise_plan` remains the mechanism for updating the same plan. The new reviewer gate decides whether the revised plan is acceptable.
+`minion_revise_plan` remains the mechanism for updating the same plan. The new reviewer gate decides whether the revised plan is acceptable.
 
 ## Checkpoint Review Gate
 
@@ -287,15 +287,15 @@ LSP is not required for the first reviewer gate slice, but the gate schema shoul
 When the first-party LSP provider exists, reviewer can include evidence from:
 
 ```text
-op_lsp_definition
-op_lsp_hover
-op_lsp_implementation
-op_lsp_references
-op_lsp_prepare_call_hierarchy
-op_lsp_incoming_calls
-op_lsp_outgoing_calls
-op_lsp_diagnostics
-op_lsp_doctor
+lsp_definition
+lsp_hover
+lsp_implementation
+lsp_references
+lsp_prepare_call_hierarchy
+lsp_incoming_calls
+lsp_outgoing_calls
+lsp_diagnostics
+lsp_doctor
 ```
 
 LSP evidence is useful but not absolute. For high-risk API claims, pair it with source/docs/build/test evidence.
@@ -306,12 +306,12 @@ LSP evidence is useful but not absolute. For high-risk API claims, pair it with 
 
 - Add `ReviewGateResult` validation model.
 - Add repository storage/ledger event for review gates.
-- Add `op_minion_review_gate_submit`.
+- Add `review_gate_submit`.
 - Add tests for pass/fail/partial validation.
 
 ### Slice 2: Plan Acceptance Gate
 
-- Update `op_minion_accept_plan` to require a passing plan-review gate.
+- Update `minion_accept_plan` to require a passing plan-review gate.
 - Store review gate ref in acceptance marker.
 - Add explicit human override path with reason.
 - Add tests for missing review, failed review, stale review, and override.

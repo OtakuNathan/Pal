@@ -192,7 +192,7 @@ class ChannelIntrospectionProvider:
         family="channel",
         action_name="send_attachment",
         description="Send a local file attachment back to the channel that started the current turn.",
-        aliases=("send_attachment", "channel_send_attachment"),
+        aliases=("send_attachment", "op_channel_send_attachment"),
         args_schema={
             "type": "object",
             "properties": {
@@ -218,9 +218,9 @@ class ChannelIntrospectionProvider:
         _ = call
         return IntrospectionResult(
             status=RuntimeStatus.INVALID,
-            text="op_channel_send_attachment requires current async turn context",
+            text="channel_send_attachment requires current async turn context",
             structured={"reason": "async_required"},
-            llm_text="Use op_channel_send_attachment as a direct tool call during an active turn.",
+            llm_text="Use channel_send_attachment as a direct tool call during an active turn.",
         )
 
     @capability_action(

@@ -19,6 +19,7 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.skill.builtin_skills import (
     PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID,
     PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID,
+    PAL_LSP_TEMPLATE_DEVELOPMENT_SKILL_ID,
     PAL_PLUGIN_DEVELOPMENT_SKILL_ID,
     builtin_declared_skills,
 )
@@ -154,6 +155,38 @@ if TYPE_CHECKING:
     activation_threshold=0.2,
     metadata={"skill_trigger": True, "resident": False, "runtime_root_layout": "channel/providers"},
 )
+@affordance(
+    affordance_id="declared.skill.pal_lsp_template_development",
+    title="Pal LSP template and language environment development skill",
+    scenario_text=(
+        "The user wants to add, repair, test, or hot-load an LSP server template, language server config, "
+        "new programming language LSP support, or minion workspace language environment preparer."
+    ),
+    prompt_hint=(
+        "If this route is selected, inject skill `pal.lsp.template.development` before creating "
+        "plugins/lsp/servers templates or workspace_environment language preparer code."
+    ),
+    activation_terms=(
+        "lsp template",
+        "language server template",
+        "new language lsp",
+        "add lsp support",
+        "add language support",
+        "language server",
+        "plugins/lsp/servers",
+        "WorkspaceEnvironmentPreparer",
+        "workspace environment preparer",
+        "language_ids",
+        "op_lsp_mgmt_rescan",
+        "lsp 插件",
+        "语言服务器",
+        "新语言",
+    ),
+    skill_refs=(PAL_LSP_TEMPLATE_DEVELOPMENT_SKILL_ID,),
+    priority=35,
+    activation_threshold=0.2,
+    metadata={"skill_trigger": True, "resident": False, "runtime_root_layout": "plugins/lsp/servers"},
+)
 @dataclass
 class SkillIntrospectionProvider:
     service: SkillService
@@ -257,7 +290,7 @@ class SkillIntrospectionProvider:
         args_schema=SKILL_READ_ARGS_SCHEMA,
         result_schema={"type": "object"},
     )
-    def op_read(self, call: CapabilityCall):
+    def read(self, call: CapabilityCall):
         return SkillReadTool(service=self.service).invoke(call.args)
 
     @capability_action(

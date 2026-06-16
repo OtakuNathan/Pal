@@ -110,7 +110,7 @@ Core fields:
 `visibility_mode`:
 
 - `resident`: may enter short resident prompt hints.
-- `discoverable`: only found through `op_behavior_advise`.
+- `discoverable`: only found through `behavior_advise`.
 
 `activation_kind`:
 
@@ -190,7 +190,7 @@ Learned affordances must use weak wording even when the lexical score is high. T
 
 ## Public Tools
 
-### `op_behavior_advise`
+### `behavior_advise`
 
 Async-first behavior consultation.
 
@@ -218,11 +218,11 @@ Rules:
 - does not execute capabilities
 - does not inject skills
 - does not trigger memory recall
-- does not suggest recursively calling `op_behavior_advise`
+- does not suggest recursively calling `behavior_advise`
 - sync invoke returns structured failure: `async_required`
 - internal semantic router failure falls back to deterministic ranking
 
-### `op_skill_inject`
+### `skill_inject`
 
 Skill manual injection.
 
@@ -244,7 +244,7 @@ Rules:
 - over-budget skill manuals return structured failure
 - owned by `pal.skill`, not `pal.behavior`
 
-### `op_behavior_save`
+### `behavior_save`
 
 Persist a new user-instructed or learned affordance.
 
@@ -267,12 +267,12 @@ Rules:
 
 ## Cap Search vs Behavior Advise
 
-`op_tool_search` answers:
+`tool_search` answers:
 
 - what capabilities exist?
 - what can Execution invoke now?
 
-`op_behavior_advise` answers:
+`behavior_advise` answers:
 
 - what should Pal think of in this scenario?
 - which skill/capability/memory hint route is behaviorally relevant?
@@ -285,9 +285,9 @@ Advice may return `capability_refs`, but those are pointers only. It does not be
 
 Behavior contributes a small prompt fragment:
 
-- use `op_behavior_advise` when Pal intends to act and needs route advice.
-- use `op_skill_inject` when advice returns a `skill_ref`.
-- use `op_behavior_save` only for recurring behavior rules.
+- use `behavior_advise` when Pal intends to act and needs route advice.
+- use `skill_inject` when advice returns a `skill_ref`.
+- use `behavior_save` only for recurring behavior rules.
 - keep affordance hints thin; multi-step procedures belong in skills.
 
 Resident affordances may also be injected as short hints, under a strict budget.
@@ -314,7 +314,7 @@ from pal.behavior import affordance, skill
     title="Commit safely",
     summary="Review and commit local changes safely.",
     manual_text="1. Inspect changes.\n2. Run tests.\n3. Commit with a clear message.",
-    capability_refs=("op_exec_shell",),
+    capability_refs=("shell",),
 )
 @affordance(
     affordance_id="demo.commit_when_user_asks",
@@ -323,7 +323,7 @@ from pal.behavior import affordance, skill
     prompt_hint="Consider injecting the commit skill and checking working tree status.",
     activation_terms=("commit", "git", "changes"),
     skill_refs=("demo.commit",),
-    capability_refs=("op_exec_shell",),
+    capability_refs=("shell",),
 )
 class DemoProvider:
     module_id = "demo"
@@ -341,7 +341,7 @@ Rules:
 - no automatic learned-affordance extraction
 - no separate approval path in behavior
 - no automatic memory recall from `memory_query_hints`
-- no capability execution from `op_behavior_advise`
+- no capability execution from `behavior_advise`
 - no skill learning or skill storage ownership inside `behavior`
 
 ## Implementation Entry Points

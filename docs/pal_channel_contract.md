@@ -160,7 +160,7 @@ def build_channel_provider(context):
 
 `context` 包含 runtime root、provider 目录、manifest，以及 manager/runtime/repository/secret resolver 等 channel provider 需要的边界对象。
 
-`op_channel_provider_rescan` 的语义是：
+`channel_provider_rescan` 的语义是：
 
 - 重新扫描 `runtime_root/channel/providers`
 - 加载此前没有注册的 provider

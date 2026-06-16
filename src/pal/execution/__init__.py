@@ -20,6 +20,7 @@ __all__ = [
     "ExecutionSnapshot",
     "ExecutionRuntime",
     "ExecutionRuntimePort",
+    "FileDeleteTool",
     "FileEditTool",
     "FileReadTool",
     "FileStateCache",
@@ -80,6 +81,10 @@ def __getattr__(name: str):
         from pal.execution.file_read import FileReadTool
 
         return FileReadTool
+    if name == "FileDeleteTool":
+        from pal.execution.file_delete import FileDeleteTool
+
+        return FileDeleteTool
     if name == "FileEditTool":
         from pal.execution.file_edit import FileEditTool
 

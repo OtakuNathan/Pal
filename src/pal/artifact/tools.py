@@ -10,7 +10,7 @@ from pal.shared import RuntimeStatus
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
-ARTIFACT_ID_SCHEMA = {"type": "string", "description": "Artifact id from Available Artifacts or op_artifact_search."}
+ARTIFACT_ID_SCHEMA = {"type": "string", "description": "Artifact id from Available Artifacts or artifact_search."}
 _OBJECT_RESULT_SCHEMA = {"type": "object"}
 
 

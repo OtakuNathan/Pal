@@ -320,7 +320,7 @@ class TurnExecutor:
                     safe_to_retry=False,
                     repair_domain="execution:runtime",
                 ),
-                origin="tool_call",
+                origin="op_tool_call",
                 conversation_context={"turn_id": continuation.turn_id, "tool_name": execution_call.name},
             )
             tool_result = CanonicalToolResult(
@@ -512,7 +512,7 @@ class TurnExecutor:
         if hint:
             parts.append(f"Hint: {hint}")
         if skill_refs:
-            parts.append(f"Skill refs: {', '.join(skill_refs)}. MUST NOT call `op_skill_inject` solely because listed; call it only when workflow/domain rules are needed.")
+            parts.append(f"Skill refs: {', '.join(skill_refs)}. MUST NOT call `skill_inject` solely because listed; call it only when workflow/domain rules are needed.")
         if capability_refs:
             parts.append(f"Capability refs: {', '.join(capability_refs)}. Resolve current inventory before use; if one directly completes the request, use it without injecting a skill.")
         if memory_query_hints:
@@ -872,7 +872,7 @@ class TurnExecutor:
     def _build_tool_call_budget(self, continuation, *, execution_call=None) -> ToolCallBudget:
         cfg = self._config
         token_limit = cfg.max_tool_result_tokens
-        if execution_call is not None and str(getattr(execution_call, "name", "") or "").strip() == "shell_exec":
+        if execution_call is not None and str(getattr(execution_call, "name", "") or "").strip() == "op_exec_shell":
             token_limit = min(cfg.max_tool_result_tokens, cfg.default_max_output_tokens)
         max_output_chars = min(
             cfg.default_max_result_size_chars,

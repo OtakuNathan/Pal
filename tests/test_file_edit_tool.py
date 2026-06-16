@@ -276,7 +276,7 @@ class ToolProtocolTests(unittest.TestCase):
 
     def test_tool_attributes(self) -> None:
         tool = FileEditTool()
-        self.assertEqual(tool.name, "file_edit")
+        self.assertEqual(tool.name, "op_file_edit")
         self.assertEqual(tool.family, "system")
         self.assertIsInstance(tool.args_schema, dict)
         self.assertIsInstance(tool.result_schema, dict)

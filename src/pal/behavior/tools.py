@@ -90,7 +90,7 @@ class BehaviorAdviceTool:
         structured = {"reason": "async_required", "tool": self.name}
         return CapabilityResult(
             status=RuntimeStatus.INVALID,
-            text="op_behavior_advise requires an active async turn context.",
+            text="behavior_advise requires an active async turn context.",
             structured=structured,
             llm_text=render_titled_structured_for_llm("Behavior advice unavailable", structured),
         )

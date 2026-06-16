@@ -88,18 +88,18 @@ Internal image parts become LiteLLM `image_url` data URLs only at the final LLM 
 
 Artifact capabilities:
 
-- `op_artifact_list`: list hot artifacts visible to the current turn.
-- `op_artifact_info`: inspect metadata and available representations for one artifact.
-- `op_artifact_read`: read text-like representations by `artifact_id`.
-- `op_artifact_search`: search artifact objects by filename, kind, time, caption, or summary.
-- `op_artifact_select`: mark one artifact as chosen and refresh TTL.
-- `op_artifact_grep`: search existing text-like representations inside one known artifact. It does not inspect image pixels, run OCR, or create audio transcripts.
-- `op_artifact_transcribe`: request transcript generation; V1 returns `needs_transcription` without an ASR provider.
+- `artifact_list`: list hot artifacts visible to the current turn.
+- `artifact_info`: inspect metadata and available representations for one artifact.
+- `artifact_read`: read text-like representations by `artifact_id`.
+- `artifact_search`: search artifact objects by filename, kind, time, caption, or summary.
+- `artifact_select`: mark one artifact as chosen and refresh TTL.
+- `artifact_grep`: search existing text-like representations inside one known artifact. It does not inspect image pixels, run OCR, or create audio transcripts.
+- `artifact_transcribe`: request transcript generation; V1 returns `needs_transcription` without an ASR provider.
 
 Resident LLM tools currently include only:
 
-- `op_artifact_info`
-- `op_artifact_read`
+- `artifact_info`
+- `artifact_read`
 
 Other artifact capabilities remain discoverable through execution discovery.
 

@@ -55,9 +55,9 @@ class PalV2SocketClientTests(unittest.IsolatedAsyncioTestCase):
         events = iter(
             [
                 {
-                    "type": "tool_call",
+                    "type": "op_tool_call",
                     "request_id": "req-1",
-                    "tool_call": {"name": "op_probe", "args": {}},
+                    "op_tool_call": {"name": "op_probe", "args": {}},
                 },
                 {"type": "llm_done", "request_id": "req-1", "finish_reason": "tool_calls"},
                 {"type": "text_delta", "request_id": "req-1", "text": "done"},

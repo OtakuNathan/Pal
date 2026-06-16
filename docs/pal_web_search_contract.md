@@ -77,19 +77,19 @@ class WebSearchProviderPort(Protocol):
 
 | canonical_path | 作用 |
 |----------------|------|
-| `intro_module_web_search_show` | 模块概览 |
-| `intro_module_web_search_list_providers` | 列出所有 provider |
-| `intro_module_web_search_active_provider` | 当前活跃 provider |
-| `op_web_search` | 执行搜索 |
+| `${1}_show` | 模块概览 |
+| `${1}_providers` | 列出所有 provider |
+| `${1}_provider` | 当前活跃 provider |
+| `web_search` | 执行搜索 |
 | `op_web_search_mgmt_set_active_provider` | 切换活跃 provider |
 
 ### Provider 实例级能力
 
 每个注册的 provider 会自动生成实例级能力：
 
-- `intro_provider_web_search_health::<provider_id>`
-- `intro_provider_web_search_show::<provider_id>`
-- `intro_provider_web_search_auth_state::<provider_id>`
+- `${1}_provider_health::<provider_id>`
+- `${1}_provider_show::<provider_id>`
+- `${1}_provider_state::<provider_id>`
 - `op_web_search_mgmt_enable::<provider_id>`
 - `op_web_search_mgmt_disable::<provider_id>`
 - `op_web_search_mgmt_set_config::<provider_id>`

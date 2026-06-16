@@ -66,7 +66,7 @@ class PluginsIntrospectionProvider:
         action_name="attach",
         description=(
             "Attach a plugin to the current runtime. First-party plugins that are disabled by default can be attached "
-            "temporarily; if the result is forbidden with reason=plugin_disabled, call op_plugin_mgmt_enable for that plugin_id."
+            "temporarily; if the result is forbidden with reason=plugin_disabled, call plugin_enable for that plugin_id."
         ),
         aliases=("attach plugin", "load enabled plugin"),
         args_schema={"type": "object", "properties": {"plugin_id": {"type": "string"}}, "required": ["plugin_id"]},

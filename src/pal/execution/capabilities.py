@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.channel_attachment import ChannelSendAttachmentTool
 from pal.execution.file_capabilities import FileCapabilityMixin
+from pal.execution.file_delete import FileDeleteTool
 from pal.execution.file_edit import FileEditTool
 from pal.execution.file_read import FileReadTool
 from pal.execution.file_state import FileStateCache, FileStateTool
@@ -113,6 +114,7 @@ def register_with_core(context: MainContext, runtime: ExecutionRuntime | None = 
     resolved_runtime.register_tool(FileReadTool(cache=_FILE_STATE_CACHE))
     resolved_runtime.register_tool(FileEditTool(cache=_FILE_STATE_CACHE))
     resolved_runtime.register_tool(FileWriteTool(cache=_FILE_STATE_CACHE))
+    resolved_runtime.register_tool(FileDeleteTool(cache=_FILE_STATE_CACHE))
     resolved_runtime.register_tool(FileStateTool(cache=_FILE_STATE_CACHE))
     provider = ExecutionIntrospectionProvider(runtime=resolved_runtime)
     handle = ModuleHandle(

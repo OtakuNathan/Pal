@@ -216,18 +216,38 @@ class EndpointResolver:
             self.endpoints = tuple(self.repository.list_enabled())
         return self.endpoints
 
-    def primary(self, *, preferred_endpoint_id: str | None = None) -> LLMEndpointModel | None:
-        enabled = self.enabled(preferred_endpoint_id=preferred_endpoint_id)
+    def primary(
+        self,
+        *,
+        preferred_endpoint_id: str | None = None,
+        fallback_endpoint_id: str | None = None,
+    ) -> LLMEndpointModel | None:
+        enabled = self.enabled(preferred_endpoint_id=preferred_endpoint_id, fallback_endpoint_id=fallback_endpoint_id)
         return enabled[0] if enabled else None
 
-    def enabled(self, *, preferred_endpoint_id: str | None = None) -> list[LLMEndpointModel]:
+    def enabled(
+        self,
+        *,
+        preferred_endpoint_id: str | None = None,
+        fallback_endpoint_id: str | None = None,
+    ) -> list[LLMEndpointModel]:
         items = list(self.endpoints)
-        if not preferred_endpoint_id:
+        preferred = str(preferred_endpoint_id or "").strip()
+        fallback = str(fallback_endpoint_id or "").strip()
+        if not preferred and not fallback:
             return items
-        for index, item in enumerate(items):
-            if item.endpoint_id == preferred_endpoint_id:
-                return [item, *items[:index], *items[index + 1 :]]
-        return items
+        ordered: list[LLMEndpointModel] = []
+        seen: set[str] = set()
+        for endpoint_id in (preferred, fallback):
+            if not endpoint_id or endpoint_id in seen:
+                continue
+            match = next((item for item in items if item.endpoint_id == endpoint_id), None)
+            if match is None:
+                continue
+            ordered.append(match)
+            seen.add(endpoint_id)
+        ordered.extend(item for item in items if item.endpoint_id not in seen)
+        return ordered
 
 
 class LLMEndpointInvokerPort(Protocol):
@@ -1208,6 +1228,27 @@ class LLMRuntime(LLMRuntimePort):
         endpoint_ids = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
         self.active_endpoint_id = configured_active if configured_active in endpoint_ids else None
 
+    def _enabled_endpoints_for_preference(
+        self,
+        *,
+        preferred_endpoint_id: str | None = None,
+        preferred_endpoint_source: str | None = None,
+    ) -> list[LLMEndpointModel]:
+        _ = preferred_endpoint_source
+        preferred = str(preferred_endpoint_id or "").strip() or None
+        if preferred:
+            return self.endpoint_resolver.enabled(
+                preferred_endpoint_id=preferred,
+                fallback_endpoint_id=self.active_endpoint_id,
+            )
+        return self.endpoint_resolver.enabled(preferred_endpoint_id=self.active_endpoint_id)
+
+    def _enabled_endpoints_for_metadata(self, metadata: dict[str, Any]) -> list[LLMEndpointModel]:
+        return self._enabled_endpoints_for_preference(
+            preferred_endpoint_id=str(metadata.get("preferred_endpoint_id") or "").strip() or None,
+            preferred_endpoint_source=str(metadata.get("preferred_endpoint_source") or "").strip() or None,
+        )
+
     def refresh_llm_endpoints(self) -> dict[str, Any]:
         before = [endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints]
         configured_active = self.settings_repository.get_active_llm_endpoint_id()
@@ -1273,9 +1314,7 @@ class LLMRuntime(LLMRuntimePort):
 
     def preflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
         self.refresh_runtime_settings()
-        preferred_endpoint_id = str(request.metadata.get("preferred_endpoint_id") or "").strip() or None
-        preferred_endpoint_id = preferred_endpoint_id or self.active_endpoint_id
-        enabled = self.endpoint_resolver.enabled(preferred_endpoint_id=preferred_endpoint_id)
+        enabled = self._enabled_endpoints_for_metadata(dict(request.metadata))
         primary = enabled[0] if enabled else None
         return self._build_preflight_advice(
             endpoint=primary,
@@ -1286,14 +1325,22 @@ class LLMRuntime(LLMRuntimePort):
     async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
         return await asyncio.to_thread(self.preflight, request)
 
-    def resolve_endpoint_facts(self, *, preferred_endpoint_id: str | None = None) -> dict[str, Any]:
+    def resolve_endpoint_facts(
+        self,
+        *,
+        preferred_endpoint_id: str | None = None,
+        preferred_endpoint_source: str | None = None,
+    ) -> dict[str, Any]:
         self.refresh_runtime_settings()
         normalized_preferred = str(preferred_endpoint_id or "").strip() or None
-        normalized_preferred = normalized_preferred or self.active_endpoint_id
-        endpoint = self.endpoint_resolver.primary(preferred_endpoint_id=normalized_preferred)
+        enabled = self._enabled_endpoints_for_preference(
+            preferred_endpoint_id=normalized_preferred,
+            preferred_endpoint_source=preferred_endpoint_source,
+        )
+        endpoint = enabled[0] if enabled else None
         if endpoint is None:
             return {
-                "endpoint_id": normalized_preferred,
+                "endpoint_id": normalized_preferred or self.active_endpoint_id,
                 "model_id": None,
                 "context_window": None,
                 "max_output_tokens": None,
@@ -1311,9 +1358,18 @@ class LLMRuntime(LLMRuntimePort):
             "capabilities": dict(endpoint.capabilities_blob or {}),
         }
 
-    def resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None) -> int | None:
+    def resolve_max_output_tokens(
+        self,
+        *,
+        preferred_endpoint_id: str | None = None,
+        preferred_endpoint_source: str | None = None,
+    ) -> int | None:
         self.refresh_runtime_settings()
-        endpoint = self.endpoint_resolver.primary(preferred_endpoint_id=preferred_endpoint_id or self.active_endpoint_id)
+        enabled = self._enabled_endpoints_for_preference(
+            preferred_endpoint_id=preferred_endpoint_id,
+            preferred_endpoint_source=preferred_endpoint_source,
+        )
+        endpoint = enabled[0] if enabled else None
         if endpoint is not None and endpoint.max_output_tokens is not None:
             return endpoint.max_output_tokens
         if endpoint is not None and endpoint.context_window is not None:
@@ -1326,9 +1382,8 @@ class LLMRuntime(LLMRuntimePort):
         invoke_fn,
     ) -> _EndpointInvocationResult:
         """Shared endpoint iteration with retry, backoff, and stale-connection handling."""
-        explicit_preferred_endpoint_id = str(request.metadata.get("preferred_endpoint_id") or "").strip() or None
-        preferred_endpoint_id = explicit_preferred_endpoint_id or self.active_endpoint_id
-        enabled = list(self.endpoint_resolver.enabled(preferred_endpoint_id=preferred_endpoint_id))
+        requested_preferred_endpoint_id = str(request.metadata.get("preferred_endpoint_id") or "").strip() or None
+        enabled = list(self._enabled_endpoints_for_metadata(dict(request.metadata)))
         if not enabled:
             effective_request = self._build_effective_request(request, endpoint=None)
             self.last_request = effective_request
@@ -1398,7 +1453,7 @@ class LLMRuntime(LLMRuntimePort):
                     self.last_request = effective_request
                     self.last_endpoint_id = endpoint.endpoint_id
                     self.last_model_id = endpoint.model_id
-                    if explicit_preferred_endpoint_id is None and endpoint.endpoint_id != self.active_endpoint_id:
+                    if requested_preferred_endpoint_id is None and endpoint.endpoint_id != self.active_endpoint_id:
                         self.set_active_endpoint(endpoint.endpoint_id)
                     if endpoint_index > 0:
                         self._emit_llm_progress(

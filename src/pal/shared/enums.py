@@ -83,7 +83,7 @@ class LLMResponseMode(StrEnum):
 class LLMStreamEventKind(StrEnum):
     TEXT_DELTA = "text_delta"
     REASONING_DELTA = "reasoning_delta"
-    TOOL_CALL = "tool_call"
+    TOOL_CALL = "op_tool_call"
     DONE = "done"
     ERROR = "error"
     COMPACT_REQUIRED = "compact_required"

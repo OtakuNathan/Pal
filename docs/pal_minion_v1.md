@@ -72,11 +72,11 @@ Drafts are not progress facts and are not PalCore state. They are searchable so 
 
 The intended route is:
 
-1. Pal captures user brainstorming with `op_minion_draft_work_order`.
+1. Pal captures user brainstorming with `minion_draft_work_order`.
 2. Planner reviews the draft as a bounded input.
 3. Pal/user confirms the reviewed candidate.
 4. The reviewed output is written as a `FinalPlanArtifact` and accepted as a `plan_ref`.
-5. `op_minion_spawn` starts the selected profile from the accepted plan or from a work order already bound to an accepted plan.
+5. `minion_spawn` starts the selected profile from the accepted plan or from a work order already bound to an accepted plan.
 
 Planner must not invent task boundaries from raw chat history when a draft exists. The draft is the bounded source for review.
 
@@ -128,7 +128,7 @@ Non-coder profiles get an isolated folder workspace:
 - `data/minion/workspaces/{run_id}_{profile}/logs/`
 - `data/minion/workspaces/{run_id}_{profile}/deliverables/`
 
-The runner exposes `op_minion_artifact_write` so minions can write structured deliverables under `artifact_dir`. The terminal and checkpoint payloads include `artifacts[]` and `primary_artifact`.
+The runner exposes `artifact_write` so minions can write structured deliverables under `artifact_dir`. The terminal and checkpoint payloads include `artifacts[]` and `primary_artifact`.
 
 When a Git-backed runner finishes a milestone:
 
@@ -146,48 +146,48 @@ After user acceptance, the minion subsystem may squash the milestone commits int
 
 The minion module exposes:
 
-- `intro_task_search`
-- `intro_task_read`
-- `intro_work_order_search`
-- `intro_work_order_read`
-- `intro_work_order_draft_search`
-- `intro_work_order_draft_read`
-- `intro_minion_list`
-- `intro_minion_read`
-- `intro_minion_profile_list`
-- `intro_minion_profile_read`
-- `intro_minion_plan_search`
-- `intro_minion_plan_read`
-- `op_minion_draft_work_order`
-- `op_minion_promote_work_order_draft`
-- `op_minion_submit_plan`
-- `op_minion_accept_plan`
-- `op_minion_revise_plan`
-- `op_minion_spawn`
-- `op_minion_kill`
-- `op_minion_finalize`
+- `task_search`
+- `task_read`
+- `work_order_search`
+- `work_order_read`
+- `work_order_draft_search`
+- `work_order_draft_read`
+- `minion_list`
+- `minion_read`
+- `minion_profile_list`
+- `minion_profile_read`
+- `minion_plan_search`
+- `minion_plan_read`
+- `minion_draft_work_order`
+- `minion_promote_work_order_draft`
+- `minion_submit_plan`
+- `minion_accept_plan`
+- `minion_revise_plan`
+- `minion_spawn`
+- `minion_kill`
+- `minion_finalize`
 
-`intro_work_order_read` returns work order status, milestones, derived current milestone, latest checkpoint, latest completed checkpoint, recent ledger, current worker, task lessons, and pending system lesson candidates.
+`work_order_read` returns work order status, milestones, derived current milestone, latest checkpoint, latest completed checkpoint, recent ledger, current worker, task lessons, and pending system lesson candidates.
 
 `current_worker` comes from manager active runs bound to the work order. It is not inferred from conversation context.
 
-`op_minion_spawn` may accept `task_query` instead of `work_order_id`. The minion repository resolves it through work order search only when there is exactly one candidate. Multiple candidates or no candidates return facts for Pal to show or ask about; Pal must not guess.
+`minion_spawn` may accept `task_query` instead of `work_order_id`. The minion repository resolves it through work order search only when there is exactly one candidate. Multiple candidates or no candidates return facts for Pal to show or ask about; Pal must not guess.
 
-`op_minion_spawn` may also accept `draft_id` for the existing draft promotion path. Draft milestones are review input and should be converted into an accepted plan before new execution work. This path is not a replacement for plan-first dispatch.
+`minion_spawn` may also accept `draft_id` for the existing draft promotion path. Draft milestones are review input and should be converted into an accepted plan before new execution work. This path is not a replacement for plan-first dispatch.
 
-For new planned work, Pal must not hand-write spawn milestones. If no planner minion has produced a plan, Pal acts as a fallback planner by writing a small `FinalPlanArtifact` through `op_minion_submit_plan`. That operation writes an immutable plan file and returns a `plan_ref`. The plan file is the only milestone truth source, including for generic, reviewer, lifestyle, and other non-coder profiles. `op_minion_spawn` consumes an accepted top-level `plan_ref`; auxiliary files, review reports, checkpoints, and research outputs go in `supporting_artifacts` and never drive execution.
+For new planned work, Pal must not hand-write spawn milestones. If no planner minion has produced a plan, Pal acts as a fallback planner by writing a small `FinalPlanArtifact` through `minion_submit_plan`. That operation writes an immutable plan file and returns a `plan_ref`. The plan file is the only milestone truth source, including for generic, reviewer, lifestyle, and other non-coder profiles. `minion_spawn` consumes an accepted top-level `plan_ref`; auxiliary files, review reports, checkpoints, and research outputs go in `supporting_artifacts` and never drive execution.
 
-`op_minion_spawn` does not accept public `artifact_refs`, `minion_profile`, `allowed_capabilities`, `resolved_profile`, `milestones`, inline `plan_artifact`, `TaskContextPack`, `module_execution`, or `prompt_view`. Public profile selection uses `profile_group` plus `profile_name`; the manager resolves the runtime profile snapshot and allowed capabilities. Raw work-order milestones without a plan are ignored for execution and must not create serial milestone state. Missing dispatch source, unknown work order id, unaccepted plan ref, bad plan schema, or invalid topology is an invalid/blocking state, not a fallback opportunity.
+`minion_spawn` does not accept public `artifact_refs`, `minion_profile`, `allowed_capabilities`, `resolved_profile`, `milestones`, inline `plan_artifact`, `TaskContextPack`, `module_execution`, or `prompt_view`. Public profile selection uses `profile_group` plus `profile_name`; the manager resolves the runtime profile snapshot and allowed capabilities. Raw work-order milestones without a plan are ignored for execution and must not create serial milestone state. Missing dispatch source, unknown work order id, unaccepted plan ref, bad plan schema, or invalid topology is an invalid/blocking state, not a fallback opportunity.
 
-Plan refs are not dispatchable just because they are valid JSON. A plan must pass review and then be accepted through explicit control before implementation spawn can consume it. Review pass opens a plan acceptance interaction with Accept, Reject, and Edit actions. Accept writes a separate acceptance marker. Reject and Edit record decision state and require an explicit revision path. Revisions use `op_minion_revise_plan`, which writes a new immutable plan revision instead of mutating the old file.
+Plan refs are not dispatchable just because they are valid JSON. A plan must pass review and then be accepted through explicit control before implementation spawn can consume it. Review pass opens a plan acceptance interaction with Accept, Reject, and Edit actions. Accept writes a separate acceptance marker. Reject and Edit record decision state and require an explicit revision path. Revisions use `minion_revise_plan`, which writes a new immutable plan revision instead of mutating the old file.
 
-`op_minion_spawn` may accept optional `preferred_endpoint_id`. Pal should set it only when the user explicitly asks for a specific model or LLM endpoint for that minion, after resolving the request to an enabled endpoint id. If omitted, the runner follows the normal Pal active endpoint setting from the runtime database.
+`minion_spawn` may accept optional `preferred_endpoint_id`. Pal should set it only when the user explicitly asks for a specific model or LLM endpoint for that minion, after resolving the request to an enabled endpoint id. If omitted, the runner follows the normal Pal active endpoint setting from the runtime database.
 
 Natural-language minion control should resolve facts first. For requests like "what is it doing?", "replace it", "continue this task", or "merge the completed work", Pal should inspect active runs and work order snapshots, then call the relevant operation. Pal must not infer current worker, progress, or milestone completion from conversation text.
 
 ## Spawn Continuity
 
-`op_minion_spawn` resolves the requested profile, applies role defaults and capability exposure hooks, then asks the minion repository to prepare continuity.
+`minion_spawn` resolves the requested profile, applies role defaults and capability exposure hooks, then asks the minion repository to prepare continuity.
 
 `TaskContextPack.continuity` includes:
 
@@ -208,7 +208,7 @@ Current builtin profiles are `generic`, `planner`, `coder`, and `reviewer`. Publ
 
 Profile resolution order is builtin templates, runtime profile files, then currently mounted provider declarations. Later declarations with the same `profile_id` override earlier ones.
 
-Profiles may declare capability groups. `core_minion_read` includes scoped discovery/read/call plus read-only `op_memory_recall`, so runners can recall relevant experience without memory-write access. `web_research` expands to `op_web_search` and `op_web_read`, so research-capable minions reuse Pal's existing web tools instead of owning a second web integration.
+Profiles may declare capability groups. `core_minion_read` includes scoped discovery/read/call plus read-only `memory_recall`, so runners can recall relevant experience without memory-write access. `web_research` expands to `web_search` and `web_read`, so research-capable minions reuse Pal's existing web tools instead of owning a second web integration.
 
 Profiles may also use `capability_policy.mode = "inherit_filtered"`. In that mode, spawn starts from the manager-visible capability surface, adds profile defaults and provider hook results, then applies the minion deny policy. For `profile_only`, the profile is the upper bound; public spawn cannot expand it with ad hoc `allowed_capabilities`.
 
@@ -226,12 +226,12 @@ Denied by default:
 
 - all `intro_*` capabilities
 - all `op_minion_*` capabilities
-- memory writes such as `op_memory_write` and `op_memory_update`
+- memory writes such as `memory_write` and `memory_update`
 - behavior, skill, channel, plugin, lifecycle, attach/detach/rescan/enable/disable style operations
 
 This prevents recursive spawn/kill/list/read behavior. A task runner does not need to know the minion control plane exists; Pal observes and manages that layer through the minion module capabilities.
 
-`op_minion_artifact_write` is the one internal exception to the `op_minion_*` deny rule. It is scoped to `workspace.artifact_dir` and cannot control the minion subsystem.
+`artifact_write` is the one internal exception to the `op_minion_*` deny rule. It is scoped to `workspace.artifact_dir` and cannot control the minion subsystem.
 
 ## Runner Loop
 
@@ -239,13 +239,13 @@ The runner is a thin execution entity, not a forked Pal. It starts a slim runtim
 
 If `TaskContextPack.metadata.preferred_endpoint_id` is present, the runner forwards it as `CanonicalLLMRequest.metadata.preferred_endpoint_id` and uses that endpoint's budget when resolving max output tokens. Without that metadata, no preferred endpoint is passed; the slim runtime reads the current active LLM endpoint from `pal.sqlite3`.
 
-`TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `op_tool_search`, `op_tool_read`, `op_tool_call`, `op_file_read`, `op_file_edit`, `op_file_write`, `op_exec_shell`, `op_minion_artifact_write`, `op_web_search`, `op_web_read`, and `op_memory_recall` when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
+`TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `tool_search`, `tool_read`, `tool_call`, `file_read`, `file_edit`, `file_write`, `shell`, `artifact_write`, `web_search`, `web_read`, and `memory_recall` when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
 
-When `op_minion_artifact_write` is available, the runner prompt asks the minion to write the primary deliverable to `artifact_dir` and keep the final summary short. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
+When `artifact_write` is available, the runner prompt asks the minion to write the primary deliverable to `artifact_dir` and keep the final summary short. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
 
 Tool calls are executed through the existing `ExecutionRuntime` path and must be present in `TaskContextPack.allowed_capabilities`.
 
-If a tool or capability call fails and read-only `op_memory_recall` is allowed, the runner prompt requires recall of relevant prior experience before retrying, debugging further, or reporting the milestone blocked.
+If a tool or capability call fails and read-only `memory_recall` is allowed, the runner prompt requires recall of relevant prior experience before retrying, debugging further, or reporting the milestone blocked.
 
 High-risk calls declared by the task approval policy pause the runner and emit `approval_requested`. Reject or edit decisions block the milestone; accept continues the tool call.
 
@@ -264,4 +264,4 @@ Lessons are never absorbed silently. If a terminal event carries lessons, Pal op
 - `Reject`
 - `Edit`
 
-Accept stores task lessons as tasking continuity and stores system lessons as accepted system candidates. It also attempts to commit accepted lessons to L3 memory when `op_memory_write` is available in the current runtime. Reject discards the proposed lessons. Edit pauses absorption and asks for revised lesson text before saving.
+Accept stores task lessons as tasking continuity and stores system lessons as accepted system candidates. It also attempts to commit accepted lessons to L3 memory when `memory_write` is available in the current runtime. Reject discards the proposed lessons. Edit pauses absorption and asks for revised lesson text before saving.

@@ -123,7 +123,7 @@ def skill_read_dict(skill, *, include_manual: bool = False) -> dict[str, Any]:
         payload["manual_text"] = skill.manual_text
     else:
         payload["manual_chars"] = len(skill.manual_text)
-        payload["manual_text"] = "[omitted; call op_skill_inject or read with include_manual=true if needed]"
+        payload["manual_text"] = "[omitted; call skill_inject or read with include_manual=true if needed]"
     return payload
 
 
@@ -150,7 +150,7 @@ class SkillAssimilateTool:
         structured = {"reason": "async_required", "tool": self.name}
         return CapabilityResult(
             status=RuntimeStatus.INVALID,
-            text="op_skill_assimilate requires an active async turn context.",
+            text="skill_assimilate requires an active async turn context.",
             structured=structured,
             llm_text=render_titled_structured_for_llm("Skill assimilation unavailable", structured),
         )
@@ -303,7 +303,7 @@ class SkillSearchTool:
     name: str = "op_skill_search"
     display_name: str = "Search skills"
     family: str = "skill"
-    description: str = "Search normalized Pal skills for the current scenario or explicit skill name. Does not return manuals; call op_skill_inject next to use a matched active skill."
+    description: str = "Search normalized Pal skills for the current scenario or explicit skill name. Does not return manuals; call skill_inject next to use a matched active skill."
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("skill", "search")
@@ -350,12 +350,12 @@ class SkillSearchTool:
         structured = {"hits": hits, "count": len(hits)}
         has_injectable_hit = any(bool(hit.get("injectable")) for hit in hits)
         if has_injectable_hit:
-            structured["next_action"] = "To use a matched active skill, call op_skill_inject with its skill_id before answering from it."
+            structured["next_action"] = "To use a matched active skill, call skill_inject with its skill_id before answering from it."
         llm_text = render_titled_structured_for_llm("Skill search", structured)
         if has_injectable_hit:
             llm_text = (
                 "Skill search found an injectable active skill. "
-                "If the user asked to use this skill, the next tool call MUST be op_skill_inject with the matched skill_id. "
+                "If the user asked to use this skill, the next tool call MUST be skill_inject with the matched skill_id. "
                 "Search alone is not using the skill.\n"
                 f"{llm_text}"
             )

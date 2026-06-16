@@ -35,6 +35,9 @@ from pal.minion.utils import string_list as _string_list
 from pal.shared import MinionApprovalDecision, TaskContextPack
 
 
+_DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS = 1200
+
+
 @dataclass
 class MinionRunState:
     minion_id: str
@@ -267,8 +270,8 @@ class MinionManager:
         metadata["module_execution"] = module_execution
         updates: dict[str, Any] = {"module_execution": module_execution}
         if metadata.get("manager_turn_timeout_seconds") is None:
-            metadata["manager_turn_timeout_seconds"] = 300
-            updates["manager_turn_timeout_seconds"] = 300
+            metadata["manager_turn_timeout_seconds"] = _DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS
+            updates["manager_turn_timeout_seconds"] = _DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS
         return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata}), updates
 
     async def spawn(self, pack_payload: dict[str, Any]) -> dict[str, Any]:

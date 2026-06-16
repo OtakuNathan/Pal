@@ -174,7 +174,7 @@ class ErrorHandlingTests(_TempFileMixin, unittest.TestCase):
 class ProtocolTests(unittest.TestCase):
     def test_tool_name(self) -> None:
         tool = FileReadTool()
-        self.assertEqual(tool.name, "file_read")
+        self.assertEqual(tool.name, "op_file_read")
 
     def test_args_schema_has_required(self) -> None:
         tool = FileReadTool()

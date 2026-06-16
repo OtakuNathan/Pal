@@ -7,7 +7,7 @@ from pal.foundation import EventEnvelope
 from pal.minion.work_order import prompt_view_from_metadata
 from pal.shared import ChannelEnvelope, EndpointConfig, EventKind, ResponseHandle, SourceKind, TaskContextPack
 from pal.shared.payloads import extract_text_from_payload
-from pal.shared.prompt_rendering import render_system_reminder, render_xml_block
+from pal.shared.prompt_rendering import render_runtime_reminder, render_system_reminder, render_xml_block
 
 
 def prompt_scaffold_summary(scaffold: dict[str, Any]) -> dict[str, Any]:
@@ -45,7 +45,7 @@ def render_minion_system_prompt(scaffold: dict[str, Any]) -> str:
         "If capability evidence is required, use a relevant listed capability before completing the milestone.\n"
         f"{testing_guidance}"
         "If completion evidence cannot be produced, report blocked instead of completed.\n"
-        "When completion policy requires git_commit, do not run git add, git commit, or other git mutation commands through shell. "
+        "When completion policy requires git_commit, do not run git add, git commit, or other git mutation commands through `op_exec_shell`. "
         "After implementing and verifying the milestone, call `op_minion_checkpoint_commit` to create the structured checkpoint commit in the minion workspace branch.\n"
         "Do not create or rely on committing generated build/cache artifacts such as __pycache__, .pytest_cache, .o, .obj, .a, .so, .dylib, .dll, .exe, class files, coverage output, build directories, or minion_outputs reports.\n"
         "When `op_minion_artifact_write` or `op_minion_artifact_edit` is available, write planner/reviewer deliverables and any long structured output to workspace.artifact_dir with artifact tools; keep the final chat summary short and point to the artifact.\n"
@@ -53,7 +53,7 @@ def render_minion_system_prompt(scaffold: dict[str, Any]) -> str:
         "Artifact output must satisfy the current output_contract. If the output_contract requires JSON, write a .json artifact with application/json content containing exactly that JSON object; do not turn it into Markdown prose just because it is an artifact.\n"
         "When `op_minion_memory_candidate_write` is available and the run teaches something genuinely reusable, write a concise memory candidate there instead of asking Pal to remember it directly.\n"
         "If a tool/capability call fails because of an obvious schema, argument, path, or local input mistake, correct the call directly.\n"
-        "If a tool/capability call fails and the next step is unclear, repeated retries would be guesswork, or the failure may have prior Pal/project repair history, use `op_memory_recall` when it is listed below before retrying, debugging further, or reporting blocked.\n"
+        "If a tool/capability call fails and the next step is unclear, repeated retries would be guesswork, or the failure may have prior Pal/project repair history, use `memory_recall` when it is listed below before retrying, debugging further, or reporting blocked.\n"
         "When the current milestone is complete, stop with a concise milestone summary. "
         "Pal will ask the user before absorbing minion memory candidates."
     )
@@ -82,11 +82,14 @@ def build_minion_prompt_messages(
     system = render_minion_system_prompt(scaffold)
     retry_note = str(retry_note or "").strip()
     memory_text = str(memory_text or "").strip()
+    runtime_reminder = _render_minion_runtime_reminder(scaffold)
     if not include_tool_protocol and retry_note and not tool_protocol_messages:
         task_parts: list[dict[str, Any]] = []
         if memory_text:
             task_parts.append({"type": "text", "text": render_system_reminder(f"Minion run memory:\n{memory_text}")})
         task_parts.append({"type": "text", "text": minion_primary_input(channel_envelope)})
+        if runtime_reminder:
+            task_parts.append({"type": "text", "text": render_runtime_reminder(runtime_reminder)})
         return [
             {"role": "system", "content": system},
             {"role": "user", "content": coerce_user_content_parts(task_parts)},
@@ -105,10 +108,12 @@ def build_minion_prompt_messages(
         *protocol_messages,
     ]
     trailing_parts: list[dict[str, Any]] = []
+    if runtime_reminder:
+        trailing_parts.append({"type": "text", "text": render_runtime_reminder(runtime_reminder)})
     if memory_text and include_tool_protocol and protocol_messages:
-        trailing_parts.append({"type": "text", "text": render_system_reminder(f"Minion run memory:\n{memory_text}")})
+        trailing_parts.append({"type": "text", "text": render_runtime_reminder(f"Minion run memory:\n{memory_text}")})
     if retry_note and include_tool_protocol:
-        trailing_parts.append({"type": "text", "text": render_system_reminder(f"Minion retry guidance:\n{retry_note}")})
+        trailing_parts.append({"type": "text", "text": render_runtime_reminder(f"Minion retry guidance:\n{retry_note}")})
     if trailing_parts:
         messages.append({"role": "user", "content": coerce_user_content_parts(trailing_parts)})
     return messages
@@ -198,8 +203,40 @@ def prompt_view_from_pack(pack: TaskContextPack) -> dict[str, Any]:
 
 
 def _prompt_safe_workspace(workspace: dict[str, Any]) -> dict[str, str]:
-    allowed = {"repo_path", "source_repo", "artifact_dir", "task_repo_path", "target_repo_path"}
+    allowed = {"repo_path", "artifact_dir", "task_repo_path", "target_repo_path"}
     return {key: str(value) for key, value in dict(workspace or {}).items() if key in allowed and str(value or "").strip()}
+
+
+def _render_minion_runtime_reminder(scaffold: dict[str, Any]) -> str:
+    allowed = {str(item).strip() for item in list((scaffold or {}).get("allowed_capabilities") or []) if str(item).strip()}
+    lines = [
+        "Minion runtime reminder:",
+        "- Work only on the current scoped milestone and listed capabilities; do not start hidden or later work.",
+    ]
+    if allowed & {
+        "op_workspace_tree",
+        "op_workspace_search",
+        "op_workspace_read",
+        "op_workspace_file_read",
+        "op_workspace_file_edit",
+        "op_workspace_file_write",
+        "op_workspace_file_delete",
+    }:
+        lines.extend(
+            [
+                "- Tool routing: prefer op_workspace_tree for structured listings, op_workspace_search for text search, op_workspace_file_read for file reads, and op_workspace_file_write/edit/delete for file changes.",
+                "- Workspace tool paths are relative to workspace.repo_path, the active prepared task repo; never use absolute paths or clone-source paths with workspace tools.",
+            ]
+        )
+    if "op_exec_shell" in allowed:
+        lines.append(
+            "- Use op_exec_shell for tests, builds, scripts, Python probes, quick ls/find discovery, and read-only git verification such as git status --short or git diff --name-only; avoid cat/head/tail pipelines for workspace file reads."
+        )
+    if "op_minion_checkpoint_commit" in allowed:
+        lines.append("- After implementation and verification, call op_minion_checkpoint_commit instead of git add/commit.")
+    if allowed & {"op_minion_review_gate_submit", "op_minion_review_checkpoint"}:
+        lines.append("- Reviewer completion requires the review gate tool; prose-only approval is not enough.")
+    return "\n".join(lines).strip()
 
 
 def _prompt_safe_artifact_refs(raw: Any) -> list[dict[str, Any]]:

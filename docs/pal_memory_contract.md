@@ -13,7 +13,7 @@ Prompt ownership:
 Current system prompt rules:
 
 - If memory has been recalled or is present in the prompt, Pal MUST use it as reference before deciding, writing, retrying, debugging, or taking external action.
-- If a tool/capability call fails and memory recall is available, Pal MUST call `op_memory_recall` for relevant experience before debugging, retrying, or asking the user.
+- If a tool/capability call fails and memory recall is available, Pal MUST call `memory_recall` for relevant experience before debugging, retrying, or asking the user.
 - If the user challenges Pal's memory, says Pal already knows/remembers something, or corrects a recalled/stored fact, Pal MUST recall relevant memory before writing, patching, or insisting.
 - `memory_query_hints` from behavior advice do not trigger recall by themselves; when recall is required, use them as query seeds.
 
@@ -24,7 +24,7 @@ Current prompt projection:
 - Recalled durable facts, preferences, project context, and case knowledge are projected as `<recalled_memories view="summary">`.
 - Behavior-route entries are projected separately as `<advisor_hints>`.
 - The old single `Working Memory` prompt label is no longer the current projection.
-- Recalled memories render as `[mem_ref]: text`; `mem_ref` is operational metadata for `op_memory_update` and `op_memory_delete`.
+- Recalled memories render as `[mem_ref]: text`; `mem_ref` is operational metadata for `memory_update` and `memory_delete`.
 - L3 recall render suffixes such as `[L3 summary; origin available]` are not shown in prompt output.
 
 L1 tool-result compaction:

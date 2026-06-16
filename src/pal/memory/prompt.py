@@ -23,7 +23,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
         return getattr(self.config, "keep_recent_tool_messages", _DEFAULT_KEEP_RECENT_TOOL_MESSAGES) if self.config else _DEFAULT_KEEP_RECENT_TOOL_MESSAGES
 
     def build_prompt_fragments(self, context: PromptAssemblyContext) -> list[PromptFragment]:
-        fragments: list[PromptFragment] = [_memory_guide_fragment()]
+        fragments: list[PromptFragment] = list(_memory_guide_fragments())
         pack = context.metadata.get("memory_pack")
         if not isinstance(pack, MemoryPack):
             return fragments
@@ -169,49 +169,66 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                         "block_id": "advisor_hints",
                         "raw_user_context": True,
                         "runtime_context_kind": "behavior",
+                        "prompt_target": "runtime_reminder",
+                        "source_priority": 57,
                     },
                 )
             )
         return fragments
 
 
-def _memory_guide_fragment() -> PromptFragment:
-    return PromptFragment(
-        section="memory_guide",
-        title="Memory Guide",
-        content=(
-            "Memory is the source of truth for durable user facts, preferences, prior Pal decisions, project history, repair lessons, and reusable case knowledge.\n\n"
-            "Mandatory recall:\n"
-            "Pal MUST call op_memory_recall before answering or acting when any of these are true:\n"
-            '- The user refers to prior context, prior decisions, "you remember", "we discussed", "last time", "yesterday", "before", or a custom Pal/project term.\n'
-            "- The task depends on the user's preferences, Pal's past behavior, project-specific conventions, previous repairs, known failures, or remembered identity/context.\n"
-            "- The user corrects Pal's memory, challenges a remembered fact, or says Pal got something wrong before.\n"
-            "- A tool/capability/action fails in a way that may have Pal-specific prior repair history.\n"
-            "- Pal is about to write/update/delete memory, behavior guidance, or skill content.\n\n"
-            "If recalled memories are already present in the prompt, Pal MUST evaluate and account for them before acting. Do not re-recall unless new ambiguity appears.\n\n"
-            "Recommended recall:\n"
-            "Pal SHOULD recall when prior history may materially improve correctness, continuity, personalization, or avoiding repeated mistakes.\n\n"
-            "Recall budget:\n"
-            "- Use targeted queries.\n"
-            "- Prefer limit 3-5 unless the user asks for broader history.\n"
-            "- Usually recall once per task phase.\n"
-            "- If recall returns nothing useful, proceed with live/source inspection.\n\n"
-            "Do not recall:\n"
-            "- For purely local syntax errors, obvious code formatting, simple arithmetic, casual chat, or tasks fully answered by current visible context.\n"
-            "- For current runtime truth; inspect live runtime/capabilities instead.\n"
-            "- For current external facts; verify externally instead.\n\n"
-            "Write/update/delete:\n"
-            "- Write memory directly with op_memory_write only when the user explicitly asks Pal to remember/save it, or states a clear durable fact/preference with low ambiguity.\n"
-            "- Before op_memory_write, call op_memory_recall with the candidate summary/search_text, limit 3-5.\n"
-            "- If a recalled memory is semantically the same record, an older version, already covers the candidate, or is being corrected, use op_memory_update instead of writing a duplicate.\n"
-            "- When recalled memories are shown with [mem_ref], use that mem_ref when updating, merging, or deleting a recalled memory.\n"
-            "- Do not invent mem_ref values.\n"
-            "- If no relevant mem_ref is present, call op_memory_recall before update/delete.\n"
-            "- Use op_memory_update instead of writing duplicates when a recalled memory is being corrected.\n"
-            "- Use op_memory_delete only when the user explicitly asks to forget/delete a specific memory or approves deleting a clearly invalid recalled record."
+def _memory_guide_fragments() -> tuple[PromptFragment, PromptFragment]:
+    return (
+        PromptFragment(
+            section="memory_guide",
+            title="Memory Guide",
+            content=(
+                "Memory is the source of truth for durable user facts, preferences, prior Pal decisions, project history, repair lessons, and reusable case knowledge.\n\n"
+                "Do not recall:\n"
+                "- For purely local syntax errors, obvious code formatting, simple arithmetic, casual chat, or tasks fully answered by current visible context.\n"
+                "- For current runtime truth; inspect live runtime/capabilities instead.\n"
+                "- For current external facts; verify externally instead.\n\n"
+                "Write/update/delete:\n"
+                "- Write memory directly with memory_write only when the user explicitly asks Pal to remember/save it, or states a clear durable fact/preference with low ambiguity.\n"
+                "- Before memory_write, call memory_recall with the candidate summary/search_text, limit 3-5.\n"
+                "- If a recalled memory is semantically the same record, an older version, already covers the candidate, or is being corrected, use memory_update instead of writing a duplicate.\n"
+                "- When recalled memories are shown with [mem_ref], use that mem_ref when updating, merging, or deleting a recalled memory.\n"
+                "- Do not invent mem_ref values.\n"
+                "- If no relevant mem_ref is present, call memory_recall before update/delete.\n"
+                "- Use memory_update instead of writing duplicates when a recalled memory is being corrected.\n"
+                "- Use memory_delete only when the user explicitly asks to forget/delete a specific memory or approves deleting a clearly invalid recalled record."
+            ),
+            priority=71,
+            metadata={"module_id": "memory", "kind": "memory_guide"},
         ),
-        priority=71,
-        metadata={"module_id": "memory", "kind": "memory_guide"},
+        PromptFragment(
+            section="memory_guide",
+            title="Memory Guidance",
+            content=(
+                "Mandatory recall:\n"
+                "Pal MUST call memory_recall before answering or acting when any of these are true:\n"
+                '- The user refers to prior context, prior decisions, "you remember", "we discussed", "last time", "yesterday", "before", or a custom Pal/project term.\n'
+                "- The task depends on the user's preferences, Pal's past behavior, project-specific conventions, previous repairs, known failures, or remembered identity/context.\n"
+                "- The user corrects Pal's memory, challenges a remembered fact, or says Pal got something wrong before.\n"
+                "- A tool/capability/action fails in a way that may have Pal-specific prior repair history.\n"
+                "- Pal is about to write/update/delete memory, behavior guidance, or skill content.\n\n"
+                "If recalled memories are already present in the prompt, Pal MUST evaluate and account for them before acting. Do not re-recall unless new ambiguity appears.\n\n"
+                "Recommended recall:\n"
+                "Pal SHOULD recall when prior history may materially improve correctness, continuity, personalization, or avoiding repeated mistakes.\n\n"
+                "Recall budget:\n"
+                "- Use targeted queries.\n"
+                "- Prefer limit 3-5 unless the user asks for broader history.\n"
+                "- Usually recall once per task phase.\n"
+                "- If recall returns nothing useful, proceed with live/source inspection."
+            ),
+            priority=71,
+            metadata={
+                "module_id": "memory",
+                "kind": "memory_guidance",
+                "prompt_target": "runtime_reminder",
+                "source_priority": 71,
+            },
+        ),
     )
 
 

@@ -43,7 +43,7 @@ def validate_spawn_args(args: dict[str, Any], *, repository: MinionTaskingReposi
     for field in _LEGACY_PUBLIC_SPAWN_FIELDS:
         if field in args:
             raise MinionWorkOrderValidationError(
-                f"{field} is not accepted by op_minion_spawn; pass a semantic DispatchRequest instead",
+                f"{field} is not accepted by minion_spawn; pass a semantic DispatchRequest instead",
                 field=field,
             )
     draft_id = str(args.get("draft_id") or "").strip()
@@ -61,7 +61,7 @@ def validate_spawn_args(args: dict[str, Any], *, repository: MinionTaskingReposi
         and args.get("feedback_gate_ref") is None
     ):
         raise MinionWorkOrderValidationError(
-            "op_minion_spawn requires plan_ref, feedback_gate_ref, draft_id, work_order_id, or task_query",
+            "minion_spawn requires plan_ref, feedback_gate_ref, draft_id, work_order_id, or task_query",
             field="dispatch_source",
         )
 
@@ -73,13 +73,13 @@ def normalize_top_level_review_gate_args(args: dict[str, Any], *, repository: Mi
     metadata = dict(args.get("metadata") or {}) if isinstance(args.get("metadata"), dict) else {}
     if metadata.get("tool_evidence_refs"):
         raise MinionWorkOrderValidationError(
-            "top-level review_gate_submit cannot claim runner tool_evidence_refs; use the minion runner gate path",
+            "top-level op_minion_review_gate_submit cannot claim runner tool_evidence_refs; use the minion runner gate path",
             field="metadata.tool_evidence_refs",
         )
     human_override = metadata.get("human_override")
     if isinstance(human_override, dict):
         raise MinionWorkOrderValidationError(
-            "top-level review_gate_submit does not accept human_override; use a control/UI action",
+            "top-level op_minion_review_gate_submit does not accept human_override; use a control/UI action",
             field="metadata.human_override",
         )
     external_ref = metadata.get("external_verification_ref") or metadata.get("external_evidence_ref")
@@ -228,7 +228,7 @@ def pack_from_args(args: dict[str, Any], *, repository: MinionTaskingRepository 
             )
         raise MinionSpawnResolutionError(query=query, candidates=candidates)
     raise MinionWorkOrderValidationError(
-        "op_minion_spawn requires plan_ref, feedback_gate_ref, draft_id, work_order_id, or task_query",
+        "minion_spawn requires plan_ref, feedback_gate_ref, draft_id, work_order_id, or task_query",
         field="dispatch_source",
     )
 

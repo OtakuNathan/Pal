@@ -1,531 +1,310 @@
-# Capability Forest 结构说明
+# Capability Forest Structure
 
-这份文档专门描述 `PalV2` 里新的 **Unified Capability Forest**。
+This document describes Pal's unified capability forest: why it exists, how
+blueprints hydrate into runtime capabilities, and how discovery remains separate
+from execution.
 
-目标不是重复代码注释，而是回答这几个更重要的问题：
+## Summary
 
-- 为什么要引入 forest
-- `Execution` 和 `PalCore` 到底各自管什么
-- Blueprint / Hydration / Dispatch 分别发生在什么时候
-- 为什么 search 和 execute 要分开
-- 为什么实例级能力一定要自动注入 `target_id`
+The capability forest is Pal's runtime source of truth for capability structure.
+It organizes, compiles, and routes capabilities, but it does not make governance
+decisions.
 
-## 先看一句话
+Responsibilities:
 
-`Capability Forest` 是 `PalV2` 的统一能力目录真相源。
+- `PalCore` decides what is mounted, withdrawn, detached, or reattached.
+- `Execution` owns the forest and compiles it into search and dispatch indexes.
+- Providers define capability blueprints and runtime hydration logic.
 
-它做三件事：
+## Control Commands Are Not LLM Capabilities
 
-1. 组织能力
-2. 编译能力
-3. 路由能力
-
-但它**不直接负责治理**。治理还是 `PalCore` 的事。
-
-所以职责是：
-
-- `PalCore` 决定谁挂上来、谁摘下去
-- `Execution` 持有 forest，并把它编译成可搜索目录和可执行哈希表
-
-## 宪法补充：控制命令不是给 LLM 看的能力
-
-Capability Forest 里虽然有 `introspection` 和 `operation` 两类能力面，但
-control-plane slash command 不属于这两类对 LLM 可见的调用面。
-
-这条规则要写死：
-
-- slash command 是 runtime-private governance ingress
-- 它可以改变系统治理状态
-  例如暂停工具、切 finalization-only、调整挂载状态
-- 但它的原始命令文本不进入 LLM 可见 surface
-- 也不写入 L1 作为会话记忆
-
-换句话说：
-
-- LLM 最多只能感知控制结果
-  例如“当前 tool use disabled”
-- 不能感知原始 `/pause-tools`、`/detach ...` 之类命令文本
-
-## 为什么不是直接手写 CapabilityDescriptor
-
-旧思路是：
-
-- 每个模块自己 `describe()`
-- 返回一堆平坦 `CapabilityDescriptor`
-
-这个方式的问题是：
-
-- 模块自己手搓 descriptor，容易越来越散
-- 实例级对象很难表达
-  例如 `channel endpoint`、`llm endpoint`、`l3 provider`
-- 很难同时兼顾：
-  - LLM 看得懂的名称
-  - 稳定的执行主键
-  - 模块动态挂载/摘除
-
-所以现在改成：
-
-- 静态真相源是 **Blueprint**
-- 运行时真相源是 **Hydrated Subtree**
-- `CapabilityDescriptor` 只是编译产物
-
-## 物理结构：一个 forest，不是两棵实现完全不同的树
-
-逻辑上有两条 namespace：
+The forest contains two LLM-visible capability namespaces:
 
 - `introspection`
 - `operation`
 
-但物理上只有一个 `CapabilityForestRegistry`。
+Runtime-private slash commands are not part of either namespace.
 
-这么做的原因很简单：
+Rules:
 
-- 搜索一个目标对象的全部能力时，不用合并两张完全不同的树
-- 将来新增第三种 namespace，不用推翻底层结构
+- Slash commands are deterministic control-plane ingress.
+- Raw command text does not enter the LLM prompt.
+- Raw command text is not written to L1 as conversation memory.
+- The LLM may observe resulting governance state, such as "tool use disabled",
+  but not the raw `/pause-tools` or `/detach ...` command text.
 
-所以更准确的理解是：
+## Why Not Hand-Written Flat Descriptors
 
-- 一个 unified forest
-- 多个 namespace root
+A flat list of `CapabilityDescriptor` records is too weak for Pal's runtime
+shape.
 
-## 核心对象
+Problems with a flat-only model:
+
+- module authors hand-build descriptors inconsistently
+- instance-level targets are hard to represent
+- dynamic attach/detach semantics become scattered
+- stable execution keys and human-readable names drift apart
+
+Current model:
+
+- static source of truth: `CapabilityNodeBlueprint`
+- runtime source of truth: hydrated capability subtree
+- LLM/search-facing projection: compiled capability descriptors
+
+## Physical Structure
+
+There is one `CapabilityForestRegistry`, not separate implementations for
+introspection and operation.
+
+The namespace roots are logical:
+
+- `introspection`
+- `operation`
+
+One physical forest allows shared indexing, mounting, hydration, and dispatch
+while preserving namespace separation in compiled names.
+
+## Core Objects
 
 ### `CapabilityNodeBlueprint`
 
-文件：
+Source: [capability_forest.py](../src/pal/shared/capability_forest.py)
 
-- [capability_forest.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/shared/capability_forest.py)
+A static template describing:
 
-它是**静态模板**。
+- namespace
+- node kind, such as module, endpoint, provider, or singleton target
+- source module/provider
+- target identity extraction
+- child node shape
 
-它描述：
-
-- 这个节点属于哪个 namespace
-- 它是 `module` / `endpoint` / `provider`
-- 它属于哪个 source
-- 它如何从运行时实例里拿到 `target_id` / `target_label`
-
-它不是运行时节点。
-
-最关键的一点：
-
-- Python 装饰器发生在导入期
-- 运行时实例发生在挂载期
-
-所以装饰器只能生产 Blueprint，不能直接生产实例节点。
+Blueprints are not runtime state.
 
 ### `CapabilityActionBlueprint`
 
-同文件。
+A static action template describing:
 
-它描述一个 action 的模板，例如：
-
-- `observe`
-- `configure`
-- `attach`
-- `detach`
-
-它提供：
-
-- namespace
-- scope
 - action name
 - family
-- 参数/结果 schema 模板
-- alias 和 metadata
+- aliases
+- argument schema
+- result schema
+- handler binding metadata
+- search/display metadata
 
-它同样不是最终可执行对象。
+Action blueprints compile into LLM/search-visible capability records and runtime
+dispatch bindings.
 
 ### `HydratedCapabilityNode`
 
-同文件。
+A runtime node produced from a blueprint and a concrete provider/module
+instance.
 
-这是运行时真正挂进 forest 的节点。
-
-它已经带有：
+It carries:
 
 - `target_id`
 - `target_label`
-- `module_id`
-- `node_id`
-
-例如：
-
-- 模块级 `channel`
-- 实例级 `telegram_main`
-- provider 级 `mock_l3`
+- live mounted status
+- child runtime nodes
+- action bindings for this concrete target
 
 ### `MountedSubtreeHandle`
 
-同文件。
+A mount handle returned when a subtree is published into the registry.
 
-这是一次 subtree mount 的“回收句柄”。
+It is used to:
 
-它记录：
-
-- 本次 mount 创建了哪些 node
-- 注册了哪些 bound action key
-- 注册了哪些 search record id
-
-这很重要，因为 detach 时绝不能靠扫整张哈希表来删。
-
-detach 必须拿着这个 handle 精准 teardown。
+- withdraw a mounted subtree
+- rehydrate after endpoint/provider changes
+- keep core governance separate from provider implementation
 
 ### `CompiledCapabilityIndex`
 
-同文件。
+The searchable, LLM-facing projection.
 
-它是**给搜索和 LLM-facing usage surface 用的平坦索引**。
+It answers:
 
-里面存的是：
+- what capabilities exist
+- what each capability is called
+- what arguments are required
+- what namespace/family/module/tags can filter the capability
 
-- `display_name`
-- `aliases`
-- `canonical_path`
-- `target_label`
-- `target_id`
-
-注意：
-
-- alias 允许冲突
-- alias 只负责搜索
-- alias 不负责执行
+It is optimized for discovery and prompt/tool schema generation, not execution.
 
 ### `BoundActionIndex`
 
-同文件。
+The dispatch projection.
 
-这是**执行热路径**使用的 O(1) 哈希表。
+It maps canonical paths and aliases to concrete runtime handlers. It is optimized
+for exact invocation, not broad search.
 
-key 固定为：
+## Naming
 
-- `(canonical_path, target_id)`
+Pal separates stable execution keys from human-readable names.
 
-这里就是最初你想要的那种 O(1) tool/capability dispatch。
+### Canonical Path
 
-Forest 的存在不是为了替代哈希表，而是为了**生成哈希表**。
+The canonical path is the stable execution key, such as:
 
-## 命名：为什么要区分 canonical path 和 display name
+- `${1}_list`
+- `${1}_provider_show::mock_l3`
+- `tool_search`
+- `channel_provider_rescan`
 
-我们现在明确把这两件事分开：
+It should be:
 
-### canonical path
+- stable
+- unique
+- namespace-prefixed
+- suitable for exact dispatch
 
-这是执行主键的一部分。
+### Display Name
 
-它必须：
+The display name is for humans and model-facing descriptions. It may be shorter,
+friendlier, and less stable than the canonical path.
 
-- 稳定
-- 可预测
-- 不因为实例重命名而变化
+### `omit_family_in_canonical`
 
-规则：
+Some high-frequency capabilities intentionally use compact canonical names.
 
-- introspection：`introspection.<scope>.<module>.<action>`
-- operation：`operation.<module>.<family>.<action>`
+Example:
 
-例如：
+- capability family/action may be `discovery/search`
+- canonical path is still `tool_search`
 
-- `introspection.module.channel.list`
-- `introspection.endpoint.channel.inspect`
-- `operation.channel.management.attach`
-- `operation.execution.exec.run`
+This is controlled by metadata, so compact names are explicit and testable.
 
-这里有一条必须写死的命名宪法：
+## Instance-Level Targets
 
-- capability 的 canonical path 一律带 namespace 前缀
-- 主线只有：
-  - `introspection.*`
-  - `operation.*`
-- `module` 是 canonical path 的稳定组成部分，不省略
-- `family` 负责区分同一模块内的能力族
-- `action` 负责最终动作名
+Instance-level capabilities must automatically receive `target_id`.
 
-也就是说，统一形状应为：
+Examples:
 
-- `introspection.<scope>.<module>.<action>`
-- `operation.<module>.<family>.<action>`
+- channel endpoint management
+- LLM endpoint inspection
+- L3 provider introspection
+- plugin instance lifecycle
 
-这样做的原因是：
+The compiler injects `target_id` into instance-level action schemas so callers do
+not need to hand-maintain that argument on every action blueprint.
 
-- 不同模块即使有同名 action，也不会冲突
-- `Execution` 可以稳定地按 canonical path 编译 O(1) dispatch key
-- `LLM` 看到的名字也能天然表达：
-  - 这是哪条 namespace
-  - 属于哪个模块
-  - 属于哪个 family
-  - 最终做什么动作
+## Module-Level Targets
 
-这条规则对所有内建模块、第一方 plugin、以及未来第三方 plugin 都成立。
+Module-level actions use a singleton target internally, even when no user-facing
+`target_id` is required.
 
-### display name
+This keeps dispatch uniform:
 
-这是给人和 LLM 看的。
+- every action has a target
+- module actions target the module singleton
+- instance actions target a concrete endpoint/provider/plugin instance
 
-它可以带实例名，例如：
+## Hydration Flow
 
-- `introspection.endpoint.telegram_main.observe`
+1. Module import defines static blueprints and action blueprints.
+2. `register_with_core(instance)` registers provider/module objects with the
+   Pal context.
+3. PalCore publishes selected module/provider subtrees.
+4. Execution hydrates blueprints against live runtime instances.
+5. Execution compiles:
+   - searchable capability specs
+   - LLM tool schemas
+   - dispatch bindings
 
-所以设计上是：
+## Search And Execute Are Separate
 
-- canonical path 负责稳定执行
-- display / alias 负责可读与召回
+### Search
 
-### `omit_family_in_canonical` 元数据
+Search answers discovery questions:
 
-`CapabilityActionBlueprint` 的 `metadata` 中支持 `omit_family_in_canonical` 标志。
+- What capability names match this query?
+- Which namespace should I use?
+- Which module/family/tags narrow the result?
+- What required parameters does a capability need?
 
-当设为 `True` 时，编译器在生成 canonical path 时会跳过 family 段：
+`tool_search` returns compact hits by default:
 
-- 正常：`operation_<module>_<family>_<action>`
-- 省略：`operation_<module>_<action>`
+- `name`
+- `description`
+- `required_params`
 
-适用场景：
+It accepts:
 
-- 模块只有一个操作族（如 `web_search` 的 `query` 操作）
-- 强制 family 段只会增加路径长度，不提供额外信息
+- `query`
+- `namespace`: `intro`/`introspection` or `op`/`operation`
+- `family`
+- `module_id`
+- `tags`
+- `top_k` / `limit`
+- `facets`
 
-这条规则必须显式声明，默认行为不变（保留 family 段）。
+`facets` defaults to false. When true, the result includes namespace, module, and
+family counts over the deduplicated candidate set. Facets are a narrowing aid,
+not the default answer shape.
 
-## 为什么实例级 action 必须自动注入 `target_id`
+### Execute
 
-实例级能力最典型的问题是：
+Execute answers exact dispatch questions:
 
-- LLM 知道“我想观察 telegram_main”
-- 但执行层需要的是：
-  - `canonical_path="introspection.endpoint.channel.observe"`
-  - `target_id="telegram_main"`
+- Is this capability registered now?
+- Is the target mounted and live?
+- Are the arguments valid?
+- Which handler receives the call?
 
-如果 schema 不强制，LLM 很容易漏传 `target_id`。
+`tool_call` invokes a discovered capability by canonical path or alias. It
+should be used after discovery or when the caller already knows the exact
+capability name.
 
-所以编译器在生成 LLM-facing schema 时，必须自动做这件事：
+## Module Nodes And Plugin Nodes
 
-- 给实例级 action 自动加入 `target_id`
-- 放进 `required`
-- 如果当前实例是可枚举的，就把它编成 enum
+Module nodes represent first-party Pal subsystems such as:
 
-这样作者不用手写，执行也不会歧义。
+- `llm`
+- `memory`
+- `channel`
+- `execution`
+- `minion`
 
-对应实现主要在：
+Plugin/provider nodes represent concrete providers under those subsystems, such
+as:
 
-- [capability_compiler.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/execution/capability_compiler.py)
+- a Telegram channel endpoint
+- a sqlite-vec L3 provider
+- an MCP server projection
 
-## 为什么模块级 action 需要 `SINGLETON_TARGET`
+The module owns common governance and discovery. The provider owns concrete
+implementation mechanics.
 
-如果模块级 action 没有 target，那么 dispatch 很容易写成：
+## Reading Order
 
-- 有 target 的一套逻辑
-- 无 target 的一套逻辑
+Recommended code reading order:
 
-这样会长出一堆 `if target_id is None` 的分支。
+1. [capability_forest.py](../src/pal/shared/capability_forest.py)
+2. [capability_compiler.py](../src/pal/execution/capability_compiler.py)
+3. [execution/runtime.py](../src/pal/execution/runtime.py)
+4. [core/main_context.py](../src/pal/core/main_context.py)
+5. [core/runtime.py](../src/pal/core/runtime.py)
+6. Provider examples:
+   - [channel/capabilities.py](../src/pal/channel/capabilities.py)
+   - [llm/capabilities.py](../src/pal/llm/capabilities.py)
+   - [plugins/l3/stubs.py](../src/pal/plugins/l3/stubs.py)
 
-所以我们统一引入：
+## Provider Contribution Rule
 
-- `SINGLETON_TARGET = "__singleton__"`
+First-party modules own their capability trees. Runtime plugins may publish
+capabilities through their provider boundary, but they do not mutate another
+module's forest directly.
 
-模块级 action 的真实 dispatch key 也统一是：
+Provider-specific rendering or transport behavior belongs in the provider's own
+subsystem. For example, LLM provider wire-shape differences belong in
+`src/pal/llm/llm_adaptor/`, not in the generic capability forest.
 
-- `(canonical_path, "__singleton__")`
+## Invariants
 
-这样：
-
-- 模块级
-- 实例级
-
-两类能力都走同一条 O(1) 路由逻辑。
-
-## Blueprint 到 Hydration 的完整流程
-
-这条链是这次改动的核心。
-
-### 第一步：模块导入期
-
-模块类或方法上用：
-
-- `@capability_node(...)`
-- `@capability_action(...)`
-
-这一步只会产生 Blueprint 元数据。
-
-### 第二步：`register_with_core(instance)`
-
-当模块实例真正被挂到 `PalCore` 时：
-
-- `MainContext.register_module(handle)`
-- `ExecutionRuntime.hydrate_module_handle(handle)`
-
-这时候编译器会读取：
-
-- provider 上的 blueprint
-- provider 当前实例
-- repository 或运行时暴露出来的实例集合
-
-然后生成真实 subtree。
-
-### 第三步：publish / mount
-
-`PalCore.publish_module_capabilities(module_id)` 会让 `ExecutionRuntime`：
-
-- 把 subtree 挂进 forest
-- 把 descriptor 注册进 compiled search index
-- 把 bound action 注册进 O(1) dispatch index
-
-所以 hydration 和 mount 是分开的：
-
-- hydration：生成 subtree
-- mount：让 subtree 真正变成可见且可调用
-
-## 为什么 search 和 execute 必须严格解耦
-
-这是整个系统里非常重要的一条线。
-
-### search
-
-search 是模糊的。
-
-它允许：
-
-- alias 命中
-- 关键词召回
-- 同名多候选
-
-### execute
-
-execute 必须是严格的。
-
-它只能接受：
-
-- `canonical_path`
-- `target_id`
-
-如果缺少 `target_id`，而该能力是实例级：
-
-- 执行层应该返回结构化错误
-- 绝不能猜测
-
-所以：
-
-- alias 只进入 search
-- alias 永远不直接进 execute
-
-## 模块节点 vs plugin 节点
-
-这里也要明确：
-
-- 普通模块节点不是“新业务能力注入点”
-- plugin/provider 才是
-
-模块节点主要负责：
-
-- introspection
-- configure
-- attach
-- detach
-
-plugin 节点负责：
-
-- 注入新的 operation 能力
-- 注入新的 provider / tool / backend surface
-
-这让系统边界更干净：
-
-- 模块是对象
-- plugin 是能力扩展点
-
-## Capability Forest 宪法
-
-这条规则必须长期成立：
-
-- **父节点只管理自己的直接下一层**
-- **任何节点都不允许越级管理更深层子树**
-
-换句话说：
-
-- 模块节点只管理它的直接子节点
-- endpoint 节点只管理它的直接子节点
-- provider/plugin 节点只管理它自己的直接子节点
-
-不允许出现这种越级行为：
-
-- `channel` 模块节点直接配置某个更深层的 telegram 私有对象
-- 模块级 `configure` 直接穿透到底层 adapter 私有配置
-- 上层节点绕过中间节点直接操作孙节点或更深层节点
-
-这条规则存在的原因是：
-
-- 防止上层节点膨胀成“大总管”
-- 防止能力边界漂移
-- 让子树可以独立演化
-- 让 attach/detach/refresh 的治理范围天然清晰
-
-因此：
-
-- 通用治理能力放在父节点
-- 更具体的配置和操作必须下沉到对应子树自己实现
-
-例如：
-
-- `channel` 只负责 `channel endpoint` 这一层的通用治理
-- 更具体的 `telegram` 配置必须在 `telegram endpoint` 或它自己的子树里完成
-
-## 关键文件阅读顺序
-
-如果你要自己顺着代码看，我建议按这个顺序：
-
-1. [capability_forest.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/shared/capability_forest.py)
-   先理解 Blueprint、HydratedNode、MountedSubtreeHandle、索引结构
-
-2. [capability_compiler.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/execution/capability_compiler.py)
-   看 Blueprint 如何在 runtime 被水合和编译
-
-3. [execution/runtime.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/execution/runtime.py)
-   看 forest 怎么变成搜索索引和 dispatch 哈希表
-
-4. [core/main_context.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/core/main_context.py)
-   看 hydration 在什么时候触发
-
-5. [core/runtime.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/core/runtime.py)
-   看 `PalCore` 怎么 publish / withdraw / detach / reattach
-
-6. 具体 provider 样例：
-   - [channel/capabilities.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/channel/capabilities.py)
-   - [llm/capabilities.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/llm/capabilities.py)
-   - [plugins/l3/stubs.py](/Users/nathan/Desktop/coding/Pal/PalV2/src/pal/plugins/l3/stubs.py)
-
-## 当前第一版已经做到什么
-
-已经落地的点：
-
-- unified forest
-- blueprint -> hydration
-- compiled search index
-- O(1) dispatch
-- `SINGLETON_TARGET`
-- 实例级 schema 自动注入 `target_id`
-- precise teardown
-- 模块 lifecycle operation 进 forest
-- `channel endpoint` / `llm endpoint` / `l3 provider` 的实例级节点
-
-还没做满的点：
-
-- 全量业务 tool family 树化
-- 更丰富的 LLM-facing usage 文本生成
-- 更复杂的 subtree refresh 策略
-- worker 侧复用同一套 forest
-
-## 一句话总结
-
-`Capability Forest` 可以理解成：
-
-- **Blueprint 是设计图**
-- **Hydration 是按当前运行时把设计图变成真实节点**
-- **Execution 把真实节点编译成“可搜索目录 + 可执行哈希表”**
-- **PalCore 只负责决定这些节点什么时候挂上、什么时候摘下**
-
-## Current Provider Contribution Rule
-
-Capabilities should enter Pal through module-owned forest hydration, not by ad-hoc calls to `ExecutionRuntime.register_capability()` from arbitrary runtime objects.
-
-The current implementation hydrates a module from its `ModuleHandle.introspection_provider`. If a module has endpoint/provider-specific capabilities, the preferred extension is for the module provider to contribute them as part of the mounted subtree, for example through a dynamic `build_mounted_subtree()` projection. A future generalized shape may add `ModuleHandle.capability_providers`, but the invariant stays the same: PalCore publishes and withdraws the module's whole capability surface, and Execution only compiles and dispatches it.
-
-For channel endpoints this means endpoint-specific capabilities can be projected by the channel module/provider, but endpoint code should not register global capabilities directly. That keeps attach/detach, hot replacement, search indexes, and teardown scoped to the owning module.
+- One physical forest, multiple namespace roots.
+- Search and exact dispatch are compiled separately.
+- Canonical paths are stable execution keys.
+- Display names are human/model-facing descriptions.
+- Instance actions receive `target_id` automatically.
+- Control-plane slash commands are not LLM-visible capabilities.
+- Provider-specific protocol quirks do not belong in the forest.

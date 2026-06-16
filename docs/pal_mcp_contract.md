@@ -155,9 +155,9 @@ The MCP plugin exposes:
 - per-server metadata/snapshot read
 - manager attach/detach/rescan
 - per-server attach/detach
-- `op_mcp_image_prepare`
+- `mcp_image_prepare`
 
-`op_mcp_image_prepare` prepares image artifact/path/url inputs for MCP tool arguments as URL, local path, base64, or data URL. It is a bridge helper for external MCP tools; it is not a general OCR or image-understanding capability.
+`mcp_image_prepare` prepares image artifact/path/url inputs for MCP tool arguments as URL, local path, base64, or data URL. It is a bridge helper for external MCP tools; it is not a general OCR or image-understanding capability.
 
 ## Safety
 

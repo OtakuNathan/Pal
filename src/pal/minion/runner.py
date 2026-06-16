@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -103,6 +104,8 @@ from pal.wizard.runtime import ALL_MODELS, DEFAULT_LLM_ENDPOINTS, DEFAULT_WEB_FE
 
 EventWriter = Callable[[dict[str, Any]], Awaitable[None]]
 DecisionReader = Callable[[float | None], Awaitable[dict[str, Any] | None]]
+_DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS = 1200.0
+_MAX_MANAGER_TURN_TIMEOUT_SECONDS = 3600.0
 
 
 @dataclass
@@ -149,14 +152,22 @@ class _MinionLLMRuntimeAdapter:
         self._base = base_runtime
         self._state = state
 
-    def resolve_max_output_tokens(self, *, preferred_endpoint_id: str | None = None) -> int | None:
+    def resolve_max_output_tokens(
+        self,
+        *,
+        preferred_endpoint_id: str | None = None,
+        preferred_endpoint_source: str | None = None,
+    ) -> int | None:
         fn = getattr(self._base, "resolve_max_output_tokens", None)
         if not callable(fn):
             return None
         try:
-            return fn(preferred_endpoint_id=preferred_endpoint_id)
+            return fn(preferred_endpoint_id=preferred_endpoint_id, preferred_endpoint_source=preferred_endpoint_source)
         except TypeError:
-            return fn()
+            try:
+                return fn(preferred_endpoint_id=preferred_endpoint_id)
+            except TypeError:
+                return fn()
 
     def resolve_endpoint_facts(self, *args, **kwargs) -> dict[str, Any]:
         fn = getattr(self._base, "resolve_endpoint_facts", None)
@@ -580,11 +591,20 @@ class MinionRunner:
         workspace.setdefault("work_order_id", self.pack.work_order_id)
         workspace.setdefault("review_tool_evidence_refs", self.review_tool_evidence_refs)
         workspace.setdefault("shell_mutation_violations", self.shell_mutation_violations)
+        current_repair_attempt = self._current_repair_attempt_payload()
+        if current_repair_attempt:
+            workspace.setdefault("current_repair_attempt", current_repair_attempt)
+        checkpoint_repair = (self.pack.metadata or {}).get("checkpoint_repair")
+        if isinstance(checkpoint_repair, dict):
+            workspace.setdefault("checkpoint_repair", dict(checkpoint_repair))
         if isinstance((self.pack.metadata or {}).get("review_target"), dict):
             review_target = dict((self.pack.metadata["review_target"] or {}))
             workspace.setdefault("review_target_run_id", str(review_target.get("run_id") or ""))
             workspace.setdefault("review_target_checkpoint_id", str(review_target.get("checkpoint_id") or ""))
             workspace.setdefault("review_target_commit_sha", str(review_target.get("commit_sha") or ""))
+            workspace.setdefault("review_target_gate_kind", str(review_target.get("gate_kind") or ""))
+            if isinstance(review_target.get("source_contract"), dict):
+                workspace.setdefault("review_target_source_contract", dict(review_target.get("source_contract") or {}))
         workspace.setdefault("current_milestone_index", self._current_milestone_index())
         workspace.setdefault("current_milestone_title", self._current_milestone_title())
         execution_runtime = MinionScopedExecutionRuntime(
@@ -726,8 +746,8 @@ class MinionRunner:
         try:
             value = float(raw)
         except (TypeError, ValueError):
-            value = 30.0
-        return max(0.1, min(300.0, value))
+            value = _DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS
+        return max(0.1, min(_MAX_MANAGER_TURN_TIMEOUT_SECONDS, value))
 
     def _apply_next_milestone_turn(self, turn: dict[str, Any], *, checkpoint_payload: dict[str, Any]) -> None:
         self.produced_artifacts.clear()
@@ -801,7 +821,7 @@ class MinionRunner:
             return (
                 "The milestone has uncommitted workspace changes and is not complete until a structured checkpoint "
                 "commit exists. Do not answer with final text. If implementation and verification are complete, call "
-                "`op_minion_checkpoint_commit` now. Do not use shell git add/commit; Pal needs the structured result "
+                "`op_minion_checkpoint_commit` now. Do not use op_exec_shell git add/commit; Pal needs the structured result "
                 "from `op_minion_checkpoint_commit` for manager reporting."
             )
         return (
@@ -1077,6 +1097,7 @@ class MinionRunner:
         return str(completion_policy.get("evidence") or "").strip().lower() == "git_commit" and bool(self.pack.allowed_capabilities)
 
     async def _execute_allowed_tool(self, execution_runtime: "MinionScopedExecutionRuntime", tool_call: CanonicalToolCall) -> CanonicalToolResult:
+        tool_call = self._tool_call_with_minion_defaults(tool_call)
         target_name = _effective_capability_name(tool_call)
         allowed = set(str(item) for item in self.pack.allowed_capabilities)
         if is_minion_capability_denied(tool_call.name) or is_minion_capability_denied(target_name):
@@ -1123,6 +1144,17 @@ class MinionRunner:
                 llm_text=policy_error,
                 status=RuntimeStatus.ERROR,
             )
+        policy_error = self._dedicated_workspace_tool_shell_command_error(target_name, tool_call)
+        if policy_error:
+            return CanonicalToolResult(
+                name=tool_call.name,
+                ok=False,
+                text=policy_error,
+                structured={"reason": "dedicated_workspace_tool_required", "capability": target_name},
+                call_id=tool_call.call_id,
+                llm_text=policy_error,
+                status=RuntimeStatus.ERROR,
+            )
         if await self._requires_approval(target_name, tool_call):
             decision = await self._request_approval(target_name, tool_call)
             if decision != "accept":
@@ -1142,6 +1174,42 @@ class MinionRunner:
         self._record_review_tool_evidence(target_name, tool_call, result)
         return result
 
+    def _tool_call_with_minion_defaults(self, tool_call: CanonicalToolCall) -> CanonicalToolCall:
+        if _effective_capability_name(tool_call) != "op_exec_shell":
+            return tool_call
+        effective_args = _effective_tool_args(tool_call)
+        cwd = str(effective_args.get("cwd") or "").strip()
+        workdir = str(effective_args.get("workdir") or "").strip()
+        default_cwd = self._default_shell_cwd()
+        if cwd:
+            return tool_call
+        if workdir:
+            effective_args["cwd"] = workdir
+        elif default_cwd:
+            effective_args["cwd"] = default_cwd
+        else:
+            return tool_call
+        if tool_call.name == "op_tool_call":
+            args = dict(tool_call.args or {})
+            args["args"] = effective_args
+            return CanonicalToolCall(name=tool_call.name, args=args, call_id=tool_call.call_id)
+        return CanonicalToolCall(name=tool_call.name, args=effective_args, call_id=tool_call.call_id)
+
+    def _default_shell_cwd(self) -> str:
+        workspace = dict(self.pack.workspace or {})
+        workspace_policy = dict(workspace.get("workspace_policy") or {})
+        if str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo":
+            for key in ("review_scratch_repo_path", "review_scratch_dir"):
+                value = str(workspace.get(key) or "").strip()
+                if value:
+                    return value
+            return ""
+        for key in ("repo_path", "task_repo_path", "target_repo_path"):
+            value = str(workspace.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
     def _runner_owned_git_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
         if str(target_name or "") != "op_exec_shell":
             return ""
@@ -1153,7 +1221,7 @@ class MinionRunner:
             return ""
         return (
             "Do not run git add, git commit, git reset, checkout/switch, clean, merge, rebase, tag, or push through "
-            "shell in this minion workspace. Use `op_minion_checkpoint_commit` for milestone checkpoint commits so "
+            "op_exec_shell in this minion workspace. Use `op_minion_checkpoint_commit` for milestone checkpoint commits so "
             "Pal can record structured commit evidence."
         )
 
@@ -1168,23 +1236,41 @@ class MinionRunner:
         allowed_root = scratch_repo or scratch
         allowed_label = "workspace.review_scratch_repo_path" if scratch_repo else "workspace.review_scratch_dir"
         if not allowed_root:
-            return "read_only_repo shell requires workspace.review_scratch_dir"
+            return "read_only_repo op_exec_shell requires workspace.review_scratch_dir"
         args = _effective_tool_args(tool_call)
         cmd = str(args.get("cmd") or "").strip()
         repo_path = str((self.pack.workspace or {}).get("repo_path") or "").strip()
         if repo_path and repo_path in cmd:
-            return "read_only_repo shell command must not reference the source repo path; use workspace.review_scratch_repo_path"
+            return "read_only_repo op_exec_shell command must not reference the source repo path; use workspace.review_scratch_repo_path"
         cwd = str(args.get("cwd") or args.get("workdir") or "").strip()
         if not cwd:
-            return f"read_only_repo shell must set cwd to {allowed_label}"
+            return f"read_only_repo op_exec_shell must set cwd to {allowed_label}"
         try:
             scratch_path = Path(allowed_root).resolve()
             cwd_path = Path(cwd).resolve()
         except Exception:
-            return "read_only_repo shell cwd is invalid"
+            return "read_only_repo op_exec_shell cwd is invalid"
         if not _path_is_relative_to(cwd_path, scratch_path):
-            return f"read_only_repo shell cwd must be under {allowed_label}"
+            return f"read_only_repo op_exec_shell cwd must be under {allowed_label}"
         return ""
+
+    def _dedicated_workspace_tool_shell_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
+        if str(target_name or "") != "op_exec_shell":
+            return ""
+        allowed = {str(item) for item in self.pack.allowed_capabilities}
+        if not _has_workspace_file_or_search_tools(allowed):
+            return ""
+        cmd = str(_effective_tool_args(tool_call).get("cmd") or "").strip()
+        blocked = _blocked_workspace_shell_command(cmd, allowed)
+        if not blocked:
+            return ""
+        hint = _workspace_shell_replacement_hint(blocked, allowed)
+        return (
+            f"Do not use shell command `{blocked}` for workspace file read/search/list/edit/write/delete tasks in this "
+            "minion workspace. "
+            f"{hint} "
+            "Use op_exec_shell only for tests, builds, scripts, Python probes, and read-only git verification."
+        )
 
     def _shell_audit_snapshot(self, target_name: str) -> dict[str, Any]:
         if str(target_name or "") != "op_exec_shell":
@@ -1198,15 +1284,28 @@ class MinionRunner:
         repo_path = str((self.pack.workspace or {}).get("repo_path") or "").strip()
         if not repo_path:
             return {}
+        if audit_read_only_repo:
+            scratch_repo = str((self.pack.workspace or {}).get("review_scratch_repo_path") or "").strip()
+            snapshot = {
+                "snapshot_kind": "read_only_repo",
+                "repo_path": repo_path,
+                "source_git": _git_workspace_snapshot(Path(repo_path)),
+            }
+            if scratch_repo:
+                snapshot["review_scratch_repo_path"] = scratch_repo
+                snapshot["scratch_tree"] = _file_tree_snapshot(Path(scratch_repo))
+            if not snapshot.get("source_git") and not snapshot.get("scratch_tree"):
+                return {}
+            return snapshot
         return _git_workspace_snapshot(Path(repo_path))
 
     def _record_shell_audit_violation(self, target_name: str, tool_call: CanonicalToolCall, before_snapshot: dict[str, Any]) -> None:
         if not before_snapshot or str(target_name or "") != "op_exec_shell":
             return
-        repo_path = str(before_snapshot.get("repo_path") or "")
-        after_snapshot = _git_workspace_snapshot(Path(repo_path))
-        if not after_snapshot or before_snapshot == after_snapshot:
+        after_snapshot = _shell_audit_after_snapshot(before_snapshot)
+        if not after_snapshot or not _shell_audit_snapshot_changed_meaningfully(before_snapshot, after_snapshot):
             return
+        repo_path = str(before_snapshot.get("review_scratch_repo_path") or before_snapshot.get("repo_path") or "")
         violation = {
             "violation_id": f"shell_mut_{uuid4().hex[:12]}",
             "kind": "shell_workspace_mutation",
@@ -1214,7 +1313,7 @@ class MinionRunner:
             "repo_path": repo_path,
             "before": before_snapshot,
             "after": after_snapshot,
-            "summary": "op_exec_shell changed the Git workspace; reviewer must verify this mutation before closing the milestone.",
+            "summary": "op_exec_shell changed an audited workspace; reviewer must rerun from a clean workspace before closing the milestone.",
         }
         self.shell_mutation_violations.append(violation)
         self._append_debug_log("shell_mutation_violation", violation)
@@ -1360,6 +1459,9 @@ class MinionRunner:
             checkpoint = await self._inspect_current_milestone_checkpoint()
             checkpoint_status = "claimed" if self._requires_checkpoint_review_gate() else "completed"
             if checkpoint.get("status") == "committed":
+                reuse_block = self._repair_reused_failed_checkpoint_payload(base_payload, checkpoint)
+                if reuse_block:
+                    return reuse_block
                 return {
                     **base_payload,
                     "status": checkpoint_status,
@@ -1410,6 +1512,27 @@ class MinionRunner:
             "evidence": evidence or "text_deliverable",
             **self._artifact_payload(),
             **planner_payload,
+        }
+
+    def _repair_reused_failed_checkpoint_payload(self, base_payload: dict[str, Any], checkpoint: dict[str, Any]) -> dict[str, Any]:
+        repair_attempt = self._current_repair_attempt_payload()
+        failed_commit_sha = str(repair_attempt.get("failed_commit_sha") or "").strip()
+        commit_sha = str(checkpoint.get("commit_sha") or "").strip()
+        if not failed_commit_sha or not commit_sha or commit_sha != failed_commit_sha:
+            return {}
+        return {
+            **base_payload,
+            "status": "blocked",
+            "reason": "repair_reused_failed_checkpoint",
+            "summary": (
+                "repair did not create a new checkpoint commit; the previous failed checkpoint commit "
+                f"{failed_commit_sha} cannot be resubmitted"
+            ),
+            "commit_sha": commit_sha,
+            "git_commit": checkpoint,
+            "repair_attempt": repair_attempt,
+            "shell_mutation_violations": list(self.shell_mutation_violations),
+            **self._artifact_payload(),
         }
 
     def _completion_evidence_present(self) -> bool:
@@ -2180,10 +2303,19 @@ def _resolve_minion_max_output_tokens(llm_runtime: Any, pack: TaskContextPack) -
     if explicit is not None:
         return explicit
     preferred_endpoint_id = _preferred_endpoint_id_from_pack(pack)
-    resolved = _runtime_max_output_tokens(llm_runtime, preferred_endpoint_id=preferred_endpoint_id)
+    preferred_endpoint_source = _preferred_endpoint_source_from_pack(pack)
+    resolved = _runtime_max_output_tokens(
+        llm_runtime,
+        preferred_endpoint_id=preferred_endpoint_id,
+        preferred_endpoint_source=preferred_endpoint_source,
+    )
     if resolved is not None:
         return resolved
-    facts = _runtime_endpoint_facts(llm_runtime, preferred_endpoint_id=preferred_endpoint_id)
+    facts = _runtime_endpoint_facts(
+        llm_runtime,
+        preferred_endpoint_id=preferred_endpoint_id,
+        preferred_endpoint_source=preferred_endpoint_source,
+    )
     fact_max = _optional_positive_int(facts.get("max_output_tokens")) if facts else None
     if fact_max is not None:
         return fact_max
@@ -2203,6 +2335,9 @@ def _minion_llm_request_metadata(pack: TaskContextPack, run_id: str) -> dict[str
     preferred_endpoint_id = _preferred_endpoint_id_from_pack(pack)
     if preferred_endpoint_id:
         metadata["preferred_endpoint_id"] = preferred_endpoint_id
+        preferred_endpoint_source = _preferred_endpoint_source_from_pack(pack)
+        if preferred_endpoint_source:
+            metadata["preferred_endpoint_source"] = preferred_endpoint_source
     return metadata
 
 
@@ -2212,27 +2347,51 @@ def _preferred_endpoint_id_from_pack(pack: TaskContextPack) -> str | None:
     return value or None
 
 
-def _runtime_max_output_tokens(llm_runtime: Any, *, preferred_endpoint_id: str | None = None) -> int | None:
+def _preferred_endpoint_source_from_pack(pack: TaskContextPack) -> str | None:
+    metadata = pack.metadata if isinstance(pack.metadata, dict) else {}
+    value = str(metadata.get("preferred_endpoint_source") or "").strip()
+    return value or None
+
+
+def _runtime_max_output_tokens(
+    llm_runtime: Any,
+    *,
+    preferred_endpoint_id: str | None = None,
+    preferred_endpoint_source: str | None = None,
+) -> int | None:
     resolver = getattr(llm_runtime, "resolve_max_output_tokens", None)
     if not callable(resolver):
         return None
     with contextlib.suppress(Exception):
         try:
-            return _optional_positive_int(resolver(preferred_endpoint_id=preferred_endpoint_id))
+            return _optional_positive_int(
+                resolver(preferred_endpoint_id=preferred_endpoint_id, preferred_endpoint_source=preferred_endpoint_source)
+            )
         except TypeError:
-            return _optional_positive_int(resolver())
+            try:
+                return _optional_positive_int(resolver(preferred_endpoint_id=preferred_endpoint_id))
+            except TypeError:
+                return _optional_positive_int(resolver())
     return None
 
 
-def _runtime_endpoint_facts(llm_runtime: Any, *, preferred_endpoint_id: str | None = None) -> dict[str, Any]:
+def _runtime_endpoint_facts(
+    llm_runtime: Any,
+    *,
+    preferred_endpoint_id: str | None = None,
+    preferred_endpoint_source: str | None = None,
+) -> dict[str, Any]:
     resolver = getattr(llm_runtime, "resolve_endpoint_facts", None)
     if not callable(resolver):
         return {}
     with contextlib.suppress(Exception):
         try:
-            facts = resolver(preferred_endpoint_id=preferred_endpoint_id)
+            facts = resolver(preferred_endpoint_id=preferred_endpoint_id, preferred_endpoint_source=preferred_endpoint_source)
         except TypeError:
-            facts = resolver()
+            try:
+                facts = resolver(preferred_endpoint_id=preferred_endpoint_id)
+            except TypeError:
+                facts = resolver()
         return dict(facts) if isinstance(facts, dict) else {}
     return {}
 
@@ -2250,14 +2409,271 @@ def _max_output_tokens_from_context_window(context_window: int, llm_runtime: Any
     return max(512, min(cap, max(floor, context_fraction), usable))
 
 
-_RUNNER_OWNED_GIT_MUTATION_RE = re.compile(
-    r"(?:^|[;&|()]\s*)git\s+"
-    r"(?:add|commit|reset|checkout|switch|clean|rm|mv|merge|rebase|tag|push|branch)\b"
-)
+_RUNNER_OWNED_GIT_MUTATION_COMMANDS = {
+    "add",
+    "checkout",
+    "cherry-pick",
+    "clean",
+    "commit",
+    "merge",
+    "mv",
+    "push",
+    "rebase",
+    "reset",
+    "restore",
+    "revert",
+    "rm",
+    "stash",
+    "switch",
+    "tag",
+}
+_GIT_GLOBAL_OPTIONS_WITH_VALUE = {
+    "-C",
+    "-c",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree",
+}
+_GIT_BRANCH_MUTATING_OPTIONS = {
+    "-c",
+    "-C",
+    "-d",
+    "-D",
+    "-f",
+    "-m",
+    "-M",
+    "-t",
+    "-u",
+    "--copy",
+    "--delete",
+    "--edit-description",
+    "--force",
+    "--move",
+    "--no-track",
+    "--set-upstream-to",
+    "--track",
+    "--unset-upstream",
+}
+_GIT_BRANCH_READ_ONLY_OPTIONS = {
+    "-a",
+    "-l",
+    "-r",
+    "-v",
+    "-vv",
+    "--all",
+    "--color",
+    "--column",
+    "--contains",
+    "--format",
+    "--ignore-case",
+    "--list",
+    "--merged",
+    "--no-color",
+    "--no-column",
+    "--no-contains",
+    "--no-merged",
+    "--points-at",
+    "--remotes",
+    "--show-current",
+    "--sort",
+    "--verbose",
+}
+
+_SHELL_SEGMENT_RE = re.compile(r"(?:&&|\|\||[;|])")
+_SHELL_READ_COMMANDS = {"cat", "head", "tail"}
+_SHELL_SEARCH_COMMANDS = {"grep", "rg"}
+_SHELL_EDIT_COMMANDS = {"sed", "awk"}
+_SHELL_WRITE_COMMANDS = {"tee"}
+_SHELL_REDIRECT_WRITE_COMMANDS = {"cat", "echo", "printf"}
+_SHELL_WRAPPER_COMMANDS = {"sudo", "command", "builtin", "time", "nohup"}
+_SHELL_GIT_WORKSPACE_LIST_COMMANDS = {"ls-files"}
+
+
+def _has_workspace_file_or_search_tools(allowed: set[str]) -> bool:
+    return bool(
+        allowed
+        & {
+            "op_workspace_file_read",
+            "op_workspace_file_edit",
+            "op_workspace_file_write",
+            "op_workspace_file_delete",
+            "op_workspace_search",
+            "op_workspace_tree",
+            "op_workspace_read",
+        }
+    )
+
+
+def _blocked_workspace_shell_command(cmd: str, allowed: set[str]) -> str:
+    for segment in _SHELL_SEGMENT_RE.split(str(cmd or "")):
+        blocked = _blocked_workspace_shell_segment(segment, allowed)
+        if blocked:
+            return blocked
+    return ""
+
+
+def _blocked_workspace_shell_segment(segment: str, allowed: set[str]) -> str:
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        tokens = segment.split()
+    if not tokens:
+        return ""
+    action = _shell_action_token(tokens)
+    if not action:
+        return ""
+    action = Path(action).name
+    if action in _SHELL_READ_COMMANDS and allowed & {"op_workspace_file_read", "op_workspace_read"}:
+        return action
+    if action == "find" and allowed & {"op_workspace_file_read", "op_workspace_read"}:
+        exec_read = _find_exec_read_command(tokens[1:])
+        if exec_read:
+            return exec_read
+    if action in _SHELL_SEARCH_COMMANDS and allowed & {"op_workspace_search", "op_workspace_tree"}:
+        return action
+    if action == "git" and allowed & {"op_workspace_search", "op_workspace_tree"}:
+        subcommand, _args = _git_subcommand_from_tokens(tokens[1:])
+        if subcommand in _SHELL_GIT_WORKSPACE_LIST_COMMANDS:
+            return f"git {subcommand}"
+    if action in _SHELL_EDIT_COMMANDS and "op_workspace_file_edit" in allowed:
+        return action
+    if action in _SHELL_WRITE_COMMANDS and "op_workspace_file_write" in allowed:
+        return action
+    if action in _SHELL_REDIRECT_WRITE_COMMANDS and _segment_has_write_redirect(segment) and "op_workspace_file_write" in allowed:
+        return action
+    if action == "sed" and any(token == "-i" or token.startswith("-i") for token in tokens[1:]) and "op_workspace_file_edit" in allowed:
+        return action
+    return ""
+
+
+def _workspace_shell_replacement_hint(blocked: str, allowed: set[str]) -> str:
+    command = str(blocked or "").strip()
+    if command in {"cat", "head", "tail"}:
+        if allowed & {"op_workspace_file_read", "op_workspace_read"}:
+            return "Use op_workspace_file_read(path='relative/file', start_line=..., limit_lines=...) for file inspection; for command output, rerun the command without head/tail/cat pipelines."
+    if command in {"grep", "rg"} and "op_workspace_search" in allowed:
+        return "Use op_workspace_search(query='text', path='relative/dir') for workspace text search."
+    if command == "git ls-files" and "op_workspace_tree" in allowed:
+        return "Use op_workspace_tree(path='relative/dir', max_depth=..., limit=...) for workspace listing; use git status --short or git diff --name-only only when you specifically need changed-file evidence."
+    if command in {"sed", "awk"} and "op_workspace_file_edit" in allowed:
+        return "Use op_workspace_file_read first, then op_workspace_file_edit(path='relative/file', old_string='...', new_string='...') for edits."
+    if command == "tee" and "op_workspace_file_write" in allowed:
+        return "Use op_workspace_file_write(path='relative/file', content='...') for file writes."
+    if command in {"echo", "printf"} and "op_workspace_file_write" in allowed:
+        return "Use op_workspace_file_write(path='relative/file', content='...') for file writes."
+    return "Use the dedicated workspace tool for that file operation."
+
+
+def _shell_action_token(tokens: list[str]) -> str:
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        name = Path(token).name
+        if _looks_like_env_assignment(token):
+            index += 1
+            continue
+        if name in _SHELL_WRAPPER_COMMANDS:
+            index += 1
+            continue
+        if name == "env":
+            index += 1
+            while index < len(tokens) and (tokens[index].startswith("-") or _looks_like_env_assignment(tokens[index])):
+                index += 1
+            continue
+        if name == "xargs":
+            for candidate in tokens[index + 1 :]:
+                if candidate.startswith("-") or candidate in {"{}", "{", "}"}:
+                    continue
+                return Path(candidate).name
+            return name
+        return name
+    return ""
+
+
+def _looks_like_env_assignment(token: str) -> bool:
+    if token.startswith("-") or "/" in token:
+        return False
+    name, separator, _value = token.partition("=")
+    return bool(separator and name and all(ch.isalnum() or ch == "_" for ch in name))
+
+
+def _find_exec_read_command(tokens: list[str]) -> str:
+    for index, token in enumerate(tokens):
+        if token not in {"-exec", "-execdir"}:
+            continue
+        for candidate in tokens[index + 1 :]:
+            if candidate in {";", r"\;", "+", "{}"} or candidate.startswith("-"):
+                continue
+            name = Path(candidate).name
+            if name in _SHELL_READ_COMMANDS:
+                return name
+            break
+    return ""
+
+
+def _segment_has_write_redirect(segment: str) -> bool:
+    return bool(re.search(r"(^|[^0-9])(?:>>?|<<)", str(segment or "")))
 
 
 def _contains_runner_owned_git_mutation(cmd: str) -> bool:
-    return bool(_RUNNER_OWNED_GIT_MUTATION_RE.search(str(cmd or "")))
+    for segment in re.split(r"[;&|()]+", str(cmd or "")):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            tokens = segment.split()
+        for index, token in enumerate(tokens):
+            if token != "git":
+                continue
+            subcommand, args = _git_subcommand_from_tokens(tokens[index + 1 :])
+            if subcommand in _RUNNER_OWNED_GIT_MUTATION_COMMANDS:
+                return True
+            if subcommand == "branch" and _git_branch_args_mutate(args):
+                return True
+    return False
+
+
+def _git_subcommand_from_tokens(tokens: list[str]) -> tuple[str, list[str]]:
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            index += 1
+            break
+        if token in _GIT_GLOBAL_OPTIONS_WITH_VALUE:
+            index += 2
+            continue
+        if any(token.startswith(option + "=") for option in _GIT_GLOBAL_OPTIONS_WITH_VALUE if option.startswith("--")):
+            index += 1
+            continue
+        if token.startswith("-C") and token != "-C":
+            index += 1
+            continue
+        if token.startswith("-c") and token != "-c":
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return token, tokens[index + 1 :]
+    if index < len(tokens):
+        return tokens[index], tokens[index + 1 :]
+    return "", []
+
+
+def _git_branch_args_mutate(args: list[str]) -> bool:
+    if not args:
+        return False
+    if any(arg in _GIT_BRANCH_MUTATING_OPTIONS for arg in args):
+        return True
+    for arg in args:
+        if not arg.startswith("-"):
+            return True
+        option = arg.split("=", 1)[0]
+        if option not in _GIT_BRANCH_READ_ONLY_OPTIONS:
+            return True
+    return False
 
 
 def _git_workspace_snapshot(repo_path: Path) -> dict[str, Any]:
@@ -2276,6 +2692,116 @@ def _git_workspace_snapshot(repo_path: Path) -> dict[str, Any]:
         "head": head.stdout.strip(),
         "status": status.stdout.strip(),
     }
+
+
+_FILE_TREE_IGNORED_DIRS = {
+    ".git",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "venv",
+    "node_modules",
+    "dist",
+    "build",
+    "target",
+    "htmlcov",
+    "coverage",
+}
+_FILE_TREE_IGNORED_SUFFIXES = {".pyc", ".pyo", ".coverage"}
+
+
+def _file_tree_snapshot(root_path: Path) -> dict[str, Any]:
+    root = Path(root_path)
+    if not root.exists() or not root.is_dir():
+        return {}
+    entries: dict[str, str] = {}
+    try:
+        paths = sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())
+    except Exception:
+        return {}
+    for path in paths:
+        try:
+            rel_path = path.relative_to(root)
+        except ValueError:
+            continue
+        rel = rel_path.as_posix()
+        parts = rel_path.parts
+        if any(part in _FILE_TREE_IGNORED_DIRS or part.endswith(".egg-info") for part in parts):
+            continue
+        if path.is_dir():
+            continue
+        if path.suffix in _FILE_TREE_IGNORED_SUFFIXES:
+            continue
+        try:
+            if path.is_symlink():
+                entries[rel] = f"symlink:{path.readlink()}"
+                continue
+            if not path.is_file():
+                continue
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            entries[rel] = f"file:{path.stat().st_size}:{digest}"
+        except Exception:
+            entries[rel] = "unreadable"
+    tree_digest = hashlib.sha256(json.dumps(entries, sort_keys=True).encode("utf-8")).hexdigest()
+    return {"root_path": str(root), "digest": tree_digest, "entries": entries}
+
+
+def _shell_audit_after_snapshot(before: dict[str, Any]) -> dict[str, Any]:
+    if str(before.get("snapshot_kind") or "") == "read_only_repo":
+        snapshot = {
+            "snapshot_kind": "read_only_repo",
+            "repo_path": str(before.get("repo_path") or ""),
+            "source_git": _git_workspace_snapshot(Path(str(before.get("repo_path") or ""))),
+        }
+        scratch_repo = str(before.get("review_scratch_repo_path") or "").strip()
+        if scratch_repo:
+            snapshot["review_scratch_repo_path"] = scratch_repo
+            snapshot["scratch_tree"] = _file_tree_snapshot(Path(scratch_repo))
+        return snapshot
+    repo_path = str(before.get("repo_path") or "").strip()
+    return _git_workspace_snapshot(Path(repo_path)) if repo_path else {}
+
+
+def _shell_audit_snapshot_changed_meaningfully(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    if not before or not after:
+        return False
+    if str(before.get("snapshot_kind") or "") == "read_only_repo":
+        source_changed = _git_workspace_snapshot_changed_meaningfully(
+            dict(before.get("source_git") or {}),
+            dict(after.get("source_git") or {}),
+        )
+        scratch_changed = _file_tree_snapshot_changed_meaningfully(
+            dict(before.get("scratch_tree") or {}),
+            dict(after.get("scratch_tree") or {}),
+        )
+        return source_changed or scratch_changed
+    return _git_workspace_snapshot_changed_meaningfully(before, after)
+
+
+def _file_tree_snapshot_changed_meaningfully(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    if not before or not after:
+        return False
+    return str(before.get("digest") or "") != str(after.get("digest") or "")
+
+
+def _git_workspace_snapshot_changed_meaningfully(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    if not before or not after:
+        return False
+    if str(before.get("head") or "") != str(after.get("head") or ""):
+        return True
+    return _git_status_without_ignored(before.get("status")) != _git_status_without_ignored(after.get("status"))
+
+
+def _git_status_without_ignored(status: Any) -> str:
+    lines = []
+    for line in str(status or "").splitlines():
+        if line.startswith("!! "):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def _extract_ask_user_question_payload(text: str) -> dict[str, Any]:

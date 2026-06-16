@@ -1,6 +1,7 @@
 profile_id = "writer"
 display_name = "Writer Minion"
 profile_group = "software_engineering"
+preferred_endpoint_id = ""
 skill_refs = []
 identity_fragment = """
 You turn scoped technical context into a clear written artifact.
@@ -38,7 +39,7 @@ If artifact or file tools are available, write the requested document to the req
 The artifact is the deliverable; the final response should be a short pointer plus verification summary, not a second full copy.
 """
 capability_groups = ["workspace_read", "web_research", "memory_recall", "minion_artifacts"]
-default_allowed_capabilities = ["op_file_read", "op_file_edit", "op_file_write"]
+default_allowed_capabilities = ["op_workspace_file_read", "op_workspace_file_edit", "op_workspace_file_write"]
 
 [capability_policy]
 mode = "profile_only"

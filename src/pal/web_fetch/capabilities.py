@@ -296,9 +296,9 @@ class WebFetchIntrospectionProvider:
         _ = call
         return IntrospectionResult(
             status=RuntimeStatus.INVALID,
-            text="op_web_screenshot requires async turn context",
+            text="web_screenshot requires async turn context",
             structured={"reason": "async_required"},
-            llm_text="op_web_screenshot requires async turn context.",
+            llm_text="web_screenshot requires async turn context.",
         )
 
     @capability_action(

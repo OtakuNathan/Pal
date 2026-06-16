@@ -281,32 +281,32 @@ continuity 不绑定单个 minions 进程。
 
 当前 minion subsystem 暴露给 `Pal` 的 capability shape 是：
 
-- `intro_task_search`
-- `intro_task_read`
-- `intro_work_order_search`
-- `intro_work_order_read`
-- `intro_work_order_draft_search`
-- `intro_work_order_draft_read`
-- `intro_minion_list`
-- `intro_minion_read`
-- `intro_minion_profile_list`
-- `intro_minion_profile_read`
-- `op_minion_draft_work_order`
-- `op_minion_promote_work_order_draft`
-- `op_minion_spawn`
-- `op_minion_kill`
-- `op_minion_finalize`
+- `task_search`
+- `task_read`
+- `work_order_search`
+- `work_order_read`
+- `work_order_draft_search`
+- `work_order_draft_read`
+- `minion_list`
+- `minion_read`
+- `minion_profile_list`
+- `minion_profile_read`
+- `minion_draft_work_order`
+- `minion_promote_work_order_draft`
+- `minion_spawn`
+- `minion_kill`
+- `minion_finalize`
 
 其中：
 
 - `intro_*` 允许 `Pal` 读取任务、work order、draft、profile 和 active runner 状态
-- `op_minion_spawn` 是唯一启动入口
-- `op_minion_kill` 是正常治理动作
+- `minion_spawn` 是唯一启动入口
+- `minion_kill` 是正常治理动作
 - 没有单独的 replace capability；替换就是 `kill` 后用 checkpoint continuity 重新 `spawn`
 
 这些 capability 暴露给 `Pal`，不暴露给 runner。runner 不能看到 `intro_*` 或 `op_minion_*`，也不能递归 spawn 新 runner。
 
-runner 的能力池可以从 `Pal` 当前 capability registry 继承后过滤，但 LLM-facing tool surface 应保持小：暴露 discovery/read/call 元工具，以及少量常驻干活工具（`op_file_read`、`op_file_edit`、`op_file_write`、`op_exec_shell`、`op_web_search`、`op_web_read`、只读 `op_memory_recall`）。discovery/read 必须只返回该 runner 已允许且未被黑名单过滤的 capability。
+runner 的能力池可以从 `Pal` 当前 capability registry 继承后过滤，但 LLM-facing tool surface 应保持小：暴露 discovery/read/call 元工具，以及少量常驻干活工具（`file_read`、`file_edit`、`file_write`、`shell`、`web_search`、`web_read`、只读 `memory_recall`）。discovery/read 必须只返回该 runner 已允许且未被黑名单过滤的 capability。
 
 ## minions Observation Contract
 

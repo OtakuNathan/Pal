@@ -206,7 +206,7 @@ class ArtifactManager:
                 representation=representation,
                 metadata=self._record_dict(record),
                 reason="representation_unavailable",
-                next_actions=("Use op_artifact_info to inspect available representations.",),
+                next_actions=("Use artifact_info to inspect available representations.",),
             )
         if selected.representation_kind == REPRESENTATION_METADATA:
             return ArtifactReadResult(
@@ -226,7 +226,7 @@ class ArtifactManager:
                 representation=selected.representation_kind,
                 metadata={**self._record_dict(record), "representation": self._representation_dict(selected)},
                 reason="representation_not_text_readable",
-                next_actions=("Use a vision-capable model for image representations.", "Use op_artifact_info for metadata."),
+                next_actions=("Use a vision-capable model for image representations.", "Use artifact_info for metadata."),
             )
         text = Path(selected.path).read_text(encoding="utf-8", errors="replace") if selected.path else selected.text_preview
         truncated = len(text) > max_chars
@@ -777,9 +777,9 @@ def _snippet(text: str, terms: list[str], *, max_chars: int) -> str:
 
 def _next_actions_for(record: ArtifactRecord) -> tuple[str, ...]:
     if record.kind == ARTIFACT_KIND_PDF:
-        return ("Use op_artifact_grep for specific terms.", "Use op_artifact_read with page or chunk for focused reading.")
+        return ("Use artifact_grep for specific terms.", "Use artifact_read with page or chunk for focused reading.")
     if record.kind == ARTIFACT_KIND_AUDIO:
-        return ("Use op_artifact_transcribe if a transcript is needed.",)
+        return ("Use artifact_transcribe if a transcript is needed.",)
     if record.kind == ARTIFACT_KIND_IMAGE:
         return ("Use a vision-capable model for image content.",)
     return ()

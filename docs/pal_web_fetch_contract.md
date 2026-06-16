@@ -66,7 +66,7 @@ class WebFetchProviderPort(Protocol):
 - `metadata`（例如 `description`、`canonical_url`、`language`）
 - `response_headers`（只保留安全排错字段）
 
-LLM-facing 的 `op_web_read` 仍然返回紧凑文本，但 structured payload 会带上这些字段，并用 `raw_content_available` / `raw_content_truncated` 标明是否保留了原始内容，方便引用、排错和后续处理。
+LLM-facing 的 `web_read` 仍然返回紧凑文本，但 structured payload 会带上这些字段，并用 `raw_content_available` / `raw_content_truncated` 标明是否保留了原始内容，方便引用、排错和后续处理。
 
 ### BrowserServiceManager
 
@@ -108,19 +108,19 @@ Playwright 的进程管理器。负责：
 
 | canonical_path | 作用 |
 |----------------|------|
-| `intro_module_web_fetch_show` | 模块概览 |
-| `intro_module_web_fetch_list_providers` | 列出所有 provider |
-| `intro_module_web_fetch_active_provider` | 当前活跃 provider |
-| `op_web_read` | 抓取网页内容 |
+| `${1}_show` | 模块概览 |
+| `${1}_providers` | 列出所有 provider |
+| `${1}_provider` | 当前活跃 provider |
+| `web_read` | 抓取网页内容 |
 | `op_web_fetch_mgmt_set_active_provider` | 切换活跃 provider |
 
 ### Provider 实例级能力
 
 每个注册的 provider 会自动生成实例级能力：
 
-- `intro_provider_web_fetch_health::<provider_id>`
-- `intro_provider_web_fetch_show::<provider_id>`
-- `intro_provider_web_fetch_auth_state::<provider_id>`
+- `${1}_provider_health::<provider_id>`
+- `${1}_provider_show::<provider_id>`
+- `${1}_provider_state::<provider_id>`
 - `op_web_fetch_mgmt_enable::<provider_id>`
 - `op_web_fetch_mgmt_disable::<provider_id>`
 - `op_web_fetch_mgmt_set_config::<provider_id>`

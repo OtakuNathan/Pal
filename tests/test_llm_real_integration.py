@@ -19,6 +19,7 @@ from pal.behavior import BehaviorRepository, BehaviorAffordanceModel, BehaviorSk
 from pal.bootstrap import compose_runtime
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import EndpointConfig, ResponseHandle
+from pal.core.runtime_config import RuntimeConfig
 from pal.foundation import EventEnvelope, PalV2Database
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
 from pal.llm import EndpointResolver, LLMRuntime, LiteLLMCredentialResolver
@@ -168,6 +169,7 @@ def _extra_body_for_model(model: str) -> dict[str, Any]:
 
 def _real_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
     api_key, base_url, model = _configured_real_llm()
+    timeout_seconds = float(_env("PAL_TEST_LLM_TIMEOUT_SECONDS") or "180")
     endpoint = SimpleNamespace(
         endpoint_id="real-test",
         provider="openai_compatible",
@@ -191,7 +193,11 @@ def _real_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
         endpoint_invoker=_HTTPInvoker(
             api_key=api_key,
             extra_body=_extra_body_for_model(model),
-            timeout_seconds=float(_env("PAL_TEST_LLM_TIMEOUT_SECONDS") or "180"),
+            timeout_seconds=timeout_seconds,
+        ),
+        config=RuntimeConfig(
+            llm_request_timeout_seconds=timeout_seconds,
+            llm_compaction_timeout_seconds=timeout_seconds,
         ),
     )
 
@@ -260,7 +266,7 @@ def _seed_real_endpoint(runtime_root: Path, *, endpoint_id: str = "real_e2e") ->
 
 def _skill_system_prompt() -> str:
     fragments = SkillPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext())
-    skill_policy = fragments[0].content
+    skill_policy = "\n\n".join(fragment.content for fragment in fragments)
     return (
         "You are Pal in a real integration test. Follow the skill policy exactly. "
         "Use the available skill tools when the policy calls for them. "
@@ -533,7 +539,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
 
         result = runtime.compact_memory_structured(
             (
-                "Nathan calls Pal his cyber son, not a generic tool. "
+                "The user treats Pal as a personal assistant, not a generic tool. "
                 "Pal should recall relevant repair experience when a tool call fails. "
                 "A recent repair found that mutating frozen ResponseHandle broke socket streaming."
             ),
@@ -647,7 +653,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                 _run_real_skill_tool_dialog(
                     runtime,
                     service,
-                    f"Save this skill candidate now by calling op_skill_commit. candidate_id: {candidate.candidate_id}",
+                    f"Save this skill candidate now by calling skill_commit. candidate_id: {candidate.candidate_id}",
                     ["op_skill_commit"],
                     required_tool_names=["op_skill_commit"],
                 )
@@ -661,8 +667,8 @@ class RealLLMIntegrationTests(unittest.TestCase):
                     service,
                     (
                         "Use the named skill safe.git.diff_review and tell me what to do before preparing a git commit. "
-                        "You must call op_skill_search first. When the search result shows safe.git.diff_review is injectable, "
-                        "immediately call op_skill_inject with skill_id safe.git.diff_review before any final answer. "
+                        "You must call skill_search first. When the search result shows safe.git.diff_review is injectable, "
+                        "immediately call skill_inject with skill_id safe.git.diff_review before any final answer. "
                         "Do not stop after search."
                     ),
                     ["op_skill_search", "op_skill_inject"],
@@ -784,11 +790,11 @@ class RealLLMIntegrationTests(unittest.TestCase):
                         work_order_id="wo_real_minion_recall",
                         goal="Recover from a failing tool call by following the runner recall rule.",
                         instruction=(
-                            "First call `op_exec_shell` with command `simulate failure`. "
+                            "First call `shell` with command `simulate failure`. "
                             "It will fail. Then obey the system rule for failed tool calls."
                         ),
-                        acceptance_criteria=["op_memory_recall is called after the failed op_exec_shell"],
-                        allowed_capabilities=["op_exec_shell", "op_memory_recall"],
+                        acceptance_criteria=["memory_recall is called after the failed shell"],
+                        allowed_capabilities=["shell", "op_memory_recall"],
                         continuity={"current_milestone": {"milestone_index": 0, "milestone_id": "m0", "title": "Recall after failure"}},
                         metadata={"max_tool_rounds": 4, "max_output_tokens": 1000},
                         resolved_profile={
@@ -801,9 +807,9 @@ class RealLLMIntegrationTests(unittest.TestCase):
 
                 class FakeExecution:
                     def get_capability_spec(self, name):
-                        if name == "op_exec_shell":
+                        if name == "shell":
                             return {
-                                "name": "op_exec_shell",
+                                "name": "shell",
                                 "description": "Simulated shell execution. This test tool always fails.",
                                 "parameters_schema": {
                                     "type": "object",
@@ -829,12 +835,12 @@ class RealLLMIntegrationTests(unittest.TestCase):
                     async def execute_tool_async(self, call, **kwargs):
                         _ = kwargs
                         executed.append(call.name)
-                        if call.name == "op_exec_shell":
+                        if call.name == "shell":
                             return CanonicalToolResult(
                                 name=call.name,
                                 ok=False,
                                 text="simulated command failed",
-                                llm_text="op_exec_shell failed: simulated failure. Use recall before retrying, debugging further, or reporting blocked.",
+                                llm_text="shell failed: simulated failure. Use recall before retrying, debugging further, or reporting blocked.",
                                 structured={"returncode": 1, "stderr": "simulated failure"},
                                 status=RuntimeStatus.ERROR,
                             )
@@ -867,9 +873,9 @@ class RealLLMIntegrationTests(unittest.TestCase):
                 ).run()
 
                 self.assertEqual(code, 0)
-                self.assertIn("op_exec_shell", executed)
+                self.assertIn("shell", executed)
                 self.assertIn("op_memory_recall", executed)
-                self.assertLess(executed.index("op_exec_shell"), executed.index("op_memory_recall"))
+                self.assertLess(executed.index("shell"), executed.index("op_memory_recall"))
                 terminal = next(event for event in events if event["event_kind"] == "terminal")
                 self.assertIn(terminal["payload"]["status"], {"completed", "blocked"})
             finally:
@@ -903,7 +909,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                     work_order_id="wo_real_manager_glm",
                     goal="Use the shell capability to write the manager integration marker file.",
                     instruction=(
-                        "You MUST call `op_exec_shell` exactly once. Do not answer in text before the tool call. "
+                        "You MUST call `shell` exactly once. Do not answer in text before the tool call. "
                         "Use `cwd` equal to `workspace.repo_path` from the task JSON. "
                         "Use this exact cmd value: "
                         "\"python -c \\\"from pathlib import Path; "
@@ -911,7 +917,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                         "After the tool result succeeds, stop with a concise milestone summary."
                     ),
                     acceptance_criteria=["status.txt contains MINION_MANAGER_GLM_OK"],
-                    allowed_capabilities=["op_exec_shell"],
+                    allowed_capabilities=["shell"],
                     approval_policy={"high_risk_capabilities": [], "decision_timeout_seconds": 1},
                     continuity={
                         "current_milestone": {
@@ -938,7 +944,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                         "identity_fragment": "You are a strict integration-test task runner.",
                         "behavior_fragment": (
                             "Use the provided capability to complete the milestone. "
-                            "A text-only response without `op_exec_shell` is a failed task."
+                            "A text-only response without `shell` is a failed task."
                         ),
                         "output_contract_fragment": "Report the confirmed tool result and milestone completion.",
                     },
@@ -965,7 +971,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                 self.assertIn(detail["status"], {"completed", "blocked", "failed"})
                 self.assertTrue(detail["last_event_at"])
                 self.assertEqual(detail["last_phase"], "milestone_finalizing")
-                self.assertEqual(detail["last_tool_call"]["target_name"], "op_minion_checkpoint_commit")
+                self.assertEqual(detail["last_tool_call"]["target_name"], "checkpoint_commit")
                 self.assertGreaterEqual(detail["llm_round_count"], 1)
                 self.assertGreaterEqual(detail["tool_call_count"], 1)
                 metadata = (detail["work_order_snapshot"].get("work_order") or {}).get("metadata") or {}
@@ -979,8 +985,8 @@ class RealLLMIntegrationTests(unittest.TestCase):
                     for event in progress_events
                     if event.get("payload", {}).get("phase") == "tool_call_completed"
                 ]
-                self.assertIn("op_exec_shell", completed_targets)
-                self.assertIn("op_minion_checkpoint_commit", completed_targets)
+                self.assertIn("shell", completed_targets)
+                self.assertIn("checkpoint_commit", completed_targets)
             finally:
                 if client is not None:
                     with contextlib.suppress(Exception):
@@ -1021,7 +1027,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                             "Return ONLY one JSON object. No markdown. Schema: "
                             "{\"title\": string, \"goal\": string, \"instruction\": string, "
                             "\"milestones\": [{\"title\": string, \"acceptance_criteria\": [string]}]}. "
-                            "The work order must tell a coder minion to call op_exec_shell with cwd equal to workspace.repo_path "
+                            "The work order must tell a coder minion to call shell with cwd equal to workspace.repo_path "
                             "and create status.txt containing exactly MINION_TEAM_OK."
                         ),
                         acceptance_criteria=["planner returns one valid JSON work order"],
@@ -1060,7 +1066,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                         instruction=(
                             "Review this planner JSON for a coder handoff. Return ONLY JSON with schema: "
                             "{\"approved\": boolean, \"issues\": [string], \"revised_instruction\": string}. "
-                            "Approve only if it is one milestone, tells coder to use op_exec_shell, and requires status.txt "
+                            "Approve only if it is one milestone, tells coder to use shell, and requires status.txt "
                             "to contain MINION_TEAM_OK. Planner JSON: "
                             f"{json.dumps(plan, ensure_ascii=False, sort_keys=True)}"
                         ),
@@ -1091,17 +1097,17 @@ class RealLLMIntegrationTests(unittest.TestCase):
                 review = _extract_json_object(_terminal_summary(reviewer_events))
                 review_instruction = str(review.get("revised_instruction") or plan.get("instruction") or json.dumps(plan, ensure_ascii=False))
                 self.assertIn("MINION_TEAM_OK", review_instruction)
-                self.assertIn("op_exec_shell", review_instruction)
+                self.assertIn("shell", review_instruction)
 
                 slim_bundle = build_slim_minion_runtime(runtime_root)
                 reviewed_instruction = review_instruction
                 coder_instruction = (
                     f"Reviewer-approved instruction: {reviewed_instruction}\n"
-                    "Hard execution requirement for this test: first call op_exec_shell with cwd equal to workspace.repo_path. "
+                    "Hard execution requirement for this test: first call shell with cwd equal to workspace.repo_path. "
                     "Use cmd exactly: "
                     "\"python -c \\\"from pathlib import Path; "
                     "Path('status.txt').write_text('MINION_TEAM_OK', encoding='utf-8')\\\"\". "
-                    "After the shell tool succeeds, call op_minion_checkpoint_commit for the current milestone. "
+                    "After the shell tool succeeds, call checkpoint_commit for the current milestone. "
                     "Only after the checkpoint commit succeeds, stop with a concise milestone summary."
                 )
                 coder_pack = prepare_git_task_environment(
@@ -1111,7 +1117,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                         goal=str(plan.get("goal") or "Create the marker file."),
                         instruction=coder_instruction,
                         acceptance_criteria=["status.txt contains MINION_TEAM_OK"],
-                        allowed_capabilities=["op_exec_shell", "op_minion_checkpoint_commit"],
+                        allowed_capabilities=["shell", "checkpoint_commit"],
                         approval_policy={"high_risk_capabilities": [], "decision_timeout_seconds": 1},
                         continuity={"current_milestone": {"milestone_index": 0, "milestone_id": "code", "title": "Create marker file"}},
                         metadata={"max_tool_rounds": 6, "max_output_tokens": 900},
@@ -1119,7 +1125,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                             "profile_id": "coder",
                             "display_name": "Coder Minion",
                             "identity_fragment": "You are a strict coder minion.",
-                            "behavior_fragment": "Use op_exec_shell for implementation. Text-only completion is failure.",
+                            "behavior_fragment": "Use shell for implementation. Text-only completion is failure.",
                             "output_contract_fragment": "Report the confirmed tool result and milestone completion.",
                         },
                     ),

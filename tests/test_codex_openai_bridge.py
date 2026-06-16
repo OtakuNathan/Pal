@@ -233,7 +233,7 @@ class OpenAICodexBridgeMappingTests(unittest.TestCase):
         )
 
         self.assertIn("Pal owns memory", developer)
-        self.assertIn("op_exec_shell", developer)
+        self.assertIn("shell", developer)
         self.assertIn("authorized shell path", developer)
         self.assertIn("instead of claiming shell access is unavailable", developer)
         self.assertIn("Use Pal policy.", developer)

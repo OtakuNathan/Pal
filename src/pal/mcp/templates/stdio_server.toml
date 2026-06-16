@@ -3,7 +3,7 @@
 server_id = "filesystem"
 transport = "stdio"
 command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/wufen/Desktop"]
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed-directory"]
 enabled = true
 trust_level = "local"
 

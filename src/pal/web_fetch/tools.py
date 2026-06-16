@@ -70,9 +70,9 @@ class WebScreenshotTool:
         _ = args
         return CapabilityResult(
             status=RuntimeStatus.INVALID,
-            text="op_web_screenshot requires async turn context",
+            text="web_screenshot requires async turn context",
             structured={"reason": "async_required"},
-            llm_text="op_web_screenshot requires async turn context.",
+            llm_text="web_screenshot requires async turn context.",
         )
 
     async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
@@ -160,7 +160,7 @@ class WebScreenshotTool:
                 metadata={
                     "source_url": source_url,
                     "final_url": payload.get("final_url"),
-                    "capture_kind": "web_screenshot",
+                    "capture_kind": "op_web_screenshot",
                     "stored_artifact_id": stored.artifact_id,
                 },
             )

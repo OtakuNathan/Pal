@@ -85,8 +85,19 @@ from pal.minion.runner import (
 from pal.minion.scoped_execution import (
     MinionScopedExecutionRuntime,
     WORKSPACE_TOOL_SPECS,
+    _effective_tool_args,
+    _minion_checkpoint_commit_result,
+    _minion_review_checkpoint_result,
     _minion_review_gate_submit_result,
 )
+from pal.minion.review_orchestrator import (
+    _checkpoint_gate_requires_repair,
+    _checkpoint_git_context,
+    _checkpoint_review_environment_workspace,
+    _checkpoint_repair_payload,
+    review_gate_repair_note,
+)
+from pal.minion.workspace_environment import prepare_workspace_environment
 from pal.minion.prompt_adapter import (
     build_minion_task_envelope as _build_minion_task_envelope,
     build_minion_prompt_messages,
@@ -183,6 +194,19 @@ def _plan_review_key_for_test(plan_ref: dict) -> str:
         )
         if part
     )
+
+
+def _init_git_source_repo(path: Path, files: dict[str, str], *, message: str = "initial source") -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", check=True)
+    _git(path, "config", "user.email", "test@example.com", check=True)
+    _git(path, "config", "user.name", "Test User", check=True)
+    for relative_path, content in files.items():
+        target = path / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    _git(path, "add", "-A", check=True)
+    _git(path, "commit", "-m", message, check=True)
 
 
 def _plan_module(module_id: str, *, title: str = "", task: str = "", acceptance: str = "") -> dict:
@@ -308,11 +332,50 @@ class SidecarFoundationTests(unittest.TestCase):
         self.assertIn("stdout noise", completed.stderr.decode("utf-8", errors="replace"))
         self.assertEqual(read_sidecar_message_sync(io.BytesIO(completed.stdout)), {"type": "event", "event_kind": "probe"})
 
+    def test_runner_main_read_decision_timeout_does_not_block_process_exit(self) -> None:
+        script = (
+            "import asyncio, os, types\n"
+            "from pal.minion import runner_main\n"
+            "read_fd, write_fd = os.pipe()\n"
+            "runner_main.sys.stdin = types.SimpleNamespace(buffer=os.fdopen(read_fd, 'rb', buffering=0))\n"
+            "async def scenario():\n"
+            "    result = await runner_main._read_decision(timeout=0.01)\n"
+            "    assert result is None\n"
+            "asyncio.run(scenario())\n"
+            "os.close(write_fd)\n"
+            "print('ok')\n"
+        )
+
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            env=python_subprocess_env(),
+            timeout=2,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
+        self.assertEqual(completed.stdout.decode("utf-8").strip(), "ok")
+
     def test_python_subprocess_env_includes_source_root_for_sidecars(self) -> None:
         env = python_subprocess_env()
         entries = [Path(item).resolve() for item in str(env.get("PYTHONPATH") or "").split(os.pathsep) if item]
 
         self.assertIn((Path(__file__).resolve().parents[1] / "src").resolve(), entries)
+
+    def test_python_subprocess_env_prepends_nvm_node_bins_for_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_sidecar_node_env_") as tmp:
+            home = Path(tmp)
+            older = home / ".nvm" / "versions" / "node" / "v20.1.0" / "bin"
+            newer = home / ".nvm" / "versions" / "node" / "v22.22.1" / "bin"
+            older.mkdir(parents=True)
+            newer.mkdir(parents=True)
+
+            with patch.dict(os.environ, {"HOME": str(home), "PATH": "/usr/bin"}, clear=False):
+                env = python_subprocess_env()
+
+            entries = [Path(item) for item in str(env.get("PATH") or "").split(os.pathsep) if item]
+            self.assertEqual(entries[:2], [newer, older])
+            self.assertIn(Path("/usr/bin"), entries)
 
     def test_runner_main_liveness_watcher_resolves_when_manager_pipe_closes(self) -> None:
         from pal.minion import runner_main
@@ -426,8 +489,8 @@ class MinionContractTests(unittest.TestCase):
                 "goal": "inspect repo",
                 "acceptance_criteria": ["report findings"],
                 "workspace": {"root": "/tmp/repo"},
-                "allowed_capabilities": ["tool_read"],
-                "approval_policy": {"high_risk_capabilities": ["shell_exec"]},
+                "allowed_capabilities": ["op_tool_read"],
+                "approval_policy": {"high_risk_capabilities": ["shell"]},
                 "minion_profile": "software_engineering.coder",
                 "resolved_profile": {"profile_id": "coder", "display_name": "Coder Minion"},
             }
@@ -437,9 +500,9 @@ class MinionContractTests(unittest.TestCase):
 
         self.assertEqual(restored.work_order_id, "wo_1")
         self.assertEqual(restored.instruction, "inspect repo")
-        self.assertEqual(restored.allowed_capabilities, ["tool_read"])
+        self.assertEqual(restored.allowed_capabilities, ["op_tool_read"])
         self.assertNotIn("allowed_tools", restored.to_dict())
-        self.assertEqual(restored.approval_policy["high_risk_capabilities"], ["shell_exec"])
+        self.assertEqual(restored.approval_policy["high_risk_capabilities"], ["shell"])
         self.assertEqual(restored.minion_profile, "software_engineering.coder")
         self.assertEqual(restored.resolved_profile["profile_id"], "coder")
 
@@ -450,7 +513,7 @@ class MinionContractTests(unittest.TestCase):
         self.assertEqual(restored.resolved_profile, {})
 
     def test_task_context_pack_ignores_removed_allowed_tools_field(self) -> None:
-        restored = TaskContextPack.from_dict({"work_order_id": "wo_caps", "allowed_tools": ["op_exec_shell"]})
+        restored = TaskContextPack.from_dict({"work_order_id": "wo_caps", "allowed_tools": ["shell"]})
 
         self.assertEqual(restored.allowed_capabilities, [])
         self.assertNotIn("allowed_tools", restored.to_dict())
@@ -470,15 +533,19 @@ class MinionContractTests(unittest.TestCase):
     def test_minion_max_output_tokens_passes_preferred_endpoint_to_runtime(self) -> None:
         calls = []
 
-        def resolve_max_output_tokens(*, preferred_endpoint_id=None):
-            calls.append(preferred_endpoint_id)
+        def resolve_max_output_tokens(*, preferred_endpoint_id=None, preferred_endpoint_source=None):
+            calls.append((preferred_endpoint_id, preferred_endpoint_source))
             return 8192
 
         runtime = SimpleNamespace(resolve_max_output_tokens=resolve_max_output_tokens)
-        pack = TaskContextPack(work_order_id="wo_tokens", goal="budget", metadata={"preferred_endpoint_id": "coder_fast"})
+        pack = TaskContextPack(
+            work_order_id="wo_tokens",
+            goal="budget",
+            metadata={"preferred_endpoint_id": "coder_fast", "preferred_endpoint_source": "profile"},
+        )
 
         self.assertEqual(_resolve_minion_max_output_tokens(runtime, pack), 8192)
-        self.assertEqual(calls, ["coder_fast"])
+        self.assertEqual(calls, [("coder_fast", "profile")])
 
     def test_minion_max_output_tokens_derives_from_context_window_when_needed(self) -> None:
         runtime = SimpleNamespace(
@@ -504,11 +571,16 @@ class MinionContractTests(unittest.TestCase):
         self.assertEqual(metadata["minion_run_id"], "run_tokens")
 
     def test_minion_llm_request_metadata_includes_explicit_preferred_endpoint(self) -> None:
-        pack = TaskContextPack(work_order_id="wo_tokens", goal="budget", metadata={"preferred_endpoint_id": "planner_long"})
+        pack = TaskContextPack(
+            work_order_id="wo_tokens",
+            goal="budget",
+            metadata={"preferred_endpoint_id": "planner_long", "preferred_endpoint_source": "user"},
+        )
 
         metadata = _minion_llm_request_metadata(pack, "run_tokens")
 
         self.assertEqual(metadata["preferred_endpoint_id"], "planner_long")
+        self.assertEqual(metadata["preferred_endpoint_source"], "user")
 
     def test_invalid_task_context_pack_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -769,6 +841,12 @@ class MinionContractTests(unittest.TestCase):
                 "repo_path": "/tmp/prepared-repo",
                 "source_repo": "/tmp/source-repo",
                 "artifact_dir": "/tmp/prepared-repo/minion_outputs/wo_workspace_prompt",
+                "languages": ["cpp"],
+                "lsp_setup": {
+                    "languages": ["cpp"],
+                    "servers": [],
+                    "skipped": ["cpp skipped; missing LSP server template(s): clangd"],
+                },
             },
             allowed_capabilities=["op_file_read", "op_file_write"],
             metadata={
@@ -784,12 +862,32 @@ class MinionContractTests(unittest.TestCase):
         parsed = json.loads(_render_task_prompt(pack))
 
         self.assertEqual(parsed["prompt_view"]["workspace"]["repo_path"], "/tmp/prepared-repo")
-        self.assertEqual(parsed["prompt_view"]["workspace"]["source_repo"], "/tmp/source-repo")
+        self.assertNotIn("source_repo", parsed["prompt_view"]["workspace"])
         self.assertEqual(
             parsed["prompt_view"]["workspace"]["artifact_dir"],
             "/tmp/prepared-repo/minion_outputs/wo_workspace_prompt",
         )
+        self.assertEqual(parsed["prompt_view"]["workspace"]["languages"], ["cpp"])
+        self.assertEqual(parsed["prompt_view"]["workspace"]["lsp_setup"]["servers"], [])
+        self.assertIn("missing LSP server template", parsed["prompt_view"]["workspace"]["lsp_setup"]["skipped"][0])
         self.assertEqual(parsed["prompt_view"]["allowed_capabilities"], ["op_file_read", "op_file_write"])
+
+    def test_fallback_task_prompt_hides_source_repo(self) -> None:
+        pack = TaskContextPack(
+            work_order_id="wo_workspace_fallback_prompt",
+            goal="use prepared workspace",
+            workspace={
+                "repo_path": "/tmp/prepared-repo",
+                "source_repo": "/tmp/source-repo",
+                "artifact_dir": "/tmp/prepared-repo/minion_outputs/wo_workspace_fallback_prompt",
+            },
+        )
+
+        parsed = json.loads(_render_task_prompt(pack))
+
+        self.assertEqual(parsed["workspace"]["repo_path"], "/tmp/prepared-repo")
+        self.assertNotIn("source_repo", parsed["workspace"])
+        self.assertNotIn("/tmp/source-repo", json.dumps(parsed, sort_keys=True))
 
     def test_planner_task_prompt_ignores_raw_pack_dump_when_work_order_is_structured(self) -> None:
         planner = build_planner_work_order(
@@ -842,6 +940,10 @@ class MinionContractTests(unittest.TestCase):
 
         self.assertEqual(planner["planning_requirements"]["ask_user_policy"]["max_questions_per_turn"], 3)
         self.assertTrue(planner["planning_requirements"]["ask_user_policy"]["do_not_ask_if_repo_discoverable"])
+        self.assertTrue(planner["planning_requirements"]["require_language_metadata"])
+        self.assertEqual(planner["planning_requirements"]["language_metadata_field"], "metadata.languages")
+        self.assertIn("python", planner["planning_requirements"]["canonical_language_ids"])
+        self.assertIn("cpp", planner["planning_requirements"]["canonical_language_ids"])
         self.assertEqual(question.to_dict()["type"], "ask_user_question")
         self.assertEqual(question.to_dict()["questions"][0]["why_needed"], "The choice changes module boundaries.")
 
@@ -1050,7 +1152,7 @@ class MinionContractTests(unittest.TestCase):
                             text="",
                             tool_calls=[
                                 CanonicalToolCall(
-                                    name="op_minion_artifact_write",
+                                    name="artifact_write",
                                     args={
                                         "relative_path": "plan.json",
                                         "title": "Final plan",
@@ -1104,7 +1206,7 @@ class MinionContractTests(unittest.TestCase):
                     work_order_id="wo_planner_wait",
                     goal="Plan module work",
                     workspace={"artifact_dir": str(root / "artifacts")},
-                    allowed_capabilities=["op_minion_artifact_write"],
+                    allowed_capabilities=["artifact_write"],
                     minion_profile="software_engineering.planner",
                     metadata={"task_id": "task_planner_wait", "planner_work_order": planner_work_order},
                 ),
@@ -1159,7 +1261,7 @@ class MinionContractTests(unittest.TestCase):
                             text="",
                             tool_calls=[
                                 CanonicalToolCall(
-                                    name="op_minion_artifact_write",
+                                    name="artifact_write",
                                     args={
                                         "relative_path": "plan.json",
                                         "title": "Bad GLM plan",
@@ -1178,7 +1280,7 @@ class MinionContractTests(unittest.TestCase):
                             text="",
                             tool_calls=[
                                 CanonicalToolCall(
-                                    name="op_minion_artifact_write",
+                                    name="artifact_write",
                                     args={
                                         "relative_path": "plan.json",
                                         "title": "Repaired GLM plan",
@@ -1217,7 +1319,7 @@ class MinionContractTests(unittest.TestCase):
                         work_order_id="wo_glm_repair",
                         goal="Produce a dispatchable plan even if the model first writes a bad one.",
                         workspace={"artifact_dir": str(root / "artifacts")},
-                        allowed_capabilities=["op_minion_artifact_write"],
+                        allowed_capabilities=["artifact_write"],
                         minion_profile="software_engineering.planner",
                         metadata={
                             "task_id": "task_glm_repair",
@@ -1394,11 +1496,11 @@ class MinionContractTests(unittest.TestCase):
             pack = TaskContextPack(work_order_id="wo_log_inject", goal="debug")
             injected = provider._inject_debug_log_request(
                 pack,
-                CapabilityCall(name="op_minion_spawn", args={}, meta={"turn_id": "turn_log_on"}),
+                CapabilityCall(name="minion_spawn", args={}, meta={"turn_id": "turn_log_on"}),
             )
             skipped = provider._inject_debug_log_request(
                 pack,
-                CapabilityCall(name="op_minion_spawn", args={}, meta={"turn_id": "turn_log_off"}),
+                CapabilityCall(name="minion_spawn", args={}, meta={"turn_id": "turn_log_off"}),
             )
 
         self.assertTrue(injected.metadata["minion_debug_log_enabled"])
@@ -1410,15 +1512,15 @@ class MinionContractTests(unittest.TestCase):
             pack = registry.resolve_pack(TaskContextPack(work_order_id="wo_profile", goal="research"), requested_profile="software_engineering.planner")
 
             self.assertIn("op_memory_recall", pack.allowed_capabilities)
-            self.assertIn("op_workspace_tree", pack.allowed_capabilities)
-            self.assertIn("op_workspace_search", pack.allowed_capabilities)
-            self.assertIn("op_workspace_read", pack.allowed_capabilities)
-            self.assertIn("op_web_search", pack.allowed_capabilities)
+            self.assertIn("tree", pack.allowed_capabilities)
+            self.assertIn("search", pack.allowed_capabilities)
+            self.assertIn("op_file_read", pack.allowed_capabilities)
+            self.assertIn("web_search", pack.allowed_capabilities)
             self.assertIn("op_web_read", pack.allowed_capabilities)
             self.assertFalse(any(name.startswith("intro_") for name in pack.allowed_capabilities))
             self.assertEqual(
                 [name for name in pack.allowed_capabilities if name.startswith("op_minion_")],
-                ["op_minion_artifact_write", "op_minion_artifact_edit", "op_minion_memory_candidate_write"],
+                ["artifact_write", "artifact_edit", "memory_candidate_write"],
             )
             self.assertEqual(pack.workspace["workspace_policy"]["mode"], "read_only_repo")
             self.assertEqual(pack.workspace["completion_policy"]["evidence"], "text_deliverable")
@@ -1453,6 +1555,72 @@ class MinionContractTests(unittest.TestCase):
         self.assertNotIn("default_allowed_skills", profile.to_dict())
         self.assertEqual(pack.allowed_skills, ["legacy_skill"])
 
+    def test_profile_default_preferred_endpoint_is_applied_without_explicit_endpoint(self) -> None:
+        registry = MinionProfileRegistry()
+
+        coder_pack = registry.resolve_pack(
+            TaskContextPack(work_order_id="wo_profile_endpoint_coder", goal="implement"),
+            requested_profile="software_engineering.coder",
+        )
+        reviewer_pack = registry.resolve_pack(
+            TaskContextPack(work_order_id="wo_profile_endpoint_reviewer", goal="review"),
+            requested_profile="software_engineering.reviewer",
+        )
+
+        self.assertEqual(coder_pack.metadata["preferred_endpoint_id"], "glm-5.2")
+        self.assertEqual(reviewer_pack.metadata["preferred_endpoint_id"], "deepseek-reasoner")
+        self.assertEqual(coder_pack.metadata["preferred_endpoint_source"], "profile")
+        self.assertEqual(reviewer_pack.metadata["preferred_endpoint_source"], "profile")
+        self.assertEqual(coder_pack.resolved_profile["preferred_endpoint_id"], "glm-5.2")
+        self.assertEqual(reviewer_pack.resolved_profile["preferred_endpoint_id"], "deepseek-reasoner")
+
+    def test_profile_default_preferred_endpoint_does_not_override_explicit_endpoint(self) -> None:
+        registry = MinionProfileRegistry()
+
+        pack = registry.resolve_pack(
+            TaskContextPack(
+                work_order_id="wo_profile_endpoint_explicit",
+                goal="review with explicit endpoint",
+                metadata={"preferred_endpoint_id": "manual-reviewer-endpoint"},
+            ),
+            requested_profile="software_engineering.reviewer",
+        )
+
+        self.assertEqual(pack.metadata["preferred_endpoint_id"], "manual-reviewer-endpoint")
+        self.assertEqual(pack.metadata["preferred_endpoint_source"], "explicit")
+
+    def test_profile_preferred_endpoint_is_first_class_with_metadata_compatibility(self) -> None:
+        profile = MinionProfile.from_dict(
+            {
+                "profile_id": "legacy_endpoint_profile",
+                "display_name": "Legacy Endpoint Profile",
+                "identity_fragment": "Legacy endpoint profile.",
+                "metadata": {"preferred_endpoint_id": "legacy-endpoint"},
+            }
+        )
+        registry = MinionProfileRegistry(builtin_profiles=(profile,))
+
+        pack = registry.resolve_pack(
+            TaskContextPack(work_order_id="wo_legacy_endpoint", goal="use legacy endpoint"),
+            requested_profile="legacy_endpoint_profile",
+        )
+
+        self.assertEqual(profile.preferred_endpoint_id, "legacy-endpoint")
+        self.assertEqual(profile.to_dict()["preferred_endpoint_id"], "legacy-endpoint")
+        self.assertEqual(pack.metadata["preferred_endpoint_id"], "legacy-endpoint")
+        self.assertEqual(pack.metadata["preferred_endpoint_source"], "profile")
+
+    def test_builtin_profiles_all_expose_preferred_endpoint_field(self) -> None:
+        profiles = {profile.canonical_profile_id: profile for profile in MinionProfileRegistry().list_profiles()}
+
+        self.assertEqual(profiles["software_engineering.coder"].preferred_endpoint_id, "glm-5.2")
+        self.assertEqual(profiles["software_engineering.reviewer"].preferred_endpoint_id, "deepseek-reasoner")
+        self.assertEqual(profiles["software_engineering.planner"].preferred_endpoint_id, "")
+        self.assertEqual(profiles["software_engineering.writer"].preferred_endpoint_id, "")
+        self.assertEqual(profiles["generic"].preferred_endpoint_id, "")
+        for profile in profiles.values():
+            self.assertIn("preferred_endpoint_id", profile.to_dict())
+
     def test_profile_string_fields_are_not_split_into_characters(self) -> None:
         profile = MinionProfile.from_dict(
             {
@@ -1461,13 +1629,13 @@ class MinionContractTests(unittest.TestCase):
                 "identity_fragment": "String field profile.",
                 "skill_refs": "single_skill",
                 "capability_groups": "web_research",
-                "default_allowed_capabilities": "op_workspace_read",
+                "default_allowed_capabilities": "op_file_read",
             }
         )
 
         self.assertEqual(profile.skill_refs, ("single_skill",))
         self.assertEqual(profile.capability_groups, ("web_research",))
-        self.assertEqual(profile.default_allowed_capabilities, ("op_workspace_read",))
+        self.assertEqual(profile.default_allowed_capabilities, ("op_file_read",))
 
     def test_inflight_tracker_claims_once_and_releases_after_task(self) -> None:
         async def scenario() -> None:
@@ -1504,26 +1672,26 @@ class MinionContractTests(unittest.TestCase):
                 work_order_id="wo_policy",
                 goal="do work",
                 allowed_capabilities=[
-                    "intro_minion_task_read",
-                    "intro_minion_work_order_read",
+                    "minion_task_read",
+                    "minion_work_order_read",
                     "op_memory_write",
                     "op_memory_update",
                     "op_memory_delete",
                     "op_behavior_save",
                     "op_skill_commit",
                     "op_channel_send_attachment",
-                    "op_minion_spawn",
-                    "op_minion_kill",
-                    "op_exec_shell",
+                    "minion_spawn",
+                    "minion_kill",
+                    "shell",
                     "op_memory_recall",
-                    "op_web_search",
+                    "web_search",
                     "op_fake_extra",
                 ],
             ),
             requested_profile="software_engineering.coder",
         )
 
-        self.assertEqual(pack.allowed_capabilities, ["op_exec_shell", "op_memory_recall", "op_web_search"])
+        self.assertEqual(pack.allowed_capabilities, ["shell", "op_memory_recall", "web_search"])
         self.assertIn("effective_capability_policy", pack.resolved_profile)
 
     def test_builtin_profile_resolution_does_not_inherit_current_capability_surface(self) -> None:
@@ -1532,14 +1700,14 @@ class MinionContractTests(unittest.TestCase):
                 "op_tool_search",
                 "op_tool_read",
                 "op_tool_call",
-                "op_exec_shell",
+                "shell",
                 "op_memory_recall",
-                "op_web_search",
+                "web_search",
                 "op_web_read",
-                "op_llm_mgmt_set_active_endpoint",
+                "llm_set_active_endpoint",
                 "op_fake_ambient",
-                "intro_minion_task_read",
-                "op_minion_spawn",
+                "minion_task_read",
+                "minion_spawn",
                 "op_memory_write",
                 "op_memory_update",
                 "op_memory_delete",
@@ -1550,15 +1718,15 @@ class MinionContractTests(unittest.TestCase):
         self.assertNotIn("op_tool_search", pack.allowed_capabilities)
         self.assertNotIn("op_tool_read", pack.allowed_capabilities)
         self.assertNotIn("op_tool_call", pack.allowed_capabilities)
-        self.assertNotIn("op_exec_shell", pack.allowed_capabilities)
-        self.assertIn("op_workspace_read", pack.allowed_capabilities)
+        self.assertNotIn("shell", pack.allowed_capabilities)
+        self.assertIn("op_file_read", pack.allowed_capabilities)
         self.assertIn("op_memory_recall", pack.allowed_capabilities)
-        self.assertIn("op_web_search", pack.allowed_capabilities)
+        self.assertIn("web_search", pack.allowed_capabilities)
         self.assertIn("op_web_read", pack.allowed_capabilities)
-        self.assertNotIn("op_llm_mgmt_set_active_endpoint", pack.allowed_capabilities)
+        self.assertNotIn("llm_set_active_endpoint", pack.allowed_capabilities)
         self.assertNotIn("op_fake_ambient", pack.allowed_capabilities)
-        self.assertNotIn("intro_minion_task_read", pack.allowed_capabilities)
-        self.assertNotIn("op_minion_spawn", pack.allowed_capabilities)
+        self.assertNotIn("minion_task_read", pack.allowed_capabilities)
+        self.assertNotIn("minion_spawn", pack.allowed_capabilities)
         self.assertNotIn("op_memory_write", pack.allowed_capabilities)
         self.assertNotIn("op_memory_update", pack.allowed_capabilities)
         self.assertNotIn("op_memory_delete", pack.allowed_capabilities)
@@ -1575,11 +1743,11 @@ class MinionContractTests(unittest.TestCase):
             builtin_profiles=(profile,),
             ambient_capabilities=(
                 "op_tool_search",
-                "op_exec_shell",
+                "shell",
                 "op_memory_recall",
                 "op_fake_ambient",
-                "intro_minion_task_read",
-                "op_minion_spawn",
+                "minion_task_read",
+                "minion_spawn",
                 "op_memory_write",
             ),
         )
@@ -1587,10 +1755,10 @@ class MinionContractTests(unittest.TestCase):
 
         self.assertIn("op_tool_search", pack.allowed_capabilities)
         self.assertIn("op_fake_ambient", pack.allowed_capabilities)
-        self.assertIn("op_workspace_read", pack.allowed_capabilities)
-        self.assertNotIn("op_exec_shell", pack.allowed_capabilities)
-        self.assertNotIn("intro_minion_task_read", pack.allowed_capabilities)
-        self.assertNotIn("op_minion_spawn", pack.allowed_capabilities)
+        self.assertIn("op_file_read", pack.allowed_capabilities)
+        self.assertNotIn("shell", pack.allowed_capabilities)
+        self.assertNotIn("minion_task_read", pack.allowed_capabilities)
+        self.assertNotIn("minion_spawn", pack.allowed_capabilities)
         self.assertNotIn("op_memory_write", pack.allowed_capabilities)
 
     def test_runtime_profiles_load_recursively_with_scoped_profile_name(self) -> None:
@@ -2042,6 +2210,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(resumed.metadata["module_execution"]["module_id"], "module_truth")
         self.assertEqual([item["title"] for item in resumed.metadata["milestones"]], ["Plan milestone one", "Plan milestone two"])
         self.assertEqual(resumed.metadata["preferred_endpoint_id"], "debug_endpoint")
+        self.assertEqual(resumed.metadata["preferred_endpoint_source"], "explicit")
 
     def test_plan_ref_revision_writes_immutable_validated_artifact(self) -> None:
         plan = _dispatchable_plan_payload(
@@ -2106,7 +2275,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         result = provider.spawn(
             CapabilityCall(
-                name="op_minion_spawn",
+                name="minion_spawn",
                 args={
                     "feedback_gate_ref": {"gate_id": review_gate_ref["gate_id"]},
                     "workspace": {"repo_path": str(self.root)},
@@ -2216,17 +2385,17 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             plan_ref,
             reason="manual acceptance",
             human_override={
-                "reason": "Nathan accepts the plan after reading it",
-                "actor": "Nathan",
+                "reason": "The user accepts the plan after reading it",
+                "actor": "test_user",
                 "source": "control_action",
                 "action_kind": "minion_plan_accept_override",
                 "target_scope": "minion",
                 "target_id": "plan_gate_required",
             },
         )
-        self.assertEqual(accepted["human_override"]["actor"], "Nathan")
+        self.assertEqual(accepted["human_override"]["actor"], "test_user")
         marker = json.loads(Path(accepted["acceptance_marker_path"]).read_text(encoding="utf-8"))
-        self.assertEqual(marker["human_override"]["reason"], "Nathan accepts the plan after reading it")
+        self.assertEqual(marker["human_override"]["reason"], "The user accepts the plan after reading it")
 
     def test_plan_acceptance_rejects_stale_review_gate(self) -> None:
         plan = _dispatchable_plan_payload(
@@ -2656,6 +2825,447 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(recorded["review_gate_ref"]["verdict"], "pass")
 
+    def test_checkpoint_pass_requires_source_contract_coverage(self) -> None:
+        checkpoint_id = "chk_source_contract_coverage"
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_source_contract_coverage",
+                "minion_id": "m_source_contract_coverage",
+                "run_id": "r_source_contract_coverage",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "acceptance_criteria": ["Broad feature result is verified."],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        source_contract = {"acceptance_criteria": ["6-10 focused pytest tests exist and all pass via pytest"]}
+
+        with self.assertRaisesRegex(ValueError, "6-10 focused pytest tests"):
+            self.repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                    "verdict": "pass",
+                    "summary": "source contract coverage missing",
+                    "evidence": [{"kind": "review", "summary": "reviewed"}],
+                    "commands_run": [
+                        {
+                            "command": "pytest tests/test_feature.py",
+                            "status": "passed",
+                            "summary": "test command passed",
+                            "covers": ["Broad feature result is verified."],
+                        }
+                    ],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "observed 16 passed tests outside required range 6-10"):
+            self.repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                    "verdict": "pass",
+                    "summary": "source contract range violated",
+                    "evidence": [{"kind": "review", "summary": "reviewed"}],
+                    "commands_run": [
+                        {
+                            "command": "pytest tests/test_feature.py",
+                            "status": "passed",
+                            "output_summary": "16 passed in 0.08s",
+                            "summary": "test command passed",
+                            "covers": [
+                                "Broad feature result is verified.",
+                                "6-10 focused pytest tests exist and all pass via pytest",
+                            ],
+                        }
+                    ],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                }
+            )
+
+        recorded = self.repository.submit_review_gate(
+            {
+                "gate_kind": "checkpoint_verification",
+                "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                "verdict": "pass",
+                "summary": "source contract coverage present",
+                "evidence": [{"kind": "review", "summary": "reviewed"}],
+                "commands_run": [
+                    {
+                        "command": "pytest tests/test_feature.py",
+                        "status": "passed",
+                        "output_summary": "8 passed in 0.08s",
+                        "summary": "test command passed",
+                        "covers": [
+                            "Broad feature result is verified.",
+                            "6-10 focused pytest tests exist and all pass via pytest",
+                        ],
+                    }
+                ],
+                "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                "metadata": {
+                    "lsp_evidence_not_applicable": True,
+                    "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                },
+            }
+        )
+        self.assertEqual(recorded["review_gate"]["target"]["source_contract"], source_contract)
+
+    def test_checkpoint_pass_rejects_numeric_bounds_from_source_instruction(self) -> None:
+        checkpoint_id = "chk_instruction_numeric_contract"
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_instruction_numeric_contract",
+                "minion_id": "m_instruction_numeric_contract",
+                "run_id": "r_instruction_numeric_contract",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "acceptance_criteria": ["Focused pytest suite passes with python -m pytest -q."],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        source_contract = {
+            "acceptance_criteria": ["Focused pytest suite passes with python -m pytest -q."],
+            "instruction": (
+                "Hard requirements:\n"
+                "- Add 6-10 focused pytest tests covering grouping, monthly totals, invalid records, and CLI/report behavior.\n"
+                "- Run python -m pytest -q successfully before checkpointing."
+            ),
+        }
+
+        with self.assertRaisesRegex(ValueError, "observed 12 passed tests outside required range 6-10"):
+            self.repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                    "verdict": "pass",
+                    "summary": "checkpoint passed despite too many focused tests",
+                    "evidence": [{"kind": "review", "summary": "reviewed"}],
+                    "commands_run": [
+                        {
+                            "command": "python -m pytest -q",
+                            "status": "passed",
+                            "output_summary": "12 passed in 0.07s",
+                            "summary": "pytest passed",
+                            "covers": ["Focused pytest suite passes with python -m pytest -q."],
+                        }
+                    ],
+                    "api_evidence": [
+                        {
+                            "kind": "source",
+                            "summary": "source inspection verified the feature",
+                            "covers": ["Focused pytest suite passes with python -m pytest -q."],
+                        }
+                    ],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                }
+            )
+
+    def test_checkpoint_pass_rejects_json_plan_numeric_bound_with_output_summary_alias(self) -> None:
+        checkpoint_id = "chk_json_plan_numeric_contract"
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_json_plan_numeric_contract",
+                "minion_id": "m_json_plan_numeric_contract",
+                "run_id": "r_json_plan_numeric_contract",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "acceptance_criteria": ["Focused pytest suite passes with python -m pytest -q."],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        plan_json = {
+            "acceptance_criteria": [
+                "tests/test_spend_report.py contains 6-10 focused pytest tests.",
+                "Running pytest in the repository passes all tests.",
+            ],
+            "task": "Add 6-10 focused pytest tests covering parsing, validation, totals, anomalies, and CLI behavior.",
+        }
+        source_contract = {
+            "acceptance_criteria": ["Focused pytest suite passes with python -m pytest -q."],
+            "instruction": "PLAN_JSON:\n" + json.dumps(plan_json, sort_keys=True) + "\nHard requirements:\n- Run python -m pytest -q.",
+        }
+
+        with self.assertRaisesRegex(ValueError, "observed 12 passed tests outside required range 6-10"):
+            self.repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                    "verdict": "pass",
+                    "summary": "checkpoint passed despite too many collected tests",
+                    "evidence": [{"kind": "review", "summary": "reviewed"}],
+                    "commands_run": [
+                        {
+                            "command": "python3 -m pytest -q",
+                            "status": "passed",
+                            "output summary": "12 passed in 0.07s",
+                            "summary": "pytest passed",
+                            "covers": ["Focused pytest suite passes with python -m pytest -q."],
+                        }
+                    ],
+                    "api_evidence": [
+                        {
+                            "kind": "source",
+                            "summary": "source inspection verified the feature",
+                            "covers": ["Focused pytest suite passes with python -m pytest -q."],
+                        }
+                    ],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                }
+            )
+
+    def test_checkpoint_pass_rejects_numeric_bound_from_collect_only_output(self) -> None:
+        checkpoint_id = "chk_collect_only_numeric_contract"
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_collect_only_numeric_contract",
+                "minion_id": "m_collect_only_numeric_contract",
+                "run_id": "r_collect_only_numeric_contract",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "acceptance_criteria": ["Focused pytest suite passes with python -m pytest -q."],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        source_contract = {
+            "acceptance_criteria": ["Focused pytest suite passes with python -m pytest -q."],
+            "instruction": "Hard requirements:\n- Add 6-10 focused pytest tests and verify the collected count.",
+        }
+
+        with self.assertRaisesRegex(ValueError, "observed 12 passed tests outside required range 6-10"):
+            self.repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                    "verdict": "pass",
+                    "summary": "checkpoint passed despite too many collected tests",
+                    "evidence": [{"kind": "review", "summary": "reviewed"}],
+                    "commands_run": [
+                        {
+                            "command": "python -m pytest --collect-only -q",
+                            "status": "passed",
+                            "output_summary": "12 tests collected in 0.03s",
+                            "summary": "pytest collected tests",
+                            "covers": ["Focused pytest suite passes with python -m pytest -q."],
+                        }
+                    ],
+                    "api_evidence": [
+                        {
+                            "kind": "source",
+                            "summary": "source inspection verified the feature",
+                            "covers": ["Focused pytest suite passes with python -m pytest -q."],
+                        }
+                    ],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                }
+            )
+
+    def test_failed_checkpoint_gate_records_detected_numeric_contract_violation(self) -> None:
+        checkpoint_id = "chk_failed_numeric_contract"
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_failed_numeric_contract",
+                "minion_id": "m_failed_numeric_contract",
+                "run_id": "r_failed_numeric_contract",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "acceptance_criteria": ["Broad feature result is verified."],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        source_contract = {"acceptance_criteria": ["tests/test_feature.py contains 6-10 focused pytest tests, all passing"]}
+
+        recorded = self.repository.submit_review_gate(
+            {
+                "gate_kind": "checkpoint_verification",
+                "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                "verdict": "fail",
+                "summary": "boolean amount validation is broken",
+                "findings": [{"severity": "blocker", "summary": "bool amounts are accepted"}],
+                "commands_run": [
+                    {
+                        "command": "python -m pytest -q",
+                        "status": "passed",
+                        "output_summary": "18 passed in 0.11s",
+                        "summary": "pytest passed but count exceeds contract",
+                    }
+                ],
+                "api_evidence": [{"kind": "source", "summary": "validation defect confirmed"}],
+                "metadata": {
+                    "lsp_evidence_not_applicable": True,
+                    "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                },
+            }
+        )
+
+        metadata = recorded["review_gate"]["metadata"]
+        violations = metadata["detected_contract_violations"]
+        self.assertEqual(violations[0]["observed_count"], 18)
+        self.assertIn("6-10", violations[0]["summary"])
+        findings = recorded["review_gate"]["findings"]
+        self.assertTrue(any(item.get("source") == "system_detected" for item in findings))
+
+    def test_failed_checkpoint_gate_records_instruction_numeric_contract_violation(self) -> None:
+        checkpoint_id = "chk_failed_instruction_numeric_contract"
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_failed_instruction_numeric_contract",
+                "minion_id": "m_failed_instruction_numeric_contract",
+                "run_id": "r_failed_instruction_numeric_contract",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "acceptance_criteria": ["Focused pytest suite passes with python -m pytest -q."],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        source_contract = {
+            "acceptance_criteria": ["Focused pytest suite passes with python -m pytest -q."],
+            "instruction": "Add 6-10 focused pytest tests. Run python -m pytest -q successfully before checkpointing.",
+        }
+
+        recorded = self.repository.submit_review_gate(
+            {
+                "gate_kind": "checkpoint_verification",
+                "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                "verdict": "fail",
+                "summary": "validation defect found",
+                "findings": [{"severity": "blocker", "summary": "validation defect found"}],
+                "commands_run": [
+                    {
+                        "command": "python -m pytest -q",
+                        "status": "passed",
+                        "output_summary": "12 passed in 0.07s",
+                        "summary": "pytest passed",
+                    }
+                ],
+                "api_evidence": [{"kind": "source", "summary": "validation defect confirmed"}],
+                "metadata": {
+                    "lsp_evidence_not_applicable": True,
+                    "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                },
+            }
+        )
+
+        metadata = recorded["review_gate"]["metadata"]
+        violations = metadata["detected_contract_violations"]
+        self.assertEqual(violations[0]["observed_count"], 12)
+        self.assertIn("6-10", violations[0]["summary"])
+        findings = recorded["review_gate"]["findings"]
+        self.assertTrue(any(item.get("source") == "system_detected" for item in findings))
+
+    def test_review_gate_numeric_range_ignores_line_number_ranges(self) -> None:
+        checkpoint_id = "chk_line_number_range_not_test_count"
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_line_number_range_not_test_count",
+                "minion_id": "m_line_number_range_not_test_count",
+                "run_id": "r_line_number_range_not_test_count",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "acceptance_criteria": ["Focused pytest suite passes with python -m pytest -q."],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        source_contract = {
+            "acceptance_criteria": [
+                "Change format_summary on line 132-133 and update test_format_summary_renders_lines accordingly.",
+            ],
+        }
+
+        recorded = self.repository.submit_review_gate(
+            {
+                "gate_kind": "checkpoint_verification",
+                "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                "verdict": "fail",
+                "summary": "format_summary still renders empty labels incorrectly",
+                "findings": [{"severity": "blocker", "summary": "format_summary still needs labels=-"}],
+                "commands_run": [
+                    {
+                        "command": "python -m pytest -q",
+                        "status": "passed",
+                        "output_summary": "6 passed in 0.04s",
+                    }
+                ],
+                "api_evidence": [{"kind": "source", "summary": "format_summary inspected"}],
+                "metadata": {
+                    "lsp_evidence_not_applicable": True,
+                    "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                },
+            }
+        )
+
+        metadata = recorded["review_gate"]["metadata"]
+        self.assertNotIn("detected_contract_violations", metadata)
+        findings = recorded["review_gate"]["findings"]
+        self.assertFalse(any(item.get("source") == "system_detected" for item in findings))
+
     def test_review_gate_tool_evidence_refs_must_be_ledger_backed(self) -> None:
         checkpoint_id = "chk_fake_tool_ref"
         self.repository.record_minion_event(
@@ -2774,7 +3384,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         provider = MinionManagerProvider(runtime_root=self.root)
         result = provider.revise_plan(
             CapabilityCall(
-                name="op_minion_revise_plan",
+                name="minion_revise_plan",
                 args={
                     "source_plan_ref": {
                         "path": str(artifact_path),
@@ -2801,7 +3411,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         provider = MinionManagerProvider(runtime_root=self.root)
         result = provider.submit_plan(
             CapabilityCall(
-                name="op_minion_submit_plan",
+                name="minion_submit_plan",
                 args={
                     "plan_artifact": plan,
                     "submission_notes": "fallback planner",
@@ -2826,7 +3436,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         provider = MinionManagerProvider(runtime_root=self.root)
         submitted = provider.submit_plan(
             CapabilityCall(
-                name="op_minion_submit_plan",
+                name="minion_submit_plan",
                 args={"plan_artifact": plan, "submission_notes": "fallback planner"},
             )
         )
@@ -2834,19 +3444,19 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         gate = _submit_plan_review_gate(provider._repository(), submitted.structured["plan_ref"], verdict="pass")
         accepted = provider.accept_plan(
             CapabilityCall(
-                name="op_minion_accept_plan",
+                name="minion_accept_plan",
                 args={"plan_ref": submitted.structured["plan_ref"], "review_gate_ref": gate},
             )
         )
         self.assertEqual(accepted.status, RuntimeStatus.OK)
 
-        search = provider.search_plans(CapabilityCall(name="intro_minion_plan_search", args={"query": "Searchable module", "limit": 3}))
+        search = provider.search_plans(CapabilityCall(name="minion_plan_search", args={"query": "Searchable module", "limit": 3}))
         self.assertEqual(search.status, RuntimeStatus.OK)
         self.assertEqual(search.structured["items"][0]["plan_ref"]["plan_id"], "plan_cap_search")
         self.assertTrue(search.structured["items"][0]["plan_ref"]["accepted"])
 
         read = provider.read_plan(
-            CapabilityCall(name="intro_minion_plan_read", args={"plan_ref": search.structured["items"][0]["plan_ref"]})
+            CapabilityCall(name="minion_plan_read", args={"plan_ref": search.structured["items"][0]["plan_ref"]})
         )
         self.assertEqual(read.status, RuntimeStatus.OK)
         self.assertEqual(read.structured["plan_artifact"]["plan_id"], "plan_cap_search")
@@ -2868,7 +3478,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         provider = MinionManagerProvider(runtime_root=self.root)
         revise = provider.revise_plan(
             CapabilityCall(
-                name="op_minion_revise_plan",
+                name="minion_revise_plan",
                 args={
                     "source_plan_ref": source_ref,
                     "revised_plan_artifact": revised,
@@ -2882,7 +3492,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         accept = provider.accept_plan(
             CapabilityCall(
-                name="op_minion_accept_plan",
+                name="minion_accept_plan",
                 args={
                     "plan_ref": source_ref,
                     "human_override": {"reason": "LLM forged override"},
@@ -2905,7 +3515,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         denied = provider.review_gate_submit(
             CapabilityCall(
-                name="op_minion_review_gate_submit",
+                name="review_gate_submit",
                 args={
                     "gate_kind": "plan_acceptance",
                     "target": {"plan_ref": source_ref},
@@ -2925,7 +3535,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         forged_tool_refs = provider.review_gate_submit(
             CapabilityCall(
-                name="op_minion_review_gate_submit",
+                name="review_gate_submit",
                 args={
                     "gate_kind": "plan_acceptance",
                     "target": {"plan_ref": source_ref},
@@ -2942,7 +3552,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         human_gate = provider.review_gate_submit(
             CapabilityCall(
-                name="op_minion_review_gate_submit",
+                name="review_gate_submit",
                 args={
                     "gate_kind": "plan_acceptance",
                     "target": {"plan_ref": source_ref},
@@ -2965,7 +3575,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         bad_external_ref["sha256"] = "0" * 64
         bad_external = provider.review_gate_submit(
             CapabilityCall(
-                name="op_minion_review_gate_submit",
+                name="review_gate_submit",
                 args={
                     "gate_kind": "plan_acceptance",
                     "target": {"plan_ref": source_ref},
@@ -2987,7 +3597,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
         accepted = provider.review_gate_submit(
             CapabilityCall(
-                name="op_minion_review_gate_submit",
+                name="review_gate_submit",
                 args={
                     "gate_kind": "plan_acceptance",
                     "target": {"plan_ref": source_ref},
@@ -3318,12 +3928,12 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                     target_scope="minion",
                     target_id="wo_control_accept",
                     route=route,
-                    notes="Nathan clicked accept",
+                    notes="The user clicked accept",
                     args={
                         "plan_ref": plan_ref,
                         "review_gate_ref": review_gate_ref,
-                        "reason": "Nathan accepts the reviewed plan",
-                        "actor": "Nathan",
+                        "reason": "The user accepts the reviewed plan",
+                        "actor": "test_user",
                         "interaction_origin": "button",
                         "interaction_id": "minion_plan_accept_wo_control_accept",
                         "interaction_kind": "minion_plan_acceptance",
@@ -3620,7 +4230,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                     "prompt_scaffold": {
                         "instruction": "x" * 20000,
                         "acceptance_criteria": ["one"],
-                        "allowed_capabilities": ["op_workspace_read"],
+                        "allowed_capabilities": ["op_file_read"],
                         "continuity": {
                             "recent_ledger": [{"payload": "y" * 20000}],
                             "completed_milestones": [{"title": "done"}],
@@ -3802,7 +4412,192 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         prepared = prepare_git_task_environment(self.root, pack)
 
         self.assertEqual(prepared.workspace["completion_policy"]["evidence"], "git_commit")
-        self.assertNotIn("op_minion_checkpoint_commit", prepared.allowed_capabilities)
+        self.assertNotIn("checkpoint_commit", prepared.allowed_capabilities)
+
+    def test_git_task_environment_creates_cpp_lsp_baseline_from_plan_languages(self) -> None:
+        source = self.root / "source_cpp_lsp"
+        _init_git_source_repo(source, {"README.md": "source\n"})
+        module = _plan_module("module_cpp_lsp", title="C++ feature")
+        module["owned_area"] = ["src/feature.cpp"]
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_cpp_lsp",
+            task_id="task_cpp_lsp",
+            modules=[module],
+        )
+        plan["metadata"] = {"languages": ["C++"]}
+        pack = self.repository.prepare_pack_for_spawn(
+            self.repository.build_coder_module_pack_from_plan(
+                plan,
+                module_id="module_cpp_lsp",
+                work_order_id="wo_cpp_lsp",
+                goal="implement c++ feature",
+                workspace={"source_repo": str(source)},
+            )
+        )
+
+        prepared = prepare_git_task_environment(self.root, pack)
+        repo = Path(prepared.workspace["repo_path"])
+
+        self.assertEqual(prepared.workspace["languages"], ["cpp"])
+        self.assertEqual(prepared.workspace["lsp_setup"]["servers"], ["clangd"])
+        self.assertEqual(prepared.workspace["lsp_setup"]["created_files"], [".clangd"])
+        self.assertIn("-std=c++20", (repo / ".clangd").read_text(encoding="utf-8"))
+        self.assertEqual(_git(repo, "status", "--porcelain", check=True).stdout, "")
+        self.assertEqual(prepared.workspace["base_sha"], _git(repo, "rev-parse", "HEAD", check=True).stdout.strip())
+        self.assertEqual(
+            _git(repo, "log", "-1", "--format=%s", prepared.workspace["base_sha"], check=True).stdout.strip(),
+            "minion: prepare workspace environment",
+        )
+
+    def test_git_task_environment_does_not_overwrite_existing_clangd_config(self) -> None:
+        source = self.root / "source_existing_clangd"
+        custom_config = "CompileFlags:\n  Add: [-std=c++17]\n"
+        _init_git_source_repo(source, {"README.md": "source\n", ".clangd": custom_config}, message="seed clangd")
+        pack = self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_existing_clangd",
+                goal="implement c++ feature",
+                metadata={"task_id": "task_existing_clangd", "languages": ["cpp"]},
+                workspace={"source_repo": str(source)},
+            )
+        )
+
+        prepared = prepare_git_task_environment(self.root, pack)
+        repo = Path(prepared.workspace["repo_path"])
+
+        self.assertEqual((repo / ".clangd").read_text(encoding="utf-8"), custom_config)
+        self.assertEqual(prepared.workspace["lsp_setup"]["created_files"], [])
+        self.assertIn(".clangd already exists", prepared.workspace["lsp_setup"]["skipped"])
+        self.assertEqual(_git(repo, "status", "--porcelain", check=True).stdout, "")
+
+    def test_git_task_environment_records_python_lsp_without_repo_config(self) -> None:
+        pack = self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_python_lsp",
+                goal="implement python feature",
+                metadata={"task_id": "task_python_lsp", "languages": ["py"]},
+            )
+        )
+
+        prepared = prepare_git_task_environment(self.root, pack)
+        repo = Path(prepared.workspace["repo_path"])
+
+        self.assertEqual(prepared.workspace["languages"], ["python"])
+        self.assertEqual(prepared.workspace["lsp_setup"]["servers"], ["pyright"])
+        self.assertFalse((repo / "pyrightconfig.json").exists())
+        self.assertIn("python uses the pyright sidecar", "\n".join(prepared.workspace["lsp_setup"]["skipped"]))
+
+    def test_workspace_environment_skips_language_preparer_without_lsp_template(self) -> None:
+        repo = self.root / "missing_lsp_template_repo"
+        repo.mkdir()
+        pack = TaskContextPack(
+            work_order_id="wo_missing_lsp_template",
+            goal="prepare cpp",
+            metadata={"languages": ["cpp"]},
+        )
+
+        environment = prepare_workspace_environment(
+            repo,
+            pack,
+            {},
+            write_files=True,
+            available_lsp_server_ids=set(),
+        )
+
+        self.assertEqual(environment["languages"], ["cpp"])
+        self.assertEqual(environment["lsp_setup"]["servers"], [])
+        self.assertEqual(environment["created_files"], [])
+        self.assertFalse((repo / ".clangd").exists())
+        self.assertIn("missing LSP server template", "\n".join(environment["lsp_setup"]["skipped"]))
+
+    def test_workspace_environment_treats_disabled_runtime_lsp_override_as_unavailable(self) -> None:
+        repo = self.root / "disabled_lsp_template_repo"
+        repo.mkdir()
+        config_dir = self.root / "plugins" / "lsp" / "servers"
+        config_dir.mkdir(parents=True)
+        (config_dir / "clangd.toml").write_text(
+            'server_id = "clangd"\nenabled = false\ncommand = ["clangd"]\n',
+            encoding="utf-8",
+        )
+        pack = TaskContextPack(
+            work_order_id="wo_disabled_lsp_template",
+            goal="prepare cpp",
+            metadata={"languages": ["cpp"]},
+        )
+
+        environment = prepare_workspace_environment(
+            repo,
+            pack,
+            {},
+            write_files=True,
+            runtime_root=self.root,
+        )
+
+        self.assertEqual(environment["languages"], ["cpp"])
+        self.assertEqual(environment["lsp_setup"]["servers"], [])
+        self.assertFalse((repo / ".clangd").exists())
+        self.assertIn("missing LSP server template", "\n".join(environment["lsp_setup"]["skipped"]))
+
+    def test_workspace_environment_uses_runtime_lsp_template_for_new_language(self) -> None:
+        repo = self.root / "runtime_lsp_template_repo"
+        repo.mkdir()
+        config_dir = self.root / "plugins" / "lsp" / "servers"
+        config_dir.mkdir(parents=True)
+        (config_dir / "nimlsp.toml").write_text(
+            "\n".join(
+                [
+                    'server_id = "nimlsp"',
+                    'display_name = "nimlsp"',
+                    'command = ["nimlsp"]',
+                    'extensions = [".nim"]',
+                    'language_ids = ["nim"]',
+                    'workspace_markers = ["nimble.lock", ".git"]',
+                    'install_hint = "Install nimlsp."',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        pack = TaskContextPack(
+            work_order_id="wo_runtime_lsp_template",
+            goal="prepare nim",
+            metadata={"languages": ["nim"]},
+        )
+
+        environment = prepare_workspace_environment(
+            repo,
+            pack,
+            {},
+            write_files=True,
+            runtime_root=self.root,
+        )
+
+        self.assertEqual(environment["languages"], ["nim"])
+        self.assertEqual(environment["lsp_setup"]["servers"], ["nimlsp"])
+        self.assertEqual(environment["created_files"], [])
+        self.assertEqual(environment["lsp_setup"]["skipped"], [])
+
+    def test_checkpoint_reviewer_inherits_coder_language_lsp_setup_summary(self) -> None:
+        inherited = _checkpoint_review_environment_workspace(
+            {
+                "repo_path": "/tmp/source",
+                "source_repo": "/tmp/origin",
+                "languages": ["cpp"],
+                "lsp_setup": {
+                    "languages": ["cpp"],
+                    "servers": [],
+                    "skipped": ["cpp skipped; missing LSP server template(s): clangd"],
+                    "unsafe": {"do": "not copy"},
+                },
+            }
+        )
+
+        self.assertEqual(inherited["languages"], ["cpp"])
+        self.assertEqual(inherited["lsp_setup"]["languages"], ["cpp"])
+        self.assertEqual(inherited["lsp_setup"]["servers"], [])
+        self.assertIn("missing LSP server template", inherited["lsp_setup"]["skipped"][0])
+        self.assertNotIn("source_repo", inherited)
+        self.assertNotIn("unsafe", inherited["lsp_setup"])
 
     def test_commit_milestone_excludes_generated_artifacts(self) -> None:
         pack = self.repository.prepare_pack_for_spawn(
@@ -3936,6 +4731,383 @@ class MinionManagerTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
 
+    def test_workspace_file_tools_use_relative_paths_and_file_state(self) -> None:
+        async def scenario() -> None:
+            from pal.execution.file_delete import FileDeleteTool
+            from pal.execution.file_edit import FileEditTool
+            from pal.execution.file_read import FileReadTool
+            from pal.execution.file_state import FileStateCache
+            from pal.execution.file_write import FileWriteTool
+            from pal.execution.runtime import ExecutionRuntime
+
+            repo_path = self.root / "workspace_file_repo"
+            repo_path.mkdir()
+            (repo_path / "app.py").write_text("value = 'old'\n", encoding="utf-8")
+            cache = FileStateCache()
+            runtime = ExecutionRuntime()
+            runtime.register_tool(FileReadTool(cache=cache))
+            runtime.register_tool(FileEditTool(cache=cache))
+            runtime.register_tool(FileWriteTool(cache=cache))
+            runtime.register_tool(FileDeleteTool(cache=cache))
+            scoped = MinionScopedExecutionRuntime(
+                base_runtime=runtime,
+                allowed_capabilities=[
+                    "op_file_read",
+                    "op_file_edit",
+                    "op_file_write",
+                    "op_file_delete",
+                ],
+                workspace={"repo_path": str(repo_path)},
+            )
+
+            read = await scoped.execute_tool_async(CanonicalToolCall(name="op_file_read", args={"path": "app.py"}, call_id="read_app"))
+            self.assertTrue(read.ok, read.text)
+            self.assertEqual(read.structured["workspace_path"], "app.py")
+            self.assertIn(str(repo_path / "app.py"), cache)
+
+            edit = await scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="op_file_edit",
+                    args={"path": "app.py", "old_string": "old", "new_string": "new"},
+                    call_id="edit_app",
+                )
+            )
+            self.assertTrue(edit.ok, edit.text)
+            self.assertEqual((repo_path / "app.py").read_text(encoding="utf-8"), "value = 'new'\n")
+
+            delete = await scoped.execute_tool_async(CanonicalToolCall(name="op_file_delete", args={"path": "app.py"}, call_id="delete_app"))
+            self.assertTrue(delete.ok, delete.text)
+            self.assertFalse((repo_path / "app.py").exists())
+
+            create = await scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="op_file_write",
+                    args={"path": "nested/result.txt", "content": "done\n"},
+                    call_id="write_result",
+                )
+            )
+            self.assertTrue(create.ok, create.text)
+            self.assertEqual((repo_path / "nested" / "result.txt").read_text(encoding="utf-8"), "done\n")
+
+        asyncio.run(scenario())
+
+    def test_workspace_file_tools_reject_paths_outside_workspace(self) -> None:
+        async def scenario() -> None:
+            from pal.execution.file_read import FileReadTool
+            from pal.execution.file_state import FileStateCache
+            from pal.execution.runtime import ExecutionRuntime
+
+            repo_path = self.root / "workspace_file_sandbox"
+            repo_path.mkdir()
+            (self.root / "outside.txt").write_text("outside\n", encoding="utf-8")
+            runtime = ExecutionRuntime()
+            runtime.register_tool(FileReadTool(cache=FileStateCache()))
+            scoped = MinionScopedExecutionRuntime(
+                base_runtime=runtime,
+                allowed_capabilities=["op_file_read"],
+                workspace={"repo_path": str(repo_path)},
+            )
+
+            result = await scoped.execute_tool_async(
+                CanonicalToolCall(name="op_file_read", args={"path": "../outside.txt"}, call_id="read_outside")
+            )
+
+            self.assertFalse(result.ok)
+            self.assertIn("relative to workspace.repo_path", result.text)
+
+        asyncio.run(scenario())
+
+    def test_lsp_tools_default_to_minion_workspace_root(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "lsp_repo"
+            source_path = repo_path / "src" / "app.py"
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text("value: str = 1\n", encoding="utf-8")
+            calls = []
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, *, allow_tools=True, turn_id=None):
+                    _ = allow_tools, turn_id
+                    calls.append(call)
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text="lsp ok",
+                        llm_text="lsp ok",
+                        structured={"args": dict(call.args)},
+                        status=RuntimeStatus.OK,
+                    )
+
+            scoped = MinionScopedExecutionRuntime(
+                FakeExecution(),
+                ["lsp_diagnostics", "lsp_workspace_symbols"],
+                workspace={"repo_path": str(repo_path)},
+            )
+
+            result = await scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="lsp_diagnostics",
+                    args={"file": "src/app.py", "workspace_root": str(self.root / "wrong_root")},
+                    call_id="call_lsp_diag",
+                )
+            )
+            self.assertTrue(result.ok, result.text)
+            self.assertEqual(calls[-1].args["workspace_root"], str(repo_path.resolve()))
+            self.assertEqual(calls[-1].args["file"], str(source_path.resolve()))
+
+            symbols = await scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="lsp_workspace_symbols",
+                    args={"query": "value"},
+                    call_id="call_lsp_symbols",
+                )
+            )
+            self.assertTrue(symbols.ok, symbols.text)
+            self.assertEqual(calls[-1].args["workspace_root"], str(repo_path.resolve()))
+
+        asyncio.run(scenario())
+
+    def test_reviewer_lsp_tools_prefer_review_scratch_root(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "source_repo"
+            scratch_repo = self.root / "review_scratch" / "source"
+            (repo_path / "src").mkdir(parents=True)
+            (scratch_repo / "src").mkdir(parents=True)
+            (repo_path / "src" / "app.py").write_text("source_value = 1\n", encoding="utf-8")
+            scratch_file = scratch_repo / "src" / "app.py"
+            scratch_file.write_text("scratch_value = 1\n", encoding="utf-8")
+            calls = []
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, *, allow_tools=True, turn_id=None):
+                    _ = allow_tools, turn_id
+                    calls.append(call)
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text="lsp ok",
+                        llm_text="lsp ok",
+                        status=RuntimeStatus.OK,
+                    )
+
+            scoped = MinionScopedExecutionRuntime(
+                FakeExecution(),
+                ["lsp_hover"],
+                workspace={
+                    "repo_path": str(repo_path),
+                    "review_scratch_repo_path": str(scratch_repo),
+                    "workspace_policy": {"mode": "read_only_repo"},
+                },
+            )
+
+            result = await scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="lsp_hover",
+                    args={"file": "src/app.py", "line": 0, "character": 0},
+                    call_id="call_lsp_hover",
+                )
+            )
+
+            self.assertTrue(result.ok, result.text)
+            self.assertEqual(calls[-1].args["workspace_root"], str(scratch_repo.resolve()))
+            self.assertEqual(calls[-1].args["file"], str(scratch_file.resolve()))
+
+        asyncio.run(scenario())
+
+    def test_lsp_tools_reject_files_outside_minion_workspace_root(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "lsp_sandbox_repo"
+            repo_path.mkdir()
+            outside = self.root / "outside.py"
+            outside.write_text("value = 1\n", encoding="utf-8")
+            calls = []
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, *, allow_tools=True, turn_id=None):
+                    _ = allow_tools, turn_id
+                    calls.append(call)
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text="should not run",
+                        llm_text="should not run",
+                        status=RuntimeStatus.OK,
+                    )
+
+            scoped = MinionScopedExecutionRuntime(
+                FakeExecution(),
+                ["lsp_diagnostics"],
+                workspace={"repo_path": str(repo_path)},
+            )
+
+            result = await scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="lsp_diagnostics",
+                    args={"file": str(outside)},
+                    call_id="call_lsp_outside",
+                )
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.structured["reason"], "lsp_path_outside_workspace")
+            self.assertEqual(calls, [])
+
+        asyncio.run(scenario())
+
+    def test_repair_round_blocks_lsp_until_workspace_edit(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "repair_lsp_guard_repo"
+            repo_path.mkdir()
+            calls = []
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, *, allow_tools=True, turn_id=None):
+                    _ = allow_tools, turn_id
+                    calls.append(call)
+                    if call.name == "op_file_write":
+                        file_path = Path(call.args["file_path"])
+                        file_path.parent.mkdir(parents=True, exist_ok=True)
+                        file_path.write_text(str(call.args.get("content") or ""), encoding="utf-8")
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text=f"{call.name} ok",
+                        llm_text=f"{call.name} ok",
+                        structured={"args": dict(call.args)},
+                        status=RuntimeStatus.OK,
+                    )
+
+            workspace = {
+                "repo_path": str(repo_path),
+                "current_repair_attempt": {"attempt": 1, "milestone_index": 0},
+                "checkpoint_repair": {
+                    "repair_checklist": [
+                        {"id": "R1", "action": "Render empty tags as tags=-.", "status": "pending"}
+                    ]
+                },
+            }
+            scoped = MinionScopedExecutionRuntime(
+                FakeExecution(),
+                ["op_lsp_diagnostics", "op_workspace_file_write", "op_minion_checkpoint_commit"],
+                workspace=workspace,
+            )
+
+            blocked = await scoped.execute_tool_async(
+                CanonicalToolCall(name="op_lsp_diagnostics", args={"file": "src/app.py"}, call_id="call_lsp_before_edit")
+            )
+            self.assertFalse(blocked.ok)
+            self.assertEqual(blocked.structured["reason"], "repair_requires_checklist_edit_first")
+            self.assertEqual(blocked.structured["repair_checklist"][0]["id"], "R1")
+            self.assertEqual(calls, [])
+
+            commit = await scoped.execute_tool_async(
+                CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "repair"}, call_id="call_commit_before_edit")
+            )
+            self.assertFalse(commit.ok)
+            self.assertEqual(commit.structured["reason"], "repair_requires_checklist_edit_first")
+            self.assertEqual(calls, [])
+
+            write = await scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="op_workspace_file_write",
+                    args={"path": "src/app.py", "content": "value = 1\n"},
+                    call_id="call_repair_write",
+                )
+            )
+            self.assertTrue(write.ok, write.text)
+            self.assertTrue(workspace["repair_workspace_changed"])
+
+            allowed = await scoped.execute_tool_async(
+                CanonicalToolCall(name="op_lsp_diagnostics", args={"file": "src/app.py"}, call_id="call_lsp_after_edit")
+            )
+            self.assertTrue(allowed.ok, allowed.text)
+            self.assertEqual(calls[-1].name, "op_lsp_diagnostics")
+
+        asyncio.run(scenario())
+
+    def test_repair_round_blocks_broad_verification_shell_until_workspace_edit(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "repair_shell_guard_repo"
+            repo_path.mkdir()
+            calls = []
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, *, allow_tools=True, turn_id=None):
+                    _ = allow_tools, turn_id
+                    calls.append(call)
+                    if call.name == "op_file_write":
+                        file_path = Path(call.args["file_path"])
+                        file_path.parent.mkdir(parents=True, exist_ok=True)
+                        file_path.write_text(str(call.args.get("content") or ""), encoding="utf-8")
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text=f"{call.name} ok",
+                        llm_text=f"{call.name} ok",
+                        structured={"exit_code": 0, "args": dict(call.args)},
+                        status=RuntimeStatus.OK,
+                    )
+
+            workspace = {
+                "repo_path": str(repo_path),
+                "current_repair_attempt": {"attempt": 1, "milestone_index": 0},
+                "checkpoint_repair": {"repair_checklist": [{"id": "R1", "action": "Fix contract mismatch."}]},
+            }
+            scoped = MinionScopedExecutionRuntime(
+                FakeExecution(),
+                ["shell", "op_file_write"],
+                workspace=workspace,
+            )
+
+            blocked = await scoped.execute_tool_async(
+                CanonicalToolCall(name="shell", args={"cmd": "python -m pytest -q"}, call_id="call_pytest_before_edit")
+            )
+            self.assertFalse(blocked.ok)
+            self.assertEqual(blocked.structured["reason"], "repair_requires_checklist_edit_first")
+            self.assertEqual(calls, [])
+
+            discovery = await scoped.execute_tool_async(
+                CanonicalToolCall(name="shell", args={"cmd": "find . -maxdepth 2 -type f"}, call_id="call_find_before_edit")
+            )
+            self.assertTrue(discovery.ok, discovery.text)
+            self.assertEqual(calls[-1].name, "shell")
+
+            write = await scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="op_file_write",
+                    args={"path": "src/app.py", "content": "value = 1\n"},
+                    call_id="call_repair_write",
+                )
+            )
+            self.assertTrue(write.ok, write.text)
+
+            pytest = await scoped.execute_tool_async(
+                CanonicalToolCall(name="shell", args={"cmd": "python -m pytest -q"}, call_id="call_pytest_after_edit")
+            )
+            self.assertTrue(pytest.ok, pytest.text)
+            self.assertEqual(calls[-1].args["cmd"], "python -m pytest -q")
+
+            verification_only = MinionScopedExecutionRuntime(
+                FakeExecution(),
+                ["shell"],
+                workspace={
+                    "repo_path": str(repo_path),
+                    "current_repair_attempt": {"attempt": 1, "milestone_index": 0},
+                    "checkpoint_repair": {
+                        "repair_checklist": [
+                            {"id": "R1", "action": "Run focused pytest for missing verification evidence."}
+                        ]
+                    },
+                },
+            )
+            verification = await verification_only.execute_tool_async(
+                CanonicalToolCall(name="shell", args={"cmd": "python -m pytest -q"}, call_id="call_pytest_verification_only")
+            )
+            self.assertTrue(verification.ok, verification.text)
+            self.assertEqual(calls[-1].args["cmd"], "python -m pytest -q")
+
+        asyncio.run(scenario())
+
     def test_manager_spawn_returns_immediately_and_records_terminal_event(self) -> None:
         async def scenario() -> None:
             manager, manager_task, client = await self._start_manager()
@@ -4023,7 +5195,7 @@ class MinionManagerTests(unittest.TestCase):
                 "gate_id": "gate_repair_fail_1",
                 "gate_kind": "checkpoint_verification",
                 "verdict": "fail",
-                "target": {"checkpoint_id": "chk_repair_bound", "milestone_index": 0, "milestone_id": "m1"},
+                "target": {"checkpoint_id": "chk_repair_bound", "commit_sha": "abc123", "milestone_index": 0, "milestone_id": "m1"},
                 "summary": "missing verification",
                 "findings": [{"severity": "major", "summary": "test evidence is missing"}],
             }
@@ -4031,8 +5203,23 @@ class MinionManagerTests(unittest.TestCase):
             await manager.reviews._send_checkpoint_repair_turn(state, gate)
 
             self.assertEqual(manager.sent_messages[-1]["message"]["type"], "repair_turn")
+            turn = manager.sent_messages[-1]["message"]["turn"]
+            self.assertEqual(turn["turn_kind"], "checkpoint_repair")
+            self.assertIn("abc123", turn["instruction"])
+            self.assertIn("minion_outputs is excluded", turn["instruction"])
+            self.assertIn("Structured repair payload", turn["instruction"])
+            self.assertIn("before the first successful workspace edit", turn["instruction"])
+            self.assertIn("do not call op_lsp_*", turn["instruction"])
+            self.assertIn("source_contract", turn["instruction"])
+            self.assertIn("binding_constraints_to_recheck", turn["instruction"])
+            self.assertIn('"failed_checkpoint"', json.dumps(turn["metadata_updates"]["checkpoint_repair"], sort_keys=True))
+            self.assertEqual(turn["metadata_updates"]["checkpoint_repair"]["failed_checkpoint"]["commit_sha"], "abc123")
+            self.assertEqual(turn["metadata_updates"]["checkpoint_repair"]["findings"][0]["title"], "test evidence is missing")
+            self.assertEqual(state.pack.metadata["checkpoint_repair"]["failed_checkpoint"]["checkpoint_id"], "chk_repair_bound")
             module_execution = dict(state.pack.metadata["module_execution"])
             self.assertEqual(module_execution["repair_attempts_by_milestone"], {"0": 1})
+            self.assertEqual(module_execution["last_repair_attempt"]["failed_commit_sha"], "abc123")
+            self.assertEqual(module_execution["last_repair_attempt"]["failed_checkpoint_id"], "chk_repair_bound")
             snapshot = manager.tasking_repository.read_work_order("wo_repair_bound")
             self.assertEqual(snapshot["work_order"]["metadata"]["module_execution"]["repair_attempts_by_milestone"], {"0": 1})
 
@@ -4047,6 +5234,204 @@ class MinionManagerTests(unittest.TestCase):
             self.assertTrue(any(event.get("event_kind") == "review_repair_blocked" for event in manager.event_queue))
 
         asyncio.run(scenario())
+
+    def test_checkpoint_repair_payload_filters_gate_noise_for_llm(self) -> None:
+        long_evidence = " ".join(["evidence"] * 200)
+        gate = {
+            "gate_id": "gate_compact",
+            "gate_kind": "checkpoint_verification",
+            "verdict": "fail",
+            "target": {
+                "checkpoint_id": "chk_compact",
+                "commit_sha": "abc123",
+                "milestone_index": 0,
+                "acceptance_criteria": ["format_summary renders labels=- for empty labels"],
+                "source_contract": {
+                    "acceptance_criteria": ["Add 4-7 pytest tests covering formatting and invalid data."],
+                },
+            },
+            "summary": "format_summary violates the empty-label contract",
+            "findings": [
+                {
+                    "severity": "blocker",
+                    "title": "empty labels output violates contract",
+                    "area": "src/pal_dogfood/window_stats.py:format_summary",
+                    "evidence": long_evidence,
+                    "suggested_fix": "Use ','.join(summary.labels) or '-'",
+                    "contract_impact": "Consumers receive labels= instead of labels=-.",
+                    "extra_large_blob": "do not include me",
+                },
+                {
+                    "severity": "blocker",
+                    "source": "system_detected",
+                    "summary": "checkpoint review gate evidence violates acceptance criterion 'Change format_summary on line 132-133 and test it': observed 6 passed tests outside required range 132-133",
+                    "contract_impact": "line 132-133 was mistaken for a test-count range",
+                    "suggested_fix": "do not include me",
+                },
+            ],
+            "required_fixes": [
+                {
+                    "finding_index": 0,
+                    "description": "Change empty-label formatting to render labels=-.",
+                    "verification": "Run a runtime probe for format_summary with labels=().",
+                }
+            ],
+            "commands_run": [
+                {
+                    "command": "python -m pytest -q",
+                    "exit_code": 0,
+                    "output_summary": "6 passed",
+                    "covers": ["python -m pytest -q passes"],
+                    "large_stdout": long_evidence,
+                }
+            ],
+            "api_evidence": [
+                {
+                    "source": "src/pal_dogfood/window_stats.py",
+                    "finding": "format_summary uses an empty string for empty labels.",
+                    "covers": ["window_stats.py implements format_summary"],
+                    "irrelevant": long_evidence,
+                }
+            ],
+            "report_artifact_ref": {
+                "path": "/tmp/review_report.json",
+                "sha256": "sha",
+                "content": long_evidence,
+            },
+        }
+
+        payload = _checkpoint_repair_payload(gate, {"attempt": 1, "max_repair_attempts": 5})
+
+        serialized = json.dumps(payload, sort_keys=True)
+        self.assertEqual(payload["turn_kind"], "checkpoint_repair")
+        self.assertEqual(payload["failed_checkpoint"]["checkpoint_id"], "chk_compact")
+        self.assertEqual(payload["repair_checklist"][0]["id"], "R1")
+        self.assertEqual(payload["repair_checklist"][0]["status"], "pending")
+        self.assertIn("labels=-", payload["repair_checklist"][0]["action"])
+        self.assertIn("format_summary", payload["repair_checklist"][0]["area"])
+        self.assertIn("runtime probe", payload["repair_checklist"][0]["verify"])
+        self.assertEqual(payload["findings"][0]["suggested_fix"], "Use ','.join(summary.labels) or '-'")
+        self.assertEqual(len(payload["findings"]), 1)
+        self.assertIn("format_summary renders labels=-", payload["failed_acceptance_criteria"][0])
+        self.assertIn("Add 4-7 pytest tests", payload["binding_constraints_to_recheck"][0])
+        self.assertIn("op_lsp_*", " ".join(payload["repair_order"]))
+        self.assertIn("source_contract", " ".join(payload["pre_checkpoint_self_check"]))
+        self.assertIn("wrong expectation", " ".join(payload["pre_checkpoint_self_check"]))
+        self.assertEqual(payload["review_artifact_ref"]["sha256"], "sha")
+        self.assertNotIn("extra_large_blob", serialized)
+        self.assertNotIn("large_stdout", serialized)
+        self.assertNotIn("132-133", serialized)
+        self.assertNotIn("content", payload["review_artifact_ref"])
+        self.assertLess(len(payload["findings"][0]["evidence"]), len(long_evidence))
+
+    def test_review_gate_repair_note_renders_structured_fixes_and_numeric_constraints(self) -> None:
+        note = review_gate_repair_note(
+            {
+                "gate_kind": "checkpoint_verification",
+                "verdict": "fail",
+                "summary": "BLOCKER: 21 pytest tests found, but the binding source-contract requires exactly 6-10.",
+                "target": {
+                    "checkpoint_id": "chk_repair_note",
+                    "commit_sha": "abc123",
+                    "source_contract": {
+                        "instruction": (
+                            "Hard requirements:\n"
+                            "- Add 6-10 focused pytest tests covering grouping, monthly totals, invalid records, and CLI/report behavior.\n"
+                            "- Run python -m pytest -q successfully before checkpointing."
+                        ),
+                        "acceptance_criteria": [
+                            "6-10 pytest tests pass covering validation, computation, anomaly detection, and CLI output."
+                        ],
+                    },
+                },
+                "findings": [
+                    {
+                        "severity": "blocker",
+                        "title": "Test count exceeds binding source-contract bound",
+                        "area": "tests/test_spend_report.py",
+                        "evidence": "AST count found 21 test functions.",
+                        "suggested_fix": "Reduce the test suite to 6-10 focused tests.",
+                    }
+                ],
+                "required_fixes": [
+                    {
+                        "finding_index": 0,
+                        "description": "Reduce test count from 21 to 6-10 while preserving required coverage.",
+                    }
+                ],
+            }
+        )
+
+        self.assertIn("Binding source-contract constraints", note)
+        self.assertIn("Add 6-10 focused pytest tests", note)
+        self.assertIn("6-10 pytest tests pass", note)
+        self.assertIn("Test count exceeds binding source-contract bound", note)
+        self.assertIn("Repair checklist", note)
+        self.assertIn("- [ ] R1", note)
+        self.assertIn("Reduce the test suite to 6-10 focused tests", note)
+        self.assertIn("finding_index=0: Reduce test count from 21 to 6-10", note)
+        self.assertIn("Complete every repair checklist item", note)
+        self.assertIn("If a required fix says to reduce a count", note)
+        self.assertNotIn("{'severity'", note)
+
+    def test_checkpoint_git_context_includes_changed_files_without_source_shell_access(self) -> None:
+        repo_path = self.root / "checkpoint_git_context_repo"
+        repo_path.mkdir()
+        _git(repo_path, "init", check=True)
+        _git(repo_path, "checkout", "-B", "main", check=True)
+        _git(repo_path, "config", "user.email", "pal-test@example.invalid", check=True)
+        _git(repo_path, "config", "user.name", "Pal Test", check=True)
+        (repo_path / "README.md").write_text("# base\n", encoding="utf-8")
+        _git(repo_path, "add", "README.md", check=True)
+        _git(repo_path, "commit", "-m", "initial", check=True)
+        (repo_path / "spend_report").mkdir()
+        (repo_path / "spend_report" / "core.py").write_text("VALUE = 1\n", encoding="utf-8")
+        _git(repo_path, "add", "spend_report/core.py", check=True)
+        _git(repo_path, "commit", "-m", "add core", check=True)
+        commit_sha = _git(repo_path, "rev-parse", "HEAD", check=True).stdout.strip()
+
+        context = _checkpoint_git_context(str(repo_path), commit_sha)
+
+        self.assertEqual(context["commit_sha"], commit_sha)
+        self.assertIn("spend_report/core.py", context["changed_files"])
+        self.assertIn("spend_report/core.py", context["stat"])
+        self.assertNotIn(str(repo_path), context["stat"])
+
+    def test_checkpoint_gate_requires_repair_for_actionable_partial(self) -> None:
+        self.assertTrue(
+            _checkpoint_gate_requires_repair(
+                {
+                    "verdict": "partial",
+                    "required_fixes": [{"description": "Reject non-string labels."}],
+                    "findings": [{"severity": "note", "contract_impact": "none"}],
+                }
+            )
+        )
+        self.assertTrue(
+            _checkpoint_gate_requires_repair(
+                {
+                    "verdict": "partial",
+                    "findings": [{"severity": "blocker", "contract_impact": "none"}],
+                }
+            )
+        )
+        self.assertTrue(
+            _checkpoint_gate_requires_repair(
+                {
+                    "verdict": "partial",
+                    "findings": [{"severity": "note", "contract_impact": "declared tuple[str, ...] can contain ints"}],
+                }
+            )
+        )
+        self.assertFalse(
+            _checkpoint_gate_requires_repair(
+                {
+                    "verdict": "partial",
+                    "findings": [{"severity": "note", "contract_impact": "not applicable"}],
+                }
+            )
+        )
+        self.assertFalse(_checkpoint_gate_requires_repair({"verdict": "pass", "required_fixes": [{"description": "schema-invalid but ignored"}]}))
 
     def test_bare_coder_spawn_gets_checkpoint_review_gate(self) -> None:
         class BareCoderReviewManager(MinionManager):
@@ -4070,6 +5455,8 @@ class MinionManagerTests(unittest.TestCase):
                 TaskContextPack(
                     work_order_id="wo_bare_coder_review",
                     goal="Implement one bare coder task.",
+                    instruction="Hard requirement: create exactly one file.",
+                    acceptance_criteria=["Exactly one file is created."],
                     minion_profile="software_engineering.coder",
                     metadata={"milestones": ["Implement one bare coder task."]},
                 ).to_dict()
@@ -4078,7 +5465,7 @@ class MinionManagerTests(unittest.TestCase):
             checkpoint_review = state.pack.metadata["module_execution"]["checkpoint_review"]
             self.assertEqual(checkpoint_review["scope"], "bare_coder_checkpoint")
             self.assertEqual(checkpoint_review["max_repair_attempts"], 5)
-            self.assertEqual(state.pack.metadata["manager_turn_timeout_seconds"], 300)
+            self.assertEqual(state.pack.metadata["manager_turn_timeout_seconds"], 1200)
             snapshot = manager.tasking_repository.read_work_order("wo_bare_coder_review")
             self.assertEqual(snapshot["work_order"]["metadata"]["module_execution"]["checkpoint_review"]["scope"], "bare_coder_checkpoint")
 
@@ -4104,6 +5491,14 @@ class MinionManagerTests(unittest.TestCase):
             reviewer_state = manager.started_reviewers[0]
             self.assertEqual(reviewer_state.pack.metadata["review_target"]["checkpoint_id"], checkpoint_id)
             self.assertEqual(reviewer_state.pack.metadata["review_target"]["gate_kind"], "checkpoint_verification")
+            source_contract = reviewer_state.pack.metadata["review_target"]["source_contract"]
+            self.assertEqual(source_contract["goal"], "Implement one bare coder task.")
+            self.assertEqual(source_contract["instruction"], "Hard requirement: create exactly one file.")
+            self.assertEqual(source_contract["acceptance_criteria"], ["Exactly one file is created."])
+            self.assertEqual(
+                reviewer_state.pack.metadata["prompt_view"]["review_target"]["source_contract"]["instruction"],
+                "Hard requirement: create exactly one file.",
+            )
 
             gate = manager.tasking_repository.submit_review_gate(
                 {
@@ -4129,6 +5524,83 @@ class MinionManagerTests(unittest.TestCase):
             completion = manager.sent_messages[-1]["message"]["completion"]
             self.assertEqual(completion["checkpoint_id"], checkpoint_id)
             self.assertEqual(completion["review_gate_ref"]["gate_id"], gate["review_gate_ref"]["gate_id"])
+
+        asyncio.run(scenario())
+
+    def test_partial_checkpoint_with_required_fixes_routes_to_repair(self) -> None:
+        class PartialRepairManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started_reviewers = []
+                self.sent_messages = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                if state.pack.minion_profile == "software_engineering.reviewer":
+                    self.started_reviewers.append(state)
+
+            async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
+                self.sent_messages.append({"run_id": state.run_id, "message": dict(message)})
+                return {"ok": True, "run_id": state.run_id, "message_type": str(message.get("type") or "")}
+
+        async def scenario() -> None:
+            manager = PartialRepairManager(runtime_root=self.root)
+            spawned = await manager.spawn(
+                TaskContextPack(
+                    work_order_id="wo_partial_checkpoint_repair",
+                    goal="Implement one bare coder task.",
+                    instruction="Hard requirement: create exactly one file.",
+                    acceptance_criteria=["Exactly one file is created."],
+                    minion_profile="software_engineering.coder",
+                    metadata={"milestones": ["Implement one bare coder task."]},
+                ).to_dict()
+            )
+            state = manager.runs[spawned["run_id"]]
+            checkpoint_id = "chk_partial_checkpoint_repair"
+            manager._record_event(
+                state,
+                {
+                    "event_kind": "checkpoint",
+                    "payload": {
+                        "checkpoint_id": checkpoint_id,
+                        "status": "claimed",
+                        "milestone_index": 0,
+                        "milestone_id": "m0",
+                        "summary": "bare coder checkpoint claim",
+                        "commit_sha": "abc123",
+                        "expected_review_gate_kind": "checkpoint_verification",
+                    },
+                    "created_at": utc_now(),
+                },
+            )
+            await asyncio.sleep(0)
+            reviewer_state = manager.started_reviewers[0]
+            gate = manager.tasking_repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "milestone_index": 0},
+                    "verdict": "partial",
+                    "summary": "checkpoint has one contract mismatch",
+                    "findings": [
+                        {
+                            "severity": "blocker",
+                            "area": "src/example.py",
+                            "contract_impact": "declared tuple[str, ...] can contain non-string values",
+                            "suggested_fix": "Validate the input type.",
+                        }
+                    ],
+                    "required_fixes": [{"finding_index": 0, "description": "Validate the input type."}],
+                    "reviewer_profile": "software_engineering.reviewer",
+                }
+            )
+            await manager.reviews._reconcile_checkpoint_review(reviewer_state, checkpoint_id, state.run_id)
+
+            self.assertEqual(manager.sent_messages[-1]["message"]["type"], "repair_turn")
+            turn = manager.sent_messages[-1]["message"]["turn"]
+            self.assertEqual(turn["turn_kind"], "checkpoint_repair")
+            self.assertEqual(turn["metadata_updates"]["checkpoint_repair"]["review_gate_ref"]["verdict"], "partial")
+            self.assertIn(gate["review_gate_ref"]["gate_id"], turn["instruction"])
+            self.assertIn("Validate the input type", turn["instruction"])
 
         asyncio.run(scenario())
 
@@ -4858,7 +6330,7 @@ class MinionManagerTests(unittest.TestCase):
                 if call_count == 2:
                     return CanonicalLLMOutcome(
                         text="",
-                        tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": title})],
+                        tool_calls=[CanonicalToolCall(name="checkpoint_commit", args={"title": title})],
                     )
                 return CanonicalLLMOutcome(
                     text=(
@@ -4941,7 +6413,7 @@ class MinionManagerTests(unittest.TestCase):
                             text="",
                             tool_calls=[
                                 CanonicalToolCall(
-                                    name="op_minion_artifact_write",
+                                    name="artifact_write",
                                     args={
                                         "relative_path": "plan.json",
                                         "title": "Dogfood plan",
@@ -5001,7 +6473,7 @@ class MinionManagerTests(unittest.TestCase):
                             text="",
                             tool_calls=[
                                 CanonicalToolCall(
-                                    name="op_minion_artifact_write",
+                                    name="artifact_write",
                                     args={
                                         "relative_path": "review_report.md",
                                         "title": "Dogfood review",
@@ -5072,7 +6544,7 @@ class MinionManagerTests(unittest.TestCase):
             provider = MinionManagerProvider(runtime_root=self.root)
             revised = provider.revise_plan(
                 CapabilityCall(
-                    name="op_minion_revise_plan",
+                    name="minion_revise_plan",
                     args={
                         "source_plan_ref": plan_ref,
                         "revised_plan_artifact": revised_plan,
@@ -5089,7 +6561,7 @@ class MinionManagerTests(unittest.TestCase):
             )
             gate = provider.review_gate_submit(
                 CapabilityCall(
-                    name="op_minion_review_gate_submit",
+                    name="review_gate_submit",
                     args={
                         "gate_kind": "plan_acceptance",
                         "target": {"plan_ref": dict(revised.structured["plan_ref"])},
@@ -5109,7 +6581,7 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(gate.status, RuntimeStatus.OK)
             accepted = provider.accept_plan(
                 CapabilityCall(
-                    name="op_minion_accept_plan",
+                    name="minion_accept_plan",
                     args={
                         "plan_ref": dict(revised.structured["plan_ref"]),
                         "review_gate_ref": dict(gate.structured["review_gate_ref"]),
@@ -5260,7 +6732,7 @@ class MinionManagerTests(unittest.TestCase):
                 if call_count == 2:
                     return CanonicalLLMOutcome(
                         text="",
-                        tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": title})],
+                        tool_calls=[CanonicalToolCall(name="checkpoint_commit", args={"title": title})],
                     )
                 return CanonicalLLMOutcome(text=f"{milestone_id} completed with checkpoint commit.")
 
@@ -5375,7 +6847,7 @@ class MinionManagerTests(unittest.TestCase):
             provider = MinionManagerProvider(runtime_root=self.root)
             revised = provider.revise_plan(
                 CapabilityCall(
-                    name="op_minion_revise_plan",
+                    name="minion_revise_plan",
                     args={
                         "source_plan_ref": {
                             "path": str(initial_plan_path),
@@ -5394,7 +6866,7 @@ class MinionManagerTests(unittest.TestCase):
             )
             gate = provider.review_gate_submit(
                 CapabilityCall(
-                    name="op_minion_review_gate_submit",
+                    name="review_gate_submit",
                     args={
                         "gate_kind": "plan_acceptance",
                         "target": {"plan_ref": dict(revised.structured["plan_ref"])},
@@ -5414,7 +6886,7 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(gate.status, RuntimeStatus.OK)
             accepted = provider.accept_plan(
                 CapabilityCall(
-                    name="op_minion_accept_plan",
+                    name="minion_accept_plan",
                     args={
                         "plan_ref": dict(revised.structured["plan_ref"]),
                         "review_gate_ref": dict(gate.structured["review_gate_ref"]),
@@ -5577,7 +7049,7 @@ class MinionManagerTests(unittest.TestCase):
                 if call_count == 2:
                     return CanonicalLLMOutcome(
                         text="",
-                        tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": title})],
+                        tool_calls=[CanonicalToolCall(name="checkpoint_commit", args={"title": title})],
                     )
                 return CanonicalLLMOutcome(text=f"{milestone_id} completed with checkpoint commit.")
 
@@ -5933,7 +7405,7 @@ class MinionManagerTests(unittest.TestCase):
                     if self.calls == 2:
                         return CanonicalLLMOutcome(
                             text="",
-                            tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "approval work"})],
+                            tool_calls=[CanonicalToolCall(name="checkpoint_commit", args={"title": "approval work"})],
                         )
                     return CanonicalLLMOutcome(
                         text=(
@@ -5974,7 +7446,7 @@ class MinionManagerTests(unittest.TestCase):
 
             code = await MinionRunner(
                 runtime_root=self.root,
-                pack=TaskContextPack.from_dict({**repo_pack.to_dict(), "allowed_capabilities": ["op_fake_tool", "op_minion_checkpoint_commit"]}),
+                pack=TaskContextPack.from_dict({**repo_pack.to_dict(), "allowed_capabilities": ["op_fake_tool", "checkpoint_commit"]}),
                 minion_id="m1",
                 run_id="r1",
                 write_event=write_event,
@@ -6234,10 +7706,10 @@ class MinionManagerTests(unittest.TestCase):
             status="running",
         )
 
-        manager._record_runner_stderr_line(state, "[tool call] turn_id=r name=op_minion_artifact_write call_id=call_1 args={}")
+        manager._record_runner_stderr_line(state, "[tool call] turn_id=r name=artifact_write call_id=call_1 args={}")
         manager._record_runner_stderr_line(
             state,
-            '[tool result] turn_id=r name=op_minion_artifact_write call_id=call_1 ok=True status=ok text="Artifact written"',
+            '[tool result] turn_id=r name=artifact_write call_id=call_1 ok=True status=ok text="Artifact written"',
         )
 
         self.assertEqual(state.last_error, "")
@@ -6320,7 +7792,7 @@ class MinionManagerTests(unittest.TestCase):
                     work_order_id="wo_nudge",
                     goal="write evidence file",
                     continuity={"current_milestone": {"milestone_index": 0, "title": "write evidence"}},
-                    allowed_capabilities=["op_fake_write", "op_minion_checkpoint_commit"],
+                    allowed_capabilities=["op_fake_write", "checkpoint_commit"],
                 ),
             )
             repo = Path(repo_pack.workspace["repo_path"])
@@ -6342,7 +7814,7 @@ class MinionManagerTests(unittest.TestCase):
                     if self.calls == 3:
                         return CanonicalLLMOutcome(
                             text="",
-                            tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "write evidence"})],
+                            tool_calls=[CanonicalToolCall(name="checkpoint_commit", args={"title": "write evidence"})],
                         )
                     return CanonicalLLMOutcome(text="milestone done with evidence")
 
@@ -6644,37 +8116,37 @@ class MinionManagerTests(unittest.TestCase):
 
             runtime = MinionScopedExecutionRuntime(
                 FakeBase(),
-                ["op_workspace_tree", "op_workspace_search", "op_workspace_read"],
+                ["tree", "search", "op_file_read"],
                 {"repo_path": str(repo)},
             )
 
             specs = {spec["name"] for spec in runtime.list_capability_specs()}
-            self.assertIn("op_workspace_tree", specs)
-            self.assertIn("op_workspace_search", specs)
-            self.assertIn("op_workspace_read", specs)
+            self.assertIn("tree", specs)
+            self.assertIn("search", specs)
+            self.assertIn("op_file_read", specs)
 
-            tree = await runtime.execute_tool_async(CanonicalToolCall(name="op_workspace_tree", args={"path": "."}), turn_id="r")
+            tree = await runtime.execute_tool_async(CanonicalToolCall(name="tree", args={"path": "."}), turn_id="r")
             self.assertTrue(tree.ok)
             self.assertIn("src/app.py", tree.text)
 
-            search = await runtime.execute_tool_async(CanonicalToolCall(name="op_workspace_search", args={"query": "target"}), turn_id="r")
+            search = await runtime.execute_tool_async(CanonicalToolCall(name="search", args={"query": "target"}), turn_id="r")
             self.assertTrue(search.ok)
             self.assertIn("src/app.py:1", search.text)
             self.assertNotIn("__pycache__", search.text)
 
-            no_match = await runtime.execute_tool_async(CanonicalToolCall(name="op_workspace_search", args={"query": "missing"}), turn_id="r")
+            no_match = await runtime.execute_tool_async(CanonicalToolCall(name="search", args={"query": "missing"}), turn_id="r")
             self.assertTrue(no_match.ok)
             self.assertIn("No workspace matches found", no_match.text)
 
-            read = await runtime.execute_tool_async(CanonicalToolCall(name="op_workspace_read", args={"path": "src/app.py"}), turn_id="r")
+            read = await runtime.execute_tool_async(CanonicalToolCall(name="op_file_read", args={"path": "src/app.py"}), turn_id="r")
             self.assertTrue(read.ok)
             self.assertIn("1: def target", read.text)
 
-            empty_read = await runtime.execute_tool_async(CanonicalToolCall(name="op_workspace_read", args={"path": "src/__init__.py"}), turn_id="r")
+            empty_read = await runtime.execute_tool_async(CanonicalToolCall(name="op_file_read", args={"path": "src/__init__.py"}), turn_id="r")
             self.assertTrue(empty_read.ok)
             self.assertIn("src/__init__.py: empty file", empty_read.text)
 
-            escaped = await runtime.execute_tool_async(CanonicalToolCall(name="op_workspace_read", args={"path": "../outside.txt"}), turn_id="r")
+            escaped = await runtime.execute_tool_async(CanonicalToolCall(name="op_file_read", args={"path": "../outside.txt"}), turn_id="r")
             self.assertFalse(escaped.ok)
             self.assertIn("escapes", escaped.text)
 
@@ -6700,20 +8172,20 @@ class MinionManagerTests(unittest.TestCase):
 
             runtime = MinionScopedExecutionRuntime(
                 FakeBase(),
-                ["op_minion_artifact_write", "op_minion_artifact_edit"],
+                ["artifact_write", "artifact_edit"],
                 {"artifact_dir": str(artifact_dir)},
                 produced_artifacts=produced,
             )
 
             specs = {spec["name"] for spec in runtime.list_capability_specs()}
-            self.assertIn("op_minion_artifact_write", specs)
-            self.assertIn("op_minion_artifact_edit", specs)
-            write_spec = runtime.get_capability_spec("op_minion_artifact_write")
+            self.assertIn("artifact_write", specs)
+            self.assertIn("artifact_edit", specs)
+            write_spec = runtime.get_capability_spec("artifact_write")
             self.assertFalse(write_spec["parameters_schema"]["additionalProperties"])
 
             result = await runtime.execute_tool_async(
                 CanonicalToolCall(
-                    name="op_minion_artifact_write",
+                    name="artifact_write",
                     args={
                         "relative_path": "plan.md",
                         "content": "hello plan",
@@ -6733,7 +8205,7 @@ class MinionManagerTests(unittest.TestCase):
 
             second = await runtime.execute_tool_async(
                 CanonicalToolCall(
-                    name="op_minion_artifact_write",
+                    name="artifact_write",
                     args={"relative_path": "plan.md", "content": "second plan"},
                 ),
                 turn_id="r",
@@ -6745,7 +8217,7 @@ class MinionManagerTests(unittest.TestCase):
 
             append = await runtime.execute_tool_async(
                 CanonicalToolCall(
-                    name="op_minion_artifact_edit",
+                    name="artifact_edit",
                     args={"relative_path": "plan.md", "operation": "append", "content": "\nnext section"},
                 ),
                 turn_id="r",
@@ -6757,7 +8229,7 @@ class MinionManagerTests(unittest.TestCase):
 
             replace = await runtime.execute_tool_async(
                 CanonicalToolCall(
-                    name="op_minion_artifact_edit",
+                    name="artifact_edit",
                     args={"relative_path": "plan.md", "operation": "replace", "content": "replacement"},
                 ),
                 turn_id="r",
@@ -6768,7 +8240,7 @@ class MinionManagerTests(unittest.TestCase):
 
             create_missing = await runtime.execute_tool_async(
                 CanonicalToolCall(
-                    name="op_minion_artifact_edit",
+                    name="artifact_edit",
                     args={"relative_path": "notes.md", "operation": "append", "content": "notes"},
                 ),
                 turn_id="r",
@@ -6779,7 +8251,7 @@ class MinionManagerTests(unittest.TestCase):
 
             missing = await runtime.execute_tool_async(
                 CanonicalToolCall(
-                    name="op_minion_artifact_edit",
+                    name="artifact_edit",
                     args={"relative_path": "missing.md", "operation": "append", "content": "no", "create_if_missing": False},
                 ),
                 turn_id="r",
@@ -6788,14 +8260,14 @@ class MinionManagerTests(unittest.TestCase):
             self.assertIn("does not exist", missing.text)
 
             empty = await runtime.execute_tool_async(
-                CanonicalToolCall(name="op_minion_artifact_write", args={"relative_path": "empty.md", "content": ""}),
+                CanonicalToolCall(name="artifact_write", args={"relative_path": "empty.md", "content": ""}),
                 turn_id="r",
             )
             self.assertFalse(empty.ok)
             self.assertIn("content is required", empty.text)
 
             empty_edit = await runtime.execute_tool_async(
-                CanonicalToolCall(name="op_minion_artifact_edit", args={"relative_path": "empty.md", "content": ""}),
+                CanonicalToolCall(name="artifact_edit", args={"relative_path": "empty.md", "content": ""}),
                 turn_id="r",
             )
             self.assertFalse(empty_edit.ok)
@@ -6803,7 +8275,7 @@ class MinionManagerTests(unittest.TestCase):
 
             malformed = await runtime.execute_tool_async(
                 CanonicalToolCall(
-                    name="op_minion_artifact_write",
+                    name="artifact_write",
                     args={"relative_path": "bad.md", "content": "partial body", "unexpected": "spilled text"},
                 ),
                 turn_id="r",
@@ -6813,7 +8285,7 @@ class MinionManagerTests(unittest.TestCase):
             self.assertFalse((artifact_dir / "bad.md").exists())
 
             escaped = await runtime.execute_tool_async(
-                CanonicalToolCall(name="op_minion_artifact_write", args={"relative_path": "../escape.md", "content": "no"}),
+                CanonicalToolCall(name="artifact_write", args={"relative_path": "../escape.md", "content": "no"}),
                 turn_id="r",
             )
             self.assertFalse(escaped.ok)
@@ -6821,7 +8293,7 @@ class MinionManagerTests(unittest.TestCase):
             self.assertFalse((self.root / "escape.md").exists())
 
             escaped_edit = await runtime.execute_tool_async(
-                CanonicalToolCall(name="op_minion_artifact_edit", args={"relative_path": "../escape.md", "content": "no"}),
+                CanonicalToolCall(name="artifact_edit", args={"relative_path": "../escape.md", "content": "no"}),
                 turn_id="r",
             )
             self.assertFalse(escaped_edit.ok)
@@ -6851,7 +8323,7 @@ class MinionManagerTests(unittest.TestCase):
             state,
             {
                 "event_kind": "progress",
-                "payload": {"phase": "tool_call_completed", "tool_name": "op_workspace_read", "target_name": "op_workspace_read", "ok": True},
+                "payload": {"phase": "tool_call_completed", "tool_name": "op_file_read", "target_name": "op_file_read", "ok": True},
                 "created_at": "2026-01-01T00:00:01Z",
             },
         )
@@ -6860,7 +8332,7 @@ class MinionManagerTests(unittest.TestCase):
 
         self.assertEqual(detail["last_phase"], "tool_call_completed")
         self.assertEqual(detail["last_event_at"], "2026-01-01T00:00:01Z")
-        self.assertEqual(detail["last_tool_call"]["target_name"], "op_workspace_read")
+        self.assertEqual(detail["last_tool_call"]["target_name"], "op_file_read")
         self.assertEqual(detail["llm_round_count"], 3)
         self.assertEqual(detail["tool_call_count"], 1)
         self.assertEqual(detail["current_milestone"]["title"], "Inspect state")
@@ -6874,7 +8346,7 @@ class MinionManagerTests(unittest.TestCase):
                     work_order_id="wo_many_tools",
                     goal="use many tool calls",
                     continuity={"current_milestone": {"milestone_index": 0, "title": "many tools"}},
-                    allowed_capabilities=["op_fake_append", "op_minion_checkpoint_commit"],
+                    allowed_capabilities=["op_fake_append", "checkpoint_commit"],
                 ),
             )
             repo = Path(repo_pack.workspace["repo_path"])
@@ -6894,7 +8366,7 @@ class MinionManagerTests(unittest.TestCase):
                     if self.calls == 13:
                         return CanonicalLLMOutcome(
                             text="",
-                            tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "many tools"})],
+                            tool_calls=[CanonicalToolCall(name="checkpoint_commit", args={"title": "many tools"})],
                         )
                     return CanonicalLLMOutcome(text="completed after many tool calls")
 
@@ -7001,7 +8473,7 @@ class MinionManagerTests(unittest.TestCase):
                     work_order_id="wo_limit_with_evidence",
                     goal="write before limit",
                     continuity={"current_milestone": {"milestone_index": 0, "title": "write before limit"}},
-                    allowed_capabilities=["op_fake_write", "op_minion_checkpoint_commit"],
+                    allowed_capabilities=["op_fake_write", "checkpoint_commit"],
                     metadata={"max_tool_rounds": 1},
                 ),
             )
@@ -7014,7 +8486,7 @@ class MinionManagerTests(unittest.TestCase):
                         text="",
                         tool_calls=[
                             CanonicalToolCall(name="op_fake_write", args={}),
-                            CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "write before limit"}),
+                            CanonicalToolCall(name="checkpoint_commit", args={"title": "write before limit"}),
                         ],
                     )
 
@@ -7201,7 +8673,7 @@ class MinionManagerTests(unittest.TestCase):
                     work_order_id="wo_bare_runner_review",
                     goal="Implement one bare runner review task.",
                     continuity={"current_milestone": {"milestone_index": 0, "milestone_id": "m0", "title": "Bare review"}},
-                    allowed_capabilities=["op_fake_write", "op_minion_checkpoint_commit"],
+                    allowed_capabilities=["op_fake_write", "checkpoint_commit"],
                     minion_profile="software_engineering.coder",
                     metadata={
                         "checkpoint_review": {"enabled": True, "reviewer_profile": "software_engineering.reviewer"},
@@ -7224,7 +8696,7 @@ class MinionManagerTests(unittest.TestCase):
                     if self.calls == 2:
                         return CanonicalLLMOutcome(
                             text="",
-                            tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "bare checkpoint"})],
+                            tool_calls=[CanonicalToolCall(name="checkpoint_commit", args={"title": "bare checkpoint"})],
                         )
                     return CanonicalLLMOutcome(text="Bare checkpoint is ready for review.")
 
@@ -7320,7 +8792,7 @@ class MinionManagerTests(unittest.TestCase):
                     work_order_id="wo_retry_no_changes",
                     goal="retry before report-only completion",
                     continuity={"current_milestone": {"milestone_index": 0, "title": "code"}},
-                    allowed_capabilities=["op_fake_read", "op_fake_change", "op_minion_checkpoint_commit"],
+                    allowed_capabilities=["op_fake_read", "op_fake_change", "checkpoint_commit"],
                 ),
             )
             repo = Path(repo_pack.workspace["repo_path"])
@@ -7347,7 +8819,7 @@ class MinionManagerTests(unittest.TestCase):
                     if self.calls == 5:
                         return CanonicalLLMOutcome(
                             text="",
-                            tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": "retry changes"})],
+                            tool_calls=[CanonicalToolCall(name="checkpoint_commit", args={"title": "retry changes"})],
                         )
                     return CanonicalLLMOutcome(text="changed after retry")
 
@@ -7542,7 +9014,7 @@ class MinionManagerTests(unittest.TestCase):
             pack = TaskContextPack(
                 work_order_id="wo_git_guard",
                 goal="guard git checkpoint",
-                allowed_capabilities=["op_exec_shell"],
+                allowed_capabilities=["shell"],
                 workspace={"completion_policy": {"evidence": "git_commit"}},
             )
 
@@ -7570,14 +9042,338 @@ class MinionManagerTests(unittest.TestCase):
             )
             result = await runner._execute_allowed_tool(
                 FakeExecution(),
-                CanonicalToolCall(name="op_exec_shell", args={"cmd": "git add . && git commit -m done"}, call_id="call_git"),
+                CanonicalToolCall(name="shell", args={"cmd": "git --no-pager add . && git -C . commit -m done"}, call_id="call_git"),
             )
 
             self.assertFalse(result.ok)
             self.assertEqual(result.structured["reason"], "use_checkpoint_commit_capability")
-            self.assertIn("op_minion_checkpoint_commit", result.llm_text)
+            self.assertIn("checkpoint_commit", result.llm_text)
             self.assertFalse(runner.blocked_summary)
             self.assertFalse(called)
+
+        asyncio.run(scenario())
+
+    def test_runner_allows_read_only_git_branch_query(self) -> None:
+        async def scenario() -> None:
+            called = False
+            pack = TaskContextPack(
+                work_order_id="wo_git_read_guard",
+                goal="allow read-only git query",
+                allowed_capabilities=["shell"],
+                workspace={"completion_policy": {"evidence": "git_commit"}},
+            )
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, **kwargs):
+                    nonlocal called
+                    _ = call, kwargs
+                    called = True
+                    return CanonicalToolResult(
+                        name="shell",
+                        ok=True,
+                        text="main",
+                        llm_text="main",
+                        structured={"exit_code": 0},
+                        status=RuntimeStatus.OK,
+                    )
+
+            async def write_event(event):
+                _ = event
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_git_read_guard",
+                run_id="r_git_read_guard",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+            result = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="shell", args={"cmd": "git branch --show-current"}, call_id="call_git_read"),
+            )
+
+            self.assertTrue(result.ok)
+            self.assertTrue(called)
+
+        asyncio.run(scenario())
+
+    def test_runner_blocks_shell_file_reads_when_workspace_tools_are_available(self) -> None:
+        async def scenario() -> None:
+            called = False
+            pack = TaskContextPack(
+                work_order_id="wo_shell_file_guard",
+                goal="prefer workspace file tools",
+                allowed_capabilities=["op_exec_shell", "op_workspace_file_read"],
+                workspace={},
+            )
+
+            class FakeExecution:
+                async def execute_tool_async(self, *args, **kwargs):
+                    nonlocal called
+                    _ = args, kwargs
+                    called = True
+                    raise AssertionError("shell file read should have been blocked before runtime execution")
+
+            async def write_event(event):
+                _ = event
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_shell_file_guard",
+                run_id="r_shell_file_guard",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+            direct = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="op_exec_shell", args={"cmd": "cat README.md"}, call_id="call_cat"),
+            )
+            tail = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="op_exec_shell", args={"cmd": "tail -20 README.md"}, call_id="call_tail"),
+            )
+            piped = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="op_exec_shell", args={"cmd": "printf 'README.md\\n' | xargs cat"}, call_id="call_xargs_cat"),
+            )
+            find_exec = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="op_exec_shell", args={"cmd": "find . -type f -exec cat {} \\;"}, call_id="call_find_exec_cat"),
+            )
+
+            self.assertFalse(direct.ok)
+            self.assertEqual(direct.structured["reason"], "dedicated_workspace_tool_required")
+            self.assertIn("op_workspace_file_read", direct.llm_text)
+            self.assertIn("without head/tail/cat pipelines", direct.llm_text)
+            self.assertFalse(tail.ok)
+            self.assertIn("without head/tail/cat pipelines", tail.llm_text)
+            self.assertFalse(piped.ok)
+            self.assertFalse(find_exec.ok)
+            self.assertFalse(called)
+
+        asyncio.run(scenario())
+
+    def test_runner_allows_shell_ls_and_find_for_workspace_discovery(self) -> None:
+        async def scenario() -> None:
+            calls: list[str] = []
+            pack = TaskContextPack(
+                work_order_id="wo_shell_listing_guard",
+                goal="allow quick workspace listing",
+                allowed_capabilities=["shell", "tree"],
+                workspace={},
+            )
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, **kwargs):
+                    _ = kwargs
+                    calls.append(str(call.args.get("cmd") or ""))
+                    return CanonicalToolResult(
+                        name="shell",
+                        ok=True,
+                        text="listing ok",
+                        llm_text="listing ok",
+                        structured={"exit_code": 0},
+                        status=RuntimeStatus.OK,
+                    )
+
+            async def write_event(event):
+                _ = event
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_shell_listing_guard",
+                run_id="r_shell_listing_guard",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+
+            listed = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="shell", args={"cmd": "ls -R src tests 2>/dev/null || true"}, call_id="call_ls"),
+            )
+            found = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="shell", args={"cmd": "find . -maxdepth 2 -type f"}, call_id="call_find"),
+            )
+
+            self.assertTrue(listed.ok, listed.text)
+            self.assertTrue(found.ok, found.text)
+            self.assertEqual(calls, ["ls -R src tests 2>/dev/null || true", "find . -maxdepth 2 -type f"])
+
+        asyncio.run(scenario())
+
+    def test_runner_blocks_git_ls_files_when_workspace_tree_is_available(self) -> None:
+        async def scenario() -> None:
+            called = False
+            pack = TaskContextPack(
+                work_order_id="wo_shell_git_ls_files_guard",
+                goal="prefer workspace tree tools",
+                allowed_capabilities=["shell", "tree", "search"],
+                workspace={},
+            )
+
+            class FakeExecution:
+                async def execute_tool_async(self, *args, **kwargs):
+                    nonlocal called
+                    _ = args, kwargs
+                    called = True
+                    raise AssertionError("git ls-files should have been blocked before runtime execution")
+
+            async def write_event(event):
+                _ = event
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_shell_git_ls_files_guard",
+                run_id="r_shell_git_ls_files_guard",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+            result = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="shell", args={"cmd": "git -C /tmp/source ls-files"}, call_id="call_git_ls_files"),
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.structured["reason"], "dedicated_workspace_tool_required")
+            self.assertIn("git ls-files", result.llm_text)
+            self.assertIn("tree", result.llm_text)
+            self.assertFalse(called)
+
+        asyncio.run(scenario())
+
+    def test_runner_allows_shell_test_commands_when_workspace_tools_are_available(self) -> None:
+        async def scenario() -> None:
+            called = False
+            pack = TaskContextPack(
+                work_order_id="wo_shell_test_guard",
+                goal="allow tests",
+                allowed_capabilities=["shell", "op_file_read"],
+                workspace={},
+            )
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, **kwargs):
+                    nonlocal called
+                    _ = call, kwargs
+                    called = True
+                    return CanonicalToolResult(
+                        name="shell",
+                        ok=True,
+                        text="1 passed",
+                        llm_text="1 passed",
+                        structured={"exit_code": 0},
+                        status=RuntimeStatus.OK,
+                    )
+
+            async def write_event(event):
+                _ = event
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_shell_test_guard",
+                run_id="r_shell_test_guard",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+            result = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="shell", args={"cmd": "python -m pytest -q"}, call_id="call_pytest"),
+            )
+
+            self.assertTrue(result.ok)
+            self.assertTrue(called)
+
+        asyncio.run(scenario())
+
+    def test_runner_defaults_shell_cwd_to_workspace_repo_path(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "default_shell_cwd_repo"
+            repo_path.mkdir()
+            pack = TaskContextPack(
+                work_order_id="wo_default_shell_cwd",
+                goal="run shell in workspace",
+                allowed_capabilities=["shell", "op_tool_call"],
+                workspace={"repo_path": str(repo_path)},
+            )
+            calls = []
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, **kwargs):
+                    _ = kwargs
+                    calls.append(call)
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text="shell ok",
+                        llm_text="shell ok",
+                        structured={"exit_code": 0, "cwd": _effective_tool_args(call).get("cwd")},
+                        status=RuntimeStatus.OK,
+                    )
+
+            async def write_event(event):
+                _ = event
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_default_shell_cwd",
+                run_id="r_default_shell_cwd",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+            direct = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="shell", args={"cmd": "pwd"}, call_id="call_direct_shell"),
+            )
+            wrapped = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(
+                    name="op_tool_call",
+                    args={"name": "shell", "args": {"cmd": "pwd"}},
+                    call_id="call_wrapped_shell",
+                ),
+            )
+
+            self.assertTrue(direct.ok)
+            self.assertTrue(wrapped.ok)
+            self.assertEqual(_effective_tool_args(calls[0]).get("cwd"), str(repo_path))
+            self.assertEqual(_effective_tool_args(calls[1]).get("cwd"), str(repo_path))
 
         asyncio.run(scenario())
 
@@ -7595,7 +9391,7 @@ class MinionManagerTests(unittest.TestCase):
             pack = TaskContextPack(
                 work_order_id="wo_shell_mutation",
                 goal="audit shell mutation",
-                allowed_capabilities=["op_exec_shell"],
+                allowed_capabilities=["shell"],
                 workspace={"repo_path": str(repo_path), "completion_policy": {"evidence": "git_commit"}},
             )
 
@@ -7604,7 +9400,7 @@ class MinionManagerTests(unittest.TestCase):
                     _ = call, kwargs
                     (repo_path / "created_by_shell.txt").write_text("hidden mutation\n", encoding="utf-8")
                     return CanonicalToolResult(
-                        name="op_exec_shell",
+                        name="shell",
                         ok=True,
                         text="shell ok",
                         llm_text="shell ok",
@@ -7631,7 +9427,7 @@ class MinionManagerTests(unittest.TestCase):
             result = await runner._execute_allowed_tool(
                 FakeExecution(),
                 CanonicalToolCall(
-                    name="op_exec_shell",
+                    name="shell",
                     args={"cmd": "printf hidden > created_by_shell.txt"},
                     call_id="call_shell_mutation",
                 ),
@@ -7643,6 +9439,182 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(violation["kind"], "shell_workspace_mutation")
             self.assertIn("created_by_shell.txt", violation["after"]["status"])
             self.assertEqual(violation["command"], "printf hidden > created_by_shell.txt")
+
+        asyncio.run(scenario())
+
+    def test_runner_blocks_repair_completion_that_reuses_failed_commit(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "repair_same_commit_repo"
+            repo_path.mkdir()
+            _git(repo_path, "init", check=True)
+            _git(repo_path, "checkout", "-B", "main", check=True)
+            _git(repo_path, "config", "user.email", "pal-test@example.invalid", check=True)
+            _git(repo_path, "config", "user.name", "Pal Test", check=True)
+            (repo_path / "README.md").write_text("# repair same commit\n", encoding="utf-8")
+            _git(repo_path, "add", "README.md", check=True)
+            _git(repo_path, "commit", "-m", "initial", check=True)
+            base_sha = _git(repo_path, "rev-parse", "HEAD", check=True).stdout.strip()
+            (repo_path / "feature.py").write_text("BROKEN = True\n", encoding="utf-8")
+            failed = commit_milestone(repo_path, work_order_id="wo_repair_same_commit", milestone_index=0, title="repairable")
+            self.assertEqual(failed["status"], "committed")
+            failed_commit_sha = failed["commit_sha"]
+
+            pack = TaskContextPack(
+                work_order_id="wo_repair_same_commit",
+                goal="repair failed checkpoint",
+                acceptance_criteria=["Repair the feature."],
+                workspace={
+                    "repo_path": str(repo_path),
+                    "base_sha": base_sha,
+                    "completion_policy": {"evidence": "git_commit"},
+                },
+                metadata={
+                    "module_execution": {
+                        "checkpoint_review": {"enabled": True},
+                        "last_repair_attempt": {
+                            "attempt": 1,
+                            "max_repair_attempts": 5,
+                            "milestone_index": 0,
+                            "milestone_id": "m1",
+                            "failed_checkpoint_id": "chk_failed",
+                            "failed_commit_sha": failed_commit_sha,
+                        },
+                    }
+                },
+                continuity={
+                    "current_milestone": {
+                        "milestone_index": 0,
+                        "milestone_id": "m1",
+                        "title": "Repairable",
+                        "acceptance_criteria": ["Repair the feature."],
+                    }
+                },
+            )
+
+            async def write_event(event):
+                _ = event
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_repair_same_commit",
+                run_id="r_repair_same_commit",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+
+            payload = await runner._complete_current_milestone("repair done")
+
+            self.assertEqual(payload["status"], "blocked")
+            self.assertEqual(payload["reason"], "repair_reused_failed_checkpoint")
+            self.assertEqual(payload["commit_sha"], failed_commit_sha)
+            self.assertIn(failed_commit_sha, payload["summary"])
+
+        asyncio.run(scenario())
+
+    def test_checkpoint_commit_tool_rejects_repair_reusing_failed_commit(self) -> None:
+        repo_path = self.root / "repair_checkpoint_tool_repo"
+        repo_path.mkdir()
+        _git(repo_path, "init", check=True)
+        _git(repo_path, "checkout", "-B", "main", check=True)
+        _git(repo_path, "config", "user.email", "pal-test@example.invalid", check=True)
+        _git(repo_path, "config", "user.name", "Pal Test", check=True)
+        (repo_path / "README.md").write_text("# repair tool\n", encoding="utf-8")
+        _git(repo_path, "add", "README.md", check=True)
+        _git(repo_path, "commit", "-m", "initial", check=True)
+        base_sha = _git(repo_path, "rev-parse", "HEAD", check=True).stdout.strip()
+        (repo_path / "feature.py").write_text("BROKEN = True\n", encoding="utf-8")
+        failed = commit_milestone(repo_path, work_order_id="wo_repair_tool", milestone_index=0, title="repairable")
+        self.assertEqual(failed["status"], "committed")
+
+        result = _minion_checkpoint_commit_result(
+            CanonicalToolCall(name="checkpoint_commit", args={}, call_id="call_repair_same_commit"),
+            {
+                "repo_path": str(repo_path),
+                "base_sha": base_sha,
+                "work_order_id": "wo_repair_tool",
+                "current_milestone_index": 0,
+                "current_milestone_title": "Repairable",
+                "current_repair_attempt": {
+                    "attempt": 1,
+                    "milestone_index": 0,
+                    "failed_commit_sha": failed["commit_sha"],
+                },
+            },
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.status, RuntimeStatus.ERROR)
+        self.assertEqual(result.structured["reason"], "repair_reused_failed_checkpoint")
+        self.assertIn(failed["commit_sha"], result.text)
+
+    def test_runner_ignores_cache_only_shell_workspace_changes(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "shell_cache_mutation_repo"
+            repo_path.mkdir()
+            _git(repo_path, "init", check=True)
+            _git(repo_path, "checkout", "-B", "main", check=True)
+            _git(repo_path, "config", "user.email", "pal-test@example.invalid", check=True)
+            _git(repo_path, "config", "user.name", "Pal Test", check=True)
+            (repo_path / ".gitignore").write_text(".pytest_cache/\n__pycache__/\n*.pyc\n", encoding="utf-8")
+            (repo_path / "README.md").write_text("# shell cache mutation\n", encoding="utf-8")
+            _git(repo_path, "add", ".gitignore", "README.md", check=True)
+            _git(repo_path, "commit", "-m", "initial", check=True)
+            pack = TaskContextPack(
+                work_order_id="wo_shell_cache_mutation",
+                goal="audit cache-only shell changes",
+                allowed_capabilities=["shell"],
+                workspace={"repo_path": str(repo_path), "completion_policy": {"evidence": "git_commit"}},
+            )
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, **kwargs):
+                    _ = call, kwargs
+                    (repo_path / ".pytest_cache" / "v").mkdir(parents=True)
+                    (repo_path / ".pytest_cache" / "CACHEDIR.TAG").write_text("cache\n", encoding="utf-8")
+                    (repo_path / "__pycache__").mkdir()
+                    (repo_path / "__pycache__" / "module.cpython-313.pyc").write_bytes(b"cache")
+                    return CanonicalToolResult(
+                        name="shell",
+                        ok=True,
+                        text="cache-only shell ok",
+                        llm_text="cache-only shell ok",
+                        structured={"exit_code": 0},
+                        status=RuntimeStatus.OK,
+                    )
+
+            async def write_event(event):
+                _ = event
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_shell_cache_mutation",
+                run_id="r_shell_cache_mutation",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+            result = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(
+                    name="shell",
+                    args={"cmd": "python -m pytest -q"},
+                    call_id="call_shell_cache_mutation",
+                ),
+            )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(runner.shell_mutation_violations, [])
 
         asyncio.run(scenario())
 
@@ -7661,7 +9633,7 @@ class MinionManagerTests(unittest.TestCase):
                 work_order_id="wo_reviewer_readonly_shell",
                 goal="review without mutating source",
                 minion_profile="software_engineering.reviewer",
-                allowed_capabilities=["op_exec_shell", "op_minion_review_gate_submit"],
+                allowed_capabilities=["shell", "review_gate_submit"],
                 workspace={
                     "repo_path": str(repo_path),
                     "review_scratch_dir": str(self.root / "review_scratch"),
@@ -7671,13 +9643,15 @@ class MinionManagerTests(unittest.TestCase):
             )
             Path(pack.workspace["review_scratch_dir"]).mkdir(parents=True, exist_ok=True)
             Path(pack.workspace["review_scratch_repo_path"]).mkdir(parents=True, exist_ok=True)
+            shell_calls = []
 
             class FakeExecution:
                 async def execute_tool_async(self, call, **kwargs):
                     _ = call, kwargs
+                    shell_calls.append(call)
                     (repo_path / "mutated_by_reviewer.txt").write_text("mutation\n", encoding="utf-8")
                     return CanonicalToolResult(
-                        name="op_exec_shell",
+                        name="shell",
                         ok=True,
                         text="shell ok",
                         llm_text="shell ok",
@@ -7701,16 +9675,17 @@ class MinionManagerTests(unittest.TestCase):
                 read_decision=read_decision,
                 runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
             )
-            denied = await runner._execute_allowed_tool(
+            defaulted = await runner._execute_allowed_tool(
                 FakeExecution(),
-                CanonicalToolCall(name="op_exec_shell", args={"cmd": "printf mutation > mutated_by_reviewer.txt"}, call_id="call_review_shell_denied"),
+                CanonicalToolCall(name="shell", args={"cmd": "printf mutation > mutated_by_reviewer.txt"}, call_id="call_review_shell_denied"),
             )
-            self.assertFalse(denied.ok)
-            self.assertEqual(denied.structured["reason"], "read_only_repo_shell_policy")
+            self.assertTrue(defaulted.ok)
+            self.assertEqual(shell_calls[-1].args["cwd"], pack.workspace["review_scratch_repo_path"])
+            self.assertEqual(runner.review_tool_evidence_refs[-1]["cwd"], pack.workspace["review_scratch_repo_path"])
             denied_root = await runner._execute_allowed_tool(
                 FakeExecution(),
                 CanonicalToolCall(
-                    name="op_exec_shell",
+                    name="shell",
                     args={"cmd": "printf mutation > mutated_by_reviewer.txt", "cwd": pack.workspace["review_scratch_dir"]},
                     call_id="call_review_shell_root_denied",
                 ),
@@ -7720,7 +9695,7 @@ class MinionManagerTests(unittest.TestCase):
             result = await runner._execute_allowed_tool(
                 FakeExecution(),
                 CanonicalToolCall(
-                    name="op_exec_shell",
+                    name="shell",
                     args={
                         "cmd": "printf mutation > mutated_by_reviewer.txt",
                         "cwd": pack.workspace["review_scratch_repo_path"],
@@ -7733,7 +9708,7 @@ class MinionManagerTests(unittest.TestCase):
 
             gate = _minion_review_gate_submit_result(
                 CanonicalToolCall(
-                    name="op_minion_review_gate_submit",
+                    name="review_gate_submit",
                     args={
                         "gate_kind": "checkpoint_verification",
                         "target": {"checkpoint_id": "chk_readonly_shell"},
@@ -7771,10 +9746,124 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_reviewer_readonly_scratch_mutation_blocks_review_gate_pass(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "reviewer_scratch_source_repo"
+            repo_path.mkdir()
+            _git(repo_path, "init", check=True)
+            _git(repo_path, "checkout", "-B", "main", check=True)
+            _git(repo_path, "config", "user.email", "pal-test@example.invalid", check=True)
+            _git(repo_path, "config", "user.name", "Pal Test", check=True)
+            (repo_path / "README.md").write_text("# source stays clean\n", encoding="utf-8")
+            _git(repo_path, "add", "README.md", check=True)
+            _git(repo_path, "commit", "-m", "initial", check=True)
+            scratch_repo = self.root / "review_scratch_source" / "source"
+            scratch_repo.mkdir(parents=True)
+            (scratch_repo / "README.md").write_text("# scratch copy\n", encoding="utf-8")
+            pack = TaskContextPack(
+                work_order_id="wo_reviewer_scratch_mutation",
+                goal="review scratch without mutation",
+                minion_profile="software_engineering.reviewer",
+                allowed_capabilities=["shell", "review_gate_submit"],
+                workspace={
+                    "repo_path": str(repo_path),
+                    "review_scratch_dir": str(scratch_repo.parent),
+                    "review_scratch_repo_path": str(scratch_repo),
+                    "workspace_policy": {"mode": "read_only_repo"},
+                },
+            )
+            shell_calls = []
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, **kwargs):
+                    _ = kwargs
+                    shell_calls.append(call)
+                    (scratch_repo / "README.md").write_text("# scratch was changed\n", encoding="utf-8")
+                    return CanonicalToolResult(
+                        name="shell",
+                        ok=True,
+                        text="shell ok",
+                        llm_text="shell ok",
+                        structured={"exit_code": 0},
+                        status=RuntimeStatus.OK,
+                    )
+
+            async def write_event(event):
+                _ = event
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=pack,
+                minion_id="m_reviewer_scratch_mutation",
+                run_id="r_reviewer_scratch_mutation",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+            result = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(
+                    name="shell",
+                    args={"cmd": "printf changed > README.md", "cwd": str(scratch_repo)},
+                    call_id="call_review_scratch_mutation",
+                ),
+            )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(shell_calls[-1].args["cwd"], str(scratch_repo))
+            self.assertEqual(_git(repo_path, "status", "--porcelain", check=True).stdout.strip(), "")
+            self.assertEqual(len(runner.shell_mutation_violations), 1)
+            self.assertEqual(runner.shell_mutation_violations[0]["repo_path"], str(scratch_repo))
+            self.assertIn("README.md", runner.shell_mutation_violations[0]["before"]["scratch_tree"]["entries"])
+
+            gate = _minion_review_gate_submit_result(
+                CanonicalToolCall(
+                    name="review_gate_submit",
+                    args={
+                        "gate_kind": "checkpoint_verification",
+                        "target": {"checkpoint_id": "chk_scratch_mutation"},
+                        "verdict": "pass",
+                        "summary": "should not pass after scratch mutation",
+                        "evidence": [{"kind": "review", "summary": "reviewed"}],
+                        "commands_run": [
+                            {
+                                "command": "printf changed > README.md",
+                                "cwd": str(scratch_repo),
+                                "status": "passed",
+                                "summary": "fixture shell command changed review scratch",
+                            }
+                        ],
+                        "api_evidence": [{"kind": "not_applicable", "summary": "no API claims"}],
+                        "metadata": {
+                            "lsp_evidence_not_applicable": True,
+                            "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                        },
+                    },
+                    call_id="call_scratch_review_gate",
+                ),
+                {
+                    "runtime_root": str(self.root),
+                    "work_order_id": "wo_reviewer_scratch_mutation",
+                    "run_id": "r_reviewer_scratch_mutation",
+                    "minion_profile": "software_engineering.reviewer",
+                    "review_tool_evidence_refs": runner.review_tool_evidence_refs,
+                    "shell_mutation_violations": runner.shell_mutation_violations,
+                },
+            )
+            self.assertFalse(gate.ok)
+            self.assertEqual(gate.status, RuntimeStatus.INVALID)
+            self.assertIn("audited workspace", gate.text)
+
+        asyncio.run(scenario())
+
     def test_review_gate_submit_rejects_unbacked_command_and_lsp_evidence(self) -> None:
         command_gate = _minion_review_gate_submit_result(
             CanonicalToolCall(
-                name="op_minion_review_gate_submit",
+                name="review_gate_submit",
                 args={
                     "gate_kind": "checkpoint_verification",
                     "target": {"checkpoint_id": "chk_fake_provenance"},
@@ -7799,7 +9888,7 @@ class MinionManagerTests(unittest.TestCase):
         )
         self.assertFalse(command_gate.ok)
         self.assertEqual(command_gate.status, RuntimeStatus.INVALID)
-        self.assertIn("lacks matching op_exec_shell evidence", command_gate.text)
+        self.assertIn("lacks matching shell evidence", command_gate.text)
 
         plan = _dispatchable_plan_payload(
             plan_id="plan_lsp_provenance",
@@ -7811,7 +9900,7 @@ class MinionManagerTests(unittest.TestCase):
         source_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
         lsp_gate = _minion_review_gate_submit_result(
             CanonicalToolCall(
-                name="op_minion_review_gate_submit",
+                name="review_gate_submit",
                 args={
                     "gate_kind": "plan_acceptance",
                     "target": {"plan_ref": source_ref},
@@ -7844,7 +9933,7 @@ class MinionManagerTests(unittest.TestCase):
         source_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
         gate = _minion_review_gate_submit_result(
             CanonicalToolCall(
-                name="op_minion_review_gate_submit",
+                name="review_gate_submit",
                 args={
                     "gate_kind": "plan_acceptance",
                     "target": {"plan_ref": source_ref},
@@ -7887,12 +9976,499 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(len(refs), 1)
         self.assertTrue(str(refs[0].get("ledger_id") or "").startswith("led_"))
 
+    def test_review_gate_provenance_keeps_runner_evidence_list_live_after_submit(self) -> None:
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_live_tool_evidence",
+            task_id="task_live_tool_evidence",
+            modules=[_plan_module("module_live_tool_evidence", title="Live tool evidence module")],
+        )
+        artifact_path = self.root / "live-tool-evidence-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        source_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
+        evidence_refs: list[dict[str, object]] = [
+            {
+                "kind": "command",
+                "command": "python -m pytest tests/test_first.py",
+                "status": "passed",
+                "summary": "first command passed",
+            }
+        ]
+        workspace = {
+            "runtime_root": str(self.root),
+            "work_order_id": "wo_live_tool_evidence",
+            "run_id": "r_live_tool_evidence",
+            "minion_profile": "software_engineering.reviewer",
+            "review_tool_evidence_refs": evidence_refs,
+            "shell_mutation_violations": [],
+        }
+
+        first_gate = _minion_review_gate_submit_result(
+            CanonicalToolCall(
+                name="review_gate_submit",
+                args={
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": source_ref},
+                    "verdict": "pass",
+                    "summary": "first command backed by shell evidence",
+                    "evidence": [{"kind": "plan_review", "summary": "plan reviewed"}],
+                    "commands_run": [
+                        {
+                            "command": "python -m pytest tests/test_first.py",
+                            "status": "passed",
+                            "summary": "first command passed",
+                        }
+                    ],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                },
+            ),
+            workspace,
+        )
+        self.assertTrue(first_gate.ok)
+        self.assertIs(workspace["review_tool_evidence_refs"], evidence_refs)
+        self.assertTrue(str(evidence_refs[0].get("ledger_id") or "").startswith("led_"))
+
+        evidence_refs.append(
+            {
+                "kind": "command",
+                "command": "python -m pytest tests/test_second.py",
+                "status": "passed",
+                "summary": "second command passed",
+            }
+        )
+        second_gate = _minion_review_gate_submit_result(
+            CanonicalToolCall(
+                name="review_gate_submit",
+                args={
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": source_ref},
+                    "verdict": "pass",
+                    "summary": "second command backed by shell evidence after first submit",
+                    "evidence": [{"kind": "plan_review", "summary": "plan reviewed again"}],
+                    "commands_run": [
+                        {
+                            "command": "python -m pytest tests/test_second.py",
+                            "status": "passed",
+                            "summary": "second command passed",
+                        }
+                    ],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                },
+            ),
+            workspace,
+        )
+
+        self.assertTrue(second_gate.ok, second_gate.text)
+        self.assertIs(workspace["review_tool_evidence_refs"], evidence_refs)
+        self.assertEqual(len(evidence_refs), 2)
+        self.assertTrue(str(evidence_refs[1].get("ledger_id") or "").startswith("led_"))
+
+    def test_review_gate_submit_defaults_lsp_skip_from_unavailable_status_ref(self) -> None:
+        repository = MinionTaskingRepository(runtime_root=self.root)
+        checkpoint_id = "chk_lsp_status_default"
+        repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_lsp_status_default",
+                "minion_id": "m_lsp_status_default",
+                "run_id": "r_lsp_status_default",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "acceptance_criteria": ["Feature result is verified."],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        workspace = {
+            "runtime_root": str(self.root),
+            "work_order_id": "wo_lsp_status_default",
+            "run_id": "r_lsp_status_default",
+            "minion_profile": "software_engineering.reviewer",
+            "review_target_checkpoint_id": checkpoint_id,
+            "review_target_commit_sha": "abc123",
+            "review_tool_evidence_refs": [
+                {
+                    "kind": "command",
+                    "command": "python -m pytest tests/test_feature.py",
+                    "status": "passed",
+                    "summary": "fixture command passed",
+                },
+                {
+                    "kind": "lsp",
+                    "tool_name": "lsp_status",
+                    "operation": "status",
+                    "attached_count": 0,
+                    "server_count": 13,
+                    "unavailable_reason": "lsp_status reported no attached language server (13 configured; statuses: missing_binary)",
+                    "summary": "LSP status: attached_count=0, all servers missing_binary",
+                },
+            ],
+            "shell_mutation_violations": [],
+        }
+
+        gate = _minion_review_gate_submit_result(
+            CanonicalToolCall(
+                name="review_gate_submit",
+                args={
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123"},
+                    "verdict": "pass",
+                    "summary": "checkpoint passed with unavailable LSP status",
+                    "evidence": [{"kind": "review", "summary": "reviewed"}],
+                    "commands_run": [
+                        {
+                            "command": "python -m pytest tests/test_feature.py",
+                            "status": "passed",
+                            "summary": "fixture command passed",
+                            "covers": ["Feature result is verified."],
+                        }
+                    ],
+                    "api_evidence": [
+                        {
+                            "kind": "source",
+                            "summary": "fixture source read verified the feature",
+                            "covers": ["Feature result is verified."],
+                        }
+                    ],
+                },
+            ),
+            workspace,
+        )
+
+        self.assertTrue(gate.ok, gate.text)
+        metadata = gate.structured["review_gate"]["metadata"]
+        self.assertTrue(metadata["lsp_evidence_not_applicable"])
+        self.assertIn("no attached language server", metadata["lsp_evidence_not_applicable_reason"])
+
+    def test_review_gate_submit_defaults_lsp_skip_from_workspace_setup(self) -> None:
+        repository = MinionTaskingRepository(runtime_root=self.root)
+        checkpoint_id = "chk_lsp_setup_default"
+        repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_lsp_setup_default",
+                "minion_id": "m_lsp_setup_default",
+                "run_id": "r_lsp_setup_default",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "acceptance_criteria": ["Feature result is verified."],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        workspace = {
+            "runtime_root": str(self.root),
+            "work_order_id": "wo_lsp_setup_default",
+            "run_id": "r_lsp_setup_default",
+            "minion_profile": "software_engineering.reviewer",
+            "review_target_checkpoint_id": checkpoint_id,
+            "review_target_commit_sha": "abc123",
+            "languages": ["cpp"],
+            "lsp_setup": {
+                "languages": ["cpp"],
+                "servers": [],
+                "skipped": ["cpp skipped; missing LSP server template(s): clangd"],
+            },
+            "review_tool_evidence_refs": [
+                {
+                    "kind": "command",
+                    "command": "python -m pytest tests/test_feature.py",
+                    "status": "passed",
+                    "summary": "fixture command passed",
+                }
+            ],
+            "shell_mutation_violations": [],
+        }
+
+        gate = _minion_review_gate_submit_result(
+            CanonicalToolCall(
+                name="review_gate_submit",
+                args={
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123"},
+                    "verdict": "pass",
+                    "summary": "checkpoint passed with setup-unavailable LSP",
+                    "evidence": [{"kind": "review", "summary": "reviewed"}],
+                    "commands_run": [
+                        {
+                            "command": "python -m pytest tests/test_feature.py",
+                            "status": "passed",
+                            "summary": "fixture command passed",
+                            "covers": ["Feature result is verified."],
+                        }
+                    ],
+                    "api_evidence": [
+                        {
+                            "kind": "source",
+                            "summary": "fixture source read verified the feature",
+                            "covers": ["Feature result is verified."],
+                        }
+                    ],
+                },
+            ),
+            workspace,
+        )
+
+        self.assertTrue(gate.ok, gate.text)
+        metadata = gate.structured["review_gate"]["metadata"]
+        self.assertTrue(metadata["lsp_evidence_not_applicable"])
+        self.assertIn("workspace LSP setup did not prepare", metadata["lsp_evidence_not_applicable_reason"])
+        self.assertIn("missing LSP server template", metadata["lsp_evidence_not_applicable_reason"])
+
+    def test_review_checkpoint_tool_binds_target_and_records_provenance(self) -> None:
+        repository = MinionTaskingRepository(runtime_root=self.root)
+        checkpoint_id = "chk_review_checkpoint_tool"
+        acceptance = "Feature result is verified."
+        repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_review_checkpoint_tool_source",
+                "minion_id": "m_review_checkpoint_tool_source",
+                "run_id": "r_review_checkpoint_tool_source",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "expected_review_gate_kind": "checkpoint_verification",
+                    "acceptance_criteria": [acceptance],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        evidence_refs: list[dict[str, object]] = [
+            {
+                "kind": "command",
+                "tool_name": "shell",
+                "command": "python -m pytest tests/test_feature.py -q",
+                "status": "passed",
+                "summary": "fixture command passed",
+            },
+            {
+                "kind": "source",
+                "tool_name": "op_file_read",
+                "path": "src/pal/feature.py",
+                "status": "ok",
+                "summary": "fixture source read verified the feature",
+            },
+        ]
+        workspace = {
+            "runtime_root": str(self.root),
+            "work_order_id": "wo_review_checkpoint_tool",
+            "run_id": "r_review_checkpoint_tool",
+            "minion_profile": "software_engineering.reviewer",
+            "review_target_checkpoint_id": checkpoint_id,
+            "review_target_commit_sha": "abc123",
+            "review_target_gate_kind": "checkpoint_verification",
+            "review_tool_evidence_refs": evidence_refs,
+            "shell_mutation_violations": [],
+        }
+
+        gate = _minion_review_checkpoint_result(
+            CanonicalToolCall(
+                name="review_checkpoint",
+                args={
+                    "verdict": "pass",
+                    "summary": "checkpoint meets the milestone contract",
+                    "checks": [
+                        {
+                            "command": "python -m pytest tests/test_feature.py -q",
+                            "status": "passed",
+                            "summary": "fixture command passed",
+                            "covers": [acceptance],
+                        }
+                    ],
+                    "api_checks": [
+                        {
+                            "kind": "source",
+                            "summary": "fixture source read verified the feature",
+                            "covers": [acceptance],
+                        }
+                    ],
+                    "lsp_evidence_not_applicable_reason": "fixture does not exercise symbol-level API claims",
+                },
+                call_id="call_review_checkpoint_tool",
+            ),
+            workspace,
+        )
+
+        self.assertTrue(gate.ok, gate.text)
+        review_gate = gate.structured["review_gate"]
+        self.assertEqual(review_gate["gate_kind"], "checkpoint_verification")
+        self.assertEqual(review_gate["target"]["checkpoint_id"], checkpoint_id)
+        self.assertEqual(review_gate["target"]["commit_sha"], "abc123")
+        self.assertEqual(review_gate["commands_run"][0]["output_summary"], "fixture command passed")
+        self.assertTrue(str(review_gate["commands_run"][0].get("evidence_ref_id") or "").startswith("tev_"))
+        metadata = review_gate["metadata"]
+        self.assertTrue(metadata["lsp_evidence_not_applicable"])
+        self.assertIn("symbol-level API", metadata["lsp_evidence_not_applicable_reason"])
+        self.assertIs(workspace["review_tool_evidence_refs"], evidence_refs)
+        self.assertEqual(len(metadata["tool_evidence_refs"]), 2)
+        self.assertTrue(all(str(item.get("ledger_id") or "").startswith("led_") for item in metadata["tool_evidence_refs"]))
+        latest = repository.latest_review_gate_for_checkpoint(checkpoint_id)
+        self.assertEqual(latest["review_gate_ref"]["verdict"], "pass")
+        self.assertEqual(latest["review_gate_ref"]["gate_kind"], "checkpoint_verification")
+
+    def test_review_checkpoint_tool_rejects_pass_with_contract_finding(self) -> None:
+        repository = MinionTaskingRepository(runtime_root=self.root)
+        checkpoint_id = "chk_review_checkpoint_contract_finding"
+        acceptance = "Feature result is verified."
+        repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_review_checkpoint_contract_finding_source",
+                "minion_id": "m_review_checkpoint_contract_finding_source",
+                "run_id": "r_review_checkpoint_contract_finding_source",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "expected_review_gate_kind": "checkpoint_verification",
+                    "acceptance_criteria": [acceptance],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        evidence_refs: list[dict[str, object]] = [
+            {
+                "kind": "command",
+                "tool_name": "shell",
+                "command": "python -m pytest tests/test_feature.py -q",
+                "status": "passed",
+                "summary": "fixture command passed",
+            },
+            {
+                "kind": "source",
+                "tool_name": "op_file_read",
+                "path": "src/pal/feature.py",
+                "status": "ok",
+                "summary": "fixture source read verified the feature",
+            },
+        ]
+        workspace = {
+            "runtime_root": str(self.root),
+            "work_order_id": "wo_review_checkpoint_contract_finding",
+            "run_id": "r_review_checkpoint_contract_finding",
+            "minion_profile": "software_engineering.reviewer",
+            "review_target_checkpoint_id": checkpoint_id,
+            "review_target_commit_sha": "abc123",
+            "review_target_gate_kind": "checkpoint_verification",
+            "review_tool_evidence_refs": evidence_refs,
+            "shell_mutation_violations": [],
+        }
+
+        rejected = _minion_review_checkpoint_result(
+            CanonicalToolCall(
+                name="review_checkpoint",
+                args={
+                    "verdict": "pass",
+                    "summary": "checkpoint passes, but one contract finding remains",
+                    "findings": [
+                        {
+                            "severity": "minor",
+                            "title": "label type contract is not enforced",
+                            "contract_impact": "The implementation can return labels that are not tuple[str, ...].",
+                            "suggested_fix": "Reject non-string labels with ValueError.",
+                            "non_blocking": True,
+                            "non_blocking_reason": "The reviewer incorrectly tries to waive a contract mismatch.",
+                        }
+                    ],
+                    "checks": [
+                        {
+                            "command": "python -m pytest tests/test_feature.py -q",
+                            "status": "passed",
+                            "summary": "fixture command passed",
+                            "covers": [acceptance],
+                        }
+                    ],
+                    "api_checks": [
+                        {
+                            "kind": "source",
+                            "summary": "fixture source read verified the feature",
+                            "covers": [acceptance],
+                        }
+                    ],
+                    "lsp_evidence_not_applicable_reason": "fixture does not exercise symbol-level API claims",
+                },
+                call_id="call_review_checkpoint_contract_finding_reject",
+            ),
+            workspace,
+        )
+
+        self.assertFalse(rejected.ok)
+        self.assertIn("unresolved contract findings", rejected.text)
+        self.assertEqual(repository.latest_review_gate_for_checkpoint(checkpoint_id)["status"], "not_found")
+
+        accepted = _minion_review_checkpoint_result(
+            CanonicalToolCall(
+                name="review_checkpoint",
+                args={
+                    "verdict": "pass",
+                    "summary": "checkpoint passes with an explicitly non-blocking observation",
+                    "findings": [
+                        {
+                            "severity": "note",
+                            "title": "optional follow-up remains",
+                            "contract_impact": "none",
+                            "suggested_fix": "Consider a future edge-case test.",
+                            "non_blocking": True,
+                            "non_blocking_reason": "The observation is advisory and does not affect the milestone contract.",
+                        }
+                    ],
+                    "checks": [
+                        {
+                            "command": "python -m pytest tests/test_feature.py -q",
+                            "status": "passed",
+                            "summary": "fixture command passed",
+                            "covers": [acceptance],
+                        }
+                    ],
+                    "api_checks": [
+                        {
+                            "kind": "source",
+                            "summary": "fixture source read verified the feature",
+                            "covers": [acceptance],
+                        }
+                    ],
+                    "lsp_evidence_not_applicable_reason": "fixture does not exercise symbol-level API claims",
+                },
+                call_id="call_review_checkpoint_contract_finding_waived",
+            ),
+            workspace,
+        )
+
+        self.assertTrue(accepted.ok, accepted.text)
+        latest = repository.latest_review_gate_for_checkpoint(checkpoint_id)
+        self.assertEqual(latest["review_gate_ref"]["verdict"], "pass")
+
     def test_op_tool_call_shell_git_mutation_uses_inner_command_for_policy(self) -> None:
         async def scenario() -> None:
             pack = TaskContextPack(
                 work_order_id="wo_tool_call_git_policy",
                 goal="block wrapped git mutation",
-                allowed_capabilities=["op_tool_call", "op_exec_shell"],
+                allowed_capabilities=["op_tool_call", "shell"],
                 workspace={"completion_policy": {"evidence": "git_commit"}},
             )
 
@@ -7924,7 +10500,7 @@ class MinionManagerTests(unittest.TestCase):
                 fake_execution,
                 CanonicalToolCall(
                     name="op_tool_call",
-                    args={"name": "op_exec_shell", "args": {"cmd": "git add ."}},
+                    args={"name": "shell", "args": {"cmd": "git add ."}},
                     call_id="call_wrapped_git",
                 ),
             )
@@ -7994,7 +10570,7 @@ class MinionManagerTests(unittest.TestCase):
             pack = TaskContextPack(
                 work_order_id="wo_artifact_done",
                 goal="write the plan artifact",
-                allowed_capabilities=["op_minion_artifact_write"],
+                allowed_capabilities=["artifact_write"],
                 workspace={"artifact_dir": str(artifact_dir)},
                 continuity={"current_milestone": {"milestone_index": 0, "title": "Write plan artifact"}},
                 metadata={"max_tool_rounds": 1},
@@ -8007,7 +10583,7 @@ class MinionManagerTests(unittest.TestCase):
                         text="",
                         tool_calls=[
                             CanonicalToolCall(
-                                name="op_minion_artifact_write",
+                                name="artifact_write",
                                 args={
                                     "relative_path": "plan.md",
                                     "content": "full plan body",
@@ -8234,9 +10810,50 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual([message["role"] for message in messages], ["system", "user", "assistant", "tool", "user"])
         self.assertNotIn("Minion run memory", _message_text(messages[1]))
         self.assertIn("fresh tool result", _message_text(messages[3]))
-        self.assertIn("<system-reminder>", _message_text(messages[4]))
+        self.assertIn("<runtime_reminder", _message_text(messages[4]))
         self.assertIn("Minion run memory", _message_text(messages[4]))
         self.assertIn("Prior minion context was compacted.", _message_text(messages[4]))
+
+    def test_minion_prompt_appends_tool_efficiency_runtime_reminder(self) -> None:
+        pack = TaskContextPack(
+            work_order_id="wo_tool_efficiency_reminder",
+            goal="finish with efficient tools",
+            allowed_capabilities=[
+                "op_workspace_tree",
+                "op_workspace_search",
+                "op_workspace_file_read",
+                "op_workspace_file_write",
+                "op_exec_shell",
+                "op_minion_checkpoint_commit",
+            ],
+        )
+        runner = MinionRunner(
+            runtime_root=self.root,
+            pack=pack,
+            minion_id="m_tool_efficiency_reminder",
+            run_id="r_tool_efficiency_reminder",
+            write_event=lambda event: None,
+            read_decision=lambda timeout: None,
+            runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+        )
+
+        messages = build_minion_prompt_messages(
+            scaffold=runner._prompt_scaffold(),
+            channel_envelope=_build_minion_task_envelope(pack, minion_id="m_tool_efficiency_reminder", run_id="r_tool_efficiency_reminder"),
+            memory_text="",
+            retry_note="",
+            tool_protocol_messages=[],
+        )
+
+        self.assertEqual([message["role"] for message in messages], ["system", "user", "user"])
+        reminder = _message_text(messages[-1])
+        self.assertIn("<runtime_reminder", reminder)
+        self.assertIn("prefer op_workspace_tree for structured listings", reminder)
+        self.assertIn("op_workspace_search for text search", reminder)
+        self.assertIn("quick ls/find discovery", reminder)
+        self.assertIn("avoid cat/head/tail pipelines", reminder)
+        self.assertIn("git status --short", reminder)
+        self.assertIn("op_minion_checkpoint_commit", reminder)
 
     def test_runner_defers_experience_for_serial_module_completion(self) -> None:
         runner = MinionRunner(
@@ -8325,13 +10942,13 @@ class MinionManagerTests(unittest.TestCase):
                 async def agenerate(self, request):
                     self.calls += 1
                     tool_names = {item["function"]["name"] for item in request.tools}
-                    test_case.assertIn("op_minion_memory_candidate_write", tool_names)
+                    test_case.assertIn("memory_candidate_write", tool_names)
                     if self.calls == 1:
                         return CanonicalLLMOutcome(
                             text="",
                             tool_calls=[
                                 CanonicalToolCall(
-                                    name="op_minion_memory_candidate_write",
+                                    name="memory_candidate_write",
                                     args={
                                         "kind": "case",
                                         "scope": "task",
@@ -8357,7 +10974,7 @@ class MinionManagerTests(unittest.TestCase):
                 pack=TaskContextPack(
                     work_order_id="wo_memory_candidate",
                     goal="record reusable memory",
-                    allowed_capabilities=["op_minion_memory_candidate_write"],
+                    allowed_capabilities=["memory_candidate_write"],
                     metadata={"allow_text_only_completion": True},
                 ),
                 minion_id="m_memory_candidate",
@@ -8389,15 +11006,15 @@ class MinionManagerTests(unittest.TestCase):
             pack = TaskContextPack(
                 work_order_id="wo_denied",
                 goal="do not mutate Pal state",
-                allowed_capabilities=["op_memory_write", "op_minion_spawn", "op_exec_shell"],
+                allowed_capabilities=["op_memory_write", "minion_spawn", "shell"],
             )
 
             class FakeLLM:
                 async def agenerate(self, request):
                     tool_names = {item["function"]["name"] for item in request.tools}
                     test_case.assertNotIn("op_memory_write", tool_names)
-                    test_case.assertNotIn("op_minion_spawn", tool_names)
-                    test_case.assertIn("op_exec_shell", tool_names)
+                    test_case.assertNotIn("minion_spawn", tool_names)
+                    test_case.assertIn("shell", tool_names)
                     return CanonicalLLMOutcome(
                         text="",
                         tool_calls=[CanonicalToolCall(name="op_memory_write", args={"title": "bad"})],
@@ -8470,12 +11087,12 @@ class MinionManagerTests(unittest.TestCase):
                             "op_file_read",
                             "op_file_edit",
                             "op_file_write",
-                            "op_exec_shell",
-                            "op_web_search",
+                            "shell",
+                            "web_search",
                             "op_web_read",
                             "op_memory_recall",
-                            "intro_minion_task_read",
-                            "op_minion_spawn",
+                            "minion_task_read",
+                            "minion_spawn",
                             "op_memory_write",
                             "op_memory_update",
                             "op_memory_delete",
@@ -8505,12 +11122,12 @@ class MinionManagerTests(unittest.TestCase):
                 "op_file_read",
                 "op_file_edit",
                 "op_file_write",
-                "op_exec_shell",
-                "op_web_search",
+                "shell",
+                "web_search",
                 "op_web_read",
                 "op_memory_recall",
-                "intro_minion_task_read",
-                "op_minion_spawn",
+                "minion_task_read",
+                "minion_spawn",
                 "op_memory_write",
                 "op_memory_update",
                 "op_memory_delete",
@@ -8527,8 +11144,8 @@ class MinionManagerTests(unittest.TestCase):
                     "op_file_read",
                     "op_file_edit",
                     "op_file_write",
-                    "op_exec_shell",
-                    "op_web_search",
+                    "shell",
+                    "web_search",
                     "op_web_read",
                     "op_memory_recall",
                 ],
@@ -8539,22 +11156,22 @@ class MinionManagerTests(unittest.TestCase):
             self.assertIn("op_file_read", hit_names)
             self.assertIn("op_file_edit", hit_names)
             self.assertIn("op_file_write", hit_names)
-            self.assertIn("op_exec_shell", hit_names)
-            self.assertIn("op_web_search", hit_names)
+            self.assertIn("shell", hit_names)
+            self.assertIn("web_search", hit_names)
             self.assertIn("op_web_read", hit_names)
             self.assertIn("op_memory_recall", hit_names)
-            self.assertNotIn("intro_minion_task_read", hit_names)
-            self.assertNotIn("op_minion_spawn", hit_names)
+            self.assertNotIn("minion_task_read", hit_names)
+            self.assertNotIn("minion_spawn", hit_names)
             self.assertNotIn("op_memory_write", hit_names)
             self.assertNotIn("op_memory_update", hit_names)
             self.assertNotIn("op_memory_delete", hit_names)
 
-            denied_read = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_read", args={"name": "op_minion_spawn"}))
+            denied_read = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_read", args={"name": "minion_spawn"}))
             self.assertEqual(denied_read.status, RuntimeStatus.NOT_FOUND)
             allowed_call = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_call", args={"name": "op_file_read", "args": {}}))
             self.assertTrue(allowed_call.ok)
             self.assertEqual(allowed_call.name, "op_file_read")
-            denied_call = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_call", args={"name": "op_minion_spawn", "args": {}}))
+            denied_call = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_call", args={"name": "minion_spawn", "args": {}}))
             self.assertFalse(denied_call.ok)
             self.assertEqual(denied_call.structured["reason"], "capability_not_allowed")
 
@@ -8577,12 +11194,12 @@ class MinionManagerTests(unittest.TestCase):
                         "op_file_read",
                         "op_file_edit",
                         "op_file_write",
-                        "op_exec_shell",
-                        "op_workspace_tree",
-                        "op_workspace_search",
-                        "op_workspace_read",
-                        "op_minion_artifact_write",
-                        "op_minion_review_gate_submit",
+                        "shell",
+                        "tree",
+                        "search",
+                        "op_file_read",
+                        "artifact_write",
+                        "review_gate_submit",
                     )
                 }
 
@@ -8604,16 +11221,16 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(pack.workspace["workspace_policy"]["mode"], "read_only_repo")
         self.assertNotIn("op_file_edit", pack.allowed_capabilities)
         self.assertNotIn("op_file_write", pack.allowed_capabilities)
-        self.assertIn("op_exec_shell", pack.allowed_capabilities)
+        self.assertIn("shell", pack.allowed_capabilities)
         self.assertNotIn("op_file_edit", visible)
         self.assertNotIn("op_file_write", visible)
-        self.assertIn("op_exec_shell", visible)
+        self.assertIn("shell", visible)
         self.assertNotIn("op_file_edit", searchable)
         self.assertNotIn("op_file_write", searchable)
-        self.assertIn("op_exec_shell", searchable)
-        self.assertIn("op_workspace_read", searchable)
-        self.assertIn("op_minion_artifact_write", searchable)
-        self.assertIn("op_minion_review_gate_submit", searchable)
+        self.assertIn("shell", searchable)
+        self.assertIn("op_file_read", searchable)
+        self.assertIn("artifact_write", searchable)
+        self.assertIn("review_gate_submit", searchable)
         denied = asyncio.run(scoped.execute_tool_async(CanonicalToolCall(name="op_file_write", args={"path": "x.py", "content": "bad"})))
         self.assertFalse(denied.ok)
         self.assertEqual(denied.structured["reason"], "capability_not_allowed")
@@ -8633,20 +11250,20 @@ class MinionManagerTests(unittest.TestCase):
                     }
                 return None
 
-        allowed = ["op_fake_write", "op_minion_checkpoint_commit"]
+        allowed = ["op_fake_write", "checkpoint_commit"]
         scoped = MinionScopedExecutionRuntime(FakeExecution(), allowed)
         tool_names = [item["function"]["name"] for item in _llm_tools_for_allowed(scoped, allowed)]
 
         self.assertIn("op_fake_write", tool_names)
-        self.assertIn("op_minion_checkpoint_commit", tool_names)
+        self.assertIn("checkpoint_commit", tool_names)
 
     def test_slim_runner_runtime_publishes_resident_work_capabilities(self) -> None:
         async def scenario() -> None:
             bundle = build_slim_minion_runtime(self.root)
             try:
                 names = {spec["name"] for spec in bundle.execution_runtime.list_capability_specs()}
-                self.assertIn("op_exec_shell", names)
-                self.assertIn("op_web_search", names)
+                self.assertIn("shell", names)
+                self.assertIn("web_search", names)
                 self.assertIn("op_web_read", names)
                 self.assertIn("op_memory_recall", names)
             finally:
@@ -8660,14 +11277,14 @@ class MinionManagerTests(unittest.TestCase):
                 "identity": "You are a coder.",
                 "behavior": "Do the milestone.",
                 "output_contract": "Summarize results.",
-                "allowed_capabilities": ["op_exec_shell", "op_memory_recall"],
+                "allowed_capabilities": ["shell", "op_memory_recall"],
             }
         )
 
         self.assertIn("obvious schema, argument, path, or local input mistake", prompt)
         self.assertIn("correct the call directly", prompt)
         self.assertIn("repeated retries would be guesswork", prompt)
-        self.assertIn("use `op_memory_recall`", prompt)
+        self.assertIn("use `memory_recall`", prompt)
         self.assertIn("before retrying, debugging further, or reporting blocked", prompt)
         self.assertIn("If completion evidence cannot be produced", prompt)
         self.assertIn("<operating_rules>", prompt)
@@ -8699,6 +11316,9 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("Module tests", prompt)
         self.assertIn("Integration tests", prompt)
         self.assertIn("dogfood", prompt)
+        self.assertIn("metadata.languages", prompt)
+        self.assertIn("canonical implementation language ids", prompt)
+        self.assertIn("python, cpp, c", prompt)
         self.assertIn("Output exactly one JSON object", prompt)
         self.assertIn("primary planner deliverable must be a JSON artifact", prompt)
         self.assertIn("relative_path: plan.json", prompt)
@@ -8707,11 +11327,11 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("Artifact output must satisfy the current output_contract", prompt)
         self.assertIn('"type": "FinalPlanArtifact"', prompt)
         self.assertIn("Do not output markdown tables", prompt)
-        self.assertIn("op_workspace_read", prompt)
+        self.assertIn("op_file_read", prompt)
         self.assertIn("<identity>", prompt)
         self.assertIn("<behavior_guidance>", prompt)
         self.assertIn("<workspace_policy>", prompt)
-        self.assertNotIn("op_exec_shell", pack.allowed_capabilities)
+        self.assertNotIn("shell", pack.allowed_capabilities)
         self.assertNotIn("Stay read-only", prompt)
         self.assertNotIn("disposable task runner", prompt)
 
@@ -8744,17 +11364,24 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("Fix failures", prompt)
         self.assertIn("Dogfood", prompt)
         self.assertIn("tests/commands run with pass/fail evidence", prompt)
+        self.assertIn("workspace.languages", prompt)
+        self.assertIn("workspace.lsp_setup", prompt)
+        self.assertIn("workspace language/LSP setup status", prompt)
         self.assertIn("op_file_read", pack.allowed_capabilities)
         self.assertIn("op_file_edit", pack.allowed_capabilities)
         self.assertIn("op_file_write", pack.allowed_capabilities)
-        self.assertIn("op_minion_checkpoint_commit", pack.allowed_capabilities)
-        self.assertIn("op_minion_artifact_write", pack.allowed_capabilities)
-        self.assertIn("op_minion_artifact_edit", pack.allowed_capabilities)
+        self.assertIn("op_file_delete", pack.allowed_capabilities)
+        self.assertNotIn("op_file_read", pack.allowed_capabilities)
+        self.assertNotIn("op_file_edit", pack.allowed_capabilities)
+        self.assertNotIn("op_file_write", pack.allowed_capabilities)
+        self.assertIn("checkpoint_commit", pack.allowed_capabilities)
+        self.assertIn("artifact_write", pack.allowed_capabilities)
+        self.assertIn("artifact_edit", pack.allowed_capabilities)
         self.assertIn("op_file_edit", prompt)
         self.assertIn("op_file_write", prompt)
-        self.assertIn("op_minion_checkpoint_commit", prompt)
-        self.assertIn("op_minion_artifact_write", prompt)
-        self.assertIn("op_minion_artifact_edit", prompt)
+        self.assertIn("checkpoint_commit", prompt)
+        self.assertIn("artifact_write", prompt)
+        self.assertIn("artifact_edit", prompt)
         self.assertIn("Do not create or commit generated", prompt)
         self.assertIn("CMakeLists.txt", prompt)
         self.assertEqual(pack.allowed_skills, ["test_debugging"])
@@ -8772,18 +11399,18 @@ class MinionManagerTests(unittest.TestCase):
 
         registry = MinionProfileRegistry(runtime_root=self.root)
         lsp_tools = {
-            "op_lsp_status",
-            "op_lsp_doctor",
-            "op_lsp_hover",
-            "op_lsp_definition",
-            "op_lsp_implementation",
-            "op_lsp_references",
-            "op_lsp_prepare_call_hierarchy",
-            "op_lsp_incoming_calls",
-            "op_lsp_outgoing_calls",
-            "op_lsp_document_symbols",
-            "op_lsp_workspace_symbols",
-            "op_lsp_diagnostics",
+            "lsp_status",
+            "lsp_doctor",
+            "lsp_hover",
+            "lsp_definition",
+            "lsp_implementation",
+            "lsp_references",
+            "lsp_prepare_call_hierarchy",
+            "lsp_incoming_calls",
+            "lsp_outgoing_calls",
+            "lsp_document_symbols",
+            "lsp_workspace_symbols",
+            "lsp_diagnostics",
         }
         for profile_id in (
             "software_engineering.planner",
@@ -8819,6 +11446,16 @@ class MinionManagerTests(unittest.TestCase):
 
         self.assertIn("Trace happens-before chains", prompt)
         self.assertIn("contract alignment", prompt)
+        self.assertIn("container element types as binding contract", prompt)
+        self.assertIn("labels: tuple[str, ...]", prompt)
+        self.assertIn("Type-contract mismatches are real contract_impact", prompt)
+        self.assertIn("source, LSP, or a runtime probe", prompt)
+        self.assertIn("workspace.languages", prompt)
+        self.assertIn("workspace.lsp_setup", prompt)
+        self.assertIn("lsp_evidence_not_applicable_reason", prompt)
+        self.assertIn("exact output-format contracts", prompt)
+        self.assertIn("tags=<comma-separated-tags-or->", prompt)
+        self.assertIn("empty/default case renders the literal `-`", prompt)
         self.assertIn("preconditions and postconditions", prompt)
         self.assertIn("exception escape", prompt)
         self.assertIn("lifecycle management", prompt)
@@ -8857,11 +11494,10 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("confirmed facts and source evidence", prompt)
         self.assertIn("write the requested document to the requested path", prompt)
         self.assertIn("final response should be a short pointer plus verification summary", prompt)
-        self.assertIn("op_workspace_read", pack.allowed_capabilities)
+        self.assertIn("op_workspace_file_read", pack.allowed_capabilities)
         self.assertIn("op_web_search", pack.allowed_capabilities)
-        self.assertIn("op_file_read", pack.allowed_capabilities)
-        self.assertIn("op_file_edit", pack.allowed_capabilities)
-        self.assertIn("op_file_write", pack.allowed_capabilities)
+        self.assertIn("op_workspace_file_edit", pack.allowed_capabilities)
+        self.assertIn("op_workspace_file_write", pack.allowed_capabilities)
         self.assertNotIn("op_exec_shell", pack.allowed_capabilities)
 
     async def _start_manager(self):
@@ -8987,13 +11623,13 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 self.assertIsNone(behavior_repository.get_affordance("declared.minion.delegate_professional_work"))
                 self.assertIsNone(behavior_repository.get_affordance("declared.minion.natural_language_takeover"))
-                self.assertIn("op_minion_draft_work_order", candidate.capability_refs)
-                self.assertIn("op_minion_promote_work_order_draft", candidate.capability_refs)
-                self.assertIn("intro_minion_work_order_draft_read", candidate.capability_refs)
-                self.assertIn("intro_minion_profile_list", candidate.capability_refs)
-                self.assertIn("intro_minion_profile_read", candidate.capability_refs)
-                self.assertIn("op_minion_spawn", candidate.capability_refs)
-                self.assertIn("intro_minion_work_order_read", candidate.capability_refs)
+                self.assertIn("minion_draft_work_order", candidate.capability_refs)
+                self.assertIn("minion_promote_work_order_draft", candidate.capability_refs)
+                self.assertIn("minion_work_order_draft_read", candidate.capability_refs)
+                self.assertIn("minion_profile_list", candidate.capability_refs)
+                self.assertIn("minion_profile_read", candidate.capability_refs)
+                self.assertIn("minion_spawn", candidate.capability_refs)
+                self.assertIn("minion_work_order_read", candidate.capability_refs)
                 self.assertIn("draft", candidate.prompt_hint.lower())
                 self.assertIn("planner", candidate.prompt_hint.lower())
                 self.assertIn("profile", candidate.prompt_hint.lower())
@@ -9012,10 +11648,10 @@ class MinionIntegrationTests(unittest.TestCase):
                 )
                 takeover_candidates = {item.affordance_id: item for item in takeover.candidates}
                 self.assertIn("declared.minion.natural_language_takeover", takeover_candidates)
-                self.assertIn("op_minion_kill", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
-                self.assertIn("op_minion_destroy_work_order_run", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
-                self.assertIn("op_minion_recover_work_order", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
-                self.assertIn("op_minion_spawn", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
+                self.assertIn("minion_kill", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
+                self.assertIn("minion_destroy_work_order_run", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
+                self.assertIn("minion_recover_work_order", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
+                self.assertIn("minion_spawn", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
 
                 core.detach_module("minion")
                 after = asyncio.run(
@@ -9042,7 +11678,7 @@ class MinionIntegrationTests(unittest.TestCase):
             try:
                 created = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_draft_work_order",
+                        name="minion_draft_work_order",
                         args={
                             "title": "Minion control affordance",
                             "goal": "Let Pal inspect and replace active minions by facts.",
@@ -9055,10 +11691,10 @@ class MinionIntegrationTests(unittest.TestCase):
                 draft_id = created.structured["draft"]["draft_id"]
 
                 searched = core.context.execution_runtime.execute(
-                    CapabilityCall(name="intro_minion_work_order_draft_search", args={"query": "replace active minions"})
+                    CapabilityCall(name="minion_work_order_draft_search", args={"query": "replace active minions"})
                 )
                 read = core.context.execution_runtime.execute(
-                    CapabilityCall(name="intro_minion_work_order_draft_read", args={"draft_id": draft_id})
+                    CapabilityCall(name="minion_work_order_draft_read", args={"draft_id": draft_id})
                 )
 
                 self.assertEqual(searched.status, "ok")
@@ -9080,7 +11716,7 @@ class MinionIntegrationTests(unittest.TestCase):
             try:
                 created = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_draft_work_order",
+                        name="minion_draft_work_order",
                         args={
                             "title": "Draft promotion path",
                             "goal": "Promote draft into a formal work order",
@@ -9092,10 +11728,10 @@ class MinionIntegrationTests(unittest.TestCase):
                 )
                 draft_id = created.structured["draft"]["draft_id"]
                 promoted = core.context.execution_runtime.execute(
-                    CapabilityCall(name="op_minion_promote_work_order_draft", args={"draft_id": draft_id})
+                    CapabilityCall(name="minion_promote_work_order_draft", args={"draft_id": draft_id})
                 )
                 read = core.context.execution_runtime.execute(
-                    CapabilityCall(name="intro_minion_work_order_read", args={"work_order_id": "wo_draft_promotion"})
+                    CapabilityCall(name="minion_work_order_read", args={"work_order_id": "wo_draft_promotion"})
                 )
 
                 self.assertEqual(promoted.status, "ok")
@@ -9104,7 +11740,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 created_2 = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_draft_work_order",
+                        name="minion_draft_work_order",
                         args={
                             "title": "Spawn from draft",
                             "goal": "Let spawn promote draft through the unified entry",
@@ -9116,7 +11752,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 )
                 spawned = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_spawn",
+                        name="minion_spawn",
                         args={
                             "draft_id": created_2.structured["draft"]["draft_id"],
                             "profile_group": "software_engineering",
@@ -9138,7 +11774,7 @@ class MinionIntegrationTests(unittest.TestCase):
             try:
                 draft = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_draft_work_order",
+                        name="minion_draft_work_order",
                         args={"title": "Missing milestones", "goal": "Reject incomplete work order args"},
                     )
                 )
@@ -9147,7 +11783,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 spawn = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_spawn",
+                        name="minion_spawn",
                         args={"goal": "reject"},
                     )
                 )
@@ -9156,7 +11792,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 legacy_milestones_spawn = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_spawn",
+                        name="minion_spawn",
                         args={"goal": "reject", "milestones": ["do not accept"]},
                     )
                 )
@@ -9165,7 +11801,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 missing_work_order = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_spawn",
+                        name="minion_spawn",
                         args={"work_order_id": "wo_missing", "goal": "do not fallback"},
                     )
                 )
@@ -9174,7 +11810,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 legacy_spawn = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_spawn",
+                        name="minion_spawn",
                         args={"task_context_pack": {"work_order_id": "wo_missing_milestones", "goal": "reject"}},
                     )
                 )
@@ -9190,7 +11826,7 @@ class MinionIntegrationTests(unittest.TestCase):
             handle = register_minion_with_core(core.context, runtime_root=Path(tmp))
             core.publish_module_capabilities("minion")
             try:
-                listed = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_list"))
+                listed = core.context.execution_runtime.execute(CapabilityCall(name="minion_profile_list"))
                 self.assertEqual(listed.status, "ok")
                 profile_ids = {item["canonical_profile_id"] for item in listed.structured["items"]}
                 self.assertIn("generic", profile_ids)
@@ -9201,24 +11837,24 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("runtime TOML", listed.structured["profile_source_order"])
                 self.assertIn("profile_group + profile_name", listed.structured["usage"])
 
-                planner = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_read", args={"profile_id": "software_engineering.planner"}))
+                planner = core.context.execution_runtime.execute(CapabilityCall(name="minion_profile_read", args={"profile_id": "software_engineering.planner"}))
                 self.assertEqual(planner.status, "ok")
                 self.assertEqual(planner.structured["profile_group"], "software_engineering")
                 self.assertEqual(planner.structured["workspace_policy"]["mode"], "read_only_repo")
                 self.assertIn("work order", planner.structured["identity_fragment"].lower())
 
-                read = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_read", args={"profile_id": "software_engineering.reviewer"}))
+                read = core.context.execution_runtime.execute(CapabilityCall(name="minion_profile_read", args={"profile_id": "software_engineering.reviewer"}))
                 self.assertEqual(read.status, "ok")
                 self.assertEqual(read.structured["profile_id"], "reviewer")
 
-                spawn_spec = core.context.execution_runtime.get_capability_spec("op_minion_spawn")
+                spawn_spec = core.context.execution_runtime.get_capability_spec("minion_spawn")
                 self.assertIsNotNone(spawn_spec)
                 assert spawn_spec is not None
-                self.assertIn("intro_minion_profile_list", spawn_spec["description"])
-                self.assertIn("intro_minion_profile_read", spawn_spec["description"])
+                self.assertIn("minion_profile_list", spawn_spec["description"])
+                self.assertIn("minion_profile_read", spawn_spec["description"])
                 self.assertIn("runtime_root/plugins/minion/profiles/*.toml", spawn_spec["description"])
                 self.assertIn("top-level plan_ref", spawn_spec["description"])
-                self.assertIn("op_minion_submit_plan", spawn_spec["description"])
+                self.assertIn("minion_submit_plan", spawn_spec["description"])
                 self.assertIn("not a way to invent new milestones", spawn_spec["description"])
                 self.assertIn("Do not pass TaskContextPack", spawn_spec["description"])
                 self.assertIn("preferred_endpoint_id", spawn_spec["description"])
@@ -9248,31 +11884,31 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("active endpoint", endpoint_arg["description"])
                 bonus_arg = spawn_spec["parameters_schema"]["properties"]["spawn_bonus_skill_refs"]
                 self.assertIn("optional skill libraries", bonus_arg["description"])
-                self.assertIsNotNone(core.context.execution_runtime.get_capability_spec("op_minion_recover_work_order"))
-                self.assertIsNotNone(core.context.execution_runtime.get_capability_spec("op_minion_destroy_work_order_run"))
-                revise_spec = core.context.execution_runtime.get_capability_spec("op_minion_revise_plan")
+                self.assertIsNotNone(core.context.execution_runtime.get_capability_spec("minion_recover_work_order"))
+                self.assertIsNotNone(core.context.execution_runtime.get_capability_spec("minion_destroy_work_order_run"))
+                revise_spec = core.context.execution_runtime.get_capability_spec("minion_revise_plan")
                 self.assertIsNotNone(revise_spec)
                 assert revise_spec is not None
                 self.assertIn("source_plan_ref", revise_spec["parameters_schema"]["required"])
                 self.assertIn("revised_plan_artifact", revise_spec["parameters_schema"]["required"])
                 self.assertIn("increment plan_revision by exactly one", revise_spec["description"])
-                submit_spec = core.context.execution_runtime.get_capability_spec("op_minion_submit_plan")
+                submit_spec = core.context.execution_runtime.get_capability_spec("minion_submit_plan")
                 self.assertIsNotNone(submit_spec)
                 assert submit_spec is not None
                 self.assertIn("plan_artifact", submit_spec["parameters_schema"]["required"])
                 self.assertIn("fallback planner", submit_spec["description"])
-                accept_spec = core.context.execution_runtime.get_capability_spec("op_minion_accept_plan")
+                accept_spec = core.context.execution_runtime.get_capability_spec("minion_accept_plan")
                 self.assertIsNotNone(accept_spec)
                 assert accept_spec is not None
                 self.assertIn("plan_ref", accept_spec["parameters_schema"]["required"])
                 self.assertIn("review_gate_ref", accept_spec["parameters_schema"]["properties"])
                 self.assertNotIn("human_override", accept_spec["parameters_schema"]["properties"])
-                review_gate_spec = core.context.execution_runtime.get_capability_spec("op_minion_review_gate_submit")
+                review_gate_spec = core.context.execution_runtime.get_capability_spec("review_gate_submit")
                 self.assertIsNotNone(review_gate_spec)
                 assert review_gate_spec is not None
                 self.assertIn("gate_kind", review_gate_spec["parameters_schema"]["required"])
 
-                draft_spec = core.context.execution_runtime.get_capability_spec("op_minion_draft_work_order")
+                draft_spec = core.context.execution_runtime.get_capability_spec("minion_draft_work_order")
                 self.assertIsNotNone(draft_spec)
                 assert draft_spec is not None
                 self.assertIn("Draft a minion work order candidate", draft_spec["description"])
@@ -9301,7 +11937,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn(EventKind.MINION_PROGRESS, core.context.event_handler_registry.handlers)
                 self.assertIn("minion_approval_decision", core.context.control_action_registry.handlers)
                 self.assertIn("minion_lesson_decision", core.context.control_action_registry.handlers)
-                self.assertIn("op_minion_spawn", core.context.capability_registry.descriptors)
+                self.assertIn("minion_spawn", core.context.capability_registry.descriptors)
 
                 core.detach_module("minion")
 
@@ -9310,7 +11946,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertNotIn(EventKind.MINION_PROGRESS, core.context.event_handler_registry.handlers)
                 self.assertNotIn("minion_approval_decision", core.context.control_action_registry.handlers)
                 self.assertNotIn("minion_lesson_decision", core.context.control_action_registry.handlers)
-                self.assertNotIn("op_minion_spawn", core.context.capability_registry.descriptors)
+                self.assertNotIn("minion_spawn", core.context.capability_registry.descriptors)
             finally:
                 handle.shutdown_sync()
 
@@ -9323,15 +11959,15 @@ class MinionIntegrationTests(unittest.TestCase):
             try:
                 runtime = core.context.execution_runtime
                 self.assertIn("op_minion_detach", {spec["name"] for spec in runtime.list_capability_specs()})
-                self.assertIn("op_minion_spawn", runtime.compiled_capability_index.records)
+                self.assertIn("minion_spawn", runtime.compiled_capability_index.records)
 
                 result = runtime.execute(CapabilityCall(name="op_minion_detach"))
 
                 self.assertEqual(result.status, RuntimeStatus.OK)
                 self.assertEqual(result.structured["lifecycle_controller"], "core")
                 self.assertNotIn("op_minion_detach", {spec["name"] for spec in runtime.list_capability_specs()})
-                self.assertNotIn("op_minion_spawn", runtime.compiled_capability_index.records)
-                self.assertNotIn("op_minion_spawn", core.context.capability_registry.descriptors)
+                self.assertNotIn("minion_spawn", runtime.compiled_capability_index.records)
+                self.assertNotIn("minion_spawn", core.context.capability_registry.descriptors)
                 self.assertNotIn("minion.manager", core.context.event_source_registry.sources)
             finally:
                 handle.shutdown_sync()
@@ -9382,12 +12018,12 @@ class MinionIntegrationTests(unittest.TestCase):
             core.context.register_module(fake)
             core.publish_module_capabilities("minion")
             try:
-                listed = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_list"))
+                listed = core.context.execution_runtime.execute(CapabilityCall(name="minion_profile_list"))
                 profile_ids = {item["profile_id"] for item in listed.structured["items"]}
                 self.assertIn("designer", profile_ids)
 
                 fake.mounted = False
-                listed = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_list"))
+                listed = core.context.execution_runtime.execute(CapabilityCall(name="minion_profile_list"))
                 profile_ids = {item["profile_id"] for item in listed.structured["items"]}
                 self.assertNotIn("designer", profile_ids)
             finally:
@@ -9415,7 +12051,7 @@ class MinionIntegrationTests(unittest.TestCase):
             try:
                 draft = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_draft_work_order",
+                        name="minion_draft_work_order",
                         args={
                             "title": "Coder hook spawn",
                             "goal": "make a change",
@@ -9429,7 +12065,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(draft.status, "ok")
                 spawned = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_spawn",
+                        name="minion_spawn",
                         args={
                             "profile_group": "software_engineering",
                             "profile_name": "coder",
@@ -9441,7 +12077,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(spawned.status, "ok")
                 self.assertEqual(spawned.structured["minion_profile"], "software_engineering.coder")
                 read = core.context.execution_runtime.execute(
-                    CapabilityCall(name="intro_minion_read", args={"run_id": spawned.structured["run_id"]})
+                    CapabilityCall(name="minion_read", args={"run_id": spawned.structured["run_id"]})
                 )
                 pack = read.structured["task_context_pack"]
                 self.assertEqual(pack["minion_profile"], "software_engineering.coder")
@@ -9449,12 +12085,17 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("op_file_read", pack["allowed_capabilities"])
                 self.assertIn("op_file_edit", pack["allowed_capabilities"])
                 self.assertIn("op_file_write", pack["allowed_capabilities"])
-                self.assertIn("op_exec_shell", pack["allowed_capabilities"])
-                self.assertIn("op_minion_artifact_write", pack["allowed_capabilities"])
-                self.assertIn("op_minion_artifact_edit", pack["allowed_capabilities"])
+                self.assertIn("op_file_delete", pack["allowed_capabilities"])
+                self.assertNotIn("op_file_read", pack["allowed_capabilities"])
+                self.assertNotIn("op_file_edit", pack["allowed_capabilities"])
+                self.assertNotIn("op_file_write", pack["allowed_capabilities"])
+                self.assertIn("shell", pack["allowed_capabilities"])
+                self.assertIn("artifact_write", pack["allowed_capabilities"])
+                self.assertIn("artifact_edit", pack["allowed_capabilities"])
                 self.assertNotIn("op_fake_extra", pack["allowed_capabilities"])
-                self.assertEqual(pack["approval_policy"]["high_risk_capabilities"], ["op_exec_shell"])
+                self.assertEqual(pack["approval_policy"]["high_risk_capabilities"], ["shell"])
                 self.assertEqual(pack["metadata"]["preferred_endpoint_id"], "coder_fast")
+                self.assertEqual(pack["metadata"]["preferred_endpoint_source"], "user")
             finally:
                 handle.shutdown_sync()
 
@@ -9468,7 +12109,7 @@ class MinionIntegrationTests(unittest.TestCase):
             try:
                 missing_draft = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_draft_work_order",
+                        name="minion_draft_work_order",
                         args={
                             "title": "Missing profile",
                             "goal": "nope",
@@ -9481,7 +12122,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(missing_draft.status, "ok")
                 unknown = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_spawn",
+                        name="minion_spawn",
                         args={
                             "profile_group": "missing",
                             "profile_name": "missing",
@@ -9494,7 +12135,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 explicit_draft = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_draft_work_order",
+                        name="minion_draft_work_order",
                         args={
                             "title": "Explicit fields",
                             "goal": "plan",
@@ -9508,7 +12149,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(explicit_draft.status, "ok")
                 spawned = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="op_minion_spawn",
+                        name="minion_spawn",
                         args={
                             "profile_group": "software_engineering",
                             "profile_name": "planner",
@@ -9521,10 +12162,10 @@ class MinionIntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(spawned.status, "ok")
                 read = core.context.execution_runtime.execute(
-                    CapabilityCall(name="intro_minion_read", args={"run_id": spawned.structured["run_id"]})
+                    CapabilityCall(name="minion_read", args={"run_id": spawned.structured["run_id"]})
                 )
                 pack = read.structured["task_context_pack"]
-                self.assertIn("op_workspace_read", pack["allowed_capabilities"])
+                self.assertIn("op_file_read", pack["allowed_capabilities"])
                 self.assertNotIn("op_only_this", pack["allowed_capabilities"])
                 self.assertEqual(pack["allowed_skills"], ["skill.only"])
                 self.assertTrue(pack["approval_policy"]["custom"])
@@ -9566,14 +12207,14 @@ class MinionIntegrationTests(unittest.TestCase):
             core.publish_module_capabilities("minion")
             try:
                 spawned = core.context.execution_runtime.execute(
-                    CapabilityCall(name="op_minion_spawn", args={"task_query": "telegram reliability"})
+                    CapabilityCall(name="minion_spawn", args={"task_query": "telegram reliability"})
                 )
                 self.assertEqual(spawned.status, "ok")
                 self.assertEqual(spawned.structured["work_order_id"], "wo_query_one")
                 self.assertEqual(spawned.structured["instruction"], "repair telegram by reading the stored work order facts")
 
                 ambiguous = core.context.execution_runtime.execute(
-                    CapabilityCall(name="op_minion_spawn", args={"task_query": "shared ambiguous"})
+                    CapabilityCall(name="minion_spawn", args={"task_query": "shared ambiguous"})
                 )
                 self.assertEqual(ambiguous.status, "error")
                 self.assertGreaterEqual(ambiguous.structured["candidate_count"], 2)
@@ -9638,7 +12279,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 "run_id": "r1",
                 "minion_id": "m1",
                 "work_order_id": "wo1",
-                "requested_action": "op_exec_shell",
+                "requested_action": "shell",
                 "args_summary": {"cmd": "cat <<'EOF'\n" + ("x" * 10000) + "\nEOF"},
                 "route": {
                     "endpoint_id": route.endpoint_id,
@@ -9726,8 +12367,8 @@ class MinionIntegrationTests(unittest.TestCase):
                             "minion_profile": "software_engineering.planner",
                             "payload": {
                                 "phase": "tool_call_started",
-                                "summary": "Tool started: op_exec_shell",
-                                "target_name": "op_exec_shell",
+                                "summary": "Tool started: shell",
+                                "target_name": "shell",
                             },
                             "created_at": "2026-01-01T00:00:00Z",
                         }
