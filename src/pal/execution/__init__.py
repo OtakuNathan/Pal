@@ -20,17 +20,18 @@ __all__ = [
     "ExecutionSnapshot",
     "ExecutionRuntime",
     "ExecutionRuntimePort",
-    "FileDeleteTool",
     "FileEditTool",
     "FileReadTool",
     "FileStateCache",
     "FileStateTool",
     "FileWriteTool",
+    "PathDeleteTool",
     "Plugin",
     "RegisteredCapability",
     "ShellExecTool",
     "ToolCallTool",
     "ToolReadTool",
+    "ToolResultPageTool",
     "ToolSearchTool",
     "Tool",
     "ToolCallBudget",
@@ -77,14 +78,18 @@ def __getattr__(name: str):
             "ToolReadTool": ToolReadTool,
             "inspect_tools": inspect_tools,
         }[name]
+    if name == "ToolResultPageTool":
+        from pal.execution.tool_result_pager import ToolResultPageTool
+
+        return ToolResultPageTool
     if name == "FileReadTool":
         from pal.execution.file_read import FileReadTool
 
         return FileReadTool
-    if name == "FileDeleteTool":
-        from pal.execution.file_delete import FileDeleteTool
+    if name == "PathDeleteTool":
+        from pal.execution.path_delete import PathDeleteTool
 
-        return FileDeleteTool
+        return PathDeleteTool
     if name == "FileEditTool":
         from pal.execution.file_edit import FileEditTool
 

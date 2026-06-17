@@ -882,6 +882,7 @@ class PalCore:
         # The hot path is: start turn -> interpret yielded effects -> resume
         # until the generator returns a TurnOutcome.
         continuation = self.turn_manager.start(channel_envelope)
+        self._begin_tool_result_turn(continuation)
         return await self._run_turn_continuation_async(continuation)
 
     def turn_execution_options(self) -> dict[str, Any]:
@@ -897,7 +898,18 @@ class PalCore:
 
     async def run_turn_continuation_async(self, continuation: TurnContinuation) -> TurnOutcome:
         self.state.active_turns[continuation.turn_id] = continuation
+        self._begin_tool_result_turn(continuation)
         return await self._run_turn_continuation_async(continuation)
+
+    def _begin_tool_result_turn(self, continuation: TurnContinuation) -> None:
+        begin = getattr(self.context.execution_runtime, "begin_tool_result_turn", None)
+        if not callable(begin):
+            return
+        begin(
+            turn_id=continuation.turn_id,
+            scope_key=continuation.control_scope_key,
+            retention_user_turns=getattr(self.config, "tool_result_pager_retention_user_turns", 5),
+        )
 
     async def _background_channel_turn_runner_async(self, channel_envelope: ChannelEnvelope) -> None:
         turn_id = channel_envelope.event.event_id

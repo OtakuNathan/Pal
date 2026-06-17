@@ -38,6 +38,7 @@ from pal.shared import (
     default_tool_result_text,
     ensure_tool_call_identity,
 )
+from pal.shared.result_rendering import render_head_tail_preview_for_llm
 from pal.shared.payloads import extract_text_from_payload
 from pal.stream_events import NormalizedLLMStreamEvent
 
@@ -979,8 +980,11 @@ class TurnExecutor:
     def _render_tool_preview(self, content: str) -> str:
         if len(content) <= self._config.active_tool_result_preview:
             return content
-        preview = content[: self._config.active_tool_result_preview].rstrip()
-        return f"{preview}\n\n[preview only: original={len(content)} chars]"
+        preview, preview_size = render_head_tail_preview_for_llm(
+            content,
+            max_chars=self._config.active_tool_result_preview,
+        )
+        return f"{preview}\n\n[preview only: original={len(content)} chars, kept={preview_size} chars]"
 
     @staticmethod
     def _render_minimal_tool_observation(content: str) -> str:

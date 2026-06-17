@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,14 +43,15 @@ MINION_CODE_INTEL_TOOL_SURFACE = (
 
 
 MINION_DIRECT_WORK_TOOL_SURFACE = (
-    "op_workspace_file_read",
-    "op_workspace_file_edit",
-    "op_workspace_file_write",
-    "op_workspace_file_delete",
+    "op_file_read",
+    "op_file_edit",
+    "op_file_write",
+    "op_path_delete",
+    "op_file_state",
     "op_exec_shell",
     "op_minion_checkpoint_commit",
-    "op_workspace_tree",
-    "op_workspace_search",
+    "op_tree",
+    "op_search",
     "op_minion_artifact_write",
     "op_minion_artifact_edit",
     "op_minion_memory_candidate_write",
@@ -61,42 +63,35 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
 
 
 WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
-    "op_workspace_tree": {
-        "name": "op_workspace_tree",
-        "description": "List files under the minion workspace repo_path without modifying anything.",
+    "op_tree": {
+        "name": "op_tree",
+        "description": (
+            "Use this first for structured directory listings under the current task repo; do not use op_exec_shell with ls/find/git ls-files "
+            "for repo listing when this tool is visible. This does not modify anything."
+        ),
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative directory path. Use '.' for the repo root; do not use '/'."},
+                "path": {"type": "string", "description": "Repo-relative directory path. Use '.' for the repo root; do not use '/'."},
                 "max_depth": {"type": "integer", "default": 2},
                 "limit": {"type": "integer", "default": 200},
             },
         },
     },
-    "op_workspace_search": {
-        "name": "op_workspace_search",
-        "description": "Search text files under the minion workspace repo_path without modifying anything.",
+    "op_search": {
+        "name": "op_search",
+        "description": (
+            "Use this first for repository text search under the current task repo; do not use op_exec_shell with grep/rg/find text scans "
+            "when this tool is visible. This does not modify anything."
+        ),
         "parameters_schema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
-                "path": {"type": "string", "description": "Workspace-relative directory path. Use '.' for the repo root; do not use '/'."},
+                "path": {"type": "string", "description": "Repo-relative directory path. Use '.' for the repo root; do not use '/'."},
                 "limit": {"type": "integer", "default": 50},
             },
             "required": ["query"],
-        },
-    },
-    "op_workspace_read": {
-        "name": "op_workspace_read",
-        "description": "Read a workspace-relative text file without modifying anything.",
-        "parameters_schema": {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path. Use paths like 'src/app.py', not absolute paths."},
-                "start_line": {"type": "integer", "default": 1},
-                "limit_lines": {"type": "integer", "default": 200},
-            },
-            "required": ["path"],
         },
     },
     "op_minion_artifact_write": {
@@ -245,9 +240,9 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
 WORKSPACE_TOOL_SPECS.update(WORKSPACE_FILE_TOOL_SPECS)
 
 _REPAIR_EDIT_TOOL_NAMES = {
-    "op_workspace_file_edit",
-    "op_workspace_file_write",
-    "op_workspace_file_delete",
+    "op_file_edit",
+    "op_file_write",
+    "op_path_delete",
 }
 
 _PRE_EDIT_VERIFICATION_COMMAND_MARKERS = (
@@ -268,6 +263,56 @@ _PRE_EDIT_VERIFICATION_COMMAND_MARKERS = (
     "tox",
     "nox",
 )
+
+
+def _augment_minion_capability_spec(spec: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
+    name = str(spec.get("name") or spec.get("canonical_path") or "").strip()
+    if name != "op_exec_shell":
+        return spec
+    guidance = _minion_shell_dedicated_tool_guidance(allowed)
+    if not guidance:
+        return spec
+    augmented = deepcopy(spec)
+    description = str(augmented.get("description") or "").strip()
+    if guidance not in description:
+        augmented["description"] = f"{description} {guidance}".strip()
+    schema = deepcopy(augmented.get("parameters_schema") or {"type": "object", "properties": {}})
+    properties = dict(schema.get("properties") or {})
+    cmd_property = dict(properties.get("cmd") or {})
+    cmd_description = str(cmd_property.get("description") or "").strip()
+    if guidance not in cmd_description:
+        cmd_property["description"] = f"{cmd_description} {guidance}".strip()
+    properties["cmd"] = cmd_property
+    schema["properties"] = properties
+    augmented["parameters_schema"] = schema
+    return augmented
+
+
+def _minion_shell_dedicated_tool_guidance(allowed: set[str]) -> str:
+    hints: list[str] = []
+    if "op_tree" in allowed:
+        hints.append("op_tree for structured repo listings")
+    if "op_search" in allowed:
+        hints.append("op_search for repository text search")
+    if "op_file_read" in allowed:
+        hints.append("op_file_read for reading repo text files")
+    if "op_file_edit" in allowed:
+        hints.append("op_file_edit for precise repo text edits")
+    if "op_file_write" in allowed:
+        hints.append("op_file_write for creating, overwriting, or appending repo text files")
+    if "op_path_delete" in allowed:
+        hints.append("op_path_delete for deleting repo files or directories")
+    if "op_file_state" in allowed:
+        hints.append("op_file_state for checking read-before-edit cache state")
+    if "op_minion_checkpoint_commit" in allowed:
+        hints.append("op_minion_checkpoint_commit for milestone checkpoint commits")
+    if not hints:
+        return ""
+    return (
+        "Minion tool choice: when visible, use "
+        + "; ".join(hints)
+        + ". Keep op_exec_shell for tests, builds, scripts, process probes, package commands, and read-only git verification."
+    )
 
 
 @dataclass
@@ -291,8 +336,10 @@ class MinionScopedExecutionRuntime:
         if callable(list_specs):
             for spec in list(list_specs()):
                 name = str(spec.get("name") or "").strip()
+                if name in WORKSPACE_TOOL_SPECS:
+                    continue
                 if name in allowed and not is_minion_capability_denied(name):
-                    specs.append(spec)
+                    specs.append(_augment_minion_capability_spec(spec, allowed))
         return specs
 
     def get_capability_spec(self, name: str) -> dict[str, Any] | None:
@@ -309,7 +356,7 @@ class MinionScopedExecutionRuntime:
         canonical = str(spec.get("name") or spec.get("canonical_path") or name).strip()
         if canonical not in set(self.allowed_capabilities) or is_minion_capability_denied(canonical):
             return None
-        return spec
+        return _augment_minion_capability_spec(spec, set(self.allowed_capabilities))
 
     async def execute_tool_async(
         self,
@@ -369,7 +416,7 @@ class MinionScopedExecutionRuntime:
                 if artifact:
                     _append_unique_artifact(self.produced_artifacts, artifact)
             return result
-        if call.name.startswith("op_lsp_"):
+        if _is_lsp_capability_name(call.name):
             normalized = _normalize_minion_lsp_call(call, self.workspace)
             if isinstance(normalized, CanonicalToolResult):
                 return normalized
@@ -422,7 +469,7 @@ def _repair_pre_edit_tool_guard(call: CanonicalToolCall, workspace: dict[str, An
     if not target_name:
         return None
     args = _effective_tool_args(call)
-    if target_name.startswith("op_lsp_"):
+    if _is_lsp_capability_name(target_name):
         return _repair_requires_first_edit_result(call, target_name, workspace)
     if target_name == "op_minion_checkpoint_commit":
         return _repair_requires_first_edit_result(call, target_name, workspace)
@@ -453,8 +500,8 @@ def _is_pre_edit_verification_shell_command(args: dict[str, Any]) -> bool:
 def _repair_requires_first_edit_result(call: CanonicalToolCall, target_name: str, workspace: dict[str, Any]) -> CanonicalToolResult:
     text = (
         "Repair checklist has not had a successful workspace edit yet. "
-        "First complete a repair_checklist item with op_workspace_file_edit, "
-        "op_workspace_file_write, or op_workspace_file_delete. LSP, broad verification, "
+        "First complete a repair_checklist item with op_file_edit, "
+        "op_file_write, or op_path_delete. LSP, broad verification, "
         "and checkpointing are available after the first successful repair edit."
     )
     return CanonicalToolResult(
@@ -541,6 +588,12 @@ def _normalize_minion_lsp_call(call: CanonicalToolCall, workspace: dict[str, Any
         return call
     args = dict(call.args or {})
     args["workspace_root"] = str(root)
+    if not any(key in args for key in ("workspace_languages", "languages", "language", "primary_language")):
+        languages = _string_list((workspace.get("lsp_setup") or {}).get("languages") if isinstance(workspace.get("lsp_setup"), dict) else None)
+        if not languages:
+            languages = _string_list(workspace.get("languages"))
+        if languages:
+            args["workspace_languages"] = languages
     raw_file = str(args.get("file") or args.get("path") or "").strip()
     if raw_file:
         file_path = Path(raw_file).expanduser()
@@ -1021,7 +1074,7 @@ def _minion_checkpoint_commit_result(call: CanonicalToolCall, workspace: dict[st
     try:
         repo_path = str((workspace or {}).get("repo_path") or "").strip()
         if not repo_path:
-            raise ValueError("workspace.repo_path is not available")
+            raise ValueError("current task repo is not available")
         repo = Path(repo_path)
         title = str(call.args.get("title") or workspace.get("current_milestone_title") or "").strip()
         result = commit_milestone(
@@ -1140,7 +1193,7 @@ def _review_tool_evidence_ref(target_name: str, tool_call: CanonicalToolCall, re
                 if key in structured:
                     ref[key] = structured.get(key)
     if kind == "lsp":
-        ref["operation"] = normalized_target.removeprefix("op_lsp_")
+        ref["operation"] = _lsp_operation_name(normalized_target)
         if ref["operation"] == "status":
             for key in ("attached_count", "server_count"):
                 if structured.get(key) is not None:
@@ -1163,9 +1216,9 @@ def _review_tool_evidence_ref(target_name: str, tool_call: CanonicalToolCall, re
 def _review_tool_evidence_kind(target_name: str) -> str:
     if target_name == "op_exec_shell":
         return "command"
-    if target_name.startswith("op_lsp_"):
+    if _is_lsp_capability_name(target_name):
         return "lsp"
-    if target_name in {"op_workspace_tree", "op_workspace_search", "op_workspace_read", "op_workspace_file_read"}:
+    if target_name in {"op_tree", "op_search", "op_file_read"}:
         return "source"
     return ""
 
@@ -1186,6 +1239,18 @@ def _lsp_status_unavailable_reason(structured: dict[str, Any]) -> str:
         rendered = ", ".join(sorted(statuses)[:4])
         return f"op_lsp_status reported no attached language server ({server_count} configured; statuses: {rendered})"
     return f"op_lsp_status reported no attached language server ({server_count} configured)"
+
+
+def _is_lsp_capability_name(name: str) -> bool:
+    value = str(name or "").strip()
+    return value.startswith("op_lsp_") or value.startswith("lsp_")
+
+
+def _lsp_operation_name(name: str) -> str:
+    value = str(name or "").strip()
+    if value.startswith("op_lsp_"):
+        return value.removeprefix("op_lsp_")
+    return value.removeprefix("lsp_")
 
 def _tool_result_text(result: CanonicalToolResult) -> str:
     return default_tool_result_text(result, fallback_ok="tool completed", fallback_error="tool failed")

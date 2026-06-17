@@ -29,6 +29,7 @@ from pal.llm.codex_openai_bridge import (
     _strip_openai_prefix,
 )
 from pal.llm.credentials import LiteLLMCredentialResolver
+from pal.llm.request_hooks import apply_llm_message_hooks, is_zai_glm_endpoint
 
 from pal.llm.contracts import (
     CanonicalLLMOutcome,
@@ -324,6 +325,7 @@ class LiteLLMEndpointInvoker:
     artifact_manager: Any = None
     runtime_root: str | Path | None = None
     provider_registry: LLMProviderRegistry = field(default_factory=build_runtime_provider_registry)
+    message_hooks: tuple[str, ...] = ()
     last_payload_summary: dict[str, Any] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
@@ -489,7 +491,6 @@ class LiteLLMEndpointInvoker:
             image_url_format=image_url_format,
         )
         adapter = self.provider_registry.resolve(endpoint)
-        self.last_payload_summary = _summarize_provider_payload(endpoint, messages, image_url_format=image_url_format)
         request_shape = str(getattr(adapter, "request_shape", "") or "").strip() or "chat_completions"
         draft = adapter.new_draft(messages)
         timeout_seconds = request.metadata.get("timeout_seconds")
@@ -529,6 +530,16 @@ class LiteLLMEndpointInvoker:
             draft.tools = tools
             draft.tool_choice = "auto"
         adapter.apply_request(request, draft)
+        if is_zai_glm_endpoint(endpoint) and self.message_hooks and hasattr(draft, "messages"):
+            draft.messages = apply_llm_message_hooks(
+                endpoint,
+                request,
+                list(draft.messages or []),
+                hooks=self.message_hooks,
+            )
+        if hasattr(draft, "messages"):
+            messages = list(draft.messages or [])
+        self.last_payload_summary = _summarize_provider_payload(endpoint, messages, image_url_format=image_url_format)
         return request_shape, draft.to_kwargs(), tool_name_aliases
 
     def _iter_litellm_stream(
@@ -656,6 +667,7 @@ class OpenAIResponsesEndpointInvoker:
     artifact_manager: Any = None
     runtime_root: str | Path | None = None
     provider_registry: LLMProviderRegistry = field(default_factory=build_runtime_provider_registry)
+    message_hooks: tuple[str, ...] = ()
     _renderer: LiteLLMEndpointInvoker = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -664,6 +676,7 @@ class OpenAIResponsesEndpointInvoker:
             artifact_manager=self.artifact_manager,
             runtime_root=self.runtime_root,
             provider_registry=self.provider_registry,
+            message_hooks=self.message_hooks,
         )
 
     @staticmethod
@@ -768,6 +781,7 @@ class AnthropicMessagesEndpointInvoker:
             supports_vision=bool(endpoint.supports_vision),
             image_url_format=image_url_format,
         )
+        messages = self._transform_messages(endpoint, request, messages)
         self.last_payload_summary = _summarize_provider_payload(endpoint, messages, image_url_format=image_url_format)
         system, anthropic_messages = chat_messages_to_anthropic_messages(messages)
         timeout = _coerce_timeout_seconds(request.metadata.get("timeout_seconds"), default=120.0)
@@ -801,6 +815,32 @@ class AnthropicMessagesEndpointInvoker:
         if thinking is not None:
             request_kwargs["thinking"] = thinking
         return client_kwargs, request_kwargs, tool_name_aliases
+
+    def _transform_messages(
+        self,
+        endpoint: LLMEndpointModel,
+        request: CanonicalLLMRequest,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return messages
+
+
+@dataclass
+class ZaiAnthropicMessagesEndpointInvoker(AnthropicMessagesEndpointInvoker):
+    message_hooks: tuple[str, ...] = ()
+
+    @staticmethod
+    def supports_endpoint(endpoint: LLMEndpointModel) -> bool:
+        api_mode = str(getattr(endpoint, "api_mode", "") or "").strip().lower()
+        return bool(api_mode == "anthropic_messages" and is_zai_glm_endpoint(endpoint))
+
+    def _transform_messages(
+        self,
+        endpoint: LLMEndpointModel,
+        request: CanonicalLLMRequest,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return apply_llm_message_hooks(endpoint, request, messages, hooks=self.message_hooks)
 
 
 def _stream_events_from_outcome(outcome: CanonicalLLMOutcome) -> Iterable[NormalizedLLMStreamEvent]:
@@ -994,6 +1034,7 @@ class RoutingLLMEndpointInvoker:
     litellm_invoker: LiteLLMEndpointInvoker = field(default_factory=LiteLLMEndpointInvoker)
     codex_invoker: CodexCliEndpointInvoker = field(default_factory=CodexCliEndpointInvoker)
     openai_invoker: OpenAIResponsesEndpointInvoker = field(default_factory=OpenAIResponsesEndpointInvoker)
+    zai_anthropic_invoker: ZaiAnthropicMessagesEndpointInvoker = field(default_factory=ZaiAnthropicMessagesEndpointInvoker)
     anthropic_invoker: AnthropicMessagesEndpointInvoker = field(default_factory=AnthropicMessagesEndpointInvoker)
 
     @property
@@ -1003,6 +1044,7 @@ class RoutingLLMEndpointInvoker:
     def refresh_credentials(self) -> bool:
         refreshed = bool(self.litellm_invoker.refresh_credentials())
         refreshed = bool(self.openai_invoker.refresh_credentials()) or refreshed
+        refreshed = bool(self.zai_anthropic_invoker.refresh_credentials()) or refreshed
         refreshed = bool(self.anthropic_invoker.refresh_credentials()) or refreshed
         return refreshed
 
@@ -1022,6 +1064,8 @@ class RoutingLLMEndpointInvoker:
             return self.codex_invoker
         if self.openai_invoker.supports_endpoint(endpoint):
             return self.openai_invoker
+        if self.zai_anthropic_invoker.supports_endpoint(endpoint):
+            return self.zai_anthropic_invoker
         if self.anthropic_invoker.supports_endpoint(endpoint):
             return self.anthropic_invoker
         return self.litellm_invoker
@@ -1032,6 +1076,7 @@ def build_default_endpoint_invoker(
     credentials: LiteLLMCredentialResolver | None = None,
     artifact_manager: Any = None,
     runtime_root: str | Path | None = None,
+    message_hooks: tuple[str, ...] = (),
 ) -> RoutingLLMEndpointInvoker:
     resolver = credentials or LiteLLMCredentialResolver()
     provider_registry = build_runtime_provider_registry()
@@ -1041,12 +1086,19 @@ def build_default_endpoint_invoker(
             artifact_manager=artifact_manager,
             runtime_root=runtime_root,
             provider_registry=provider_registry,
+            message_hooks=message_hooks,
         ),
         openai_invoker=OpenAIResponsesEndpointInvoker(
             credentials=resolver,
             artifact_manager=artifact_manager,
             runtime_root=runtime_root,
             provider_registry=provider_registry,
+            message_hooks=message_hooks,
+        ),
+        zai_anthropic_invoker=ZaiAnthropicMessagesEndpointInvoker(
+            credentials=resolver,
+            artifact_manager=artifact_manager,
+            message_hooks=message_hooks,
         ),
         anthropic_invoker=AnthropicMessagesEndpointInvoker(
             credentials=resolver,

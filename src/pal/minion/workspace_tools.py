@@ -22,17 +22,14 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
             text = f"Artifact edited: {artifact['relative_path']}"
         else:
             root = _workspace_root(workspace)
-            if call.name == "op_workspace_tree":
+            if call.name == "op_tree":
                 payload = _workspace_tree(root, call.args)
                 text = "\n".join(item["path"] for item in payload["items"])
-            elif call.name == "op_workspace_search":
+            elif call.name == "op_search":
                 payload = _workspace_search(root, call.args)
                 text = "\n".join(f"{item['path']}:{item['line_number']}: {item['line']}" for item in payload["matches"])
-            elif call.name == "op_workspace_read":
-                payload = _workspace_read(root, call.args)
-                text = payload["text"]
             else:
-                raise ValueError(f"unknown workspace tool: {call.name}")
+                raise ValueError(f"unknown repo tool: {call.name}")
         if not text.strip():
             text = _empty_workspace_tool_text(call.name, payload)
         return CanonicalToolResult(
@@ -60,10 +57,10 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
 def _workspace_root(workspace: dict[str, Any]) -> Path:
     repo_path = str((workspace or {}).get("repo_path") or "").strip()
     if not repo_path:
-        raise ValueError("workspace.repo_path is not available")
+        raise ValueError("current task repo is not available")
     root = Path(repo_path).expanduser().resolve()
     if not root.exists() or not root.is_dir():
-        raise ValueError(f"workspace.repo_path is not a directory: {root}")
+        raise ValueError(f"current task repo is not a directory: {root}")
     return root
 
 
@@ -180,7 +177,7 @@ def _workspace_path(root: Path, raw_path: Any = "") -> Path:
     relative = str(raw_path or ".").strip() or "."
     candidate = (root / relative).resolve()
     if candidate != root and root not in candidate.parents:
-        raise ValueError("workspace path must be relative to workspace.repo_path; absolute paths and clone-source paths are not accepted")
+        raise ValueError("path must be relative to the current task repo; absolute paths and clone-source paths are not accepted")
     return candidate
 
 
@@ -212,21 +209,18 @@ def _workspace_should_skip_generated(path: Path, root: Path) -> bool:
 
 
 def _empty_workspace_tool_text(name: str, payload: dict[str, Any]) -> str:
-    if name == "op_workspace_tree":
-        return "No workspace entries found."
-    if name == "op_workspace_search":
+    if name == "op_tree":
+        return "No repo entries found."
+    if name == "op_search":
         query = str(payload.get("query") or "").strip()
-        return f"No workspace matches found for query: {query}" if query else "No workspace matches found."
-    if name == "op_workspace_read":
-        path = str(payload.get("path") or "").strip()
-        return f"{path}: empty file" if path else "Empty workspace file."
-    return "Workspace tool completed with no textual output."
+        return f"No repo matches found for query: {query}" if query else "No repo matches found."
+    return "Repo tool completed with no textual output."
 
 
 def _workspace_tree(root: Path, args: dict[str, Any]) -> dict[str, Any]:
     base = _workspace_path(root, args.get("path") or ".")
     if not base.exists():
-        raise ValueError(f"workspace path does not exist: {base.relative_to(root)}")
+        raise ValueError(f"repo path does not exist: {base.relative_to(root)}")
     max_depth = max(0, min(_optional_positive_int(args.get("max_depth")) or 2, 8))
     limit = max(1, min(_optional_positive_int(args.get("limit")) or 200, 1000))
     items: list[dict[str, Any]] = []
@@ -285,24 +279,6 @@ def _workspace_search(root: Path, args: dict[str, Any]) -> dict[str, Any]:
             continue
     return {"root": str(root), "query": query, "matches": matches, "count": len(matches)}
 
-
-def _workspace_read(root: Path, args: dict[str, Any]) -> dict[str, Any]:
-    path = _workspace_path(root, args.get("path") or "")
-    if not path.is_file():
-        raise ValueError(f"workspace path is not a file: {path.relative_to(root)}")
-    start_line = max(1, _optional_positive_int(args.get("start_line")) or 1)
-    limit_lines = max(1, min(_optional_positive_int(args.get("limit_lines")) or 200, 1000))
-    lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    selected = lines[start_line - 1 : start_line - 1 + limit_lines]
-    numbered = [f"{index}: {line}" for index, line in enumerate(selected, start=start_line)]
-    return {
-        "root": str(root),
-        "path": str(path.relative_to(root)).replace("\\", "/"),
-        "start_line": start_line,
-        "line_count": len(selected),
-        "truncated": start_line - 1 + limit_lines < len(lines),
-        "text": "\n".join(numbered),
-    }
 
 def _preview_text(value: Any, *, limit: int = 400) -> str:
     text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())

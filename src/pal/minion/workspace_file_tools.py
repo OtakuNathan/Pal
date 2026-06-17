@@ -10,17 +10,18 @@ from pal.minion.workspace_tools import _workspace_path, _workspace_root
 
 
 WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
-    "op_workspace_file_read": {
-        "name": "op_workspace_file_read",
+    "op_file_read": {
+        "name": "op_file_read",
         "description": (
-            "Read a UTF-8 text file under workspace.repo_path using a workspace-relative path. "
-            "A successful read also caches the file for op_workspace_file_edit, op_workspace_file_write overwrite/append, "
-            "and op_workspace_file_delete safety checks."
+            "Use this first when you need to inspect a UTF-8 text file under the current task repo; do not use op_exec_shell with cat/head/tail for repo file reads when this tool is visible. "
+            "Read using a repo-relative path. "
+            "A successful read also caches the file for op_file_edit, op_file_write overwrite/append, "
+            "op_path_delete, and op_file_state safety checks."
         ),
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path, for example src/app.py."},
+                "path": {"type": "string", "description": "Repo-relative file path, for example src/app.py."},
                 "start_line": {"type": "integer", "default": 1},
                 "limit_lines": {"type": "integer", "default": 2000},
             },
@@ -28,16 +29,17 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
-    "op_workspace_file_edit": {
-        "name": "op_workspace_file_edit",
+    "op_file_edit": {
+        "name": "op_file_edit",
         "description": (
-            "Edit a UTF-8 text file under workspace.repo_path by replacing one exact old_string with new_string. "
-            "The file must first be read with op_workspace_file_read so Pal can detect stale edits."
+            "Use this first for precise repo text edits; do not use op_exec_shell with sed/awk/python one-liners for file edits when this tool is visible. "
+            "Edit a UTF-8 text file under the current task repo by replacing one exact old_string with new_string. "
+            "The file must first be read with op_file_read so Pal can detect stale edits."
         ),
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path, for example src/app.py."},
+                "path": {"type": "string", "description": "Repo-relative file path, for example src/app.py."},
                 "old_string": {"type": "string", "description": "Exact text to find and replace."},
                 "new_string": {"type": "string", "description": "Replacement text."},
             },
@@ -45,16 +47,17 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
-    "op_workspace_file_write": {
-        "name": "op_workspace_file_write",
+    "op_file_write": {
+        "name": "op_file_write",
         "description": (
-            "Create, overwrite, or append to a UTF-8 text file under workspace.repo_path. "
-            "Create mode fails if the file exists. Overwrite and append require a current prior op_workspace_file_read snapshot."
+            "Use this first for creating, overwriting, or appending UTF-8 text files under the current task repo; do not use op_exec_shell with tee/echo/printf redirection when this tool is visible. "
+            "Create, overwrite, or append to a UTF-8 text file under the current task repo. "
+            "Create mode fails if the file exists. Overwrite and append require a current prior op_file_read snapshot."
         ),
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path, for example tests/test_app.py."},
+                "path": {"type": "string", "description": "Repo-relative file path, for example tests/test_app.py."},
                 "content": {"type": "string", "description": "UTF-8 text content to write."},
                 "mode": {"type": "string", "enum": ["create", "overwrite", "append"], "default": "create"},
             },
@@ -62,20 +65,42 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
-    "op_workspace_file_delete": {
-        "name": "op_workspace_file_delete",
+    "op_path_delete": {
+        "name": "op_path_delete",
         "description": (
-            "Delete a regular file under workspace.repo_path. The file must first be read with op_workspace_file_read, "
-            "or expected_sha256 must match the current file bytes."
+            "Use this first for deleting a file or directory under the current task repo; do not use op_exec_shell with rm/unlink/rmdir/git rm/find -delete when this tool is visible. "
+            "Regular files must first be read with op_file_read, "
+            "or expected_sha256 must match the current file bytes. Directories require recursive=true."
         ),
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path to delete."},
+                "path": {"type": "string", "description": "Repo-relative path to delete."},
                 "expected_sha256": {
                     "type": "string",
-                    "description": "Optional current SHA-256 digest. If supplied, a prior op_workspace_file_read snapshot is not required.",
+                    "description": "Optional current SHA-256 digest for regular files. If supplied, a prior op_file_read snapshot is not required.",
                 },
+                "recursive": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Required for directory deletion. Regular file deletion does not require this.",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    "op_file_state": {
+        "name": "op_file_state",
+        "description": (
+            "Use this first when you need to check read-before-edit state for a repo-relative file. "
+            "Inspect whether a repo-relative file has a current cached read snapshot for safe op_file_edit, "
+            "op_file_write overwrite/append, or op_path_delete use. This does not return cached file contents."
+        ),
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Repo-relative file path, for example src/app.py."},
             },
             "required": ["path"],
             "additionalProperties": False,
@@ -117,18 +142,18 @@ async def workspace_file_tool_result(
 
 
 def _workspace_file_path(root: Path, args: dict[str, Any]) -> tuple[str, Path]:
-    raw = str(args.get("path") or "").strip()
+    raw = str(args.get("path") or args.get("file_path") or "").strip()
     if not raw:
         raise ValueError("path is required")
     path = _workspace_path(root, raw)
     if path == root:
-        raise ValueError("workspace file path must name a file")
+        raise ValueError("repo file path must name a file")
     return str(path.relative_to(root)).replace("\\", "/"), path
 
 
 def _underlying_file_tool(call: CanonicalToolCall, absolute: Path) -> tuple[str, dict[str, Any]]:
     args = dict(call.args or {})
-    if call.name == "op_workspace_file_read":
+    if call.name == "op_file_read":
         return (
             "op_file_read",
             {
@@ -137,7 +162,7 @@ def _underlying_file_tool(call: CanonicalToolCall, absolute: Path) -> tuple[str,
                 "limit": args.get("limit_lines") or args.get("limit") or 2000,
             },
         )
-    if call.name == "op_workspace_file_edit":
+    if call.name == "op_file_edit":
         return (
             "op_file_edit",
             {
@@ -146,7 +171,7 @@ def _underlying_file_tool(call: CanonicalToolCall, absolute: Path) -> tuple[str,
                 "new_string": args.get("new_string", ""),
             },
         )
-    if call.name == "op_workspace_file_write":
+    if call.name == "op_file_write":
         return (
             "op_file_write",
             {
@@ -155,12 +180,16 @@ def _underlying_file_tool(call: CanonicalToolCall, absolute: Path) -> tuple[str,
                 "mode": args.get("mode") or "create",
             },
         )
-    if call.name == "op_workspace_file_delete":
+    if call.name == "op_path_delete":
         tool_args: dict[str, Any] = {"file_path": str(absolute)}
         if str(args.get("expected_sha256") or "").strip():
             tool_args["expected_sha256"] = str(args.get("expected_sha256") or "").strip()
-        return "op_file_delete", tool_args
-    raise ValueError(f"unknown workspace file tool: {call.name}")
+        if "recursive" in args:
+            tool_args["recursive"] = bool(args.get("recursive"))
+        return "op_path_delete", tool_args
+    if call.name == "op_file_state":
+        return "op_file_state", {"file_path": str(absolute)}
+    raise ValueError(f"unknown scoped file tool: {call.name}")
 
 
 def _workspace_result(call: CanonicalToolCall, result: CanonicalToolResult, *, relative: str, absolute: Path) -> CanonicalToolResult:
@@ -169,8 +198,9 @@ def _workspace_result(call: CanonicalToolCall, result: CanonicalToolResult, *, r
     structured["workspace_path"] = relative
     structured.setdefault("file_path", str(absolute))
     text = str(result.llm_text or result.text or "").strip()
-    if result.ok and call.name == "op_workspace_file_delete":
-        text = f"Deleted workspace file: {relative}"
+    if result.ok and call.name == "op_path_delete":
+        path_kind = str(structured.get("path_kind") or "path")
+        text = f"Deleted {path_kind}: {relative}"
     return CanonicalToolResult(
         name=call.name,
         ok=result.ok,

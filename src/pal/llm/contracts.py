@@ -7,6 +7,28 @@ from pal.stream_events import NormalizedLLMStreamEvent
 
 
 @dataclass(frozen=True)
+class ToolResultHandle:
+    result_ref: str
+    turn_id: str = ""
+    backing_path: str = ""
+    page_size: int = 0
+    original_size: int = 0
+    page_count: int = 0
+    created_user_turn_index: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "result_ref": self.result_ref,
+            "turn_id": self.turn_id,
+            "backing_path": self.backing_path,
+            "page_size": self.page_size,
+            "original_size": self.original_size,
+            "page_count": self.page_count,
+            "created_user_turn_index": self.created_user_turn_index,
+        }
+
+
+@dataclass(frozen=True)
 class CanonicalLLMRequest:
     messages: list[dict[str, Any]]
     max_output_tokens: int
@@ -32,6 +54,7 @@ class CanonicalToolResult:
     structured: dict[str, Any] | None = None
     call_id: str | None = None
     status: str = ""
+    result_handle: ToolResultHandle | None = None
 
     def __post_init__(self) -> None:
         if not str(self.llm_text or "").strip():

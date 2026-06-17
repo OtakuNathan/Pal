@@ -41,6 +41,7 @@ from pal.llm.contracts import (
     LLMPreflightAdvice,
     LLMPreflightRequest,
 )
+from pal.llm.request_hooks import MINION_LLM_REQUEST_HOOKS
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.lsp import build_lsp_plugin
 from pal.minion.contracts import SERIAL_MILESTONE_MODES
@@ -1266,8 +1267,8 @@ class MinionRunner:
             return ""
         hint = _workspace_shell_replacement_hint(blocked, allowed)
         return (
-            f"Do not use shell command `{blocked}` for workspace file read/search/list/edit/write/delete tasks in this "
-            "minion workspace. "
+            f"Do not use shell command `{blocked}` for repo file read/search/list/edit/write/delete tasks in the current "
+            "task repo. "
             f"{hint} "
             "Use op_exec_shell only for tests, builds, scripts, Python probes, and read-only git verification."
         )
@@ -1418,7 +1419,7 @@ class MinionRunner:
     async def _inspect_current_milestone_checkpoint(self) -> dict[str, Any]:
         repo_path = str((self.pack.workspace or {}).get("repo_path") or "").strip()
         if not repo_path:
-            return {"status": "error", "error": "workspace.repo_path is missing"}
+            return {"status": "error", "error": "current task repo is missing"}
         return inspect_milestone_checkpoint(
             Path(repo_path),
             base_sha=str((self.pack.workspace or {}).get("base_sha") or ""),
@@ -2047,6 +2048,7 @@ def build_slim_minion_runtime(runtime_root: Path) -> MinionRuntimeBundle:
             credentials=LiteLLMCredentialResolver(secret_store=EncryptedFileSecretStore(secrets_path=str(Path(runtime_root) / "secrets.json"))),
             artifact_manager=artifact_service,
             runtime_root=runtime_root,
+            message_hooks=MINION_LLM_REQUEST_HOOKS,
         ),
         config=config,
     )
@@ -2487,6 +2489,7 @@ _SHELL_SEARCH_COMMANDS = {"grep", "rg"}
 _SHELL_EDIT_COMMANDS = {"sed", "awk"}
 _SHELL_WRITE_COMMANDS = {"tee"}
 _SHELL_REDIRECT_WRITE_COMMANDS = {"cat", "echo", "printf"}
+_SHELL_DELETE_COMMANDS = {"rm", "unlink", "rmdir"}
 _SHELL_WRAPPER_COMMANDS = {"sudo", "command", "builtin", "time", "nohup"}
 _SHELL_GIT_WORKSPACE_LIST_COMMANDS = {"ls-files"}
 
@@ -2495,13 +2498,13 @@ def _has_workspace_file_or_search_tools(allowed: set[str]) -> bool:
     return bool(
         allowed
         & {
-            "op_workspace_file_read",
-            "op_workspace_file_edit",
-            "op_workspace_file_write",
-            "op_workspace_file_delete",
-            "op_workspace_search",
-            "op_workspace_tree",
-            "op_workspace_read",
+            "op_file_read",
+            "op_file_edit",
+            "op_file_write",
+            "op_path_delete",
+            "op_file_state",
+            "op_search",
+            "op_tree",
         }
     )
 
@@ -2525,25 +2528,35 @@ def _blocked_workspace_shell_segment(segment: str, allowed: set[str]) -> str:
     if not action:
         return ""
     action = Path(action).name
-    if action in _SHELL_READ_COMMANDS and allowed & {"op_workspace_file_read", "op_workspace_read"}:
+    if action in _SHELL_READ_COMMANDS and "op_file_read" in allowed and _read_shell_command_targets_file(action, tokens):
         return action
-    if action == "find" and allowed & {"op_workspace_file_read", "op_workspace_read"}:
+    if action == "find" and "op_file_read" in allowed:
         exec_read = _find_exec_read_command(tokens[1:])
         if exec_read:
             return exec_read
-    if action in _SHELL_SEARCH_COMMANDS and allowed & {"op_workspace_search", "op_workspace_tree"}:
+    if action == "find" and "op_path_delete" in allowed:
+        delete_command = _find_delete_command(tokens[1:])
+        if delete_command:
+            return delete_command
+    if action in _SHELL_SEARCH_COMMANDS and allowed & {"op_search", "op_tree"}:
         return action
-    if action == "git" and allowed & {"op_workspace_search", "op_workspace_tree"}:
+    if action == "git" and allowed & {"op_search", "op_tree"}:
         subcommand, _args = _git_subcommand_from_tokens(tokens[1:])
         if subcommand in _SHELL_GIT_WORKSPACE_LIST_COMMANDS:
             return f"git {subcommand}"
-    if action in _SHELL_EDIT_COMMANDS and "op_workspace_file_edit" in allowed:
+    if action == "git" and "op_path_delete" in allowed:
+        subcommand, _args = _git_subcommand_from_tokens(tokens[1:])
+        if subcommand == "rm":
+            return "git rm"
+    if action in _SHELL_EDIT_COMMANDS and "op_file_edit" in allowed:
         return action
-    if action in _SHELL_WRITE_COMMANDS and "op_workspace_file_write" in allowed:
+    if action in _SHELL_WRITE_COMMANDS and "op_file_write" in allowed:
         return action
-    if action in _SHELL_REDIRECT_WRITE_COMMANDS and _segment_has_write_redirect(segment) and "op_workspace_file_write" in allowed:
+    if action in _SHELL_REDIRECT_WRITE_COMMANDS and _segment_has_write_redirect(segment) and "op_file_write" in allowed:
         return action
-    if action == "sed" and any(token == "-i" or token.startswith("-i") for token in tokens[1:]) and "op_workspace_file_edit" in allowed:
+    if action == "sed" and any(token == "-i" or token.startswith("-i") for token in tokens[1:]) and "op_file_edit" in allowed:
+        return action
+    if action in _SHELL_DELETE_COMMANDS and "op_path_delete" in allowed:
         return action
     return ""
 
@@ -2551,19 +2564,21 @@ def _blocked_workspace_shell_segment(segment: str, allowed: set[str]) -> str:
 def _workspace_shell_replacement_hint(blocked: str, allowed: set[str]) -> str:
     command = str(blocked or "").strip()
     if command in {"cat", "head", "tail"}:
-        if allowed & {"op_workspace_file_read", "op_workspace_read"}:
-            return "Use op_workspace_file_read(path='relative/file', start_line=..., limit_lines=...) for file inspection; for command output, rerun the command without head/tail/cat pipelines."
-    if command in {"grep", "rg"} and "op_workspace_search" in allowed:
-        return "Use op_workspace_search(query='text', path='relative/dir') for workspace text search."
-    if command == "git ls-files" and "op_workspace_tree" in allowed:
-        return "Use op_workspace_tree(path='relative/dir', max_depth=..., limit=...) for workspace listing; use git status --short or git diff --name-only only when you specifically need changed-file evidence."
-    if command in {"sed", "awk"} and "op_workspace_file_edit" in allowed:
-        return "Use op_workspace_file_read first, then op_workspace_file_edit(path='relative/file', old_string='...', new_string='...') for edits."
-    if command == "tee" and "op_workspace_file_write" in allowed:
-        return "Use op_workspace_file_write(path='relative/file', content='...') for file writes."
-    if command in {"echo", "printf"} and "op_workspace_file_write" in allowed:
-        return "Use op_workspace_file_write(path='relative/file', content='...') for file writes."
-    return "Use the dedicated workspace tool for that file operation."
+        if "op_file_read" in allowed:
+            return "Use op_file_read(path='relative/file', start_line=..., limit_lines=...) for file inspection; head/tail are allowed for shortening command stdout/stderr, not for reading repo files."
+    if command in {"grep", "rg"} and "op_search" in allowed:
+        return "Use op_search(query='text', path='relative/dir') for repo text search."
+    if command == "git ls-files" and "op_tree" in allowed:
+        return "Use op_tree(path='relative/dir', max_depth=..., limit=...) for repo listing; use git status --short or git diff --name-only only when you specifically need changed-file evidence."
+    if command in {"sed", "awk"} and "op_file_edit" in allowed:
+        return "Use op_file_read first, then op_file_edit(path='relative/file', old_string='...', new_string='...') for edits."
+    if command == "tee" and "op_file_write" in allowed:
+        return "Use op_file_write(path='relative/file', content='...') for file writes."
+    if command in {"echo", "printf"} and "op_file_write" in allowed:
+        return "Use op_file_write(path='relative/file', content='...') for file writes."
+    if command in _SHELL_DELETE_COMMANDS | {"git rm", "find -delete"} and "op_path_delete" in allowed:
+        return "Use op_path_delete(path='relative/path', recursive=true only for directories) for repo file or directory deletion."
+    return "Use the dedicated repo or file tool for that operation."
 
 
 def _shell_action_token(tokens: list[str]) -> str:
@@ -2592,6 +2607,72 @@ def _shell_action_token(tokens: list[str]) -> str:
     return ""
 
 
+def _read_shell_command_targets_file(action: str, tokens: list[str]) -> bool:
+    """Return True when cat/head/tail is being used to inspect files.
+
+    Commands like `pytest ... | tail -20` should remain valid because tail is
+    filtering command output. Commands like `tail -20 README.md` should route
+    through op_file_read when that dedicated file tool is available.
+    """
+    action_name = Path(str(action or "")).name
+    if not action_name:
+        return False
+    token_names = [Path(str(token)).name for token in tokens]
+    if "xargs" in token_names and action_name in _SHELL_READ_COMMANDS:
+        return True
+    action_index = next((index for index, name in enumerate(token_names) if name == action_name), -1)
+    if action_index < 0:
+        return False
+    args = tokens[action_index + 1 :]
+    if action_name == "cat":
+        return _cat_args_target_file(args)
+    if action_name in {"head", "tail"}:
+        return _head_tail_args_target_file(args)
+    return False
+
+
+def _cat_args_target_file(args: list[str]) -> bool:
+    for token in args:
+        if token == "-":
+            continue
+        if token.startswith("-"):
+            continue
+        if _looks_like_shell_redirection(token):
+            return True
+        return True
+    return False
+
+
+def _head_tail_args_target_file(args: list[str]) -> bool:
+    index = 0
+    option_args = {"-n", "--lines", "-c", "--bytes", "-s", "--sleep-interval"}
+    while index < len(args):
+        token = args[index]
+        if token == "--":
+            return any(item != "-" for item in args[index + 1 :])
+        if token == "-":
+            index += 1
+            continue
+        if _looks_like_shell_redirection(token):
+            return True
+        if token in option_args:
+            index += 2
+            continue
+        if token.startswith("--"):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return True
+    return False
+
+
+def _looks_like_shell_redirection(token: str) -> bool:
+    text = str(token or "")
+    return text in {"<", "0<"} or text.startswith("<") or text.startswith("0<")
+
+
 def _looks_like_env_assignment(token: str) -> bool:
     if token.startswith("-") or "/" in token:
         return False
@@ -2608,6 +2689,22 @@ def _find_exec_read_command(tokens: list[str]) -> str:
                 continue
             name = Path(candidate).name
             if name in _SHELL_READ_COMMANDS:
+                return name
+            break
+    return ""
+
+
+def _find_delete_command(tokens: list[str]) -> str:
+    for index, token in enumerate(tokens):
+        if token == "-delete":
+            return "find -delete"
+        if token not in {"-exec", "-execdir"}:
+            continue
+        for candidate in tokens[index + 1 :]:
+            if candidate in {";", r"\;", "+", "{}"} or candidate.startswith("-"):
+                continue
+            name = Path(candidate).name
+            if name in _SHELL_DELETE_COMMANDS:
                 return name
             break
     return ""

@@ -5,8 +5,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pal.lsp.config import LspServerConfig, LspServerFileConfig, load_builtin_lsp_templates, load_lsp_server_file, lsp_config_root
+from pal.lsp.connector import AsyncLspConnector
 from pal.lsp.manager import LspManager, LspServerState
 
 
@@ -75,6 +77,74 @@ install_hint = "install pyright"
         self.assertEqual(lsp_config_root(self.root), self.root / "plugins" / "lsp" / "servers")
 
 
+class LspConnectorTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="pal_lsp_connector_test_"))
+
+    async def asyncTearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    async def test_initialize_drains_large_stderr_output(self) -> None:
+        server = self.root / "fake_lsp.py"
+        server.write_text(
+            """
+import json
+import sys
+
+
+def read_message():
+    content_length = 0
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\\r\\n", b"\\n"):
+            break
+        key, _, value = line.partition(b":")
+        if key.lower() == b"content-length":
+            content_length = int(value.strip())
+    if content_length <= 0:
+        return None
+    return json.loads(sys.stdin.buffer.read(content_length).decode("utf-8"))
+
+
+def write_message(payload):
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(raw)).encode("ascii") + b"\\r\\n\\r\\n" + raw)
+    sys.stdout.buffer.flush()
+
+
+sys.stderr.buffer.write(b"x" * 200000 + b"\\nready\\n")
+sys.stderr.buffer.flush()
+request = read_message()
+write_message({"jsonrpc": "2.0", "id": request["id"], "result": {"serverInfo": {"name": "fake"}, "capabilities": {}}})
+while read_message() is not None:
+    pass
+""".lstrip(),
+            encoding="utf-8",
+        )
+        connector = AsyncLspConnector(
+            LspServerConfig(
+                server_id="fake",
+                command=(sys.executable,),
+                args=("-u", str(server)),
+                extensions=(".fake",),
+                language_ids=("fake",),
+                startup_timeout_ms=2000,
+                request_timeout_ms=2000,
+            ),
+            workspace_root=self.root,
+        )
+
+        try:
+            await connector.initialize()
+
+            self.assertTrue(connector.initialized)
+            self.assertIn("ready", connector.stderr_tail_text())
+        finally:
+            await connector.close()
+
+
 class LspManagerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.root = Path(tempfile.mkdtemp(prefix="pal_lsp_manager_test_"))
@@ -132,6 +202,158 @@ language_ids = ["foo"]
         self.assertEqual(result["reason"], "missing_binary")
         self.assertEqual(result["server"]["server_id"], "fake_foo")
         self.assertFalse(self.manager.states["fake_foo"].attached)
+
+    async def test_doctor_without_file_or_server_does_not_pick_arbitrary_server(self) -> None:
+        await self.manager.rescan()
+
+        result = await self.manager.doctor({})
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["reason"], "server_id_or_file_required")
+        self.assertIn("servers", result)
+        self.assertFalse(any(state.attached for state in self.manager.states.values()))
+
+    async def test_operation_resolves_relative_file_against_workspace_root(self) -> None:
+        config_root = lsp_config_root(self.root)
+        config_root.mkdir(parents=True)
+        (config_root / "fake.toml").write_text(
+            """
+server_id = "fake_foo"
+command = ["pal-lsp-missing-foo-test"]
+extensions = [".foo"]
+language_ids = ["foo"]
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        workspace = self.root / "workspace"
+        source_dir = workspace / "src"
+        source_dir.mkdir(parents=True)
+        (source_dir / "sample.foo").write_text("symbol value\n", encoding="utf-8")
+
+        await self.manager.rescan()
+        result = await self.manager.run_lsp_operation(
+            "diagnostics",
+            {"file": "src/sample.foo", "workspace_root": str(workspace)},
+        )
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["reason"], "missing_binary")
+        self.assertEqual(result["server"]["server_id"], "fake_foo")
+
+    async def test_extension_language_takes_priority_over_workspace_language(self) -> None:
+        python_state = LspServerState(
+            file_config=LspServerFileConfig(
+                config=LspServerConfig(
+                    server_id="pyright",
+                    command=(sys.executable,),
+                    extensions=(".py",),
+                    language_ids=("python",),
+                ),
+                source="test",
+                config_path=str(self.root / "pyright.toml"),
+            ),
+            config_path=self.root / "pyright.toml",
+        )
+        typescript_state = LspServerState(
+            file_config=LspServerFileConfig(
+                config=LspServerConfig(
+                    server_id="typescript",
+                    command=(sys.executable,),
+                    extensions=(".ts", ".js"),
+                    language_ids=("typescript", "javascript"),
+                ),
+                source="test",
+                config_path=str(self.root / "typescript.toml"),
+            ),
+            config_path=self.root / "typescript.toml",
+        )
+        self.manager.states = {python_state.server_id: python_state, typescript_state.server_id: typescript_state}
+
+        selected = self.manager._select_state({"file": "src/app.js", "workspace_languages": ["python"]})
+        language_id = self.manager._language_id(selected, Path("src/app.js"), {"workspace_languages": ["python"]})
+
+        self.assertEqual(selected.server_id, "typescript")
+        self.assertEqual(language_id, "javascript")
+
+    async def test_workspace_language_falls_back_when_extension_does_not_select_language(self) -> None:
+        python_state = LspServerState(
+            file_config=LspServerFileConfig(
+                config=LspServerConfig(
+                    server_id="pyright",
+                    command=(sys.executable,),
+                    extensions=(".py",),
+                    language_ids=("python",),
+                ),
+                source="test",
+                config_path=str(self.root / "pyright.toml"),
+            ),
+            config_path=self.root / "pyright.toml",
+        )
+        clangd_state = LspServerState(
+            file_config=LspServerFileConfig(
+                config=LspServerConfig(
+                    server_id="clangd",
+                    command=(sys.executable,),
+                    extensions=(".c", ".cpp", ".h"),
+                    language_ids=("c", "cpp"),
+                ),
+                source="test",
+                config_path=str(self.root / "clangd.toml"),
+            ),
+            config_path=self.root / "clangd.toml",
+        )
+        self.manager.states = {python_state.server_id: python_state, clangd_state.server_id: clangd_state}
+
+        selected = self.manager._select_state({"file": "Makefile", "workspace_languages": ["cpp"]})
+        fallback_language = self.manager._language_id(selected, Path("Makefile"), {"workspace_languages": ["cpp"]})
+        header_language = self.manager._language_id(clangd_state, Path("include/lib.h"), {"workspace_languages": ["c"]})
+
+        self.assertEqual(selected.server_id, "clangd")
+        self.assertEqual(fallback_language, "cpp")
+        self.assertEqual(header_language, "c")
+
+    async def test_recent_attach_failure_short_circuits_repeated_operations(self) -> None:
+        sample = self.root / "sample.foo"
+        sample.write_text("symbol value\n", encoding="utf-8")
+        attempts: list[Path] = []
+
+        class FailingConnector:
+            def __init__(self, config: LspServerConfig, *, workspace_root: Path) -> None:
+                _ = config
+                self.workspace_root = workspace_root
+
+            async def initialize(self) -> None:
+                attempts.append(self.workspace_root)
+                raise TimeoutError("startup timed out")
+
+            async def close(self) -> None:
+                return None
+
+        state = LspServerState(
+            file_config=LspServerFileConfig(
+                config=LspServerConfig(
+                    server_id="fake_foo",
+                    command=(sys.executable,),
+                    extensions=(".foo",),
+                    language_ids=("foo",),
+                ),
+                source="test",
+                config_path=str(self.root / "fake.toml"),
+            ),
+            config_path=self.root / "fake.toml",
+        )
+        self.manager.states[state.server_id] = state
+
+        with patch("pal.lsp.manager.AsyncLspConnector", FailingConnector):
+            first = await self.manager.run_lsp_operation("diagnostics", {"file": str(sample)})
+            second = await self.manager.run_lsp_operation("diagnostics", {"file": str(sample)})
+
+        self.assertEqual(first["status"], "unavailable")
+        self.assertIn("attach_failed:TimeoutError", first["reason"])
+        self.assertEqual(second["status"], "unavailable")
+        self.assertIn("recent_attach_failure:TimeoutError", second["reason"])
+        self.assertEqual(len(attempts), 1)
 
     async def test_extended_operations_use_fixed_lsp_methods(self) -> None:
         sample = self.root / "sample.py"

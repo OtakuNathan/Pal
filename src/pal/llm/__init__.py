@@ -50,6 +50,7 @@ from pal.llm.runtime import (
     LLMRuntime,
     OpenAIResponsesEndpointInvoker,
     RoutingLLMEndpointInvoker,
+    ZaiAnthropicMessagesEndpointInvoker,
     build_default_endpoint_invoker,
 )
 from pal.stream_events import NormalizedLLMStreamEvent
@@ -83,6 +84,7 @@ __all__ = [
     "LiteLLMEndpointInvoker",
     "OpenAIResponsesEndpointInvoker",
     "RoutingLLMEndpointInvoker",
+    "ZaiAnthropicMessagesEndpointInvoker",
     "LLMProviderAdapter",
     "LLMProviderRegistry",
     "LiteLLMCompletionDraft",

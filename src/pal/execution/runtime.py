@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
-from pal.foundation.artifact import ArtifactIngestor, StoredArtifact
 from pal.execution.capability_registry import CapabilityRegistry
 from pal.execution.capability_compiler import compile_provider_subtree
 from pal.execution.contracts import (
@@ -25,6 +25,12 @@ from pal.execution.contracts import (
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.plugins.l3.registry import L3PluginRegistry
 from pal.plugins.l3.stubs import NullL3Plugin
+from pal.execution.tool_result_pager import (
+    DEFAULT_TOOL_RESULT_RETENTION_USER_TURNS,
+    ToolResultPage,
+    ToolResultPagerStore,
+    render_tool_result_page_for_llm,
+)
 from pal.shared import (
     BoundActionIndex,
     BoundCapabilityAction,
@@ -33,6 +39,7 @@ from pal.shared import (
     RuntimeStatus,
     SINGLETON_TARGET,
 )
+from pal.shared.result_rendering import render_head_tail_preview_for_llm
 
 if TYPE_CHECKING:
     from pal.core.module_registry import ModuleHandle
@@ -49,6 +56,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
     provider_registry: dict[str, Any] = field(default_factory=dict)
     l3_plugin_registry: L3PluginRegistry = field(default_factory=L3PluginRegistry)
     runtime_root: Path | None = None
+    tool_result_pager: ToolResultPagerStore = field(default_factory=ToolResultPagerStore)
     lifecycle_controller: Any | None = None
     sync_executor_max_workers: int = 4
     sync_executor: ThreadPoolExecutor | None = None
@@ -103,6 +111,29 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     def register_tool(self, tool: Tool) -> None:
         self.tools[tool.name] = tool
+
+    def begin_tool_result_turn(
+        self,
+        *,
+        turn_id: str,
+        scope_key: str = "",
+        retention_user_turns: int = DEFAULT_TOOL_RESULT_RETENTION_USER_TURNS,
+    ) -> None:
+        self.tool_result_pager.begin_turn(
+            runtime_root=self.runtime_root,
+            turn_id=turn_id,
+            scope_key=scope_key,
+            retention_user_turns=retention_user_turns,
+        )
+
+    def read_tool_result_page(
+        self,
+        *,
+        result_ref: str,
+        page: int = 1,
+        page_size: int | None = None,
+    ) -> ToolResultPage | None:
+        return self.tool_result_pager.read_page(result_ref, page=page, page_size=page_size)
 
     def list_tool_specs(self) -> list[dict[str, Any]]:
         specs: list[dict[str, Any]] = []
@@ -351,25 +382,45 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if char_limit is None or original_size <= char_limit:
             return normalized
         preview_chars = max(256, int(budget.preview_chars or 1000))
-        preview_text = rendered[: min(preview_chars, char_limit)].rstrip()
-        artifact = None
-        if budget.max_result_spill_chars is not None and original_size > budget.max_result_spill_chars:
-            artifact = self._spill_tool_result(call, normalized, rendered, budget=budget)
-        lines = [preview_text] if preview_text else []
-        marker = f"[truncated: original={original_size} chars, kept={len(preview_text)} chars]"
-        lines.append(marker)
-        if artifact is not None:
-            lines.append(f"[artifact: {artifact.local_cached_path}]")
-        preview_payload = "\n\n".join(part for part in lines if part).strip() or marker
+        page_size = min(preview_chars, char_limit)
+        result_ref = str(call.call_id or normalized.call_id or "").strip() or f"call_{uuid4().hex[:12]}"
+        turn_id = str(budget.artifact_bucket_id or result_ref)
+        result_handle = None
+        preview_payload = ""
+        preview_size = 0
+        if self.runtime_root is not None:
+            result_handle = self.tool_result_pager.store(
+                runtime_root=self.runtime_root,
+                turn_id=turn_id,
+                result_ref=result_ref,
+                tool_name=call.name,
+                status=normalized.status,
+                ok=normalized.ok,
+                rendered=rendered,
+                page_size=page_size,
+            )
+            page = self.tool_result_pager.read_page(result_ref, page=1)
+            if page is not None:
+                preview_payload = render_tool_result_page_for_llm(page, tag="tool_result")
+                preview_size = len(page.content)
+        if not preview_payload:
+            preview_text, preview_size = render_head_tail_preview_for_llm(rendered, max_chars=page_size)
+            preview_payload = (
+                f'<tool_result page="1" page_count="1" has_more="false" status="{normalized.status}">\n'
+                f"{preview_text}\n"
+                f"</tool_result>"
+            ).strip()
         structured = dict(normalized.structured or {})
         structured.update(
             {
                 "truncated": True,
                 "original_size": original_size,
-                "preview_size": len(preview_text),
+                "preview_size": preview_size,
+                "preview_strategy": "pager" if result_handle is not None else "head_tail",
                 "max_output_chars": char_limit,
                 "max_output_tokens_estimate": budget.max_output_tokens_estimate,
-                "artifact_ref": self._artifact_ref(artifact),
+                "result_ref": result_ref,
+                "result_handle": result_handle.to_dict() if result_handle is not None else None,
             }
         )
         return CanonicalToolResult(
@@ -377,9 +428,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
             ok=normalized.ok,
             text=preview_payload,
             structured=structured,
-            call_id=normalized.call_id,
+            call_id=normalized.call_id or result_ref,
             llm_text=preview_payload,
             status=normalized.status,
+            result_handle=result_handle,
         )
 
     def _apply_shell_exec_budget(
@@ -439,53 +491,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if result.structured:
             return json.dumps(result.structured, ensure_ascii=False, sort_keys=True)
         return ""
-
-    def _spill_tool_result(
-        self,
-        call: CanonicalToolCall,
-        result: CanonicalToolResult,
-        rendered: str,
-        *,
-        budget: ToolCallBudget,
-    ) -> StoredArtifact | None:
-        if self.runtime_root is None:
-            return None
-        ingestor = ArtifactIngestor(self.runtime_root)
-        payload = json.dumps(
-            {
-                "tool_name": call.name,
-                "call_id": getattr(call, "call_id", None),
-                "args": dict(call.args),
-                "status": result.status,
-                "ok": result.ok,
-                "text": result.text,
-                "llm_text": result.llm_text,
-                "structured": result.structured,
-                "rendered": rendered,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            indent=2,
-        ).encode("utf-8")
-        return ingestor.store_bytes(
-            channel_kind="tool_results",
-            bucket_id=str(budget.artifact_bucket_id or getattr(call, "call_id", None) or call.name or "tool"),
-            file_name=f"{call.name.replace('/', '_')}.json",
-            content=payload,
-            mime_type="application/json",
-        )
-
-    @staticmethod
-    def _artifact_ref(artifact: StoredArtifact | None) -> dict[str, Any] | None:
-        if artifact is None:
-            return None
-        return {
-            "artifact_id": artifact.artifact_id,
-            "local_cached_path": artifact.local_cached_path,
-            "sha256": artifact.sha256,
-            "size_bytes": artifact.size_bytes,
-            "mime_type": artifact.mime_type,
-        }
 
     def call_registered(self, call: CapabilityCall) -> CapabilityResult:
         target_id = str(call.args.get("target_id") or SINGLETON_TARGET)
@@ -697,9 +702,16 @@ def _truncate_linewise(text: str, *, max_lines: int | None) -> tuple[str, bool]:
     lines = text.splitlines()
     if len(lines) <= max_lines:
         return text, False
-    kept = "\n".join(lines[:max_lines]).rstrip()
-    suffix = f"\n\n[... truncated after {max_lines} lines, original: {len(lines)} lines]"
-    return f"{kept}{suffix}".strip(), True
+    head_count = max(1, max_lines // 2)
+    tail_count = max(1, max_lines - head_count)
+    head = "\n".join(lines[:head_count]).rstrip()
+    tail = "\n".join(lines[-tail_count:]).lstrip()
+    omitted = max(0, len(lines) - head_count - tail_count)
+    marker = (
+        f"\n\n[... omitted {omitted} lines, showing first {head_count} "
+        f"and last {tail_count} of {len(lines)} lines]\n\n"
+    )
+    return f"{head}{marker}{tail}".strip(), True
 
 
 def _target_id_required_result(

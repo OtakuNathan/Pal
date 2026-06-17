@@ -21,6 +21,7 @@ class RuntimeConfig:
     max_tool_result_tokens: int = 100_000
     max_tool_results_per_message_chars: int = 200_000
     active_tool_result_preview: int = 1_000
+    tool_result_pager_retention_user_turns: int = 5
     chars_per_token: float = 3.5
     context_margin_factor: float = 0.05
     context_margin_cap: int = 16_384
@@ -70,6 +71,7 @@ class RuntimeConfig:
             "max_tool_result_tokens": int,
             "max_tool_results_per_message_chars": int,
             "active_tool_result_preview": int,
+            "tool_result_pager_retention_user_turns": int,
             "chars_per_token": float,
             "context_margin_factor": float,
             "context_margin_cap": int,

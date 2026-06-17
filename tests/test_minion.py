@@ -568,6 +568,7 @@ class MinionContractTests(unittest.TestCase):
         metadata = _minion_llm_request_metadata(pack, "run_tokens")
 
         self.assertNotIn("preferred_endpoint_id", metadata)
+        self.assertNotIn("llm_request_hooks", metadata)
         self.assertEqual(metadata["minion_run_id"], "run_tokens")
 
     def test_minion_llm_request_metadata_includes_explicit_preferred_endpoint(self) -> None:
@@ -581,6 +582,7 @@ class MinionContractTests(unittest.TestCase):
 
         self.assertEqual(metadata["preferred_endpoint_id"], "planner_long")
         self.assertEqual(metadata["preferred_endpoint_source"], "user")
+        self.assertNotIn("llm_request_hooks", metadata)
 
     def test_invalid_task_context_pack_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -1496,11 +1498,11 @@ class MinionContractTests(unittest.TestCase):
             pack = TaskContextPack(work_order_id="wo_log_inject", goal="debug")
             injected = provider._inject_debug_log_request(
                 pack,
-                CapabilityCall(name="minion_spawn", args={}, meta={"turn_id": "turn_log_on"}),
+                CapabilityCall(name="op_minion_spawn", args={}, meta={"turn_id": "turn_log_on"}),
             )
             skipped = provider._inject_debug_log_request(
                 pack,
-                CapabilityCall(name="minion_spawn", args={}, meta={"turn_id": "turn_log_off"}),
+                CapabilityCall(name="op_minion_spawn", args={}, meta={"turn_id": "turn_log_off"}),
             )
 
         self.assertTrue(injected.metadata["minion_debug_log_enabled"])
@@ -1512,15 +1514,15 @@ class MinionContractTests(unittest.TestCase):
             pack = registry.resolve_pack(TaskContextPack(work_order_id="wo_profile", goal="research"), requested_profile="software_engineering.planner")
 
             self.assertIn("op_memory_recall", pack.allowed_capabilities)
-            self.assertIn("tree", pack.allowed_capabilities)
-            self.assertIn("search", pack.allowed_capabilities)
+            self.assertIn("op_tree", pack.allowed_capabilities)
+            self.assertIn("op_search", pack.allowed_capabilities)
             self.assertIn("op_file_read", pack.allowed_capabilities)
-            self.assertIn("web_search", pack.allowed_capabilities)
+            self.assertIn("op_web_search", pack.allowed_capabilities)
             self.assertIn("op_web_read", pack.allowed_capabilities)
             self.assertFalse(any(name.startswith("intro_") for name in pack.allowed_capabilities))
             self.assertEqual(
                 [name for name in pack.allowed_capabilities if name.startswith("op_minion_")],
-                ["artifact_write", "artifact_edit", "memory_candidate_write"],
+                ["op_minion_artifact_write", "op_minion_artifact_edit", "op_minion_memory_candidate_write"],
             )
             self.assertEqual(pack.workspace["workspace_policy"]["mode"], "read_only_repo")
             self.assertEqual(pack.workspace["completion_policy"]["evidence"], "text_deliverable")
@@ -1673,25 +1675,25 @@ class MinionContractTests(unittest.TestCase):
                 goal="do work",
                 allowed_capabilities=[
                     "minion_task_read",
-                    "minion_work_order_read",
+                    "intro_minion_work_order_read",
                     "op_memory_write",
                     "op_memory_update",
                     "op_memory_delete",
                     "op_behavior_save",
                     "op_skill_commit",
                     "op_channel_send_attachment",
-                    "minion_spawn",
+                    "op_minion_spawn",
                     "minion_kill",
-                    "shell",
+                    "op_exec_shell",
                     "op_memory_recall",
-                    "web_search",
+                    "op_web_search",
                     "op_fake_extra",
                 ],
             ),
             requested_profile="software_engineering.coder",
         )
 
-        self.assertEqual(pack.allowed_capabilities, ["shell", "op_memory_recall", "web_search"])
+        self.assertEqual(pack.allowed_capabilities, ["op_exec_shell", "op_memory_recall", "op_web_search"])
         self.assertIn("effective_capability_policy", pack.resolved_profile)
 
     def test_builtin_profile_resolution_does_not_inherit_current_capability_surface(self) -> None:
@@ -1700,14 +1702,14 @@ class MinionContractTests(unittest.TestCase):
                 "op_tool_search",
                 "op_tool_read",
                 "op_tool_call",
-                "shell",
+                "op_exec_shell",
                 "op_memory_recall",
-                "web_search",
+                "op_web_search",
                 "op_web_read",
                 "llm_set_active_endpoint",
                 "op_fake_ambient",
-                "minion_task_read",
-                "minion_spawn",
+                "op_minion_task_read",
+                "op_minion_spawn",
                 "op_memory_write",
                 "op_memory_update",
                 "op_memory_delete",
@@ -1718,15 +1720,15 @@ class MinionContractTests(unittest.TestCase):
         self.assertNotIn("op_tool_search", pack.allowed_capabilities)
         self.assertNotIn("op_tool_read", pack.allowed_capabilities)
         self.assertNotIn("op_tool_call", pack.allowed_capabilities)
-        self.assertNotIn("shell", pack.allowed_capabilities)
+        self.assertNotIn("op_exec_shell", pack.allowed_capabilities)
         self.assertIn("op_file_read", pack.allowed_capabilities)
         self.assertIn("op_memory_recall", pack.allowed_capabilities)
-        self.assertIn("web_search", pack.allowed_capabilities)
+        self.assertIn("op_web_search", pack.allowed_capabilities)
         self.assertIn("op_web_read", pack.allowed_capabilities)
         self.assertNotIn("llm_set_active_endpoint", pack.allowed_capabilities)
         self.assertNotIn("op_fake_ambient", pack.allowed_capabilities)
-        self.assertNotIn("minion_task_read", pack.allowed_capabilities)
-        self.assertNotIn("minion_spawn", pack.allowed_capabilities)
+        self.assertNotIn("op_minion_task_read", pack.allowed_capabilities)
+        self.assertNotIn("op_minion_spawn", pack.allowed_capabilities)
         self.assertNotIn("op_memory_write", pack.allowed_capabilities)
         self.assertNotIn("op_memory_update", pack.allowed_capabilities)
         self.assertNotIn("op_memory_delete", pack.allowed_capabilities)
@@ -1743,11 +1745,11 @@ class MinionContractTests(unittest.TestCase):
             builtin_profiles=(profile,),
             ambient_capabilities=(
                 "op_tool_search",
-                "shell",
+                "op_exec_shell",
                 "op_memory_recall",
                 "op_fake_ambient",
-                "minion_task_read",
-                "minion_spawn",
+                "op_minion_task_read",
+                "op_minion_spawn",
                 "op_memory_write",
             ),
         )
@@ -1756,9 +1758,9 @@ class MinionContractTests(unittest.TestCase):
         self.assertIn("op_tool_search", pack.allowed_capabilities)
         self.assertIn("op_fake_ambient", pack.allowed_capabilities)
         self.assertIn("op_file_read", pack.allowed_capabilities)
-        self.assertNotIn("shell", pack.allowed_capabilities)
-        self.assertNotIn("minion_task_read", pack.allowed_capabilities)
-        self.assertNotIn("minion_spawn", pack.allowed_capabilities)
+        self.assertNotIn("op_exec_shell", pack.allowed_capabilities)
+        self.assertNotIn("op_minion_task_read", pack.allowed_capabilities)
+        self.assertNotIn("op_minion_spawn", pack.allowed_capabilities)
         self.assertNotIn("op_memory_write", pack.allowed_capabilities)
 
     def test_runtime_profiles_load_recursively_with_scoped_profile_name(self) -> None:
@@ -2275,7 +2277,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         result = provider.spawn(
             CapabilityCall(
-                name="minion_spawn",
+                name="op_minion_spawn",
                 args={
                     "feedback_gate_ref": {"gate_id": review_gate_ref["gate_id"]},
                     "workspace": {"repo_path": str(self.root)},
@@ -3384,7 +3386,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         provider = MinionManagerProvider(runtime_root=self.root)
         result = provider.revise_plan(
             CapabilityCall(
-                name="minion_revise_plan",
+                name="op_minion_revise_plan",
                 args={
                     "source_plan_ref": {
                         "path": str(artifact_path),
@@ -3411,7 +3413,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         provider = MinionManagerProvider(runtime_root=self.root)
         result = provider.submit_plan(
             CapabilityCall(
-                name="minion_submit_plan",
+                name="op_minion_submit_plan",
                 args={
                     "plan_artifact": plan,
                     "submission_notes": "fallback planner",
@@ -3436,7 +3438,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         provider = MinionManagerProvider(runtime_root=self.root)
         submitted = provider.submit_plan(
             CapabilityCall(
-                name="minion_submit_plan",
+                name="op_minion_submit_plan",
                 args={"plan_artifact": plan, "submission_notes": "fallback planner"},
             )
         )
@@ -3444,7 +3446,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         gate = _submit_plan_review_gate(provider._repository(), submitted.structured["plan_ref"], verdict="pass")
         accepted = provider.accept_plan(
             CapabilityCall(
-                name="minion_accept_plan",
+                name="op_minion_accept_plan",
                 args={"plan_ref": submitted.structured["plan_ref"], "review_gate_ref": gate},
             )
         )
@@ -3478,7 +3480,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         provider = MinionManagerProvider(runtime_root=self.root)
         revise = provider.revise_plan(
             CapabilityCall(
-                name="minion_revise_plan",
+                name="op_minion_revise_plan",
                 args={
                     "source_plan_ref": source_ref,
                     "revised_plan_artifact": revised,
@@ -3492,7 +3494,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         accept = provider.accept_plan(
             CapabilityCall(
-                name="minion_accept_plan",
+                name="op_minion_accept_plan",
                 args={
                     "plan_ref": source_ref,
                     "human_override": {"reason": "LLM forged override"},
@@ -4733,11 +4735,11 @@ class MinionManagerTests(unittest.TestCase):
 
     def test_workspace_file_tools_use_relative_paths_and_file_state(self) -> None:
         async def scenario() -> None:
-            from pal.execution.file_delete import FileDeleteTool
             from pal.execution.file_edit import FileEditTool
             from pal.execution.file_read import FileReadTool
-            from pal.execution.file_state import FileStateCache
+            from pal.execution.file_state import FileStateCache, FileStateTool
             from pal.execution.file_write import FileWriteTool
+            from pal.execution.path_delete import PathDeleteTool
             from pal.execution.runtime import ExecutionRuntime
 
             repo_path = self.root / "workspace_file_repo"
@@ -4748,14 +4750,16 @@ class MinionManagerTests(unittest.TestCase):
             runtime.register_tool(FileReadTool(cache=cache))
             runtime.register_tool(FileEditTool(cache=cache))
             runtime.register_tool(FileWriteTool(cache=cache))
-            runtime.register_tool(FileDeleteTool(cache=cache))
+            runtime.register_tool(PathDeleteTool(cache=cache))
+            runtime.register_tool(FileStateTool(cache=cache))
             scoped = MinionScopedExecutionRuntime(
                 base_runtime=runtime,
                 allowed_capabilities=[
                     "op_file_read",
                     "op_file_edit",
                     "op_file_write",
-                    "op_file_delete",
+                    "op_path_delete",
+                    "op_file_state",
                 ],
                 workspace={"repo_path": str(repo_path)},
             )
@@ -4764,6 +4768,11 @@ class MinionManagerTests(unittest.TestCase):
             self.assertTrue(read.ok, read.text)
             self.assertEqual(read.structured["workspace_path"], "app.py")
             self.assertIn(str(repo_path / "app.py"), cache)
+
+            state = await scoped.execute_tool_async(CanonicalToolCall(name="op_file_state", args={"path": "app.py"}, call_id="state_app"))
+            self.assertTrue(state.ok, state.text)
+            self.assertTrue(state.structured["valid"])
+            self.assertEqual(state.structured["workspace_path"], "app.py")
 
             edit = await scoped.execute_tool_async(
                 CanonicalToolCall(
@@ -4775,9 +4784,18 @@ class MinionManagerTests(unittest.TestCase):
             self.assertTrue(edit.ok, edit.text)
             self.assertEqual((repo_path / "app.py").read_text(encoding="utf-8"), "value = 'new'\n")
 
-            delete = await scoped.execute_tool_async(CanonicalToolCall(name="op_file_delete", args={"path": "app.py"}, call_id="delete_app"))
+            delete = await scoped.execute_tool_async(CanonicalToolCall(name="op_path_delete", args={"path": "app.py"}, call_id="delete_app"))
             self.assertTrue(delete.ok, delete.text)
             self.assertFalse((repo_path / "app.py").exists())
+
+            cache_dir = repo_path / ".pytest_cache"
+            cache_dir.mkdir()
+            (cache_dir / "nodeids").write_text("cache\n", encoding="utf-8")
+            delete_dir = await scoped.execute_tool_async(
+                CanonicalToolCall(name="op_path_delete", args={"path": ".pytest_cache", "recursive": True}, call_id="delete_cache")
+            )
+            self.assertTrue(delete_dir.ok, delete_dir.text)
+            self.assertFalse(cache_dir.exists())
 
             create = await scoped.execute_tool_async(
                 CanonicalToolCall(
@@ -4813,7 +4831,67 @@ class MinionManagerTests(unittest.TestCase):
             )
 
             self.assertFalse(result.ok)
-            self.assertIn("relative to workspace.repo_path", result.text)
+            self.assertIn("relative to the current task repo", result.text)
+
+        asyncio.run(scenario())
+
+    def test_workspace_file_tools_shadow_base_file_specs_with_workspace_schema(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "workspace_file_shadow"
+            repo_path.mkdir()
+            source_path = repo_path / "app.py"
+            source_path.write_text("value = 1\n", encoding="utf-8")
+            calls: list[CanonicalToolCall] = []
+
+            class FakeBase:
+                def list_capability_specs(self):
+                    return [
+                        {
+                            "name": "op_file_read",
+                            "description": "base absolute file reader",
+                            "parameters_schema": {
+                                "type": "object",
+                                "properties": {"file_path": {"type": "string"}},
+                                "required": ["file_path"],
+                            },
+                        }
+                    ]
+
+                def get_capability_spec(self, name):
+                    return next((spec for spec in self.list_capability_specs() if spec["name"] == name), None)
+
+                async def execute_tool_async(self, call, *, allow_tools=True, turn_id=None):
+                    _ = allow_tools, turn_id
+                    calls.append(call)
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text="read ok",
+                        llm_text="read ok",
+                        structured={"file_path": call.args.get("file_path")},
+                        status=RuntimeStatus.OK,
+                    )
+
+            scoped = MinionScopedExecutionRuntime(
+                base_runtime=FakeBase(),
+                allowed_capabilities=["op_file_read"],
+                workspace={"repo_path": str(repo_path)},
+            )
+
+            specs = scoped.list_capability_specs()
+            self.assertEqual([spec["name"] for spec in specs], ["op_file_read"])
+            parameters = specs[0]["parameters_schema"]["properties"]
+            self.assertIn("path", parameters)
+            self.assertNotIn("file_path", parameters)
+
+            result = await scoped.execute_tool_async(
+                CanonicalToolCall(name="op_file_read", args={"path": "app.py"}, call_id="read_shadow")
+            )
+
+            self.assertTrue(result.ok, result.text)
+            self.assertEqual(calls[0].name, "op_file_read")
+            self.assertEqual(calls[0].args["file_path"], str(source_path))
+            self.assertEqual(result.structured["workspace_path"], "app.py")
 
         asyncio.run(scenario())
 
@@ -4841,7 +4919,7 @@ class MinionManagerTests(unittest.TestCase):
             scoped = MinionScopedExecutionRuntime(
                 FakeExecution(),
                 ["lsp_diagnostics", "lsp_workspace_symbols"],
-                workspace={"repo_path": str(repo_path)},
+                workspace={"repo_path": str(repo_path), "languages": ["python"]},
             )
 
             result = await scoped.execute_tool_async(
@@ -4854,6 +4932,7 @@ class MinionManagerTests(unittest.TestCase):
             self.assertTrue(result.ok, result.text)
             self.assertEqual(calls[-1].args["workspace_root"], str(repo_path.resolve()))
             self.assertEqual(calls[-1].args["file"], str(source_path.resolve()))
+            self.assertEqual(calls[-1].args["workspace_languages"], ["python"])
 
             symbols = await scoped.execute_tool_async(
                 CanonicalToolCall(
@@ -4864,6 +4943,7 @@ class MinionManagerTests(unittest.TestCase):
             )
             self.assertTrue(symbols.ok, symbols.text)
             self.assertEqual(calls[-1].args["workspace_root"], str(repo_path.resolve()))
+            self.assertEqual(calls[-1].args["workspace_languages"], ["python"])
 
         asyncio.run(scenario())
 
@@ -4988,7 +5068,7 @@ class MinionManagerTests(unittest.TestCase):
             }
             scoped = MinionScopedExecutionRuntime(
                 FakeExecution(),
-                ["op_lsp_diagnostics", "op_workspace_file_write", "op_minion_checkpoint_commit"],
+                ["op_lsp_diagnostics", "op_file_write", "op_minion_checkpoint_commit"],
                 workspace=workspace,
             )
 
@@ -5009,7 +5089,7 @@ class MinionManagerTests(unittest.TestCase):
 
             write = await scoped.execute_tool_async(
                 CanonicalToolCall(
-                    name="op_workspace_file_write",
+                    name="op_file_write",
                     args={"path": "src/app.py", "content": "value = 1\n"},
                     call_id="call_repair_write",
                 )
@@ -6544,7 +6624,7 @@ class MinionManagerTests(unittest.TestCase):
             provider = MinionManagerProvider(runtime_root=self.root)
             revised = provider.revise_plan(
                 CapabilityCall(
-                    name="minion_revise_plan",
+                    name="op_minion_revise_plan",
                     args={
                         "source_plan_ref": plan_ref,
                         "revised_plan_artifact": revised_plan,
@@ -6581,7 +6661,7 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(gate.status, RuntimeStatus.OK)
             accepted = provider.accept_plan(
                 CapabilityCall(
-                    name="minion_accept_plan",
+                    name="op_minion_accept_plan",
                     args={
                         "plan_ref": dict(revised.structured["plan_ref"]),
                         "review_gate_ref": dict(gate.structured["review_gate_ref"]),
@@ -6847,7 +6927,7 @@ class MinionManagerTests(unittest.TestCase):
             provider = MinionManagerProvider(runtime_root=self.root)
             revised = provider.revise_plan(
                 CapabilityCall(
-                    name="minion_revise_plan",
+                    name="op_minion_revise_plan",
                     args={
                         "source_plan_ref": {
                             "path": str(initial_plan_path),
@@ -6886,7 +6966,7 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(gate.status, RuntimeStatus.OK)
             accepted = provider.accept_plan(
                 CapabilityCall(
-                    name="minion_accept_plan",
+                    name="op_minion_accept_plan",
                     args={
                         "plan_ref": dict(revised.structured["plan_ref"]),
                         "review_gate_ref": dict(gate.structured["review_gate_ref"]),
@@ -8112,43 +8192,30 @@ class MinionManagerTests(unittest.TestCase):
                     return None
 
                 async def execute_tool_async(self, call, **kwargs):
-                    raise AssertionError("workspace tools must not delegate to base runtime")
+                    raise AssertionError("repo tools must not delegate to base runtime")
 
             runtime = MinionScopedExecutionRuntime(
                 FakeBase(),
-                ["tree", "search", "op_file_read"],
+                ["op_tree", "op_search"],
                 {"repo_path": str(repo)},
             )
 
             specs = {spec["name"] for spec in runtime.list_capability_specs()}
-            self.assertIn("tree", specs)
-            self.assertIn("search", specs)
-            self.assertIn("op_file_read", specs)
+            self.assertIn("op_tree", specs)
+            self.assertIn("op_search", specs)
 
-            tree = await runtime.execute_tool_async(CanonicalToolCall(name="tree", args={"path": "."}), turn_id="r")
+            tree = await runtime.execute_tool_async(CanonicalToolCall(name="op_tree", args={"path": "."}), turn_id="r")
             self.assertTrue(tree.ok)
             self.assertIn("src/app.py", tree.text)
 
-            search = await runtime.execute_tool_async(CanonicalToolCall(name="search", args={"query": "target"}), turn_id="r")
+            search = await runtime.execute_tool_async(CanonicalToolCall(name="op_search", args={"query": "target"}), turn_id="r")
             self.assertTrue(search.ok)
             self.assertIn("src/app.py:1", search.text)
             self.assertNotIn("__pycache__", search.text)
 
-            no_match = await runtime.execute_tool_async(CanonicalToolCall(name="search", args={"query": "missing"}), turn_id="r")
+            no_match = await runtime.execute_tool_async(CanonicalToolCall(name="op_search", args={"query": "missing"}), turn_id="r")
             self.assertTrue(no_match.ok)
-            self.assertIn("No workspace matches found", no_match.text)
-
-            read = await runtime.execute_tool_async(CanonicalToolCall(name="op_file_read", args={"path": "src/app.py"}), turn_id="r")
-            self.assertTrue(read.ok)
-            self.assertIn("1: def target", read.text)
-
-            empty_read = await runtime.execute_tool_async(CanonicalToolCall(name="op_file_read", args={"path": "src/__init__.py"}), turn_id="r")
-            self.assertTrue(empty_read.ok)
-            self.assertIn("src/__init__.py: empty file", empty_read.text)
-
-            escaped = await runtime.execute_tool_async(CanonicalToolCall(name="op_file_read", args={"path": "../outside.txt"}), turn_id="r")
-            self.assertFalse(escaped.ok)
-            self.assertIn("escapes", escaped.text)
+            self.assertIn("No repo matches found", no_match.text)
 
         asyncio.run(scenario())
 
@@ -9105,20 +9172,26 @@ class MinionManagerTests(unittest.TestCase):
 
     def test_runner_blocks_shell_file_reads_when_workspace_tools_are_available(self) -> None:
         async def scenario() -> None:
-            called = False
+            calls: list[str] = []
             pack = TaskContextPack(
                 work_order_id="wo_shell_file_guard",
-                goal="prefer workspace file tools",
-                allowed_capabilities=["op_exec_shell", "op_workspace_file_read"],
+                goal="prefer repo file tools",
+                allowed_capabilities=["op_exec_shell", "op_file_read", "op_path_delete"],
                 workspace={},
             )
 
             class FakeExecution:
-                async def execute_tool_async(self, *args, **kwargs):
-                    nonlocal called
-                    _ = args, kwargs
-                    called = True
-                    raise AssertionError("shell file read should have been blocked before runtime execution")
+                async def execute_tool_async(self, call, **kwargs):
+                    _ = kwargs
+                    calls.append(str(call.args.get("cmd") or ""))
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text="stdout",
+                        llm_text="stdout",
+                        structured={"exit_code": 0},
+                        status=RuntimeStatus.OK,
+                    )
 
             async def write_event(event):
                 _ = event
@@ -9152,16 +9225,47 @@ class MinionManagerTests(unittest.TestCase):
                 FakeExecution(),
                 CanonicalToolCall(name="op_exec_shell", args={"cmd": "find . -type f -exec cat {} \\;"}, call_id="call_find_exec_cat"),
             )
+            rm_file = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="op_exec_shell", args={"cmd": "rm README.md"}, call_id="call_rm_file"),
+            )
+            rm_dir = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="op_exec_shell", args={"cmd": "rm -rf .pytest_cache"}, call_id="call_rm_dir"),
+            )
+            unlink_file = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="op_exec_shell", args={"cmd": "unlink README.md"}, call_id="call_unlink_file"),
+            )
+            find_delete = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(name="op_exec_shell", args={"cmd": "find . -name '*.pyc' -delete"}, call_id="call_find_delete"),
+            )
+            stdout_tail = await runner._execute_allowed_tool(
+                FakeExecution(),
+                CanonicalToolCall(
+                    name="op_exec_shell",
+                    args={"cmd": "python -m pytest --collect-only -q 2>&1 | tail -20"},
+                    call_id="call_stdout_tail",
+                ),
+            )
 
             self.assertFalse(direct.ok)
             self.assertEqual(direct.structured["reason"], "dedicated_workspace_tool_required")
-            self.assertIn("op_workspace_file_read", direct.llm_text)
-            self.assertIn("without head/tail/cat pipelines", direct.llm_text)
+            self.assertIn("op_file_read", direct.llm_text)
+            self.assertIn("head/tail are allowed for shortening command stdout/stderr", direct.llm_text)
             self.assertFalse(tail.ok)
-            self.assertIn("without head/tail/cat pipelines", tail.llm_text)
+            self.assertIn("not for reading repo files", tail.llm_text)
             self.assertFalse(piped.ok)
             self.assertFalse(find_exec.ok)
-            self.assertFalse(called)
+            self.assertFalse(rm_file.ok)
+            self.assertIn("op_path_delete", rm_file.llm_text)
+            self.assertFalse(rm_dir.ok)
+            self.assertIn("recursive=true", rm_dir.llm_text)
+            self.assertFalse(unlink_file.ok)
+            self.assertFalse(find_delete.ok)
+            self.assertTrue(stdout_tail.ok)
+            self.assertEqual(calls, ["python -m pytest --collect-only -q 2>&1 | tail -20"])
 
         asyncio.run(scenario())
 
@@ -10819,10 +10923,11 @@ class MinionManagerTests(unittest.TestCase):
             work_order_id="wo_tool_efficiency_reminder",
             goal="finish with efficient tools",
             allowed_capabilities=[
-                "op_workspace_tree",
-                "op_workspace_search",
-                "op_workspace_file_read",
-                "op_workspace_file_write",
+                "op_tree",
+                "op_search",
+                "op_file_read",
+                "op_file_write",
+                "op_path_delete",
                 "op_exec_shell",
                 "op_minion_checkpoint_commit",
             ],
@@ -10848,12 +10953,17 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual([message["role"] for message in messages], ["system", "user", "user"])
         reminder = _message_text(messages[-1])
         self.assertIn("<runtime_reminder", reminder)
-        self.assertIn("prefer op_workspace_tree for structured listings", reminder)
-        self.assertIn("op_workspace_search for text search", reminder)
-        self.assertIn("quick ls/find discovery", reminder)
-        self.assertIn("avoid cat/head/tail pipelines", reminder)
-        self.assertIn("git status --short", reminder)
-        self.assertIn("op_minion_checkpoint_commit", reminder)
+        self.assertIn("behavior-routing guidance", reminder)
+        self.assertIn("Choose the smallest available capability", reminder)
+        self.assertIn("Do not guess unavailable capability names", reminder)
+        self.assertIn("process execution only when the task needs a real command", reminder)
+        self.assertIn("structured checkpoint", reminder)
+        self.assertNotIn("op_tree", reminder)
+        self.assertNotIn("op_search", reminder)
+        self.assertNotIn("op_file_read", reminder)
+        self.assertNotIn("op_path_delete", reminder)
+        self.assertNotIn("op_exec_shell", reminder)
+        self.assertNotIn("op_minion_checkpoint_commit", reminder)
 
     def test_runner_defers_experience_for_serial_module_completion(self) -> None:
         runner = MinionRunner(
@@ -11006,14 +11116,14 @@ class MinionManagerTests(unittest.TestCase):
             pack = TaskContextPack(
                 work_order_id="wo_denied",
                 goal="do not mutate Pal state",
-                allowed_capabilities=["op_memory_write", "minion_spawn", "shell"],
+                allowed_capabilities=["op_memory_write", "op_minion_spawn", "shell"],
             )
 
             class FakeLLM:
                 async def agenerate(self, request):
                     tool_names = {item["function"]["name"] for item in request.tools}
                     test_case.assertNotIn("op_memory_write", tool_names)
-                    test_case.assertNotIn("minion_spawn", tool_names)
+                    test_case.assertNotIn("op_minion_spawn", tool_names)
                     test_case.assertIn("shell", tool_names)
                     return CanonicalLLMOutcome(
                         text="",
@@ -11092,7 +11202,7 @@ class MinionManagerTests(unittest.TestCase):
                             "op_web_read",
                             "op_memory_recall",
                             "minion_task_read",
-                            "minion_spawn",
+                            "op_minion_spawn",
                             "op_memory_write",
                             "op_memory_update",
                             "op_memory_delete",
@@ -11127,7 +11237,7 @@ class MinionManagerTests(unittest.TestCase):
                 "op_web_read",
                 "op_memory_recall",
                 "minion_task_read",
-                "minion_spawn",
+                "op_minion_spawn",
                 "op_memory_write",
                 "op_memory_update",
                 "op_memory_delete",
@@ -11161,17 +11271,17 @@ class MinionManagerTests(unittest.TestCase):
             self.assertIn("op_web_read", hit_names)
             self.assertIn("op_memory_recall", hit_names)
             self.assertNotIn("minion_task_read", hit_names)
-            self.assertNotIn("minion_spawn", hit_names)
+            self.assertNotIn("op_minion_spawn", hit_names)
             self.assertNotIn("op_memory_write", hit_names)
             self.assertNotIn("op_memory_update", hit_names)
             self.assertNotIn("op_memory_delete", hit_names)
 
-            denied_read = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_read", args={"name": "minion_spawn"}))
+            denied_read = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_read", args={"name": "op_minion_spawn"}))
             self.assertEqual(denied_read.status, RuntimeStatus.NOT_FOUND)
             allowed_call = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_call", args={"name": "op_file_read", "args": {}}))
             self.assertTrue(allowed_call.ok)
             self.assertEqual(allowed_call.name, "op_file_read")
-            denied_call = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_call", args={"name": "minion_spawn", "args": {}}))
+            denied_call = await scoped.execute_tool_async(CanonicalToolCall(name="op_tool_call", args={"name": "op_minion_spawn", "args": {}}))
             self.assertFalse(denied_call.ok)
             self.assertEqual(denied_call.structured["reason"], "capability_not_allowed")
 
@@ -11194,12 +11304,11 @@ class MinionManagerTests(unittest.TestCase):
                         "op_file_read",
                         "op_file_edit",
                         "op_file_write",
-                        "shell",
-                        "tree",
-                        "search",
-                        "op_file_read",
-                        "artifact_write",
-                        "review_gate_submit",
+                        "op_exec_shell",
+                        "op_tree",
+                        "op_search",
+                        "op_minion_artifact_write",
+                        "op_minion_review_gate_submit",
                     )
                 }
 
@@ -11221,16 +11330,23 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(pack.workspace["workspace_policy"]["mode"], "read_only_repo")
         self.assertNotIn("op_file_edit", pack.allowed_capabilities)
         self.assertNotIn("op_file_write", pack.allowed_capabilities)
-        self.assertIn("shell", pack.allowed_capabilities)
+        self.assertIn("op_exec_shell", pack.allowed_capabilities)
         self.assertNotIn("op_file_edit", visible)
         self.assertNotIn("op_file_write", visible)
-        self.assertIn("shell", visible)
+        self.assertIn("op_exec_shell", visible)
         self.assertNotIn("op_file_edit", searchable)
         self.assertNotIn("op_file_write", searchable)
-        self.assertIn("shell", searchable)
+        self.assertIn("op_exec_shell", searchable)
         self.assertIn("op_file_read", searchable)
-        self.assertIn("artifact_write", searchable)
-        self.assertIn("review_gate_submit", searchable)
+        self.assertIn("op_minion_artifact_write", searchable)
+        self.assertIn("op_minion_review_gate_submit", searchable)
+        shell_spec = scoped.get_capability_spec("op_exec_shell")
+        assert shell_spec is not None
+        shell_description = str(shell_spec["description"])
+        self.assertIn("op_file_read for reading repo text files", shell_description)
+        self.assertIn("op_tree for structured repo listings", shell_description)
+        self.assertNotIn("op_file_edit for precise repo text edits", shell_description)
+        self.assertNotIn("op_file_write for creating", shell_description)
         denied = asyncio.run(scoped.execute_tool_async(CanonicalToolCall(name="op_file_write", args={"path": "x.py", "content": "bad"})))
         self.assertFalse(denied.ok)
         self.assertEqual(denied.structured["reason"], "capability_not_allowed")
@@ -11370,7 +11486,7 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("op_file_read", pack.allowed_capabilities)
         self.assertIn("op_file_edit", pack.allowed_capabilities)
         self.assertIn("op_file_write", pack.allowed_capabilities)
-        self.assertIn("op_file_delete", pack.allowed_capabilities)
+        self.assertIn("op_path_delete", pack.allowed_capabilities)
         self.assertNotIn("op_file_read", pack.allowed_capabilities)
         self.assertNotIn("op_file_edit", pack.allowed_capabilities)
         self.assertNotIn("op_file_write", pack.allowed_capabilities)
@@ -11399,18 +11515,18 @@ class MinionManagerTests(unittest.TestCase):
 
         registry = MinionProfileRegistry(runtime_root=self.root)
         lsp_tools = {
-            "lsp_status",
-            "lsp_doctor",
-            "lsp_hover",
-            "lsp_definition",
-            "lsp_implementation",
-            "lsp_references",
-            "lsp_prepare_call_hierarchy",
-            "lsp_incoming_calls",
-            "lsp_outgoing_calls",
-            "lsp_document_symbols",
-            "lsp_workspace_symbols",
-            "lsp_diagnostics",
+            "op_lsp_status",
+            "op_lsp_doctor",
+            "op_lsp_hover",
+            "op_lsp_definition",
+            "op_lsp_implementation",
+            "op_lsp_references",
+            "op_lsp_prepare_call_hierarchy",
+            "op_lsp_incoming_calls",
+            "op_lsp_outgoing_calls",
+            "op_lsp_document_symbols",
+            "op_lsp_workspace_symbols",
+            "op_lsp_diagnostics",
         }
         for profile_id in (
             "software_engineering.planner",
@@ -11494,10 +11610,10 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("confirmed facts and source evidence", prompt)
         self.assertIn("write the requested document to the requested path", prompt)
         self.assertIn("final response should be a short pointer plus verification summary", prompt)
-        self.assertIn("op_workspace_file_read", pack.allowed_capabilities)
+        self.assertIn("op_file_read", pack.allowed_capabilities)
         self.assertIn("op_web_search", pack.allowed_capabilities)
-        self.assertIn("op_workspace_file_edit", pack.allowed_capabilities)
-        self.assertIn("op_workspace_file_write", pack.allowed_capabilities)
+        self.assertIn("op_file_edit", pack.allowed_capabilities)
+        self.assertIn("op_file_write", pack.allowed_capabilities)
         self.assertNotIn("op_exec_shell", pack.allowed_capabilities)
 
     async def _start_manager(self):
@@ -11623,13 +11739,13 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 self.assertIsNone(behavior_repository.get_affordance("declared.minion.delegate_professional_work"))
                 self.assertIsNone(behavior_repository.get_affordance("declared.minion.natural_language_takeover"))
-                self.assertIn("minion_draft_work_order", candidate.capability_refs)
-                self.assertIn("minion_promote_work_order_draft", candidate.capability_refs)
-                self.assertIn("minion_work_order_draft_read", candidate.capability_refs)
-                self.assertIn("minion_profile_list", candidate.capability_refs)
-                self.assertIn("minion_profile_read", candidate.capability_refs)
-                self.assertIn("minion_spawn", candidate.capability_refs)
-                self.assertIn("minion_work_order_read", candidate.capability_refs)
+                self.assertIn("op_minion_draft_work_order", candidate.capability_refs)
+                self.assertIn("op_minion_promote_work_order_draft", candidate.capability_refs)
+                self.assertIn("intro_minion_work_order_draft_read", candidate.capability_refs)
+                self.assertIn("intro_minion_profile_list", candidate.capability_refs)
+                self.assertIn("intro_minion_profile_read", candidate.capability_refs)
+                self.assertIn("op_minion_spawn", candidate.capability_refs)
+                self.assertIn("intro_minion_work_order_read", candidate.capability_refs)
                 self.assertIn("draft", candidate.prompt_hint.lower())
                 self.assertIn("planner", candidate.prompt_hint.lower())
                 self.assertIn("profile", candidate.prompt_hint.lower())
@@ -11648,10 +11764,10 @@ class MinionIntegrationTests(unittest.TestCase):
                 )
                 takeover_candidates = {item.affordance_id: item for item in takeover.candidates}
                 self.assertIn("declared.minion.natural_language_takeover", takeover_candidates)
-                self.assertIn("minion_kill", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
-                self.assertIn("minion_destroy_work_order_run", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
-                self.assertIn("minion_recover_work_order", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
-                self.assertIn("minion_spawn", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
+                self.assertIn("op_minion_kill", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
+                self.assertIn("op_minion_destroy_work_order_run", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
+                self.assertIn("op_minion_recover_work_order", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
+                self.assertIn("op_minion_spawn", takeover_candidates["declared.minion.natural_language_takeover"].capability_refs)
 
                 core.detach_module("minion")
                 after = asyncio.run(
@@ -11678,7 +11794,7 @@ class MinionIntegrationTests(unittest.TestCase):
             try:
                 created = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_draft_work_order",
+                        name="op_minion_draft_work_order",
                         args={
                             "title": "Minion control affordance",
                             "goal": "Let Pal inspect and replace active minions by facts.",
@@ -11691,10 +11807,10 @@ class MinionIntegrationTests(unittest.TestCase):
                 draft_id = created.structured["draft"]["draft_id"]
 
                 searched = core.context.execution_runtime.execute(
-                    CapabilityCall(name="minion_work_order_draft_search", args={"query": "replace active minions"})
+                    CapabilityCall(name="intro_minion_work_order_draft_search", args={"query": "replace active minions"})
                 )
                 read = core.context.execution_runtime.execute(
-                    CapabilityCall(name="minion_work_order_draft_read", args={"draft_id": draft_id})
+                    CapabilityCall(name="intro_minion_work_order_draft_read", args={"draft_id": draft_id})
                 )
 
                 self.assertEqual(searched.status, "ok")
@@ -11716,7 +11832,7 @@ class MinionIntegrationTests(unittest.TestCase):
             try:
                 created = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_draft_work_order",
+                        name="op_minion_draft_work_order",
                         args={
                             "title": "Draft promotion path",
                             "goal": "Promote draft into a formal work order",
@@ -11728,10 +11844,10 @@ class MinionIntegrationTests(unittest.TestCase):
                 )
                 draft_id = created.structured["draft"]["draft_id"]
                 promoted = core.context.execution_runtime.execute(
-                    CapabilityCall(name="minion_promote_work_order_draft", args={"draft_id": draft_id})
+                    CapabilityCall(name="op_minion_promote_work_order_draft", args={"draft_id": draft_id})
                 )
                 read = core.context.execution_runtime.execute(
-                    CapabilityCall(name="minion_work_order_read", args={"work_order_id": "wo_draft_promotion"})
+                    CapabilityCall(name="intro_minion_work_order_read", args={"work_order_id": "wo_draft_promotion"})
                 )
 
                 self.assertEqual(promoted.status, "ok")
@@ -11740,7 +11856,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 created_2 = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_draft_work_order",
+                        name="op_minion_draft_work_order",
                         args={
                             "title": "Spawn from draft",
                             "goal": "Let spawn promote draft through the unified entry",
@@ -11752,7 +11868,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 )
                 spawned = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_spawn",
+                        name="op_minion_spawn",
                         args={
                             "draft_id": created_2.structured["draft"]["draft_id"],
                             "profile_group": "software_engineering",
@@ -11774,7 +11890,7 @@ class MinionIntegrationTests(unittest.TestCase):
             try:
                 draft = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_draft_work_order",
+                        name="op_minion_draft_work_order",
                         args={"title": "Missing milestones", "goal": "Reject incomplete work order args"},
                     )
                 )
@@ -11783,7 +11899,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 spawn = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_spawn",
+                        name="op_minion_spawn",
                         args={"goal": "reject"},
                     )
                 )
@@ -11792,7 +11908,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 legacy_milestones_spawn = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_spawn",
+                        name="op_minion_spawn",
                         args={"goal": "reject", "milestones": ["do not accept"]},
                     )
                 )
@@ -11801,7 +11917,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 missing_work_order = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_spawn",
+                        name="op_minion_spawn",
                         args={"work_order_id": "wo_missing", "goal": "do not fallback"},
                     )
                 )
@@ -11810,7 +11926,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 legacy_spawn = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_spawn",
+                        name="op_minion_spawn",
                         args={"task_context_pack": {"work_order_id": "wo_missing_milestones", "goal": "reject"}},
                     )
                 )
@@ -11826,7 +11942,7 @@ class MinionIntegrationTests(unittest.TestCase):
             handle = register_minion_with_core(core.context, runtime_root=Path(tmp))
             core.publish_module_capabilities("minion")
             try:
-                listed = core.context.execution_runtime.execute(CapabilityCall(name="minion_profile_list"))
+                listed = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_list"))
                 self.assertEqual(listed.status, "ok")
                 profile_ids = {item["canonical_profile_id"] for item in listed.structured["items"]}
                 self.assertIn("generic", profile_ids)
@@ -11837,24 +11953,24 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("runtime TOML", listed.structured["profile_source_order"])
                 self.assertIn("profile_group + profile_name", listed.structured["usage"])
 
-                planner = core.context.execution_runtime.execute(CapabilityCall(name="minion_profile_read", args={"profile_id": "software_engineering.planner"}))
+                planner = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_read", args={"profile_id": "software_engineering.planner"}))
                 self.assertEqual(planner.status, "ok")
                 self.assertEqual(planner.structured["profile_group"], "software_engineering")
                 self.assertEqual(planner.structured["workspace_policy"]["mode"], "read_only_repo")
                 self.assertIn("work order", planner.structured["identity_fragment"].lower())
 
-                read = core.context.execution_runtime.execute(CapabilityCall(name="minion_profile_read", args={"profile_id": "software_engineering.reviewer"}))
+                read = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_read", args={"profile_id": "software_engineering.reviewer"}))
                 self.assertEqual(read.status, "ok")
                 self.assertEqual(read.structured["profile_id"], "reviewer")
 
-                spawn_spec = core.context.execution_runtime.get_capability_spec("minion_spawn")
+                spawn_spec = core.context.execution_runtime.get_capability_spec("op_minion_spawn")
                 self.assertIsNotNone(spawn_spec)
                 assert spawn_spec is not None
-                self.assertIn("minion_profile_list", spawn_spec["description"])
-                self.assertIn("minion_profile_read", spawn_spec["description"])
+                self.assertIn("intro_minion_profile_list", spawn_spec["description"])
+                self.assertIn("intro_minion_profile_read", spawn_spec["description"])
                 self.assertIn("runtime_root/plugins/minion/profiles/*.toml", spawn_spec["description"])
                 self.assertIn("top-level plan_ref", spawn_spec["description"])
-                self.assertIn("minion_submit_plan", spawn_spec["description"])
+                self.assertIn("op_minion_submit_plan", spawn_spec["description"])
                 self.assertIn("not a way to invent new milestones", spawn_spec["description"])
                 self.assertIn("Do not pass TaskContextPack", spawn_spec["description"])
                 self.assertIn("preferred_endpoint_id", spawn_spec["description"])
@@ -11884,31 +12000,31 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("active endpoint", endpoint_arg["description"])
                 bonus_arg = spawn_spec["parameters_schema"]["properties"]["spawn_bonus_skill_refs"]
                 self.assertIn("optional skill libraries", bonus_arg["description"])
-                self.assertIsNotNone(core.context.execution_runtime.get_capability_spec("minion_recover_work_order"))
-                self.assertIsNotNone(core.context.execution_runtime.get_capability_spec("minion_destroy_work_order_run"))
-                revise_spec = core.context.execution_runtime.get_capability_spec("minion_revise_plan")
+                self.assertIsNotNone(core.context.execution_runtime.get_capability_spec("op_minion_recover_work_order"))
+                self.assertIsNotNone(core.context.execution_runtime.get_capability_spec("op_minion_destroy_work_order_run"))
+                revise_spec = core.context.execution_runtime.get_capability_spec("op_minion_revise_plan")
                 self.assertIsNotNone(revise_spec)
                 assert revise_spec is not None
                 self.assertIn("source_plan_ref", revise_spec["parameters_schema"]["required"])
                 self.assertIn("revised_plan_artifact", revise_spec["parameters_schema"]["required"])
                 self.assertIn("increment plan_revision by exactly one", revise_spec["description"])
-                submit_spec = core.context.execution_runtime.get_capability_spec("minion_submit_plan")
+                submit_spec = core.context.execution_runtime.get_capability_spec("op_minion_submit_plan")
                 self.assertIsNotNone(submit_spec)
                 assert submit_spec is not None
                 self.assertIn("plan_artifact", submit_spec["parameters_schema"]["required"])
                 self.assertIn("fallback planner", submit_spec["description"])
-                accept_spec = core.context.execution_runtime.get_capability_spec("minion_accept_plan")
+                accept_spec = core.context.execution_runtime.get_capability_spec("op_minion_accept_plan")
                 self.assertIsNotNone(accept_spec)
                 assert accept_spec is not None
                 self.assertIn("plan_ref", accept_spec["parameters_schema"]["required"])
                 self.assertIn("review_gate_ref", accept_spec["parameters_schema"]["properties"])
                 self.assertNotIn("human_override", accept_spec["parameters_schema"]["properties"])
-                review_gate_spec = core.context.execution_runtime.get_capability_spec("review_gate_submit")
+                review_gate_spec = core.context.execution_runtime.get_capability_spec("op_minion_review_gate_submit")
                 self.assertIsNotNone(review_gate_spec)
                 assert review_gate_spec is not None
                 self.assertIn("gate_kind", review_gate_spec["parameters_schema"]["required"])
 
-                draft_spec = core.context.execution_runtime.get_capability_spec("minion_draft_work_order")
+                draft_spec = core.context.execution_runtime.get_capability_spec("op_minion_draft_work_order")
                 self.assertIsNotNone(draft_spec)
                 assert draft_spec is not None
                 self.assertIn("Draft a minion work order candidate", draft_spec["description"])
@@ -11937,7 +12053,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn(EventKind.MINION_PROGRESS, core.context.event_handler_registry.handlers)
                 self.assertIn("minion_approval_decision", core.context.control_action_registry.handlers)
                 self.assertIn("minion_lesson_decision", core.context.control_action_registry.handlers)
-                self.assertIn("minion_spawn", core.context.capability_registry.descriptors)
+                self.assertIn("op_minion_spawn", core.context.capability_registry.descriptors)
 
                 core.detach_module("minion")
 
@@ -11946,7 +12062,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertNotIn(EventKind.MINION_PROGRESS, core.context.event_handler_registry.handlers)
                 self.assertNotIn("minion_approval_decision", core.context.control_action_registry.handlers)
                 self.assertNotIn("minion_lesson_decision", core.context.control_action_registry.handlers)
-                self.assertNotIn("minion_spawn", core.context.capability_registry.descriptors)
+                self.assertNotIn("op_minion_spawn", core.context.capability_registry.descriptors)
             finally:
                 handle.shutdown_sync()
 
@@ -11959,15 +12075,15 @@ class MinionIntegrationTests(unittest.TestCase):
             try:
                 runtime = core.context.execution_runtime
                 self.assertIn("op_minion_detach", {spec["name"] for spec in runtime.list_capability_specs()})
-                self.assertIn("minion_spawn", runtime.compiled_capability_index.records)
+                self.assertIn("op_minion_spawn", runtime.compiled_capability_index.records)
 
                 result = runtime.execute(CapabilityCall(name="op_minion_detach"))
 
                 self.assertEqual(result.status, RuntimeStatus.OK)
                 self.assertEqual(result.structured["lifecycle_controller"], "core")
                 self.assertNotIn("op_minion_detach", {spec["name"] for spec in runtime.list_capability_specs()})
-                self.assertNotIn("minion_spawn", runtime.compiled_capability_index.records)
-                self.assertNotIn("minion_spawn", core.context.capability_registry.descriptors)
+                self.assertNotIn("op_minion_spawn", runtime.compiled_capability_index.records)
+                self.assertNotIn("op_minion_spawn", core.context.capability_registry.descriptors)
                 self.assertNotIn("minion.manager", core.context.event_source_registry.sources)
             finally:
                 handle.shutdown_sync()
@@ -12018,12 +12134,12 @@ class MinionIntegrationTests(unittest.TestCase):
             core.context.register_module(fake)
             core.publish_module_capabilities("minion")
             try:
-                listed = core.context.execution_runtime.execute(CapabilityCall(name="minion_profile_list"))
+                listed = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_list"))
                 profile_ids = {item["profile_id"] for item in listed.structured["items"]}
                 self.assertIn("designer", profile_ids)
 
                 fake.mounted = False
-                listed = core.context.execution_runtime.execute(CapabilityCall(name="minion_profile_list"))
+                listed = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_list"))
                 profile_ids = {item["profile_id"] for item in listed.structured["items"]}
                 self.assertNotIn("designer", profile_ids)
             finally:
@@ -12051,7 +12167,7 @@ class MinionIntegrationTests(unittest.TestCase):
             try:
                 draft = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_draft_work_order",
+                        name="op_minion_draft_work_order",
                         args={
                             "title": "Coder hook spawn",
                             "goal": "make a change",
@@ -12065,7 +12181,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(draft.status, "ok")
                 spawned = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_spawn",
+                        name="op_minion_spawn",
                         args={
                             "profile_group": "software_engineering",
                             "profile_name": "coder",
@@ -12077,7 +12193,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(spawned.status, "ok")
                 self.assertEqual(spawned.structured["minion_profile"], "software_engineering.coder")
                 read = core.context.execution_runtime.execute(
-                    CapabilityCall(name="minion_read", args={"run_id": spawned.structured["run_id"]})
+                    CapabilityCall(name="intro_minion_read", args={"run_id": spawned.structured["run_id"]})
                 )
                 pack = read.structured["task_context_pack"]
                 self.assertEqual(pack["minion_profile"], "software_engineering.coder")
@@ -12085,15 +12201,12 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("op_file_read", pack["allowed_capabilities"])
                 self.assertIn("op_file_edit", pack["allowed_capabilities"])
                 self.assertIn("op_file_write", pack["allowed_capabilities"])
-                self.assertIn("op_file_delete", pack["allowed_capabilities"])
-                self.assertNotIn("op_file_read", pack["allowed_capabilities"])
-                self.assertNotIn("op_file_edit", pack["allowed_capabilities"])
-                self.assertNotIn("op_file_write", pack["allowed_capabilities"])
-                self.assertIn("shell", pack["allowed_capabilities"])
-                self.assertIn("artifact_write", pack["allowed_capabilities"])
-                self.assertIn("artifact_edit", pack["allowed_capabilities"])
+                self.assertIn("op_path_delete", pack["allowed_capabilities"])
+                self.assertIn("op_exec_shell", pack["allowed_capabilities"])
+                self.assertIn("op_minion_artifact_write", pack["allowed_capabilities"])
+                self.assertIn("op_minion_artifact_edit", pack["allowed_capabilities"])
                 self.assertNotIn("op_fake_extra", pack["allowed_capabilities"])
-                self.assertEqual(pack["approval_policy"]["high_risk_capabilities"], ["shell"])
+                self.assertEqual(pack["approval_policy"]["high_risk_capabilities"], ["op_exec_shell"])
                 self.assertEqual(pack["metadata"]["preferred_endpoint_id"], "coder_fast")
                 self.assertEqual(pack["metadata"]["preferred_endpoint_source"], "user")
             finally:
@@ -12109,7 +12222,7 @@ class MinionIntegrationTests(unittest.TestCase):
             try:
                 missing_draft = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_draft_work_order",
+                        name="op_minion_draft_work_order",
                         args={
                             "title": "Missing profile",
                             "goal": "nope",
@@ -12122,7 +12235,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(missing_draft.status, "ok")
                 unknown = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_spawn",
+                        name="op_minion_spawn",
                         args={
                             "profile_group": "missing",
                             "profile_name": "missing",
@@ -12135,7 +12248,7 @@ class MinionIntegrationTests(unittest.TestCase):
 
                 explicit_draft = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_draft_work_order",
+                        name="op_minion_draft_work_order",
                         args={
                             "title": "Explicit fields",
                             "goal": "plan",
@@ -12149,7 +12262,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(explicit_draft.status, "ok")
                 spawned = core.context.execution_runtime.execute(
                     CapabilityCall(
-                        name="minion_spawn",
+                        name="op_minion_spawn",
                         args={
                             "profile_group": "software_engineering",
                             "profile_name": "planner",
@@ -12162,7 +12275,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 )
                 self.assertEqual(spawned.status, "ok")
                 read = core.context.execution_runtime.execute(
-                    CapabilityCall(name="minion_read", args={"run_id": spawned.structured["run_id"]})
+                    CapabilityCall(name="intro_minion_read", args={"run_id": spawned.structured["run_id"]})
                 )
                 pack = read.structured["task_context_pack"]
                 self.assertIn("op_file_read", pack["allowed_capabilities"])
@@ -12207,14 +12320,14 @@ class MinionIntegrationTests(unittest.TestCase):
             core.publish_module_capabilities("minion")
             try:
                 spawned = core.context.execution_runtime.execute(
-                    CapabilityCall(name="minion_spawn", args={"task_query": "telegram reliability"})
+                    CapabilityCall(name="op_minion_spawn", args={"task_query": "telegram reliability"})
                 )
                 self.assertEqual(spawned.status, "ok")
                 self.assertEqual(spawned.structured["work_order_id"], "wo_query_one")
                 self.assertEqual(spawned.structured["instruction"], "repair telegram by reading the stored work order facts")
 
                 ambiguous = core.context.execution_runtime.execute(
-                    CapabilityCall(name="minion_spawn", args={"task_query": "shared ambiguous"})
+                    CapabilityCall(name="op_minion_spawn", args={"task_query": "shared ambiguous"})
                 )
                 self.assertEqual(ambiguous.status, "error")
                 self.assertGreaterEqual(ambiguous.structured["candidate_count"], 2)

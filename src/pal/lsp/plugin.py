@@ -36,6 +36,18 @@ def _file_schema() -> dict[str, Any]:
     }
 
 
+def _doctor_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "file": {"type": "string"},
+            "path": {"type": "string"},
+            "workspace_root": {"type": "string"},
+            "server_id": {"type": "string"},
+        },
+    }
+
+
 def _position_schema() -> dict[str, Any]:
     schema = _file_schema()
     schema["properties"] = {
@@ -85,7 +97,7 @@ class LspManagerPluginProvider:
         _ = call
         return _capability_from_rpc("LSP status", self._request_or_error("status"))
 
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="doctor", description="Check LSP server binary, workspace, initialize, and diagnostics readiness")
+    @capability_action(namespace=OPERATION_NAMESPACE, scope="lsp", family="lsp", action_name="doctor", description="Check one selected LSP server's binary, workspace, initialize, and diagnostics readiness", args_schema=_doctor_schema())
     def doctor(self, call: CapabilityCall) -> CapabilityResult:
         return _capability_from_rpc("LSP doctor", self._request_or_error("doctor", dict(call.args or {})))
 

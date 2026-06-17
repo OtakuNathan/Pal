@@ -129,6 +129,7 @@ class FileStateTool:
     display_name: str = "File State"
     family: str = "system"
     description: str = (
+        "Use this first when you need to check whether a file has a current read snapshot before editing, writing, or deleting it. "
         "Inspect whether a file has a current cached read snapshot for safe file_edit use. "
         "This does not return cached file contents."
     )

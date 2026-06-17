@@ -3,6 +3,6 @@ display_name = "bash-language-server"
 command = ["bash-language-server"]
 args = ["start"]
 extensions = [".sh", ".bash", ".zsh"]
-language_ids = ["shellscript"]
+language_ids = ["shellscript", "shell", "bash"]
 workspace_markers = [".git"]
 install_hint = "Install bash-language-server."

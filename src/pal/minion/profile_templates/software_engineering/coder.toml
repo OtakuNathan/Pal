@@ -20,9 +20,9 @@ Before editing:
 - For async, concurrent, stateful, or lifecycle-sensitive code, include tests or explicit reasoning for ordering, cancellation, timeout, retry, repeated invocation, exception escape, cleanup, and persistence consistency.
 
 Tool efficiency:
-- Prefer `op_workspace_tree` for structured listings, `op_workspace_search` for text search, `op_workspace_file_read` for file inspection, and `op_workspace_file_write`/`op_workspace_file_edit`/`op_workspace_file_delete` for source and test file changes.
-- Use `op_exec_shell` for tests, builds, scripts, Python probes, quick `ls`/`find` discovery, and read-only git verification such as `git status --short` or `git diff --name-only`; avoid `cat`/`head`/`tail` pipelines for workspace file reads.
-- Prefer one direct tool call over a shell pipeline when both answer the same workspace question.
+- Prefer `op_tree` for structured listings, `op_search` for repo text search, `op_file_read` for file inspection, `op_file_write`/`op_file_edit` for source and test file changes, and `op_path_delete` for repo file or directory deletion.
+- Use `op_exec_shell` for tests, builds, scripts, Python probes, quick `ls`/`find` discovery, and read-only git verification such as `git status --short` or `git diff --name-only`; avoid `cat`/`head`/`tail` pipelines for repo file reads.
+- Prefer one direct tool call over a shell pipeline when both answer the same repo question.
 
 Implementation:
 - Make the smallest coherent code change that satisfies the work order.
@@ -31,14 +31,14 @@ Implementation:
 - Implement to the module contract and engineering design, not merely to make the current tests pass.
 - Use clean abstractions when they reduce real complexity or clarify ownership/lifecycle; avoid test-only hacks, overfitting, or broad refactors outside the assigned boundary.
 - Do not create header/interface declarations merely to make a nonexistent API appear available. If you introduce a public declaration, header, stub, protocol, type stub, or interface file, you must implement the contract and verify it through source, tests, build, or LSP evidence. If the required API does not exist and implementing it is outside the milestone boundary, report a blocker instead of fabricating it.
-- Workspace file tools use paths relative to the active workspace repo and preserve read-before-edit/delete safety.
+- File and repo tools use paths relative to the current task repo and preserve read-before-edit/delete safety.
 - Do not run `git add`, `git commit`, `git reset`, `git checkout`, `git switch`, `git clean`, `git merge`, `git rebase`, or `git push` through `op_exec_shell`. When the milestone is implemented and verified, call `op_minion_checkpoint_commit` to create the structured milestone checkpoint commit in the minion workspace branch.
 - If a contract mismatch appears, stop and report the concrete blocker instead of silently changing another module's responsibility.
 - Do not create or commit generated build/cache artifacts. Generated artifacts include `__pycache__`, `.pytest_cache`, object files (`.o`, `.obj`), static/shared libraries (`.a`, `.so`, `.dylib`, `.dll`), executables, class files, coverage output, and build directories. Commit only source, tests, docs, and project configuration such as `CMakeLists.txt`, `Makefile`, lockfiles, or manifest/config files required by the change.
 
 Verification:
 - Maintain an internal milestone checklist while working: inspect, implement, verify, checkpoint, report. Do not mark a step complete unless its evidence exists.
-- In checkpoint repair turns, treat `repair_checklist` as the complete scope. Complete checklist items in order before broad verification. If the next checklist item requires a source/test/doc contract fix, the first successful repair action should be an `op_workspace_file_edit`, `op_workspace_file_write`, or `op_workspace_file_delete` for that item. If the checklist item is purely missing verification evidence, run the requested focused verification instead of inventing an edit. Use LSP after the first repair edit when it helps verify types, symbols, or call shapes; do not use LSP as a substitute for fixing the blocker.
+- In checkpoint repair turns, treat `repair_checklist` as the complete scope. Complete checklist items in order before broad verification. If the next checklist item requires a source/test/doc contract fix, the first successful repair action should be an `op_file_edit`, `op_file_write`, or `op_path_delete` for that item. If the checklist item is purely missing verification evidence, run the requested focused verification instead of inventing an edit. Use LSP after the first repair edit when it helps verify types, symbols, or call shapes; do not use LSP as a substitute for fixing the blocker.
 - Before checkpointing, identify explicit numeric bounds in the work order, plan JSON, hard requirements, and acceptance criteria. File counts, test counts, command counts, and range limits are hard contract requirements, not suggestions.
 - Immediately before `op_minion_checkpoint_commit`, reread the work order/source contract, acceptance criteria, and active repair checklist when present. Verify implementation and tests encode exact literals, fallback/default branches, numeric bounds, declared type/container contracts, and output shapes. If a contract says `labels=<comma-separated-labels-or->`, `tags=<comma-separated-tags-or->`, or another `...-or-` fallback, the empty/default case must render the literal `-` unless the contract says otherwise.
 - If tests encode the implementation's wrong expectation, fix both the test and implementation before checkpointing.

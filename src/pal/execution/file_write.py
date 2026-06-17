@@ -60,6 +60,7 @@ class FileWriteTool:
     display_name: str = "File Write"
     family: str = "system"
     description: str = (
+        "Use this first for creating, overwriting, or appending UTF-8 text files; do not use op_exec_shell with tee/echo/printf redirection for file writes when this tool is visible. "
         "Create, overwrite, or append to a UTF-8 text file. "
         "Create mode creates missing parent directories. "
         "Overwrite and append require a current prior file_read snapshot."

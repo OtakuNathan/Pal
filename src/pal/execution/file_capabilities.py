@@ -134,20 +134,25 @@ class FileCapabilityMixin:
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="module",
-        family="file",
+        family="path",
         action_name="delete",
         description=(
-            "Delete a regular file. The file must first be read with op_file_read so Pal can detect stale deletes, "
-            "or expected_sha256 must match the current file bytes."
+            "Delete a file or directory. Regular files must first be read with op_file_read so Pal can detect stale deletes, "
+            "or expected_sha256 must match the current file bytes. Directories require recursive=true."
         ),
-        aliases=("file_delete",),
+        aliases=("path_delete",),
         args_schema={
             "type": "object",
             "properties": {
-                "file_path": {"type": "string", "description": "Path to the file to delete."},
+                "file_path": {"type": "string", "description": "Path to delete."},
                 "expected_sha256": {
                     "type": "string",
-                    "description": "Optional current SHA-256 digest. If supplied, a prior file_read snapshot is not required.",
+                    "description": "Optional current SHA-256 digest for regular files. If supplied, a prior file_read snapshot is not required.",
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Required for directory deletion. Regular file deletion does not require this.",
                 },
             },
             "required": ["file_path"],
@@ -157,14 +162,16 @@ class FileCapabilityMixin:
             "properties": {
                 "file_path": {"type": "string"},
                 "deleted": {"type": "boolean"},
+                "path_kind": {"type": "string"},
+                "recursive": {"type": "boolean"},
                 "sha256": {"type": "string"},
                 "error_code": {"type": "string"},
             },
         },
-        metadata={"canonical_path": "op_file_delete"},
+        metadata={"canonical_path": "op_path_delete"},
     )
-    def file_delete(self, call: IntrospectionCall) -> IntrospectionResult:
-        return _tool_capability_result(self.runtime, "op_file_delete", call.args)
+    def path_delete(self, call: IntrospectionCall) -> IntrospectionResult:
+        return _tool_capability_result(self.runtime, "op_path_delete", call.args)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,

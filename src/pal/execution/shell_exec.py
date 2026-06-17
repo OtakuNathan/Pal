@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import signal
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -11,27 +13,187 @@ from pathlib import Path
 
 from pal.execution.contracts import CapabilityResult
 from pal.shared import OPERATION_NAMESPACE, IntrospectionCall, IntrospectionResult, RuntimeStatus, capability_action
+from pal.shared.result_rendering import render_head_tail_preview_for_llm
 
 
 SHELL_EXEC_DESCRIPTION = (
     "Execute a shell command in the local runtime and return stdout, stderr, and exit status. "
-    "IMPORTANT: Prefer dedicated Pal capabilities for reading, writing, searching, inspecting, or editing files. "
-    "Avoid using this tool to run find, grep, cat, head, tail, sed, awk, or echo unless the user explicitly asks "
-    "for a shell command, no dedicated capability is available, or you have verified the dedicated capability is insufficient. "
+    "Use this for tests, builds, scripts, process probes, package commands, and read-only git verification. "
+    "When these capabilities are visible, use them before shell for their matching task: op_tree for structured directory listings; "
+    "op_search for repository text search; op_file_read for reading text files; op_file_edit for precise in-place edits after reading; "
+    "op_file_write for creating, overwriting, or appending UTF-8 text files; op_path_delete for deleting files or directories; "
+    "op_file_state for checking read-before-edit cache state. "
+    "Do not use shell commands such as cat/head/tail for file inspection, grep/rg for repository search, sed/awk for edits, "
+    "tee/echo/printf redirection for writes, or rm/unlink/rmdir/git rm/find -delete for deletion when the matching capability is visible. "
+    "Piping command output through head/tail to shorten stdout or stderr is fine. "
     "In minion workspaces, do not use shell for git add/commit or other checkpoint mutations; use the dedicated checkpoint commit capability instead."
 )
 
 SHELL_EXEC_CMD_DESCRIPTION = (
-    "Shell command to execute. Prefer dedicated Pal capabilities over shell commands for file read/write/search/edit tasks; "
-    "avoid find/grep/cat/head/tail/sed/awk/echo unless explicitly requested or no suitable dedicated capability is available. "
+    "Shell command to execute. Use only for command execution, tests, builds, scripts, process probes, package commands, and read-only git verification. "
+    "If visible, prefer op_tree for listings, op_search for text search, op_file_read for file reads, op_file_edit for edits, "
+    "op_file_write for writes, op_path_delete for deletion, and op_file_state for file cache checks. "
+    "Avoid cat/head/tail/grep/rg/sed/awk/tee/echo/printf redirection/rm/unlink/rmdir/git rm/find -delete for repo file operations when the matching capability is visible. "
     "In minion workspaces, do not run git add/commit/reset/checkout/clean/merge/rebase/push for checkpointing; use the dedicated checkpoint commit capability instead."
 )
+
+_SHELL_READ_COMMANDS = {"cat", "head", "tail"}
+_SHELL_EDIT_COMMANDS = {"sed", "awk"}
+_SHELL_WRITE_COMMANDS = {"tee"}
+_SHELL_REDIRECT_WRITE_COMMANDS = {"cat", "echo", "printf"}
+_SHELL_DELETE_COMMANDS = {"rm", "unlink", "rmdir"}
+
+
+def _dedicated_tool_hint_for_shell_command(cmd: str) -> CapabilityResult | None:
+    blocked = _blocked_shell_file_operation(cmd)
+    if blocked is None:
+        return None
+    operation, command = blocked
+    suggested = _suggested_tools_for_blocked_operation(operation)
+    tool_text = ", ".join(suggested)
+    text = (
+        f"Use the dedicated Pal capability for this file operation instead of op_exec_shell. "
+        f"Blocked shell command: {command}. Suggested capability: {tool_text}."
+    )
+    if operation == "read":
+        text += " Use op_file_read with offset/limit for file inspection; head/tail remain okay for shortening command stdout or stderr."
+    elif operation == "edit":
+        text += " Use op_file_read first, then op_file_edit with old_string/new_string for precise edits."
+    elif operation == "write":
+        text += " Use op_file_write for create/overwrite/append instead of shell redirection."
+    elif operation == "delete":
+        text += " Use op_path_delete; set recursive=true only when deleting a directory."
+    return CapabilityResult(
+        status=RuntimeStatus.INVALID,
+        text=text,
+        structured={
+            "reason": "dedicated_file_tool_required",
+            "blocked_command": command,
+            "operation": operation,
+            "suggested_tools": suggested,
+        },
+        llm_text=text,
+    )
+
+
+def _blocked_shell_file_operation(cmd: str) -> tuple[str, str] | None:
+    for segment in _shell_segments(cmd):
+        tokens = _shell_tokens(segment)
+        if not tokens:
+            continue
+        action = Path(tokens[0]).name
+        if action in _SHELL_READ_COMMANDS and _read_command_targets_file(action, tokens):
+            return "read", segment
+        if action == "xargs" and any(Path(token).name in _SHELL_READ_COMMANDS for token in tokens[1:]):
+            return "read", segment
+        if action == "find":
+            if _find_exec_read_command(tokens[1:]):
+                return "read", segment
+            if any(token == "-delete" for token in tokens[1:]):
+                return "delete", segment
+        if action in _SHELL_EDIT_COMMANDS and _edit_command_mutates_file(action, tokens):
+            return "edit", segment
+        if action in _SHELL_WRITE_COMMANDS:
+            return "write", segment
+        if action in _SHELL_REDIRECT_WRITE_COMMANDS and _segment_has_write_redirect(segment):
+            return "write", segment
+        if action in _SHELL_DELETE_COMMANDS:
+            return "delete", segment
+        if action == "git" and len(tokens) > 1 and tokens[1] == "rm":
+            return "delete", segment
+    return None
+
+
+def _shell_segments(cmd: str) -> list[str]:
+    return [segment.strip() for segment in re.split(r"\s*(?:&&|\|\||[|;])\s*", str(cmd or "")) if segment.strip()]
+
+
+def _shell_tokens(segment: str) -> list[str]:
+    try:
+        return shlex.split(segment, posix=(os.name != "nt"))
+    except ValueError:
+        return []
+
+
+def _read_command_targets_file(action: str, tokens: list[str]) -> bool:
+    args = tokens[1:]
+    if action == "cat":
+        return _cat_args_target_file(args)
+    if action in {"head", "tail"}:
+        return _head_tail_args_target_file(args)
+    return False
+
+
+def _cat_args_target_file(args: list[str]) -> bool:
+    for token in args:
+        if token == "-":
+            continue
+        if token.startswith("-"):
+            continue
+        return True
+    return False
+
+
+def _head_tail_args_target_file(args: list[str]) -> bool:
+    index = 0
+    option_args = {"-n", "--lines", "-c", "--bytes"}
+    while index < len(args):
+        token = args[index]
+        if token == "-":
+            index += 1
+            continue
+        if token in option_args:
+            index += 2
+            continue
+        if token.startswith(("--lines=", "--bytes=")):
+            index += 1
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        return True
+    return False
+
+
+def _find_exec_read_command(args: list[str]) -> str:
+    for index, token in enumerate(args):
+        if token not in {"-exec", "-execdir"}:
+            continue
+        if index + 1 >= len(args):
+            continue
+        action = Path(args[index + 1]).name
+        if action in _SHELL_READ_COMMANDS:
+            return action
+    return ""
+
+
+def _edit_command_mutates_file(action: str, tokens: list[str]) -> bool:
+    if action == "sed":
+        return any(token == "-i" or token.startswith("-i") for token in tokens[1:])
+    return _segment_has_write_redirect(" ".join(tokens))
+
+
+def _segment_has_write_redirect(segment: str) -> bool:
+    return bool(re.search(r">>|(?<![<])>(?![>&])", segment))
+
+
+def _suggested_tools_for_blocked_operation(operation: str) -> list[str]:
+    if operation == "read":
+        return ["op_file_read"]
+    if operation == "edit":
+        return ["op_file_read", "op_file_edit"]
+    if operation == "write":
+        return ["op_file_write"]
+    if operation == "delete":
+        return ["op_path_delete"]
+    return ["op_file_read", "op_file_edit", "op_file_write", "op_path_delete"]
 
 
 def _truncate(text: str, limit: int) -> tuple[str, bool]:
     if len(text) <= limit:
         return text, False
-    return text[:limit], True
+    preview, _preview_size = render_head_tail_preview_for_llm(text, max_chars=limit)
+    return preview, True
 
 
 @dataclass(unsafe_hash=True)
@@ -153,6 +315,9 @@ class ShellExecTool:
                 structured={"reason": "missing_cmd"},
                 llm_text="cmd is required",
             )
+        dedicated_hint = _dedicated_tool_hint_for_shell_command(cmd)
+        if dedicated_hint is not None:
+            return dedicated_hint
 
         cwd_value = args.get("cwd")
         cwd = str(cwd_value).strip() if isinstance(cwd_value, str) and cwd_value.strip() else None
@@ -203,6 +368,9 @@ class ShellExecTool:
                 structured={"reason": "missing_cmd"},
                 llm_text="cmd is required",
             )
+        dedicated_hint = _dedicated_tool_hint_for_shell_command(cmd)
+        if dedicated_hint is not None:
+            return dedicated_hint
         cwd_value = args.get("cwd")
         cwd = str(cwd_value).strip() if isinstance(cwd_value, str) and cwd_value.strip() else None
         timeout_ms = self._coerce_int(args.get("timeout_ms"), default=self.default_timeout_ms, minimum=1)

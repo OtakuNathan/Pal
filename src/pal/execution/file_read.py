@@ -48,6 +48,7 @@ class FileReadTool:
     display_name: str = "File Read"
     family: str = "system"
     description: str = (
+        "Use this first when you need to inspect a UTF-8 text file; do not use op_exec_shell with cat/head/tail for file reads when this tool is visible. "
         "Read a text file and return a line-numbered slice. "
         "The full content is cached for subsequent file_edit calls. "
         "Supports offset and limit for large files. "

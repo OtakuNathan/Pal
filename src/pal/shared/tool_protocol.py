@@ -5,6 +5,8 @@ from collections.abc import Callable, Sequence
 from typing import Any
 from uuid import uuid4
 
+from pal.shared.result_rendering import render_structured_for_llm
+
 
 ToolResultRenderer = Callable[[Any, Any], str]
 
@@ -46,7 +48,7 @@ def default_tool_result_text(
         return text
     structured = getattr(result, "structured", None)
     if structured:
-        return json.dumps(structured, ensure_ascii=False, sort_keys=True)
+        return render_structured_for_llm(structured)
     return fallback_ok if bool(getattr(result, "ok", False)) else fallback_error
 
 

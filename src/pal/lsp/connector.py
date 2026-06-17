@@ -26,6 +26,9 @@ class AsyncLspConnector:
     _next_id: int = 1
     _diagnostics: dict[str, dict[str, Any]] = field(default_factory=dict)
     _open_hashes: dict[str, str] = field(default_factory=dict)
+    _stderr_task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
+    _stderr_tail: str = field(default="", init=False, repr=False)
+    _stderr_tail_limit: int = field(default=4000, init=False, repr=False)
 
     async def initialize(self) -> None:
         if self.initialized and self.process is not None and self.process.returncode is None:
@@ -39,6 +42,8 @@ class AsyncLspConnector:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        self._stderr_tail = ""
+        self._stderr_task = asyncio.create_task(self._drain_stderr(), name=f"lsp-{self.config.server_id}-stderr")
         result = await asyncio.wait_for(
             self.request(
                 "initialize",
@@ -58,9 +63,12 @@ class AsyncLspConnector:
 
     async def close(self) -> None:
         process = self.process
+        stderr_task = self._stderr_task
         self.process = None
+        self._stderr_task = None
         self.initialized = False
         if process is None:
+            await self._cancel_stderr_task(stderr_task)
             return
         if process.returncode is None:
             with contextlib.suppress(Exception):
@@ -74,6 +82,10 @@ class AsyncLspConnector:
                 process.kill()
             with contextlib.suppress(Exception):
                 await process.wait()
+        await self._cancel_stderr_task(stderr_task)
+
+    def stderr_tail_text(self) -> str:
+        return self._stderr_tail.strip()
 
     async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         ident = self._next_id
@@ -168,6 +180,33 @@ class AsyncLspConnector:
         if not isinstance(decoded, dict):
             raise LspProtocolError("LSP payload must be an object")
         return decoded
+
+    async def _drain_stderr(self) -> None:
+        process = self.process
+        if process is None or process.stderr is None:
+            return
+        try:
+            while True:
+                chunk = await process.stderr.read(4096)
+                if not chunk:
+                    return
+                self._append_stderr_tail(chunk.decode("utf-8", errors="replace"))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return
+
+    async def _cancel_stderr_task(self, task: asyncio.Task[None] | None) -> None:
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    def _append_stderr_tail(self, text: str) -> None:
+        if not text:
+            return
+        self._stderr_tail = (self._stderr_tail + text)[-self._stderr_tail_limit :]
 
     def _handle_notification(self, message: dict[str, Any]) -> None:
         if str(message.get("method") or "") != "textDocument/publishDiagnostics":

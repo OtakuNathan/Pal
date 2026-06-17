@@ -23,7 +23,7 @@ class DeepSeekProvider(LLMProviderAdapter):
             return
         thinking = _think_level_to_deepseek_thinking(request.metadata.get("think_level"))
         if thinking is not None:
-            draft.extra_body["thinking"] = thinking
+            draft.thinking = thinking
         effort = _think_level_to_deepseek_reasoning_effort(request.metadata.get("think_level"))
         if effort is not None:
             draft.reasoning_effort = effort

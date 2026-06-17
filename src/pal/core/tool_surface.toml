@@ -15,6 +15,7 @@ capabilities = [
     "op_file_write",
     "op_file_state",
     "op_tool_call",
+    "op_tool_result_page",
     # -- behavior (affordance + skill) --
     "op_behavior_advise",
     "op_behavior_save",

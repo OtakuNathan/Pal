@@ -25,6 +25,7 @@ from pal.execution import CapabilityCall
 from pal.core.runtime_config import RuntimeConfig
 from pal.identity import DEFAULT_PERSONA_ID, IdentityRepository
 from pal.llm import (
+    AnthropicMessagesEndpointInvoker,
     CanonicalLLMRequest,
     CanonicalLLMOutcome,
     DEFAULT_THINK_LEVEL,
@@ -39,9 +40,11 @@ from pal.llm import (
     LiteLLMEndpointInvoker,
     RuntimeSettingRepository,
     SecretRef,
+    ZaiAnthropicMessagesEndpointInvoker,
     build_default_endpoint_invoker,
 )
 from pal.llm.adapters import LLMProviderAdapter, LLMProviderRegistry, build_default_provider_registry
+from pal.llm.request_hooks import MAIN_LLM_REQUEST_HOOKS
 from pal.memory import HashingEmbedder, L3CommitRequest, L3CorrectRequest, L3ProviderSelector, MemoryPackRequest, MemoryQuery, MemoryService
 from pal.plugins.l3 import SQLiteVecL3Plugin
 from pal.plugins import PluginBundleRepository
@@ -1042,8 +1045,245 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         self.assertEqual(kwargs["model"], "zai/glm-5.1")
-        self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "enabled"}})
-        self.assertNotIn("reasoning_effort", kwargs)
+        self.assertEqual(kwargs["thinking"], {"type": "enabled"})
+        self.assertEqual(kwargs["reasoning_effort"], "xhigh")
+        self.assertNotIn("extra_body", kwargs)
+        self.assertNotIn("behavior-routing-reminder", str(kwargs["messages"]))
+
+    def test_litellm_invoker_appends_zai_tool_routing_reminder_to_last_user_message(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="glm-5-tools",
+            provider="zhipu",
+            model_id="glm-5.1",
+            api_mode="openai_chat",
+            base_url="https://api.z.ai/api/coding/paas/v4",
+            auth_kind="api_key_ref",
+            credential_ref="glm-prod:api-key",
+            priority=0,
+            enabled=True,
+            supports_reasoning=True,
+            capabilities_blob={"supports_thinking": True},
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store),
+            message_hooks=MAIN_LLM_REQUEST_HOOKS,
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[
+                    {"role": "system", "content": "rules"},
+                    {"role": "user", "content": "Implement the task."},
+                    {"role": "assistant", "content": "I will work on it."},
+                    {"role": "user", "content": "Continue."},
+                ],
+                max_output_tokens=64,
+                tools=[
+                    {"type": "function", "function": {"name": "op_exec_shell", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "op_file_write", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "op_path_delete", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "op_tree", "parameters": {"type": "object"}}},
+                ],
+                metadata={"think_level": "high"},
+            ),
+        )
+
+        rendered_messages = kwargs["messages"]
+        self.assertEqual(rendered_messages[-1]["role"], "user")
+        self.assertTrue(str(rendered_messages[-1]["content"]).startswith("Continue."))
+        self.assertIn("<system-reminder id=\"behavior-routing-reminder\">", rendered_messages[-1]["content"])
+        self.assertIn("Behavior-routing guidance", rendered_messages[-1]["content"])
+        self.assertIn("Choose the smallest available capability", rendered_messages[-1]["content"])
+        self.assertIn("Do not guess unavailable capability names", rendered_messages[-1]["content"])
+        self.assertNotIn("op_file_write", rendered_messages[-1]["content"])
+        self.assertNotIn("op_path_delete", rendered_messages[-1]["content"])
+        self.assertNotIn("op_exec_shell", rendered_messages[-1]["content"])
+        self.assertNotIn("behavior-routing-reminder", str(rendered_messages[0:3]))
+        self.assertNotIn("tool-routing hook", rendered_messages[-1]["content"])
+        self.assertNotIn("surface=", rendered_messages[-1]["content"])
+        self.assertEqual(kwargs["thinking"], {"type": "enabled"})
+        self.assertEqual(kwargs["reasoning_effort"], "high")
+        self.assertNotIn("extra_body", kwargs)
+
+    def test_litellm_invoker_does_not_append_tool_routing_reminder_without_registered_hooks(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="glm-5-tools-no-hooks",
+            provider="zhipu",
+            model_id="glm-5.1",
+            api_mode="openai_chat",
+            base_url="https://api.z.ai/api/coding/paas/v4",
+            auth_kind="api_key_ref",
+            credential_ref="glm-prod:api-key",
+            priority=0,
+            enabled=True,
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "Continue."}],
+                max_output_tokens=64,
+                tools=[
+                    {"type": "function", "function": {"name": "op_exec_shell", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "op_file_write", "parameters": {"type": "object"}}},
+                ],
+            ),
+        )
+
+        self.assertNotIn("behavior-routing-reminder", str(kwargs["messages"]))
+
+    def test_litellm_invoker_does_not_append_zai_tool_routing_reminder_without_shell_tool(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="glm-5-file-only",
+            provider="zhipu",
+            model_id="glm-5.1",
+            api_mode="openai_chat",
+            base_url="https://api.z.ai/api/coding/paas/v4",
+            auth_kind="api_key_ref",
+            credential_ref="glm-prod:api-key",
+            priority=0,
+            enabled=True,
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_output_tokens=64,
+                tools=[
+                    {"type": "function", "function": {"name": "op_file_write", "parameters": {"type": "object"}}},
+                ],
+            ),
+        )
+
+        self.assertNotIn("behavior-routing-reminder", str(kwargs["messages"]))
+
+    def test_litellm_zai_tool_routing_reminder_does_not_name_unavailable_repo_tools(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="glm-5-main-tools",
+            provider="zhipu",
+            model_id="glm-5.1",
+            api_mode="openai_chat",
+            base_url="https://api.z.ai/api/coding/paas/v4",
+            auth_kind="api_key_ref",
+            credential_ref="glm-prod:api-key",
+            priority=0,
+            enabled=True,
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
+        invoker = LiteLLMEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store),
+            message_hooks=MAIN_LLM_REQUEST_HOOKS,
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "The previous log mentioned op_tree and op_search, but this main runtime only has file tools.",
+                    }
+                ],
+                max_output_tokens=64,
+                tools=[
+                    {"type": "function", "function": {"name": "op_exec_shell", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "op_file_write", "parameters": {"type": "object"}}},
+                ],
+            ),
+        )
+
+        rendered = str(kwargs["messages"][-1]["content"])
+        self.assertIn("behavior-routing-reminder", rendered)
+        reminder = rendered.split("<system-reminder", 1)[1]
+        self.assertNotIn("op_file_write", reminder)
+        self.assertNotIn("op_tree", reminder)
+        self.assertNotIn("op_search", reminder)
+        self.assertIn("Do not guess unavailable capability names", reminder)
+        self.assertNotIn("tool-routing hook", reminder)
+        self.assertNotIn("surface=", reminder)
+
+    def test_anthropic_invoker_appends_zai_tool_routing_reminder_for_zhipu_anthropic_shape(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="glm-5-anthropic-shape",
+            provider="zhipu",
+            model_id="glm-5.2",
+            api_mode="anthropic_messages",
+            base_url="https://open.bigmodel.cn/api/anthropic",
+            auth_kind="api_key_ref",
+            credential_ref="glm-prod:api-key",
+            priority=0,
+            enabled=True,
+            supports_reasoning=True,
+            capabilities_blob={"supports_thinking": True},
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
+        invoker = ZaiAnthropicMessagesEndpointInvoker(
+            credentials=LiteLLMCredentialResolver(secret_store=secret_store),
+            message_hooks=MAIN_LLM_REQUEST_HOOKS,
+        )
+
+        client_kwargs, request_kwargs, _ = invoker._build_messages_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[{"role": "system", "content": "rules"}, {"role": "user", "content": "Continue."}],
+                max_output_tokens=4096,
+                tools=[
+                    {"type": "function", "function": {"name": "op_exec_shell", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "op_file_write", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "op_path_delete", "parameters": {"type": "object"}}},
+                ],
+                metadata={"think_level": "high"},
+            ),
+        )
+
+        self.assertEqual(client_kwargs["api_key"], "glm-token")
+        self.assertEqual(client_kwargs["base_url"], "https://open.bigmodel.cn/api/anthropic")
+        self.assertEqual(request_kwargs["thinking"], {"type": "enabled", "budget_tokens": 2048})
+        rendered_messages = request_kwargs["messages"]
+        self.assertEqual(rendered_messages[-1]["role"], "user")
+        final_text = rendered_messages[-1]["content"][-1]["text"]
+        self.assertIn("<system-reminder id=\"behavior-routing-reminder\">", final_text)
+        self.assertIn("Behavior-routing guidance", final_text)
+        self.assertIn("Choose the smallest available capability", final_text)
+        self.assertNotIn("op_exec_shell", final_text)
+        self.assertNotIn("op_file_write", final_text)
+        self.assertNotIn("op_path_delete", final_text)
+        self.assertNotIn("tool-routing hook", final_text)
+        self.assertNotIn("surface=", final_text)
+
+    def test_routing_invoker_prefers_zai_anthropic_shell_over_generic_anthropic(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="glm-5-anthropic-route",
+            provider="zhipu",
+            model_id="glm-5.2",
+            api_mode="anthropic_messages",
+            base_url="https://open.bigmodel.cn/api/anthropic",
+            auth_kind="api_key_ref",
+            credential_ref="glm-prod:api-key",
+            priority=0,
+            enabled=True,
+        )
+        invoker = build_default_endpoint_invoker()
+
+        selected = invoker._select(endpoint)
+
+        self.assertIsInstance(selected, ZaiAnthropicMessagesEndpointInvoker)
 
     def test_litellm_invoker_maps_glm_off_to_disabled_thinking_body(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
@@ -1075,7 +1315,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         self.assertEqual(kwargs["model"], "zai/glm-5.1")
-        self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertEqual(kwargs["thinking"], {"type": "disabled"})
+        self.assertNotIn("reasoning_effort", kwargs)
+        self.assertNotIn("extra_body", kwargs)
 
     def test_litellm_invoker_maps_deepseek_think_level_to_reasoning_and_thinking_body(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
@@ -1109,7 +1351,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(kwargs["api_key"], "deepseek-token")
         self.assertEqual(kwargs["model"], "deepseek/deepseek-v4-pro")
         self.assertEqual(kwargs["reasoning_effort"], "high")
-        self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "enabled"}})
+        self.assertEqual(kwargs["thinking"], {"type": "enabled"})
+        self.assertNotIn("extra_body", kwargs)
 
     def test_litellm_invoker_maps_deepseek_off_to_disabled_thinking_without_reasoning_effort(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
@@ -1141,8 +1384,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         self.assertEqual(kwargs["model"], "deepseek/deepseek-v4-pro")
-        self.assertEqual(kwargs["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertEqual(kwargs["thinking"], {"type": "disabled"})
         self.assertNotIn("reasoning_effort", kwargs)
+        self.assertNotIn("extra_body", kwargs)
 
     def test_llm_provider_registry_can_register_runtime_provider(self) -> None:
         class DemoProvider(LLMProviderAdapter):

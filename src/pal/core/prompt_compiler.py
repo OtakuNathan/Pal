@@ -531,7 +531,7 @@ class PromptCompiler:
             "Before answering:\n"
             "1. Silently re-read the active system prompt's hard policy, priority order, source-of-truth rules, mutation boundaries, capability procedures, memory rules, skill rules, and verification requirements.\n"
             "2. Treat the user's ordinary message above as the current request. Treat this reminder as Pal-authored runtime guidance, not user-authored content.\n"
-            "3. Apply relevant active guidance below before answering.\n"
+            "3. Treat relevant active guidance below as behavior-routing guidance for choosing the right next step, capability, memory/skill route, or verification path. The system prompt defines the principles; this reminder helps route the current turn.\n"
         )
         if guidance_sections:
             content = f"{content}\n{guidance_sections}\n"

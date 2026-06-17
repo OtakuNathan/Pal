@@ -387,6 +387,42 @@ class ExecutionDiscoveryCapabilityMixin:
     def read(self, call: IntrospectionCall) -> IntrospectionResult:
         return _tool_capability_result(self.runtime, "op_tool_read", call.args)
 
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="module",
+        family="discovery",
+        action_name="result_page",
+        description=(
+            "Read a later page of a prior tool result only when that result explicitly provides a next_page call. "
+            "Pass the original tool_call_id as result_ref."
+        ),
+        aliases=("tool_result_page",),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "result_ref": {
+                    "type": "string",
+                    "description": "The result_ref shown in a prior tool result; this is the original tool_call_id.",
+                },
+                "page": {"type": "integer", "minimum": 1, "description": "1-based page number to read."},
+                "page_size": {"type": "integer", "minimum": 256, "description": "Optional character page size."},
+            },
+            "required": ["result_ref", "page"],
+        },
+        result_schema={
+            "type": "object",
+            "properties": {
+                "result_ref": {"type": "string"},
+                "page": {"type": "integer"},
+                "page_count": {"type": "integer"},
+                "has_more": {"type": "boolean"},
+            },
+        },
+        metadata={"canonical_path": "op_tool_result_page"},
+    )
+    def result_page(self, call: IntrospectionCall) -> IntrospectionResult:
+        return _tool_capability_result(self.runtime, "op_tool_result_page", call.args)
+
 
 @dataclass
 class ToolSearchTool:

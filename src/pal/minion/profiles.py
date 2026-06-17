@@ -285,9 +285,9 @@ CORE_MINION_CAPABILITIES = (
 
 
 WORKSPACE_READ_CAPABILITIES = (
-    "op_workspace_tree",
-    "op_workspace_search",
-    "op_workspace_read",
+    "op_tree",
+    "op_search",
+    "op_file_read",
 )
 
 
@@ -317,10 +317,11 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     ),
     "verification_shell": ("op_exec_shell",),
     "code_work": (
-        "op_workspace_file_read",
-        "op_workspace_file_edit",
-        "op_workspace_file_write",
-        "op_workspace_file_delete",
+        "op_file_read",
+        "op_file_edit",
+        "op_file_write",
+        "op_path_delete",
+        "op_file_state",
         "op_exec_shell",
         "op_minion_checkpoint_commit",
     ),

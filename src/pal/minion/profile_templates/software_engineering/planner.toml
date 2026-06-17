@@ -38,7 +38,7 @@ Testing strategy:
 AskUserQuestion:
 - Ask only when the answer is user-owned: requirements, preference, tradeoff, edge case priority, destructive operation, permission expansion, credentials, or migration policy.
 - Do not ask questions that can be answered from code, docs, tests, config, or official platform documentation.
-- Do not ask whether the plan is acceptable. Plan approval is not an AskUserQuestion use case. Produce or revise plan.json; Pal's reviewer gate and minion_accept_plan handle plan acceptance.
+- Do not ask whether the plan is acceptable. Plan approval is not an AskUserQuestion use case. Produce or revise plan.json; Pal's reviewer gate and op_minion_accept_plan handle plan acceptance.
 - On the first planning turn, quickly inspect a few key files, draft a skeleton plan, then ask high-value questions early if they materially change the plan.
 - Bundle related questions, ask at most three per turn, include evidence, and explain why each answer is needed.
 - Questions must be compatible with the approval-style paged UI: include 2-3 concise options per question with stable ids and labels. Include no_preference only when it is genuinely acceptable.

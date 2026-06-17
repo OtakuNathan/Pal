@@ -211,31 +211,19 @@ def _render_minion_runtime_reminder(scaffold: dict[str, Any]) -> str:
     allowed = {str(item).strip() for item in list((scaffold or {}).get("allowed_capabilities") or []) if str(item).strip()}
     lines = [
         "Minion runtime reminder:",
+        "- Treat this reminder as behavior-routing guidance for choosing the right capability. The system prompt and capability policy still define the principles and priority order.",
         "- Work only on the current scoped milestone and listed capabilities; do not start hidden or later work.",
+        "- Choose the smallest available capability that matches the immediate intent, then reassess after seeing its result.",
+        "- Do not guess unavailable capability names; if the right capability is absent, use the closest safe path or report the limitation.",
     ]
-    if allowed & {
-        "op_workspace_tree",
-        "op_workspace_search",
-        "op_workspace_read",
-        "op_workspace_file_read",
-        "op_workspace_file_edit",
-        "op_workspace_file_write",
-        "op_workspace_file_delete",
-    }:
-        lines.extend(
-            [
-                "- Tool routing: prefer op_workspace_tree for structured listings, op_workspace_search for text search, op_workspace_file_read for file reads, and op_workspace_file_write/edit/delete for file changes.",
-                "- Workspace tool paths are relative to workspace.repo_path, the active prepared task repo; never use absolute paths or clone-source paths with workspace tools.",
-            ]
-        )
     if "op_exec_shell" in allowed:
         lines.append(
-            "- Use op_exec_shell for tests, builds, scripts, Python probes, quick ls/find discovery, and read-only git verification such as git status --short or git diff --name-only; avoid cat/head/tail pipelines for workspace file reads."
+            "- Use process execution only when the task needs a real command, build, test, script, probe, or read-only repository verification."
         )
     if "op_minion_checkpoint_commit" in allowed:
-        lines.append("- After implementation and verification, call op_minion_checkpoint_commit instead of git add/commit.")
+        lines.append("- When a structured checkpoint is required, complete implementation and verification before submitting it.")
     if allowed & {"op_minion_review_gate_submit", "op_minion_review_checkpoint"}:
-        lines.append("- Reviewer completion requires the review gate tool; prose-only approval is not enough.")
+        lines.append("- Reviewer completion requires a structured gate result; prose-only approval is not enough.")
     return "\n".join(lines).strip()
 
 

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import logging
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ class LspServerState:
     attached: bool = False
     last_error: str = ""
     last_attached_at: str = ""
+    last_attach_failed_at: float = 0.0
+    last_attach_failed_workspace_root: str = ""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
@@ -40,6 +43,7 @@ class LspManager:
     started_at: str = field(default_factory=utc_now)
     last_rescan_at: str = ""
     last_error: str = ""
+    attach_failure_cooldown_seconds: float = 60.0
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
     _manager_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -148,6 +152,14 @@ class LspManager:
             return {"status": "ok" if not errors else "error", "errors": errors, **self.status()}
 
     async def doctor(self, params: dict[str, Any]) -> dict[str, Any]:
+        if not self._has_server_selector(params):
+            return {
+                "status": "unavailable",
+                "reason": "server_id_or_file_required",
+                "message": "LSP doctor requires server_id or file/path so it does not inspect an arbitrary configured server.",
+                "servers": [self._server_summary(state) for state in sorted(self.states.values(), key=lambda item: item.server_id)],
+                **self.health(),
+            }
         state = self._select_state(params)
         workspace_root = self._workspace_root(params)
         binary = shutil.which(state.file_config.config.command[0])
@@ -162,12 +174,16 @@ class LspManager:
         checks.append({"name": "workspace_markers", "status": "ok" if any(item["present"] for item in marker_checks) or not marker_checks else "warning", "items": marker_checks})
         if not state.file_config.enabled or not binary or not workspace_root.exists():
             return {"status": "unavailable", "server": self._server_summary(state), "checks": checks}
+        recent_failure = self._recent_attach_failure_reason(state, workspace_root)
+        if recent_failure:
+            checks.append({"name": "initialize", "status": "skipped_recent_failure", "reason": recent_failure})
+            return {"status": "unavailable", "reason": recent_failure, "server": self._server_summary(state), "checks": checks}
         try:
             await self._ensure_attached(state, workspace_root)
             checks.append({"name": "initialize", "status": "ok", "server_info": state.connector.server_info if state.connector else {}})
             return {"status": "ok", "server": self._server_summary(state), "checks": checks}
         except Exception as exc:
-            checks.append({"name": "initialize", "status": "error", "error": f"{exc.__class__.__name__}: {exc}"})
+            checks.append({"name": "initialize", "status": "error", "error": state.last_error or f"{exc.__class__.__name__}: {exc}"})
             return {"status": "error", "server": self._server_summary(state), "checks": checks}
 
     async def run_lsp_operation(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -176,15 +192,23 @@ class LspManager:
         workspace_root = self._workspace_root(params, file_path=file_path)
         unavailable = self._unavailable_reason(state, workspace_root)
         if unavailable:
-            return {"status": "unavailable", "operation": operation, "reason": unavailable, "server": self._server_summary(state)}
+            return self._unavailable_payload(operation, unavailable, state, workspace_root)
         async with state.lock:
-            await self._ensure_attached(state, workspace_root)
+            unavailable = self._unavailable_reason(state, workspace_root)
+            if unavailable:
+                return self._unavailable_payload(operation, unavailable, state, workspace_root)
+            try:
+                await self._ensure_attached(state, workspace_root)
+            except Exception as exc:
+                detail = state.last_error or f"{exc.__class__.__name__}: {exc}"
+                reason = f"attach_failed:{detail}"
+                return self._unavailable_payload(operation, reason, state, workspace_root)
             assert state.connector is not None
             if operation == "workspace_symbols":
                 query = str(params.get("query") or "")
                 result = await state.connector.request("workspace/symbol", {"query": query})
                 return self._evidence(operation, state, workspace_root, None, params, result.get("value", result))
-            language_id = self._language_id(state, file_path)
+            language_id = self._language_id(state, file_path, params)
             document = await state.connector.ensure_document_open(file_path, language_id=language_id)
             text_document = {"uri": document["uri"]}
             if operation == "diagnostics":
@@ -255,12 +279,16 @@ class LspManager:
             await connector.initialize()
         except Exception as exc:
             await connector.close()
-            state.last_error = f"{exc.__class__.__name__}: {exc}"
+            state.last_error = _attach_error_detail(exc, connector)
+            state.last_attach_failed_at = time.monotonic()
+            state.last_attach_failed_workspace_root = str(workspace_root)
             raise
         state.connector = connector
         state.attached = True
         state.last_error = ""
         state.last_attached_at = utc_now()
+        state.last_attach_failed_at = 0.0
+        state.last_attach_failed_workspace_root = ""
 
     async def _detach_state(self, state: LspServerState) -> None:
         connector = state.connector
@@ -281,10 +309,17 @@ class LspManager:
         for state in self.states.values():
             if suffix and suffix in state.file_config.config.extensions:
                 return state
+        for language in _workspace_languages(params):
+            for state in self.states.values():
+                if _state_supports_language(state, language):
+                    return state
         for state in self.states.values():
             if state.file_config.enabled:
                 return state
         raise KeyError("no LSP server configured")
+
+    def _has_server_selector(self, params: dict[str, Any]) -> bool:
+        return bool(str(params.get("server_id") or "").strip()) or bool(str(params.get("file") or params.get("path") or "").strip())
 
     def _workspace_root(self, params: dict[str, Any], *, file_path: Path | None = None) -> Path:
         explicit = str(params.get("workspace_root") or params.get("repo_path") or "").strip()
@@ -300,7 +335,12 @@ class LspManager:
             if required:
                 raise ValueError("file is required")
             return Path()
-        path = Path(raw).expanduser().resolve()
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            base = str(params.get("workspace_root") or params.get("repo_path") or "").strip()
+            if base:
+                path = Path(base).expanduser() / path
+        path = path.resolve()
         if not path.is_file():
             raise FileNotFoundError(f"LSP file not found: {path}")
         return path
@@ -312,9 +352,45 @@ class LspManager:
             return "missing_binary"
         if not workspace_root.exists():
             return "missing_workspace_root"
+        recent_failure = self._recent_attach_failure_reason(state, workspace_root)
+        if recent_failure:
+            return recent_failure
         return ""
 
-    def _language_id(self, state: LspServerState, file_path: Path) -> str:
+    def _recent_attach_failure_reason(self, state: LspServerState, workspace_root: Path) -> str:
+        if not state.last_attach_failed_at or state.attached:
+            return ""
+        if state.last_attach_failed_workspace_root != str(workspace_root):
+            return ""
+        elapsed = max(0.0, time.monotonic() - state.last_attach_failed_at)
+        remaining = self.attach_failure_cooldown_seconds - elapsed
+        if remaining <= 0:
+            return ""
+        detail = state.last_error or "unknown attach failure"
+        return f"recent_attach_failure:{detail}; retry_after_seconds={remaining:.1f}"
+
+    def _unavailable_payload(
+        self,
+        operation: str,
+        reason: str,
+        state: LspServerState,
+        workspace_root: Path,
+    ) -> dict[str, Any]:
+        return {
+            "status": "unavailable",
+            "operation": operation,
+            "reason": reason,
+            "workspace_root": str(workspace_root),
+            "server": self._server_summary(state),
+        }
+
+    def _language_id(self, state: LspServerState, file_path: Path, params: dict[str, Any] | None = None) -> str:
+        language = _language_id_from_extension(file_path.suffix.lower(), _workspace_languages(params or {}))
+        if language:
+            return language
+        for language in _workspace_languages(params or {}):
+            if _state_supports_language(state, language):
+                return _lsp_language_id(language)
         language_ids = state.file_config.config.language_ids
         if language_ids:
             return language_ids[0]
@@ -390,6 +466,161 @@ def _result_list(value: Any) -> list[Any]:
 
 def _position(params: dict[str, Any]) -> dict[str, int]:
     return {"line": _int(params.get("line"), 0), "character": _int(params.get("character"), 0)}
+
+
+_LANGUAGE_ALIASES = {
+    "bash": "shellscript",
+    "c": "c",
+    "c++": "cpp",
+    "cc": "cpp",
+    "cxx": "cpp",
+    "cpp": "cpp",
+    "css": "css",
+    "go": "go",
+    "golang": "go",
+    "html": "html",
+    "javascript": "javascript",
+    "js": "javascript",
+    "json": "json",
+    "objective-c": "objective-c",
+    "objective-c++": "objective-cpp",
+    "objective-cpp": "objective-cpp",
+    "objc": "objective-c",
+    "objcpp": "objective-cpp",
+    "py": "python",
+    "python": "python",
+    "rs": "rust",
+    "rust": "rust",
+    "sh": "shellscript",
+    "shell": "shellscript",
+    "shellscript": "shellscript",
+    "ts": "typescript",
+    "typescript": "typescript",
+    "yaml": "yaml",
+    "yml": "yaml",
+}
+
+_EXTENSION_LANGUAGE_IDS = {
+    ".c": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
+    ".css": "css",
+    ".go": "go",
+    ".html": "html",
+    ".htm": "html",
+    ".hxx": "cpp",
+    ".hh": "cpp",
+    ".hpp": "cpp",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".json": "json",
+    ".jsonc": "json",
+    ".m": "objective-c",
+    ".mm": "objective-cpp",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".py": "python",
+    ".pyi": "python",
+    ".rs": "rust",
+    ".sh": "shellscript",
+    ".bash": "shellscript",
+    ".zsh": "shellscript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+}
+
+_AMBIGUOUS_EXTENSION_LANGUAGE_IDS = {
+    ".h": {"c", "cpp", "objective-c", "objective-cpp"},
+}
+
+
+def _workspace_languages(params: dict[str, Any]) -> list[str]:
+    raw_values = [
+        params.get("workspace_languages"),
+        params.get("languages"),
+        params.get("language"),
+        params.get("primary_language"),
+    ]
+    lsp_setup = params.get("lsp_setup")
+    if isinstance(lsp_setup, dict):
+        raw_values.append(lsp_setup.get("languages"))
+    result: list[str] = []
+    for raw in raw_values:
+        for item in _language_tokens(raw):
+            language = _normalize_language_id(item)
+            if language and language not in result:
+                result.append(language)
+    return result
+
+
+def _language_tokens(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        collected: list[str] = []
+        for key in ("language", "name", "id", "value"):
+            collected.extend(_language_tokens(value.get(key)))
+        return collected
+    if isinstance(value, (list, tuple, set)):
+        collected = []
+        for item in value:
+            collected.extend(_language_tokens(item))
+        return collected
+    text = str(value or "").strip().lower()
+    if not text:
+        return []
+    for separator in ("\n", "\t", ",", ";", "/", "|"):
+        text = text.replace(separator, ",")
+    text = text.replace(" and ", ",").replace(" & ", ",")
+    return [part.strip().replace("_", "-") for part in text.split(",") if part.strip()]
+
+
+def _normalize_language_id(value: str) -> str:
+    text = "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum() or ch in {"-", "+", "#", "."}).strip()
+    return _LANGUAGE_ALIASES.get(text, text)
+
+
+def _lsp_language_id(language: str) -> str:
+    return _normalize_language_id(language)
+
+
+def _language_id_from_extension(suffix: str, workspace_languages: list[str]) -> str:
+    normalized_suffix = str(suffix or "").lower()
+    if normalized_suffix in _AMBIGUOUS_EXTENSION_LANGUAGE_IDS:
+        allowed = _AMBIGUOUS_EXTENSION_LANGUAGE_IDS[normalized_suffix]
+        for language in workspace_languages:
+            if language in allowed:
+                return _lsp_language_id(language)
+    return _EXTENSION_LANGUAGE_IDS.get(normalized_suffix, "")
+
+
+def _state_supports_language(state: LspServerState, language: str) -> bool:
+    normalized = _normalize_language_id(language)
+    if not normalized:
+        return False
+    advertised = {_normalize_language_id(item) for item in state.file_config.config.language_ids}
+    if normalized in advertised:
+        return True
+    for extension, extension_language in _EXTENSION_LANGUAGE_IDS.items():
+        if extension_language == normalized and extension in state.file_config.config.extensions:
+            return True
+    if normalized in _AMBIGUOUS_EXTENSION_LANGUAGE_IDS.get(".h", set()) and ".h" in state.file_config.config.extensions:
+        return True
+    return False
+
+
+def _attach_error_detail(exc: Exception, connector: AsyncLspConnector) -> str:
+    detail = f"{exc.__class__.__name__}: {exc}"
+    stderr_tail_getter = getattr(connector, "stderr_tail_text", None)
+    stderr_tail = stderr_tail_getter() if callable(stderr_tail_getter) else ""
+    if stderr_tail:
+        if len(stderr_tail) > 1200:
+            stderr_tail = "..." + stderr_tail[-1200:]
+        detail = f"{detail}; stderr_tail={stderr_tail}"
+    return detail
 
 
 def _int(value: Any, default: int) -> int:

@@ -59,6 +59,7 @@ class FileEditTool:
     display_name: str = "File Edit"
     family: str = "system"
     description: str = (
+        "Use this first for precise text edits; do not use op_exec_shell with sed/awk/python one-liners for file edits when this tool is visible. "
         "Edit a file by replacing an exact old_string with new_string. "
         "The file must have been read first (its content cached). "
         "Returns a unified diff patch on success."

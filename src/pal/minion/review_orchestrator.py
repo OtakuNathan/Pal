@@ -459,7 +459,7 @@ class ReviewOrchestrator:
                     minion_profile=reviewer_state.pack.minion_profile,
                     payload={
                         "status": "pending",
-                        "summary": "plan review passed; minion_accept_plan or explicit policy is required before dispatch",
+                        "summary": "plan review passed; op_minion_accept_plan or explicit policy is required before dispatch",
                         "plan_ref": dict(plan_ref),
                         "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
                     },
@@ -694,8 +694,8 @@ class ReviewOrchestrator:
                 "with your own diagnosis, do not search for review artifacts, and do not broaden scope. When the next "
                 "checklist item requires a source/test/doc contract fix, before the first successful workspace edit for this "
                 "repair attempt do not call op_lsp_* and do not run broad test/static-check commands. First inspect only the "
-                "directly relevant files and make the required edit with op_workspace_file_edit, op_workspace_file_write, or "
-                "op_workspace_file_delete. If the checklist item is purely missing verification evidence, run that focused "
+                "directly relevant files and make the required edit with op_file_edit, op_file_write, or "
+                "op_path_delete. If the checklist item is purely missing verification evidence, run that focused "
                 "verification instead of inventing an edit. "
                 "After that first repair edit, use LSP when it helps verify types, symbols, or call shapes, and rerun focused "
                 "verification. Before calling op_minion_checkpoint_commit, reread source_contract, failed_acceptance_criteria, "

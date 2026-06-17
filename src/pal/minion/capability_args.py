@@ -43,7 +43,7 @@ def validate_spawn_args(args: dict[str, Any], *, repository: MinionTaskingReposi
     for field in _LEGACY_PUBLIC_SPAWN_FIELDS:
         if field in args:
             raise MinionWorkOrderValidationError(
-                f"{field} is not accepted by minion_spawn; pass a semantic DispatchRequest instead",
+                f"{field} is not accepted by op_minion_spawn; pass a semantic DispatchRequest instead",
                 field=field,
             )
     draft_id = str(args.get("draft_id") or "").strip()
@@ -61,7 +61,7 @@ def validate_spawn_args(args: dict[str, Any], *, repository: MinionTaskingReposi
         and args.get("feedback_gate_ref") is None
     ):
         raise MinionWorkOrderValidationError(
-            "minion_spawn requires plan_ref, feedback_gate_ref, draft_id, work_order_id, or task_query",
+            "op_minion_spawn requires plan_ref, feedback_gate_ref, draft_id, work_order_id, or task_query",
             field="dispatch_source",
         )
 
@@ -228,7 +228,7 @@ def pack_from_args(args: dict[str, Any], *, repository: MinionTaskingRepository 
             )
         raise MinionSpawnResolutionError(query=query, candidates=candidates)
     raise MinionWorkOrderValidationError(
-        "minion_spawn requires plan_ref, feedback_gate_ref, draft_id, work_order_id, or task_query",
+        "op_minion_spawn requires plan_ref, feedback_gate_ref, draft_id, work_order_id, or task_query",
         field="dispatch_source",
     )
 
