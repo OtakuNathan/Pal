@@ -469,9 +469,6 @@ def _review_target_acceptance_criteria(target_binding: dict[str, Any]) -> list[s
     criteria: list[str] = []
     seen: set[str] = set()
     sources = [target_binding.get("acceptance_criteria")]
-    source_contract = target_binding.get("source_contract")
-    if isinstance(source_contract, dict):
-        sources.append(source_contract.get("acceptance_criteria"))
     for source in sources:
         for item in list(source or []):
             criterion = str(item or "").strip()
@@ -490,6 +487,12 @@ def _review_target_numeric_range_criteria(target_binding: dict[str, Any]) -> lis
     seen = {_coverage_token(item) for item in criteria}
     source_contract = target_binding.get("source_contract")
     if isinstance(source_contract, dict):
+        for key in ("acceptance_criteria", "overall_acceptance_criteria"):
+            for item in list(source_contract.get(key) or []):
+                token = _coverage_token(item)
+                if token and token not in seen:
+                    seen.add(token)
+                    criteria.append(str(item or "").strip())
         for key in ("instruction", "goal", "task", "summary"):
             for clause in _numeric_range_contract_clauses(str(source_contract.get(key) or "")):
                 token = _coverage_token(clause)

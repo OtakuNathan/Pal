@@ -9,7 +9,7 @@ from pal.llm.models import LLMEndpointModel
 
 from pal.llm.llm_adaptor.base import (
     LLMProviderAdapter,
-    LiteLLMCompletionDraft,
+    OpenAIChatCompletionDraft,
     render_instruction_fallback_text,
 )
 
@@ -17,14 +17,14 @@ from pal.llm.llm_adaptor.base import (
 class AnthropicMessagesProvider(LLMProviderAdapter):
     provider_names = frozenset({"anthropic"})
     adapter_names = frozenset({"anthropic", "anthropic_messages"})
-    litellm_provider = "anthropic"
+    model_provider_prefix = "anthropic"
     model_provider_aliases = frozenset({"anthropic"})
 
     @classmethod
     def matches_endpoint(cls, endpoint: LLMEndpointModel) -> bool:
         return str(endpoint.api_mode or "") == "anthropic_messages"
 
-    def apply_request(self, request: CanonicalLLMRequest, draft: LiteLLMCompletionDraft) -> None:
+    def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIChatCompletionDraft) -> None:
         draft.thinking = _think_level_to_anthropic_thinking(
             request.metadata.get("think_level"),
             request.max_output_tokens,
@@ -69,7 +69,8 @@ def chat_messages_to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple
                 seen_conversation = True
             continue
         if role == "assistant":
-            blocks = _anthropic_text_blocks(content)
+            blocks = _anthropic_provider_thinking_blocks(message.get("provider_specific_fields"))
+            blocks.extend(_anthropic_text_blocks(content))
             for tool_call in list(message.get("tool_calls") or []):
                 block = _anthropic_tool_use_block(tool_call)
                 if block is not None:
@@ -155,6 +156,22 @@ def _think_level_to_anthropic_thinking(value: Any, max_output_tokens: int | None
 def _anthropic_text_blocks(content: Any) -> list[dict[str, Any]]:
     text = _content_text(content)
     return [{"type": "text", "text": text}] if text else []
+
+
+def _anthropic_provider_thinking_blocks(provider_specific_fields: Any) -> list[dict[str, Any]]:
+    if not isinstance(provider_specific_fields, dict):
+        return []
+    raw_blocks = provider_specific_fields.get("anthropic_thinking_blocks")
+    if not isinstance(raw_blocks, list):
+        return []
+    blocks: list[dict[str, Any]] = []
+    for block in raw_blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = str(block.get("type") or "").strip()
+        if block_type in {"thinking", "redacted_thinking"}:
+            blocks.append(dict(block))
+    return blocks
 
 
 def _anthropic_user_blocks(content: Any) -> list[dict[str, Any]]:

@@ -11,6 +11,9 @@ from pal.shared import (
     IntrospectionResult,
     RuntimeStatus,
     capability_action,
+    llm_tool_name,
+    replace_internal_tool_names,
+    replace_internal_tool_names_in_value,
 )
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
@@ -27,18 +30,18 @@ def _query_terms(query: str) -> list[str]:
 
 def _normalize_namespace(value: object) -> str:
     text = str(value or "").strip().lower()
-    if text in {"intro", INTROSPECTION_NAMESPACE}:
+    if text in {"intro", "inspect", "inspection", INTROSPECTION_NAMESPACE}:
         return INTROSPECTION_NAMESPACE
-    if text in {"op", OPERATION_NAMESPACE}:
+    if text in {"op", "action", "actions", OPERATION_NAMESPACE}:
         return OPERATION_NAMESPACE
     return text
 
 
 def _namespace_from_query(query: str) -> str:
     terms = set(_query_terms(query))
-    if INTROSPECTION_NAMESPACE in terms or "intro" in terms:
+    if INTROSPECTION_NAMESPACE in terms or "intro" in terms or "inspect" in terms:
         return INTROSPECTION_NAMESPACE
-    if OPERATION_NAMESPACE in terms or "op" in terms:
+    if OPERATION_NAMESPACE in terms or "op" in terms or "action" in terms:
         return OPERATION_NAMESPACE
     return ""
 
@@ -99,7 +102,7 @@ def _read_name_arg(args: dict[str, object], *aliases: str) -> str:
 
 
 def _compact_description(value: object) -> str:
-    text = " ".join(str(value or "").strip().split())
+    text = " ".join(replace_internal_tool_names(value).strip().split())
     if len(text) <= _DESCRIPTION_PREVIEW_CHARS:
         return text
     return f"{text[: _DESCRIPTION_PREVIEW_CHARS - 18].rstrip()} ... [truncated]"
@@ -117,8 +120,9 @@ def _required_params(spec: dict[str, object]) -> list[str]:
 
 def _compact_capability_hit(runtime: object, spec: dict[str, object]) -> dict[str, object]:
     _ = runtime
+    canonical = str(spec.get("canonical_path") or spec.get("name") or "").strip()
     return {
-        "name": str(spec.get("canonical_path") or spec.get("name") or "").strip(),
+        "name": llm_tool_name(canonical),
         "description": _compact_description(spec.get("description")),
         "required_params": _required_params(spec),
     }
@@ -185,9 +189,12 @@ def _required_params_from_schema(schema: object) -> list[str]:
 
 
 def _llm_capability_contract(capability: dict[str, object]) -> dict[str, object]:
-    parameters_schema = dict(capability.get("parameters_schema") or {"type": "object", "properties": {}})
+    parameters_schema = replace_internal_tool_names_in_value(
+        dict(capability.get("parameters_schema") or {"type": "object", "properties": {}})
+    )
+    canonical = str(capability.get("canonical_path") or capability.get("name") or "").strip()
     return {
-        "name": str(capability.get("canonical_path") or capability.get("name") or "").strip(),
+        "name": llm_tool_name(canonical),
         "description": _compact_description(capability.get("description")),
         "parameters_schema": parameters_schema,
         "required_params": _required_params_from_schema(parameters_schema),
@@ -228,7 +235,7 @@ class ToolCallTool:
     name: str = "op_tool_call"
     display_name: str = "Tool Call"
     family: str = "discovery"
-    description: str = "Invoke a discovered capability by canonical path or alias."
+    description: str = "Invoke a discovered capability by its tool name or alias."
     tags: tuple[str, ...] = ("discovery", "capability", "invoke")
     keywords: tuple[str, ...] = ("call", "invoke", "capability", "tool")
     args_schema: dict[str, object] = None  # type: ignore[assignment]
@@ -283,12 +290,12 @@ class ExecutionDiscoveryCapabilityMixin:
         scope="module",
         family="exec",
         action_name="capability_call",
-        description="Invoke any registered capability by canonical path or alias. Use op_tool_search to find available capabilities first.",
+        description="Invoke any registered capability by tool name or alias. Use search_tools to find available capabilities first.",
         aliases=("capability_call",),
         args_schema={
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Canonical path or alias of the capability to invoke."},
+                "name": {"type": "string", "description": "Tool name or alias of the capability to invoke."},
                 "args": {"type": "object", "description": "Arguments for the capability."},
             },
             "required": ["name"],
@@ -316,8 +323,8 @@ class ExecutionDiscoveryCapabilityMixin:
         family="discovery",
         action_name="search",
         description=(
-            "Search execution capabilities by query text. Use namespace='intro' for inspect/list/show capabilities "
-            "and namespace='op' for actions that mutate, execute, or call external services. Set facets=true only for broad searches that need narrowing statistics."
+            "Search execution capabilities by query text. Use namespace='inspect' for inspect/list/show capabilities "
+            "and namespace='action' for capabilities that mutate, execute, or call external services. Set facets=true only for broad searches that need narrowing statistics."
         ),
         aliases=("tool_search",),
         args_schema={
@@ -329,8 +336,8 @@ class ExecutionDiscoveryCapabilityMixin:
                 },
                 "namespace": {
                     "type": "string",
-                    "description": "Root capability namespace. Use intro/introspection to inspect state; use op/operation to perform actions.",
-                    "enum": ["intro", "introspection", "op", "operation"],
+                    "description": "Capability namespace. Use inspect to inspect state; use action to perform work.",
+                    "enum": ["inspect", "action", "introspection", "operation"],
                 },
                 "family": {"type": "string", "description": "Optional family filter such as management, lifecycle, endpoint, or search."},
                 "module_id": {"type": "string", "description": "Optional module filter such as llm, memory, channel, artifact, minion, or web_search."},
@@ -431,8 +438,8 @@ class ToolSearchTool:
     display_name: str = "Tool Search"
     family: str = "discovery"
     description: str = (
-        "Search capability definitions by query text. Use namespace='intro' for inspect/list/show capabilities "
-        "and namespace='op' for actions that mutate, execute, or call external services. Set facets=true only for broad searches that need narrowing statistics."
+        "Search capability definitions by query text. Use namespace='inspect' for inspect/list/show capabilities "
+        "and namespace='action' for actions that mutate, execute, or call external services. Set facets=true only for broad searches that need narrowing statistics."
     )
     tags: tuple[str, ...] = ("discovery", "search")
     keywords: tuple[str, ...] = ("find", "lookup", "discover", "tool")
@@ -450,8 +457,8 @@ class ToolSearchTool:
                     },
                     "namespace": {
                         "type": "string",
-                        "description": "Root capability namespace. Use intro/introspection to inspect state; use op/operation to perform actions.",
-                        "enum": ["intro", "introspection", "op", "operation"],
+                        "description": "Capability namespace. Use inspect to inspect state; use action to perform work.",
+                        "enum": ["inspect", "action", "introspection", "operation"],
                     },
                     "family": {"type": "string", "description": "Optional family filter such as management, lifecycle, endpoint, or search."},
                     "module_id": {"type": "string", "description": "Optional module filter such as llm, memory, channel, artifact, minion, or web_search."},
@@ -586,7 +593,7 @@ class ToolReadTool:
     name: str = "op_tool_read"
     display_name: str = "Tool Read"
     family: str = "discovery"
-    description: str = "Read the full definition for a capability by canonical path or alias."
+    description: str = "Read the full definition for a capability by tool name or alias."
     tags: tuple[str, ...] = ("discovery", "read")
     keywords: tuple[str, ...] = ("inspect", "definition", "schema", "tool")
     args_schema: dict[str, object] = None  # type: ignore[assignment]

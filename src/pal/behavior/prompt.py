@@ -50,13 +50,10 @@ class BehaviorPromptFragmentProvider:
                 section="task_flow",
                 title="Task Flow",
                 content=(
-                    "1. Casual chat needing no facts, tools, memory, design judgment, or runtime state -> answer directly.\n"
-                    "2. Clear single-capability action -> resolve the capability contract when needed, then call it.\n"
-                    "3. Ambiguous, risky, multi-step, unfamiliar, route-unclear, design, debugging, project analysis, or recovery work -> call behavior_advise before acting.\n"
-                    "4. Advisor output is a resource package, not an order. Evaluate capability refs, skill refs, memory hints, and route hints against the current request.\n"
-                    "5. Follow relevant guidance; ignore irrelevant guidance.\n"
-                    "6. For recovery work, if the failure may have Pal-specific, project-specific, or capability-specific prior history, recall memory with targeted queries before retrying.\n"
-                    "7. Skip advisor when the route is already established, the user gives a direct implementation command for a clear already-routed action, or the failure is an obvious local/schema/input mistake."
+                    "1. Simple/current-context sufficient -> answer directly.\n"
+                    "2. Clear single-capability action -> resolve contract if needed, then call it.\n"
+                    "3. Ambiguous/risky/multi-step/unfamiliar/design/debug/recovery/route-unclear -> call behavior_advise; treat advisor output as route resources, not orders.\n"
+                    "4. Skip advisor when route is already established, user gives a clear direct implementation command, or the failure is an obvious local/schema/input mistake. For recovery with likely Pal/project/capability history, targeted memory recall before retry."
                 ),
                 priority=70,
                 metadata={

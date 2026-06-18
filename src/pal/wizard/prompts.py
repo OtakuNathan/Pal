@@ -507,7 +507,7 @@ def run_llm_endpoint_preflight(
     invoker: object | None = None,
 ) -> WizardLLMPreflightResult:
     try:
-        from pal.llm import CanonicalLLMRequest, LiteLLMCredentialResolver, build_default_endpoint_invoker
+        from pal.llm import CanonicalLLMRequest, LLMCredentialResolver, build_default_endpoint_invoker
         from pal.llm.models import LLMEndpointModel
         from pal.llm.secret_store import InMemorySecretStore, SecretRef
     except Exception as exc:
@@ -539,7 +539,7 @@ def run_llm_endpoint_preflight(
         capabilities_blob=dict(endpoint.capabilities_blob or {}),
         notes="Setup preflight endpoint.",
     )
-    active_invoker = invoker or build_default_endpoint_invoker(credentials=LiteLLMCredentialResolver(secret_store=secret_store))
+    active_invoker = invoker or build_default_endpoint_invoker(credentials=LLMCredentialResolver(secret_store=secret_store))
     metadata = {"timeout_seconds": timeout_seconds}
 
     try:

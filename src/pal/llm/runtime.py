@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol
 
 from pal.llm.adapters import LLMProviderRegistry, build_runtime_provider_registry, _think_level_to_completion_reasoning_effort
-from pal.llm.llm_adaptor.base import LITELLM_RESPONSES_SHAPE
+from pal.llm.llm_adaptor.base import OPENAI_RESPONSES_SHAPE
 from pal.llm.llm_adaptor.anthropic_api import (
     chat_messages_to_anthropic_messages,
     chat_tools_to_anthropic_tools,
@@ -28,7 +28,7 @@ from pal.llm.codex_openai_bridge import (
     _openai_tools_to_dynamic_tools,
     _strip_openai_prefix,
 )
-from pal.llm.credentials import LiteLLMCredentialResolver
+from pal.llm.credentials import LLMCredentialResolver
 from pal.llm.request_hooks import apply_llm_message_hooks, is_zai_glm_endpoint
 
 from pal.llm.contracts import (
@@ -41,7 +41,7 @@ from pal.llm.contracts import (
 )
 from pal.llm.models import LLMEndpointModel
 from pal.llm.repository import DEFAULT_THINK_LEVEL, LLMEndpointRepository, RuntimeSettingRepository
-from pal.shared import LLMFinishReason, LLMPreflightStatus, LLMStreamEventKind
+from pal.shared import LLMFinishReason, LLMPreflightStatus, LLMStreamEventKind, llm_tool_name
 from pal.stream_events import NormalizedLLMStreamEvent
 
 
@@ -271,7 +271,7 @@ class LLMEndpointInvocationError(RuntimeError):
     pass
 
 
-def _timeout_from_litellm_kwargs(kwargs: dict[str, Any]) -> float:
+def _timeout_from_openai_kwargs(kwargs: dict[str, Any]) -> float:
     for key in ("force_timeout", "request_timeout", "timeout"):
         value = kwargs.get(key)
         if value is None:
@@ -294,7 +294,7 @@ def _run_with_wall_timeout(
         except BaseException as exc:  # noqa: BLE001
             result_queue.put(("error", exc))
 
-    thread = threading.Thread(target=target, name="pal-litellm-call", daemon=True)
+    thread = threading.Thread(target=target, name="pal-llm-call", daemon=True)
     thread.start()
     thread.join(timeout=max(0.001, float(timeout_seconds)))
     if thread.is_alive():
@@ -308,7 +308,7 @@ def _run_with_wall_timeout(
     return payload
 
 
-def _run_litellm_with_wall_timeout(
+def _run_llm_with_wall_timeout(
     operation: Callable[[], Any],
     *,
     timeout_seconds: float,
@@ -318,10 +318,10 @@ def _run_litellm_with_wall_timeout(
 
 
 @dataclass
-class LiteLLMEndpointInvoker:
-    """Unified invoker using LiteLLM, with stub:// endpoints kept local."""
+class OpenAIChatEndpointInvoker:
+    """OpenAI-compatible chat invoker, with stub:// endpoints kept local."""
 
-    credentials: LiteLLMCredentialResolver = field(default_factory=LiteLLMCredentialResolver)
+    credentials: LLMCredentialResolver = field(default_factory=LLMCredentialResolver)
     artifact_manager: Any = None
     runtime_root: str | Path | None = None
     provider_registry: LLMProviderRegistry = field(default_factory=build_runtime_provider_registry)
@@ -355,7 +355,7 @@ class LiteLLMEndpointInvoker:
         if endpoint.provider == "stub" or str(endpoint.base_url).startswith("stub://"):
             self.last_payload_summary = _summarize_provider_payload(endpoint, request.messages, image_url_format="stub")
             return self._invoke_stub(endpoint, request)
-        return self._invoke_litellm(endpoint, request)
+        return self._invoke_openai_chat(endpoint, request)
 
     def invoke_stream(
         self,
@@ -365,7 +365,7 @@ class LiteLLMEndpointInvoker:
         if endpoint.provider == "stub" or str(endpoint.base_url).startswith("stub://"):
             self.last_payload_summary = _summarize_provider_payload(endpoint, request.messages, image_url_format="stub")
             return self._invoke_stub_stream(endpoint, request)
-        return self._invoke_litellm_stream(endpoint, request)
+        return self._invoke_openai_chat_stream(endpoint, request)
 
     def _invoke_stub(
         self,
@@ -403,47 +403,51 @@ class LiteLLMEndpointInvoker:
             ),
         ]
 
-    def _invoke_litellm(
+    def _invoke_openai_chat(
         self,
         endpoint: LLMEndpointModel,
         request: CanonicalLLMRequest,
     ) -> CanonicalLLMOutcome:
         try:
-            import litellm  # type: ignore
+            import openai  # type: ignore
         except Exception as exc:
-            raise LLMEndpointInvocationError("litellm is not installed in the current runtime") from exc
+            raise LLMEndpointInvocationError("openai SDK is not installed in the current runtime") from exc
 
-        request_shape, kwargs, tool_name_aliases = self._build_litellm_kwargs(endpoint, request)
+        request_shape, kwargs, tool_name_aliases = self._build_openai_request_kwargs(endpoint, request)
         try:
-            if request_shape == LITELLM_RESPONSES_SHAPE:
-                response = _run_litellm_with_wall_timeout(
-                    lambda: litellm.responses(**kwargs),
-                    timeout_seconds=_timeout_from_litellm_kwargs(kwargs),
-                    description=f"litellm responses invocation for {endpoint.endpoint_id}",
+            if request_shape == OPENAI_RESPONSES_SHAPE:
+                client_kwargs, request_kwargs = _split_openai_responses_sdk_kwargs(kwargs)
+                client = openai.OpenAI(**client_kwargs)
+                response = _run_llm_with_wall_timeout(
+                    lambda: client.responses.create(**request_kwargs),
+                    timeout_seconds=_timeout_from_openai_kwargs(kwargs),
+                    description=f"openai responses invocation for {endpoint.endpoint_id}",
                 )
-                return self._parse_litellm_responses_response(response, tool_name_aliases=tool_name_aliases)
-            response = _run_litellm_with_wall_timeout(
-                lambda: litellm.completion(**kwargs),
-                timeout_seconds=_timeout_from_litellm_kwargs(kwargs),
-                description=f"litellm invocation for {endpoint.endpoint_id}",
+                return self._parse_openai_responses_response(response, tool_name_aliases=tool_name_aliases)
+            client_kwargs, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
+            client = openai.OpenAI(**client_kwargs)
+            response = _run_llm_with_wall_timeout(
+                lambda: client.chat.completions.create(**request_kwargs),
+                timeout_seconds=_timeout_from_openai_kwargs(kwargs),
+                description=f"openai chat invocation for {endpoint.endpoint_id}",
             )
         except Exception as exc:
-            raise LLMEndpointInvocationError(f"litellm invocation failed for {endpoint.endpoint_id}: {exc}") from exc
-        return self._parse_litellm_response(response, tool_name_aliases=tool_name_aliases)
+            raise LLMEndpointInvocationError(f"openai chat invocation failed for {endpoint.endpoint_id}: {exc}") from exc
+        return self._parse_openai_chat_response(response, tool_name_aliases=tool_name_aliases)
 
-    def _invoke_litellm_stream(
+    def _invoke_openai_chat_stream(
         self,
         endpoint: LLMEndpointModel,
         request: CanonicalLLMRequest,
     ) -> Iterable[NormalizedLLMStreamEvent]:
         try:
-            import litellm  # type: ignore
+            import openai  # type: ignore
         except Exception as exc:
-            raise LLMEndpointInvocationError("litellm is not installed in the current runtime") from exc
+            raise LLMEndpointInvocationError("openai SDK is not installed in the current runtime") from exc
 
-        request_shape, kwargs, tool_name_aliases = self._build_litellm_kwargs(endpoint, request)
-        if request_shape == LITELLM_RESPONSES_SHAPE:
-            outcome = self._invoke_litellm(endpoint, request)
+        request_shape, kwargs, tool_name_aliases = self._build_openai_request_kwargs(endpoint, request)
+        if request_shape == OPENAI_RESPONSES_SHAPE:
+            outcome = self._invoke_openai_chat(endpoint, request)
             events: list[NormalizedLLMStreamEvent] = []
             for tool_call in outcome.tool_calls:
                 events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TOOL_CALL, tool_call=tool_call))
@@ -455,35 +459,38 @@ class LiteLLMEndpointInvoker:
             events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=outcome.finish_reason))
             return events
         try:
-            return _run_litellm_with_wall_timeout(
+            client_kwargs, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
+            request_kwargs["stream"] = True
+            client = openai.OpenAI(**client_kwargs)
+            return _run_llm_with_wall_timeout(
                 lambda: list(
-                    self._iter_litellm_stream(
-                        litellm.completion(stream=True, **kwargs),
+                    self._iter_openai_chat_stream(
+                        client.chat.completions.create(**request_kwargs),
                         tool_name_aliases=tool_name_aliases,
                     )
                 ),
-                timeout_seconds=_timeout_from_litellm_kwargs(kwargs),
-                description=f"litellm streaming invocation for {endpoint.endpoint_id}",
+                timeout_seconds=_timeout_from_openai_kwargs(kwargs),
+                description=f"openai chat streaming invocation for {endpoint.endpoint_id}",
             )
         except Exception as exc:
-            raise LLMEndpointInvocationError(f"litellm invocation failed for {endpoint.endpoint_id}: {exc}") from exc
+            raise LLMEndpointInvocationError(f"openai chat invocation failed for {endpoint.endpoint_id}: {exc}") from exc
 
     def _build_completion_kwargs(
         self,
         endpoint: LLMEndpointModel,
         request: CanonicalLLMRequest,
     ) -> tuple[dict[str, Any], dict[str, str]]:
-        _, kwargs, tool_name_aliases = self._build_litellm_kwargs(endpoint, request)
+        _, kwargs, tool_name_aliases = self._build_openai_request_kwargs(endpoint, request)
         return kwargs, tool_name_aliases
 
-    def _build_litellm_kwargs(
+    def _build_openai_request_kwargs(
         self,
         endpoint: LLMEndpointModel,
         request: CanonicalLLMRequest,
     ) -> tuple[str, dict[str, Any], dict[str, str]]:
         tool_name_aliases = _build_tool_name_aliases(request.tools)
         image_url_format = _image_url_format(endpoint)
-        messages = _coerce_messages_for_litellm(
+        messages = _coerce_messages_for_openai_chat(
             list(request.messages),
             tool_name_aliases=tool_name_aliases,
             artifact_manager=self.artifact_manager,
@@ -505,7 +512,7 @@ class LiteLLMEndpointInvoker:
             except (TypeError, ValueError):
                 pass
         if endpoint.base_url and not str(endpoint.base_url).startswith("stub://"):
-            draft.api_base = _litellm_api_base(str(endpoint.base_url))
+            draft.api_base = _openai_api_base(str(endpoint.base_url))
         api_key = self.credentials.resolve_api_key(endpoint)
         if api_key:
             draft.api_key = api_key
@@ -522,10 +529,10 @@ class LiteLLMEndpointInvoker:
                 draft.max_tokens = request.max_output_tokens
         if isinstance(draft, OpenAIResponsesDraft):
             tools = chat_tools_to_responses_tools(
-                _coerce_tools_for_litellm(request.tools, tool_name_aliases=tool_name_aliases)
+                _coerce_tools_for_openai_chat(request.tools, tool_name_aliases=tool_name_aliases)
             )
         else:
-            tools = _coerce_tools_for_litellm(request.tools, tool_name_aliases=tool_name_aliases)
+            tools = _coerce_tools_for_openai_chat(request.tools, tool_name_aliases=tool_name_aliases)
         if tools:
             draft.tools = tools
             draft.tool_choice = "auto"
@@ -542,17 +549,17 @@ class LiteLLMEndpointInvoker:
         self.last_payload_summary = _summarize_provider_payload(endpoint, messages, image_url_format=image_url_format)
         return request_shape, draft.to_kwargs(), tool_name_aliases
 
-    def _iter_litellm_stream(
+    def _iter_openai_chat_stream(
         self,
         stream: Iterable[Any],
         *,
         tool_name_aliases: dict[str, str] | None = None,
     ) -> Iterable[NormalizedLLMStreamEvent]:
         for raw_chunk in stream:
-            for event in _parse_litellm_stream_chunk(raw_chunk, tool_name_aliases=tool_name_aliases):
+            for event in _parse_openai_chat_stream_chunk(raw_chunk, tool_name_aliases=tool_name_aliases):
                 yield event
 
-    def _parse_litellm_response(
+    def _parse_openai_chat_response(
         self,
         response: Any,
         *,
@@ -569,6 +576,7 @@ class LiteLLMEndpointInvoker:
         outcome = CanonicalLLMOutcome(
             text=text,
             reasoning_text=reasoning_text,
+            provider_specific_fields=_message_provider_specific_fields(message),
             tool_calls=_parse_tool_calls(message, tool_name_aliases=tool_name_aliases),
             finish_reason=str(first.get("finish_reason") or LLMFinishReason.STOP),
             response_mode=_coerce_response_mode(((payload or {}).get("metadata") or {}).get("response_mode")),
@@ -576,7 +584,7 @@ class LiteLLMEndpointInvoker:
         _ensure_llm_invocation_result_has_payload(outcome)
         return outcome
 
-    def _parse_litellm_responses_response(
+    def _parse_openai_responses_response(
         self,
         response: Any,
         *,
@@ -584,7 +592,7 @@ class LiteLLMEndpointInvoker:
     ) -> CanonicalLLMOutcome:
         payload = response.model_dump() if hasattr(response, "model_dump") else response.to_dict() if hasattr(response, "to_dict") else response
         if isinstance(payload, dict) and payload.get("choices"):
-            return self._parse_litellm_response(payload, tool_name_aliases=tool_name_aliases)
+            return self._parse_openai_chat_response(payload, tool_name_aliases=tool_name_aliases)
         output_items = list((payload or {}).get("output") or []) if isinstance(payload, dict) else []
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -663,15 +671,15 @@ def _is_empty_successful_stream_result(events: list[NormalizedLLMStreamEvent]) -
 
 @dataclass
 class OpenAIResponsesEndpointInvoker:
-    credentials: LiteLLMCredentialResolver = field(default_factory=LiteLLMCredentialResolver)
+    credentials: LLMCredentialResolver = field(default_factory=LLMCredentialResolver)
     artifact_manager: Any = None
     runtime_root: str | Path | None = None
     provider_registry: LLMProviderRegistry = field(default_factory=build_runtime_provider_registry)
     message_hooks: tuple[str, ...] = ()
-    _renderer: LiteLLMEndpointInvoker = field(init=False, repr=False)
+    _renderer: OpenAIChatEndpointInvoker = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._renderer = LiteLLMEndpointInvoker(
+        self._renderer = OpenAIChatEndpointInvoker(
             credentials=self.credentials,
             artifact_manager=self.artifact_manager,
             runtime_root=self.runtime_root,
@@ -704,20 +712,20 @@ class OpenAIResponsesEndpointInvoker:
         except Exception as exc:
             raise LLMEndpointInvocationError("openai SDK is not installed in the current runtime") from exc
 
-        request_shape, kwargs, tool_name_aliases = self._renderer._build_litellm_kwargs(endpoint, request)
-        if request_shape != LITELLM_RESPONSES_SHAPE:
+        request_shape, kwargs, tool_name_aliases = self._renderer._build_openai_request_kwargs(endpoint, request)
+        if request_shape != OPENAI_RESPONSES_SHAPE:
             raise LLMEndpointInvocationError(f"endpoint {endpoint.endpoint_id} did not render a Responses request")
         client_kwargs, request_kwargs = _split_openai_responses_sdk_kwargs(kwargs)
         try:
             client = openai.OpenAI(**client_kwargs)
             response = _run_with_wall_timeout(
                 lambda: client.responses.create(**request_kwargs),
-                timeout_seconds=_timeout_from_litellm_kwargs(kwargs),
+                timeout_seconds=_timeout_from_openai_kwargs(kwargs),
                 description=f"openai responses invocation for {endpoint.endpoint_id}",
             )
         except Exception as exc:
             raise LLMEndpointInvocationError(f"openai responses invocation failed for {endpoint.endpoint_id}: {exc}") from exc
-        return self._renderer._parse_litellm_responses_response(response, tool_name_aliases=tool_name_aliases)
+        return self._renderer._parse_openai_responses_response(response, tool_name_aliases=tool_name_aliases)
 
     def invoke_stream(self, endpoint: LLMEndpointModel, request: CanonicalLLMRequest) -> Iterable[NormalizedLLMStreamEvent]:
         yield from _stream_events_from_outcome(self.invoke(endpoint, request))
@@ -725,7 +733,7 @@ class OpenAIResponsesEndpointInvoker:
 
 @dataclass
 class AnthropicMessagesEndpointInvoker:
-    credentials: LiteLLMCredentialResolver = field(default_factory=LiteLLMCredentialResolver)
+    credentials: LLMCredentialResolver = field(default_factory=LLMCredentialResolver)
     artifact_manager: Any = None
     last_payload_summary: dict[str, Any] = field(default_factory=dict, init=False)
 
@@ -774,7 +782,7 @@ class AnthropicMessagesEndpointInvoker:
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
         tool_name_aliases = _build_tool_name_aliases(request.tools)
         image_url_format = _image_url_format(endpoint)
-        messages = _coerce_messages_for_litellm(
+        messages = _coerce_messages_for_openai_chat(
             list(request.messages),
             tool_name_aliases=tool_name_aliases,
             artifact_manager=self.artifact_manager,
@@ -793,7 +801,7 @@ class AnthropicMessagesEndpointInvoker:
         if api_key:
             client_kwargs["api_key"] = api_key
         if endpoint.base_url and not str(endpoint.base_url).startswith("stub://"):
-            client_kwargs["base_url"] = _litellm_api_base(str(endpoint.base_url))
+            client_kwargs["base_url"] = _openai_api_base(str(endpoint.base_url))
         request_kwargs: dict[str, Any] = {
             "model": _strip_model_provider_prefix(str(request.model_hint or endpoint.model_id or ""), {"anthropic"}),
             "messages": anthropic_messages,
@@ -804,7 +812,7 @@ class AnthropicMessagesEndpointInvoker:
         if request.temperature is not None:
             request_kwargs["temperature"] = request.temperature
         tools = chat_tools_to_anthropic_tools(
-            _coerce_tools_for_litellm(request.tools, tool_name_aliases=tool_name_aliases)
+            _coerce_tools_for_openai_chat(request.tools, tool_name_aliases=tool_name_aliases)
         )
         if tools:
             request_kwargs["tools"] = tools
@@ -844,15 +852,20 @@ class ZaiAnthropicMessagesEndpointInvoker(AnthropicMessagesEndpointInvoker):
 
 
 def _stream_events_from_outcome(outcome: CanonicalLLMOutcome) -> Iterable[NormalizedLLMStreamEvent]:
+    provider_specific_fields = dict(getattr(outcome, "provider_specific_fields", {}) or {})
+    if outcome.reasoning_text or provider_specific_fields:
+        yield NormalizedLLMStreamEvent(
+            event_kind=LLMStreamEventKind.REASONING_DELTA,
+            reasoning_text=outcome.reasoning_text,
+            provider_specific_fields=provider_specific_fields,
+        )
+    if outcome.text:
+        yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=outcome.text)
     for tool_call in outcome.tool_calls:
         yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TOOL_CALL, tool_call=tool_call)
     if outcome.tool_calls:
         yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.TOOL_CALLS)
         return
-    if outcome.reasoning_text:
-        yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.REASONING_DELTA, reasoning_text=outcome.reasoning_text)
-    if outcome.text:
-        yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=outcome.text)
     yield NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=outcome.finish_reason)
 
 
@@ -868,6 +881,30 @@ def _split_openai_responses_sdk_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str
         str(request_kwargs.get("model") or ""),
         {"openai", "hosted_vllm", "lm_studio", "llamafile"},
     )
+    client_kwargs: dict[str, Any] = {"max_retries": int(max_retries or 0)}
+    if api_key:
+        client_kwargs["api_key"] = api_key
+    if api_base:
+        client_kwargs["base_url"] = api_base
+    if timeout is not None:
+        client_kwargs["timeout"] = timeout
+    return client_kwargs, request_kwargs
+
+
+def _split_openai_chat_sdk_kwargs(kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    request_kwargs = dict(kwargs)
+    api_key = request_kwargs.pop("api_key", None)
+    api_base = request_kwargs.pop("api_base", None)
+    timeout = request_kwargs.pop("timeout", None)
+    max_retries = request_kwargs.pop("max_retries", 0)
+    request_kwargs.pop("request_timeout", None)
+    request_kwargs.pop("force_timeout", None)
+    thinking = request_kwargs.pop("thinking", None)
+    extra_body = dict(request_kwargs.pop("extra_body", {}) or {})
+    if thinking is not None:
+        extra_body["thinking"] = thinking
+    if extra_body:
+        request_kwargs["extra_body"] = extra_body
     client_kwargs: dict[str, Any] = {"max_retries": int(max_retries or 0)}
     if api_key:
         client_kwargs["api_key"] = api_key
@@ -897,6 +934,7 @@ def _parse_anthropic_messages_response(
     content_blocks = list((payload or {}).get("content") or []) if isinstance(payload, dict) else []
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
+    thinking_blocks: list[dict[str, Any]] = []
     tool_calls: list[CanonicalToolCall] = []
     for block in content_blocks:
         if not isinstance(block, dict):
@@ -908,9 +946,13 @@ def _parse_anthropic_messages_response(
                 text_parts.append(text)
             continue
         if block_type == "thinking":
+            thinking_blocks.append(dict(block))
             text = str(block.get("thinking") or block.get("text") or "")
             if text:
                 reasoning_parts.append(text)
+            continue
+        if block_type == "redacted_thinking":
+            thinking_blocks.append(dict(block))
             continue
         if block_type == "tool_use":
             name = _canonical_tool_name(str(block.get("name") or ""), tool_name_aliases)
@@ -927,6 +969,7 @@ def _parse_anthropic_messages_response(
     outcome = CanonicalLLMOutcome(
         text="".join(text_parts),
         reasoning_text="\n".join(reasoning_parts),
+        provider_specific_fields=_anthropic_provider_specific_fields(thinking_blocks, reasoning_parts),
         tool_calls=tool_calls,
         finish_reason=finish_reason,
     )
@@ -940,6 +983,19 @@ def _anthropic_finish_reason(stop_reason: str) -> str:
     if stop_reason == "tool_use":
         return LLMFinishReason.TOOL_CALLS
     return stop_reason or LLMFinishReason.STOP
+
+
+def _anthropic_provider_specific_fields(
+    thinking_blocks: list[dict[str, Any]],
+    reasoning_parts: list[str],
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    if thinking_blocks:
+        fields["anthropic_thinking_blocks"] = [dict(block) for block in thinking_blocks]
+    reasoning_content = "\n".join(reasoning_parts)
+    if reasoning_content:
+        fields["reasoning_content"] = reasoning_content
+    return fields
 
 
 @dataclass
@@ -1029,9 +1085,9 @@ class CodexCliEndpointInvoker:
 
 @dataclass
 class RoutingLLMEndpointInvoker:
-    """Route native providers before falling back to LiteLLM."""
+    """Route native endpoint protocols to their concrete SDK invokers."""
 
-    litellm_invoker: LiteLLMEndpointInvoker = field(default_factory=LiteLLMEndpointInvoker)
+    openai_chat_invoker: OpenAIChatEndpointInvoker = field(default_factory=OpenAIChatEndpointInvoker)
     codex_invoker: CodexCliEndpointInvoker = field(default_factory=CodexCliEndpointInvoker)
     openai_invoker: OpenAIResponsesEndpointInvoker = field(default_factory=OpenAIResponsesEndpointInvoker)
     zai_anthropic_invoker: ZaiAnthropicMessagesEndpointInvoker = field(default_factory=ZaiAnthropicMessagesEndpointInvoker)
@@ -1039,17 +1095,17 @@ class RoutingLLMEndpointInvoker:
 
     @property
     def provider_registry(self) -> LLMProviderRegistry:
-        return self.litellm_invoker.provider_registry
+        return self.openai_chat_invoker.provider_registry
 
     def refresh_credentials(self) -> bool:
-        refreshed = bool(self.litellm_invoker.refresh_credentials())
+        refreshed = bool(self.openai_chat_invoker.refresh_credentials())
         refreshed = bool(self.openai_invoker.refresh_credentials()) or refreshed
         refreshed = bool(self.zai_anthropic_invoker.refresh_credentials()) or refreshed
         refreshed = bool(self.anthropic_invoker.refresh_credentials()) or refreshed
         return refreshed
 
     def refresh_provider_registry(self) -> bool:
-        refreshed = bool(self.litellm_invoker.refresh_provider_registry())
+        refreshed = bool(self.openai_chat_invoker.refresh_provider_registry())
         refreshed = bool(self.openai_invoker.refresh_provider_registry()) or refreshed
         return refreshed
 
@@ -1068,20 +1124,20 @@ class RoutingLLMEndpointInvoker:
             return self.zai_anthropic_invoker
         if self.anthropic_invoker.supports_endpoint(endpoint):
             return self.anthropic_invoker
-        return self.litellm_invoker
+        return self.openai_chat_invoker
 
 
 def build_default_endpoint_invoker(
     *,
-    credentials: LiteLLMCredentialResolver | None = None,
+    credentials: LLMCredentialResolver | None = None,
     artifact_manager: Any = None,
     runtime_root: str | Path | None = None,
     message_hooks: tuple[str, ...] = (),
 ) -> RoutingLLMEndpointInvoker:
-    resolver = credentials or LiteLLMCredentialResolver()
+    resolver = credentials or LLMCredentialResolver()
     provider_registry = build_runtime_provider_registry()
     return RoutingLLMEndpointInvoker(
-        litellm_invoker=LiteLLMEndpointInvoker(
+        openai_chat_invoker=OpenAIChatEndpointInvoker(
             credentials=resolver,
             artifact_manager=artifact_manager,
             runtime_root=runtime_root,
@@ -1962,6 +2018,12 @@ class LLMRuntime(LLMRuntimePort):
         tool_call_id = str(message.get("tool_call_id", "") or "").strip()
         if tool_call_id:
             total += len(tool_call_id)
+        provider_specific_fields = message.get("provider_specific_fields")
+        if provider_specific_fields:
+            try:
+                total += len(json.dumps(provider_specific_fields, ensure_ascii=False, sort_keys=True))
+            except TypeError:
+                total += len(str(provider_specific_fields))
         return total
 
     def _context_margin_tokens(self, context_window: int) -> int:
@@ -2051,7 +2113,7 @@ def _coerce_response_mode(value: Any) -> str | None:
     return text
 
 
-def _litellm_api_base(base_url: str) -> str:
+def _openai_api_base(base_url: str) -> str:
     url = str(base_url or "").strip().rstrip("/")
     for suffix in ("/chat/completions", "/chat", "/v1/messages", "/messages"):
         if url.endswith(suffix):
@@ -2066,7 +2128,7 @@ def _build_tool_name_aliases(tools: list[dict[str, Any]]) -> dict[str, str]:
         name = str((function or {}).get("name") or tool.get("name") or "").strip()
         if not name:
             continue
-        aliases[name] = re.sub(r"[^a-zA-Z0-9_-]+", "_", name).strip("_") or "tool"
+        aliases[name] = re.sub(r"[^a-zA-Z0-9_-]+", "_", llm_tool_name(name)).strip("_") or "tool"
     return aliases
 
 
@@ -2079,7 +2141,7 @@ def _canonical_tool_name(name: str, tool_name_aliases: dict[str, str] | None) ->
     return str(reverse.get(name, name))
 
 
-def _coerce_tools_for_litellm(
+def _coerce_tools_for_openai_chat(
     tools: list[dict[str, Any]],
     *,
     tool_name_aliases: dict[str, str] | None = None,
@@ -2132,7 +2194,7 @@ def _estimate_tools_schema_chars(tools: list[dict[str, Any]]) -> int:
         return len(str(tools))
 
 
-def _coerce_messages_for_litellm(
+def _coerce_messages_for_openai_chat(
     messages: list[dict[str, Any]],
     *,
     tool_name_aliases: dict[str, str] | None = None,
@@ -2145,7 +2207,7 @@ def _coerce_messages_for_litellm(
         payload = dict(message)
         content = payload.get("content")
         if isinstance(content, list):
-            payload["content"] = _coerce_content_parts_for_litellm(
+            payload["content"] = _coerce_content_parts_for_openai_chat(
                 content,
                 artifact_manager=artifact_manager,
                 supports_vision=supports_vision,
@@ -2169,7 +2231,7 @@ def _coerce_messages_for_litellm(
     return normalized
 
 
-def _coerce_content_parts_for_litellm(
+def _coerce_content_parts_for_openai_chat(
     content: list[Any],
     *,
     artifact_manager: Any = None,
@@ -2300,6 +2362,17 @@ def _message_reasoning_text(message: dict[str, Any]) -> str:
     return ""
 
 
+def _message_provider_specific_fields(message: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    provider_fields = message.get("provider_specific_fields")
+    if isinstance(provider_fields, dict):
+        fields.update({str(key): value for key, value in provider_fields.items() if str(key).strip()})
+    reasoning = message.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning:
+        fields["reasoning_content"] = reasoning
+    return fields
+
+
 def _parse_tool_calls(
     message: dict[str, Any],
     *,
@@ -2337,7 +2410,7 @@ def _parse_tool_calls(
     return result
 
 
-def _parse_litellm_stream_chunk(
+def _parse_openai_chat_stream_chunk(
     raw_chunk: Any,
     *,
     tool_name_aliases: dict[str, str] | None = None,
@@ -2361,7 +2434,13 @@ def _parse_litellm_stream_chunk(
             events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text=text))
     if isinstance(reasoning_content, str):
         if reasoning_content:
-            events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.REASONING_DELTA, reasoning_text=reasoning_content))
+            events.append(
+                NormalizedLLMStreamEvent(
+                    event_kind=LLMStreamEventKind.REASONING_DELTA,
+                    reasoning_text=reasoning_content,
+                    provider_specific_fields={"reasoning_content": reasoning_content},
+                )
+            )
     for tool_call in _parse_tool_calls(delta if isinstance(delta, dict) else {}, tool_name_aliases=tool_name_aliases):
         events.append(NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TOOL_CALL, tool_call=tool_call))
     if finish_reason is not None:

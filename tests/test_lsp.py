@@ -4,12 +4,18 @@ import shutil
 import sys
 import tempfile
 import unittest
+import asyncio
+import time
 from pathlib import Path
 from unittest.mock import patch
 
+from pal.execution.contracts import CapabilityResult
 from pal.lsp.config import LspServerConfig, LspServerFileConfig, load_builtin_lsp_templates, load_lsp_server_file, lsp_config_root
 from pal.lsp.connector import AsyncLspConnector
+from pal.lsp.ipc import LspManagerClient
 from pal.lsp.manager import LspManager, LspServerState
+from pal.minion.lsp_prewarm import lsp_prewarm_plan, prewarm_workspace_lsp
+from pal.shared import RuntimeStatus
 
 
 class LspConfigTests(unittest.TestCase):
@@ -66,12 +72,24 @@ install_hint = "install pyright"
         pyright = next(item.config for item in templates if item.config.server_id == "pyright")
         self.assertEqual(pyright.command, ("npx",))
         self.assertEqual(pyright.args, ("--yes", "--package", "pyright", "pyright-langserver", "--stdio"))
-        self.assertEqual(pyright.startup_timeout_ms, 60_000)
+        self.assertEqual(pyright.startup_timeout_ms, 120_000)
         self.assertEqual(pyright.diagnostics_timeout_ms, 10_000)
         clangd = next(item.config for item in templates if item.config.server_id == "clangd")
         self.assertEqual(clangd.command, ("clangd",))
         self.assertEqual(clangd.startup_timeout_ms, 30_000)
         self.assertEqual(clangd.diagnostics_timeout_ms, 10_000)
+
+    def test_lsp_rpc_timeout_exceeds_slowest_builtin_operation_window(self) -> None:
+        templates = load_builtin_lsp_templates()
+        slowest_window_ms = max(
+            item.config.startup_timeout_ms + item.config.diagnostics_timeout_ms
+            for item in templates
+        )
+
+        self.assertGreaterEqual(
+            int(LspManagerClient(self.root).request_timeout_seconds * 1000),
+            slowest_window_ms + 10_000,
+        )
 
     def test_runtime_lsp_config_root_mirrors_minion_profile_layout(self) -> None:
         self.assertEqual(lsp_config_root(self.root), self.root / "plugins" / "lsp" / "servers")
@@ -141,6 +159,95 @@ while read_message() is not None:
 
             self.assertTrue(connector.initialized)
             self.assertIn("ready", connector.stderr_tail_text())
+        finally:
+            await connector.close()
+
+    async def test_connector_routes_concurrent_response_and_diagnostics_notification(self) -> None:
+        sample = self.root / "sample.fake"
+        sample.write_text("symbol value\n", encoding="utf-8")
+        server = self.root / "fake_lsp_concurrent.py"
+        server.write_text(
+            """
+import json
+import sys
+
+
+def read_message():
+    content_length = 0
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        if line in (b"\\r\\n", b"\\n"):
+            break
+        key, _, value = line.partition(b":")
+        if key.lower() == b"content-length":
+            content_length = int(value.strip())
+    if content_length <= 0:
+        return None
+    return json.loads(sys.stdin.buffer.read(content_length).decode("utf-8"))
+
+
+def write_message(payload):
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: " + str(len(raw)).encode("ascii") + b"\\r\\n\\r\\n" + raw)
+    sys.stdout.buffer.flush()
+
+
+request = read_message()
+write_message({"jsonrpc": "2.0", "id": request["id"], "result": {"serverInfo": {"name": "fake"}, "capabilities": {}}})
+opened_uri = ""
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    if method == "textDocument/didOpen":
+        opened_uri = message["params"]["textDocument"]["uri"]
+        write_message({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {"uri": opened_uri, "diagnostics": [{"message": "fixture diagnostic"}]},
+        })
+    elif method == "textDocument/hover":
+        write_message({
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "result": {"contents": {"kind": "markdown", "value": "fixture hover"}},
+        })
+    elif "id" in message:
+        write_message({"jsonrpc": "2.0", "id": message["id"], "result": None})
+""".lstrip(),
+            encoding="utf-8",
+        )
+        connector = AsyncLspConnector(
+            LspServerConfig(
+                server_id="fake",
+                command=(sys.executable,),
+                args=("-u", str(server)),
+                extensions=(".fake",),
+                language_ids=("fake",),
+                startup_timeout_ms=2000,
+                request_timeout_ms=2000,
+                diagnostics_timeout_ms=2000,
+            ),
+            workspace_root=self.root,
+        )
+
+        try:
+            await connector.initialize()
+
+            diagnostics_result, hover_result = await asyncio.gather(
+                connector.diagnostics(sample, language_id="fake"),
+                connector.request(
+                    "textDocument/hover",
+                    {"textDocument": {"uri": sample.resolve().as_uri()}, "position": {"line": 0, "character": 1}},
+                ),
+            )
+
+            self.assertEqual(diagnostics_result["status"], "ok")
+            self.assertEqual(diagnostics_result["diagnostics"][0]["message"], "fixture diagnostic")
+            self.assertEqual(hover_result["contents"]["value"], "fixture hover")
         finally:
             await connector.close()
 
@@ -313,6 +420,139 @@ language_ids = ["foo"]
         self.assertEqual(fallback_language, "cpp")
         self.assertEqual(header_language, "c")
 
+    async def test_server_keeps_separate_workspace_sessions(self) -> None:
+        workspace_a = self.root / "workspace_a"
+        workspace_b = self.root / "workspace_b"
+        workspace_a.mkdir()
+        workspace_b.mkdir()
+        initialized: list[Path] = []
+        closed: list[Path] = []
+
+        class FakeConnector:
+            def __init__(self, config: LspServerConfig, *, workspace_root: Path) -> None:
+                _ = config
+                self.workspace_root = workspace_root
+
+            async def initialize(self) -> None:
+                initialized.append(self.workspace_root)
+
+            async def request(self, method: str, params: dict) -> dict:
+                self_method = method
+                return {
+                    "value": [
+                        {
+                            "method": self_method,
+                            "workspace_root": str(self.workspace_root),
+                            "query": str(params.get("query") or ""),
+                        }
+                    ]
+                }
+
+            async def close(self) -> None:
+                closed.append(self.workspace_root)
+
+        state = LspServerState(
+            file_config=LspServerFileConfig(
+                config=LspServerConfig(
+                    server_id="fake_python",
+                    command=(sys.executable,),
+                    extensions=(".py",),
+                    language_ids=("python",),
+                ),
+                source="test",
+                config_path=str(self.root / "fake.toml"),
+            ),
+            config_path=self.root / "fake.toml",
+        )
+        self.manager.states[state.server_id] = state
+
+        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+            first = await self.manager.run_lsp_operation(
+                "workspace_symbols",
+                {"server_id": "fake_python", "workspace_root": str(workspace_a), "query": "A"},
+            )
+            second = await self.manager.run_lsp_operation(
+                "workspace_symbols",
+                {"server_id": "fake_python", "workspace_root": str(workspace_b), "query": "B"},
+            )
+            third = await self.manager.run_lsp_operation(
+                "workspace_symbols",
+                {"server_id": "fake_python", "workspace_root": str(workspace_a), "query": "C"},
+            )
+
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(second["status"], "ok")
+        self.assertEqual(third["status"], "ok")
+        self.assertEqual(initialized, [workspace_a.resolve(), workspace_b.resolve()])
+        self.assertEqual(len(state.sessions), 2)
+        self.assertEqual(third["result"][0]["workspace_root"], str(workspace_a.resolve()))
+        summary = self.manager._server_summary(state)
+        self.assertEqual(summary["attached_count"], 2)
+        await self.manager.close_all()
+        self.assertEqual(sorted(str(path) for path in closed), sorted(str(path.resolve()) for path in (workspace_a, workspace_b)))
+
+    async def test_idle_eviction_closes_only_stale_workspace_sessions(self) -> None:
+        workspace_a = self.root / "workspace_a"
+        workspace_b = self.root / "workspace_b"
+        workspace_a.mkdir()
+        workspace_b.mkdir()
+        closed: list[Path] = []
+
+        class FakeConnector:
+            def __init__(self, config: LspServerConfig, *, workspace_root: Path) -> None:
+                _ = config
+                self.workspace_root = workspace_root
+
+            async def initialize(self) -> None:
+                return None
+
+            async def request(self, method: str, params: dict) -> dict:
+                _ = method
+                return {"value": [{"workspace_root": str(self.workspace_root), "query": str(params.get("query") or "")}]}
+
+            async def close(self) -> None:
+                closed.append(self.workspace_root)
+
+        state = LspServerState(
+            file_config=LspServerFileConfig(
+                config=LspServerConfig(
+                    server_id="fake_python",
+                    command=(sys.executable,),
+                    extensions=(".py",),
+                    language_ids=("python",),
+                ),
+                source="test",
+                config_path=str(self.root / "fake.toml"),
+            ),
+            config_path=self.root / "fake.toml",
+        )
+        self.manager.states[state.server_id] = state
+
+        with patch("pal.lsp.manager.AsyncLspConnector", FakeConnector):
+            await self.manager.run_lsp_operation(
+                "workspace_symbols",
+                {"server_id": "fake_python", "workspace_root": str(workspace_a), "query": "A"},
+            )
+            await self.manager.run_lsp_operation(
+                "workspace_symbols",
+                {"server_id": "fake_python", "workspace_root": str(workspace_b), "query": "B"},
+            )
+
+        stale = state.sessions[str(workspace_a.resolve())]
+        active = state.sessions[str(workspace_b.resolve())]
+        now = time.monotonic()
+        stale.last_used_at = now - 10.0
+        active.last_used_at = now
+
+        result = await self.manager.evict_idle_sessions(now=now, idle_seconds=1.0)
+
+        self.assertEqual(result["evicted_count"], 1)
+        self.assertEqual(closed, [workspace_a.resolve()])
+        self.assertNotIn(str(workspace_a.resolve()), state.sessions)
+        self.assertIn(str(workspace_b.resolve()), state.sessions)
+        self.assertTrue(state.attached)
+        self.assertIs(state.connector, active.connector)
+
     async def test_recent_attach_failure_short_circuits_repeated_operations(self) -> None:
         sample = self.root / "sample.foo"
         sample.write_text("symbol value\n", encoding="utf-8")
@@ -436,3 +676,59 @@ language_ids = ["foo"]
         self.assertEqual(incoming["result"]["items"][0]["name"], "target")
         self.assertEqual(incoming["result"]["calls"][0]["calls"][0]["from"]["name"], "caller")
         self.assertEqual(outgoing["result"]["calls"][0]["calls"][0]["to"]["name"], "dependency")
+
+
+class LspPrewarmTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp(prefix="pal_lsp_prewarm_test_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_prewarm_plan_uses_workspace_lsp_setup_servers(self) -> None:
+        workspace = {
+            "repo_path": str(self.root),
+            "languages": ["python"],
+            "lsp_setup": {"servers": ["pyright", "pyright"], "languages": ["python"]},
+        }
+
+        plan = lsp_prewarm_plan(workspace)
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.workspace_root, self.root.resolve())
+        self.assertEqual(plan.server_ids, ("pyright",))
+        self.assertEqual(plan.languages, ("python",))
+
+    def test_prewarm_calls_lsp_doctor_for_each_server(self) -> None:
+        calls = []
+
+        class FakeProvider:
+            def __init__(self, *, runtime_root: Path) -> None:
+                self.runtime_root = runtime_root
+
+            def doctor(self, call):
+                calls.append(call)
+                return CapabilityResult(
+                    status=RuntimeStatus.OK,
+                    text="ok",
+                    llm_text="ok",
+                    structured={"status": "ok"},
+                )
+
+        result = prewarm_workspace_lsp(
+            runtime_root=self.root,
+            workspace={
+                "repo_path": str(self.root),
+                "languages": ["python"],
+                "lsp_setup": {"servers": ["pyright"], "languages": ["python"]},
+            },
+            provider_factory=FakeProvider,
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["ok_count"], 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].args["server_id"], "pyright")
+        self.assertEqual(calls[0].args["workspace_root"], str(self.root.resolve()))
+        self.assertEqual(calls[0].args["workspace_languages"], ["python"])

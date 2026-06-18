@@ -8,7 +8,7 @@ from pal.llm.contracts import CanonicalLLMRequest
 from pal.llm.models import LLMEndpointModel
 
 from pal.llm.llm_adaptor.base import (
-    LITELLM_RESPONSES_SHAPE,
+    OPENAI_RESPONSES_SHAPE,
     LLMProviderAdapter,
     _capabilities,
     _think_level_to_completion_reasoning_effort,
@@ -60,9 +60,9 @@ class OpenAIResponsesDraft:
 class OpenAIResponsesProvider(LLMProviderAdapter):
     provider_names = frozenset({"openai"})
     adapter_names = frozenset({"openai_responses", "responses"})
-    litellm_provider = "openai"
+    model_provider_prefix = "openai"
     model_provider_aliases = frozenset({"openai"})
-    request_shape = LITELLM_RESPONSES_SHAPE
+    request_shape = OPENAI_RESPONSES_SHAPE
 
     @classmethod
     def matches_endpoint(cls, endpoint: LLMEndpointModel) -> bool:
@@ -72,7 +72,7 @@ class OpenAIResponsesProvider(LLMProviderAdapter):
     def new_draft(self, messages: list[dict[str, Any]]) -> OpenAIResponsesDraft:  # type: ignore[override]
         instructions, input_items = chat_messages_to_responses_input(messages)
         return OpenAIResponsesDraft(
-            model=self.litellm_model(),
+            model=self.api_model(),
             instructions=instructions,
             input=input_items,
         )

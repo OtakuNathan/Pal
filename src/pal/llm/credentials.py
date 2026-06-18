@@ -27,7 +27,7 @@ class ResolvedLLMAuth:
 
 
 @dataclass
-class LiteLLMCredentialResolver:
+class LLMCredentialResolver:
     """Resolve provider credentials without exposing them through introspection."""
 
     secret_store: SecretStorePort | None = None

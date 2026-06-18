@@ -234,26 +234,26 @@ ADAPTERS = (MyProviderAdapter, OtherProviderAdapter)
 
 ## Adapter Contract
 
-Keep adapter code small and deterministic. It should translate Pal's canonical request and endpoint metadata into LiteLLM kwargs, not perform network calls, mutate databases, read secrets, or import PalCore internals.
+Keep adapter code small and deterministic. It should translate Pal's canonical request and endpoint metadata into OpenAI-compatible request fields, not perform network calls, mutate databases, read secrets, or import PalCore internals.
 
 Minimal adapter:
 
 ```python
-from pal.llm import CanonicalLLMRequest, LLMProviderAdapter, LiteLLMCompletionDraft
+from pal.llm import CanonicalLLMRequest, LLMProviderAdapter, OpenAIChatCompletionDraft
 
 
 class MyProviderAdapter(LLMProviderAdapter):
     provider_names = frozenset({"my_provider"})
     adapter_names = frozenset({"my_provider"})
-    litellm_provider = "openai"
+    model_provider_prefix = "openai"
     model_provider_aliases = frozenset({"openai"})
 
-    def apply_request(self, request: CanonicalLLMRequest, draft: LiteLLMCompletionDraft) -> None:
+    def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIChatCompletionDraft) -> None:
         if request.metadata.get("think_level") == "off":
             draft.extra_body["thinking"] = {"type": "disabled"}
 ```
 
-Use `provider_names` for endpoint `provider` matching. Use `adapter_names` when an endpoint sets `capabilities_blob.adapter` or `capabilities_blob.llm_adapter`. Use `litellm_provider` and `model_provider_aliases` to normalize `model_id` into the provider prefix LiteLLM expects.
+Use `provider_names` for endpoint `provider` matching. Use `adapter_names` when an endpoint sets `capabilities_blob.adapter` or `capabilities_blob.llm_adapter`. Use `model_provider_prefix` and `model_provider_aliases` to strip known provider prefixes from `model_id` before sending the model name to the provider API.
 
 ## Endpoint Row
 
@@ -261,7 +261,7 @@ Create or update endpoint metadata only after checking the existing endpoint lis
 
 - `endpoint_id`: stable unique ID, such as `my_provider_gpt_5`.
 - `provider`: must match the adapter `provider_names` unless `capabilities_blob.adapter` selects the adapter.
-- `model_id`: model name or LiteLLM-prefixed model, such as `my-model` or `openai/my-model`.
+- `model_id`: model name or provider-prefixed model, such as `my-model` or `openai/my-model`.
 - `api_mode`: normally `openai_chat`; use `anthropic_messages` only for Anthropic-shaped endpoints.
 - `base_url`: provider base URL, without credentials.
 - `auth_kind`: `api_key_ref`, `oauth`, or `local_provider_auth`.
@@ -278,7 +278,7 @@ Before asking the user to refresh:
 2. Write adapter source in the runtime-root adapter directory.
 3. Compile the adapter file with `python -m py_compile <adapter_file>`.
 4. Load it only in an isolated registry or subprocess, not the live Pal runtime.
-5. Build a representative `LiteLLMEndpointInvoker(...)._build_completion_kwargs(...)` payload with a fake or test endpoint.
+5. Build a representative `OpenAIChatEndpointInvoker(...)._build_completion_kwargs(...)` payload with a fake or test endpoint.
 6. Assert model prefix, `api_base`, auth behavior, tools, `tool_choice`, `temperature`, max tokens, reasoning/thinking fields, and vendor-specific `extra_body`.
 7. Confirm the adapter does not import plugin, channel, control, service, or PalCore internals.
 8. If endpoint metadata changes are needed, verify them against a temporary database or produce an exact patch for user approval.
@@ -661,7 +661,7 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
                 "provider adapter",
                 "endpoint adapter",
                 "runtime adapter",
-                "litellm adapter",
+                "OpenAI-compatible adapter",
                 "new model provider",
                 "add llm provider",
                 "pal.llm_provider_adapters",
@@ -680,7 +680,7 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
                 result="The adapter and endpoint are ready to load, with tests completed and production refresh left to the user.",
             ),
             use_when=(
-                "Use when the user asks Pal to add an LLM adapter, add an LLM endpoint, fix provider-specific LiteLLM "
+                "Use when the user asks Pal to add an LLM adapter, add an LLM endpoint, fix provider-specific OpenAI-compatible "
                 "serialization, or prepare a new model provider integration."
             ),
             avoid_when=(

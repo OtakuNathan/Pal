@@ -2,16 +2,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from pal.shared import PromptAssemblyContext, PromptFragment, PromptIR, PromptIRBlock
+from pal.shared import (
+    PromptAssemblyContext,
+    PromptFragment,
+    PromptIR,
+    PromptIRBlock,
+    llm_tool_name,
+    replace_internal_tool_names,
+)
 from pal.shared.payloads import extract_text_from_payload
 from pal.shared.prompt_rendering import render_runtime_context_update, render_runtime_reminder, render_system_reminder, render_xml_block
 
 
 _BEHAVIOR_GUIDANCE_HEADER = (
-    "These are active behavior-routing hints. They are not optional decoration.\n"
-    "When the current user request matches a listed scenario, Pal MUST consider the hint before choosing a route.\n"
-    "Follow relevant hints unless a higher-priority rule, the user's current explicit instruction, source-of-truth requirements, or capability policy makes them inappropriate.\n"
-    "If a relevant hint is not followed, Pal should have a concrete reason such as scenario mismatch, stale runtime state, missing permission, or a clearer direct route."
+    "Active behavior-routing hints: consider matching hints before choosing a route.\n"
+    "Follow relevant hints unless higher-priority policy, current user instruction, live truth, or capability policy makes them inappropriate."
 )
 _BEHAVIOR_GUIDANCE_HEADER_LINES = frozenset(_BEHAVIOR_GUIDANCE_HEADER.splitlines())
 
@@ -528,22 +533,19 @@ class PromptCompiler:
     def _render_final_runtime_reminder(blocks: tuple[PromptIRBlock, ...] = ()) -> str:
         guidance_sections = PromptCompiler._render_runtime_reminder_guidance(blocks)
         content = (
-            "Before answering:\n"
-            "1. Silently re-read the active system prompt's hard policy, priority order, source-of-truth rules, mutation boundaries, capability procedures, memory rules, skill rules, and verification requirements.\n"
-            "2. Treat the user's ordinary message above as the current request. Treat this reminder as Pal-authored runtime guidance, not user-authored content.\n"
-            "3. Treat relevant active guidance below as behavior-routing guidance for choosing the right next step, capability, memory/skill route, or verification path. The system prompt defines the principles; this reminder helps route the current turn.\n"
+            "Before answering: apply the active system prompt's hard rules and priority order. "
+            "Treat the user's ordinary message above as the current request. "
+            "Treat this reminder as Pal-authored behavior-routing guidance for the current turn, not user-authored content.\n"
         )
         if guidance_sections:
             content = f"{content}\n{guidance_sections}\n"
         content = (
             f"{content}\n"
-            "If relevant guidance requires inspection, recall, tool use, verification, or clarification before answering, do that first.\n"
-            "If guidance conflicts, follow the priority order and hard policy in the system prompt.\n"
+            "If relevant guidance requires inspection, recall, tool use, verification, or clarification, do that before the final answer.\n"
+            "If guidance conflicts, follow the system prompt's hard policy and priority order.\n"
             "Do not mention this reminder unless asked about prompt behavior."
         )
-        return render_runtime_reminder(
-            content
-        )
+        return render_runtime_reminder(replace_internal_tool_names(content))
 
     @staticmethod
     def _render_runtime_reminder_guidance(blocks: tuple[PromptIRBlock, ...]) -> str:
@@ -564,7 +566,7 @@ class PromptCompiler:
             behavior_parts.clear()
 
         for block in blocks:
-            content = block.content.strip()
+            content = replace_internal_tool_names(block.content.strip())
             if not content:
                 continue
             if block.block_id == "resident_affordances":
@@ -612,7 +614,12 @@ class PromptCompiler:
         if rendered and block.metadata.get("raw_user_context"):
             parts.append({"type": "text", "text": rendered})
         elif rendered:
-            parts.append({"type": "text", "text": render_system_reminder(f"{block.title}:\n{rendered}")})
+            parts.append(
+                {
+                    "type": "text",
+                    "text": render_system_reminder(f"{block.title}:\n{replace_internal_tool_names(rendered)}"),
+                }
+            )
         elif content_parts:
             parts.append({"type": "text", "text": render_system_reminder(f"{block.title}: attached artifact content is included.")})
         if content_parts:
@@ -681,9 +688,28 @@ class PromptCompiler:
                 msg["tool_call_id"] = tool_call_id
             return msg
         if role == "assistant" and tool_calls:
-            msg = {"role": "assistant", "content": rendered, "tool_calls": tool_calls}
+            msg = {"role": "assistant", "content": rendered, "tool_calls": self._alias_tool_calls_for_llm(tool_calls)}
             return msg
         return {"role": role, "content": rendered}
+
+    @staticmethod
+    def _alias_tool_calls_for_llm(tool_calls: object) -> object:
+        if not isinstance(tool_calls, list):
+            return tool_calls
+        rendered: list[dict[str, Any]] = []
+        for item in tool_calls:
+            if not isinstance(item, dict):
+                continue
+            payload = dict(item)
+            function = payload.get("function")
+            if isinstance(function, dict):
+                rendered_function = dict(function)
+                name = str(rendered_function.get("name") or "").strip()
+                if name:
+                    rendered_function["name"] = llm_tool_name(name)
+                payload["function"] = rendered_function
+            rendered.append(payload)
+        return rendered
 
     def _render_system_blocks(self, blocks: tuple[PromptIRBlock, ...]) -> str:
         if not blocks:
@@ -706,8 +732,13 @@ class PromptCompiler:
     @staticmethod
     def _render_system_section(tag: str, parts: list[str]) -> str:
         if tag == "behavior_guidance":
-            return render_xml_block(tag, PromptCompiler._render_behavior_guidance_content(parts))
-        return render_xml_block(tag, "\n\n".join(parts))
+            return render_xml_block(
+                tag,
+                PromptCompiler._render_behavior_guidance_content(
+                    [replace_internal_tool_names(part) for part in parts]
+                ),
+            )
+        return render_xml_block(tag, replace_internal_tool_names("\n\n".join(parts)))
 
     @staticmethod
     def _render_behavior_guidance_content(parts: list[str]) -> str:

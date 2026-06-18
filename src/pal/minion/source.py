@@ -14,7 +14,7 @@ from pal.control.interactions import (
 )
 from pal.core.events import EventHandler, EventSource
 from pal.foundation import EventEnvelope
-from pal.shared import EventKind, SourceKind
+from pal.shared import ChannelEnvelope, EndpointConfig, EventKind, ResponseHandle, SourceKind
 
 
 @dataclass
@@ -124,44 +124,41 @@ class MinionControlEventHandler(EventHandler):
                 notes="minion event notification",
             )
         elif event.event_kind in {EventKind.MINION_TERMINAL, EventKind.MINION_MODULE_COMPLETED, EventKind.MINION_WORK_ORDER_COMPLETED}:
-            text = _render_minion_event_notification(event.event_kind, payload)
-            if not text:
-                return []
             module_continue_delivery = (
                 minion_module_continue_delivery(payload, route)
                 if event.event_kind == EventKind.MINION_MODULE_COMPLETED
                 else None
             )
             if module_continue_delivery is not None:
-                action = ControlAction(
-                    action_kind="interactive_open",
-                    target_scope="interaction",
-                    target_id=(
-                        module_continue_delivery.interaction.interaction_id
-                        if module_continue_delivery.interaction is not None
-                        else None
-                    ),
-                    route=route,
-                    delivery=module_continue_delivery,
-                    notes="minion module continue",
-                )
+                envelopes = [
+                    EventEnvelope(
+                        event_kind=EventKind.CONTROL_ACTION,
+                        source_kind=SourceKind.CONTROL,
+                        payload=ControlAction(
+                            action_kind="interactive_open",
+                            target_scope="interaction",
+                            target_id=(
+                                module_continue_delivery.interaction.interaction_id
+                                if module_continue_delivery.interaction is not None
+                                else None
+                            ),
+                            route=route,
+                            delivery=module_continue_delivery,
+                            notes="minion module continue",
+                        ),
+                        correlation_id=event.correlation_id,
+                    )
+                ]
             else:
-                action = ControlAction(
-                    action_kind="route_reply",
-                    target_scope="channel",
-                    target_id=str(payload.get("run_id") or payload.get("minion_id") or ""),
-                    route=route,
-                    delivery=delivery_for_reply(route, text),
-                    notes="minion event notification",
-                )
-            envelopes = [
-                EventEnvelope(
-                    event_kind=EventKind.CONTROL_ACTION,
-                    source_kind=SourceKind.CONTROL,
-                    payload=action,
+                notification_event = _build_minion_completion_trigger_event(
+                    event.event_kind,
+                    payload,
+                    route,
                     correlation_id=event.correlation_id,
                 )
-            ]
+                if notification_event is None:
+                    return []
+                envelopes = [notification_event]
             lesson_delivery = minion_lesson_approval_delivery(payload, route)
             if lesson_delivery is not None:
                 envelopes.append(
@@ -264,61 +261,6 @@ def _render_minion_event_notification(event_kind: str, payload: dict[str, Any]) 
         if summary and summary != phase:
             lines.append(f"Summary: {summary}")
         return "\n".join(lines)
-    if event_kind == EventKind.MINION_MODULE_COMPLETED:
-        status = str(payload.get("status") or "completed")
-        summary = str(payload.get("summary") or "").strip()
-        module_id = str(payload.get("module_id") or "").strip()
-        lines = [f"Minion module completed: {status}", f"Profile: {profile}"]
-        if module_id:
-            lines.append(f"Module: {module_id}")
-        if work_order_id:
-            lines.append(f"Work order: {work_order_id}")
-        completed_count = payload.get("completed_milestone_count")
-        if completed_count is not None:
-            lines.append(f"Milestones: {completed_count}")
-        if summary:
-            lines.append("Summary:")
-            lines.append(_preview_text(summary, limit=500))
-        return "\n".join(lines)
-    if event_kind == EventKind.MINION_WORK_ORDER_COMPLETED:
-        status = str(payload.get("status") or "completed")
-        summary = str(payload.get("summary") or "").strip()
-        task_id = str(payload.get("task_id") or "").strip()
-        lines = [f"Minion work order completed: {status}", f"Profile: {profile}"]
-        if task_id:
-            lines.append(f"Task: {task_id}")
-        if work_order_id:
-            lines.append(f"Work order: {work_order_id}")
-        completed_count = payload.get("completed_milestone_count")
-        if completed_count is not None:
-            lines.append(f"Milestones: {completed_count}")
-        if summary:
-            lines.append("Summary:")
-            lines.append(_preview_text(summary, limit=500))
-        return "\n".join(lines)
-    if event_kind == EventKind.MINION_TERMINAL:
-        status = str(payload.get("status") or "terminal")
-        summary = _preview_text(_strip_lesson_sections(str(payload.get("summary") or "")).strip(), limit=500)
-        artifacts = _artifact_list(payload.get("artifacts"))
-        lines = [f"Minion finished: {status}", f"Profile: {profile}"]
-        if run_id:
-            lines.append(f"Run: {run_id}")
-        if work_order_id:
-            lines.append(f"Work order: {work_order_id}")
-        if artifacts:
-            lines.append("Artifacts:")
-            for index, artifact in enumerate(artifacts[:3], start=1):
-                label = str(artifact.get("title") or artifact.get("relative_path") or "artifact").strip()
-                path = str(artifact.get("path") or artifact.get("relative_path") or "").strip()
-                lines.append(f"[{index}] {label}: {path}")
-            if len(artifacts) > 3:
-                lines.append(f"[...] {len(artifacts) - 3} more")
-        if summary:
-            if artifacts:
-                lines.append("")
-            lines.append("Summary:")
-            lines.append(summary)
-        return "\n".join(lines)
     return ""
 
 
@@ -347,58 +289,96 @@ def _record_minion_observation(provider: object | None, context: Any, payload: d
             return
 
 
-def _preview_text(value: str, *, limit: int) -> str:
-    text = _compact_preview_text(str(value or ""))
-    if len(text) <= limit:
-        return text
-    return text[: max(0, limit - 3)].rstrip() + "..."
+def _build_minion_completion_trigger_event(
+    event_kind: str,
+    payload: dict[str, Any],
+    route: ControlRoute,
+    *,
+    correlation_id: str | None = None,
+) -> EventEnvelope | None:
+    text = _render_minion_completion_trigger(event_kind, payload)
+    if not text:
+        return None
+    trigger_event = EventEnvelope(
+        event_kind=EventKind.USER_MESSAGE,
+        source_kind=SourceKind.MINION,
+        payload={
+            "text": text,
+            "minion_completion_trigger": {
+                "event_kind": event_kind,
+                "run_id": str(payload.get("run_id") or ""),
+                "work_order_id": str(payload.get("work_order_id") or ""),
+                "minion_id": str(payload.get("minion_id") or ""),
+                "status": str(payload.get("status") or ""),
+            },
+        },
+        correlation_id=correlation_id or route.correlation_id,
+    )
+    channel_envelope = ChannelEnvelope(
+        event=trigger_event,
+        endpoint=EndpointConfig(
+            endpoint_id=route.endpoint_id,
+            channel_kind=route.channel_kind,
+            binding_key=route.control_scope_key or route.endpoint_id,
+        ),
+        response_handle=ResponseHandle(
+            endpoint_id=route.endpoint_id,
+            reply_target=dict(route.reply_target),
+        ),
+    )
+    return EventEnvelope(
+        event_kind=EventKind.USER_MESSAGE,
+        source_kind=SourceKind.MINION,
+        payload=channel_envelope,
+        correlation_id=trigger_event.correlation_id,
+    )
 
 
-def _compact_preview_text(value: str) -> str:
-    lines: list[str] = []
-    blank_pending = False
-    for raw_line in str(value or "").strip().splitlines():
-        line = " ".join(raw_line.strip().split())
-        if not line:
-            blank_pending = bool(lines)
-            continue
-        if blank_pending:
-            lines.append("")
-            blank_pending = False
-        lines.append(line)
-    return "\n".join(lines).strip()
-
-
-def _strip_lesson_sections(text: str) -> str:
-    current_lesson_section = False
-    kept: list[str] = []
-    for line in str(text or "").splitlines():
-        stripped = line.strip().strip("-* ")
-        if _lesson_heading_kind(stripped):
-            current_lesson_section = True
-            continue
-        if current_lesson_section and stripped:
-            continue
-        current_lesson_section = False
-        kept.append(line.rstrip())
-    return "\n".join(kept).strip()
-
-
-def _lesson_heading_kind(text: str) -> str:
-    normalized = str(text or "").strip().strip("#*_` ")
-    while normalized and not (normalized[0].isalnum() or normalized[0] == "_"):
-        normalized = normalized[1:].strip()
-    lowered = normalized.lower().replace("_", " ")
-    lowered = lowered.rstrip(":").strip()
-    if lowered in {"task lesson", "task lessons", "task wise lessons", "task-wise lessons"}:
-        return "task_lessons"
-    if lowered in {"system lesson", "system lessons", "system wise lessons", "system-wise lessons"}:
-        return "system_lessons"
-    if lowered.startswith(("task lesson:", "task lessons:", "task wise lessons:", "task-wise lessons:")):
-        return "task_lessons"
-    if lowered.startswith(("system lesson:", "system lessons:", "system wise lessons:", "system-wise lessons:")):
-        return "system_lessons"
-    return ""
+def _render_minion_completion_trigger(event_kind: str, payload: dict[str, Any]) -> str:
+    run_id = str(payload.get("run_id") or "").strip()
+    work_order_id = str(payload.get("work_order_id") or "").strip()
+    minion_id = str(payload.get("minion_id") or "").strip()
+    profile = str(payload.get("minion_profile") or payload.get("profile") or "minion").strip()
+    status = str(payload.get("status") or "completed").strip()
+    if not (run_id or work_order_id or minion_id):
+        return ""
+    lines = [
+        "<minion_completion_trigger>",
+        "A minion task has completed. Treat this as an internal runtime event, not as the user's final answer.",
+        f"event_kind: {event_kind}",
+        f"status: {status}",
+        f"profile: {profile}",
+    ]
+    if minion_id:
+        lines.append(f"minion_id: {minion_id}")
+    if run_id:
+        lines.append(f"run_id: {run_id}")
+    if work_order_id:
+        lines.append(f"work_order_id: {work_order_id}")
+    task_id = str(payload.get("task_id") or "").strip()
+    module_id = str(payload.get("module_id") or "").strip()
+    if task_id:
+        lines.append(f"task_id: {task_id}")
+    if module_id:
+        lines.append(f"module_id: {module_id}")
+    artifacts = _artifact_list(payload.get("artifacts"))
+    if artifacts:
+        lines.append(f"artifact_count: {len(artifacts)}")
+    lines.extend(
+        [
+            "",
+            "Required action:",
+            "- MUST query current minion manager state before replying to the user.",
+            "- Prefer `intro_minion_work_order_read` when work_order_id is present; use `intro_minion_read` for run_id details when needed.",
+            "- If those exact capabilities are not available in the current tool surface, use tool introspection/search to find the minion state read capability.",
+            "- Do not send a final user-visible response until the manager query has completed.",
+            "- Tell the user which task/work order completed, the final status, relevant artifacts, and any next action.",
+            "- Trust manager state over this trigger if they disagree.",
+            "- Do not ask the user to poll minion status.",
+            "</minion_completion_trigger>",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _route_from_payload(payload: object) -> ControlRoute | None:

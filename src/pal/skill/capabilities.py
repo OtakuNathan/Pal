@@ -94,7 +94,7 @@ if TYPE_CHECKING:
     affordance_id="declared.skill.pal_llm_adapter_endpoint_development",
     title="Pal LLM adapter endpoint development skill",
     scenario_text=(
-        "The user wants to add, repair, test, or validate an LLM provider adapter, LiteLLM "
+        "The user wants to add, repair, test, or validate an LLM provider adapter, OpenAI-compatible "
         "serialization adapter, runtime-root adapter source, or matching llm_endpoints row."
     ),
     prompt_hint=(
@@ -107,7 +107,7 @@ if TYPE_CHECKING:
         "provider adapter",
         "endpoint adapter",
         "runtime adapter",
-        "litellm adapter",
+        "OpenAI-compatible adapter",
         "new model provider",
         "add llm provider",
         "llm/adapters",

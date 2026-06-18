@@ -38,6 +38,9 @@ from pal.shared import (
     CompiledCapabilityIndex,
     RuntimeStatus,
     SINGLETON_TARGET,
+    llm_tool_name,
+    replace_internal_tool_names,
+    replace_internal_tool_names_in_value,
 )
 from pal.shared.result_rendering import render_head_tail_preview_for_llm
 
@@ -141,31 +144,39 @@ class ExecutionRuntime(ExecutionRuntimePort):
             tool = self.tools[name]
             specs.append(
                 {
-                    "name": tool.name,
+                    "name": llm_tool_name(tool.name),
                     "display_name": str(getattr(tool, "display_name", "") or tool.name),
                     "family": str(getattr(tool, "family", "") or "general"),
-                    "description": str(getattr(tool, "description", "") or f"Tool {tool.name}"),
+                    "description": replace_internal_tool_names(getattr(tool, "description", "") or f"Tool {tool.name}"),
                     "tags": list(getattr(tool, "tags", ()) or ()),
                     "keywords": list(getattr(tool, "keywords", ()) or ()),
-                    "args_schema": dict(getattr(tool, "args_schema", {}) or {"type": "object", "properties": {}}),
-                    "result_schema": dict(getattr(tool, "result_schema", {}) or {"type": "object", "properties": {}}),
+                    "args_schema": replace_internal_tool_names_in_value(
+                        dict(getattr(tool, "args_schema", {}) or {"type": "object", "properties": {}})
+                    ),
+                    "result_schema": replace_internal_tool_names_in_value(
+                        dict(getattr(tool, "result_schema", {}) or {"type": "object", "properties": {}})
+                    ),
                 }
             )
         return specs
 
     def get_tool_spec(self, name: str) -> dict[str, Any] | None:
-        tool = self.tools.get(name)
+        tool = self.tools.get(name) or self.tools.get(self.resolve_llm_tool_name(name))
         if tool is None:
             return None
         return {
-            "name": tool.name,
+            "name": llm_tool_name(tool.name),
             "display_name": str(getattr(tool, "display_name", "") or tool.name),
             "family": str(getattr(tool, "family", "") or "general"),
-            "description": str(getattr(tool, "description", "") or f"Tool {tool.name}"),
+            "description": replace_internal_tool_names(getattr(tool, "description", "") or f"Tool {tool.name}"),
             "tags": list(getattr(tool, "tags", ()) or ()),
             "keywords": list(getattr(tool, "keywords", ()) or ()),
-            "args_schema": dict(getattr(tool, "args_schema", {}) or {"type": "object", "properties": {}}),
-            "result_schema": dict(getattr(tool, "result_schema", {}) or {"type": "object", "properties": {}}),
+            "args_schema": replace_internal_tool_names_in_value(
+                dict(getattr(tool, "args_schema", {}) or {"type": "object", "properties": {}})
+            ),
+            "result_schema": replace_internal_tool_names_in_value(
+                dict(getattr(tool, "result_schema", {}) or {"type": "object", "properties": {}})
+            ),
         }
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
@@ -266,6 +277,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
         turn_id: str | None = None,
     ) -> CanonicalToolResult:
         call_id = getattr(call, "call_id", None)
+        resolved_name = self.resolve_llm_tool_name(call.name)
+        if resolved_name != call.name:
+            call = CanonicalToolCall(name=resolved_name, args=dict(call.args), call_id=call_id)
         try:
             if not allow_tools:
                 return CanonicalToolResult(
@@ -441,7 +455,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
         *,
         budget: ToolCallBudget,
     ) -> CanonicalToolResult:
-        if call.name != "op_exec_shell":
+        if call.name not in {"op_exec_shell", "run_shell", "shell_exec"}:
             return result
         structured = dict(result.structured or {})
         max_lines = budget.max_lines_to_read
@@ -493,6 +507,9 @@ class ExecutionRuntime(ExecutionRuntimePort):
         return ""
 
     def call_registered(self, call: CapabilityCall) -> CapabilityResult:
+        resolved_name = self.resolve_llm_tool_name(call.name)
+        if resolved_name != call.name:
+            call = CapabilityCall(name=resolved_name, args=dict(call.args), meta=dict(call.meta))
         target_id = str(call.args.get("target_id") or SINGLETON_TARGET)
         bound = self.bound_action_index.get(call.name, target_id)
         if bound is not None:
@@ -571,17 +588,28 @@ class ExecutionRuntime(ExecutionRuntimePort):
 
     def _resolve_descriptor(self, name: str, *, target_id: str = SINGLETON_TARGET) -> CapabilityDescriptor | CapabilityResult | None:
         candidates: list[CapabilityDescriptor] = []
-        if name in self.compiled_capability_index.by_canonical:
+        lookup_names = [str(name or "").strip()]
+        resolved_name = self.resolve_llm_tool_name(name)
+        if resolved_name and resolved_name not in lookup_names:
+            lookup_names.append(resolved_name)
+        for lookup_name in lookup_names:
+            if lookup_name in self.compiled_capability_index.by_canonical:
+                candidates.extend(
+                    self.compiled_capability_index.records[record_id]
+                    for record_id in self.compiled_capability_index.by_canonical[lookup_name]
+                    if record_id in self.compiled_capability_index.records
+                )
+            if lookup_name in self.compiled_capability_index.aliases:
+                candidates.extend(
+                    self.compiled_capability_index.records[record_id]
+                    for record_id in self.compiled_capability_index.aliases[lookup_name]
+                    if record_id in self.compiled_capability_index.records
+                )
+        if not candidates:
             candidates.extend(
-                self.compiled_capability_index.records[record_id]
-                for record_id in self.compiled_capability_index.by_canonical[name]
-                if record_id in self.compiled_capability_index.records
-            )
-        if name in self.compiled_capability_index.aliases:
-            candidates.extend(
-                self.compiled_capability_index.records[record_id]
-                for record_id in self.compiled_capability_index.aliases[name]
-                if record_id in self.compiled_capability_index.records
+                descriptor
+                for descriptor in self.compiled_capability_index.records.values()
+                if llm_tool_name(descriptor.canonical_path or descriptor.name) == name
             )
         if not candidates:
             return None
@@ -618,6 +646,30 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if instance_targets:
             return _target_id_required_result(name=name, available_target_ids=instance_targets)
         return None
+
+    def resolve_llm_tool_name(self, name: object) -> str:
+        raw = str(name or "").strip()
+        if not raw:
+            return ""
+        if self._is_known_internal_name(raw):
+            return raw
+        matches: list[str] = []
+        for tool_name in self.tools:
+            if llm_tool_name(tool_name) == raw and tool_name not in matches:
+                matches.append(tool_name)
+        for descriptor in self.compiled_capability_index.records.values():
+            canonical = descriptor.canonical_path or descriptor.name
+            if llm_tool_name(canonical) == raw and canonical not in matches:
+                matches.append(canonical)
+        return matches[0] if len(matches) == 1 else raw
+
+    def _is_known_internal_name(self, name: str) -> bool:
+        return (
+            name in self.tools
+            or name in self.capabilities
+            or name in self.compiled_capability_index.by_canonical
+            or name in self.compiled_capability_index.aliases
+        )
 
     def execute(self, call: CapabilityCall) -> CapabilityResult:
         try:

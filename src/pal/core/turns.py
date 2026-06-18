@@ -149,6 +149,7 @@ class TurnContinuation:
     pending_tool_call_batch: list[CanonicalToolCall] = field(default_factory=list)
     pending_tool_results: list[CanonicalToolResult] = field(default_factory=list)
     pending_assistant_tool_text: str = ""
+    pending_assistant_provider_specific_fields: dict[str, Any] = field(default_factory=dict)
     emitted_reply_texts: list[str] = field(default_factory=list)
     budget_failure_feedback_text: str = ""
     prompt_budget_snapshot: dict[str, Any] = field(default_factory=dict)

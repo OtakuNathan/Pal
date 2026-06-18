@@ -13,7 +13,7 @@ from typing import Any
 
 from pal.execution.contracts import CapabilityResult
 from pal.llm.contracts import ToolResultHandle
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, llm_tool_name
 
 
 DEFAULT_TOOL_RESULT_PAGE_SIZE = 4_000
@@ -310,7 +310,7 @@ def render_tool_result_page_for_llm(page: ToolResultPage, *, tag: str = "tool_re
     parts = [open_tag, page.content.rstrip()]
     if page.has_more:
         parts.append(
-            f"next_page: op_tool_result_page(result_ref={json.dumps(page.result_ref)}, page={page.page + 1})"
+            f"next_page: {llm_tool_name('op_tool_result_page')}(result_ref={json.dumps(page.result_ref)}, page={page.page + 1})"
         )
     parts.append(f"</{tag}>")
     return "\n".join(part for part in parts if part).strip()

@@ -238,12 +238,13 @@ IM channel 默认采用三阶段反馈：
 
 ### Transport Strategy
 
-`llm` 默认保留旧版 canonical/provider 分层，但 transport 层优先通过 `LiteLLM` 统一。
+`llm` 默认保留 canonical/provider 分层，transport 层按 endpoint shape 路由到具体 native SDK。
 
 也就是说：
 
 - `Pal` 自己定义 canonical protocol
-- `LiteLLM` 负责尽量统一 provider wire shape
+- OpenAI-compatible chat/completions 走 OpenAI SDK
+- Anthropic Messages 走 Anthropic SDK
 - provider native tool calling 仍然不能绕过本地 `Execution`
 
 ### Registry Rule

@@ -5,7 +5,16 @@ from typing import Any
 
 from pal.foundation import EventEnvelope
 from pal.minion.work_order import prompt_view_from_metadata
-from pal.shared import ChannelEnvelope, EndpointConfig, EventKind, ResponseHandle, SourceKind, TaskContextPack
+from pal.shared import (
+    ChannelEnvelope,
+    EndpointConfig,
+    EventKind,
+    ResponseHandle,
+    SourceKind,
+    TaskContextPack,
+    llm_tool_name,
+    replace_internal_tool_names,
+)
 from pal.shared.payloads import extract_text_from_payload
 from pal.shared.prompt_rendering import render_runtime_reminder, render_system_reminder, render_xml_block
 
@@ -45,7 +54,7 @@ def render_minion_system_prompt(scaffold: dict[str, Any]) -> str:
         "If capability evidence is required, use a relevant listed capability before completing the milestone.\n"
         f"{testing_guidance}"
         "If completion evidence cannot be produced, report blocked instead of completed.\n"
-        "When completion policy requires git_commit, do not run git add, git commit, or other git mutation commands through `op_exec_shell`. "
+        "When completion policy requires git_commit, do not run git add, git commit, or other checkpoint git mutation commands through shell or the git wrapper. "
         "After implementing and verifying the milestone, call `op_minion_checkpoint_commit` to create the structured checkpoint commit in the minion workspace branch.\n"
         "Do not create or rely on committing generated build/cache artifacts such as __pycache__, .pytest_cache, .o, .obj, .a, .so, .dylib, .dll, .exe, class files, coverage output, build directories, or minion_outputs reports.\n"
         "When `op_minion_artifact_write` or `op_minion_artifact_edit` is available, write planner/reviewer deliverables and any long structured output to workspace.artifact_dir with artifact tools; keep the final chat summary short and point to the artifact.\n"
@@ -57,15 +66,16 @@ def render_minion_system_prompt(scaffold: dict[str, Any]) -> str:
         "When the current milestone is complete, stop with a concise milestone summary. "
         "Pal will ask the user before absorbing minion memory candidates."
     )
+    allowed_aliases = [llm_tool_name(item) for item in list(scaffold.get("allowed_capabilities") or [])]
     blocks = [
-        ("identity", str(scaffold.get("identity") or "").strip()),
-        ("behavior_guidance", str(scaffold.get("behavior") or "").strip()),
-        ("system-reminder", _render_skill_manual_context(scaffold.get("skill_manual_context"))),
-        ("operating_rules", operating_rules.strip()),
-        ("workspace_policy", json.dumps(scaffold.get("workspace_policy") or {}, ensure_ascii=False, sort_keys=True)),
-        ("completion_policy", json.dumps(scaffold.get("completion_policy") or {}, ensure_ascii=False, sort_keys=True)),
-        ("output_contract", str(scaffold.get("output_contract") or "").strip()),
-        ("allowed_capabilities", json.dumps(scaffold.get("allowed_capabilities") or [], ensure_ascii=False)),
+        ("identity", replace_internal_tool_names(str(scaffold.get("identity") or "").strip())),
+        ("behavior_guidance", replace_internal_tool_names(str(scaffold.get("behavior") or "").strip())),
+        ("system-reminder", replace_internal_tool_names(_render_skill_manual_context(scaffold.get("skill_manual_context")))),
+        ("operating_rules", replace_internal_tool_names(operating_rules).strip()),
+        ("workspace_policy", replace_internal_tool_names(json.dumps(scaffold.get("workspace_policy") or {}, ensure_ascii=False, sort_keys=True))),
+        ("completion_policy", replace_internal_tool_names(json.dumps(scaffold.get("completion_policy") or {}, ensure_ascii=False, sort_keys=True))),
+        ("output_contract", replace_internal_tool_names(str(scaffold.get("output_contract") or "").strip())),
+        ("allowed_capabilities", json.dumps(allowed_aliases, ensure_ascii=False)),
     ]
     return "\n\n".join(render_xml_block(tag, content) for tag, content in blocks if str(content or "").strip()).strip()
 
@@ -166,7 +176,7 @@ def render_minion_task_prompt(pack: TaskContextPack) -> str:
         ]
         if str(prompt_view.get("role") or "").strip().lower() == "planner":
             instructions.append(
-                "If a question is user-answerable and materially changes the plan, return ask_user_question with evidence."
+                "Prefer a dispatchable plan with explicit conservative assumptions over ask_user_question when missing details are normal implementation choices; ask only for genuinely user-owned blockers."
             )
         payload = {
             "goal": pack.goal,
@@ -191,13 +201,13 @@ def prompt_view_from_pack(pack: TaskContextPack) -> dict[str, Any]:
     prompt_view = prompt_view_from_metadata(metadata, workspace=dict(pack.workspace))
     if prompt_view:
         if pack.allowed_capabilities:
-            prompt_view["allowed_capabilities"] = list(pack.allowed_capabilities)
+            prompt_view["allowed_capabilities"] = [llm_tool_name(item) for item in list(pack.allowed_capabilities)]
         return prompt_view
     continuity = dict(pack.continuity or {})
     if isinstance(continuity.get("prompt_view"), dict):
         prompt_view = prompt_view_from_metadata({"prompt_view": dict(continuity.get("prompt_view") or {})}, workspace=dict(pack.workspace))
         if prompt_view and pack.allowed_capabilities:
-            prompt_view["allowed_capabilities"] = list(pack.allowed_capabilities)
+            prompt_view["allowed_capabilities"] = [llm_tool_name(item) for item in list(pack.allowed_capabilities)]
         return prompt_view
     return {}
 
@@ -224,6 +234,7 @@ def _render_minion_runtime_reminder(scaffold: dict[str, Any]) -> str:
         lines.append("- When a structured checkpoint is required, complete implementation and verification before submitting it.")
     if allowed & {"op_minion_review_gate_submit", "op_minion_review_checkpoint"}:
         lines.append("- Reviewer completion requires a structured gate result; prose-only approval is not enough.")
+        lines.append("- If review evidence already covers the binding contract, submit the review gate now instead of gathering optional extra evidence.")
     return "\n".join(lines).strip()
 
 

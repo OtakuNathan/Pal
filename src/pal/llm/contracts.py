@@ -74,6 +74,7 @@ class CanonicalLLMOutcome:
     reserved_output_tokens: int = 0
     preferred_endpoint_id: str | None = None
     preferred_model_id: str | None = None
+    provider_specific_fields: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -36,6 +36,7 @@ from pal.channel import ChannelEnvelope, ChannelRuntime, EndpointConfig, Respons
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityDescriptor
 from pal.foundation import EventEnvelope, HeatLevel, HeatPolicy, HeatStateMachine, HeatStateRegistry, PalV2Database
+from pal.lsp.plugin import LspManagerPluginProvider
 from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
 from pal.memory import L2Entry, MemoryPack, MemoryService, register_with_core as register_memory_with_core
 from pal.memory.models import MemoryCaseModel
@@ -522,6 +523,28 @@ class BehaviorSubsystemTests(unittest.TestCase):
         after = "\n".join(str(message["content"]) for message in after_prompt.messages)
         self.assertNotIn("Declared resident", after)
 
+    def test_lsp_provider_declares_resident_code_intelligence_affordance(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_behavior_with_core(core.context, self.service)
+
+        provider = LspManagerPluginProvider(runtime_root=self.root)
+        handle = _FakeHandle(module_id="lsp", introspection_provider=provider)
+        self.service.register_declared_module(handle)
+
+        self.assertIsNone(self.repository.get_affordance("declared.lsp.code_intelligence"))
+        prompt = core.build_canonical_prompt(PromptAssemblyContext())
+        system = prompt.messages[0]["content"]
+        reminder = str(prompt.messages[-1]["content"])
+        guidance = reminder.split("<behavior_guidance>", 1)[1].split("</behavior_guidance>", 1)[0]
+
+        self.assertNotIn("<behavior_guidance>", system)
+        self.assertIn("LSP code intelligence", guidance)
+        self.assertIn("When reading or changing code, consider LSP capabilities", guidance)
+        self.assertIn("lsp_document_symbols/workspace_symbols", guidance)
+        self.assertIn("lsp_diagnostics after edits", guidance)
+        self.assertIn("resident_affordances", prompt.metadata["reminder_sections"])
+
     def test_declared_affordance_canonicalizes_prompt_hint_title_prefix(self) -> None:
         @affordance(
             affordance_id="declared.clean",
@@ -932,18 +955,15 @@ class BehaviorSubsystemTests(unittest.TestCase):
         content = "\n".join(fragment.content for fragment in fragments)
 
         self.assertIn("behavior_advise", content)
-        self.assertIn("Casual chat", content)
+        self.assertIn("Simple/current-context sufficient", content)
         self.assertIn("Clear single-capability action", content)
-        self.assertLess(content.index("Casual chat"), content.index("behavior_advise"))
-        self.assertIn("resolve the capability contract when needed", content)
-        self.assertIn("project analysis", content)
-        self.assertIn("direct implementation command for a clear already-routed action", content)
+        self.assertLess(content.index("Simple/current-context sufficient"), content.index("behavior_advise"))
+        self.assertIn("resolve contract if needed", content)
+        self.assertIn("design/debug/recovery/route-unclear", content)
+        self.assertIn("clear direct implementation command", content)
         self.assertIn("obvious local/schema/input mistake", content)
-        self.assertIn("Advisor output is a resource package, not an order", content)
+        self.assertIn("advisor output as route resources, not orders", content)
         self.assertNotIn("If advice returns `skill_ref`, call `skill_inject` before executing that workflow", content)
-        self.assertIn("capability refs", content)
-        self.assertIn("skill refs", content)
-        self.assertIn("memory hints", content)
         self.assertIn("Behavior guidance answers", content)
         self.assertIn("behavior_save", content)
         self.assertIn("behavior_affordance_update", content)
@@ -1017,7 +1037,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("<task_flow>", reminder)
         self.assertIn("<tool_efficiency>", reminder)
         self.assertIn("behavior-routing guidance", reminder)
-        self.assertIn("The system prompt defines the principles", reminder)
+        self.assertIn("active system prompt's hard rules", reminder)
         self.assertIn("behavior_advise", reminder)
         self.assertIn("Use behavior_save only when the user explicitly asks Pal to adopt/follow/save a future behavior rule", system)
         self.assertIn("Stable fact, preference, project context, prior decision, or repair lesson -> memory", system)
@@ -1078,7 +1098,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(entry.kind, "behavior_rule")
         self.assertEqual(entry.source_kind, "behavior_advice")
         self.assertEqual(entry.candidate_state, "active")
-        self.assertIn("op_skill_inject", entry.rendered)
+        self.assertIn("skill_inject", entry.rendered)
         self.assertIn("MUST NOT call `skill_inject` solely because listed", entry.rendered)
         self.assertIn("commit preferences", entry.rendered)
 
@@ -1161,13 +1181,11 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("custom Pal/project term", routing)
         self.assertIn("repair lessons", policy)
         self.assertIn("If recalled memories are already present in the prompt", routing)
-        self.assertIn("Mandatory recall", routing)
-        self.assertIn("A tool/capability/action fails", routing)
         self.assertEqual(fragments[1].metadata["prompt_target"], "runtime_reminder")
         self.assertIn("Do not recall", policy)
         self.assertIn("Write/update/delete", policy)
         self.assertIn("MUST call memory_recall", routing)
-        self.assertIn("challenges a remembered fact", routing)
+        self.assertIn("corrects or challenges memory", routing)
         self.assertIn("Recall budget", routing)
         self.assertIn("Do not invent mem_ref values.", policy)
 
@@ -1281,8 +1299,8 @@ class BehaviorSubsystemTests(unittest.TestCase):
         guidance = reminder.split("<behavior_guidance>", 1)[1].split("</behavior_guidance>", 1)[0]
 
         self.assertNotIn("<behavior_guidance>", system)
-        self.assertEqual(guidance.count("These are active behavior-routing hints"), 1)
-        self.assertEqual(guidance.count("When the current user request matches a listed scenario"), 1)
+        self.assertEqual(guidance.count("Active behavior-routing hints"), 1)
+        self.assertEqual(guidance.count("consider matching hints before choosing a route"), 1)
         self.assertIn("- OLED expression: Use the OLED expression capability sparingly.", guidance)
         self.assertIn(
             "- Task routing: handle social/simple work directly, delegate implementation: "

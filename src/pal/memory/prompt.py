@@ -203,24 +203,13 @@ def _memory_guide_fragments() -> tuple[PromptFragment, PromptFragment]:
         ),
         PromptFragment(
             section="memory_guide",
-            title="Memory Guidance",
-            content=(
-                "Mandatory recall:\n"
-                "Pal MUST call memory_recall before answering or acting when any of these are true:\n"
-                '- The user refers to prior context, prior decisions, "you remember", "we discussed", "last time", "yesterday", "before", or a custom Pal/project term.\n'
-                "- The task depends on the user's preferences, Pal's past behavior, project-specific conventions, previous repairs, known failures, or remembered identity/context.\n"
-                "- The user corrects Pal's memory, challenges a remembered fact, or says Pal got something wrong before.\n"
-                "- A tool/capability/action fails in a way that may have Pal-specific prior repair history.\n"
-                "- Pal is about to write/update/delete memory, behavior guidance, or skill content.\n\n"
-                "If recalled memories are already present in the prompt, Pal MUST evaluate and account for them before acting. Do not re-recall unless new ambiguity appears.\n\n"
-                "Recommended recall:\n"
-                "Pal SHOULD recall when prior history may materially improve correctness, continuity, personalization, or avoiding repeated mistakes.\n\n"
-                "Recall budget:\n"
-                "- Use targeted queries.\n"
-                "- Prefer limit 3-5 unless the user asks for broader history.\n"
-                "- Usually recall once per task phase.\n"
-                "- If recall returns nothing useful, proceed with live/source inspection."
-            ),
+                title="Memory Guidance",
+                content=(
+                    "MUST call memory_recall before acting when: user references prior context/decisions/custom Pal/project terms; task depends on preferences/history/project conventions/known failures; user corrects or challenges memory; a tool/action failure may have Pal-specific repair history; or Pal will write/update/delete memory, behavior guidance, or skill content.\n"
+                    "If recalled memories are already present in the prompt, account for them; do not re-recall unless new ambiguity appears.\n"
+                    "SHOULD recall when history materially improves correctness, continuity, personalization, or avoiding repeated mistakes.\n"
+                    "Recall budget: targeted queries, limit 3-5 by default, usually once per task phase; if no useful result, proceed with live/source inspection."
+                ),
             priority=71,
             metadata={
                 "module_id": "memory",

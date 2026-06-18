@@ -22,10 +22,10 @@ from pal.channel.contracts import EndpointConfig, ResponseHandle
 from pal.core.runtime_config import RuntimeConfig
 from pal.foundation import EventEnvelope, PalV2Database
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
-from pal.llm import EndpointResolver, LLMRuntime, LiteLLMCredentialResolver
+from pal.llm import EndpointResolver, LLMRuntime, LLMCredentialResolver
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolResult
 from pal.llm.repository import LLMEndpointRepository, RuntimeSettingRepository
-from pal.llm.runtime import LiteLLMEndpointInvoker
+from pal.llm.runtime import OpenAIChatEndpointInvoker
 from pal.llm.secret_store import EncryptedFileSecretStore, InMemorySecretStore, SecretRef
 from pal.minion.git_env import prepare_git_task_environment
 from pal.minion import MinionManager, MinionManagerClient
@@ -56,7 +56,7 @@ class _HTTPInvoker:
             payload["tools"] = list(request.tools)
             payload["tool_choice"] = "auto"
         data = self._post(endpoint.base_url, payload)
-        return LiteLLMEndpointInvoker()._parse_litellm_response(_DictResponse(data))
+        return OpenAIChatEndpointInvoker()._parse_openai_chat_response(_DictResponse(data))
 
     def invoke_stream(self, endpoint, request: CanonicalLLMRequest):
         _ = endpoint, request
@@ -202,10 +202,10 @@ def _real_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
     )
 
 
-def _real_litellm_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
+def _real_openai_chat_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
     api_key, base_url, model = _configured_real_llm()
     endpoint = SimpleNamespace(
-        endpoint_id="real-litellm-test",
+        endpoint_id="real-openai_chat-test",
         provider="openai_compatible",
         model_id=model,
         api_mode="openai_chat",
@@ -226,8 +226,8 @@ def _real_litellm_runtime(*, max_output_tokens: int = 4096) -> LLMRuntime:
     return LLMRuntime(
         endpoint_resolver=EndpointResolver(endpoints=(endpoint,)),
         settings_repository=_Settings(),
-        endpoint_invoker=LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store),
+        endpoint_invoker=OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store),
         ),
     )
 
@@ -504,8 +504,8 @@ class RealLLMIntegrationTests(unittest.TestCase):
         self.assertTrue((outcome.text or outcome.reasoning_text).strip())
         self.assertEqual(runtime.last_endpoint_id, "real-test")
 
-    def test_real_litellm_invoker_reaches_configured_model(self) -> None:
-        runtime = _real_litellm_runtime(max_output_tokens=1024)
+    def test_real_openai_chat_invoker_reaches_configured_model(self) -> None:
+        runtime = _real_openai_chat_runtime(max_output_tokens=1024)
 
         outcome = runtime.generate(
             CanonicalLLMRequest(
@@ -518,7 +518,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
 
         self.assertNotEqual(outcome.finish_reason, LLMFinishReason.ERROR)
         self.assertIn("PAL_ONLINE", (outcome.text or outcome.reasoning_text))
-        self.assertEqual(runtime.last_endpoint_id, "real-litellm-test")
+        self.assertEqual(runtime.last_endpoint_id, "real-openai_chat-test")
 
     def test_real_llm_summarize_compaction_returns_text(self) -> None:
         runtime = _real_runtime(max_output_tokens=4096)

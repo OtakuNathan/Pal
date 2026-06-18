@@ -65,6 +65,7 @@ from pal.shared.tool_protocol import (
     default_tool_result_text,
     ensure_tool_call_identity,
 )
+from pal.shared.tool_aliases import llm_tool_name, replace_internal_tool_names, replace_internal_tool_names_in_value
 from pal.shared.messages import (
     CheckpointEvent,
     MinionApprovalDecision,
@@ -144,4 +145,7 @@ __all__ = [
     "extract_text_from_payload",
     "default_tool_result_text",
     "ensure_tool_call_identity",
+    "llm_tool_name",
+    "replace_internal_tool_names",
+    "replace_internal_tool_names_in_value",
 ]

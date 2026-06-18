@@ -49,13 +49,14 @@ def collect_dependency_checks() -> tuple[WizardDependencyCheck, ...]:
     checks: list[WizardDependencyCheck] = [
         _check_python_version(),
         _check_python_package("jieba", "jieba", "Chinese FTS tokenization"),
-        _check_python_package("litellm", "litellm", "LLM endpoint calls"),
+        _check_python_package("openai", "openai", "OpenAI-compatible endpoint calls"),
         _check_python_package("playwright", "playwright", "rendered web fetch"),
         _check_python_package("python-telegram-bot", "telegram", "Telegram channel"),
         _check_python_package("sqlite-vec", "sqlite_vec", "vector memory backend", required=False),
         _check_playwright_chromium(),
         _check_git(),
         _check_codex_cli(),
+        _check_minion_sandbox(),
         _check_ollama_embedding(),
         _check_service_manager(),
     ]
@@ -209,6 +210,64 @@ def _check_codex_cli() -> WizardDependencyCheck:
         detail="codex is not on PATH. API-key LLM endpoints still work, but Codex-backed endpoints are unavailable.",
         required=False,
         fix="Install and sign in to the Codex CLI if you plan to use Codex-backed endpoints.",
+    )
+
+
+def _check_minion_sandbox() -> WizardDependencyCheck:
+    disabled = str(os.environ.get("PAL_MINION_SANDBOX") or "").strip().lower() in {"0", "false", "no", "off", "disabled"}
+    if disabled:
+        return WizardDependencyCheck(
+            check_id="minion.sandbox",
+            title="Minion sandbox",
+            status=CHECK_STATUS_INFO,
+            detail="PAL_MINION_SANDBOX disables minion sandboxing for this process.",
+            required=False,
+            fix="Unset PAL_MINION_SANDBOX or set it to 1 to use sandboxed minions.",
+        )
+    system = platform.system().lower()
+    if system == "linux":
+        bwrap = shutil.which("bwrap")
+        if bwrap:
+            return WizardDependencyCheck(
+                check_id="minion.sandbox",
+                title="Minion sandbox",
+                status=CHECK_STATUS_OK,
+                detail=f"bubblewrap found at {bwrap}; Linux minion runners can be sandboxed.",
+            )
+        return WizardDependencyCheck(
+            check_id="minion.sandbox",
+            title="Minion sandbox",
+            status=CHECK_STATUS_MISSING,
+            detail="bubblewrap is not on PATH. Minion runners fail closed when sandboxing is enabled.",
+            fix="Install bubblewrap, for example: sudo apt-get install bubblewrap",
+        )
+    if system == "darwin":
+        docker = shutil.which("docker")
+        image = str(os.environ.get("PAL_MINION_DOCKER_IMAGE") or "").strip()
+        if docker and image:
+            return WizardDependencyCheck(
+                check_id="minion.sandbox",
+                title="Minion sandbox",
+                status=CHECK_STATUS_WARN,
+                detail="Docker is configured for a future macOS minion sandbox backend, but this build only wires the Linux bubblewrap runner.",
+                required=False,
+                fix="Run Pal minions on Linux with bubblewrap, or set PAL_MINION_SANDBOX=0 until the Docker backend is wired.",
+            )
+        return WizardDependencyCheck(
+            check_id="minion.sandbox",
+            title="Minion sandbox",
+            status=CHECK_STATUS_WARN,
+            detail="The Linux bubblewrap minion sandbox is unavailable on macOS in this build.",
+            required=False,
+            fix="Set PAL_MINION_SANDBOX=0 for local macOS minions, or run minions on Linux.",
+        )
+    return WizardDependencyCheck(
+        check_id="minion.sandbox",
+        title="Minion sandbox",
+        status=CHECK_STATUS_WARN,
+        detail=f"No minion sandbox backend is implemented for {platform.system() or 'this platform'}.",
+        required=False,
+        fix="Set PAL_MINION_SANDBOX=0 to run minions without the sandbox on this platform.",
     )
 
 

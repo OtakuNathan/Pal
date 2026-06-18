@@ -22,7 +22,7 @@ from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.prompt_compiler import PromptCompiler
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import EventEnvelope, PalV2Database
-from pal.llm.runtime import _coerce_messages_for_litellm
+from pal.llm.runtime import _coerce_messages_for_openai_chat
 from pal.shared import EventKind, PromptAssemblyContext, SourceKind
 
 
@@ -345,7 +345,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("transcribed hello", result.text)
 
     @unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
-    def test_image_artifact_can_be_serialized_to_litellm_data_url(self) -> None:
+    def test_image_artifact_can_be_serialized_to_openai_chat_data_url(self) -> None:
         from PIL import Image
 
         image_path = self.root / "incoming" / "tiny.png"
@@ -365,7 +365,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(len(exposure.inline_parts), 1)
-        coerced = _coerce_messages_for_litellm(
+        coerced = _coerce_messages_for_openai_chat(
             [{"role": "user", "content": [{"type": "text", "text": "look"}, exposure.inline_parts[0].to_message_part()]}],
             artifact_manager=self.manager,
             supports_vision=True,
@@ -375,7 +375,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image_part["type"], "image_url")
         self.assertTrue(image_part["image_url"]["url"].startswith("data:image/"))
         self.assertEqual(exposure.inline_parts[0].artifact_id, ref.artifact_id)
-        raw_base64_coerced = _coerce_messages_for_litellm(
+        raw_base64_coerced = _coerce_messages_for_openai_chat(
             [{"role": "user", "content": [{"type": "text", "text": "look"}, exposure.inline_parts[0].to_message_part()]}],
             artifact_manager=self.manager,
             supports_vision=True,
@@ -416,7 +416,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(merged_content[0]["type"], "artifact_image")
         self.assertTrue(any(part.get("type") == "artifact_image" for part in merged_content if isinstance(part, dict)))
 
-        merged_coerced = _coerce_messages_for_litellm(
+        merged_coerced = _coerce_messages_for_openai_chat(
             request.messages,
             artifact_manager=self.manager,
             supports_vision=True,
@@ -504,7 +504,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("representation", contracts["op_artifact_read"]["properties"])
 
     @unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
-    def test_image_source_url_passthrough_to_litellm(self) -> None:
+    def test_image_source_url_passthrough_to_openai_chat(self) -> None:
         from PIL import Image
 
         image_path = self.root / "incoming" / "photo.jpg"
@@ -540,7 +540,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         part_dict = exposure.inline_parts[0].to_message_part()
         self.assertEqual(part_dict["source_url"], "https://api.telegram.org/file/botFAKE_TOKEN/photos/file_123.jpg")
 
-        coerced = _coerce_messages_for_litellm(
+        coerced = _coerce_messages_for_openai_chat(
             [{"role": "user", "content": [
                 {"type": "text", "text": "look"},
                 exposure.inline_parts[0].to_message_part(),
@@ -585,7 +585,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(exposure.inline_parts), 1)
         self.assertEqual(exposure.inline_parts[0].source_url, "")
 
-        coerced = _coerce_messages_for_litellm(
+        coerced = _coerce_messages_for_openai_chat(
             [{"role": "user", "content": [
                 {"type": "text", "text": "look"},
                 exposure.inline_parts[0].to_message_part(),

@@ -4,7 +4,12 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from pal.shared import SINGLETON_TARGET
+from pal.shared import (
+    SINGLETON_TARGET,
+    llm_tool_name,
+    replace_internal_tool_names,
+    replace_internal_tool_names_in_value,
+)
 
 _CONFIG_PATH = Path(__file__).parent / "tool_surface.toml"
 
@@ -50,13 +55,16 @@ class ToolSurface:
     def build_tool_contracts_from_descriptors(self, descriptors: list[Any]) -> list[dict[str, object]]:
         contracts: list[dict[str, object]] = []
         for descriptor in sorted(descriptors, key=lambda item: item.name):
+            canonical_name = descriptor.canonical_path or descriptor.name
             contracts.append(
                 {
                     "type": "function",
                     "function": {
-                        "name": descriptor.canonical_path or descriptor.name,
-                        "description": str(descriptor.description or descriptor.name),
-                        "parameters": dict(descriptor.parameters_schema or {"type": "object", "properties": {}}),
+                        "name": llm_tool_name(canonical_name),
+                        "description": replace_internal_tool_names(descriptor.description or descriptor.name),
+                        "parameters": replace_internal_tool_names_in_value(
+                            dict(descriptor.parameters_schema or {"type": "object", "properties": {}})
+                        ),
                     },
                 }
             )

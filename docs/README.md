@@ -42,7 +42,7 @@ Older design notes are historical references. These docs are the active baseline
 - `pal_bootstrap_and_process.md`: supervisor, Pal process, minions, startup, and runtime composition.
 - `pal_channel_contract.md`: channel provider lifecycle, I/O, normalization, reply routing, interaction realization, and UX acknowledgment.
 - `pal_change_admission.md`: change admission checklist for contract changes, generated code, dogfood, and review risk.
-- `pal_llm_contract.md`: canonical LLM shape, LiteLLM transport, streaming, and model routing.
+- `pal_llm_contract.md`: canonical LLM shape, native provider transports, streaming, and model routing.
 - `pal_execution_contract.md`: capability, tool, plugin, and execution contract.
 - `pal_behavior_contract.md`: affordance descriptors, skill manuals, behavior advice, and the cap-search vs advise split.
 - `pal_skill_contract.md`: skill learning, sanitization, STAR applicability, storage, and injection contract.

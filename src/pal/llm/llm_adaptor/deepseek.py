@@ -5,20 +5,21 @@ from typing import Any
 from pal.llm.contracts import CanonicalLLMRequest
 from pal.llm.models import LLMEndpointModel
 
-from pal.llm.llm_adaptor.base import LLMProviderAdapter, LiteLLMCompletionDraft, _capabilities, _normalize_key
+from pal.llm.llm_adaptor.base import LLMProviderAdapter, OpenAIChatCompletionDraft, _capabilities, _normalize_key
 
 
 class DeepSeekProvider(LLMProviderAdapter):
     provider_names = frozenset({"deepseek"})
     adapter_names = frozenset({"deepseek"})
-    litellm_provider = "deepseek"
+    model_provider_prefix = "deepseek"
     model_provider_aliases = frozenset({"openai", "deepseek"})
+    reasoning_content_messages = True
 
     @classmethod
     def matches_endpoint(cls, endpoint: LLMEndpointModel) -> bool:
         return _is_deepseek_identifier(endpoint)
 
-    def apply_request(self, request: CanonicalLLMRequest, draft: LiteLLMCompletionDraft) -> None:
+    def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIChatCompletionDraft) -> None:
         if not _supports_deepseek_thinking(self.endpoint):
             return
         thinking = _think_level_to_deepseek_thinking(request.metadata.get("think_level"))

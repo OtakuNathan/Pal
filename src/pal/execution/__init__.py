@@ -25,6 +25,7 @@ __all__ = [
     "FileStateCache",
     "FileStateTool",
     "FileWriteTool",
+    "GitTool",
     "PathDeleteTool",
     "Plugin",
     "RegisteredCapability",
@@ -102,6 +103,10 @@ def __getattr__(name: str):
         from pal.execution.file_write import FileWriteTool
 
         return FileWriteTool
+    if name == "GitTool":
+        from pal.execution.git_tool import GitTool
+
+        return GitTool
     if name == "get_file_state_cache":
         from pal.execution.capabilities import get_file_state_cache
 

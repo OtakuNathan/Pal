@@ -20,7 +20,7 @@ from pal.llm import (
     EndpointResolver,
     LLMEndpointRepository,
     LLMRuntime,
-    LiteLLMCredentialResolver,
+    LLMCredentialResolver,
     RuntimeSettingRepository,
     build_default_endpoint_invoker,
     register_with_core as register_llm_with_core,
@@ -96,7 +96,7 @@ def compose_runtime(
     channel_runtime = ChannelRuntime()
     secrets_path = registration.runtime.runtime_root / "secrets.json"
     secret_store = EncryptedFileSecretStore(secrets_path=str(secrets_path))
-    credential_resolver = LiteLLMCredentialResolver(secret_store=secret_store)
+    credential_resolver = LLMCredentialResolver(secret_store=secret_store)
     llm_runtime = LLMRuntime(
         endpoint_resolver=EndpointResolver(repository=llm_repository),
         settings_repository=runtime_settings_repository,

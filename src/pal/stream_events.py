@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pal.llm.contracts import CanonicalToolCall
@@ -12,6 +12,7 @@ class NormalizedLLMStreamEvent:
     event_kind: str = "text_delta"
     text: str = ""
     reasoning_text: str = ""
+    provider_specific_fields: dict[str, Any] = field(default_factory=dict)
     tool_call: CanonicalToolCall | None = None
     finish_reason: str | None = None
     response_mode: str | None = None

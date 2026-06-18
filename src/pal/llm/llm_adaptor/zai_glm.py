@@ -5,21 +5,22 @@ from typing import Any
 from pal.llm.contracts import CanonicalLLMRequest
 from pal.llm.models import LLMEndpointModel
 
-from pal.llm.llm_adaptor.base import LLMProviderAdapter, LiteLLMCompletionDraft, _capabilities
+from pal.llm.llm_adaptor.base import LLMProviderAdapter, OpenAIChatCompletionDraft, _capabilities
 from pal.llm.request_hooks import is_zai_glm_endpoint
 
 
 class ZaiGLMProvider(LLMProviderAdapter):
     provider_names = frozenset({"zai", "zhipu"})
     adapter_names = frozenset({"glm", "zai", "zai_glm", "zhipu"})
-    litellm_provider = "zai"
+    model_provider_prefix = "zai"
     model_provider_aliases = frozenset({"openai", "zai", "zhipu"})
+    reasoning_content_messages = True
 
     @classmethod
     def matches_endpoint(cls, endpoint: LLMEndpointModel) -> bool:
         return is_zai_glm_endpoint(endpoint)
 
-    def apply_request(self, request: CanonicalLLMRequest, draft: LiteLLMCompletionDraft) -> None:
+    def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIChatCompletionDraft) -> None:
         if not _supports_glm_openai_shape_thinking(self.endpoint):
             return
         thinking = _think_level_to_glm_openai_shape_thinking(request.metadata.get("think_level"))

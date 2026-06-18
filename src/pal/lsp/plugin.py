@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pal.behavior.decorators import affordance
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.foundation.sidecar import python_subprocess_env
@@ -74,6 +75,54 @@ def _position_schema() -> dict[str, Any]:
     source="builtin:lsp",
     target_kind="lsp_provider",
     path_module_id="lsp",
+)
+@affordance(
+    affordance_id="declared.lsp.code_intelligence",
+    title="LSP code intelligence",
+    scenario_text=(
+        "Pal is reading, navigating, editing, reviewing, or verifying source code and may benefit from "
+        "symbol-aware language-server information."
+    ),
+    prompt_hint=(
+        "When reading or changing code, consider LSP capabilities for symbol-aware navigation and verification: "
+        "use lsp_document_symbols/workspace_symbols to map code, lsp_definition/references/hover/call hierarchy "
+        "to understand relationships, and lsp_diagnostics after edits when a matching server is available. "
+        "Pair LSP with source reads, search, and tests; do not treat LSP as a substitute for inspecting source."
+    ),
+    visibility_mode="resident",
+    activation_terms=(
+        "code",
+        "source",
+        "symbol",
+        "definition",
+        "references",
+        "diagnostics",
+        "lsp",
+        "language server",
+        "python",
+        "cpp",
+        "typescript",
+        "读代码",
+        "代码导航",
+        "诊断",
+    ),
+    capability_refs=(
+        "op_lsp_status",
+        "op_lsp_doctor",
+        "op_lsp_diagnostics",
+        "op_lsp_hover",
+        "op_lsp_definition",
+        "op_lsp_implementation",
+        "op_lsp_references",
+        "op_lsp_prepare_call_hierarchy",
+        "op_lsp_incoming_calls",
+        "op_lsp_outgoing_calls",
+        "op_lsp_document_symbols",
+        "op_lsp_workspace_symbols",
+    ),
+    priority=75,
+    activation_threshold=0.15,
+    metadata={"resident": True},
 )
 @dataclass
 class LspManagerPluginProvider:
@@ -180,6 +229,12 @@ class LspManagerPluginProvider:
                 return
             except Exception:
                 self._stop_process_only()
+        try:
+            self.last_health = self.client.health_sync()
+            self.last_error = ""
+            return
+        except Exception:
+            pass
         self._cleanup_stale_socket()
         lsp_log_path(self.runtime_root).parent.mkdir(parents=True, exist_ok=True)
         self.process = subprocess.Popen(
@@ -243,11 +298,17 @@ class LspManagerPluginProvider:
     def _status_payload(self) -> dict[str, Any]:
         return {
             "module_id": "lsp",
-            "manager_running": self.process is not None and self.process.poll() is None,
+            "manager_running": self._manager_running(),
+            "manager_owned": self.process is not None and self.process.poll() is None,
             "log_path": str(lsp_log_path(self.runtime_root)),
             "last_error": self.last_error,
             **dict(self.last_health or {}),
         }
+
+    def _manager_running(self) -> bool:
+        if self.process is not None and self.process.poll() is None:
+            return True
+        return bool((self.last_health or {}).get("ok"))
 
 
 @dataclass

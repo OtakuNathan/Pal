@@ -16,7 +16,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "Use this first when you need to inspect a UTF-8 text file under the current task repo; do not use op_exec_shell with cat/head/tail for repo file reads when this tool is visible. "
             "Read using a repo-relative path. "
             "A successful read also caches the file for op_file_edit, op_file_write overwrite/append, "
-            "op_path_delete, and op_file_state safety checks."
+            "and op_path_delete safety checks."
         ),
         "parameters_schema": {
             "type": "object",

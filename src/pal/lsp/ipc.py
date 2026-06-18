@@ -34,7 +34,7 @@ class LspManagerRpcError(SidecarRpcError):
 @dataclass
 class LspManagerClient:
     runtime_root: Path
-    request_timeout_seconds: float = 60.0
+    request_timeout_seconds: float = 180.0
     _client: SidecarRpcClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:

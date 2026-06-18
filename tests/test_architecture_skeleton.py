@@ -265,6 +265,14 @@ class ScriptedLLMRuntime:
                 NormalizedLLMStreamEvent(
                     event_kind=LLMStreamEventKind.REASONING_DELTA,
                     reasoning_text=outcome.reasoning_text,
+                    provider_specific_fields=dict(outcome.provider_specific_fields or {}),
+                )
+            )
+        elif outcome.provider_specific_fields:
+            events.append(
+                NormalizedLLMStreamEvent(
+                    event_kind=LLMStreamEventKind.REASONING_DELTA,
+                    provider_specific_fields=dict(outcome.provider_specific_fields or {}),
                 )
             )
         if outcome.text:
@@ -556,26 +564,29 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(str(result.structured["stdout"]).strip(), "pong")
         self.assertEqual(result.text, "pong")
 
-    def test_shell_exec_builtin_tool_redirects_file_operations_to_dedicated_tools(self) -> None:
+    def test_shell_exec_builtin_tool_allows_file_operations(self) -> None:
         core = PalCore()
         register_execution_with_core(core.context)
+        with tempfile.TemporaryDirectory(prefix="pal_shell_exec_test_") as tmp:
+            root = Path(tmp)
+            target = root / "sample.txt"
+            target.write_text("line\n", encoding="utf-8")
 
-        read_result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="shell_exec", args={"cmd": "cat README.md"})
-        )
-        stdout_tail = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="shell_exec", args={"cmd": "printf 'line\\n' | tail -1"})
-        )
-        delete_result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="shell_exec", args={"cmd": "rm README.md"})
-        )
+            read_result = core.context.execution_runtime.execute_tool(
+                CanonicalToolCall(name="shell_exec", args={"cmd": "cat sample.txt", "cwd": str(root)})
+            )
+            stdout_tail = core.context.execution_runtime.execute_tool(
+                CanonicalToolCall(name="shell_exec", args={"cmd": "printf 'line\\n' | tail -1", "cwd": str(root)})
+            )
+            delete_result = core.context.execution_runtime.execute_tool(
+                CanonicalToolCall(name="shell_exec", args={"cmd": "rm sample.txt", "cwd": str(root)})
+            )
 
-        self.assertFalse(read_result.ok)
-        self.assertEqual(read_result.structured["reason"], "dedicated_file_tool_required")
-        self.assertIn("op_file_read", read_result.llm_text)
-        self.assertTrue(stdout_tail.ok)
-        self.assertFalse(delete_result.ok)
-        self.assertIn("op_path_delete", delete_result.llm_text)
+            self.assertTrue(read_result.ok, read_result.text)
+            self.assertEqual(str(read_result.structured["stdout"]).strip(), "line")
+            self.assertTrue(stdout_tail.ok, stdout_tail.text)
+            self.assertTrue(delete_result.ok, delete_result.text)
+            self.assertFalse(target.exists())
 
     def test_execution_exec_shell_capability_routes_to_shell_exec_tool(self) -> None:
         core = PalCore()
@@ -696,13 +707,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         register_execution_with_core(core.context)
         core.publish_module_capabilities("execution")
 
-        result = core.context.execution_runtime.execute(CapabilityCall(name="exec_tools"))
+        result = core.context.execution_runtime.execute(CapabilityCall(name="intro_module_exec_tools"))
 
         self.assertEqual(result.status, "ok")
         tools = result.structured["tools"]
         shell = next(tool for tool in tools if tool["name"] == "shell_exec")
         self.assertIn("description", shell)
         self.assertIn("cmd", shell["args_schema"]["properties"])
+        self.assertNotIn("op_", shell["description"])
 
     def test_tool_search_discovers_shell_exec_by_natural_language(self) -> None:
         core = PalCore()
@@ -715,13 +727,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         hit_names = [item["name"] for item in result.structured["hits"]]
-        self.assertIn("op_exec_shell", hit_names)
-        shell_hit = next(item for item in result.structured["hits"] if item["name"] == "op_exec_shell")
+        self.assertIn("run_shell", hit_names)
+        shell_hit = next(item for item in result.structured["hits"] if item["name"] == "run_shell")
         self.assertIn("cmd", shell_hit["required_params"])
-        self.assertEqual(shell_hit["canonical_path"], "op_exec_shell")
-        self.assertEqual(shell_hit["namespace"], "operation")
-        self.assertEqual(shell_hit["surface"], "exec")
-        self.assertEqual(shell_hit["action"], "shell")
+        self.assertNotIn("canonical_path", shell_hit)
         self.assertNotIn("module_id", shell_hit)
         self.assertNotIn("call_names", shell_hit)
         self.assertGreaterEqual(result.structured["total_count"], result.structured["returned_count"])
@@ -746,10 +755,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         hit_names = [item["name"] for item in result.structured["hits"]]
-        self.assertIn("op_file_read", hit_names)
-        self.assertIn("op_file_edit", hit_names)
-        self.assertIn("op_file_write", hit_names)
-        self.assertIn("op_path_delete", hit_names)
+        self.assertIn("read_file", hit_names)
+        self.assertIn("edit_file", hit_names)
+        self.assertIn("write_file", hit_names)
+        self.assertIn("delete_path", hit_names)
+        self.assertFalse(any(name.startswith("op_") or name.startswith("intro_") for name in hit_names))
 
     def test_main_runtime_tool_search_does_not_expose_minion_scoped_repo_tools(self) -> None:
         core = PalCore()
@@ -828,21 +838,22 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("execution")
 
         result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="op_tool_read", args={"name": "op_exec_shell"})
+            CanonicalToolCall(name="read_tool", args={"name": "run_shell"})
         )
 
         self.assertTrue(result.ok)
         capability = result.structured["capability"]
-        self.assertEqual(capability["name"], "op_exec_shell")
+        self.assertEqual(capability["name"], "run_shell")
         self.assertEqual(result.text, "capability definition")
         self.assertIn("shell", result.llm_text)
-        self.assertIn("op_tree for structured directory listings", capability["description"])
+        self.assertIn("tree for structured directory listings", capability["description"])
         self.assertIn("cmd", capability["parameters_schema"]["properties"])
         cmd_description = capability["parameters_schema"]["properties"]["cmd"]["description"]
-        self.assertIn("op_search for text search", cmd_description)
-        self.assertIn("op_file_read for file reads", cmd_description)
-        self.assertIn("op_file_edit for edits", cmd_description)
-        self.assertIn("op_path_delete for deletion", cmd_description)
+        self.assertIn("search for text search", cmd_description)
+        self.assertIn("read_file for file reads", cmd_description)
+        self.assertIn("edit_file for edits", cmd_description)
+        self.assertIn("delete_path for deletion", cmd_description)
+        self.assertNotIn("op_", result.llm_text)
         self.assertEqual(capability["required_params"], ["cmd"])
         self.assertNotIn("result_schema", capability)
         self.assertIn(
@@ -937,32 +948,38 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"})
             exposed_names = [item["function"]["name"] for item in request.tools]
-            self.assertIn("op_tool_search", exposed_names)
-            self.assertIn("op_tool_read", exposed_names)
-            self.assertIn("op_tool_result_page", exposed_names)
-            self.assertIn("op_exec_shell", exposed_names)
-            self.assertIn("op_file_read", exposed_names)
-            self.assertIn("op_file_edit", exposed_names)
-            self.assertIn("op_file_write", exposed_names)
-            self.assertIn("op_path_delete", exposed_names)
-            self.assertIn("op_file_state", exposed_names)
-            self.assertIn("op_tool_call", exposed_names)
-            self.assertIn("op_memory_recall", exposed_names)
-            self.assertIn("op_memory_write", exposed_names)
-            self.assertIn("op_memory_update", exposed_names)
-            self.assertIn("op_memory_delete", exposed_names)
+            self.assertIn("search_tools", exposed_names)
+            self.assertIn("read_tool", exposed_names)
+            self.assertIn("read_tool_result_page", exposed_names)
+            self.assertIn("run_shell", exposed_names)
+            self.assertIn("read_file", exposed_names)
+            self.assertIn("edit_file", exposed_names)
+            self.assertIn("write_file", exposed_names)
+            self.assertIn("delete_path", exposed_names)
+            self.assertIn("call_tool", exposed_names)
+            self.assertIn("recall_memory", exposed_names)
+            self.assertIn("write_memory", exposed_names)
+            self.assertIn("update_memory", exposed_names)
+            self.assertIn("delete_memory", exposed_names)
+            self.assertNotIn("file_state", exposed_names)
+            self.assertNotIn("artifact_info", exposed_names)
+            self.assertNotIn("list_artifacts", exposed_names)
+            self.assertNotIn("read_artifact", exposed_names)
+            self.assertNotIn("search_artifacts", exposed_names)
+            self.assertFalse(any(name.startswith("op_") or name.startswith("intro_") for name in exposed_names))
             self.assertNotIn("memory_active_provider", exposed_names)
-            self.assertNotIn("op_memory_refresh_indexes", exposed_names)
+            self.assertNotIn("memory_refresh_indexes", exposed_names)
             self.assertNotIn("memory_show", exposed_names)
             self.assertNotIn("llm_active", exposed_names)
             self.assertNotIn("llm_set_active_endpoint", exposed_names)
             self.assertNotIn("echo", exposed_names)
-            exec_tool = next(item for item in request.tools if item["function"]["name"] == "op_exec_shell")
+            exec_tool = next(item for item in request.tools if item["function"]["name"] == "run_shell")
             self.assertIn("cmd", exec_tool["function"]["parameters"]["properties"])
-            memory_update = next(item for item in request.tools if item["function"]["name"] == "op_memory_update")
+            self.assertNotIn("op_", exec_tool["function"]["description"])
+            memory_update = next(item for item in request.tools if item["function"]["name"] == "update_memory")
             self.assertIn("mem_ref", memory_update["function"]["parameters"]["properties"])
             self.assertNotIn("target_id", memory_update["function"]["parameters"]["properties"])
-            memory_write = next(item for item in request.tools if item["function"]["name"] == "op_memory_write")
+            memory_write = next(item for item in request.tools if item["function"]["name"] == "write_memory")
             memory_write_description = memory_write["function"]["description"]
             self.assertIn("Before using this tool, call memory_recall", memory_write_description)
             self.assertIn("use memory_update with that mem_ref instead", memory_write_description)
@@ -1244,7 +1261,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("<tool_efficiency>", final_text)
             self.assertIn("<memory_guidance>", final_text)
             self.assertIn("If recalled memories are already present in the prompt", final_text)
-            self.assertIn("Mandatory recall", final_text)
             self.assertIn("MUST call memory_recall", final_text)
             self.assertIn("custom Pal/project term", final_text)
             self.assertIn('<runtime_context_update kind="memory">', final_text)
@@ -1821,17 +1837,46 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         page_tool = next(
             item
             for item in tools
-            if item.get("function", {}).get("name") == "op_tool_result_page"
+            if item.get("function", {}).get("name") == "read_tool_result_page"
         )
 
         schema = page_tool["function"]["parameters"]
         self.assertIn("result_ref", schema["properties"])
         self.assertIn("page", schema["properties"])
         read_result = core.context.execution_runtime.execute_tool(
-            CanonicalToolCall(name="op_tool_read", args={"name": "op_tool_result_page"})
+            CanonicalToolCall(name="read_tool", args={"name": "read_tool_result_page"})
         )
         self.assertTrue(read_result.ok)
         self.assertIn("result_ref", read_result.llm_text)
+
+    def test_llm_tool_aliases_route_to_internal_canonical_capabilities(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
+
+        shell = core.context.execution_runtime.execute_tool(
+            CanonicalToolCall(name="run_shell", args={"cmd": "echo alias-ok"})
+        )
+        search = core.context.execution_runtime.execute_tool(
+            CanonicalToolCall(name="search_tools", args={"query": "shell command", "top_k": 3})
+        )
+        read = core.context.execution_runtime.execute_tool(
+            CanonicalToolCall(name="read_tool", args={"name": "run_shell"})
+        )
+        compat = core.context.execution_runtime.execute_tool(
+            CanonicalToolCall(name="op_tool_read", args={"name": "op_exec_shell"})
+        )
+
+        self.assertTrue(shell.ok)
+        self.assertEqual(shell.name, "op_exec_shell")
+        self.assertEqual(str(shell.structured["stdout"]).strip(), "alias-ok")
+        self.assertTrue(search.ok)
+        self.assertIn("run_shell", [item["name"] for item in search.structured["hits"]])
+        self.assertTrue(read.ok)
+        self.assertEqual(read.structured["capability"]["name"], "run_shell")
+        self.assertNotIn("op_exec_shell", read.llm_text)
+        self.assertTrue(compat.ok)
+        self.assertEqual(compat.structured["capability"]["name"], "run_shell")
 
     def test_detachable_proactive_module_round_trips_through_core_registry(self) -> None:
         core = PalCore()
@@ -2351,6 +2396,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             [
                 CanonicalLLMOutcome(
                     text="",
+                    provider_specific_fields={"reasoning_content": "hidden protocol reasoning"},
                     tool_calls=[CanonicalToolCall(name="echo", args={"value": "proto"})],
                     finish_reason="tool_calls",
                 ),
@@ -2381,6 +2427,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(
             ast.literal_eval(assistant_tool_message["tool_calls"][0]["function"]["arguments"]),
             {"value": "proto"},
+        )
+        self.assertEqual(
+            assistant_tool_message["provider_specific_fields"]["reasoning_content"],
+            "hidden protocol reasoning",
         )
         tool_message = next(message for message in followup_messages if message.get("role") == "tool")
         self.assertIn("stable-result", tool_message["content"])
@@ -2465,6 +2515,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             [
                 CanonicalLLMOutcome(
                     text="",
+                    provider_specific_fields={"reasoning_content": "hidden recall reasoning"},
                     tool_calls=[
                         CanonicalToolCall(
                             name="op_memory_recall",
@@ -2637,7 +2688,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         tool_message = next(message for message in generate_requests[-1].messages if message.get("role") == "tool")
         self.assertIn("<tool_result", tool_message["content"])
         self.assertIn("has_more=\"true\"", tool_message["content"])
-        self.assertIn("next_page: op_tool_result_page", tool_message["content"])
+        self.assertIn("next_page: read_tool_result_page", tool_message["content"])
 
     def test_turn_runtime_degrades_older_tool_results_when_current_turn_group_exceeds_limit(self) -> None:
         class MultiToolLLMRuntime:
@@ -2729,7 +2780,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertTrue(Path(str(result_handle["backing_path"])).exists())
             self.assertIn("<tool_result", result.llm_text)
             self.assertIn("result_ref=\"call_spill\"", result.llm_text)
-            self.assertIn("next_page: op_tool_result_page", result.llm_text)
+            self.assertIn("next_page: read_tool_result_page", result.llm_text)
             self.assertNotIn("backing_path", result.llm_text)
             self.assertNotIn(str(tmpdir), result.llm_text)
 
@@ -2746,7 +2797,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             page_count = int(result.structured["result_handle"]["page_count"])
             later = core.context.execution_runtime.execute_tool(
                 CanonicalToolCall(
-                    name="op_tool_result_page",
+                    name="read_tool_result_page",
                     args={"result_ref": "call_head_tail", "page": page_count},
                 )
             )
@@ -2775,7 +2826,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             for index in range(2, 7):
                 core.context.execution_runtime.begin_tool_result_turn(turn_id=f"turn_{index}", retention_user_turns=5)
             expired = core.context.execution_runtime.execute_tool(
-                CanonicalToolCall(name="op_tool_result_page", args={"result_ref": "call_expire", "page": 1})
+                CanonicalToolCall(name="read_tool_result_page", args={"result_ref": "call_expire", "page": 1})
             )
 
         self.assertFalse(expired.ok)
@@ -2989,6 +3040,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertEqual([fragment.metadata.get("role") for fragment in l1_fragments], ["assistant", "tool"])
         self.assertEqual(l1_fragments[0].metadata.get("tool_calls")[0]["id"], "call_1")
+        self.assertNotIn("provider_specific_fields", l1_fragments[0].metadata)
         self.assertEqual(l1_fragments[1].metadata.get("tool_call_id"), "call_1")
         self.assertEqual(l1_fragments[1].content, "probe result")
 
@@ -3023,6 +3075,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual([message["role"] for message in protocol_messages], ["assistant", "tool"])
         self.assertEqual(protocol_messages[0]["content"], "")
         self.assertEqual(protocol_messages[0]["tool_calls"][0]["id"], "call_1")
+        self.assertNotIn("provider_specific_fields", protocol_messages[0])
         self.assertEqual(protocol_messages[1]["tool_call_id"], "call_1")
         self.assertEqual(protocol_messages[1]["content"], "probe result")
 
@@ -3171,7 +3224,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("Pal capabilities are the execution path", rules.content)
         self.assertIn("shell", rules.content)
         self.assertIn("Source-of-truth, verification, and mutation rules", priority.content)
-        self.assertIn("targeted searches", tool_efficiency.content)
+        self.assertIn("targeted search", tool_efficiency.content)
         self.assertIn("Runtime capability calls are governed actions", mutation_policy.content)
         self.assertIn("Future route hint or recurring decision rule -> behavior guidance", knowledge_storage_boundary.content)
         self.assertNotIn("op_memory_recall", rules.content)

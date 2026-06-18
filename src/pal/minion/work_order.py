@@ -84,7 +84,7 @@ class ModulePlan:
             milestones = data.get("milestones")
         return cls(
             module_id=module_id,
-            owned_area=_string_list(data.get("owned_area") or data.get("owned_paths")),
+            owned_area=_owned_area_list(data.get("owned_area") or data.get("owned_paths")),
             responsibility=str(data.get("responsibility") or data.get("purpose") or "").strip(),
             provided_interfaces=_dict_list(data.get("provided_interfaces")),
             consumed_interfaces=_dict_list(data.get("consumed_interfaces")),
@@ -686,6 +686,7 @@ def prompt_view_from_metadata(metadata: dict[str, Any], *, workspace: dict[str, 
         for key in (
             "review_target",
             "acceptance_criteria",
+            "checklist_projection",
             "planning_goal",
             "planning_requirements",
             "clarifications",
@@ -1204,6 +1205,13 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list | tuple):
         return []
     return [str(item).strip() for item in value if str(item or "").strip()]
+
+
+def _owned_area_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        text = value.replace("\n", ";")
+        return [item.strip() for item in text.split(";") if item.strip()]
+    return _string_list(value)
 
 
 def _skill_refs_from(data: dict[str, Any]) -> list[str]:

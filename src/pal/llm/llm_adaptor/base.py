@@ -15,12 +15,12 @@ from pal.llm.models import LLMEndpointModel
 LLM_PROVIDER_ADAPTER_ENTRY_POINT_GROUP = "pal.llm_provider_adapters"
 RUNTIME_PROVIDER_ADAPTER_DIR = "llm/adapters"
 LEGACY_RUNTIME_PROVIDER_ADAPTER_DIR = "llm_provider_adapters"
-LITELLM_CHAT_COMPLETIONS_SHAPE = "chat_completions"
-LITELLM_RESPONSES_SHAPE = "responses"
+OPENAI_CHAT_COMPLETIONS_SHAPE = "chat_completions"
+OPENAI_RESPONSES_SHAPE = "responses"
 
 
 @dataclass
-class LiteLLMCompletionDraft:
+class OpenAIChatCompletionDraft:
     model: str
     messages: list[dict[str, Any]]
     timeout: int = 120
@@ -73,30 +73,53 @@ class LLMProviderAdapter:
 
     provider_names: ClassVar[frozenset[str]] = frozenset()
     adapter_names: ClassVar[frozenset[str]] = frozenset()
-    litellm_provider: ClassVar[str] = "openai"
+    model_provider_prefix: ClassVar[str] = "openai"
     model_provider_aliases: ClassVar[frozenset[str]] = frozenset()
-    request_shape: ClassVar[str] = LITELLM_CHAT_COMPLETIONS_SHAPE
+    request_shape: ClassVar[str] = OPENAI_CHAT_COMPLETIONS_SHAPE
+    reasoning_content_messages: ClassVar[bool] = False
 
     @classmethod
     def matches_endpoint(cls, endpoint: LLMEndpointModel) -> bool:
         return False
 
-    def new_draft(self, messages: list[dict[str, Any]]) -> LiteLLMCompletionDraft:
-        return LiteLLMCompletionDraft(
-            model=self.litellm_model(),
-            messages=chat_messages_to_openai_compatible_messages(messages),
+    def new_draft(self, messages: list[dict[str, Any]]) -> OpenAIChatCompletionDraft:
+        return OpenAIChatCompletionDraft(
+            model=self.api_model(),
+            messages=chat_messages_to_openai_compatible_messages(
+                messages,
+                reasoning_content_messages=self.should_replay_reasoning_content(),
+            ),
         )
 
-    def litellm_model(self) -> str:
+    def should_replay_reasoning_content(self) -> bool:
+        if self.reasoning_content_messages:
+            return True
+        capabilities = _capabilities(self.endpoint)
+        if capabilities.get("reasoning_content_messages") is False:
+            return False
+        if capabilities.get("reasoning_content") is False:
+            return False
+        return bool(
+            capabilities.get("reasoning_content_messages")
+            or capabilities.get("reasoning_content")
+            or capabilities.get("supports_reasoning_content")
+            or capabilities.get("supports_thinking")
+            or capabilities.get("thinking")
+            or getattr(self.endpoint, "supports_reasoning", False)
+        )
+
+    def api_model(self) -> str:
         model_id = str(self.endpoint.model_id or "").strip()
         if "/" not in model_id:
-            return f"{self.litellm_provider}/{model_id}"
+            return model_id
         provider, name = model_id.split("/", 1)
-        if provider.strip().lower() in self.model_provider_aliases:
-            return f"{self.litellm_provider}/{name}"
+        provider_aliases = set(self.model_provider_aliases)
+        provider_aliases.add(str(self.model_provider_prefix or "").strip().lower())
+        if provider.strip().lower() in provider_aliases:
+            return name
         return model_id
 
-    def apply_request(self, request: CanonicalLLMRequest, draft: LiteLLMCompletionDraft) -> None:
+    def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIChatCompletionDraft) -> None:
         return None
 
 
@@ -353,6 +376,7 @@ def chat_messages_to_openai_compatible_messages(
     messages: list[dict[str, Any]],
     *,
     supports_developer: bool = False,
+    reasoning_content_messages: bool = False,
 ) -> list[dict[str, Any]]:
     rendered: list[dict[str, Any]] = []
     seen_conversation = False
@@ -361,10 +385,20 @@ def chat_messages_to_openai_compatible_messages(
             continue
         role = str(message.get("role") or "user").strip() or "user"
         if role == "system" and not seen_conversation:
-            rendered.append(dict(message))
+            rendered.append(
+                _openai_compatible_message(
+                    message,
+                    reasoning_content_messages=reasoning_content_messages,
+                )
+            )
             continue
         if role == "developer" and supports_developer:
-            rendered.append(dict(message))
+            rendered.append(
+                _openai_compatible_message(
+                    message,
+                    reasoning_content_messages=reasoning_content_messages,
+                )
+            )
             continue
         if role in {"system", "developer"}:
             fallback = _instruction_fallback_user_message(role, message.get("content"))
@@ -372,11 +406,45 @@ def chat_messages_to_openai_compatible_messages(
                 rendered.append(fallback)
                 seen_conversation = True
             continue
-        rendered.append(dict(message))
+        rendered.append(
+            _openai_compatible_message(
+                message,
+                reasoning_content_messages=reasoning_content_messages,
+            )
+        )
         seen_conversation = True
     if not rendered:
         rendered.append({"role": "user", "content": "Continue."})
     return rendered
+
+
+def _openai_compatible_message(
+    message: dict[str, Any],
+    *,
+    reasoning_content_messages: bool,
+) -> dict[str, Any]:
+    payload = {
+        key: value
+        for key, value in dict(message).items()
+        if key not in {"provider_specific_fields", "reasoning_content"}
+    }
+    if reasoning_content_messages:
+        reasoning_content = _message_reasoning_content(message)
+        if reasoning_content:
+            payload["reasoning_content"] = reasoning_content
+    return payload
+
+
+def _message_reasoning_content(message: dict[str, Any]) -> str:
+    reasoning = message.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning:
+        return reasoning
+    provider_fields = message.get("provider_specific_fields")
+    if isinstance(provider_fields, dict):
+        nested = provider_fields.get("reasoning_content")
+        if isinstance(nested, str) and nested:
+            return nested
+    return ""
 
 
 def render_instruction_fallback_text(role: str, content: Any) -> str:

@@ -329,7 +329,7 @@ Run the workflow.
         register_skill_with_core(core.context, self.service)
         published = set(core.publish_module_capabilities("skill"))
 
-        self.assertIn("skill_show", published)
+        self.assertIn("intro_module_skill_show", published)
         self.assertNotIn("skill_list", published)
         self.assertNotIn("skill_stats_read", published)
         self.assertIn("op_skill_search", published)

@@ -6,7 +6,7 @@ from typing import Any
 from pal.behavior.contracts import BehaviorAdviceRequest
 from pal.behavior.service import BehaviorService
 from pal.execution.contracts import CapabilityResult
-from pal.shared import RuntimeStatus
+from pal.shared import RuntimeStatus, replace_internal_tool_names_in_value
 from pal.shared.result_rendering import render_titled_structured_for_llm
 
 
@@ -92,7 +92,7 @@ class BehaviorAdviceTool:
             status=RuntimeStatus.INVALID,
             text="behavior_advise requires an active async turn context.",
             structured=structured,
-            llm_text=render_titled_structured_for_llm("Behavior advice unavailable", structured),
+            llm_text=_render_behavior_tool_payload("Behavior advice unavailable", structured),
         )
 
     async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
@@ -105,7 +105,7 @@ class BehaviorAdviceTool:
             status=RuntimeStatus.OK,
             text=f"behavior advice returned {len(result.candidates)} candidate(s)",
             structured=structured,
-            llm_text=render_titled_structured_for_llm("Behavior advice", llm_payload),
+            llm_text=_render_behavior_tool_payload("Behavior advice", llm_payload),
         )
 
 
@@ -143,7 +143,7 @@ class AffordanceSubmitTool:
                 status=RuntimeStatus.INVALID,
                 text="behavior guidance save failed",
                 structured=structured,
-                llm_text=render_titled_structured_for_llm("Behavior guidance save failed", structured),
+                llm_text=_render_behavior_tool_payload("Behavior guidance save failed", structured),
             )
         structured = {
             "affordance_id": descriptor.affordance_id,
@@ -160,7 +160,7 @@ class AffordanceSubmitTool:
             status=RuntimeStatus.OK,
             text="behavior guidance saved",
             structured=structured,
-            llm_text=render_titled_structured_for_llm("Behavior guidance saved", structured),
+            llm_text=_render_behavior_tool_payload("Behavior guidance saved", structured),
         )
 
 
@@ -250,7 +250,7 @@ class AffordanceUpdateTool:
                 status=RuntimeStatus.INVALID,
                 text="behavior guidance update failed",
                 structured=structured,
-                llm_text=render_titled_structured_for_llm("Behavior guidance update failed", structured),
+                llm_text=_render_behavior_tool_payload("Behavior guidance update failed", structured),
             )
         updated_fields = [k for k in args if k not in {"affordance", "affordance_id"} and args[k] is not None]
         structured = {
@@ -266,7 +266,7 @@ class AffordanceUpdateTool:
             status=RuntimeStatus.OK,
             text="behavior guidance updated",
             structured=structured,
-            llm_text=render_titled_structured_for_llm("Behavior guidance updated", structured),
+            llm_text=_render_behavior_tool_payload("Behavior guidance updated", structured),
         )
 
 
@@ -326,7 +326,7 @@ class AffordanceDeleteTool:
                 status=RuntimeStatus.INVALID,
                 text="behavior guidance delete failed",
                 structured=structured,
-                llm_text=render_titled_structured_for_llm("Behavior guidance delete failed", structured),
+                llm_text=_render_behavior_tool_payload("Behavior guidance delete failed", structured),
             )
         structured = {
             "affordance_id": descriptor.affordance_id,
@@ -339,7 +339,7 @@ class AffordanceDeleteTool:
             status=RuntimeStatus.OK,
             text="behavior guidance deleted",
             structured=structured,
-            llm_text=render_titled_structured_for_llm("Behavior guidance deleted", structured),
+            llm_text=_render_behavior_tool_payload("Behavior guidance deleted", structured),
         )
 
 
@@ -382,6 +382,10 @@ def _advice_llm_payload(structured: dict[str, Any]) -> dict[str, Any]:
     if str(structured.get("router_error") or "").strip():
         payload["router_error"] = "present"
     return payload
+
+
+def _render_behavior_tool_payload(title: str, structured: Any) -> str:
+    return render_titled_structured_for_llm(title, replace_internal_tool_names_in_value(structured))
 
 
 def _string_list(value: object) -> list[str]:

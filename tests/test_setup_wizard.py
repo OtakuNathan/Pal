@@ -147,7 +147,7 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertEqual(endpoints[0].context_window, 200000)
 
     def test_seed_from_wizard_stores_api_key(self) -> None:
-        from pal.llm import LLMEndpointRepository, LiteLLMCredentialResolver
+        from pal.llm import LLMEndpointRepository, LLMCredentialResolver
         from pal.llm.secret_store import EncryptedFileSecretStore, SecretRef
 
         collected = _make_collected()
@@ -159,7 +159,7 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertEqual(key, "sk-test-key-123")
         endpoint = LLMEndpointRepository().get_primary_enabled()
         self.assertIsNotNone(endpoint)
-        self.assertEqual(LiteLLMCredentialResolver(secret_store=store).resolve_api_key(endpoint), "sk-test-key-123")
+        self.assertEqual(LLMCredentialResolver(secret_store=store).resolve_api_key(endpoint), "sk-test-key-123")
 
     def test_load_existing_wizard_data_reads_current_runtime(self) -> None:
         collected = _make_collected()
@@ -319,7 +319,7 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertEqual(endpoints[0].model_id, "claude-opus-4-20250514")
 
     def test_rerun_seed_from_wizard_preserves_existing_api_key_when_blank(self) -> None:
-        from pal.llm import LLMEndpointRepository, LiteLLMCredentialResolver
+        from pal.llm import LLMEndpointRepository, LLMCredentialResolver
         from pal.llm.secret_store import EncryptedFileSecretStore
 
         collected = _make_collected()
@@ -334,7 +334,7 @@ class TestSeedFromWizard(unittest.TestCase):
         endpoint = LLMEndpointRepository().get_primary_enabled()
         self.assertIsNotNone(endpoint)
         self.assertEqual(
-            LiteLLMCredentialResolver(secret_store=store).resolve_api_key(endpoint),
+            LLMCredentialResolver(secret_store=store).resolve_api_key(endpoint),
             "sk-test-key-123",
         )
 
@@ -717,6 +717,43 @@ class TestDependencyDoctor(unittest.TestCase):
                 exit_code = cli_mod.run_dependency_doctor()
 
         self.assertEqual(exit_code, 2)
+
+    def test_minion_sandbox_check_accepts_linux_bwrap(self) -> None:
+        from pal.wizard import dependencies as dep_mod
+
+        with patch.dict(os.environ, {"PAL_MINION_SANDBOX": "1"}, clear=False):
+            with patch.object(dep_mod.platform, "system", return_value="Linux"):
+                with patch.object(dep_mod.shutil, "which", return_value="/usr/bin/bwrap"):
+                    check = dep_mod._check_minion_sandbox()
+
+        self.assertEqual(check.status, "ok")
+        self.assertTrue(check.required)
+        self.assertIn("bubblewrap", check.detail)
+
+    def test_minion_sandbox_check_blocks_missing_linux_bwrap(self) -> None:
+        from pal.wizard import dependencies as dep_mod
+
+        with patch.dict(os.environ, {"PAL_MINION_SANDBOX": "1"}, clear=False):
+            with patch.object(dep_mod.platform, "system", return_value="Linux"):
+                with patch.object(dep_mod.shutil, "which", return_value=None):
+                    check = dep_mod._check_minion_sandbox()
+
+        self.assertEqual(check.status, "missing")
+        self.assertTrue(check.blocking)
+        self.assertIn("sudo apt-get install bubblewrap", check.fix)
+
+    def test_minion_sandbox_check_reports_macos_backend_as_unwired(self) -> None:
+        from pal.wizard import dependencies as dep_mod
+
+        env = {"PAL_MINION_SANDBOX": "1", "PAL_MINION_DOCKER_IMAGE": "pal-minion:latest"}
+        with patch.dict(os.environ, env, clear=False):
+            with patch.object(dep_mod.platform, "system", return_value="Darwin"):
+                with patch.object(dep_mod.shutil, "which", return_value="/usr/local/bin/docker"):
+                    check = dep_mod._check_minion_sandbox()
+
+        self.assertEqual(check.status, "warn")
+        self.assertFalse(check.required)
+        self.assertIn("future macOS", check.detail)
 
     def test_proactive_manager_check_supports_launchd(self) -> None:
         from pal.wizard import dependencies as dep_mod

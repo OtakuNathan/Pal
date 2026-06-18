@@ -22,11 +22,20 @@ from pal.minion.git_env import finalize_work_order_branch, prepare_task_workspac
 from pal.minion.inflight import InflightTracker
 from pal.minion.ipc import cleanup_manager_endpoint, minion_log_path, minion_runner_log_path, start_manager_server
 from pal.minion.lifecycle import ACTIVE_RUN_STATUSES as _ACTIVE_RUN_STATUSES
+from pal.minion.lifecycle import TERMINAL_RUN_STATUSES as _TERMINAL_RUN_STATUSES
 from pal.minion.lifecycle import transition_run_status
+from pal.minion.lsp_prewarm import prewarm_workspace_lsp
+from pal.minion.llm_broker import (
+    llm_outcome_to_payload,
+    llm_request_from_payload,
+    preflight_advice_to_payload,
+    preflight_request_from_payload,
+)
 from pal.minion.profiles import MinionProfileRegistry
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.review_orchestrator import ReviewOrchestrator
 from pal.minion.runner_process import RunnerProcessSupervisor
+from pal.minion.sandbox import with_minion_sandbox_metadata
 from pal.minion.serial_scheduler import SerialMilestoneScheduler
 from pal.minion.turns import sanitize_runner_session_pack
 from pal.minion.utils import coerce_int as _coerce_int
@@ -110,6 +119,7 @@ class MinionManager:
     reviews: ReviewOrchestrator = field(init=False)
     runner_process: RunnerProcessSupervisor = field(init=False)
     serial_scheduler: SerialMilestoneScheduler = field(init=False)
+    _llm_broker_bundle: Any | None = field(default=None, init=False, repr=False)
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _serial_turns_inflight: InflightTracker = field(default_factory=InflightTracker)
@@ -199,6 +209,14 @@ class MinionManager:
             return await self.send_decision(dict(params.get("decision") or {}))
         if method == "send_clarification":
             return await self.send_clarification(dict(params.get("clarification") or {}))
+        if method == "llm_preflight":
+            return await self.llm_broker_preflight(dict(params))
+        if method == "llm_generate":
+            return await self.llm_broker_generate(dict(params))
+        if method == "llm_resolve_max_output_tokens":
+            return await self.llm_broker_resolve_max_output_tokens(dict(params))
+        if method == "llm_resolve_endpoint_facts":
+            return await self.llm_broker_resolve_endpoint_facts(dict(params))
         if method == "finalize_work_order":
             return self.finalize_work_order(dict(params))
         if method == "continue_work_order":
@@ -297,12 +315,14 @@ class MinionManager:
         metadata["minion_id"] = minion_id
         pack = TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
         pack = prepare_task_workspace(self.runtime_root, pack, run_id=run_id)
+        pack = await self._with_lsp_prewarm(pack)
         pack, metadata_updates = self._with_profile_gate_policy(pack)
         if metadata_updates:
             self.tasking_repository.merge_work_order_metadata(pack.work_order_id, metadata_updates)
         self.tasking_repository.update_work_order_workspace(pack.work_order_id, dict(pack.workspace))
         pack = self._with_runner_debug_log(pack)
         pack = sanitize_runner_session_pack(pack)
+        pack = with_minion_sandbox_metadata(self.runtime_root, pack, run_id=run_id)
         state = MinionRunState(minion_id=minion_id, run_id=run_id, pack=pack)
         async with self._lock:
             self.runs[run_id] = state
@@ -316,6 +336,29 @@ class MinionManager:
             },
         )
         return state.summary()
+
+    async def _with_lsp_prewarm(self, pack: TaskContextPack) -> TaskContextPack:
+        metadata = dict(pack.metadata or {})
+        if bool(metadata.get("lsp_prewarm_disabled")):
+            return pack
+        try:
+            result = await asyncio.to_thread(
+                prewarm_workspace_lsp,
+                runtime_root=self.runtime_root,
+                workspace=dict(pack.workspace or {}),
+            )
+        except Exception as exc:
+            result = {
+                "status": "error",
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+        if str(result.get("status") or "") == "skipped":
+            return pack
+        workspace = dict(pack.workspace or {})
+        lsp_setup = dict(workspace.get("lsp_setup") or {})
+        lsp_setup["prewarm"] = result
+        workspace["lsp_setup"] = lsp_setup
+        return TaskContextPack.from_dict({**pack.to_dict(), "workspace": workspace})
 
     async def kill(self, run_id: str, reason: str = "") -> dict[str, Any]:
         state = self._require_run(run_id)
@@ -581,9 +624,63 @@ class MinionManager:
 
     async def close_all(self) -> None:
         await self.runner_process.close_all()
+        if self._llm_broker_bundle is not None:
+            close = getattr(self._llm_broker_bundle, "close", None)
+            if callable(close):
+                await close()
+            self._llm_broker_bundle = None
 
     async def _start_runner(self, state: MinionRunState) -> None:
         await self.runner_process.start_runner(state)
+
+    async def llm_broker_preflight(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_broker_run(params)
+        request = preflight_request_from_payload(dict(params.get("request") or {}))
+        runtime = await self._llm_broker_runtime()
+        advice = await runtime.apreflight(request)
+        return {"ok": True, "advice": preflight_advice_to_payload(advice)}
+
+    async def llm_broker_generate(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_broker_run(params)
+        request = llm_request_from_payload(dict(params.get("request") or {}))
+        runtime = await self._llm_broker_runtime()
+        outcome = await runtime.agenerate(request)
+        return {"ok": True, "outcome": llm_outcome_to_payload(outcome)}
+
+    async def llm_broker_resolve_max_output_tokens(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_broker_run(params)
+        runtime = await self._llm_broker_runtime()
+        value = await asyncio.to_thread(
+            runtime.resolve_max_output_tokens,
+            preferred_endpoint_id=str(params.get("preferred_endpoint_id") or "").strip() or None,
+            preferred_endpoint_source=str(params.get("preferred_endpoint_source") or "").strip() or None,
+        )
+        return {"ok": True, "max_output_tokens": value}
+
+    async def llm_broker_resolve_endpoint_facts(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_broker_run(params)
+        runtime = await self._llm_broker_runtime()
+        return await asyncio.to_thread(
+            runtime.resolve_endpoint_facts,
+            preferred_endpoint_id=str(params.get("preferred_endpoint_id") or "").strip() or None,
+            preferred_endpoint_source=str(params.get("preferred_endpoint_source") or "").strip() or None,
+        )
+
+    def _require_broker_run(self, params: dict[str, Any]) -> MinionRunState:
+        run_id = str(params.get("run_id") or "").strip()
+        if not run_id:
+            raise ValueError("run_id is required for minion LLM broker requests")
+        state = self._require_run(run_id)
+        if state.status in _TERMINAL_RUN_STATUSES:
+            raise RuntimeError(f"minion run is terminal: {run_id}")
+        return state
+
+    async def _llm_broker_runtime(self) -> Any:
+        if self._llm_broker_bundle is None:
+            from pal.minion.runner import build_slim_minion_runtime
+
+            self._llm_broker_bundle = await asyncio.to_thread(build_slim_minion_runtime, self.runtime_root)
+        return self._llm_broker_bundle.llm_runtime
 
     def _with_runner_debug_log(self, pack: TaskContextPack) -> TaskContextPack:
         if not _debug_log_requested(pack):
@@ -728,6 +825,9 @@ class MinionManager:
             self.serial_scheduler.schedule(state, event)
 
     async def _send_runner_control_or_record(self, state: MinionRunState, message: dict[str, Any]) -> dict[str, Any]:
+        unavailable_reason = self.runner_control_unavailable_reason(state)
+        if unavailable_reason:
+            return self.record_runner_control_skipped(state, message, reason=unavailable_reason)
         try:
             return await self._send_runner_control(state, message)
         except Exception as exc:
@@ -745,6 +845,34 @@ class MinionManager:
                 },
             )
             raise
+
+    def runner_control_unavailable_reason(self, state: MinionRunState) -> str:
+        if state.status in _TERMINAL_RUN_STATUSES:
+            return f"run status is terminal: {state.status}"
+        if state.process is None:
+            return ""
+        if state.process.stdin is None:
+            return "runner stdin is not available"
+        if state.process.returncode is not None:
+            return f"runner process exited with returncode {state.process.returncode}"
+        return ""
+
+    def record_runner_control_skipped(self, state: MinionRunState, message: dict[str, Any], *, reason: str) -> dict[str, Any]:
+        payload = {
+            "status": "skipped",
+            "summary": f"manager skipped {str(message.get('type') or 'control')} because the minion runner is not accepting control messages",
+            "message_type": str(message.get("type") or ""),
+            "reason": str(reason or "runner unavailable"),
+        }
+        self._record_event(
+            state,
+            {
+                "event_kind": "manager_control_skipped",
+                "payload": payload,
+                "created_at": utc_now(),
+            },
+        )
+        return {"ok": False, "skipped": True, "run_id": state.run_id, "message_type": payload["message_type"], "reason": payload["reason"]}
 
     def _queue_event_delivery(self, event: dict[str, Any]) -> None:
         self.events.queue_event(event)

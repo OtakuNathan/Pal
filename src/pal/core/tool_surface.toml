@@ -13,7 +13,8 @@ capabilities = [
     "op_file_read",
     "op_file_edit",
     "op_file_write",
-    "op_file_state",
+    "op_path_delete",
+    "op_git",
     "op_tool_call",
     "op_tool_result_page",
     # -- behavior (affordance + skill) --
@@ -27,10 +28,11 @@ capabilities = [
     "op_memory_update",
     "op_memory_delete",
     # -- artifacts (conversation attachments) --
-    "op_artifact_list",
-    "op_artifact_search",
-    "op_artifact_info",
-    "op_artifact_read",
+    # Discover via op_tool_search when attachments/artifacts are relevant:
+    # "op_artifact_list",
+    # "op_artifact_search",
+    # "op_artifact_info",
+    # "op_artifact_read",
     # -- channel output --
     # Discover via op_tool_search when needed:
     # "op_channel_send_attachment",

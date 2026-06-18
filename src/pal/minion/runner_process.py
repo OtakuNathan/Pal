@@ -11,6 +11,7 @@ from pal.foundation import utc_now
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
 from pal.minion.ipc import python_subprocess_env
 from pal.minion.lifecycle import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES
+from pal.minion.sandbox import build_sandboxed_runner_invocation
 
 
 def runner_stderr_line_is_error(line: str) -> bool:
@@ -64,25 +65,34 @@ class RunnerProcessSupervisor:
     async def start_runner(self, state: Any) -> None:
         manager = self.manager
         read_fd, write_fd = os.pipe()
+        argv = [
+            sys.executable,
+            "-m",
+            "pal.minion.runner_main",
+            "--runtime-root",
+            str(manager.runtime_root),
+            "--task-json",
+            state.pack.to_json(),
+            "--minion-id",
+            state.minion_id,
+            "--run-id",
+            state.run_id,
+            "--manager-liveness-fd",
+            str(read_fd),
+        ]
+        argv, env = build_sandboxed_runner_invocation(
+            runtime_root=manager.runtime_root,
+            pack=state.pack,
+            argv=argv,
+            env=python_subprocess_env(),
+        )
         try:
             process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-m",
-                "pal.minion.runner_main",
-                "--runtime-root",
-                str(manager.runtime_root),
-                "--task-json",
-                state.pack.to_json(),
-                "--minion-id",
-                state.minion_id,
-                "--run-id",
-                state.run_id,
-                "--manager-liveness-fd",
-                str(read_fd),
+                *argv,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=python_subprocess_env(),
+                env=env,
                 pass_fds=(read_fd,),
             )
         except Exception:

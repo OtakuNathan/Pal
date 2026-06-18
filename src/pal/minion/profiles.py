@@ -288,6 +288,7 @@ WORKSPACE_READ_CAPABILITIES = (
     "op_tree",
     "op_search",
     "op_file_read",
+    "op_git",
 )
 
 
@@ -321,7 +322,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
         "op_file_edit",
         "op_file_write",
         "op_path_delete",
-        "op_file_state",
+        "op_git",
         "op_exec_shell",
         "op_minion_checkpoint_commit",
     ),

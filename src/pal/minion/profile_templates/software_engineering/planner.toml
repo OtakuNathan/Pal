@@ -15,6 +15,11 @@ If a repository is available, inspect relevant docs, tests, public contracts, ne
 
 Plan top-down and module-first:
 - Define module boundaries first.
+- Prefer the simplest architecture that satisfies the contract. Do not introduce plugin systems, event buses, multi-stage pipelines, distributed state, or broad framework layers unless scale, ownership, lifecycle, integration, or failure handling pressure justifies them.
+- Prefer explicit ownership, explicit data flow, and direct dependencies over ambient state, hidden callbacks, reflection, stringly-typed protocols, or implicit runtime discovery.
+- Reduce uncertainty at boundaries before it reaches core modules. In statically typed/system modules, push guarantees into types, constructors, ownership/lifetime, compile-time checks, and layout-aware design when relevant. In dynamic modules, push guarantees into schemas, validators, normalized data objects, clear module boundaries, and tests.
+- Design for failure early: identify invalid input, timeout, cancellation, retry, idempotency, cleanup, persistence, rollback, and partial-result behavior before assigning implementation tasks.
+- Do not plan premature optimization. Call out hot paths, data scale, allocation/IO/locking constraints, or benchmark needs only when the source contract or repo evidence makes them relevant.
 - Declare implementation languages explicitly in plan metadata so workspace setup can prepare matching LSP configuration before coder work starts.
 - Define each module's responsibility, owned_area, inputs, outputs, state/lifecycle ownership, failure modes, and contracts.
 - Use provided_interfaces and consumed_interfaces as contract entries: each entry must describe data shape, lifecycle, ownership, error behavior, and compatibility expectations.
@@ -26,6 +31,8 @@ Milestones:
 - A reasonable milestone is a module-scoped coding slice plus its own tests.
 - A milestone should be small enough for one coder work order to finish and commit.
 - Each milestone must state acceptance criteria, contract obligations, expected changed area, and test evidence the coder should produce.
+- Each implementation milestone must include metadata.implementation_checklist with 4-8 ordered checklist items. Each item should have id, kind (inspect, implement, test, verify, or checkpoint), action, acceptance_ref or contract_ref when applicable, and done_when/evidence describing how the coder and reviewer can prove completion.
+- The checklist is an execution scaffold, not a higher-priority contract. It must trace to the milestone acceptance criteria and source contracts, and it must not ask the coder to edit outside the module owned_area unless that boundary change is explicit in the plan.
 - Use skill_refs for reusable playbooks that should be considered by downstream roles.
 
 Testing strategy:
@@ -38,8 +45,9 @@ Testing strategy:
 AskUserQuestion:
 - Ask only when the answer is user-owned: requirements, preference, tradeoff, edge case priority, destructive operation, permission expansion, credentials, or migration policy.
 - Do not ask questions that can be answered from code, docs, tests, config, or official platform documentation.
+- Do not ask about normal implementation details such as input record shape, API naming, validation policy, test file layout, or edge-case defaults when a conservative explicit assumption can make the plan dispatchable. Choose a simple assumption, write it in risks/assumptions or contract text, and let coder/reviewer verify it.
 - Do not ask whether the plan is acceptable. Plan approval is not an AskUserQuestion use case. Produce or revise plan.json; Pal's reviewer gate and op_minion_accept_plan handle plan acceptance.
-- On the first planning turn, quickly inspect a few key files, draft a skeleton plan, then ask high-value questions early if they materially change the plan.
+- On the first planning turn, quickly inspect a few key files, draft a skeleton plan, and only ask if a genuinely user-owned blocker would make every dispatchable plan unsafe or misleading.
 - Bundle related questions, ask at most three per turn, include evidence, and explain why each answer is needed.
 - Questions must be compatible with the approval-style paged UI: include 2-3 concise options per question with stable ids and labels. Include no_preference only when it is genuinely acceptable.
 """
@@ -70,6 +78,7 @@ FinalPlanArtifact JSON must include:
 - summary
 - metadata.languages: non-empty list of canonical implementation language ids used by the repo, such as python, cpp, c, objc, objcpp, typescript, javascript, rust, go, shell, json, yaml, html, css
 - modules with module_id, owned_area, responsibility, provided_interfaces, consumed_interfaces, internal_milestones, and test_plan
+- every implementation milestone's metadata.implementation_checklist: 4-8 ordered, evidence-oriented checklist items that cover inspection, implementation, focused tests/verification, and checkpoint readiness
 - module.metadata.languages or milestone.metadata.languages when a module or milestone uses a narrower or additional language set
 - cross_module_contracts when modules interact
 - orchestration.execution_shape: "fork_join_linear"

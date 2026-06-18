@@ -17,15 +17,30 @@ from pal.lsp.ipc import cleanup_manager_endpoint, start_manager_server
 
 
 @dataclass
+class LspWorkspaceSession:
+    workspace_root: Path
+    connector: AsyncLspConnector
+    attached_at: str
+    last_used_at: float = field(default_factory=time.monotonic)
+    last_used_timestamp: str = field(default_factory=utc_now)
+
+    def touch(self) -> None:
+        self.last_used_at = time.monotonic()
+        self.last_used_timestamp = utc_now()
+
+
+@dataclass
 class LspServerState:
     file_config: LspServerFileConfig
     config_path: Path
+    sessions: dict[str, LspWorkspaceSession] = field(default_factory=dict)
     connector: AsyncLspConnector | None = None
     attached: bool = False
     last_error: str = ""
     last_attached_at: str = ""
     last_attach_failed_at: float = 0.0
     last_attach_failed_workspace_root: str = ""
+    attach_failures: dict[str, tuple[float, str]] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @property
@@ -44,6 +59,8 @@ class LspManager:
     last_rescan_at: str = ""
     last_error: str = ""
     attach_failure_cooldown_seconds: float = 60.0
+    idle_session_timeout_seconds: float = 30 * 60.0
+    idle_eviction_interval_seconds: float = 60.0
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
     _manager_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -52,14 +69,18 @@ class LspManager:
         await self.rescan()
         async with self.server:
             serve_task = asyncio.create_task(self.server.serve_forever(), name="lsp-manager-serve")
+            eviction_task = asyncio.create_task(self._evict_idle_sessions_forever(), name="lsp-manager-idle-evict")
             try:
                 await self._shutdown_event.wait()
             finally:
                 serve_task.cancel()
+                eviction_task.cancel()
                 self.server.close()
                 await self.server.wait_closed()
                 with contextlib.suppress(asyncio.CancelledError):
                     await serve_task
+                with contextlib.suppress(asyncio.CancelledError):
+                    await eviction_task
                 await self.close_all()
                 await cleanup_manager_endpoint(self.runtime_root)
 
@@ -108,7 +129,8 @@ class LspManager:
             "last_rescan_at": self.last_rescan_at,
             "last_error": self.last_error,
             "server_count": len(self.states),
-            "attached_count": len([state for state in self.states.values() if state.attached]),
+            "attached_count": sum(_attached_session_count(state) for state in self.states.values()),
+            "idle_session_timeout_seconds": self.idle_session_timeout_seconds,
             "config_root": str(lsp_config_root(self.runtime_root)),
             **dict(self.endpoint_info),
         }
@@ -174,17 +196,19 @@ class LspManager:
         checks.append({"name": "workspace_markers", "status": "ok" if any(item["present"] for item in marker_checks) or not marker_checks else "warning", "items": marker_checks})
         if not state.file_config.enabled or not binary or not workspace_root.exists():
             return {"status": "unavailable", "server": self._server_summary(state), "checks": checks}
-        recent_failure = self._recent_attach_failure_reason(state, workspace_root)
-        if recent_failure:
-            checks.append({"name": "initialize", "status": "skipped_recent_failure", "reason": recent_failure})
-            return {"status": "unavailable", "reason": recent_failure, "server": self._server_summary(state), "checks": checks}
-        try:
-            await self._ensure_attached(state, workspace_root)
-            checks.append({"name": "initialize", "status": "ok", "server_info": state.connector.server_info if state.connector else {}})
-            return {"status": "ok", "server": self._server_summary(state), "checks": checks}
-        except Exception as exc:
-            checks.append({"name": "initialize", "status": "error", "error": state.last_error or f"{exc.__class__.__name__}: {exc}"})
-            return {"status": "error", "server": self._server_summary(state), "checks": checks}
+        async with state.lock:
+            recent_failure = self._recent_attach_failure_reason(state, workspace_root)
+            if recent_failure:
+                checks.append({"name": "initialize", "status": "skipped_recent_failure", "reason": recent_failure})
+                return {"status": "unavailable", "reason": recent_failure, "server": self._server_summary(state), "checks": checks}
+            try:
+                await self._ensure_attached(state, workspace_root)
+                connector = self._connector_for_workspace(state, workspace_root)
+                checks.append({"name": "initialize", "status": "ok", "server_info": connector.server_info if connector else {}})
+                return {"status": "ok", "server": self._server_summary(state), "checks": checks}
+            except Exception as exc:
+                checks.append({"name": "initialize", "status": "error", "error": state.last_error or f"{exc.__class__.__name__}: {exc}"})
+                return {"status": "error", "server": self._server_summary(state), "checks": checks}
 
     async def run_lsp_operation(self, operation: str, params: dict[str, Any]) -> dict[str, Any]:
         state = self._select_state(params)
@@ -203,26 +227,28 @@ class LspManager:
                 detail = state.last_error or f"{exc.__class__.__name__}: {exc}"
                 reason = f"attach_failed:{detail}"
                 return self._unavailable_payload(operation, reason, state, workspace_root)
-            assert state.connector is not None
+            connector = self._connector_for_workspace(state, workspace_root)
+            if connector is None:
+                return self._unavailable_payload(operation, "attach_failed:no_connector_for_workspace", state, workspace_root)
             if operation == "workspace_symbols":
                 query = str(params.get("query") or "")
-                result = await state.connector.request("workspace/symbol", {"query": query})
+                result = await connector.request("workspace/symbol", {"query": query})
                 return self._evidence(operation, state, workspace_root, None, params, result.get("value", result))
             language_id = self._language_id(state, file_path, params)
-            document = await state.connector.ensure_document_open(file_path, language_id=language_id)
+            document = await connector.ensure_document_open(file_path, language_id=language_id)
             text_document = {"uri": document["uri"]}
             if operation == "diagnostics":
-                result = await state.connector.diagnostics(file_path, language_id=language_id)
+                result = await connector.diagnostics(file_path, language_id=language_id)
                 return self._evidence(operation, state, workspace_root, file_path, params, result, file_sha256=str(document["file_sha256"]))
             if operation == "prepare_call_hierarchy":
-                result = await state.connector.request(
+                result = await connector.request(
                     "textDocument/prepareCallHierarchy",
                     {"textDocument": text_document, "position": _position(params)},
                 )
                 return self._evidence(operation, state, workspace_root, file_path, params, result.get("value", result), file_sha256=str(document["file_sha256"]))
             if operation in {"incoming_calls", "outgoing_calls"}:
                 result = await self._call_hierarchy_calls(
-                    state.connector,
+                    connector,
                     operation=operation,
                     text_document=text_document,
                     params=params,
@@ -240,7 +266,7 @@ class LspManager:
                 request_params["position"] = _position(params)
             if operation == "references":
                 request_params["context"] = {"includeDeclaration": bool(params.get("include_declaration", True))}
-            result = await state.connector.request(lsp_method, request_params)
+            result = await connector.request(lsp_method, request_params)
             return self._evidence(operation, state, workspace_root, file_path, params, result.get("value", result), file_sha256=str(document["file_sha256"]))
 
     async def _call_hierarchy_calls(
@@ -270,10 +296,66 @@ class LspManager:
         for state in list(self.states.values()):
             await self._detach_state(state)
 
+    async def evict_idle_sessions(
+        self,
+        *,
+        now: float | None = None,
+        idle_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        current = time.monotonic() if now is None else float(now)
+        timeout = self.idle_session_timeout_seconds if idle_seconds is None else float(idle_seconds)
+        evicted: list[dict[str, Any]] = []
+        for state in list(self.states.values()):
+            async with state.lock:
+                for key, session in list(state.sessions.items()):
+                    if current - session.last_used_at < timeout:
+                        continue
+                    state.sessions.pop(key, None)
+                    if state.connector is session.connector:
+                        state.connector = None
+                    await session.connector.close()
+                    evicted.append(
+                        {
+                            "server_id": state.server_id,
+                            "workspace_root": str(session.workspace_root),
+                            "idle_seconds": max(0.0, current - session.last_used_at),
+                        }
+                    )
+                _refresh_state_attachment(state)
+        return {"status": "ok", "evicted_count": len(evicted), "evicted": evicted}
+
+    async def _evict_idle_sessions_forever(self) -> None:
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(),
+                    timeout=max(1.0, self.idle_eviction_interval_seconds),
+                )
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self.evict_idle_sessions()
+            except Exception:
+                self.logger.exception("failed to evict idle LSP sessions")
+
     async def _ensure_attached(self, state: LspServerState, workspace_root: Path) -> None:
-        if state.connector is not None and state.attached and state.connector.workspace_root == workspace_root:
+        key = _workspace_session_key(workspace_root)
+        session = state.sessions.get(key)
+        if session is not None and session.connector.workspace_root == workspace_root:
+            session.touch()
+            state.connector = session.connector
+            state.attached = True
+            state.last_attached_at = session.attached_at
             return
-        await self._detach_state(state)
+        if state.connector is not None and state.attached and state.connector.workspace_root == workspace_root:
+            state.sessions[key] = LspWorkspaceSession(
+                workspace_root=workspace_root,
+                connector=state.connector,
+                attached_at=state.last_attached_at or utc_now(),
+            )
+            state.sessions[key].touch()
+            return
         connector = AsyncLspConnector(state.file_config.config, workspace_root=workspace_root)
         try:
             await connector.initialize()
@@ -282,20 +364,44 @@ class LspManager:
             state.last_error = _attach_error_detail(exc, connector)
             state.last_attach_failed_at = time.monotonic()
             state.last_attach_failed_workspace_root = str(workspace_root)
+            state.attach_failures[key] = (state.last_attach_failed_at, state.last_error)
             raise
+        attached_at = utc_now()
+        state.sessions[key] = LspWorkspaceSession(
+            workspace_root=workspace_root,
+            connector=connector,
+            attached_at=attached_at,
+        )
         state.connector = connector
         state.attached = True
         state.last_error = ""
-        state.last_attached_at = utc_now()
+        state.last_attached_at = attached_at
         state.last_attach_failed_at = 0.0
         state.last_attach_failed_workspace_root = ""
+        state.attach_failures.pop(key, None)
 
     async def _detach_state(self, state: LspServerState) -> None:
-        connector = state.connector
+        connectors: list[AsyncLspConnector] = []
+        for session in list(state.sessions.values()):
+            if all(session.connector is not existing for existing in connectors):
+                connectors.append(session.connector)
+        if state.connector is not None and all(state.connector is not existing for existing in connectors):
+            connectors.append(state.connector)
+        state.sessions.clear()
         state.connector = None
         state.attached = False
-        if connector is not None:
+        for connector in connectors:
             await connector.close()
+
+    def _connector_for_workspace(self, state: LspServerState, workspace_root: Path) -> AsyncLspConnector | None:
+        session = state.sessions.get(_workspace_session_key(workspace_root))
+        if session is not None:
+            session.touch()
+            return session.connector
+        connector = state.connector
+        if connector is not None and state.attached and connector.workspace_root == workspace_root:
+            return connector
+        return None
 
     def _select_state(self, params: dict[str, Any]) -> LspServerState:
         server_id = str(params.get("server_id") or "").strip()
@@ -358,6 +464,15 @@ class LspManager:
         return ""
 
     def _recent_attach_failure_reason(self, state: LspServerState, workspace_root: Path) -> str:
+        key = _workspace_session_key(workspace_root)
+        session_failure = state.attach_failures.get(key)
+        if session_failure is not None and key not in state.sessions:
+            failed_at, detail = session_failure
+            elapsed = max(0.0, time.monotonic() - failed_at)
+            remaining = self.attach_failure_cooldown_seconds - elapsed
+            if remaining > 0:
+                return f"recent_attach_failure:{detail or 'unknown attach failure'}; retry_after_seconds={remaining:.1f}"
+            state.attach_failures.pop(key, None)
         if not state.last_attach_failed_at or state.attached:
             return ""
         if state.last_attach_failed_workspace_root != str(workspace_root):
@@ -399,13 +514,30 @@ class LspManager:
 
     def _server_summary(self, state: LspServerState) -> dict[str, Any]:
         binary = shutil.which(state.file_config.config.command[0])
+        attached_workspaces = sorted(
+            str(session.workspace_root)
+            for session in state.sessions.values()
+        )
+        workspace_sessions = [
+            {
+                "workspace_root": str(session.workspace_root),
+                "attached_at": session.attached_at,
+                "last_used_at": session.last_used_timestamp,
+            }
+            for session in sorted(state.sessions.values(), key=lambda item: str(item.workspace_root))
+        ]
+        if not attached_workspaces and state.attached and state.connector is not None:
+            attached_workspaces = [str(state.connector.workspace_root)]
         return {
             "server_id": state.server_id,
             "display_name": state.file_config.config.display_name,
             "source": state.file_config.source,
             "config_path": str(state.config_path),
             "enabled": state.file_config.enabled,
-            "attached": state.attached,
+            "attached": bool(attached_workspaces),
+            "attached_count": len(attached_workspaces),
+            "attached_workspaces": attached_workspaces,
+            "workspace_sessions": workspace_sessions,
             "binary_status": "ok" if binary else "missing_binary",
             "command": list(state.file_config.config.command),
             "args": list(state.file_config.config.args),
@@ -454,6 +586,29 @@ class LspManager:
             "result": result,
         }
         return {"status": "ok", "operation": operation, "evidence": evidence, "result": result, "server": self._server_summary(state)}
+
+
+def _workspace_session_key(workspace_root: Path) -> str:
+    return str(Path(workspace_root).expanduser().resolve())
+
+
+def _attached_session_count(state: LspServerState) -> int:
+    if state.sessions:
+        return len(state.sessions)
+    if state.attached and state.connector is not None:
+        return 1
+    return 0
+
+
+def _refresh_state_attachment(state: LspServerState) -> None:
+    if state.sessions:
+        latest = max(state.sessions.values(), key=lambda session: session.last_used_at)
+        state.connector = latest.connector
+        state.attached = True
+        state.last_attached_at = latest.attached_at
+        return
+    state.connector = None
+    state.attached = False
 
 
 def _result_list(value: Any) -> list[Any]:

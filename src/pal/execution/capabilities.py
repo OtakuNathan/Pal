@@ -10,6 +10,8 @@ from pal.execution.file_edit import FileEditTool
 from pal.execution.file_read import FileReadTool
 from pal.execution.file_state import FileStateCache, FileStateTool
 from pal.execution.file_write import FileWriteTool
+from pal.execution.git_capabilities import GitCapabilityMixin
+from pal.execution.git_tool import GitTool
 from pal.execution.path_delete import PathDeleteTool
 from pal.execution.runtime import ExecutionRuntime
 from pal.execution.shell_exec import ShellExecCapabilityMixin, ShellExecTool
@@ -74,6 +76,7 @@ class ExecutionIntrospectionProvider(
     ExecutionToolSearchMixin,
     ExecutionDiscoveryCapabilityMixin,
     ShellExecCapabilityMixin,
+    GitCapabilityMixin,
     FileCapabilityMixin,
 ):
     runtime: ExecutionRuntime
@@ -118,6 +121,7 @@ def register_with_core(context: MainContext, runtime: ExecutionRuntime | None = 
     resolved_runtime.register_tool(FileWriteTool(cache=_FILE_STATE_CACHE))
     resolved_runtime.register_tool(PathDeleteTool(cache=_FILE_STATE_CACHE))
     resolved_runtime.register_tool(FileStateTool(cache=_FILE_STATE_CACHE))
+    resolved_runtime.register_tool(GitTool())
     provider = ExecutionIntrospectionProvider(runtime=resolved_runtime)
     handle = ModuleHandle(
         module_id="execution",

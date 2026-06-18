@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pal.foundation import utc_now
+from pal.minion.checklist import build_acceptance_checklist, compact_checklist, repair_acceptance_refs
 from pal.minion.contracts import SERIAL_MILESTONE_MODES
 from pal.minion.inflight import InflightTracker
 from pal.minion.profiles import MinionProfileRegistry
@@ -209,6 +210,8 @@ class ReviewOrchestrator:
             workspace = dict(coder_state.pack.workspace or {})
             repo_path = str(workspace.get("repo_path") or "").strip()
             review_gate_kind = self._checkpoint_review_gate_kind(coder_state, payload)
+            source_contract = _source_contract_from_pack(coder_state.pack)
+            current_acceptance = _checkpoint_review_acceptance_criteria(payload, source_contract)
             review_target = {
                 "checkpoint_id": checkpoint_id,
                 "gate_kind": review_gate_kind,
@@ -218,14 +221,19 @@ class ReviewOrchestrator:
                 "module_id": str(payload.get("module_id") or ""),
                 "milestone_id": str(payload.get("milestone_id") or ""),
                 "milestone_index": payload.get("milestone_index"),
-                "acceptance_criteria": [str(item) for item in list(payload.get("acceptance_criteria") or [])],
+                "acceptance_criteria": current_acceptance,
                 "commit_sha": str(payload.get("commit_sha") or ""),
                 "repo_path": repo_path,
                 "summary": str(payload.get("summary") or ""),
             }
-            source_contract = _source_contract_from_pack(coder_state.pack)
             if source_contract:
                 review_target["source_contract"] = source_contract
+                deferred_acceptance = _deferred_acceptance_criteria(source_contract, current_acceptance)
+                if deferred_acceptance:
+                    review_target["deferred_acceptance_criteria"] = deferred_acceptance
+            acceptance_checklist = build_acceptance_checklist(review_target.get("acceptance_criteria"))
+            if acceptance_checklist:
+                review_target["acceptance_checklist"] = compact_checklist(acceptance_checklist)
             checkpoint_git_context = _checkpoint_git_context(repo_path, str(payload.get("commit_sha") or ""))
             if checkpoint_git_context:
                 review_target["checkpoint_git"] = checkpoint_git_context
@@ -242,6 +250,8 @@ class ReviewOrchestrator:
                 **environment_workspace,
                 "workspace_policy": {"mode": "read_only_repo"},
             }
+            if acceptance_checklist:
+                reviewer_workspace["review_target_acceptance_checklist"] = compact_checklist(acceptance_checklist)
             reviewer_order = ReviewerWorkOrder(
                 work_order_id=review_work_order_id,
                 task_id=f"review_{safe_token(checkpoint_id)}",
@@ -256,17 +266,22 @@ class ReviewOrchestrator:
                 output_contract={"must_submit": "op_minion_review_checkpoint"},
                 metadata={"workspace": reviewer_workspace},
             )
+            prompt_view = prompt_view_for_reviewer(reviewer_order)
+            if acceptance_checklist:
+                prompt_view["checklist_projection"] = compact_checklist(acceptance_checklist)
             metadata = {
                 "task_id": reviewer_order.task_id,
                 "task_title": f"Review checkpoint {checkpoint_id}",
                 "work_order_title": f"Review checkpoint {checkpoint_id}",
                 "review_target": review_target,
                 "reviewer_work_order": reviewer_order.to_dict(),
-                "prompt_view": prompt_view_for_reviewer(reviewer_order),
+                "prompt_view": prompt_view,
                 "milestones": ["Review checkpoint and submit gate"],
                 "checkpoint_review_for_run_id": coder_state.run_id,
                 "checkpoint_review_for_work_order_id": coder_state.pack.work_order_id,
             }
+            if acceptance_checklist:
+                metadata["checklist_projection"] = compact_checklist(acceptance_checklist)
             if isinstance((coder_state.pack.metadata or {}).get("control_route"), dict):
                 metadata["control_route"] = dict((coder_state.pack.metadata or {}).get("control_route") or {})
             pack = TaskContextPack.from_dict(
@@ -647,6 +662,14 @@ class ReviewOrchestrator:
             self.checkpoint_reviews.release(checkpoint_id)
 
     async def _send_checkpoint_repair_turn(self, coder_state: MinionRunState, gate: dict[str, Any]) -> None:
+        unavailable_reason = self.manager.runner_control_unavailable_reason(coder_state)
+        if unavailable_reason:
+            self.manager.record_runner_control_skipped(
+                coder_state,
+                {"type": "repair_turn"},
+                reason=unavailable_reason,
+            )
+            return
         current = dict((coder_state.pack.continuity or {}).get("current_milestone") or {})
         if not current:
             current = dict((coder_state.pack.metadata.get("prompt_view") or {}).get("milestone") or {})
@@ -825,6 +848,7 @@ def _has_material_contract_impact(value: str) -> bool:
 
 def _checkpoint_repair_payload(gate: dict[str, Any], repair_state: dict[str, Any]) -> dict[str, Any]:
     target = review_gate_target(gate)
+    acceptance_checklist = build_acceptance_checklist(target.get("acceptance_criteria"))
     raw_findings = _repair_actionable_findings(gate)
     findings = [_compact_repair_finding(item) for item in raw_findings]
     raw_required_fixes = [dict(item) for item in list(gate.get("required_fixes") or []) if isinstance(item, dict)]
@@ -832,8 +856,9 @@ def _checkpoint_repair_payload(gate: dict[str, Any], repair_state: dict[str, Any
         _compact_required_fix(item)
         for item in raw_required_fixes
     ]
-    repair_checklist = _repair_checklist(raw_findings, raw_required_fixes)
+    repair_checklist = _repair_checklist(raw_findings, raw_required_fixes, acceptance_checklist=acceptance_checklist)
     failed_acceptance = _failed_acceptance_criteria(gate, target)
+    failed_acceptance_refs = repair_acceptance_refs({"failed_acceptance_criteria": failed_acceptance}, acceptance_checklist)
     payload: dict[str, Any] = {
         "turn_kind": "checkpoint_repair",
         "attempt": repair_state.get("attempt"),
@@ -853,7 +878,9 @@ def _checkpoint_repair_payload(gate: dict[str, Any], repair_state: dict[str, Any
         "repair_checklist": repair_checklist[:8],
         "findings": findings[:8],
         "required_fixes": required_fixes[:8],
+        "acceptance_checklist": compact_checklist(acceptance_checklist),
         "failed_acceptance_criteria": failed_acceptance[:12],
+        "failed_acceptance_refs": failed_acceptance_refs[:12],
         "binding_constraints_to_recheck": _repair_hard_constraints_from_target(target)[:8],
         "reviewer_evidence_summary": _reviewer_evidence_summary(gate),
         "review_artifact_ref": _compact_artifact_ref(gate.get("report_artifact_ref")),
@@ -913,13 +940,19 @@ def _is_noisy_system_detected_line_range(item: dict[str, Any]) -> bool:
     return bool(re.search(r"(?i)\blines?\s+\d+\s*(?:-|–|—|to)\s*\d+\b", text))
 
 
-def _repair_checklist(findings: list[dict[str, Any]], required_fixes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _repair_checklist(
+    findings: list[dict[str, Any]],
+    required_fixes: list[dict[str, Any]],
+    *,
+    acceptance_checklist: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    acceptance_items = list(acceptance_checklist or [])
     items: list[dict[str, Any]] = []
     if required_fixes:
         for index, fix in enumerate(required_fixes[:8], start=1):
             finding = _repair_fix_finding(fix, findings)
             action = _first_text(fix, "description", "summary", "fix", "message", fallback="required repair fix")
-            items.append(_repair_checklist_item(index, action=action, finding=finding, source="required_fix", raw_fix=fix))
+            items.append(_repair_checklist_item(index, action=action, finding=finding, source="required_fix", raw_fix=fix, acceptance_checklist=acceptance_items))
         return items
     actionable = [
         item
@@ -933,7 +966,7 @@ def _repair_checklist(findings: list[dict[str, Any]], required_fixes: list[dict[
         if not action:
             title = _first_text(finding, "title", "summary", "message", "description", fallback="reviewer finding")
             action = f"Address reviewer finding: {title}"
-        items.append(_repair_checklist_item(index, action=action, finding=finding, source="finding", raw_fix={}))
+        items.append(_repair_checklist_item(index, action=action, finding=finding, source="finding", raw_fix={}, acceptance_checklist=acceptance_items))
     return items
 
 
@@ -957,17 +990,22 @@ def _repair_checklist_item(
     finding: dict[str, Any],
     source: str,
     raw_fix: dict[str, Any],
+    acceptance_checklist: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    acceptance_refs = repair_acceptance_refs({**dict(finding or {}), **dict(raw_fix or {})}, acceptance_checklist)
     verify = _first_text(raw_fix, "verification", "verify", "test", fallback="")
     if not verify:
         title = _first_text(finding, "title", "summary", "message", "description", fallback="")
         verify = f"Run focused verification that proves this fix is complete{': ' + title if title else ''}."
     return _drop_empty(
         {
-            "id": f"R{index}",
+            "id": f"RC-{index}",
+            "kind": "repair",
             "status": "pending",
             "source": source,
             "finding_index": raw_fix.get("finding_index"),
+            "acceptance_refs": acceptance_refs,
+            "parent_item_id": acceptance_refs[0] if acceptance_refs else "",
             "action": _compact_repair_text(action, limit=420),
             "area": _compact_repair_text(_first_text(finding, "area", "path", fallback=""), limit=220),
             "contract_impact": _compact_repair_text(_first_text(finding, "contract_impact", fallback=""), limit=260),
@@ -1110,14 +1148,69 @@ def _source_contract_from_pack(pack: TaskContextPack) -> dict[str, Any]:
     contract: dict[str, Any] = {}
     goal = str(pack.goal or "").strip()
     instruction = str(pack.instruction or "").strip()
-    acceptance = [str(item).strip() for item in list(pack.acceptance_criteria or []) if str(item or "").strip()]
+    acceptance = _dedupe_texts(pack.acceptance_criteria)
+    current_acceptance = _current_pack_acceptance_criteria(pack)
     if goal:
         contract["goal"] = goal
     if instruction:
         contract["instruction"] = instruction
-    if acceptance:
+    if current_acceptance:
+        contract["acceptance_criteria"] = current_acceptance
+    elif acceptance:
         contract["acceptance_criteria"] = acceptance
+    if _dedupe_texts(acceptance, exclude=current_acceptance):
+        contract["overall_acceptance_criteria"] = acceptance
     return contract
+
+
+def _checkpoint_review_acceptance_criteria(payload: dict[str, Any], source_contract: dict[str, Any]) -> list[str]:
+    current = _dedupe_texts(payload.get("acceptance_criteria"))
+    if current:
+        return current
+    return _dedupe_texts(source_contract.get("acceptance_criteria") if isinstance(source_contract, dict) else None)
+
+
+def _current_pack_acceptance_criteria(pack: TaskContextPack) -> list[str]:
+    continuity = dict(pack.continuity or {})
+    current = continuity.get("current_milestone")
+    if isinstance(current, dict):
+        for key in ("acceptance_criteria", "acceptance"):
+            values = _dedupe_texts(current.get(key))
+            if values:
+                return values
+    metadata = dict(pack.metadata or {})
+    prompt_view = dict(metadata.get("prompt_view") or {})
+    milestone = prompt_view.get("milestone")
+    if isinstance(milestone, dict):
+        for key in ("acceptance_criteria", "acceptance"):
+            values = _dedupe_texts(milestone.get(key))
+            if values:
+                return values
+    return []
+
+
+def _deferred_acceptance_criteria(source_contract: dict[str, Any], current_acceptance: list[str]) -> list[str]:
+    overall = _dedupe_texts(source_contract.get("overall_acceptance_criteria"))
+    if not overall:
+        return []
+    return _dedupe_texts(overall, exclude=current_acceptance)
+
+
+def _dedupe_texts(raw: Any, *, exclude: list[str] | None = None) -> list[str]:
+    excluded = {str(item or "").strip().lower() for item in list(exclude or []) if str(item or "").strip()}
+    result: list[str] = []
+    seen: set[str] = set()
+    iterable = [raw] if isinstance(raw, str) else list(raw or [])
+    for item in iterable:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in excluded or key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
 
 
 def _checkpoint_git_context(repo_path: str, commit_sha: str) -> dict[str, Any]:
@@ -1194,6 +1287,7 @@ def review_scratch_ignore(directory: str, names: list[str]) -> set[str]:
 def review_gate_repair_note(gate: dict[str, Any]) -> str:
     parts = [f"Reviewer verdict: {str(gate.get('verdict') or 'fail')}"]
     target = review_gate_target(gate)
+    acceptance_checklist = build_acceptance_checklist(target.get("acceptance_criteria"))
     failed_commit_sha = str(target.get("commit_sha") or "").strip()
     summary = str(gate.get("summary") or "").strip()
     if summary:
@@ -1206,7 +1300,7 @@ def review_gate_repair_note(gate: dict[str, Any]) -> str:
         )
     findings = _repair_actionable_findings(gate)
     fixes = [dict(item) for item in list(gate.get("required_fixes") or []) if isinstance(item, dict)]
-    checklist = _repair_checklist(findings, fixes)
+    checklist = _repair_checklist(findings, fixes, acceptance_checklist=acceptance_checklist)
     if checklist:
         parts.append("Repair checklist:\n" + "\n".join(_render_repair_checklist_item(item) for item in checklist))
     if findings:
@@ -1238,7 +1332,7 @@ def review_gate_repair_note(gate: dict[str, Any]) -> str:
 
 
 def _render_repair_checklist_item(item: dict[str, Any]) -> str:
-    pieces = [f"- [ ] {str(item.get('id') or 'R?')}: {_compact_repair_text(str(item.get('action') or ''), limit=320)}"]
+    pieces = [f"- [ ] {str(item.get('id') or 'RC-?')}: {_compact_repair_text(str(item.get('action') or ''), limit=320)}"]
     area = str(item.get("area") or "").strip()
     verify = str(item.get("verify") or "").strip()
     if area:
@@ -1317,7 +1411,7 @@ def _repair_hard_constraints_from_target(target: dict[str, Any]) -> list[str]:
     clauses: list[str] = []
     for key in ("goal", "instruction", "summary", "task"):
         clauses.extend(_numeric_constraint_clauses(str(source_contract.get(key) or "")))
-    for key in ("acceptance_criteria", "criteria"):
+    for key in ("acceptance_criteria", "criteria", "overall_acceptance_criteria"):
         for item in list(source_contract.get(key) or []):
             clauses.extend(_numeric_constraint_clauses(str(item or "")))
     seen: set[str] = set()

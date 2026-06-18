@@ -422,8 +422,9 @@ class RuntimeCompactionTests(unittest.TestCase):
             "</runtime_context_update>\n"
             "<conversation_summary>\ncompacted prior context\n</conversation_summary>",
         )
-        self.assertEqual(generate_requests[-1].messages[-1]["role"], "user")
-        self.assertIn("<runtime_reminder", _message_text(generate_requests[-1].messages[-1]))
+        self.assertIn("<runtime_reminder", post_compact_prompt)
+        self.assertEqual(generate_requests[-1].messages[-1]["role"], "tool")
+        self.assertNotIn("<runtime_reminder", _message_text(generate_requests[-1].messages[-1]))
 
     def test_generate_compact_during_tool_turn_preserves_tool_result_and_endpoint_hint(self) -> None:
         core, memory_service, scripted_llm = _build_core_with_compacting_llm(compact_on="generate")
@@ -454,8 +455,9 @@ class RuntimeCompactionTests(unittest.TestCase):
             "</runtime_context_update>\n"
             "<conversation_summary>\ncompacted prior context\n</conversation_summary>",
         )
-        self.assertEqual(generate_requests[-1].messages[-1]["role"], "user")
-        self.assertIn("<runtime_reminder", _message_text(generate_requests[-1].messages[-1]))
+        self.assertIn("<runtime_reminder", post_compact_prompt)
+        self.assertEqual(generate_requests[-1].messages[-1]["role"], "tool")
+        self.assertNotIn("<runtime_reminder", _message_text(generate_requests[-1].messages[-1]))
 
 
 if __name__ == "__main__":

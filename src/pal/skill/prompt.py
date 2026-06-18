@@ -32,16 +32,8 @@ class SkillPromptFragmentProvider:
                 section="skill_guide",
                 title="Skill Guidance",
                 content=(
-                    "When to search/inject:\n"
-                    "- If the user explicitly asks to use a named skill, Pal MUST call `skill_search` first.\n"
-                    "- If a clear active match is found, Pal MUST call `skill_inject` before applying that skill.\n"
-                    "- Search alone is not using a skill.\n"
-                    "- Do not inject a skill merely because it exists or because an advisor hint lists a skill ref. Inject only when it clearly matches the current task or explicit request.\n\n"
-                    "When to learn:\n"
-                    "- If the user explicitly asks Pal to learn, summarize, sanitize, import, or turn a workflow into a reusable procedure, Pal MUST call `skill_assimilate`.\n"
-                    "- If the user explicitly wants a skill candidate saved, Pal MUST call `skill_commit`.\n"
-                    "- When the user provides a candidate_id, pass that candidate_id to `skill_commit`; do not ask for the candidate object.\n"
-                    "- Do not call `skill_commit` when the user asks only for a candidate, draft, summary, or review."
+                    "Use skills: explicit named skill request -> skill_search; clear active match -> skill_inject before applying. Search alone is not using a skill. Advisor skill refs are candidates, not automatic injects.\n"
+                    "Learn skills: explicit learn/summarize/sanitize/import/reusable-procedure request -> skill_assimilate. Explicit save candidate -> skill_commit; pass candidate_id when provided. Do not commit for candidate/draft/summary/review only."
                 ),
                 priority=72,
                 metadata={

@@ -24,7 +24,7 @@ The core rule is:
 - Endpoint resolution and fallback candidate iteration.
 - Provider request rendering through `llm_adaptor`.
 - Native provider invocation where Pal has a better first-party transport.
-- LiteLLM invocation for OpenAI-compatible/chat-completions style providers.
+- OpenAI SDK invocation for OpenAI-compatible/chat-completions style providers.
 - Streaming assembly into complete canonical outcomes.
 - Credential lookup through endpoint metadata.
 - Model capability read path from the local endpoint registry.
@@ -104,21 +104,21 @@ flowchart LR
     RESOLVE --> CAND["Ordered enabled candidates"]
     CAND --> ROUTE["RoutingLLMEndpointInvoker"]
     ROUTE --> RENDER["Provider adapter render"]
-    RENDER --> WIRE["Provider SDK or LiteLLM"]
+    RENDER --> WIRE["Provider SDK"]
     WIRE --> PARSE["Canonical parse"]
     PARSE --> OUT["CanonicalLLMOutcome / stream events"]
 ```
 
-The current routing invoker tries specialized transports before the generic
-LiteLLM path:
+The current routing invoker chooses a concrete native transport by endpoint
+shape:
 
 1. Codex CLI bridge when the endpoint is marked as Codex-native/bridge.
 2. Native OpenAI Responses SDK for OpenAI Responses-shaped endpoints.
 3. Native Anthropic Messages SDK for Anthropic endpoints.
-4. LiteLLM for chat-completions and other supported provider transports.
+4. Native OpenAI Chat Completions SDK for OpenAI-compatible chat endpoints.
 
-This means LiteLLM is still useful, but it is not Pal's only transport and it is
-not the owner of Pal's canonical protocol.
+Provider SDKs are transport details; they are not the owner of Pal's canonical
+protocol.
 
 ## Provider Adapter Registry
 
@@ -170,7 +170,8 @@ Rendering rules:
 ### OpenAI Chat Completions
 
 OpenAI-compatible chat endpoints render to chat-completions-style `messages`.
-Most provider overrides still use this shape through LiteLLM.
+Most provider overrides still use this shape through the OpenAI SDK with the
+endpoint's configured `base_url`.
 
 Rendering rules:
 
@@ -294,8 +295,8 @@ normalize that failure before the next LLM turn is built.
 - Provider adapters are the only layer that should perform provider wire-shape
   corrections.
 - L1 stores IR, not provider payloads.
-- OpenAI and Anthropic may use native SDKs; LiteLLM remains the generic
-  transport helper.
+- OpenAI-compatible and Anthropic endpoints use native SDK invokers selected by
+  endpoint metadata.
 - Streaming chunks are assembled before they affect the main turn loop.
 - Tool calling cannot bypass local `Execution`.
 - Fallback order comes from endpoint registry priority.
@@ -305,6 +306,6 @@ normalize that failure before the next LLM turn is built.
 
 - This contract does not define a UI model picker.
 - This contract does not require online provider model discovery.
-- This contract does not make LiteLLM Pal's source of truth.
+- This contract does not make any provider SDK Pal's source of truth.
 - This contract does not allow provider adapters to mutate durable conversation
   semantics.

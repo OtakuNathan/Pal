@@ -460,6 +460,26 @@ class MinionTaskingRepository(TaskingRepositoryPort):
     def latest_review_gate_for_checkpoint(self, checkpoint_id: str) -> dict[str, Any]:
         return self.review_gates.latest_review_gate_for_checkpoint(checkpoint_id)
 
+    def load_checkpoint(self, checkpoint_id: str) -> dict[str, Any]:
+        self.ensure_schema()
+        normalized = str(checkpoint_id or "").strip()
+        if not normalized:
+            return {"status": "invalid", "error": "checkpoint_id is required"}
+        with self._connect() as db:
+            row = self._fetch_one(db, "SELECT * FROM minion_worker_checkpoints WHERE checkpoint_id = ?", (normalized,))
+        if row is None:
+            return {"status": "not_found", "checkpoint_id": normalized}
+        payload = _loads(row["payload_json"])
+        payload.setdefault("checkpoint_id", str(row["checkpoint_id"] or normalized))
+        payload.setdefault("work_order_id", str(row["work_order_id"] or ""))
+        payload.setdefault("milestone_index", int(row["milestone_index"] or 0))
+        payload.setdefault("status", str(row["status"] or ""))
+        payload.setdefault("summary", str(row["summary"] or ""))
+        payload.setdefault("minion_id", str(row["minion_id"] or ""))
+        payload.setdefault("run_id", str(row["run_id"] or ""))
+        payload.setdefault("created_at", str(row["created_at"] or ""))
+        return {"status": "ok", "checkpoint": payload}
+
     def latest_review_gate_for_plan_ref(self, plan_ref: Any) -> dict[str, Any]:
         return self.review_gates.latest_review_gate_for_plan_ref(plan_ref)
 

@@ -74,7 +74,7 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                 title="Operating Rules",
                 content=(
                     "- Inspect before judging: never make specific claims about code, docs, config, capabilities, plugins, runtime state, or memory state without inspecting the relevant source of truth.\n"
-                    "- Do not claim shell, file, browser, or tool access is unavailable merely because built-in model tools are unavailable; Pal capabilities are the execution path. Check the current tool surface and use `op_exec_shell` when it is available for shell commands.\n"
+                    "- Do not claim shell, file, browser, or tool access is unavailable merely because built-in model tools are unavailable; Pal capabilities are the execution path. Check the current tool surface and use `run_shell` when it is available for shell commands.\n"
                     "- No success claim without confirmation: never claim a write, modification, send, execution, attach, detach, restart, repair, or state change succeeded unless the result was confirmed.\n"
                     "Operating rules and capability policy are always active."
                 ),
@@ -112,13 +112,9 @@ class MinimalOperatingRulesPromptFragmentProvider(PromptFragmentProvider):
                 section="tool_efficiency",
                 title="Tool Efficiency",
                 content=(
-                    "- Prefer targeted searches over broad exploration.\n"
-                    "- Read only the relevant semantic unit when files are large.\n"
-                    "- Avoid dumping large files into context.\n"
-                    "- Prefer search -> locate -> inspect -> summarize.\n"
-                    "- Do not re-read already inspected regions unless necessary.\n"
-                    "- Stop and reassess when tool output grows quickly.\n"
-                    "- Use the simplest viable approach first."
+                    "- Prefer targeted search -> inspect relevant semantic units -> summarize.\n"
+                    "- Avoid dumping large files or re-reading inspected regions unless necessary.\n"
+                    "- If tool output grows quickly, stop and reassess; use the simplest viable path."
                 ),
                 priority=92,
                 metadata={"prompt_target": "runtime_reminder", "source_priority": 92},

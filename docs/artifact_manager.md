@@ -82,7 +82,7 @@ Rules:
 - Non-vision endpoints receive an LLM-safe manifest with artifact metadata, representations, and `local_file.preferred_path` when available.
 - `local_file.preferred_path` may be used only with a capability that explicitly accepts local paths. It is a bridge for path-capable processors, not a general filesystem permission.
 
-Internal image parts become LiteLLM `image_url` data URLs only at the final LLM serialization boundary.
+Internal image parts become OpenAI-compatible `image_url` data URLs only at the final LLM serialization boundary.
 
 ## Tools
 

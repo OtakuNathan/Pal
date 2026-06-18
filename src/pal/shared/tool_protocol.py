@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from pal.shared.result_rendering import render_structured_for_llm
+from pal.shared.tool_aliases import llm_tool_name
 
 
 ToolResultRenderer = Callable[[Any, Any], str]
@@ -16,8 +17,13 @@ def ensure_tool_call_identity(tool_call: Any) -> Any:
     return type(tool_call)(name=tool_call.name, args=dict(tool_call.args), call_id=call_id)
 
 
-def assistant_tool_message(text: str, tool_calls: Sequence[Any]) -> dict[str, Any]:
-    return {
+def assistant_tool_message(
+    text: str,
+    tool_calls: Sequence[Any],
+    *,
+    provider_specific_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    message = {
         "role": "assistant",
         "content": str(text or ""),
         "tool_calls": [
@@ -25,13 +31,17 @@ def assistant_tool_message(text: str, tool_calls: Sequence[Any]) -> dict[str, An
                 "id": str(tool_call.call_id or ""),
                 "type": "function",
                 "function": {
-                    "name": tool_call.name,
+                    "name": llm_tool_name(tool_call.name),
                     "arguments": json.dumps(tool_call.args, ensure_ascii=False, sort_keys=True),
                 },
             }
             for tool_call in tool_calls
         ],
     }
+    fields = _copy_provider_specific_fields(provider_specific_fields)
+    if fields:
+        message["provider_specific_fields"] = fields
+    return message
 
 
 def default_tool_result_text(
@@ -56,6 +66,7 @@ def append_tool_protocol_messages(
     protocol_messages: list[dict[str, Any]],
     *,
     assistant_text: str,
+    assistant_provider_specific_fields: dict[str, Any] | None = None,
     tool_calls: Sequence[Any],
     tool_results: Sequence[Any],
     render_tool_result_content: ToolResultRenderer | None = None,
@@ -64,7 +75,13 @@ def append_tool_protocol_messages(
     if not calls:
         return
     renderer = render_tool_result_content or (lambda _tool_call, result: default_tool_result_text(result))
-    protocol_messages.append(assistant_tool_message(assistant_text, calls))
+    protocol_messages.append(
+        assistant_tool_message(
+            assistant_text,
+            calls,
+            provider_specific_fields=assistant_provider_specific_fields,
+        )
+    )
     result_by_call_id = {
         str(result.call_id or ""): result
         for result in tool_results
@@ -85,3 +102,9 @@ def append_tool_protocol_messages(
                 "content": renderer(tool_call, result),
             }
         )
+
+
+def _copy_provider_specific_fields(fields: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(fields, dict):
+        return {}
+    return {str(key): value for key, value in fields.items() if str(key).strip()}

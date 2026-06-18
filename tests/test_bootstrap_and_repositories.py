@@ -36,14 +36,17 @@ from pal.llm import (
     LLMEndpointInvocationError,
     LLMPreflightRequest,
     LLMRuntime,
-    LiteLLMCredentialResolver,
-    LiteLLMEndpointInvoker,
+    LLMCredentialResolver,
+    OpenAIChatEndpointInvoker,
     RuntimeSettingRepository,
     SecretRef,
     ZaiAnthropicMessagesEndpointInvoker,
     build_default_endpoint_invoker,
 )
 from pal.llm.adapters import LLMProviderAdapter, LLMProviderRegistry, build_default_provider_registry
+from pal.llm.llm_adaptor.anthropic_api import chat_messages_to_anthropic_messages
+from pal.llm.llm_adaptor.base import chat_messages_to_openai_compatible_messages
+from pal.llm.runtime import _parse_anthropic_messages_response, _split_openai_chat_sdk_kwargs
 from pal.llm.request_hooks import MAIN_LLM_REQUEST_HOOKS
 from pal.memory import HashingEmbedder, L3CommitRequest, L3CorrectRequest, L3ProviderSelector, MemoryPackRequest, MemoryQuery, MemoryService
 from pal.plugins.l3 import SQLiteVecL3Plugin
@@ -499,8 +502,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         secret_store = InMemorySecretStore()
         secret_ref = SecretRef(service="codex_bridge", account="api-key")
         secret_store.set_secret(secret_ref, "old-token")
-        resolver = LiteLLMCredentialResolver(secret_store=secret_store)
-        invoker = LiteLLMEndpointInvoker(credentials=resolver)
+        resolver = LLMCredentialResolver(secret_store=secret_store)
+        invoker = OpenAIChatEndpointInvoker(credentials=resolver)
         runtime = LLMRuntime(
             endpoint_resolver=EndpointResolver(repository=repository),
             settings_repository=settings,
@@ -557,7 +560,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(runtime.resolve_max_output_tokens(), 4096)
         self.assertEqual(runtime.resolve_max_output_tokens(preferred_endpoint_id="planner_long"), 8192)
 
-    def test_litellm_credential_resolver_uses_secret_store_ref(self) -> None:
+    def test_openai_chat_credential_resolver_uses_secret_store_ref(self) -> None:
         repository = LLMEndpointRepository()
         repository.ensure_defaults(
             [
@@ -577,7 +580,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(endpoint)
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "sk-test")
-        resolver = LiteLLMCredentialResolver(secret_store=secret_store)
+        resolver = LLMCredentialResolver(secret_store=secret_store)
 
         secret = resolver.resolve_api_key(endpoint)
 
@@ -585,7 +588,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(secret, "sk-test")
         self.assertEqual(resolver.secret_ref_for_endpoint(endpoint), SecretRef(service="deepseek-prod", account="api-key"))
 
-    def test_litellm_credential_resolver_parses_service_account_ref(self) -> None:
+    def test_openai_chat_credential_resolver_parses_service_account_ref(self) -> None:
         repository = LLMEndpointRepository()
         repository.ensure_defaults(
             [
@@ -605,7 +608,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(endpoint)
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "sk-test")
-        resolver = LiteLLMCredentialResolver(secret_store=secret_store)
+        resolver = LLMCredentialResolver(secret_store=secret_store)
 
         secret = resolver.resolve_api_key(endpoint)
 
@@ -636,7 +639,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 }
             ),
         )
-        resolver = LiteLLMCredentialResolver(secret_store=secret_store)
+        resolver = LLMCredentialResolver(secret_store=secret_store)
 
         auth = resolver.resolve_auth(endpoint)
 
@@ -646,7 +649,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(auth.profile["refresh_token"], "oauth-refresh-token")
         self.assertEqual(resolver.resolve_api_key(endpoint), "oauth-access-token")
 
-    def test_litellm_invoker_maps_oauth_access_token_to_bearer_key(self) -> None:
+    def test_openai_chat_invoker_maps_oauth_access_token_to_bearer_key(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="codex_oauth",
             provider="openai_codex_oauth",
@@ -663,8 +666,8 @@ class PalV2BootstrapTests(unittest.TestCase):
             SecretRef(service="codex_oauth", account="oauth-profile"),
             json.dumps({"access_token": "oauth-access-token"}),
         )
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store)
         )
 
         kwargs, _ = invoker._build_completion_kwargs(
@@ -679,7 +682,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(kwargs["api_base"], "https://api.openai.com/v1")
         self.assertNotIn("oauth-access-token", str(invoker.last_payload_summary))
 
-    def test_litellm_invoker_supplies_dummy_key_for_local_openai_endpoint(self) -> None:
+    def test_openai_chat_invoker_supplies_dummy_key_for_local_openai_endpoint(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="codex_bridge",
             provider="openai",
@@ -691,7 +694,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             priority=0,
             enabled=True,
         )
-        invoker = LiteLLMEndpointInvoker()
+        invoker = OpenAIChatEndpointInvoker()
 
         kwargs, _ = invoker._build_completion_kwargs(
             endpoint,
@@ -703,7 +706,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("input", kwargs)
         self.assertNotIn("messages", kwargs)
 
-    def test_litellm_invoker_renders_openai_provider_as_responses_shape(self) -> None:
+    def test_openai_chat_invoker_renders_openai_provider_as_responses_shape(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="openai-responses",
             provider="openai",
@@ -717,11 +720,11 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="openai-prod", account="api-key"), "openai-token")
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store)
         )
 
-        shape, kwargs, _ = invoker._build_litellm_kwargs(
+        shape, kwargs, _ = invoker._build_openai_request_kwargs(
             endpoint,
             CanonicalLLMRequest(
                 messages=[
@@ -757,7 +760,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(shape, "responses")
         self.assertEqual(kwargs["api_key"], "openai-token")
-        self.assertEqual(kwargs["model"], "openai/gpt-5.4")
+        self.assertEqual(kwargs["model"], "gpt-5.4")
         self.assertNotIn("instructions", kwargs)
         self.assertEqual(kwargs["input"][0], {"role": "developer", "content": "system rules"})
         self.assertEqual(kwargs["reasoning"], {"effort": "high"})
@@ -766,7 +769,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn({"type": "function_call", "name": "probe", "arguments": "{}", "call_id": "call_1"}, kwargs["input"])
         self.assertIn({"type": "function_call_output", "call_id": "call_1", "output": "probe result"}, kwargs["input"])
 
-    def test_litellm_invoker_wraps_chat_developer_instructions_as_user_context(self) -> None:
+    def test_openai_chat_invoker_wraps_chat_developer_instructions_as_user_context(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="deepseek",
             provider="deepseek",
@@ -780,11 +783,11 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "deepseek-token")
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store)
         )
 
-        shape, kwargs, _ = invoker._build_litellm_kwargs(
+        shape, kwargs, _ = invoker._build_openai_request_kwargs(
             endpoint,
             CanonicalLLMRequest(
                 messages=[
@@ -806,7 +809,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIn("<system-instruction>", kwargs["messages"][3]["content"])
         self.assertIn("late system guidance", kwargs["messages"][3]["content"])
 
-    def test_litellm_invoker_forwards_generation_controls_for_codex_bridge_responses(self) -> None:
+    def test_openai_chat_invoker_forwards_generation_controls_for_codex_bridge_responses(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="codex_bridge",
             provider="codex_bridge",
@@ -821,11 +824,11 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="codex_bridge", account="api-key"), "bridge-token")
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store)
         )
 
-        shape, kwargs, _ = invoker._build_litellm_kwargs(
+        shape, kwargs, _ = invoker._build_openai_request_kwargs(
             endpoint,
             CanonicalLLMRequest(
                 messages=[{"role": "user", "content": "hello"}],
@@ -847,7 +850,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertEqual(shape, "responses")
         self.assertEqual(kwargs["api_key"], "bridge-token")
-        self.assertEqual(kwargs["model"], "openai/gpt-5.4")
+        self.assertEqual(kwargs["model"], "gpt-5.4")
         self.assertIn("input", kwargs)
         self.assertNotIn("messages", kwargs)
         self.assertIn("tools", kwargs)
@@ -896,7 +899,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         fake_openai = types.SimpleNamespace(OpenAI=FakeOpenAIClient)
         invoker = build_default_endpoint_invoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+            credentials=LLMCredentialResolver(secret_store=secret_store)
         )
 
         with patch.dict(sys.modules, {"openai": fake_openai}):
@@ -965,7 +968,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         fake_anthropic = types.SimpleNamespace(Anthropic=FakeAnthropicClient)
         invoker = build_default_endpoint_invoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+            credentials=LLMCredentialResolver(secret_store=secret_store)
         )
 
         with patch.dict(sys.modules, {"anthropic": fake_anthropic}):
@@ -1015,7 +1018,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(calls[1][1]["tools"][0]["name"], "probe_alias")
         self.assertEqual(calls[1][1]["thinking"], {"type": "enabled", "budget_tokens": 2048})
 
-    def test_litellm_invoker_maps_glm_think_level_to_thinking_body(self) -> None:
+    def test_openai_chat_invoker_maps_glm_think_level_to_thinking_body(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="glm-5",
             provider="zhipu",
@@ -1031,8 +1034,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store)
         )
 
         kwargs, _ = invoker._build_completion_kwargs(
@@ -1044,13 +1047,96 @@ class PalV2BootstrapTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(kwargs["model"], "zai/glm-5.1")
+        self.assertEqual(kwargs["model"], "glm-5.1")
         self.assertEqual(kwargs["thinking"], {"type": "enabled"})
         self.assertEqual(kwargs["reasoning_effort"], "xhigh")
         self.assertNotIn("extra_body", kwargs)
         self.assertNotIn("behavior-routing-reminder", str(kwargs["messages"]))
+        _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
+        self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "enabled"}})
+        self.assertEqual(request_kwargs["reasoning_effort"], "xhigh")
+        self.assertNotIn("thinking", request_kwargs)
 
-    def test_litellm_invoker_appends_zai_tool_routing_reminder_to_last_user_message(self) -> None:
+    def test_openai_chat_invoker_replays_reasoning_content_for_openai_shape_reasoning_providers(self) -> None:
+        cases = [
+            ("generic-reasoner", "openai_compatible", "generic-reasoner", "https://example.test/v1", "generic-reasoner"),
+            ("glm-5", "zhipu", "glm-5.1", "https://api.z.ai/api/coding/paas/v4", "glm-5.1"),
+            ("deepseek-r1", "deepseek", "deepseek-reasoner", "https://api.deepseek.com", "deepseek-reasoner"),
+        ]
+        for endpoint_id, provider, model_id, base_url, expected_model in cases:
+            with self.subTest(endpoint_id=endpoint_id):
+                endpoint = LLMEndpointRepository().upsert(
+                    endpoint_id=endpoint_id,
+                    provider=provider,
+                    model_id=model_id,
+                    api_mode="openai_chat",
+                    base_url=base_url,
+                    auth_kind="api_key_ref",
+                    credential_ref=f"{endpoint_id}:api-key",
+                    priority=0,
+                    enabled=True,
+                    supports_reasoning=True,
+                    capabilities_blob={"supports_thinking": True},
+                )
+                secret_store = InMemorySecretStore()
+                secret_store.set_secret(SecretRef(service=endpoint_id, account="api-key"), "token")
+                invoker = OpenAIChatEndpointInvoker(
+                    credentials=LLMCredentialResolver(secret_store=secret_store)
+                )
+
+                kwargs, _ = invoker._build_completion_kwargs(
+                    endpoint,
+                    CanonicalLLMRequest(
+                        messages=[
+                            {"role": "user", "content": "run probe"},
+                            {
+                                "role": "assistant",
+                                "content": "",
+                                "provider_specific_fields": {"reasoning_content": "hidden reasoning"},
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {"name": "probe_tool", "arguments": "{}"},
+                                    }
+                                ],
+                            },
+                            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+                        ],
+                        max_output_tokens=64,
+                        metadata={"think_level": "high"},
+                    ),
+                )
+
+                assistant_message = next(message for message in kwargs["messages"] if message["role"] == "assistant")
+                self.assertEqual(kwargs["model"], expected_model)
+                self.assertEqual(assistant_message["reasoning_content"], "hidden reasoning")
+                self.assertNotIn("provider_specific_fields", assistant_message)
+
+    def test_openai_compatible_message_renderer_strips_internal_provider_fields_by_default(self) -> None:
+        rendered = chat_messages_to_openai_compatible_messages(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "hidden top-level",
+                    "provider_specific_fields": {"reasoning_content": "hidden nested"},
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "probe_tool", "arguments": "{}"},
+                        }
+                    ],
+                }
+            ]
+        )
+
+        self.assertEqual(rendered[0]["role"], "assistant")
+        self.assertNotIn("reasoning_content", rendered[0])
+        self.assertNotIn("provider_specific_fields", rendered[0])
+
+    def test_openai_chat_invoker_appends_zai_tool_routing_reminder_to_last_user_message(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="glm-5-tools",
             provider="zhipu",
@@ -1066,8 +1152,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store),
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store),
             message_hooks=MAIN_LLM_REQUEST_HOOKS,
         )
 
@@ -1107,8 +1193,10 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(kwargs["thinking"], {"type": "enabled"})
         self.assertEqual(kwargs["reasoning_effort"], "high")
         self.assertNotIn("extra_body", kwargs)
+        _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
+        self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "enabled"}})
 
-    def test_litellm_invoker_does_not_append_tool_routing_reminder_without_registered_hooks(self) -> None:
+    def test_openai_chat_invoker_does_not_append_tool_routing_reminder_without_registered_hooks(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="glm-5-tools-no-hooks",
             provider="zhipu",
@@ -1122,8 +1210,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store)
         )
 
         kwargs, _ = invoker._build_completion_kwargs(
@@ -1140,7 +1228,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertNotIn("behavior-routing-reminder", str(kwargs["messages"]))
 
-    def test_litellm_invoker_does_not_append_zai_tool_routing_reminder_without_shell_tool(self) -> None:
+    def test_openai_chat_invoker_does_not_append_zai_tool_routing_reminder_without_shell_tool(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="glm-5-file-only",
             provider="zhipu",
@@ -1154,8 +1242,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store)
         )
 
         kwargs, _ = invoker._build_completion_kwargs(
@@ -1171,7 +1259,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertNotIn("behavior-routing-reminder", str(kwargs["messages"]))
 
-    def test_litellm_zai_tool_routing_reminder_does_not_name_unavailable_repo_tools(self) -> None:
+    def test_openai_chat_zai_tool_routing_reminder_does_not_name_unavailable_repo_tools(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="glm-5-main-tools",
             provider="zhipu",
@@ -1185,8 +1273,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store),
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store),
             message_hooks=MAIN_LLM_REQUEST_HOOKS,
         )
 
@@ -1234,7 +1322,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
         invoker = ZaiAnthropicMessagesEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store),
+            credentials=LLMCredentialResolver(secret_store=secret_store),
             message_hooks=MAIN_LLM_REQUEST_HOOKS,
         )
 
@@ -1285,7 +1373,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertIsInstance(selected, ZaiAnthropicMessagesEndpointInvoker)
 
-    def test_litellm_invoker_maps_glm_off_to_disabled_thinking_body(self) -> None:
+    def test_openai_chat_invoker_maps_glm_off_to_disabled_thinking_body(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="glm-5-off",
             provider="zhipu",
@@ -1301,8 +1389,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store)
         )
 
         kwargs, _ = invoker._build_completion_kwargs(
@@ -1314,12 +1402,14 @@ class PalV2BootstrapTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(kwargs["model"], "zai/glm-5.1")
+        self.assertEqual(kwargs["model"], "glm-5.1")
         self.assertEqual(kwargs["thinking"], {"type": "disabled"})
         self.assertNotIn("reasoning_effort", kwargs)
         self.assertNotIn("extra_body", kwargs)
+        _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
+        self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "disabled"}})
 
-    def test_litellm_invoker_maps_deepseek_think_level_to_reasoning_and_thinking_body(self) -> None:
+    def test_openai_chat_invoker_maps_deepseek_think_level_to_reasoning_and_thinking_body(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="deepseek-v4-pro",
             provider="deepseek",
@@ -1335,8 +1425,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "deepseek-token")
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store)
         )
 
         kwargs, _ = invoker._build_completion_kwargs(
@@ -1349,12 +1439,14 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         self.assertEqual(kwargs["api_key"], "deepseek-token")
-        self.assertEqual(kwargs["model"], "deepseek/deepseek-v4-pro")
+        self.assertEqual(kwargs["model"], "deepseek-v4-pro")
         self.assertEqual(kwargs["reasoning_effort"], "high")
         self.assertEqual(kwargs["thinking"], {"type": "enabled"})
         self.assertNotIn("extra_body", kwargs)
+        _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
+        self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "enabled"}})
 
-    def test_litellm_invoker_maps_deepseek_off_to_disabled_thinking_without_reasoning_effort(self) -> None:
+    def test_openai_chat_invoker_maps_deepseek_off_to_disabled_thinking_without_reasoning_effort(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="deepseek-v4-pro-off",
             provider="deepseek",
@@ -1370,8 +1462,8 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         secret_store = InMemorySecretStore()
         secret_store.set_secret(SecretRef(service="deepseek-prod", account="api-key"), "deepseek-token")
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=secret_store)
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store)
         )
 
         kwargs, _ = invoker._build_completion_kwargs(
@@ -1383,15 +1475,17 @@ class PalV2BootstrapTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(kwargs["model"], "deepseek/deepseek-v4-pro")
+        self.assertEqual(kwargs["model"], "deepseek-v4-pro")
         self.assertEqual(kwargs["thinking"], {"type": "disabled"})
         self.assertNotIn("reasoning_effort", kwargs)
         self.assertNotIn("extra_body", kwargs)
+        _, request_kwargs = _split_openai_chat_sdk_kwargs(kwargs)
+        self.assertEqual(request_kwargs["extra_body"], {"thinking": {"type": "disabled"}})
 
     def test_llm_provider_registry_can_register_runtime_provider(self) -> None:
         class DemoProvider(LLMProviderAdapter):
             provider_names = frozenset({"demo_provider"})
-            litellm_provider = "hosted_vllm"
+            model_provider_prefix = "hosted_vllm"
 
             def apply_request(self, request: CanonicalLLMRequest, draft) -> None:  # type: ignore[no-untyped-def]
                 draft.extra["seed"] = 7
@@ -1415,13 +1509,13 @@ class PalV2BootstrapTests(unittest.TestCase):
         adapter.apply_request(CanonicalLLMRequest(messages=[], max_output_tokens=16), draft)
         kwargs = draft.to_kwargs()
 
-        self.assertEqual(kwargs["model"], "hosted_vllm/demo-model")
+        self.assertEqual(kwargs["model"], "demo-model")
         self.assertEqual(kwargs["seed"], 7)
 
     def test_llm_provider_registry_can_unregister_runtime_provider(self) -> None:
         class DemoProvider(LLMProviderAdapter):
             provider_names = frozenset({"demo_unregister"})
-            litellm_provider = "hosted_vllm"
+            model_provider_prefix = "hosted_vllm"
 
         registry = LLMProviderRegistry()
         registry.register(DemoProvider)
@@ -1440,7 +1534,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         adapter = registry.resolve(endpoint)
 
-        self.assertEqual(adapter.litellm_model(), "openai/demo-model")
+        self.assertEqual(adapter.api_model(), "demo-model")
 
     def test_llm_provider_registry_restores_builtin_mapping_after_runtime_adapter_removed(self) -> None:
         adapters_dir = self.runtime_root / "llm" / "adapters"
@@ -1453,7 +1547,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                     "",
                     "class RuntimeOpenAIOverride(LLMProviderAdapter):",
                     "    provider_names = frozenset({'openai'})",
-                    "    litellm_provider = 'hosted_vllm'",
+                    "    model_provider_prefix = 'hosted_vllm'",
                     "",
                 ]
             ),
@@ -1473,17 +1567,17 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
 
         registry.load_runtime_adapters(self.runtime_root)
-        self.assertEqual(registry.resolve(endpoint).litellm_model(), "hosted_vllm/demo-model")
+        self.assertEqual(registry.resolve(endpoint).api_model(), "demo-model")
 
         adapter_path.unlink()
         registry.load_runtime_adapters(self.runtime_root)
 
-        self.assertEqual(registry.resolve(endpoint).litellm_model(), "openai/demo-model")
+        self.assertEqual(registry.resolve(endpoint).api_model(), "demo-model")
 
-    def test_litellm_invoker_uses_injected_provider_registry(self) -> None:
+    def test_openai_chat_invoker_uses_injected_provider_registry(self) -> None:
         class DemoProvider(LLMProviderAdapter):
             provider_names = frozenset({"demo_injected"})
-            litellm_provider = "hosted_vllm"
+            model_provider_prefix = "hosted_vllm"
 
             def apply_request(self, request: CanonicalLLMRequest, draft) -> None:  # type: ignore[no-untyped-def]
                 _ = request
@@ -1502,17 +1596,17 @@ class PalV2BootstrapTests(unittest.TestCase):
             priority=0,
             enabled=True,
         )
-        invoker = LiteLLMEndpointInvoker(provider_registry=registry)
+        invoker = OpenAIChatEndpointInvoker(provider_registry=registry)
 
         kwargs, _ = invoker._build_completion_kwargs(
             endpoint,
             CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=16),
         )
 
-        self.assertEqual(kwargs["model"], "hosted_vllm/demo-model")
+        self.assertEqual(kwargs["model"], "demo-model")
         self.assertEqual(kwargs["seed"], 11)
 
-    def test_litellm_invoker_sets_litellm_and_sdk_timeouts(self) -> None:
+    def test_openai_chat_invoker_sets_openai_chat_and_sdk_timeouts(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="timeout_demo",
             provider="openai_compatible",
@@ -1524,7 +1618,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             priority=0,
             enabled=True,
         )
-        invoker = LiteLLMEndpointInvoker()
+        invoker = OpenAIChatEndpointInvoker()
 
         kwargs, _ = invoker._build_completion_kwargs(
             endpoint,
@@ -1540,15 +1634,15 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(kwargs["force_timeout"], 37.0)
         self.assertEqual(kwargs["max_retries"], 0)
 
-    def test_litellm_wall_timeout_returns_without_waiting_for_stuck_call(self) -> None:
-        from pal.llm.runtime import LLMEndpointInvocationError, _run_litellm_with_wall_timeout
+    def test_openai_chat_wall_timeout_returns_without_waiting_for_stuck_call(self) -> None:
+        from pal.llm.runtime import LLMEndpointInvocationError, _run_llm_with_wall_timeout
 
         started_at = time.monotonic()
         with self.assertRaises(LLMEndpointInvocationError):
-            _run_litellm_with_wall_timeout(
+            _run_llm_with_wall_timeout(
                 lambda: time.sleep(2.0),
                 timeout_seconds=0.05,
-                description="test litellm call",
+                description="test openai_chat call",
             )
 
         self.assertLess(time.monotonic() - started_at, 0.5)
@@ -1563,13 +1657,13 @@ class PalV2BootstrapTests(unittest.TestCase):
                 "\n".join(
                     [
                         "from __future__ import annotations",
-                        "from pal.llm import CanonicalLLMRequest, LLMProviderAdapter, LiteLLMCompletionDraft",
+                        "from pal.llm import CanonicalLLMRequest, LLMProviderAdapter, OpenAIChatCompletionDraft",
                         "",
                         "class RuntimeDemoProvider(LLMProviderAdapter):",
                         "    provider_names = frozenset({'runtime_demo'})",
-                        "    litellm_provider = 'hosted_vllm'",
+                        "    model_provider_prefix = 'hosted_vllm'",
                         "",
-                        "    def apply_request(self, request: CanonicalLLMRequest, draft: LiteLLMCompletionDraft) -> None:",
+                        "    def apply_request(self, request: CanonicalLLMRequest, draft: OpenAIChatCompletionDraft) -> None:",
                         "        _ = request",
                         f"        draft.extra['seed'] = {seed}",
                         "",
@@ -1592,7 +1686,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             priority=0,
             enabled=True,
         )
-        invoker = LiteLLMEndpointInvoker(runtime_root=self.runtime_root)
+        invoker = OpenAIChatEndpointInvoker(runtime_root=self.runtime_root)
         runtime = LLMRuntime(
             endpoint_resolver=EndpointResolver(repository=repository),
             settings_repository=settings,
@@ -1615,7 +1709,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertTrue(payload["provider_adapters_refreshed"])
         self.assertEqual(payload["provider_adapter_load_errors"], [])
-        self.assertEqual(kwargs["model"], "hosted_vllm/demo-model")
+        self.assertEqual(kwargs["model"], "demo-model")
         self.assertEqual(kwargs["seed"], 2)
 
     def test_encrypted_file_secret_store_reloads_when_file_changes(self) -> None:
@@ -1693,7 +1787,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             SecretRef(service="codex_oauth", account="oauth-profile"),
             json.dumps({"refresh_token": "oauth-refresh-token"}),
         )
-        resolver = LiteLLMCredentialResolver(secret_store=secret_store)
+        resolver = LLMCredentialResolver(secret_store=secret_store)
 
         auth = resolver.resolve_auth(endpoint)
 
@@ -2962,7 +3056,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         hot_ids = [eid for eid, state in service.l2_store.heat_registry.items() if state.heat_level == L2HeatLevel.HOT]
         self.assertEqual(len(hot_ids), 10)
 
-    def test_litellm_invoker_does_not_map_think_level_to_reasoning_effort_for_plain_openai_chat(self) -> None:
+    def test_openai_chat_invoker_does_not_map_think_level_to_reasoning_effort_for_plain_openai_chat(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="plain-openai-chat",
             provider="openai_compatible",
@@ -2972,8 +3066,8 @@ class PalV2BootstrapTests(unittest.TestCase):
             credential_ref="openai-compatible-prod",
             enabled=True,
         )
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=InMemorySecretStore())
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
         )
 
         kwargs, _ = invoker._build_completion_kwargs(
@@ -3125,7 +3219,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(events[-1].finish_reason, LLMFinishReason.STOP)
         self.assertEqual(events[-1].response_mode, "chat")
 
-    def test_litellm_invoker_stream_normalizes_reasoning_only_chunks(self) -> None:
+    def test_openai_chat_invoker_stream_normalizes_reasoning_only_chunks(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="deepseek-like",
             provider="deepseek",
@@ -3155,9 +3249,9 @@ class PalV2BootstrapTests(unittest.TestCase):
                     ]
                 }
 
-        class FakeLiteLLM:
+        class FakeOpenAICompletions:
             @staticmethod
-            def completion(**kwargs):
+            def create(**kwargs):
                 if kwargs.get("stream"):
                     return [
                         FakeChunk(
@@ -3183,15 +3277,25 @@ class PalV2BootstrapTests(unittest.TestCase):
                     ]
                 return FakeResponse()
 
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=InMemorySecretStore())
+        class FakeOpenAIClient:
+            def __init__(self, **kwargs):
+                self.client_kwargs = kwargs
+                self.chat = types.SimpleNamespace(
+                    completions=FakeOpenAICompletions(),
+                )
+
+        class FakeOpenAI:
+            OpenAI = FakeOpenAIClient
+
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
         )
         request = CanonicalLLMRequest(
             messages=[{"role": "user", "content": "Reply with exactly: pong"}],
             max_output_tokens=32,
         )
 
-        with patch.dict(sys.modules, {"litellm": FakeLiteLLM}):
+        with patch.dict(sys.modules, {"openai": FakeOpenAI}):
             events = list(invoker.invoke_stream(endpoint, request))
 
         self.assertEqual(
@@ -3201,9 +3305,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual("".join(event.reasoning_text for event in events), "thinkingstill thinking")
         self.assertEqual(events[-1].finish_reason, "length")
 
-    def test_litellm_response_parser_preserves_reasoning_text(self) -> None:
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=InMemorySecretStore())
+    def test_openai_chat_response_parser_preserves_reasoning_text(self) -> None:
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
         )
 
         class FakeResponse:
@@ -3221,14 +3325,60 @@ class PalV2BootstrapTests(unittest.TestCase):
                     ]
                 }
 
-        outcome = invoker._parse_litellm_response(FakeResponse())
+        outcome = invoker._parse_openai_chat_response(FakeResponse())
 
         self.assertEqual(outcome.text, "pong")
         self.assertEqual(outcome.reasoning_text, "thinking")
+        self.assertEqual(outcome.provider_specific_fields["reasoning_content"], "thinking")
 
-    def test_litellm_responses_parser_extracts_text_and_tool_calls(self) -> None:
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=InMemorySecretStore())
+    def test_anthropic_parser_and_renderer_preserve_thinking_blocks_for_tool_continuation(self) -> None:
+        class FakeResponse:
+            def to_dict(self):
+                return {
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {"type": "thinking", "thinking": "hidden reasoning", "signature": "sig-1"},
+                        {"type": "redacted_thinking", "data": "opaque"},
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "probe_tool",
+                            "input": {"ok": True},
+                        },
+                    ],
+                }
+
+        outcome = _parse_anthropic_messages_response(FakeResponse())
+
+        self.assertEqual(outcome.reasoning_text, "hidden reasoning")
+        self.assertEqual(outcome.provider_specific_fields["reasoning_content"], "hidden reasoning")
+        self.assertEqual(outcome.provider_specific_fields["anthropic_thinking_blocks"][0]["signature"], "sig-1")
+        self.assertEqual(outcome.provider_specific_fields["anthropic_thinking_blocks"][1]["type"], "redacted_thinking")
+
+        _, messages = chat_messages_to_anthropic_messages(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "provider_specific_fields": outcome.provider_specific_fields,
+                    "tool_calls": [
+                        {
+                            "id": "toolu_1",
+                            "type": "function",
+                            "function": {"name": "probe_tool", "arguments": "{\"ok\": true}"},
+                        }
+                    ],
+                }
+            ]
+        )
+
+        blocks = messages[0]["content"]
+        self.assertEqual([block["type"] for block in blocks], ["thinking", "redacted_thinking", "tool_use"])
+        self.assertEqual(blocks[0]["signature"], "sig-1")
+
+    def test_openai_chat_responses_parser_extracts_text_and_tool_calls(self) -> None:
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
         )
 
         class FakeResponse:
@@ -3249,7 +3399,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                     ]
                 }
 
-        outcome = invoker._parse_litellm_responses_response(
+        outcome = invoker._parse_openai_responses_response(
             FakeResponse(),
             tool_name_aliases={"probe": "probe_alias"},
         )
@@ -3260,9 +3410,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(outcome.tool_calls[0].args, {"ok": True})
         self.assertEqual(outcome.tool_calls[0].call_id, "call_1")
 
-    def test_litellm_response_parser_rejects_empty_assistant_without_tool_calls(self) -> None:
-        invoker = LiteLLMEndpointInvoker(
-            credentials=LiteLLMCredentialResolver(secret_store=InMemorySecretStore())
+    def test_openai_chat_response_parser_rejects_empty_assistant_without_tool_calls(self) -> None:
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
         )
 
         class FakeResponse:
@@ -3280,7 +3430,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 }
 
         with self.assertRaises(LLMEndpointInvocationError):
-            invoker._parse_litellm_response(FakeResponse())
+            invoker._parse_openai_chat_response(FakeResponse())
 
     def test_llm_runtime_treats_empty_assistant_without_tool_calls_as_endpoint_failure(self) -> None:
         endpoint_repository = LLMEndpointRepository()

@@ -6,5 +6,5 @@ extensions = [".py", ".pyi"]
 language_ids = ["python"]
 workspace_markers = ["pyproject.toml", "setup.py", ".git"]
 install_hint = "Install Node.js/npx or provide a runtime override for pyright-langserver."
-startup_timeout_ms = 60000
+startup_timeout_ms = 120000
 diagnostics_timeout_ms = 10000

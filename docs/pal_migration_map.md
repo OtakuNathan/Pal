@@ -92,7 +92,7 @@
 - 当前职责：provider adapter、canonical request/response、fallback
 - 当前问题：旧版 canonical 语义可保留，但 transport adapter 仍偏手写；数据库里的 `llm_endpoints` 还不够完整，streaming 也尚未成为真正一等路径
 - 目标归属：`llm`
-- 迁移方式：保留 canonical/provider 分层语义，优先以 `LiteLLM` 统一 transport；把本地 `llm_endpoints` 升级为模型路由与能力真相源；把 streaming 重写成真实流式路径
+- 迁移方式：保留 canonical/provider 分层语义，以 native SDK invoker 承载 OpenAI-compatible、OpenAI Responses、Anthropic Messages 等 transport；把本地 `llm_endpoints` 升级为模型路由与能力真相源；把 streaming 重写成真实流式路径
 - 是否保留语义：保留 canonical shape、fallback、native tool calling 边界；不保留“整段生成后再伪装成 delta”的假 streaming
 
 ## 保留

@@ -232,6 +232,10 @@ class TurnExecutor:
         )
         if outcome.tool_calls:
             continuation.pending_assistant_tool_text = str(outcome.text or "")
+            provider_fields = getattr(outcome, "provider_specific_fields", None)
+            continuation.pending_assistant_provider_specific_fields = (
+                dict(provider_fields) if isinstance(provider_fields, dict) else {}
+            )
             continuation.pending_tool_call_batch = [
                 self._ensure_tool_call_identity(tool_call) for tool_call in list(outcome.tool_calls)
             ]
@@ -500,7 +504,7 @@ class TurnExecutor:
     @staticmethod
     def _is_behavior_advise_tool_call(name: str) -> bool:
         normalized = str(name or "").strip()
-        return normalized == "op_behavior_advise" or normalized.endswith("_behavior_advise")
+        return normalized in {"op_behavior_advise", "advise_behavior"} or normalized.endswith("_behavior_advise")
 
     @staticmethod
     def _render_behavior_guidance_entry(candidate: dict[str, Any]) -> str:
@@ -578,7 +582,11 @@ class TurnExecutor:
         text_parts: list[str] = []
         reasoning_parts: list[str] = []
         tool_calls: list = []
-        state: dict[str, Any] = {"finish_reason": LLMFinishReason.STOP, "response_mode": None}
+        state: dict[str, Any] = {
+            "finish_reason": LLMFinishReason.STOP,
+            "response_mode": None,
+            "provider_specific_fields": {},
+        }
 
         events = await self._call_port_async(llm_runtime, "agenerate_stream", "generate_stream", request)
         for event in events:
@@ -604,9 +612,14 @@ class TurnExecutor:
             if acc is not None:
                 acc(event, text_parts, reasoning_parts, tool_calls, state)
 
+        reasoning_text = "".join(reasoning_parts)
+        provider_specific_fields = dict(state.get("provider_specific_fields") or {})
+        if reasoning_text and "reasoning_content" not in provider_specific_fields:
+            provider_specific_fields["reasoning_content"] = reasoning_text
         return CanonicalLLMOutcome(
             text="".join(text_parts),
-            reasoning_text="".join(reasoning_parts),
+            reasoning_text=reasoning_text,
+            provider_specific_fields=provider_specific_fields,
             tool_calls=tool_calls,
             finish_reason=state["finish_reason"],
             response_mode=state["response_mode"],
@@ -623,6 +636,7 @@ class TurnExecutor:
     def _accumulate_reasoning_delta(event, _text, reasoning_parts, _tools, _state):
         if event.reasoning_text:
             reasoning_parts.append(event.reasoning_text)
+        TurnExecutor._merge_stream_provider_specific_fields(_state, getattr(event, "provider_specific_fields", {}) or {})
 
     @staticmethod
     def _accumulate_tool_call(event, _text, _reasoning, tool_calls, _state):
@@ -639,6 +653,23 @@ class TurnExecutor:
     def _accumulate_done(event, _text, _reasoning, _tools, state):
         state["finish_reason"] = event.finish_reason or state["finish_reason"]
         state["response_mode"] = event.response_mode or state["response_mode"]
+
+    @staticmethod
+    def _merge_stream_provider_specific_fields(state: dict[str, Any], fields: dict[str, Any]) -> None:
+        if not isinstance(fields, dict) or not fields:
+            return
+        target = state.setdefault("provider_specific_fields", {})
+        if not isinstance(target, dict):
+            target = {}
+            state["provider_specific_fields"] = target
+        for key, value in fields.items():
+            normalized_key = str(key or "").strip()
+            if not normalized_key:
+                continue
+            if normalized_key == "reasoning_content" and isinstance(value, str):
+                target[normalized_key] = str(target.get(normalized_key) or "") + value
+                continue
+            target[normalized_key] = value
 
     # ── prompt building ─────────────────────────────────────────────────
 
@@ -737,59 +768,10 @@ class TurnExecutor:
         *,
         primary_input: str,
     ) -> list[dict[str, Any]]:
+        _ = primary_input
         if not prepared_tool_protocol:
             return list(base_messages)
-        split = self._split_final_user_context(base_messages, primary_input=primary_input)
-        if split is None:
-            return [*base_messages, *prepared_tool_protocol]
-        prefix, current_user_message, trailing_context_message = split
-        messages = [*prefix, current_user_message, *prepared_tool_protocol]
-        if trailing_context_message is not None:
-            messages.append(trailing_context_message)
-        return messages
-
-    def _split_final_user_context(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        primary_input: str,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any] | None] | None:
-        if not messages or not primary_input:
-            return None
-        last = dict(messages[-1])
-        if str(last.get("role") or "").strip() != "user":
-            return None
-        content = last.get("content")
-        if not isinstance(content, list):
-            return None
-        parts = [dict(part) for part in content if isinstance(part, dict)]
-        if not parts:
-            return None
-        primary_index = -1
-        for index in range(len(parts) - 1, -1, -1):
-            part = parts[index]
-            if part.get("type") == "text" and str(part.get("text") or "") == primary_input:
-                primary_index = index
-                break
-        if primary_index < 0:
-            return None
-        context_parts = [*parts[:primary_index], *parts[primary_index + 1:]]
-        if any(str(part.get("type") or "") != "text" for part in context_parts):
-            return None
-        current_user_message = {**last, "content": primary_input}
-        trailing_context_message = None
-        if context_parts:
-            trailing_context_message = {
-                "role": "user",
-                "content": self._coerce_text_parts_content(context_parts),
-            }
-        return list(messages[:-1]), current_user_message, trailing_context_message
-
-    @staticmethod
-    def _coerce_text_parts_content(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
-        if len(parts) == 1 and parts[0].get("type") == "text":
-            return str(parts[0].get("text") or "")
-        return parts
+        return [*base_messages, *prepared_tool_protocol]
 
     def _resolve_llm_capabilities(self, continuation) -> dict[str, Any]:
         llm_runtime = self.context.port_registry.get("llm:llm")
@@ -873,7 +855,7 @@ class TurnExecutor:
     def _build_tool_call_budget(self, continuation, *, execution_call=None) -> ToolCallBudget:
         cfg = self._config
         token_limit = cfg.max_tool_result_tokens
-        if execution_call is not None and str(getattr(execution_call, "name", "") or "").strip() == "op_exec_shell":
+        if execution_call is not None and str(getattr(execution_call, "name", "") or "").strip() in {"op_exec_shell", "run_shell", "shell_exec"}:
             token_limit = min(cfg.max_tool_result_tokens, cfg.default_max_output_tokens)
         max_output_chars = min(
             cfg.default_max_result_size_chars,
@@ -959,6 +941,12 @@ class TurnExecutor:
         tool_call_id = str(message.get("tool_call_id", "") or "").strip()
         if tool_call_id:
             total += len(tool_call_id)
+        provider_specific_fields = message.get("provider_specific_fields")
+        if provider_specific_fields:
+            try:
+                total += len(json.dumps(provider_specific_fields, ensure_ascii=False, sort_keys=True))
+            except TypeError:
+                total += len(str(provider_specific_fields))
         return total
 
     @staticmethod
@@ -1040,11 +1028,15 @@ class TurnExecutor:
         append_tool_protocol_messages(
             continuation.tool_protocol_messages,
             assistant_text=str(continuation.pending_assistant_tool_text or ""),
+            assistant_provider_specific_fields=dict(
+                getattr(continuation, "pending_assistant_provider_specific_fields", {}) or {}
+            ),
             tool_calls=continuation.pending_tool_call_batch,
             tool_results=continuation.pending_tool_results,
             render_tool_result_content=self._render_tool_result_content,
         )
         continuation.pending_assistant_tool_text = ""
+        continuation.pending_assistant_provider_specific_fields = {}
         continuation.pending_tool_call_batch = []
         continuation.pending_tool_results = []
 
@@ -1058,7 +1050,7 @@ class TurnExecutor:
     @staticmethod
     def _is_memory_recall_tool_call(name: str) -> bool:
         normalized = str(name or "").strip()
-        return normalized == "op_memory_recall" or normalized.endswith("_memory_recall")
+        return normalized in {"op_memory_recall", "recall_memory"} or normalized.endswith("_memory_recall")
 
     def _render_memory_recall_tool_observation(self, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> str:
         provider_id = str(tool_call.args.get("target_id") or "").strip() or "default"
