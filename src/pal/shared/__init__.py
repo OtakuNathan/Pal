@@ -65,7 +65,14 @@ from pal.shared.tool_protocol import (
     default_tool_result_text,
     ensure_tool_call_identity,
 )
-from pal.shared.tool_aliases import llm_tool_name, replace_internal_tool_names, replace_internal_tool_names_in_value
+from pal.shared.tool_aliases import (
+    RUN_SHELL_SCOPE_HINT,
+    dedicated_tool_route_hints,
+    format_dedicated_tool_route_hints,
+    llm_tool_name,
+    replace_internal_tool_names,
+    replace_internal_tool_names_in_value,
+)
 from pal.shared.messages import (
     CheckpointEvent,
     MinionApprovalDecision,
@@ -127,6 +134,7 @@ __all__ = [
     "QueuedReply",
     "QueuedStatus",
     "QueuedStreamEvent",
+    "RUN_SHELL_SCOPE_HINT",
     "render_system_reminder",
     "render_runtime_reminder",
     "render_xml_block",
@@ -138,11 +146,13 @@ __all__ = [
     "SourceKind",
     "capability_action",
     "capability_node",
+    "dedicated_tool_route_hints",
     "standard_descriptors",
     "TaskContextPack",
     "append_tool_protocol_messages",
     "assistant_tool_message",
     "extract_text_from_payload",
+    "format_dedicated_tool_route_hints",
     "default_tool_result_text",
     "ensure_tool_call_identity",
     "llm_tool_name",

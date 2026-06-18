@@ -101,9 +101,9 @@ class MinionSandboxTests(unittest.TestCase):
             sudo_text = sudo.read_text(encoding="utf-8")
             self.assertIn("blocked command 'sudo'", sudo_text)
             self.assertIn("Use Pal resident capabilities when available", sudo_text)
-            self.assertIn("read_file for repo file reads", sudo_text)
+            self.assertIn("read_file for reading repo text files", sudo_text)
             self.assertIn("delete_path for deleting repo paths", sudo_text)
-            self.assertIn("Keep run_shell for sandbox-local tests", sudo_text)
+            self.assertIn("Keep run_shell for tests", sudo_text)
 
     def test_runner_invocation_uses_broker_env_when_sandboxed(self) -> None:
         if not shutil.which("bwrap"):

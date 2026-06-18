@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 import re
 
 
@@ -35,6 +36,22 @@ EXPLICIT_LLM_TOOL_ALIASES: dict[str, str] = {
 
 _INTERNAL_TOOL_NAME_RE = re.compile(r"\b(?:op|intro)_[A-Za-z0-9_]+\b")
 
+DEDICATED_TOOL_ROUTE_HINTS: tuple[tuple[str, str], ...] = (
+    ("op_tree", "structured repo listings"),
+    ("op_search", "repository text search"),
+    ("op_file_read", "reading repo text files"),
+    ("op_file_edit", "precise repo text edits"),
+    ("op_file_write", "creating, overwriting, or appending repo text files"),
+    ("op_path_delete", "deleting repo paths"),
+    ("op_minion_checkpoint_commit", "milestone checkpoint commits"),
+    ("op_git", "git status, diff, log, show, and conservative audited git mutations"),
+)
+
+RUN_SHELL_SCOPE_HINT = (
+    "Keep run_shell for tests, builds, scripts, process probes, package commands, "
+    "and process inspection."
+)
+
 
 def llm_tool_name(name: object) -> str:
     text = str(name or "").strip()
@@ -48,6 +65,23 @@ def llm_tool_name(name: object) -> str:
     if text.startswith("intro_"):
         return text[6:]
     return text
+
+
+def dedicated_tool_route_hints(allowed: Iterable[str] | None = None) -> tuple[str, ...]:
+    allowed_set = (
+        {str(item).strip() for item in allowed or () if str(item).strip()}
+        if allowed is not None
+        else None
+    )
+    return tuple(
+        f"{llm_tool_name(tool_name)} for {purpose}"
+        for tool_name, purpose in DEDICATED_TOOL_ROUTE_HINTS
+        if allowed_set is None or tool_name in allowed_set
+    )
+
+
+def format_dedicated_tool_route_hints(allowed: Iterable[str] | None = None) -> str:
+    return "; ".join(dedicated_tool_route_hints(allowed))
 
 
 def replace_internal_tool_names(text: object) -> str:

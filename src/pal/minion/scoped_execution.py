@@ -27,8 +27,10 @@ from pal.minion.workspace_file_tools import WORKSPACE_FILE_TOOL_SPECS, workspace
 from pal.minion.workspace_tools import _append_unique_artifact, _workspace_tool_result
 from pal.plugins.l3 import MockL3Plugin
 from pal.shared import (
+    RUN_SHELL_SCOPE_HINT,
     RuntimeStatus,
     default_tool_result_text,
+    format_dedicated_tool_route_hints,
     llm_tool_name,
     replace_internal_tool_names,
     replace_internal_tool_names_in_value,
@@ -347,30 +349,10 @@ def _scrub_minion_capability_spec(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def _minion_shell_dedicated_tool_guidance(allowed: set[str]) -> str:
-    hints: list[str] = []
-    if "op_tree" in allowed:
-        hints.append(f"{llm_tool_name('op_tree')} for structured repo listings")
-    if "op_search" in allowed:
-        hints.append(f"{llm_tool_name('op_search')} for repository text search")
-    if "op_file_read" in allowed:
-        hints.append(f"{llm_tool_name('op_file_read')} for reading repo text files")
-    if "op_file_edit" in allowed:
-        hints.append(f"{llm_tool_name('op_file_edit')} for precise repo text edits")
-    if "op_file_write" in allowed:
-        hints.append(f"{llm_tool_name('op_file_write')} for creating, overwriting, or appending repo text files")
-    if "op_path_delete" in allowed:
-        hints.append(f"{llm_tool_name('op_path_delete')} for deleting repo files or directories")
-    if "op_minion_checkpoint_commit" in allowed:
-        hints.append(f"{llm_tool_name('op_minion_checkpoint_commit')} for milestone checkpoint commits")
-    if "op_git" in allowed:
-        hints.append(f"{llm_tool_name('op_git')} for git status, diff, log, show, and conservative audited git mutations")
+    hints = format_dedicated_tool_route_hints(allowed)
     if not hints:
         return ""
-    return (
-        "Minion tool choice: when visible, use "
-        + "; ".join(hints)
-        + f". Keep {llm_tool_name('op_exec_shell')} for tests, builds, scripts, process probes, package commands, and process inspection."
-    )
+    return f"Minion tool choice: when visible, use {hints}. {RUN_SHELL_SCOPE_HINT}"
 
 
 @dataclass

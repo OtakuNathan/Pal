@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from pal.foundation.sidecar import python_subprocess_env
-from pal.shared import TaskContextPack, llm_tool_name
+from pal.shared import RUN_SHELL_SCOPE_HINT, TaskContextPack, format_dedicated_tool_route_hints
 
 
 MINION_SANDBOX_BLACKLIST_COMMANDS = (
@@ -333,21 +333,11 @@ def _falsey(value: Any) -> bool:
 
 
 def _deny_wrapper_text(command: str) -> str:
-    capability_hint = (
-        "Use Pal resident capabilities when available: "
-        f"{llm_tool_name('op_file_read')} for repo file reads, "
-        f"{llm_tool_name('op_file_edit')} for precise text edits, "
-        f"{llm_tool_name('op_file_write')} for file writes, "
-        f"{llm_tool_name('op_path_delete')} for deleting repo paths, "
-        f"{llm_tool_name('op_tree')} for structured listings, "
-        f"{llm_tool_name('op_search')} for repo text search, "
-        f"{llm_tool_name('op_git')} for git inspection/audited git changes, and "
-        f"{llm_tool_name('op_minion_checkpoint_commit')} for milestone checkpoint commits."
-    )
+    capability_hint = f"Use Pal resident capabilities when available: {format_dedicated_tool_route_hints()}."
     return (
         "#!/bin/sh\n"
         f"echo \"pal minion sandbox blocked command '{command}'. This command is outside the sandboxed minion authority.\" >&2\n"
         f"echo \"{capability_hint}\" >&2\n"
-        "echo \"Keep run_shell for sandbox-local tests, builds, scripts, package commands, and process probes.\" >&2\n"
+        f"echo \"{RUN_SHELL_SCOPE_HINT}\" >&2\n"
         "exit 126\n"
     )
