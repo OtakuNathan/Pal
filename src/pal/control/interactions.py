@@ -477,6 +477,13 @@ def minion_lesson_approval_delivery(payload: dict[str, Any], route: ControlRoute
     return delivery_for_interaction(route, "interactive_open", interaction)
 
 
+def memory_candidate_approval_delivery(payload: dict[str, Any], route: ControlRoute) -> ControlDelivery | None:
+    interaction = build_memory_candidate_approval_interaction(payload, route)
+    if interaction is None:
+        return None
+    return delivery_for_interaction(route, "interactive_open", interaction)
+
+
 def minion_module_continue_delivery(payload: dict[str, Any], route: ControlRoute) -> ControlDelivery | None:
     interaction = build_minion_module_continue_interaction(payload, route)
     if interaction is None:
@@ -651,14 +658,13 @@ def build_minion_lesson_approval_interaction(
 ) -> InteractionMessageSpec | None:
     task_lessons = _string_list(payload.get("task_lessons"))
     system_lessons = _string_list(payload.get("system_lessons"))
-    memory_candidates = _dict_list(payload.get("memory_candidates"))
-    if not task_lessons and not system_lessons and not memory_candidates:
+    if not task_lessons and not system_lessons:
         return None
     run_id = str(payload.get("run_id") or "")
     work_order_id = str(payload.get("work_order_id") or "")
     interaction_id = f"minion_lesson_{run_id or uuid4().hex[:12]}"
     lines = [
-        "Minion proposed reusable memory.",
+        "Minion proposed reusable lessons.",
         "",
         "Absorb these into Pal memory?",
     ]
@@ -670,17 +676,12 @@ def build_minion_lesson_approval_interaction(
         lines.append("")
         lines.append("System lessons:")
         lines.extend(f"- {lesson}" for lesson in system_lessons)
-    if memory_candidates:
-        lines.append("")
-        lines.append("Memory candidates:")
-        lines.extend(f"- {_memory_candidate_preview(candidate)}" for candidate in memory_candidates)
     base_args = {
         "work_order_id": work_order_id,
         "run_id": run_id,
         "minion_id": str(payload.get("minion_id") or ""),
         "task_lessons": task_lessons,
         "system_lessons": system_lessons,
-        "memory_candidates": memory_candidates,
     }
 
     def action_args(decision: str) -> dict[str, Any]:
@@ -694,6 +695,73 @@ def build_minion_lesson_approval_interaction(
     return InteractionMessageSpec(
         interaction_id=interaction_id,
         interaction_kind="minion_lesson_approval",
+        route=route,
+        text="\n".join(lines),
+        buttons=(
+            (
+                InteractionButtonSpec(
+                    label="Accept",
+                    action_key="control.action.dispatch",
+                    action_args=action_args("accept"),
+                ),
+                InteractionButtonSpec(
+                    label="Reject",
+                    action_key="control.action.dispatch",
+                    action_args=action_args("reject"),
+                ),
+                InteractionButtonSpec(
+                    label="Edit",
+                    action_key="control.action.dispatch",
+                    action_args=action_args("edit"),
+                ),
+            ),
+        ),
+    )
+
+
+def build_memory_candidate_approval_interaction(
+    payload: dict[str, Any],
+    route: ControlRoute,
+) -> InteractionMessageSpec | None:
+    memory_candidates = _dict_list(payload.get("memory_candidates"))
+    if not memory_candidates:
+        return None
+    source_kind = str(payload.get("source_kind") or "pal").strip() or "pal"
+    source_ref = str(payload.get("source_ref") or payload.get("work_order_id") or payload.get("run_id") or "").strip()
+    source_label = str(payload.get("source_label") or "").strip()
+    candidate_batch_id = str(payload.get("candidate_batch_id") or source_ref or uuid4().hex[:12]).strip()
+    interaction_id = f"memory_candidate_{candidate_batch_id}"
+    source_name = "Minion" if source_kind == "minion" else "Pal"
+    lines = [
+        f"{source_name} proposed durable memory candidates.",
+        "",
+        "Save these into Pal memory?",
+    ]
+    if source_label:
+        lines.extend(["", f"Source: {source_label}"])
+    elif source_ref:
+        lines.extend(["", f"Source: {source_kind}:{source_ref}"])
+    lines.append("")
+    lines.append("Memory candidates:")
+    lines.extend(f"- {_memory_candidate_preview(candidate)}" for candidate in memory_candidates)
+    base_args = {
+        "source_kind": source_kind,
+        "source_ref": source_ref,
+        "source_label": source_label,
+        "memory_candidates": memory_candidates,
+    }
+
+    def action_args(decision: str) -> dict[str, Any]:
+        return {
+            "action_kind": "memory_candidate_decision",
+            "target_scope": "memory",
+            "target_id": candidate_batch_id,
+            "args": {**base_args, "decision": decision},
+        }
+
+    return InteractionMessageSpec(
+        interaction_id=interaction_id,
+        interaction_kind="memory_candidate_approval",
         route=route,
         text="\n".join(lines),
         buttons=(

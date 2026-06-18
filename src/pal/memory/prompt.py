@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pal.memory.contracts import MemoryPack
+from pal.memory.rendering import is_compaction_payload, render_compact_context_for_llm
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
 
 if TYPE_CHECKING:
@@ -29,6 +30,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
             return fragments
 
         summary_text = _current_summary_text(pack)
+        summary_context = _render_current_summary_context(pack)
         messages = [
             message
             for message in list(pack.l1_recent_context)
@@ -125,12 +127,12 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
                 )
                 block_index += 1
 
-        if summary_text:
+        if summary_context:
             fragments.append(
                 PromptFragment(
                     section="memory",
                     title="Conversation summary",
-                    content=_render_conversation_summary_context(summary_text),
+                    content=summary_context,
                     priority=55,
                     metadata={
                         "block_id": "memory_current_summary",
@@ -224,7 +226,21 @@ def _memory_guide_fragments() -> tuple[PromptFragment, PromptFragment]:
 def _current_summary_text(pack: MemoryPack) -> str:
     if pack.current_summary is None:
         return ""
-    return pack.current_summary.rendered.strip() or pack.current_summary.summary.strip()
+    return pack.current_summary.summary.strip()
+
+
+def _render_current_summary_context(pack: MemoryPack) -> str:
+    if pack.current_summary is None:
+        return ""
+    entry = pack.current_summary
+    summary = entry.summary.strip()
+    payload = dict(entry.payload or {})
+    if is_compaction_payload(payload):
+        return render_compact_context_for_llm(summary=summary, payload=payload)
+    text = entry.rendered.strip() or summary
+    if text.startswith("<conversation_summary") or text.startswith("<compact_context"):
+        return text
+    return _render_conversation_summary_context(text)
 
 
 def _is_synthetic_compaction_summary(message, summary_text: str) -> bool:

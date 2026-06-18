@@ -739,6 +739,11 @@ embedding provider 不可用时退化为原有 hash 去重。
 
 `compact` 不是 durable write。
 
+当前实现区分两类结构化 compact：
+
+- `pal.compaction.pal.v1`：本体会话连续性，允许提出 `memory_candidates`，但候选仍需 approval 后才可进入 L3。
+- `pal.compaction.minion.v1`：minion 任务恢复参考包，只保留 work order / milestone / checkpoint / repair / verification 线索，不生成 `memory_candidates`。
+
 ## retire
 
 `retire` 表示：

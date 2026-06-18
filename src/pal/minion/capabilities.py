@@ -26,6 +26,7 @@ from pal.control.interactions import (
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.foundation import BoundedTTLBuffer, utc_now
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
+from pal.memory.candidates import l3_commit_args_from_memory_candidate
 from pal.minion.capability_args import (
     inject_spawn_bonus_skill_refs,
     normalize_top_level_review_gate_args,
@@ -1990,45 +1991,11 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
 
 
 def _l3_commit_args_from_memory_candidate(candidate: dict[str, Any], *, work_order_id: str) -> dict[str, Any]:
-    kind = str(candidate.get("kind") or candidate.get("document_kind") or "case").strip() or "case"
-    scope = str(candidate.get("scope") or "task").strip() or "task"
-    title = " ".join(str(candidate.get("title") or "").split())
-    summary = " ".join(str(candidate.get("summary") or candidate.get("search_text") or title).split())
-    search_text = str(candidate.get("search_text") or summary or title).strip()
-    if not title:
-        title = _preview_text(summary or search_text, limit=72)
-    if not summary:
-        summary = search_text or title
-    if not search_text:
-        search_text = summary or title
-    if not kind or not title or not summary or not search_text:
-        return {}
-    topics_payload = candidate.get("topics")
-    if isinstance(topics_payload, str):
-        topics = [topics_payload]
-    elif isinstance(topics_payload, (list, tuple)):
-        topics = list(topics_payload)
-    else:
-        topics = []
-    args: dict[str, Any] = {
-        "kind": kind,
-        "scope": scope,
-        "title": title,
-        "summary": summary,
-        "search_text": search_text,
-        "topics": [str(value) for value in topics if str(value or "").strip()],
-        "payload": dict(candidate.get("payload") or {}),
-    }
-    task_id = str(candidate.get("task_id") or "").strip()
-    if task_id:
-        args["task_id"] = task_id
-    elif scope == "task" and work_order_id:
-        args["task_id"] = work_order_id
-    for key in ("canonical_key", "situation_text", "task_text", "action_text", "result_text"):
-        value = str(candidate.get(key) or "").strip()
-        if value:
-            args[key] = value
-    return args
+    return l3_commit_args_from_memory_candidate(
+        candidate,
+        default_scope="task",
+        fallback_task_id=work_order_id,
+    )
 
 
 def _preview_text(text: str, *, limit: int) -> str:

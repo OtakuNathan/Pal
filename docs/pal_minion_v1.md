@@ -200,6 +200,24 @@ Natural-language minion control should resolve facts first. For requests like "w
 
 The manager repeats this preparation before launching the runner, so reattach/retry uses live minion-owned facts.
 
+## Compact And Resume Context
+
+Minion compact is a task-state recovery packet, not a Pal conversation summary and not a memory-writing path.
+
+Runtime uses a dedicated minion compact schema:
+
+- `pal.compaction.minion.v1`
+
+The minion compact prompt and renderer are separate from Pal compact. The minion prompt does not ask for user preference tracking, collaboration history, or `memory_candidates`. The rendered context is:
+
+- `<compact_context kind="minion" authority="reference_only">`
+- title: `Minion Task Continuity Reference`
+- task-oriented fields such as `task_goal`, `current_milestone_hint`, `claimed_completed`, `claimed_pending`, `implementation_decisions`, `verification_hints`, `review_or_repair_hints`, `must_verify_against`, and `next_action_hint`
+
+The compact output is explicitly reference-only. A runner must verify against the work order, accepted plan artifact, current milestone, checkpoint/ledger, Git state, and current files before claiming progress or completion. Compact text may say that work is "claimed completed", but it is not a truth source.
+
+Minion compact must not create durable memory candidates. Reusable lessons or case memories are proposed at work-order terminal/finalization time and then routed through Pal approval.
+
 ## Profiles
 
 Minion profiles are declarative. Builtin profiles are package TOML templates, and runtime profiles are loaded from `runtime_root/plugins/minion/profiles/*.toml`.
@@ -255,6 +273,7 @@ Terminal minion events may carry:
 
 - `task_lessons`
 - `system_lessons`
+- `memory_candidates`
 
 The runner may write lesson sections in its terminal summary, but the terminal payload extracts them into structured fields and strips them from the user-facing completion text.
 
@@ -265,3 +284,5 @@ Lessons are never absorbed silently. If a terminal event carries lessons, Pal op
 - `Edit`
 
 Accept stores task lessons as tasking continuity and stores system lessons as accepted system candidates. It also attempts to commit accepted lessons to L3 memory when `memory_write` is available in the current runtime. Reject discards the proposed lessons. Edit pauses absorption and asks for revised lesson text before saving.
+
+Pure `memory_candidates` from a terminal event use the generic `memory_candidate_approval` interaction instead of the minion lesson interaction. Accept routes through Pal's `memory_candidate_decision` handler and writes approved candidates through `op_memory_write` when available. This keeps tasking lessons, system lesson absorption, and durable case/fact memory candidates separate.

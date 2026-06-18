@@ -1766,14 +1766,16 @@ class LLMRuntime(LLMRuntimePort):
         max_output_tokens: int = 192,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
+        compaction_kind: str = "pal",
     ) -> str:
+        kind = _normalize_compaction_kind(compaction_kind)
         request = CanonicalLLMRequest(
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "Summarize the recent conversation into a short, durable working-memory summary. "
-                        "Preserve user preferences, commitments, active goals, and factual context. "
+                        f"Summarize the recent {kind} context into a short continuity summary. "
+                        "Preserve user preferences, commitments, active goals, factual context, constraints, and next action. "
                         "Do not include markdown, speaker labels, or commentary."
                     ),
                 },
@@ -1787,6 +1789,7 @@ class LLMRuntime(LLMRuntimePort):
                 "preferred_endpoint_id": preferred_endpoint_id,
                 "response_mode_hint": "operational",
                 "purpose": "memory_compaction",
+                "compaction_kind": kind,
             },
         )
         outcome = self.generate(request)
@@ -1801,6 +1804,7 @@ class LLMRuntime(LLMRuntimePort):
         max_output_tokens: int = 192,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
+        compaction_kind: str = "pal",
     ) -> str:
         try:
             return await asyncio.wait_for(
@@ -1810,46 +1814,93 @@ class LLMRuntime(LLMRuntimePort):
                     max_output_tokens=max_output_tokens,
                     preferred_endpoint_id=preferred_endpoint_id,
                     preferred_model_id=preferred_model_id,
+                    compaction_kind=compaction_kind,
                 ),
                 timeout=self._default_compaction_timeout_seconds,
             )
         except TimeoutError:
             return ""
 
-    _COMPACT_STRUCTURED_SYSTEM = (
+    _COMPACT_PAL_SCHEMA = "pal.compaction.pal.v1"
+    _COMPACT_MINION_SCHEMA = "pal.compaction.minion.v1"
+    _COMPACT_LEGACY_SCHEMA = "pal.compaction.v2"
+    _COMPACT_PAL_STRUCTURED_SYSTEM = (
         "You are a memory compaction engine.\n"
-        "Read the conversation context below and produce a structured JSON object with two keys:\n"
+        "Read the context below and produce a structured JSON object using schema pal.compaction.pal.v1.\n"
         "\n"
+        "Required top-level fields:\n"
+        '  "schema": "pal.compaction.pal.v1"\n'
+        '  "kind": "pal"\n'
+        '  "continuity": object with fields:\n'
+        "    - latest_user_intent: what the user most recently wanted, beyond the literal last sentence\n"
+        "    - active_thread: the current discussion or task chain\n"
+        "    - explicit_constraints: user constraints such as do-not-code, do-not-poll, timing, or scope limits\n"
+        "    - decisions_made: confirmed design or implementation decisions\n"
+        "    - pending_questions: unresolved questions or tradeoffs\n"
+        "    - recent_user_delegated_tasks: tasks the user recently asked Pal or minions to do\n"
+        "    - next_best_action: what Pal should do next after compact, if the user continues\n"
+        "    - important_refs: important file paths, commit ids, run ids, test results, or artifacts\n"
+        "    - stale_or_discarded_context: context that should not drive future behavior\n"
         '  "summary": a JSON object with fields:\n'
-        "    - summary (string, required): rolling conversation summary (compressed, for prompt display)\n"
-        "    - search_text (string, required): the original verbatim conversation content that this summary covers — source of truth for retrieval\n"
-        "\n"
-        '  "entries": a list of zero or more extracted items, each with:\n'
+        "    - summary (string, required): compact continuity summary for prompt display\n"
+        "    - search_text (string, required): compact source excerpts, identifiers, and key terms for retrieval; do not dump full transcripts\n"
+        '  "memory_candidates": a list of zero or more candidate items, each with:\n'
         "    - kind (string): \"fact\" or \"case\"\n"
-        "    - title (string, required): short label identifying this memory\n"
-        "    - summary (string, required): concise summary for future LLM consumption\n"
-        "    - search_text (string, required): the original verbatim fact or statement — source of truth, used for retrieval indexing. Do NOT compress or paraphrase.\n"
+        "    - title (string, required): short label identifying the candidate\n"
+        "    - summary (string, required): concise candidate summary for future LLM consumption\n"
+        "    - source_excerpt (string, required): short source excerpt or key terms justifying the candidate\n"
+        "    - why_durable (string, optional): why this may be worth long-term memory\n"
+        "    - confidence (string, optional): low, medium, or high\n"
         "    - canonical_key (string, optional): stable identity key for dedup\n"
         "    - scope (string, optional): \"system\" or \"task\"\n"
         "    - task_id (string, optional)\n"
         "    - payload (object, optional): for case kind, include situation/task/action/result\n"
+        "Rules:\n"
+        "- Output valid JSON only, no markdown fences.\n"
+        "- Write a complete bounded continuity summary, usually 1500-2500 words or less. Do not trail off, end mid-sentence, or rely on output truncation.\n"
+        "- If the source is long, summarize by durable importance instead of preserving raw order.\n"
+        "- Prioritize durable user preferences, stable user status/context, real goals/plans/commitments, confirmed project decisions, and long-lived constraints.\n"
+        "- Do not create entries from jokes, temporary emotions, momentary frustration, speculation, transient runtime state, or unconfirmed intent.\n"
+        "- Do not invent information not present in the source.\n"
+        "- summary is always required and should cover the recoverable context.\n"
+        "- Create memory_candidates only for stable facts, preferences, status/context, goals/plans, commitments, project facts, confirmed decisions, or explicitly reusable task/project cases.\n"
+        "- memory_candidates are candidates only; they are not committed long-term memory.\n"
+        "- Do not create memory_candidates for repair lessons, procedures, behavior rules, routing advice, or skill workflows unless the user explicitly asked to remember/save them as memory.\n"
+        "- If nothing worth extracting, return an empty memory_candidates list.\n"
+        "- title, summary, and source_excerpt/search_text serve different purposes: title is a short label; summary is compressed prompt content; source_excerpt/search_text are retrieval/audit terms.\n"
+        "The pal compact tracks the user and current collaboration continuity."
+    )
+    _COMPACT_MINION_STRUCTURED_SYSTEM = (
+        "You are a minion task-state compaction engine.\n"
+        "Read the context below and produce a structured JSON object using schema pal.compaction.minion.v1.\n"
+        "\n"
+        "Required top-level fields:\n"
+        '  "schema": "pal.compaction.minion.v1"\n'
+        '  "kind": "minion"\n'
+        '  "continuity": object with fields:\n'
+        "    - task_goal: scoped work-order goal\n"
+        "    - current_milestone_hint: compact hint for the milestone being worked\n"
+        "    - claimed_completed: work that appears completed from the compact source\n"
+        "    - claimed_pending: work that appears pending from the compact source\n"
+        "    - implementation_decisions: decisions already made by the worker\n"
+        "    - verification_hints: commands/checks/results that may matter\n"
+        "    - review_or_repair_hints: reviewer findings, required fixes, or repair hints\n"
+        "    - next_action_hint: first likely action after reconciling with truth sources\n"
+        "    - must_verify_against: include work_order, plan_artifact, current_milestone, checkpoint_ledger, runtime_ledger, git_status, current_files\n"
+        '  "summary": a JSON object with fields:\n'
+        "    - summary (string, required): compact task-continuity summary for prompt display\n"
+        "    - search_text (string, required): compact source excerpts, identifiers, and key terms for retrieval; do not dump full transcripts\n"
         "\n"
         "Rules:\n"
         "- Output valid JSON only, no markdown fences.\n"
-        "- Write a complete bounded rolling summary, usually 1500-2500 words or less. Do not trail off, end mid-sentence, or rely on output truncation.\n"
-        "- If the source is long, summarize by durable importance instead of preserving raw order.\n"
-        "- Prioritize durable user preferences, stable user status/context, real goals/plans/commitments, confirmed project decisions, and long-lived constraints.\n"
-        "- Create fact entries only for stable facts, preferences, status/context, goals/plans, commitments, project facts, or confirmed decisions that should survive compaction.\n"
-        "- Create case entries only for explicitly durable task/project episodes with situation/task/action/result that should be reusable as memory.\n"
-        "- Do not create entries from jokes, temporary emotions, momentary frustration, speculation, transient runtime state, or unconfirmed intent.\n"
-        "- Do not create entries for repair lessons, procedures, behavior rules, routing advice, or skill workflows unless the user explicitly asked to remember/save them as memory. Keep them in the rolling summary if they matter for continuity.\n"
+        "- Write a complete bounded task-continuity summary, usually 1500-2500 words or less. Do not trail off, end mid-sentence, or rely on output truncation.\n"
+        "- Minion compact is continuity reference only, not source of truth.\n"
+        "- Do not claim milestone, acceptance criterion, checkpoint, or review completion as true solely from compact context.\n"
+        "- The worker must verify against work order, plan artifact, checkpoint/ledger, and workspace before acting.\n"
+        "- Preserve claimed completed/pending state, decisions, repair findings, verification hints, and next action.\n"
+        "- Reusable lessons or case memory are proposed at work-order completion/finalization, outside compact.\n"
         "- Do not invent information not present in the source.\n"
-        "- If nothing worth extracting, return an empty entries list.\n"
-        "- summary is always required and should cover the conversation arc.\n"
-        "- title, summary, and search_text serve different purposes:\n"
-        "  * title: short label for display\n"
-        "  * summary: compressed version for prompt consumption\n"
-        "  * search_text: original source text for retrieval — must preserve key terms and context\n"
+        "- summary is always required and should cover the recoverable task context.\n"
     )
 
     def compact_memory_structured(
@@ -1859,10 +1910,16 @@ class LLMRuntime(LLMRuntimePort):
         max_output_tokens: int = 384,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
+        compaction_kind: str = "pal",
     ) -> dict[str, Any]:
+        kind = _normalize_compaction_kind(compaction_kind)
+        system_prompt = self._COMPACT_MINION_STRUCTURED_SYSTEM if kind == "minion" else self._COMPACT_PAL_STRUCTURED_SYSTEM
         request = CanonicalLLMRequest(
             messages=[
-                {"role": "system", "content": self._COMPACT_STRUCTURED_SYSTEM},
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
                 {"role": "user", "content": text.strip()},
             ],
             max_output_tokens=max_output_tokens,
@@ -1873,13 +1930,36 @@ class LLMRuntime(LLMRuntimePort):
                 "preferred_endpoint_id": preferred_endpoint_id,
                 "response_mode_hint": "operational",
                 "purpose": "memory_compaction_structured",
+                "compaction_kind": kind,
             },
         )
         outcome = self.generate(request)
         if outcome.finish_reason == LLMFinishReason.COMPACT_REQUIRED:
             return {}
         raw = str(outcome.text or "").strip()
-        return _extract_compaction_json(raw)
+        payload = _extract_compaction_json(raw)
+        return self._normalize_structured_compaction_payload(payload, kind=kind)
+
+    def _normalize_structured_compaction_payload(self, payload: dict[str, Any], *, kind: str) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        schema = str(payload.get("schema") or "").strip()
+        if kind == "minion":
+            if schema not in {self._COMPACT_MINION_SCHEMA, self._COMPACT_LEGACY_SCHEMA}:
+                return {}
+            normalized = dict(payload)
+            normalized["schema"] = self._COMPACT_MINION_SCHEMA
+            normalized["kind"] = "minion"
+            normalized.pop("memory_candidates", None)
+            return normalized
+        if schema not in {self._COMPACT_PAL_SCHEMA, self._COMPACT_LEGACY_SCHEMA}:
+            return {}
+        normalized = dict(payload)
+        normalized["schema"] = self._COMPACT_PAL_SCHEMA
+        normalized["kind"] = "pal"
+        if not isinstance(normalized.get("memory_candidates"), list):
+            normalized["memory_candidates"] = []
+        return normalized
 
     async def acompact_memory_structured(
         self,
@@ -1888,6 +1968,7 @@ class LLMRuntime(LLMRuntimePort):
         max_output_tokens: int = 384,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
+        compaction_kind: str = "pal",
     ) -> dict[str, Any]:
         try:
             return await asyncio.wait_for(
@@ -1897,6 +1978,7 @@ class LLMRuntime(LLMRuntimePort):
                     max_output_tokens=max_output_tokens,
                     preferred_endpoint_id=preferred_endpoint_id,
                     preferred_model_id=preferred_model_id,
+                    compaction_kind=compaction_kind,
                 ),
                 timeout=self._default_compaction_timeout_seconds,
             )
@@ -2471,3 +2553,8 @@ def _extract_compaction_json(raw: str) -> dict[str, Any]:
     if "summary" not in parsed:
         return {}
     return parsed
+
+
+def _normalize_compaction_kind(value: object) -> str:
+    raw = str(value or "").strip().lower()
+    return "minion" if raw == "minion" else "pal"

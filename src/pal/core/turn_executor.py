@@ -162,12 +162,15 @@ class TurnExecutor:
     async def _handle_memory_compact(self, effect, continuation):
         memory_service = self.context.require_port("memory:memory")
         metadata = dict(effect.assembly_context.metadata)
+        compaction_kind = _compaction_kind_for_context(effect.assembly_context, metadata=metadata)
+        metadata.setdefault("compaction_kind", compaction_kind)
         metadata.update(await self.build_compaction_metadata_async(
             memory_service,
             target_input_budget=effect.target_input_budget,
             reserved_output_tokens=effect.reserved_output_tokens,
             preferred_endpoint_id=metadata.get("preferred_endpoint_id"),
             preferred_model_id=metadata.get("preferred_model_id"),
+            compaction_kind=compaction_kind,
         ))
         compact_result = await self._call_port_async(
             memory_service,
@@ -1145,6 +1148,7 @@ class TurnExecutor:
         reserved_output_tokens: int,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
+        compaction_kind: str = "pal",
     ) -> str:
         llm_runtime = self.context.port_registry.get("llm:llm")
         if llm_runtime is None:
@@ -1159,6 +1163,7 @@ class TurnExecutor:
                 max_output_tokens=min(max(512, reserved_output_tokens or 0), 1024),
                 preferred_endpoint_id=preferred_endpoint_id,
                 preferred_model_id=preferred_model_id,
+                compaction_kind=compaction_kind,
             )
             if inspect.isawaitable(result):
                 try:
@@ -1175,6 +1180,7 @@ class TurnExecutor:
                     max_output_tokens=min(max(512, reserved_output_tokens or 0), 1024),
                     preferred_endpoint_id=preferred_endpoint_id,
                     preferred_model_id=preferred_model_id,
+                    compaction_kind=compaction_kind,
                 )
             except Exception:
                 return ""
@@ -1189,6 +1195,7 @@ class TurnExecutor:
         reserved_output_tokens: int,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
+        compaction_kind: str = "pal",
     ) -> dict[str, Any]:
         structured_compaction = await self.build_structured_compaction_async(
             memory_service,
@@ -1196,6 +1203,7 @@ class TurnExecutor:
             reserved_output_tokens=reserved_output_tokens,
             preferred_endpoint_id=preferred_endpoint_id,
             preferred_model_id=preferred_model_id,
+            compaction_kind=compaction_kind,
         )
         if structured_compaction:
             return {"structured_compaction": structured_compaction}
@@ -1205,6 +1213,7 @@ class TurnExecutor:
             reserved_output_tokens=reserved_output_tokens,
             preferred_endpoint_id=preferred_endpoint_id,
             preferred_model_id=preferred_model_id,
+            compaction_kind=compaction_kind,
         )
         if semantic_summary:
             return {"semantic_summary": semantic_summary}
@@ -1227,6 +1236,7 @@ class TurnExecutor:
         reserved_output_tokens: int,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
+        compaction_kind: str = "pal",
     ) -> dict[str, Any]:
         llm_runtime = self.context.port_registry.get("llm:llm")
         if llm_runtime is None:
@@ -1241,6 +1251,7 @@ class TurnExecutor:
                 max_output_tokens=min(max(1536, reserved_output_tokens or 0), 4096),
                 preferred_endpoint_id=preferred_endpoint_id,
                 preferred_model_id=preferred_model_id,
+                compaction_kind=compaction_kind,
             )
             if inspect.isawaitable(result):
                 try:
@@ -1251,3 +1262,12 @@ class TurnExecutor:
                 payload = result
             return dict(payload or {}) if isinstance(payload, dict) else {}
         return {}
+
+
+def _compaction_kind_for_context(assembly_context: Any, *, metadata: dict[str, Any]) -> str:
+    explicit = str(metadata.get("compaction_kind") or "").strip().lower()
+    if explicit in {"pal", "minion"}:
+        return explicit
+    turn_kind = str(getattr(assembly_context, "turn_kind", "") or "").strip().lower()
+    core_mode = str(getattr(assembly_context, "core_mode", "") or "").strip().lower()
+    return "minion" if "minion" in {turn_kind, core_mode} else "pal"

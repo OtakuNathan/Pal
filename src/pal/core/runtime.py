@@ -31,6 +31,7 @@ from pal.foundation import AttachmentSpec, EventEnvelope, utc_now
 from pal.failure import FailureSignal, FailureUserFeedback
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
 from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryCommitRequest
+from pal.memory.candidates import l3_commit_args_from_memory_candidate
 from pal.shared import ChannelEnvelope, EventKind, SourceKind
 from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus
 from pal.shared.payloads import extract_text_from_payload
@@ -989,6 +990,9 @@ class PalCore:
             if action.action_kind == "compact_memory":
                 await self._handle_compact_memory_async(action)
                 return
+            if action.action_kind == "memory_candidate_decision":
+                await self._handle_memory_candidate_decision_async(action)
+                return
             if action.action_kind == "refresh_llm_endpoint":
                 await self._handle_refresh_llm_endpoint_async(action)
                 return
@@ -1399,6 +1403,74 @@ class PalCore:
         await self._complete_compact_reply_async(
             action,
             f"Memory compacted. {entry_count} entries projected, {retired} retired to L3.",
+        )
+        memory_candidates = _memory_candidates_from_compact_result(result)
+        if memory_candidates:
+            source_ref = f"compact_{uuid4().hex[:12]}"
+            delivery = control_interactions.memory_candidate_approval_delivery(
+                {
+                    "source_kind": "pal_compact",
+                    "source_ref": source_ref,
+                    "source_label": "Pal compact",
+                    "candidate_batch_id": source_ref,
+                    "memory_candidates": memory_candidates,
+                },
+                action.route,
+            )
+            if delivery is not None:
+                await self._deliver_control_delivery_async(delivery, fallback_route=action.route)
+
+    async def _handle_memory_candidate_decision_async(self, action: ControlAction) -> None:
+        decision = str(action.args.get("decision") or "").strip().lower()
+        if decision == "reject":
+            await self._complete_action_reply_async(action, "Memory candidates discarded.")
+            return
+        if decision == "edit":
+            await self._complete_action_reply_async(
+                action,
+                "Memory candidate absorption paused. Edit and resubmit the candidates when ready.",
+            )
+            return
+        if decision != "accept":
+            await self._complete_action_reply_async(action, "Unknown memory candidate decision.")
+            return
+        memory_candidates = _dict_list(action.args.get("memory_candidates"))
+        if not memory_candidates:
+            await self._complete_action_reply_async(action, "No memory candidates to commit.")
+            return
+        runtime = getattr(self.context, "execution_runtime", None)
+        if runtime is None or "op_memory_write" not in getattr(runtime, "capabilities", {}):
+            await self._complete_action_reply_async(
+                action,
+                f"Memory candidates accepted ({len(memory_candidates)} reviewed; 0 committed; memory write unavailable).",
+            )
+            return
+        source_kind = str(action.args.get("source_kind") or "").strip()
+        source_ref = str(action.args.get("source_ref") or action.target_id or "").strip()
+        default_scope = "task" if source_kind == "minion" else "system"
+        fallback_task_id = source_ref if default_scope == "task" else ""
+        committed = 0
+        skipped = 0
+        for candidate in memory_candidates:
+            args = l3_commit_args_from_memory_candidate(
+                candidate,
+                default_scope=default_scope,
+                fallback_task_id=fallback_task_id,
+                source_kind=source_kind,
+                source_ref=source_ref,
+            )
+            if not args:
+                skipped += 1
+                continue
+            result = await runtime.execute_async(CapabilityCall(name="op_memory_write", args=args))
+            if str(getattr(result, "status", "") or "") == RuntimeStatus.OK:
+                committed += 1
+            else:
+                skipped += 1
+        suffix = f"; {skipped} skipped" if skipped else ""
+        await self._complete_action_reply_async(
+            action,
+            f"Memory candidates accepted ({len(memory_candidates)} reviewed; {committed} committed{suffix}).",
         )
 
     async def _handle_route_reply_async(self, action: ControlAction) -> None:
@@ -1835,6 +1907,27 @@ class PalCore:
 
     def _build_compaction_source_text(self, memory_service, *, target_input_budget: int) -> str:
         return self.turn_executor.build_compaction_source_text(memory_service, target_input_budget=target_input_budget)
+
+
+def _memory_candidates_from_compact_result(result: Any) -> list[dict[str, Any]]:
+    if result is None:
+        return []
+    for entry in list(getattr(result, "projected_entries", []) or []):
+        payload = getattr(entry, "payload", None)
+        if isinstance(payload, dict):
+            candidates = _dict_list(payload.get("memory_candidates"))
+            if candidates:
+                return candidates
+    metadata = getattr(result, "metadata", None)
+    if isinstance(metadata, dict):
+        return _dict_list(metadata.get("memory_candidates"))
+    return []
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
 
 
 def effect_result_to_observation(tool_result) -> "ToolObservation":

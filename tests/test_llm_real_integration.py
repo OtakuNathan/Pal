@@ -549,7 +549,9 @@ class RealLLMIntegrationTests(unittest.TestCase):
         self.assertIsInstance(result, dict)
         self.assertIsInstance(result.get("summary"), dict)
         self.assertTrue(str(result["summary"].get("summary") or "").strip())
-        self.assertIsInstance(result.get("entries"), list)
+        self.assertEqual(result.get("schema"), "pal.compaction.pal.v1")
+        self.assertEqual(result.get("kind"), "pal")
+        self.assertIsInstance(result.get("memory_candidates"), list)
 
     def test_real_runtime_channel_turn_replies_through_pal_core(self) -> None:
         runtime_root = Path(tempfile.mkdtemp(prefix="pal_real_e2e_"))

@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from pal.foundation import EventEnvelope
+from pal.minion.checklist import build_acceptance_checklist, compact_checklist
 from pal.minion.work_order import prompt_view_from_metadata
 from pal.shared import (
     ChannelEnvelope,
@@ -21,20 +22,190 @@ from pal.shared.prompt_rendering import render_runtime_reminder, render_system_r
 
 def prompt_scaffold_summary(scaffold: dict[str, Any]) -> dict[str, Any]:
     continuity = dict(scaffold.get("continuity") or {})
+    milestone = _compact_milestone(scaffold.get("current_milestone") or {})
+    acceptance = _string_list(scaffold.get("acceptance_criteria"))
+    if not acceptance:
+        acceptance = _string_list(milestone.get("acceptance_criteria") or milestone.get("acceptance"))
+    prompt_view = dict(scaffold.get("prompt_view") or {})
+    checklist = _compact_prompt_checklist(prompt_view.get("checklist_projection"))
+    if not checklist:
+        checklist = compact_checklist(build_acceptance_checklist(acceptance), limit=12)
+    repair_context = _compact_repair_context(scaffold.get("repair_context"))
     return {
-        "instruction_chars": len(str(scaffold.get("instruction") or "")),
-        "acceptance_criteria_count": len(list(scaffold.get("acceptance_criteria") or [])),
+        "task_goal": _compact_text(scaffold.get("instruction"), limit=700),
+        "acceptance_checklist": checklist,
         "allowed_capability_count": len(list(scaffold.get("allowed_capabilities") or [])),
-        "continuity": {
-            "keys": sorted(str(key) for key in continuity.keys()),
-            "recent_ledger_count": len(list(continuity.get("recent_ledger") or [])),
-            "completed_milestone_count": len(list(continuity.get("completed_milestones") or [])),
-            "task_lesson_count": len(list(continuity.get("task_lessons") or [])),
-        },
-        "current_milestone": dict(scaffold.get("current_milestone") or {}),
+        "continuity": _compact_continuity(continuity),
+        "current_milestone": milestone,
         "workspace_policy": dict(scaffold.get("workspace_policy") or {}),
         "completion_policy": dict(scaffold.get("completion_policy") or {}),
+        "repair_context": repair_context,
     }
+
+
+def _compact_continuity(continuity: dict[str, Any]) -> dict[str, Any]:
+    recent_ledger = [_compact_event(item) for item in list(continuity.get("recent_ledger") or [])[:6]]
+    completed = [_compact_milestone(item) for item in list(continuity.get("completed_milestones") or [])[:6]]
+    result: dict[str, Any] = {
+        "keys": sorted(str(key) for key in continuity.keys()),
+        "recent_ledger_count": len(list(continuity.get("recent_ledger") or [])),
+        "completed_milestone_count": len(list(continuity.get("completed_milestones") or [])),
+        "task_lesson_count": len(list(continuity.get("task_lessons") or [])),
+    }
+    current = _compact_milestone(continuity.get("current_milestone") or {})
+    if current:
+        result["current_milestone"] = current
+    latest = _compact_event(continuity.get("latest_checkpoint") or {})
+    if latest:
+        result["latest_checkpoint"] = latest
+    latest_completed = _compact_event(continuity.get("latest_completed_checkpoint") or {})
+    if latest_completed:
+        result["latest_completed_checkpoint"] = latest_completed
+    if recent_ledger:
+        result["recent_ledger"] = [item for item in recent_ledger if item]
+    if completed:
+        result["completed_milestones"] = [item for item in completed if item]
+    lessons = _compact_lessons(continuity.get("task_lessons"))
+    if lessons:
+        result["task_lessons"] = lessons
+    return result
+
+
+def _compact_milestone(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in (
+        "milestone_id",
+        "work_order_id",
+        "milestone_index",
+        "title",
+        "task",
+        "summary",
+        "status",
+        "completed",
+    ):
+        item = value.get(key)
+        if item in (None, "", []):
+            continue
+        result[key] = _compact_text(item) if key in {"task", "summary"} else item
+    acceptance = _string_list(value.get("acceptance_criteria") or value.get("acceptance"))
+    if acceptance:
+        result["acceptance_criteria"] = [_compact_text(item, limit=260) for item in acceptance[:10]]
+    return result
+
+
+def _compact_event(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key in (
+        "ledger_id",
+        "checkpoint_id",
+        "event_kind",
+        "status",
+        "phase",
+        "milestone_index",
+        "milestone_title",
+        "created_at",
+        "work_order_id",
+    ):
+        item = value.get(key)
+        if item not in (None, "", []):
+            result[key] = item
+    summary = _compact_text(value.get("summary"), limit=360)
+    if summary:
+        result["summary"] = summary
+    payload = _compact_event_payload(value.get("payload"))
+    if payload:
+        result["payload"] = payload
+    return result
+
+
+def _compact_event_payload(value: Any) -> dict[str, Any]:
+    payload = value if isinstance(value, dict) else {}
+    result: dict[str, Any] = {}
+    for key in (
+        "phase",
+        "status",
+        "summary",
+        "milestone_index",
+        "milestone_title",
+        "round",
+        "tool_name",
+        "target_name",
+        "tool_call_count",
+        "finish_reason",
+        "text_preview",
+        "error",
+        "reason",
+        "decision",
+    ):
+        item = payload.get(key)
+        if item in (None, "", []):
+            continue
+        result[key] = _compact_text(item) if isinstance(item, str) else item
+    return result
+
+
+def _compact_prompt_checklist(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return compact_checklist([dict(item) for item in value if isinstance(item, dict)], limit=12)
+
+
+def _compact_repair_context(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    checkpoint_repair = value.get("checkpoint_repair") if isinstance(value.get("checkpoint_repair"), dict) else {}
+    current_attempt = value.get("current_repair_attempt") if isinstance(value.get("current_repair_attempt"), dict) else {}
+    result: dict[str, Any] = {}
+    checklist = _compact_prompt_checklist(checkpoint_repair.get("repair_checklist"))
+    if checklist:
+        result["repair_checklist"] = checklist
+    acceptance = _compact_prompt_checklist(checkpoint_repair.get("acceptance_checklist"))
+    if acceptance:
+        result["acceptance_checklist"] = acceptance
+    for key in ("turn_kind", "status", "summary", "failed_checkpoint_id", "failed_commit_sha"):
+        item = checkpoint_repair.get(key) or current_attempt.get(key)
+        if item not in (None, "", []):
+            result[key] = _compact_text(item) if isinstance(item, str) else item
+    return result
+
+
+def _compact_lessons(value: Any) -> list[str]:
+    lessons = []
+    raw_items = list(value or [])[:6] if isinstance(value, (list, tuple)) else []
+    for item in raw_items:
+        if isinstance(item, dict):
+            text = item.get("lesson_text") or item.get("summary") or item.get("text")
+        else:
+            text = item
+        compacted = _compact_text(text, limit=260)
+        if compacted:
+            lessons.append(compacted)
+    return lessons
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, dict):
+        return [str(item).strip() for item in value.values() if str(item or "").strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item or "").strip()]
+    text = str(value or "").strip()
+    return [text] if text else []
+
+
+def _compact_text(value: Any, *, limit: int = 500) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def render_minion_system_prompt(scaffold: dict[str, Any]) -> str:

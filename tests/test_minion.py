@@ -102,6 +102,7 @@ from pal.minion.prompt_adapter import (
     build_minion_task_envelope as _build_minion_task_envelope,
     build_minion_prompt_messages,
     minion_primary_input as _minion_primary_input,
+    prompt_scaffold_summary as _prompt_scaffold_summary,
     prompt_view_from_pack as _prompt_view_from_pack,
     render_minion_system_prompt as _render_system_prompt,
     render_minion_task_prompt as _render_task_prompt,
@@ -11837,6 +11838,57 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_prompt_scaffold_summary_keeps_task_state_without_identity(self) -> None:
+        summary = _prompt_scaffold_summary(
+            {
+                "identity": "You are the coder minion.",
+                "instruction": "Implement compact v2 task continuity.",
+                "acceptance_criteria": ["Render task compact as reference-only context."],
+                "allowed_capabilities": ["op_file_read", "op_file_edit"],
+                "current_milestone": {
+                    "milestone_id": "m1",
+                    "milestone_index": 0,
+                    "title": "Compact continuity",
+                    "task": "Update compact source.",
+                },
+                "continuity": {
+                    "recent_ledger": [
+                        {
+                            "event_kind": "checkpoint_committed",
+                            "summary": "Milestone checkpoint committed.",
+                            "run_id": "run_should_not_leak",
+                            "minion_id": "minion_should_not_leak",
+                            "payload": {"summary": "checkpoint ok", "raw": "x" * 20000},
+                        }
+                    ],
+                    "completed_milestones": [{"title": "old milestone", "status": "completed"}],
+                    "task_lessons": [{"lesson_text": "Keep compact task-focused."}],
+                },
+                "repair_context": {
+                    "checkpoint_repair": {
+                        "repair_checklist": [
+                            {
+                                "id": "FIX-1",
+                                "kind": "repair",
+                                "status": "pending",
+                                "source_text": "Fix failed AC.",
+                            }
+                        ]
+                    }
+                },
+            }
+        )
+
+        rendered = json.dumps(summary, ensure_ascii=False)
+        self.assertEqual(summary["task_goal"], "Implement compact v2 task continuity.")
+        self.assertEqual(summary["acceptance_checklist"][0]["id"], "AC-1")
+        self.assertEqual(summary["continuity"]["recent_ledger"][0]["event_kind"], "checkpoint_committed")
+        self.assertEqual(summary["repair_context"]["repair_checklist"][0]["id"], "FIX-1")
+        self.assertNotIn("coder minion", rendered)
+        self.assertNotIn("run_should_not_leak", rendered)
+        self.assertNotIn("minion_should_not_leak", rendered)
+        self.assertNotIn("x" * 100, rendered)
+
     def test_runner_returns_ephemeral_memory_candidates_in_terminal_payload(self) -> None:
         async def scenario() -> None:
             events = []
@@ -13802,10 +13854,14 @@ class MinionIntegrationTests(unittest.TestCase):
         self.assertEqual(approval.action_kind, "interactive_open")
         self.assertIsNotNone(approval.delivery)
         assert approval.delivery is not None and approval.delivery.interaction is not None
+        self.assertEqual(approval.delivery.interaction.interaction_kind, "memory_candidate_approval")
         self.assertIn("Memory candidates:", approval.delivery.interaction.text)
         self.assertIn("Reusable minion pattern", approval.delivery.interaction.text)
         self.assertIn("detail detail detail detail", approval.delivery.interaction.text)
         accept = approval.delivery.interaction.buttons[0][0]
+        self.assertEqual(accept.action_args["action_kind"], "memory_candidate_decision")
+        self.assertEqual(accept.action_args["args"]["source_kind"], "minion")
+        self.assertEqual(accept.action_args["args"]["source_ref"], "wo1")
         self.assertEqual(accept.action_args["args"]["memory_candidates"], [candidate])
 
     def test_minion_module_completed_opens_continue_interaction(self) -> None:

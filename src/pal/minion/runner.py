@@ -1094,9 +1094,21 @@ class MinionRunner:
 
     def _minion_compaction_source_text(self, state: MinionAgentLoopState, *, target_input_budget: int) -> str:
         parts: list[str] = []
+        with contextlib.suppress(Exception):
+            parts.append(
+                "[Task Assignment Snapshot]\n"
+                + json.dumps(
+                    _prompt_scaffold_summary(self._prompt_scaffold()),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        primary_input = _minion_primary_input(state.channel_envelope)
+        if primary_input:
+            parts.append("[Task Primary Input]\n" + primary_input)
         existing = state.memory_service.build_compaction_source_text(target_input_budget=target_input_budget)
         if existing:
-            parts.append(existing)
+            parts.append("[Prior Task Memory]\n" + existing)
         if state.tool_protocol_messages:
             rendered = []
             for message in state.tool_protocol_messages:
@@ -1105,7 +1117,7 @@ class MinionRunner:
                 if message.get("tool_calls"):
                     content += "\n" + json.dumps(message.get("tool_calls"), ensure_ascii=False, sort_keys=True)
                 rendered.append(f"{role}: {content}")
-            parts.append("[Current Minion Trajectory]\n" + "\n".join(rendered))
+            parts.append("[Current Task Trajectory]\n" + "\n".join(rendered))
         if not parts:
             parts.append(_minion_primary_input(state.channel_envelope))
         raw = "\n\n".join(parts).strip()
@@ -1778,7 +1790,19 @@ class MinionRunner:
             "workspace_policy": self._workspace_policy(),
             "completion_policy": self._completion_policy(),
             "prompt_view": prompt_view,
+            "repair_context": self._repair_context_for_compaction(),
         }
+
+    def _repair_context_for_compaction(self) -> dict[str, Any]:
+        metadata = dict(self.pack.metadata or {})
+        result: dict[str, Any] = {}
+        current = self._current_repair_attempt_payload()
+        if current:
+            result["current_repair_attempt"] = current
+        checkpoint_repair = metadata.get("checkpoint_repair")
+        if isinstance(checkpoint_repair, dict):
+            result["checkpoint_repair"] = dict(checkpoint_repair)
+        return result
 
     def _workspace_policy(self) -> dict[str, Any]:
         workspace_policy = self.pack.workspace.get("workspace_policy")

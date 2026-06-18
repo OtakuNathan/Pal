@@ -15,6 +15,7 @@ from pal.minion.contracts import (
 )
 from pal.minion.ledger_store import MinionLedgerStore
 from pal.minion.plan_store import MinionPlanStore
+from pal.minion.prompt_adapter import prompt_scaffold_summary as _prompt_scaffold_summary
 from pal.minion.review_gate_store import MinionReviewGateStore
 from pal.minion.schema import ensure_minion_schema
 from pal.minion.search_store import MinionSearchStore
@@ -2365,18 +2366,21 @@ def _compact_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _compact_prompt_scaffold_summary(scaffold: dict[str, Any]) -> dict[str, Any]:
-    continuity = _loads_or_dict(scaffold.get("continuity"))
-    return {
-        "instruction_chars": len(str(scaffold.get("instruction") or "")),
-        "acceptance_criteria_count": len(list(scaffold.get("acceptance_criteria") or [])),
-        "allowed_capability_count": len(list(scaffold.get("allowed_capabilities") or [])),
-        "continuity": {
-            "keys": sorted(str(key) for key in continuity.keys()),
-            "recent_ledger_count": len(list(continuity.get("recent_ledger") or [])),
-            "completed_milestone_count": len(list(continuity.get("completed_milestones") or [])),
-            "task_lesson_count": len(list(continuity.get("task_lessons") or [])),
-        },
-    }
+    try:
+        return _prompt_scaffold_summary(dict(scaffold or {}))
+    except Exception:
+        continuity = _loads_or_dict(scaffold.get("continuity"))
+        return {
+            "task_goal": _compact_text(scaffold.get("instruction")),
+            "acceptance_checklist": [],
+            "allowed_capability_count": len(list(scaffold.get("allowed_capabilities") or [])),
+            "continuity": {
+                "keys": sorted(str(key) for key in continuity.keys()),
+                "recent_ledger_count": len(list(continuity.get("recent_ledger") or [])),
+                "completed_milestone_count": len(list(continuity.get("completed_milestones") or [])),
+                "task_lesson_count": len(list(continuity.get("task_lessons") or [])),
+            },
+        }
 
 
 def _compact_text(value: Any, *, limit: int = _CONTINUITY_TEXT_LIMIT) -> str:

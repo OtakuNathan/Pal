@@ -33,6 +33,13 @@ from pal.memory.contracts import (
     MemoryServicePort,
 )
 from pal.memory.repository import L3ProviderSelector
+from pal.memory.rendering import (
+    COMPACTION_SCHEMA_MINION_V1,
+    COMPACTION_SCHEMA_PAL_V1,
+    COMPACTION_SCHEMA_V2,
+    compact_payload_kind,
+    render_compact_context_for_llm,
+)
 from pal.shared import RuntimeStatus
 
 SUMMARY_ENTRY_ID = "memory_summary_current"
@@ -228,6 +235,7 @@ class MemoryService(MemoryServicePort):
             request.metadata.get("structured_compaction"),
             fallback_summary=str(request.metadata.get("semantic_summary") or "").strip(),
             existing_summary=self.l2_store.get_entry(SUMMARY_ENTRY_ID),
+            requested_kind=request.metadata.get("compaction_kind"),
         )
         summary_entry = payload["summary_entry"]
         projected_entries = [summary_entry, *payload["stable_entries"]]
@@ -307,7 +315,9 @@ class MemoryService(MemoryServicePort):
         recent_l1 = _flatten_recent_l1_context(self.l1_store.items)
         rendered_turns = _render_l1_recent_context(recent_l1)
         limit = max(256, target_input_budget or 0)
-        summary_text = current_summary.summary.strip() if current_summary is not None else ""
+        summary_text = ""
+        if current_summary is not None:
+            summary_text = current_summary.rendered.strip() or current_summary.summary.strip()
         return _render_compaction_source(
             summary_text=summary_text,
             recent_text=rendered_turns,
@@ -674,8 +684,17 @@ def _coerce_structured_compaction_payload(
     *,
     fallback_summary: str,
     existing_summary: L2Entry | None,
+    requested_kind: object = None,
 ) -> dict[str, Any]:
     payload = raw if isinstance(raw, dict) else {}
+    schema = str(payload.get("schema") or "").strip()
+    if schema in {COMPACTION_SCHEMA_PAL_V1, COMPACTION_SCHEMA_MINION_V1, COMPACTION_SCHEMA_V2}:
+        return _coerce_current_structured_compaction_payload(
+            payload,
+            fallback_summary=fallback_summary,
+            existing_summary=existing_summary,
+            requested_kind=requested_kind,
+        )
     summary_payload = payload.get("summary") if isinstance(payload, dict) else None
     entries_payload = payload.get("entries") if isinstance(payload, dict) else None
 
@@ -750,6 +769,134 @@ def _coerce_structured_compaction_payload(
             )
         )
     return {"summary_entry": summary_entry, "stable_entries": stable_entries}
+
+
+def _coerce_current_structured_compaction_payload(
+    payload: dict[str, Any],
+    *,
+    fallback_summary: str,
+    existing_summary: L2Entry | None,
+    requested_kind: object = None,
+) -> dict[str, Any]:
+    requested = str(requested_kind or "").strip().lower()
+    if requested == "minion":
+        return _coerce_minion_compaction_payload(
+            payload,
+            fallback_summary=fallback_summary,
+            existing_summary=existing_summary,
+        )
+    if requested == "pal":
+        return _coerce_pal_compaction_payload(
+            payload,
+            fallback_summary=fallback_summary,
+            existing_summary=existing_summary,
+        )
+    kind = compact_payload_kind(payload)
+    if kind == "minion":
+        return _coerce_minion_compaction_payload(
+            payload,
+            fallback_summary=fallback_summary,
+            existing_summary=existing_summary,
+        )
+    return _coerce_pal_compaction_payload(
+        payload,
+        fallback_summary=fallback_summary,
+        existing_summary=existing_summary,
+    )
+
+
+def _coerce_pal_compaction_payload(
+    payload: dict[str, Any],
+    *,
+    fallback_summary: str,
+    existing_summary: L2Entry | None,
+) -> dict[str, Any]:
+    summary_payload = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    continuity = payload.get("continuity") if isinstance(payload.get("continuity"), dict) else {}
+    memory_candidates = payload.get("memory_candidates") if isinstance(payload.get("memory_candidates"), list) else []
+    summary_text = str(summary_payload.get("summary") or "").strip()
+    if not summary_text and fallback_summary:
+        summary_text = fallback_summary
+    if not summary_text and existing_summary is not None:
+        summary_text = existing_summary.summary
+    if not summary_text:
+        summary_text = "No retained compact context."
+    search_text = str(summary_payload.get("search_text") or "").strip() or summary_text
+    summary_payload_blob = {
+        "schema": COMPACTION_SCHEMA_PAL_V1,
+        "kind": "pal",
+        "continuity": dict(continuity),
+        "summary": {
+            "summary": summary_text,
+            "search_text": search_text,
+        },
+        "memory_candidates": [
+            dict(item)
+            for item in memory_candidates
+            if isinstance(item, dict)
+        ],
+    }
+    rendered = render_compact_context_for_llm(summary=summary_text, payload=summary_payload_blob)
+    summary_entry = _normalize_l2_entry(
+        L2Entry(
+            entry_id=SUMMARY_ENTRY_ID,
+            kind="summary",
+            scope="system",
+            title=SUMMARY_TITLE,
+            summary=summary_text,
+            source_kind="l1_compaction",
+            candidate_state="stable",
+            touched_at=utc_now(),
+            rendered=rendered,
+            search_text=search_text,
+            payload=summary_payload_blob,
+        )
+    )
+    return {"summary_entry": summary_entry, "stable_entries": []}
+
+
+def _coerce_minion_compaction_payload(
+    payload: dict[str, Any],
+    *,
+    fallback_summary: str,
+    existing_summary: L2Entry | None,
+) -> dict[str, Any]:
+    summary_payload = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    continuity = payload.get("continuity") if isinstance(payload.get("continuity"), dict) else {}
+    summary_text = str(summary_payload.get("summary") or "").strip()
+    if not summary_text and fallback_summary:
+        summary_text = fallback_summary
+    if not summary_text and existing_summary is not None:
+        summary_text = existing_summary.summary
+    if not summary_text:
+        summary_text = "No retained compact context."
+    search_text = str(summary_payload.get("search_text") or "").strip() or summary_text
+    summary_payload_blob = {
+        "schema": COMPACTION_SCHEMA_MINION_V1,
+        "kind": "minion",
+        "continuity": dict(continuity),
+        "summary": {
+            "summary": summary_text,
+            "search_text": search_text,
+        },
+    }
+    rendered = render_compact_context_for_llm(summary=summary_text, payload=summary_payload_blob)
+    summary_entry = _normalize_l2_entry(
+        L2Entry(
+            entry_id=SUMMARY_ENTRY_ID,
+            kind="summary",
+            scope="system",
+            title=SUMMARY_TITLE,
+            summary=summary_text,
+            source_kind="l1_compaction",
+            candidate_state="stable",
+            touched_at=utc_now(),
+            rendered=rendered,
+            search_text=search_text,
+            payload=summary_payload_blob,
+        )
+    )
+    return {"summary_entry": summary_entry, "stable_entries": []}
 
 
 def _render_entry(*, kind: str, title: str, summary: str, payload: dict[str, Any]) -> str:

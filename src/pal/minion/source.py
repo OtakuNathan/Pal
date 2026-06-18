@@ -6,6 +6,7 @@ from typing import Any
 from pal.control import ControlAction, ControlRoute
 from pal.control.interactions import (
     delivery_for_reply,
+    memory_candidate_approval_delivery,
     minion_approval_delivery,
     minion_lesson_approval_delivery,
     minion_module_continue_delivery,
@@ -180,6 +181,30 @@ class MinionControlEventHandler(EventHandler):
                         correlation_id=event.correlation_id,
                     )
                 )
+            candidate_delivery = memory_candidate_approval_delivery(
+                _memory_candidate_approval_payload_from_minion(payload),
+                route,
+            )
+            if candidate_delivery is not None:
+                envelopes.append(
+                    EventEnvelope(
+                        event_kind=EventKind.CONTROL_ACTION,
+                        source_kind=SourceKind.CONTROL,
+                        payload=ControlAction(
+                            action_kind="interactive_open",
+                            target_scope="interaction",
+                            target_id=(
+                                candidate_delivery.interaction.interaction_id
+                                if candidate_delivery.interaction is not None
+                                else None
+                            ),
+                            route=route,
+                            delivery=candidate_delivery,
+                            notes="minion memory candidate approval",
+                        ),
+                        correlation_id=event.correlation_id,
+                    )
+                )
             return envelopes
         else:
             return []
@@ -287,6 +312,21 @@ def _record_minion_observation(provider: object | None, context: Any, payload: d
             except Exception:
                 continue
             return
+
+
+def _memory_candidate_approval_payload_from_minion(payload: dict[str, Any]) -> dict[str, Any]:
+    work_order_id = str(payload.get("work_order_id") or "").strip()
+    run_id = str(payload.get("run_id") or "").strip()
+    profile = str(payload.get("minion_profile") or payload.get("profile") or "").strip()
+    source_ref = work_order_id or run_id
+    source_bits = [value for value in (profile, source_ref) if value]
+    return {
+        "source_kind": "minion",
+        "source_ref": source_ref,
+        "source_label": " / ".join(source_bits),
+        "candidate_batch_id": source_ref or run_id,
+        "memory_candidates": payload.get("memory_candidates"),
+    }
 
 
 def _build_minion_completion_trigger_event(
