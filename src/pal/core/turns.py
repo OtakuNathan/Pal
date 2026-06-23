@@ -15,7 +15,7 @@ from pal.failure.contracts import (
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolCall, CanonicalToolResult
 from pal.shared import ChannelEnvelope, EffectKind, LLMFinishReason, LLMPreflightStatus, PromptAssemblyContext, RuntimeStatus
 from pal.shared.payloads import extract_text_from_payload
-from pal.memory import L1MessageKind, L1TranscriptMessage
+from pal.memory import CompactionProfile, L1MessageKind, L1TranscriptMessage
 from pal.stream_events import NormalizedLLMStreamEvent
 
 
@@ -91,6 +91,7 @@ class MemoryCompactEffect(EffectRequest):
     assembly_context: PromptAssemblyContext = field(default_factory=PromptAssemblyContext)
     target_input_budget: int = 0
     reserved_output_tokens: int = 0
+    profile_override: CompactionProfile | None = None
     kind: str = EffectKind.MEMORY_COMPACT
 
 
@@ -233,6 +234,15 @@ def agent_turn_program(
                 target_input_budget=getattr(advice.payload, "target_input_budget", 0),
                 reserved_output_tokens=getattr(advice.payload, "reserved_output_tokens", 0),
             )
+            if compact_result.status != RuntimeStatus.OK:
+                return (yield from _finish_compaction_failure_turn(
+                    turn_id=turn_id,
+                    text=compact_result.text,
+                    emit_final_text=emit_final_text,
+                    build_commit_payload=build_commit_payload,
+                    observations=observations,
+                    reply_texts=reply_texts,
+                ))
             continue
         outcome_result = yield LLMRequestEffect(
             assembly_context=assembly_context,
@@ -246,6 +256,15 @@ def agent_turn_program(
                 target_input_budget=outcome.target_input_budget,
                 reserved_output_tokens=outcome.reserved_output_tokens,
             )
+            if compact_result.status != RuntimeStatus.OK:
+                return (yield from _finish_compaction_failure_turn(
+                    turn_id=turn_id,
+                    text=compact_result.text,
+                    emit_final_text=emit_final_text,
+                    build_commit_payload=build_commit_payload,
+                    observations=observations,
+                    reply_texts=reply_texts,
+                ))
             continue
         if outcome is not None and outcome.tool_calls:
             retry_count = 0
@@ -310,6 +329,33 @@ def _render_tool_summary(observations: list[ToolObservation], *, max_summary_cha
         parts.append(line)
         total += len(line)
     return "\n".join(parts)
+
+
+def _finish_compaction_failure_turn(
+    *,
+    turn_id: str,
+    text: str,
+    emit_final_text: BuildMailboxEffect | None,
+    build_commit_payload: BuildAgentCommitPayload,
+    observations: list[ToolObservation],
+    reply_texts: list[str],
+) -> TurnProgram:
+    final_reply = str(text or "Memory compaction failed; the current turn cannot safely continue.").strip()
+    effect = emit_final_text(final_reply) if emit_final_text is not None else None
+    if effect is not None:
+        reply_result = yield effect
+        if reply_result.status != RuntimeStatus.QUEUED:
+            final_reply = reply_result.text or final_reply
+        elif reply_result.text:
+            final_reply = reply_result.text
+    if final_reply:
+        reply_texts.append(final_reply)
+    return TurnOutcome(
+        turn_id=turn_id,
+        final_reply=final_reply,
+        commit_payload=build_commit_payload(final_reply, observations, reply_texts),
+        reply_texts=tuple(reply_texts),
+    )
 
 
 def _build_turn_transcript(
@@ -425,9 +471,9 @@ def _failure_draft_debug_payload(draft: FailureDraft) -> dict[str, Any]:
         "secondary_issues": list(draft.secondary_issues),
         "attempted_actions": list(draft.attempted_actions),
         "documents_checked": list(draft.documents_checked),
-        "maintenance_outcomes": list(draft.maintenance_outcomes),
+        "maintenance_outcomes": [_project_maintenance_outcome(item) for item in list(draft.maintenance_outcomes)],
         "repair_domain": draft.repair_domain,
-        "evidence": dict(draft.evidence),
+        "evidence": _project_failure_evidence(draft.evidence),
         "related_ids": dict(draft.related_ids),
         "safe_to_retry": draft.safe_to_retry,
     }
@@ -454,19 +500,110 @@ def _render_failure_primary_input(
             {
                 "tool_name": item.tool_name,
                 "ok": item.ok,
-                "summary": item.summary,
-                "structured": item.structured,
+                "summary": _compact_prompt_text(item.summary, limit=500),
+                "structured_summary": _project_tool_structured_summary(item.structured),
             }
             for item in observations
         ],
         "instructions": [
-            "Work only on the primary blocker.",
-            "You may inspect and perform bounded maintenance with the allowed capabilities.",
-            "Do not expand scope to secondary issues.",
-            "When verifying, return a JSON object with verification_status and any explanatory fields.",
+            "Work only on the primary blocker in this sanitized failure packet.",
+            "Use introspection capabilities first to inspect live Pal runtime state.",
+            "Use dedicated built-in operation or management capabilities only when they directly repair the blocker.",
+            "Do not directly edit code, config, databases, runtime files, or user data.",
+            "Do not restart Pal itself.",
+            "Do not answer the user's original request.",
+            "When verifying, return a JSON object with verification_status and explanatory fields.",
         ],
     }
     return json.dumps(payload, ensure_ascii=True)
+
+
+def _project_maintenance_outcome(item: dict[str, Any]) -> dict[str, Any]:
+    structured = item.get("structured") if isinstance(item, dict) else None
+    return {
+        "action_name": str(item.get("action_name") or "").strip(),
+        "status": str(item.get("status") or "").strip(),
+        "ok": bool(item.get("ok")),
+        "text": _compact_prompt_text(str(item.get("text") or ""), limit=500),
+        "structured_summary": _project_tool_structured_summary(structured),
+    }
+
+
+def _project_failure_evidence(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    projected: dict[str, Any] = {}
+    for key, raw in value.items():
+        normalized_key = str(key or "").strip()
+        if not normalized_key:
+            continue
+        if isinstance(raw, dict):
+            projected[normalized_key] = _project_mapping_shape(raw)
+        elif isinstance(raw, list):
+            projected[normalized_key] = _project_list_shape(raw)
+        else:
+            projected[normalized_key] = _compact_prompt_text(str(raw or ""), limit=500)
+    return projected
+
+
+def _project_tool_structured_summary(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict) or not value:
+        return {}
+    if isinstance(value.get("capability"), dict):
+        capability = dict(value.get("capability") or {})
+        return {
+            "kind": "capability_contract",
+            "name": str(capability.get("name") or "").strip(),
+            "required_params": _project_list_shape(capability.get("required_params")),
+        }
+    if isinstance(value.get("tools"), list):
+        tools = [item for item in value.get("tools") or [] if isinstance(item, dict)]
+        return {
+            "kind": "tool_inventory",
+            "tool_count": len(tools),
+            "tool_names_preview": [str(item.get("name") or "").strip() for item in tools[:12] if str(item.get("name") or "").strip()],
+        }
+    return _project_mapping_shape(value)
+
+
+def _project_mapping_shape(value: dict[str, Any]) -> dict[str, Any]:
+    projected: dict[str, Any] = {}
+    for key, raw in list(value.items())[:16]:
+        normalized_key = str(key or "").strip()
+        if not normalized_key:
+            continue
+        if isinstance(raw, dict):
+            projected[normalized_key] = {"keys": [str(item) for item in list(raw.keys())[:12]], "key_count": len(raw)}
+        elif isinstance(raw, list):
+            projected[normalized_key] = _project_list_shape(raw)
+        else:
+            projected[normalized_key] = _compact_prompt_text(str(raw or ""), limit=240)
+    if len(value) > 16:
+        projected["truncated_key_count"] = len(value) - 16
+    return projected
+
+
+def _project_list_shape(value: object) -> list[Any] | dict[str, Any]:
+    if not isinstance(value, list):
+        return []
+    preview: list[Any] = []
+    for item in value[:12]:
+        if isinstance(item, dict):
+            preview.append({"keys": [str(key) for key in list(item.keys())[:8]]})
+        else:
+            preview.append(_compact_prompt_text(str(item or ""), limit=160))
+    if len(value) <= 12:
+        return preview
+    return {"count": len(value), "preview": preview}
+
+
+def _compact_prompt_text(text: str, *, limit: int) -> str:
+    normalized = str(text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    if limit <= 20:
+        return normalized[:limit].rstrip()
+    return f"{normalized[: limit - 18].rstrip()} ... [truncated]"
 
 
 def _parse_failure_verification(text: str) -> tuple[VerificationResult, dict[str, Any]]:

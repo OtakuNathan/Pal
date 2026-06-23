@@ -16,6 +16,7 @@ from pal.control import (
     ControlCommandSpec,
     ControlDelivery,
     ControlEvent,
+    ControlEventHandler,
     ControlPlane,
     ControlRoute,
     InteractionButtonSpec,
@@ -284,6 +285,99 @@ class ControlPlaneTests(unittest.TestCase):
         assert action is not None
         self.assertEqual(action.action_kind, "invalid_command")
         self.assertEqual(action.notes, "Use /log start or /log end.")
+
+    def test_unknown_slash_command_parses_to_regular_message_fallback(self) -> None:
+        plane = ControlPlane()
+        action = plane.parse_event(
+            ControlEvent(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "/not_a_command should reach the model"},
+            )
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.action_kind, "fallback_user_message")
+        self.assertEqual(action.args["command_name"], "not_a_command")
+        self.assertEqual(action.args["raw_text"], "/not_a_command should reach the model")
+
+    def test_control_handler_reemits_unknown_slash_command_as_user_message(self) -> None:
+        plane = ControlPlane()
+        handler = ControlEventHandler(control_plane=plane)
+        route = ResponseHandle(
+            endpoint_id="socket_main",
+            reply_target={"session_id": "sess-1", "request_id": "req-1"},
+        )
+        channel_envelope = ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "/not_a_command should reach the model"},
+                correlation_id="req-1",
+                event_id="turn-1",
+            ),
+            endpoint=EndpointConfig(endpoint_id="socket_main", channel_kind="socket", binding_key="runtime.sock"),
+            response_handle=route,
+        )
+
+        derived = handler.handle(
+            EventEnvelope(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload=channel_envelope,
+                correlation_id="req-1",
+                event_id="outer-1",
+            ),
+            context=None,
+        )
+
+        self.assertIsNotNone(derived)
+        assert derived is not None
+        self.assertEqual(len(derived), 1)
+        fallback = derived[0]
+        self.assertEqual(fallback.event_kind, EventKind.USER_MESSAGE)
+        self.assertIsInstance(fallback.payload, ChannelEnvelope)
+        fallback_channel = fallback.payload
+        assert isinstance(fallback_channel, ChannelEnvelope)
+        self.assertEqual(fallback_channel.event.event_kind, EventKind.USER_MESSAGE)
+        self.assertEqual(fallback_channel.event.payload["text"], "/not_a_command should reach the model")
+        self.assertEqual(fallback_channel.event.event_id, "turn-1")
+        self.assertEqual(fallback_channel.response_handle.reply_target["request_id"], "req-1")
+
+    def test_registered_slash_command_handler_none_does_not_fallback_to_user_message(self) -> None:
+        plane = ControlPlane()
+        plane.register_command(
+            ControlCommandSpec(
+                name="noop",
+                handler=lambda invocation: None,
+                description="Swallow command.",
+                usage="/noop",
+            )
+        )
+        handler = ControlEventHandler(control_plane=plane)
+        channel_envelope = ChannelEnvelope(
+            event=EventEnvelope(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "/noop should not reach the model"},
+                correlation_id="req-1",
+                event_id="turn-1",
+            ),
+            endpoint=EndpointConfig(endpoint_id="socket_main", channel_kind="socket", binding_key="runtime.sock"),
+            response_handle=ResponseHandle(endpoint_id="socket_main", reply_target={"request_id": "req-1"}),
+        )
+
+        derived = handler.handle(
+            EventEnvelope(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload=channel_envelope,
+            ),
+            context=None,
+        )
+
+        self.assertEqual(derived, [])
 
     def test_log_interactions_generate_typed_actions(self) -> None:
         plane = ControlPlane()
@@ -576,7 +670,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["reload"])
         self.assertIn("Tool surface refreshed.", self.endpoint.outbox[-1].text)
         self.assertIn("Resident tools for future turns: 2", self.endpoint.outbox[-1].text)
-        self.assertIn("tool_search, tool_call", self.endpoint.outbox[-1].text)
+        self.assertIn("search_tools, call_tool", self.endpoint.outbox[-1].text)
 
     async def test_slash_command_with_telegram_bot_suffix_runs_end_to_end(self) -> None:
         self.core.bind_async_wakeup_sources()

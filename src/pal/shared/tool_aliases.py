@@ -25,6 +25,22 @@ EXPLICIT_LLM_TOOL_ALIASES: dict[str, str] = {
     "op_memory_update": "update_memory",
     "op_memory_write": "write_memory",
     "op_path_delete": "delete_path",
+    "op_minion_artifact_edit": "artifact_edit",
+    "op_minion_artifact_write": "artifact_write",
+    "op_minion_checkpoint_commit": "checkpoint_commit",
+    "op_minion_memory_candidate_write": "memory_candidate_write",
+    "op_minion_plan_add_acceptance_criterion": "plan_add_acceptance_criterion",
+    "op_minion_plan_add_constraint": "plan_add_constraint",
+    "op_minion_plan_add_design_decision": "plan_add_design_decision",
+    "op_minion_plan_add_module_interface": "plan_add_module_interface",
+    "op_minion_plan_begin": "plan_begin",
+    "op_minion_plan_begin_milestone": "plan_begin_milestone",
+    "op_minion_plan_begin_module": "plan_begin_module",
+    "op_minion_plan_end_milestone": "plan_end_milestone",
+    "op_minion_plan_end_module": "plan_end_module",
+    "op_minion_plan_finalize": "plan_finalize",
+    "op_minion_review_checkpoint": "review_checkpoint",
+    "op_minion_review_gate_submit": "review_gate_submit",
     "op_tool_call": "call_tool",
     "op_tool_read": "read_tool",
     "op_tool_result_page": "read_tool_result_page",
@@ -57,14 +73,41 @@ def llm_tool_name(name: object) -> str:
     text = str(name or "").strip()
     if not text:
         return ""
+    base, suffix = _split_instance_suffix(text)
+    mapped = _llm_tool_base_name(base)
+    return f"{mapped}{suffix}" if suffix else mapped
+
+
+def _llm_tool_base_name(text: str) -> str:
     explicit = EXPLICIT_LLM_TOOL_ALIASES.get(text)
     if explicit:
         return explicit
-    if text.startswith("op_"):
-        return text[3:]
+    if text.startswith("intro_module_"):
+        return text[len("intro_module_") :]
+    if text.startswith("intro_provider_"):
+        surface_action = text[len("intro_provider_") :]
+        parts = surface_action.split("_", 1)
+        if len(parts) == 2 and parts[0] and parts[1]:
+            return f"{parts[0]}_provider_{parts[1]}"
+        return f"provider_{surface_action}" if surface_action else "provider"
     if text.startswith("intro_"):
         return text[6:]
+    if text.startswith("op_"):
+        operation = text[3:]
+        for marker in ("_mgmt_", "_lifecycle_"):
+            if marker in operation:
+                prefix, action = operation.split(marker, 1)
+                if prefix and action:
+                    return f"{prefix}_{action}"
+        return operation
     return text
+
+
+def _split_instance_suffix(text: str) -> tuple[str, str]:
+    if "::" not in text:
+        return text, ""
+    base, suffix = text.split("::", 1)
+    return base, f"::{suffix}"
 
 
 def dedicated_tool_route_hints(allowed: Iterable[str] | None = None) -> tuple[str, ...]:

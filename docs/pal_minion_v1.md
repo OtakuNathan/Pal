@@ -128,7 +128,7 @@ Non-coder profiles get an isolated folder workspace:
 - `data/minion/workspaces/{run_id}_{profile}/logs/`
 - `data/minion/workspaces/{run_id}_{profile}/deliverables/`
 
-The runner exposes `artifact_write` so minions can write structured deliverables under `artifact_dir`. The terminal and checkpoint payloads include `artifacts[]` and `primary_artifact`.
+The runner exposes scoped deliverable tools so minions can write structured files under `artifact_dir`. General report-style profiles use `artifact_write`; software planner profiles use plan builder tools that compile and register the primary `plan.json` artifact. The terminal and checkpoint payloads include `artifacts[]` and `primary_artifact`.
 
 When a Git-backed runner finishes a milestone:
 
@@ -230,9 +230,56 @@ Profiles may declare capability groups. `core_minion_read` includes scoped disco
 
 Profiles may also use `capability_policy.mode = "inherit_filtered"`. In that mode, spawn starts from the manager-visible capability surface, adds profile defaults and provider hook results, then applies the minion deny policy. For `profile_only`, the profile is the upper bound; public spawn cannot expand it with ad hoc `allowed_capabilities`.
 
-Profiles may declare `gate_policy` and `output_policy`. `gate_policy.after_each_milestone = ["reviewer_gate"]` makes the manager insert a reviewer gate after each coder milestone. Reviewer requirements such as command/test evidence, API evidence, LSP evidence, and public declaration implementation checks are profile policy, not LLM prompt folklore. LSP stays a reviewer evidence tool rather than a separate manager gate.
+Profiles may declare `gate_policy` and `output_policy`. Gate policy names gate definitions instead of expanding every reviewer/checklist detail into each profile. For example, coder uses `gates = ["checkpoint_quality"]`, planner uses `gates = ["plan_acceptance"]`, and generic uses `gates = ["none"]`. Runtime gate definitions expand those names into target kind, gate kind, execution strategy, reviewer profile, repair/revision bounds, required checks, and blocking classes. Milestone result events are the v1 gate trigger; profile TOML should not spell out trigger mechanics.
+
+Gate definitions and individual gate checklist entries are extension points. New minion plugins may declare additional gate definitions or checklist entries; profiles reference the gate name, while the definition owns the concrete checks and default strategy. The active gate result is projected into `active_gate_todo` so reviewer failures, repair checklist items, and milestone todo state use the same ledger shape. Reviewer requirements such as command/test evidence, API evidence, LSP evidence, and public declaration implementation checks belong in gate definitions/policy, not LLM prompt folklore. LSP stays a reviewer evidence tool rather than a separate manager gate.
 
 The runner consumes only the resolved profile snapshot in `TaskContextPack`. It does not query PalCore for profile policy after spawn.
+
+## Gate Loop
+
+The manager applies profile gate policy before launching a runner. `gate_specs_from_pack(...)` expands the resolved profile's `[gate_policy] gates = [...]` names into concrete `GateSpec` values and stores them in work-order metadata as `gate_specs`. `gates = ["none"]` expands to no gate. The v1 trigger is `after_each_milestone`; profiles should name gates, not duplicate trigger mechanics or reviewer fields.
+
+Every milestone result event goes through `ReviewOrchestrator.schedule_event_gates(...)`. The orchestrator iterates the active `GateSpec` values for the trigger and uses the gate strategy registry to decide whether a strategy is runnable. Builtin `reviewer` strategy gates currently route by `target_kind`:
+
+- `plan_artifact` -> plan review/acceptance loop
+- `checkpoint` -> checkpoint verification/repair loop
+
+This is profile-driven orchestration, not a planner-vs-coder special case in the manager loop. A new profile gets a different gate by referencing a different gate name; a new execution mechanism should register a `GateStrategy` rather than adding ad hoc manager branches.
+
+### Plan Acceptance Gate
+
+`plan_acceptance` applies to planner-style milestones. A planner milestone must emit `status=completed`, a `plan_ref`, and valid plan validation data before the gate schedules. The manager spawns a reviewer work order with a read-only review workspace and a `review_target` containing the exact plan ref, validation result, source work order, and gate spec.
+
+The reviewer must submit the verdict with `op_minion_review_gate_submit` and `gate_kind=plan_acceptance`.
+
+Manager reconciliation handles verdicts as follows:
+
+- `pass`: update plan review state to acceptance pending and emit `plan_acceptance_pending`. Implementation spawn still requires `minion_accept_plan` or an explicit human override marker; a valid JSON plan plus reviewer pass is not enough by itself.
+- `fail`: spawn an automatic revision planner when the gate policy allows it and revision attempts remain; otherwise record `plan_revision_required`.
+- `partial`: record `plan_review_human_decision_required`.
+
+Plan revisions write new immutable plan revisions. They must not mutate the original plan artifact.
+
+### Checkpoint Verification Gate
+
+`checkpoint_quality` applies to coder-style implementation milestones. When the runner sees a checkpoint review gate, a successful commit is emitted as `status=claimed`, not `completed`. The coder runner waits for a manager control message before advancing.
+
+The manager spawns a reviewer work order for the claimed checkpoint. The review target includes the checkpoint id, work order id, run id, module/milestone ids, acceptance criteria, source contract, commit SHA, checkpoint git context, and gate spec. Checkpoint and repair reviewers should submit through `op_minion_review_checkpoint`; the generic `op_minion_review_gate_submit` surface is hidden for these targets.
+
+Manager reconciliation handles checkpoint verdicts as follows:
+
+- `pass`: `close_checkpoint_from_review_gate(...)` records milestone closure from the pass gate. In serial/module execution, the manager sends the next milestone turn to the same coder runner when possible; otherwise it sends a `complete` control message.
+- `fail`: send a bounded `repair_turn` to the same coder runner when runner control is available.
+- `partial`: send repair when the partial gate carries required fixes, blocker/high-severity findings, or material contract impact; otherwise block and surface the partial review.
+
+Repair turns carry `active_gate_todo`, `checkpoint_repair`, and structured reviewer feedback. The coder must treat the repair checklist as the complete scope, repair the same milestone, and produce a new checkpoint claim. Reusing the failed checkpoint commit as the repair checkpoint is blocked. Automatic repair attempts are bounded by the gate definition; builtin `checkpoint_quality` defaults to 5 attempts.
+
+### Gate Ledger And Evidence
+
+`submit_review_gate(...)` stores every gate decision in `minion_review_gates`, records ledger events, validates target binding, and projects failed/partial gate findings into `active_gate_todo` on the source work order. The same projection feeds reviewer repair context, active todo state, and future status inspection.
+
+Pass gates that cite command, API, source, or LSP evidence must be backed by recorded tool evidence whenever the runner can validate provenance. Reviewers should prefer compact evidence refs such as `EV-*`; runtime fills command, exit status, output summary, and LSP details from the recorded evidence instead of making the reviewer hand-copy every field.
 
 ## Runner Capability Boundary
 
@@ -249,7 +296,7 @@ Denied by default:
 
 This prevents recursive spawn/kill/list/read behavior. A task runner does not need to know the minion control plane exists; Pal observes and manages that layer through the minion module capabilities.
 
-`artifact_write` is the one internal exception to the `op_minion_*` deny rule. It is scoped to `workspace.artifact_dir` and cannot control the minion subsystem.
+`artifact_write` and planner `plan_*` builder tools are internal exceptions to the `op_minion_*` deny rule. `artifact_write` is scoped to `workspace.artifact_dir`; planner builder tools only maintain a planner-local draft and compile it into the normal primary `plan.json` artifact. Neither path can control the minion subsystem.
 
 ## Runner Loop
 
@@ -257,9 +304,9 @@ The runner is a thin execution entity, not a forked Pal. It starts a slim runtim
 
 If `TaskContextPack.metadata.preferred_endpoint_id` is present, the runner forwards it as `CanonicalLLMRequest.metadata.preferred_endpoint_id` and uses that endpoint's budget when resolving max output tokens. Without that metadata, no preferred endpoint is passed; the slim runtime reads the current active LLM endpoint from `pal.sqlite3`.
 
-`TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `tool_search`, `tool_read`, `tool_call`, `file_read`, `file_edit`, `file_write`, `shell`, `artifact_write`, `web_search`, `web_read`, and `memory_recall` when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
+`TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `tool_search`, `tool_read`, `tool_call`, `file_read`, `file_edit`, `file_write`, `shell`, `artifact_write`, planner `plan_*` builder tools, `web_search`, `web_read`, and `memory_recall` when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
 
-When `artifact_write` is available, the runner prompt asks the minion to write the primary deliverable to `artifact_dir` and keep the final summary short. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
+When `artifact_write` is available, the runner prompt asks the minion to write the primary deliverable to `artifact_dir` and keep the final summary short. Software planner profiles instead use `plan_begin` / `plan_begin_module` / `plan_begin_milestone` / `plan_add_acceptance_criterion` / `plan_finalize`; `plan_finalize` writes the primary `plan.json` artifact and the existing `plan_acceptance` gate reviews that artifact. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
 
 Tool calls are executed through the existing `ExecutionRuntime` path and must be present in `TaskContextPack.allowed_capabilities`.
 

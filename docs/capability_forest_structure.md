@@ -23,13 +23,14 @@ The forest contains two LLM-visible capability namespaces:
 - `introspection`
 - `operation`
 
-Runtime-private slash commands are not part of either namespace.
+Runtime-private registered slash commands are not part of either namespace.
 
 Rules:
 
-- Slash commands are deterministic control-plane ingress.
-- Raw command text does not enter the LLM prompt.
-- Raw command text is not written to L1 as conversation memory.
+- Registered slash commands are deterministic control-plane ingress.
+- Matched raw command text does not enter the LLM prompt.
+- Matched raw command text is not written to L1 as conversation memory.
+- Slash-like text that does not match any registered command or alias is ordinary user text and follows the normal conversational path.
 - The LLM may observe resulting governance state, such as "tool use disabled",
   but not the raw `/pause-tools` or `/detach ...` command text.
 

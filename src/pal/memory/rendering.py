@@ -164,10 +164,10 @@ def compact_payload_kind(payload: object) -> str:
         return "minion"
     if schema == COMPACTION_SCHEMA_PAL_V1:
         return "pal"
-    return normalize_compaction_kind(payload.get("kind"))
+    return normalize_compaction_payload_kind(payload.get("kind"))
 
 
-def normalize_compaction_kind(value: object) -> str:
+def normalize_compaction_payload_kind(value: object) -> str:
     raw = str(value or "").strip().lower()
     return "minion" if raw == "minion" else "pal"
 

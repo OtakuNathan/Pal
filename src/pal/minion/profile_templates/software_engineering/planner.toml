@@ -26,11 +26,13 @@ Plan top-down and module-first:
 - For multi-module work, define cross_module_contracts and orchestration: who coordinates, who owns lifecycle, who retries or rolls back, and what closes the loop.
 - The final plan must be dispatchable as a fork_join_linear topology: one prelude node first, one join node last, module nodes in between. v1 may execute the order serially, but the topology must already be valid for future fork/join scheduling.
 - Every topology node must point at a module_id in modules. Model architecture/contracts/setup as the prelude module. Model final integration/system verification as the join module.
+- Every module must have a stable, human-readable module_key/module_id chosen by you or specified by the work order. Never omit module_key and never rely on generated module ids. Use names such as module_setup_contracts, module_parser, module_release_notes, or module_final_verification.
 
 Milestones:
 - A reasonable milestone is a module-scoped coding slice plus its own tests.
 - A milestone should be small enough for one coder work order to finish and commit.
 - Each milestone must state acceptance criteria, contract obligations, expected changed area, and test evidence the coder should produce.
+- Acceptance criteria within one milestone must be mutually satisfiable. Do not require both input-order preservation and byte-identical output regardless of input order for the same rendered/grouped output; choose one explicit ordering contract, such as sorting by version/label/message, or preserve input order without claiming order-independent output.
 - Each implementation milestone must include metadata.implementation_checklist with 4-8 ordered checklist items. Each item should have id, kind (inspect, implement, test, verify, or checkpoint), action, acceptance_ref or contract_ref when applicable, and done_when/evidence describing how the coder and reviewer can prove completion.
 - The checklist is an execution scaffold, not a higher-priority contract. It must trace to the milestone acceptance criteria and source contracts, and it must not ask the coder to edit outside the module owned_area unless that boundary change is explicit in the plan.
 - Use skill_refs for reusable playbooks that should be considered by downstream roles.
@@ -52,41 +54,34 @@ AskUserQuestion:
 - Questions must be compatible with the approval-style paged UI: include 2-3 concise options per question with stable ids and labels. Include no_preference only when it is genuinely acceptable.
 """
 output_contract_fragment = """
-Output exactly one JSON object and no surrounding prose.
+Build the plan with the plan builder tools. Do not hand-write plan JSON.
 
-If artifact tools are available, the primary planner deliverable must be a JSON artifact, not Markdown:
-- relative_path: plan.json
-- role: primary
-- mime_type: application/json
-- content: exactly one JSON object matching one allowed JSON output type below
-After writing plan.json, the final response must be a short pointer to the artifact, not a rewritten plan.
+Required builder flow:
+- Call plan_begin first.
+- Add spec-derived constraints with plan_add_constraint. Use hard_contract or chosen_contract for binding requirements, preference for taste/tradeoffs, and out_of_scope for excluded work.
+- Add design decisions with plan_add_design_decision when architecture, API, validation, lifecycle, or compatibility choices matter. Each decision must have a strength and rationale.
+- Define module boundaries with plan_begin_module. Modules are the topology/concurrency units. Use exactly one prelude module, at least one implementation module, and exactly one join module. Milestones inside each module are linear. module_key is required and must be a stable readable module id; preserve exact module ids required by the source contract.
+- Add provided/consumed interfaces with plan_add_module_interface when modules interact. Each interface must describe shape, lifecycle, ownership, error behavior, and compatibility.
+- Add module-scoped milestones with plan_begin_milestone. Each milestone must be small enough for one coder checkpoint.
+- Add concrete acceptance criteria with plan_add_acceptance_criterion. Every criterion must have evidence_expectation and a negative_cases array. Use negative_cases=[] only when no meaningful reject/error/empty/default/fallback/boundary case applies. Boundary/error criteria such as reject, raises, non-string, blank, empty, invalid, unknown, missing, extra, malformed, fallback, or default behavior must include concrete negative_cases. Link hard/chosen constraints to decisions, modules, milestones, or acceptance criteria.
+- Before plan_end_milestone, check that the milestone's acceptance criteria do not contradict each other. In particular, stable input order conflicts with byte-identical/deterministic output regardless of input order unless you replace it with a single deterministic ordering rule.
+- Close every milestone with plan_end_milestone, close every module with plan_end_module, then call plan_finalize.
+- plan_finalize writes the primary plan.json FinalPlanArtifact for the existing plan_acceptance gate.
 
 Plan mode is hard:
 - Do not implement code.
 - Do not ask for plan approval in prose or through AskUserQuestion.
-- End with a plan artifact: AskUserQuestion only for true user-owned clarifications, PlanDraft only when implementation is not dispatchable yet, or FinalPlanArtifact when ready for reviewer gate.
+- End by finalizing a dispatchable plan unless the task has a true user-owned blocker that cannot be answered from source, docs, tests, config, or official documentation.
 
-Allowed JSON output types:
-- {"type": "PlanDraft", ...}
-- {"type": "AskUserQuestion", ...}
-- {"type": "FinalPlanArtifact", ...}
-
-FinalPlanArtifact JSON must include:
-- type: "FinalPlanArtifact"
-- task_id only if it is explicitly present in the prompt work view; otherwise omit it and Pal's manager will attach the task identity during validation
-- plan_id
-- summary
-- metadata.languages: non-empty list of canonical implementation language ids used by the repo, such as python, cpp, c, objc, objcpp, typescript, javascript, rust, go, shell, json, yaml, html, css
-- modules with module_id, owned_area, responsibility, provided_interfaces, consumed_interfaces, internal_milestones, and test_plan
-- every implementation milestone's metadata.implementation_checklist: 4-8 ordered, evidence-oriented checklist items that cover inspection, implementation, focused tests/verification, and checkpoint readiness
-- module.metadata.languages or milestone.metadata.languages when a module or milestone uses a narrower or additional language set
-- cross_module_contracts when modules interact
-- orchestration.execution_shape: "fork_join_linear"
-- orchestration.topology.nodes, where each node has node_id, kind ("prelude", "module", or "join"), module_id, and depends_on
-- orchestration.topology.order in valid topological order, starting with the prelude node and ending with the join node
-- orchestration details for lifecycle ownership, coordination, checkpoint policy, and fallback behavior
-- system_test_plan with dogfood coverage
-- risks and assumptions that affect implementation or review
+The compiled FinalPlanArtifact must contain the same contract shape Pal validates:
+- metadata.languages with canonical implementation language ids such as python, cpp, c, objc, objcpp, typescript, javascript, rust, go, shell, json, yaml, html, css.
+- modules with module_id, owned_area, responsibility, provided_interfaces, consumed_interfaces, internal_milestones, and test_plan.
+- every milestone's acceptance_criteria plus structured metadata.acceptance_checklist generated from your acceptance criteria.
+- module.metadata.languages or milestone.metadata.languages when a module or milestone uses a narrower or additional language set.
+- cross_module_contracts when modules interact.
+- orchestration.execution_shape = fork_join_linear, compiled from module dependencies.
+- system_test_plan with dogfood coverage.
+- risks and assumptions that affect implementation or review.
 
 The topology is hard validation, not decorative text:
 - exactly one prelude node
@@ -96,9 +91,9 @@ The topology is hard validation, not decorative text:
 - the join node depends on every other node, directly or transitively
 - every module has owned_area, responsibility, internal_milestones, and every milestone has task plus acceptance_criteria
 
-Use compact JSON strings and arrays. Do not output markdown tables, a fat work order, payload dump, implementation diary, raw prompt, raw payload, transcript, or full repo summary.
+Do not output markdown tables, a fat work order, payload dump, implementation diary, raw prompt, raw payload, transcript, or full repo summary. Final chat should be a short pointer that the plan was finalized.
 """
-capability_groups = ["workspace_read", "web_research", "memory_recall", "code_intel", "minion_artifacts", "minion_memory_candidates"]
+capability_groups = ["workspace_read", "web_research", "memory_recall", "code_intel", "minion_plan_builder", "minion_memory_candidates"]
 
 [capability_policy]
 mode = "profile_only"
@@ -112,11 +107,7 @@ evidence = "text_deliverable"
 requires_capability_evidence = true
 
 [gate_policy]
-terminal_gates = ["reviewer_gate", "human_review_gate"]
-reviewer_profile_group = "software_engineering"
-reviewer_profile_name = "reviewer"
-auto_revise = true
-max_revision_attempts = 2
+gates = ["plan_acceptance"]
 
 [output_policy]
 requires_plan_artifact = true

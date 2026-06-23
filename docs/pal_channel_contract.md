@@ -282,7 +282,8 @@ Channel provider 负责将这些 intent 变成自己的平台 realization。
 
 - provider 必须把平台 callback 归一化成 typed interaction result
 - core 不接收 Telegram callback payload 之类的平台 raw object
-- slash command、button callback、menu choice 都应在进入 core 前被 channel/control 解析成明确 action
+- 已注册 slash command、button callback、menu choice 都应在进入 core 前被 channel/control 解析成明确 action
+- 未匹配任何已注册 command 或 alias 的 `/...` 文本应回落成普通 `user.message`，不能被 control path 当作 unknown-command 截断
 - provider 可以决定如何展示，但不能改变 action 的业务语义
 - interaction state、token mapping、message edit、delivery retry 属于 provider implementation concern
 

@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from pal.foundation import utc_now
+from pal.minion.gates import project_active_gate_todo
 from pal.minion.utils import coerce_int
 from pal.minion.work_order import ReviewGateResult, validate_review_gate_result
 
@@ -93,6 +94,31 @@ class MinionReviewGateStore:
                     gate_payload=normalized_payload,
                     created_at=created_at,
                 )
+            todo_projection = project_active_gate_todo(normalized_payload)
+            todo_work_order_id = str(normalized_payload.get("target", {}).get("work_order_id") or normalized_work_order_id).strip()
+            if todo_work_order_id:
+                _write_active_gate_todo_locked(repo, db, todo_work_order_id, todo_projection)
+                repo.ledger.insert_ledger(
+                    db,
+                    todo_work_order_id,
+                    "gate_todo_projected",
+                    str(todo_projection.get("summary") or f"{gate.gate_kind} todo projected"),
+                    {
+                        "status": str(todo_projection.get("status") or ""),
+                        "review_gate_ref": {
+                            "gate_id": gate.gate_id,
+                            "gate_kind": gate.gate_kind,
+                            "target_kind": target_kind,
+                            "target_key": target_key,
+                            "verdict": gate.verdict,
+                            "created_at": created_at,
+                        },
+                        "active_gate_todo": todo_projection,
+                    },
+                    gate.reviewer_profile,
+                    normalized_run_id,
+                    created_at,
+                )
         return {
             "status": "recorded",
             "review_gate": normalized_payload,
@@ -105,6 +131,7 @@ class MinionReviewGateStore:
                 "created_at": created_at,
             },
             "milestone_closure": milestone_closure,
+            "active_gate_todo": todo_projection,
         }
 
     def record_review_tool_evidence_refs(
@@ -822,6 +849,21 @@ def plan_target_key(plan_ref: dict[str, Any]) -> str:
             f"v{_plan_revision_from_payload(None, ref)}",
             str(ref.get("sha256") or "").strip(),
         ]
+    )
+
+
+def _write_active_gate_todo_locked(repo: Any, db: Any, work_order_id: str, todo: dict[str, Any]) -> None:
+    normalized = str(work_order_id or "").strip()
+    if not normalized:
+        return
+    row = repo._fetch_one(db, "SELECT metadata_json FROM minion_work_orders WHERE work_order_id = ?", (normalized,))
+    if row is None:
+        return
+    metadata = _loads(row["metadata_json"])
+    metadata["active_gate_todo"] = dict(todo or {})
+    db.execute(
+        "UPDATE minion_work_orders SET metadata_json = ?, updated_at = ? WHERE work_order_id = ?",
+        (_json(metadata), utc_now(), normalized),
     )
 
 

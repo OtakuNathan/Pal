@@ -618,6 +618,8 @@ def register_with_core(
         provider_manager=provider_manager,
         main_context=context,
     )
+    if runtime_root is not None:
+        provider_manager.hydrate_all()
     source = ChannelEventSource(runtime=runtime)
     handle = ModuleHandle(
         module_id="channel",

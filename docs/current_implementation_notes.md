@@ -83,7 +83,9 @@ MCP-projected tools and prompt render capabilities are not resident by default.
 
 ## Control And Channel
 
-Slash commands are runtime-private control ingress. They do not enter the LLM prompt, do not become conversational input, and do not write the raw command text into L1. The control plane parses them deterministically into `ControlAction` values.
+Registered slash commands are runtime-private control ingress. When `/...` text matches a registered control command or alias, it does not enter the LLM prompt, does not become conversational input, and does not write the raw command text into L1. The control plane parses matched commands deterministically into `ControlAction` values.
+
+Slash-like text that does not match any registered command falls back to the ordinary `user.message` path. This lets users write normal messages that begin with `/` without being stopped by an unknown-command response. If the command name matches but the arguments are invalid, the registered command still returns a control error.
 
 Telegram command text may arrive with a bot mention suffix, such as `/control@PalDevBot`. The command normalizer strips the leading slash and the optional `@BotName` suffix before lookup, so `/control`, `/control@PalDevBot`, and `/refresh_llm_endpoint@PalDevBot` resolve to the same registered commands.
 
@@ -182,7 +184,7 @@ Checkpoint is the milestone cursor fact. Completed checkpoints advance the deriv
 
 Progress and checkpoint events are manager/tasking telemetry. They are written to the minion ledger and checkpoint tables, but they are not direct chat notifications. Pal should answer progress questions by inspecting active runs and work order snapshots. Terminal events are the user-facing completion notification path and also synchronize a recent completion observation into Pal's prompt context.
 
-Minion deliverables are file-first. Coder profiles keep their Git task repo/branch and write reports under `minion_outputs/{work_order_id}`. Planner, reviewer, generic, and other one-shot profiles get a manager-allocated folder workspace under `data/minion/workspaces/{run_id}_{profile}` with `work_order.json`, `metadata.json`, `logs/`, and `deliverables/`. The runner exposes `artifact_write`, scoped only to `workspace.artifact_dir`, and terminal/checkpoint payloads carry `artifacts[]` plus `primary_artifact`. Large reports should be read from those files instead of being pushed as chat text.
+Minion deliverables are file-first. Coder profiles keep their Git task repo/branch and write reports under `minion_outputs/{work_order_id}`. Planner, reviewer, generic, and other one-shot profiles get a manager-allocated folder workspace under `data/minion/workspaces/{run_id}_{profile}` with `work_order.json`, `metadata.json`, `logs/`, and `deliverables/`. The runner exposes `artifact_write`, scoped only to `workspace.artifact_dir`, for report-style deliverables. Software planner profiles use planner `plan_*` builder tools instead of hand-writing JSON; `plan_finalize` compiles the draft into the normal primary `plan.json` artifact. Terminal/checkpoint payloads carry `artifacts[]` plus `primary_artifact`. Large reports should be read from those files instead of being pushed as chat text.
 
 Terminal event summaries are cleaned before display: `Task Lesson` and `System Lesson` sections are extracted into structured fields and removed from the final completion text. When lessons are present, Pal opens a separate `minion_lesson_approval` interaction with `Accept`, `Reject`, and `Edit` buttons. Accept stores task lessons as tasking continuity, stores system lessons as accepted candidates, and attempts a durable memory commit through `memory_write` when it is available. Reject discards them. Edit pauses absorption and asks for revised lesson text. Pure terminal `memory_candidates` use Pal's generic `memory_candidate_approval` interaction and are committed only after `memory_candidate_decision` approval.
 

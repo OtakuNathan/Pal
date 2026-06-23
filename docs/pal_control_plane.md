@@ -2,7 +2,9 @@
 
 ## Current Implementation Alignment
 
-Slash commands are deterministic control-plane ingress. They bypass LLM reasoning, prompt assembly, and L1 transcript writes. The command parser accepts both direct command text and Telegram bot-addressed command text:
+Registered slash commands are deterministic control-plane ingress. When the slash command name resolves to a registered control command, it bypasses LLM reasoning, prompt assembly, and L1 transcript writes. If a `/...` text does not match any registered command or alias, Control re-emits it as a normal `user.message`; the text then follows the ordinary conversational LLM path instead of producing an "unknown command" reply. Registered commands with invalid arguments are still handled as control errors.
+
+The command parser accepts both direct command text and Telegram bot-addressed command text:
 
 - `/control`
 - `/control@PalDevBot`
@@ -219,7 +221,8 @@ sequenceDiagram
 - 优先命令语法
 - 优先显式模式切换
 - 优先确定性参数解析
-- 避免把控制命令交给开放式自由生成
+- 避免把已注册控制命令交给开放式自由生成
+- 未匹配任何已注册 command 的 `/...` 文本不是控制命令，应回落为普通用户消息
 
 ## Invariants
 
@@ -229,6 +232,8 @@ sequenceDiagram
 - `approve` 是 built-in control capability。
 - minions approval 必须通过 `Control`。
 - `Control` 默认走 deterministic path。
+- 只有匹配到已注册 command 或 alias 的 slash-like 输入才被消费为控制命令。
+- 未匹配的 `/...` 输入必须回落为普通 `user.message`，不能被 control path 截断成 unknown-command reply。
 - approval 是正式对象，不是瞬时 UI 动作。
 
 ## Non-Goals

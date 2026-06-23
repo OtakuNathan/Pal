@@ -59,6 +59,11 @@ class ControlEventHandler(EventHandler):
             correlation_id=event.correlation_id,
         )
         action = self.control_plane.parse_event(control_event)
+        if action is not None and action.action_kind == "fallback_user_message":
+            fallback = _slash_command_fallback_user_message(event)
+            if fallback is not None:
+                return [fallback]
+            return []
         if action is None:
             return []
         return [
@@ -69,3 +74,33 @@ class ControlEventHandler(EventHandler):
                 correlation_id=event.correlation_id or event.event_id,
             )
         ]
+
+
+def _slash_command_fallback_user_message(event: EventEnvelope) -> EventEnvelope | None:
+    if event.event_kind != EventKind.SLASH_COMMAND:
+        return None
+    if not isinstance(event.payload, ChannelEnvelope):
+        return None
+    channel_envelope = event.payload
+    inner = channel_envelope.event
+    fallback_inner = EventEnvelope(
+        event_kind=EventKind.USER_MESSAGE,
+        source_kind=inner.source_kind,
+        payload=inner.payload,
+        correlation_id=inner.correlation_id,
+        created_at=inner.created_at,
+        event_id=inner.event_id,
+    )
+    fallback_channel = ChannelEnvelope(
+        event=fallback_inner,
+        endpoint=channel_envelope.endpoint,
+        response_handle=channel_envelope.response_handle,
+    )
+    return EventEnvelope(
+        event_kind=EventKind.USER_MESSAGE,
+        source_kind=event.source_kind,
+        payload=fallback_channel,
+        correlation_id=event.correlation_id,
+        created_at=event.created_at,
+        event_id=event.event_id,
+    )

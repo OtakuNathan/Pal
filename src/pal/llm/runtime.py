@@ -41,6 +41,7 @@ from pal.llm.contracts import (
 )
 from pal.llm.models import LLMEndpointModel
 from pal.llm.repository import DEFAULT_THINK_LEVEL, LLMEndpointRepository, RuntimeSettingRepository
+from pal.memory.contracts import CompactionProfile
 from pal.shared import LLMFinishReason, LLMPreflightStatus, LLMStreamEventKind, llm_tool_name
 from pal.stream_events import NormalizedLLMStreamEvent
 
@@ -1766,15 +1767,16 @@ class LLMRuntime(LLMRuntimePort):
         max_output_tokens: int = 192,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
-        compaction_kind: str = "pal",
+        profile: CompactionProfile = CompactionProfile.PAL,
     ) -> str:
-        kind = _normalize_compaction_kind(compaction_kind)
+        profile = _coerce_compaction_profile(profile)
+        profile_name = profile.value
         request = CanonicalLLMRequest(
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        f"Summarize the recent {kind} context into a short continuity summary. "
+                        f"Summarize the recent {profile_name} context into a short continuity summary. "
                         "Preserve user preferences, commitments, active goals, factual context, constraints, and next action. "
                         "Do not include markdown, speaker labels, or commentary."
                     ),
@@ -1789,7 +1791,7 @@ class LLMRuntime(LLMRuntimePort):
                 "preferred_endpoint_id": preferred_endpoint_id,
                 "response_mode_hint": "operational",
                 "purpose": "memory_compaction",
-                "compaction_kind": kind,
+                "compaction_profile": profile_name,
             },
         )
         outcome = self.generate(request)
@@ -1804,7 +1806,7 @@ class LLMRuntime(LLMRuntimePort):
         max_output_tokens: int = 192,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
-        compaction_kind: str = "pal",
+        profile: CompactionProfile = CompactionProfile.PAL,
     ) -> str:
         try:
             return await asyncio.wait_for(
@@ -1814,7 +1816,7 @@ class LLMRuntime(LLMRuntimePort):
                     max_output_tokens=max_output_tokens,
                     preferred_endpoint_id=preferred_endpoint_id,
                     preferred_model_id=preferred_model_id,
-                    compaction_kind=compaction_kind,
+                    profile=profile,
                 ),
                 timeout=self._default_compaction_timeout_seconds,
             )
@@ -1910,10 +1912,10 @@ class LLMRuntime(LLMRuntimePort):
         max_output_tokens: int = 384,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
-        compaction_kind: str = "pal",
+        profile: CompactionProfile = CompactionProfile.PAL,
     ) -> dict[str, Any]:
-        kind = _normalize_compaction_kind(compaction_kind)
-        system_prompt = self._COMPACT_MINION_STRUCTURED_SYSTEM if kind == "minion" else self._COMPACT_PAL_STRUCTURED_SYSTEM
+        profile = _coerce_compaction_profile(profile)
+        system_prompt = self._COMPACT_MINION_STRUCTURED_SYSTEM if profile == CompactionProfile.MINION else self._COMPACT_PAL_STRUCTURED_SYSTEM
         request = CanonicalLLMRequest(
             messages=[
                 {
@@ -1930,7 +1932,7 @@ class LLMRuntime(LLMRuntimePort):
                 "preferred_endpoint_id": preferred_endpoint_id,
                 "response_mode_hint": "operational",
                 "purpose": "memory_compaction_structured",
-                "compaction_kind": kind,
+                "compaction_profile": profile.value,
             },
         )
         outcome = self.generate(request)
@@ -1938,13 +1940,13 @@ class LLMRuntime(LLMRuntimePort):
             return {}
         raw = str(outcome.text or "").strip()
         payload = _extract_compaction_json(raw)
-        return self._normalize_structured_compaction_payload(payload, kind=kind)
+        return self._normalize_structured_compaction_payload(payload, profile=profile)
 
-    def _normalize_structured_compaction_payload(self, payload: dict[str, Any], *, kind: str) -> dict[str, Any]:
+    def _normalize_structured_compaction_payload(self, payload: dict[str, Any], *, profile: CompactionProfile) -> dict[str, Any]:
         if not isinstance(payload, dict):
             return {}
         schema = str(payload.get("schema") or "").strip()
-        if kind == "minion":
+        if profile == CompactionProfile.MINION:
             if schema not in {self._COMPACT_MINION_SCHEMA, self._COMPACT_LEGACY_SCHEMA}:
                 return {}
             normalized = dict(payload)
@@ -1968,7 +1970,7 @@ class LLMRuntime(LLMRuntimePort):
         max_output_tokens: int = 384,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
-        compaction_kind: str = "pal",
+        profile: CompactionProfile = CompactionProfile.PAL,
     ) -> dict[str, Any]:
         try:
             return await asyncio.wait_for(
@@ -1978,7 +1980,7 @@ class LLMRuntime(LLMRuntimePort):
                     max_output_tokens=max_output_tokens,
                     preferred_endpoint_id=preferred_endpoint_id,
                     preferred_model_id=preferred_model_id,
-                    compaction_kind=compaction_kind,
+                    profile=profile,
                 ),
                 timeout=self._default_compaction_timeout_seconds,
             )
@@ -2555,6 +2557,8 @@ def _extract_compaction_json(raw: str) -> dict[str, Any]:
     return parsed
 
 
-def _normalize_compaction_kind(value: object) -> str:
+def _coerce_compaction_profile(value: object) -> CompactionProfile:
+    if isinstance(value, CompactionProfile):
+        return value
     raw = str(value or "").strip().lower()
-    return "minion" if raw == "minion" else "pal"
+    return CompactionProfile.MINION if raw == CompactionProfile.MINION.value else CompactionProfile.PAL

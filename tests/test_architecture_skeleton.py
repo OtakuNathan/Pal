@@ -621,8 +621,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         published = core.context.capability_registry.descriptors
 
-        self.assertIn("op_tool_search", published)
-        self.assertIn("op_tool_call", published)
+        self.assertIn("search_tools", published)
+        self.assertIn("call_tool", published)
         self.assertIn("memory_show", published)
         self.assertIn("memory_set_active_provider", published)
         self.assertIn("memory_provider_show::mock_l3", published)
@@ -677,7 +677,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         search = core.context.execution_runtime.execute(CapabilityCall(name="op_tool_search", args={"query": "demo ping"}))
         hit = next(item for item in search.structured["hits"] if item["name"] == "demo_ping")
-        self.assertEqual(set(hit), {"name", "canonical_path", "namespace", "surface", "action", "description", "required_params"})
+        self.assertEqual(set(hit), {"name", "description", "required_params"})
         found_read = core.context.execution_runtime.execute(CapabilityCall(name="op_tool_read", args={"name": hit["name"]}))
         self.assertEqual(found_read.status, "ok")
         self.assertEqual(found_read.structured["capability"]["name"], "demo_ping")
@@ -1868,7 +1868,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         )
 
         self.assertTrue(shell.ok)
-        self.assertEqual(shell.name, "op_exec_shell")
+        self.assertEqual(shell.name, "run_shell")
         self.assertEqual(str(shell.structured["stdout"]).strip(), "alias-ok")
         self.assertTrue(search.ok)
         self.assertIn("run_shell", [item["name"] for item in search.structured["hits"]])
@@ -2662,6 +2662,37 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     )
                 return CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop")
 
+            async def acompact_memory_structured(
+                self,
+                source_text,
+                *,
+                max_output_tokens,
+                preferred_endpoint_id=None,
+                preferred_model_id=None,
+                profile=None,
+            ):
+                self.requests.append(
+                    (
+                        "compact",
+                        {
+                            "source_text": source_text,
+                            "max_output_tokens": max_output_tokens,
+                            "preferred_endpoint_id": preferred_endpoint_id,
+                            "preferred_model_id": preferred_model_id,
+                            "profile": profile,
+                        },
+                    )
+                )
+                return {
+                    "schema": "pal.compaction.pal.v1",
+                    "kind": "pal",
+                    "summary": {
+                        "summary": "Compacted fallback context.",
+                        "search_text": "Compacted fallback context.",
+                    },
+                    "continuity": {},
+                }
+
         core = PalCore()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
@@ -2863,11 +2894,45 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     )
                 return CanonicalLLMOutcome(text="final answer", tool_calls=[], finish_reason="stop")
 
+            async def acompact_memory_structured(
+                self,
+                source_text,
+                *,
+                max_output_tokens,
+                preferred_endpoint_id=None,
+                preferred_model_id=None,
+                profile=None,
+            ):
+                self.requests.append(
+                    (
+                        "compact",
+                        {
+                            "source_text": source_text,
+                            "max_output_tokens": max_output_tokens,
+                            "preferred_endpoint_id": preferred_endpoint_id,
+                            "preferred_model_id": preferred_model_id,
+                            "profile": profile,
+                        },
+                    )
+                )
+                return {
+                    "schema": "pal.compaction.pal.v1",
+                    "kind": "pal",
+                    "summary": {
+                        "summary": "Compacted fallback context.",
+                        "search_text": "Compacted fallback context.",
+                    },
+                    "continuity": {},
+                }
+
         core = PalCore()
         register_core_with_core(core)
         channel_runtime = ChannelRuntime()
         register_channel_with_core(core.context, channel_runtime)
         memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        memory_service.l1_store.append(
+            [L1TranscriptMessage(role="user", content="Older context that must be compacted before retry.")]
+        )
         register_memory_with_core(core.context, memory_service)
         scripted_llm = FallbackBudgetLLMRuntime()
         core.context.port_registry["llm:llm"] = scripted_llm
@@ -3247,19 +3312,18 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
         self.assertEqual(result.summary, "The user prefers concise replies.")
-        self.assertEqual(
-            service.l1_store.items,
-            [[
-                L1TranscriptMessage(
-                    role="assistant",
-                    content="The user prefers concise replies.",
-                    kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
-                )
-            ]],
-        )
-        projected = service.l2_store.items["memory_summary_current"]
-        self.assertEqual(projected.summary, "The user prefers concise replies.")
-        self.assertEqual(projected.kind, "summary")
+        self.assertEqual(len(service.l1_store.items), 1)
+        self.assertEqual(len(service.l1_store.items[0]), 1)
+        summary_message = service.l1_store.items[0][0]
+        self.assertEqual(summary_message.role, "assistant")
+        self.assertEqual(summary_message.kind, L1MessageKind.RUNTIME_CONTEXT_SUMMARY)
+        self.assertIn('<compact_context kind="pal" authority="conversation_continuity">', summary_message.content)
+        self.assertIn("The user prefers concise replies.", summary_message.content)
+        self.assertNotIn("memory_summary_current", service.l2_store.items)
+        summary = service.build_pack(MemoryPackRequest()).current_summary
+        self.assertIsNotNone(summary)
+        self.assertEqual(summary.kind, "summary")
+        self.assertIn("The user prefers concise replies.", summary.rendered)
 
     def test_tool_stagnation_guard_detects_repeat_and_oscillation(self) -> None:
         guard = ToolStagnationGuardProcess(repeat_threshold=3, oscillation_window=4)

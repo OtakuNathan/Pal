@@ -19,6 +19,7 @@ from pal.minion.checklist import (
     resolve_evidence_ref,
 )
 from pal.minion.git_env import commit_milestone, inspect_milestone_checkpoint
+from pal.minion.plan_builder import PLAN_BUILDER_CAPABILITIES, PLAN_BUILDER_TOOL_SPECS, plan_builder_tool_result
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.review_gate_store import plan_target_key
@@ -72,6 +73,7 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_search",
     "op_minion_artifact_write",
     "op_minion_artifact_edit",
+    *PLAN_BUILDER_CAPABILITIES,
     "op_minion_memory_candidate_write",
     "op_web_search",
     "op_web_read",
@@ -282,6 +284,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
 }
 WORKSPACE_TOOL_SPECS.update(WORKSPACE_FILE_TOOL_SPECS)
+WORKSPACE_TOOL_SPECS.update(PLAN_BUILDER_TOOL_SPECS)
 
 _REPAIR_EDIT_TOOL_NAMES = {
     "op_file_edit",
@@ -311,7 +314,7 @@ _PRE_EDIT_VERIFICATION_COMMAND_MARKERS = (
 
 def _augment_minion_capability_spec(spec: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
     spec = _scrub_minion_capability_spec(spec)
-    name = str(spec.get("name") or spec.get("canonical_path") or "").strip()
+    name = str(spec.get("canonical_path") or spec.get("name") or "").strip()
     if name != "op_exec_shell":
         return spec
     guidance = _minion_shell_dedicated_tool_guidance(allowed)
@@ -335,6 +338,10 @@ def _augment_minion_capability_spec(spec: dict[str, Any], allowed: set[str]) -> 
 
 def _scrub_minion_capability_spec(spec: dict[str, Any]) -> dict[str, Any]:
     scrubbed = dict(spec)
+    canonical = str(scrubbed.get("canonical_path") or scrubbed.get("name") or "").strip()
+    if canonical:
+        scrubbed["canonical_path"] = canonical
+        scrubbed["name"] = llm_tool_name(canonical)
     if "description" in scrubbed:
         scrubbed["description"] = replace_internal_tool_names(scrubbed.get("description"))
     if "parameters_schema" in scrubbed:
@@ -355,6 +362,25 @@ def _minion_shell_dedicated_tool_guidance(allowed: set[str]) -> str:
     return f"Minion tool choice: when visible, use {hints}. {RUN_SHELL_SCOPE_HINT}"
 
 
+def _canonical_minion_capability_name(name: object) -> str:
+    raw = str(name or "").strip()
+    if not raw:
+        return ""
+    if raw in {"shell", "shell_exec", "run_shell"}:
+        return "op_exec_shell"
+    if raw in {"web_search", "search_web"}:
+        return "op_web_search"
+    if raw in {"web_read", "read_web"}:
+        return "op_web_read"
+    if raw in WORKSPACE_TOOL_SPECS:
+        return raw
+    candidates = tuple(dict.fromkeys((*MINION_DIRECT_WORK_TOOL_SURFACE, *MINION_DISCOVERY_TOOL_SURFACE)))
+    for candidate in candidates:
+        if llm_tool_name(candidate) == raw:
+            return candidate
+    return raw
+
+
 @dataclass
 class MinionScopedExecutionRuntime:
     base_runtime: Any
@@ -364,7 +390,8 @@ class MinionScopedExecutionRuntime:
     memory_l3: MockL3Plugin | None = None
 
     def __post_init__(self) -> None:
-        self.allowed_capabilities = filter_minion_allowed_capabilities(self.allowed_capabilities)
+        normalized = [_canonical_minion_capability_name(item) for item in self.allowed_capabilities]
+        self.allowed_capabilities = filter_minion_allowed_capabilities(normalized)
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
         allowed = set(self.allowed_capabilities)
@@ -378,11 +405,12 @@ class MinionScopedExecutionRuntime:
         if callable(list_specs):
             for spec in list(list_specs()):
                 name = str(spec.get("name") or "").strip()
-                if not self._tool_visible_for_workspace(name):
+                canonical = str(spec.get("canonical_path") or name).strip()
+                if not self._tool_visible_for_workspace(canonical):
                     continue
-                if name in WORKSPACE_TOOL_SPECS:
+                if canonical in WORKSPACE_TOOL_SPECS:
                     continue
-                if name in allowed and not is_minion_capability_denied(name):
+                if canonical in allowed and not is_minion_capability_denied(canonical):
                     specs.append(_augment_minion_capability_spec(spec, allowed))
         return specs
 
@@ -400,7 +428,7 @@ class MinionScopedExecutionRuntime:
         spec = get_spec(name)
         if spec is None:
             return None
-        canonical = str(spec.get("name") or spec.get("canonical_path") or name).strip()
+        canonical = str(spec.get("canonical_path") or spec.get("name") or name).strip()
         if canonical not in set(self.allowed_capabilities) or is_minion_capability_denied(canonical):
             return None
         return _augment_minion_capability_spec(spec, set(self.allowed_capabilities))
@@ -453,6 +481,8 @@ class MinionScopedExecutionRuntime:
         if call.name == "op_tool_call":
             return await self._execute_scoped_tool_call(call, allow_tools=allow_tools, turn_id=turn_id)
         if call.name in WORKSPACE_TOOL_SPECS:
+            if call.name in PLAN_BUILDER_CAPABILITIES:
+                return plan_builder_tool_result(call, self.workspace, self.produced_artifacts)
             if call.name == "op_minion_memory_candidate_write":
                 return _minion_memory_candidate_result(call, self.memory_l3)
             if call.name == "op_minion_review_gate_submit":
@@ -513,7 +543,7 @@ class MinionScopedExecutionRuntime:
                 status=RuntimeStatus.INVALID,
             )
         spec = self.get_capability_spec(target_name)
-        canonical = str((spec or {}).get("name") or (spec or {}).get("canonical_path") or target_name).strip()
+        canonical = str((spec or {}).get("canonical_path") or (spec or {}).get("name") or target_name).strip()
         if spec is None or canonical == call.name:
             return CanonicalToolResult(
                 name=call.name,
@@ -534,6 +564,9 @@ class MinionScopedExecutionRuntime:
         raw = str(name or "").strip()
         if not raw:
             return ""
+        canonical_raw = _canonical_minion_capability_name(raw)
+        if canonical_raw != raw and canonical_raw in set(self.allowed_capabilities) and not is_minion_capability_denied(canonical_raw):
+            return canonical_raw
         if raw in set(self.allowed_capabilities) or raw in WORKSPACE_TOOL_SPECS:
             return raw
         matches = [
@@ -620,9 +653,19 @@ def _active_repair_checklist(workspace: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         payload = {}
     checklist = payload.get("repair_checklist")
-    if not isinstance(checklist, list):
+    if isinstance(checklist, list):
+        return [dict(item) for item in checklist[:8] if isinstance(item, dict)]
+    active_todo = workspace.get("active_gate_todo")
+    if not isinstance(active_todo, dict):
         return []
-    return [dict(item) for item in checklist[:8] if isinstance(item, dict)]
+    repair_items = active_todo.get("repair_items")
+    if not isinstance(repair_items, list):
+        repair_items = [
+            item
+            for item in list(active_todo.get("items") or [])
+            if isinstance(item, dict) and str(item.get("kind") or "") == "repair"
+        ]
+    return [dict(item) for item in repair_items[:8] if isinstance(item, dict)]
 
 
 def _repair_requires_successful_edit_before_verification(workspace: dict[str, Any]) -> bool:
@@ -630,7 +673,11 @@ def _repair_requires_successful_edit_before_verification(workspace: dict[str, An
     if not checklist:
         return True
     for item in checklist:
-        impact = " ".join(str(item.get(key) or "") for key in ("contract_impact", "impact")).strip().lower()
+        metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {}
+        impact = " ".join(
+            str((item.get(key) if key in item else metadata.get(key)) or "")
+            for key in ("contract_impact", "impact")
+        ).strip().lower()
         if impact and impact not in {"none", "no impact", "not applicable", "n/a", "na"}:
             return True
         text = " ".join(
@@ -962,7 +1009,7 @@ def _minion_review_gate_submit_result(call: CanonicalToolCall, workspace: dict[s
         payload = repository.submit_review_gate(
             args,
             reviewer_profile=str(args.get("reviewer_profile") or ""),
-            work_order_id=str(workspace.get("work_order_id") or ""),
+            work_order_id=str(workspace.get("review_source_work_order_id") or workspace.get("work_order_id") or ""),
             run_id=str(workspace.get("run_id") or ""),
         )
         return CanonicalToolResult(
@@ -2024,7 +2071,7 @@ def _review_tool_evidence_ref(target_name: str, tool_call: CanonicalToolCall, re
 
 
 def _review_tool_evidence_kind(target_name: str) -> str:
-    if target_name == "op_exec_shell":
+    if target_name in {"op_exec_shell", "run_shell", "shell", "shell_exec"}:
         return "command"
     if _is_lsp_capability_name(target_name):
         return "lsp"

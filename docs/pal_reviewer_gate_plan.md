@@ -1,5 +1,11 @@
 # Pal Reviewer Gate Hardening Plan
 
+Status: historical hardening plan. The current implementation sync point is
+`pal_minion_v1.md#gate-loop`. The implemented system is profile-driven:
+profiles declare `[gate_policy] gates = [...]`, runtime expands those names into
+`GateSpec` values, and the review orchestrator schedules gates after milestone
+result events.
+
 This plan turns the reviewer from an optional after-the-fact reviewer into a required gate in Pal's software-engineering minion workflow.
 
 It is intentionally strict. Pal V1 has not been publicly released, so the workflow should be cleaned up now instead of preserving weak compatibility.
@@ -105,10 +111,12 @@ Rules:
 
 ## Capability Surface
 
-Prefer one generic structured capability over several ad-hoc ones:
+The implemented reviewer surface has one generic plan-review submitter plus a
+checkpoint-specific wrapper:
 
 ```text
-review_gate_submit
+op_minion_review_gate_submit
+op_minion_review_checkpoint
 ```
 
 Inputs:
@@ -129,6 +137,8 @@ Policy:
 - Expose it only to reviewer/verifier profiles.
 - The repository validates target existence and hash/commit binding.
 - The manager consumes the gate result; the runner does not self-advance.
+- Use `op_minion_review_gate_submit` for `plan_acceptance`.
+- Use `op_minion_review_checkpoint` for `checkpoint_verification` and `repair_verification`; Pal binds the checkpoint target and tool evidence.
 
 Plan acceptance should then change from:
 
@@ -160,7 +170,7 @@ For each coder milestone:
 4. Manager records the claim and does not advance the milestone cursor yet.
 5. Manager spawns or schedules a reviewer run with a scoped review work order.
 6. Reviewer inspects plan, diff, checkpoint commit, tests, and evidence.
-7. Reviewer calls `review_gate_submit`.
+7. Reviewer submits the gate. Plan reviewers use `op_minion_review_gate_submit`; checkpoint and repair reviewers use `op_minion_review_checkpoint`.
 8. Manager handles verdict:
    - `pass`: write milestone closure, advance cursor, send next milestone to same coder runner if available.
    - `fail`: send same coder runner a repair turn with `review_gate_ref` and required fixes.
@@ -207,7 +217,7 @@ Optional human-readable companion:
 review_report.md
 ```
 
-The JSON report must contain the same gate fields submitted through `review_gate_submit`.
+The JSON report must contain the same gate fields submitted through the reviewer gate capability.
 
 ## Coder Repair Turn
 
@@ -228,7 +238,7 @@ The coder must not proceed to the next milestone until the current milestone pas
 
 Repair attempts should be bounded:
 
-- default max automatic repair attempts: 2
+- builtin `checkpoint_quality` default max automatic repair attempts: 5
 - after that, block and ask Pal/user
 
 This prevents infinite "review -> repair -> review" loops.
@@ -306,7 +316,7 @@ LSP evidence is useful but not absolute. For high-risk API claims, pair it with 
 
 - Add `ReviewGateResult` validation model.
 - Add repository storage/ledger event for review gates.
-- Add `review_gate_submit`.
+- Add review gate submit surfaces.
 - Add tests for pass/fail/partial validation.
 
 ### Slice 2: Plan Acceptance Gate

@@ -160,6 +160,19 @@ def _compact_repair_context(value: Any) -> dict[str, Any]:
     checkpoint_repair = value.get("checkpoint_repair") if isinstance(value.get("checkpoint_repair"), dict) else {}
     current_attempt = value.get("current_repair_attempt") if isinstance(value.get("current_repair_attempt"), dict) else {}
     result: dict[str, Any] = {}
+    active_gate_todo = value.get("active_gate_todo") if isinstance(value.get("active_gate_todo"), dict) else {}
+    active_items = _compact_prompt_checklist(active_gate_todo.get("items"))
+    if active_items:
+        result["active_gate_todo"] = {
+            key: item
+            for key, item in {
+                "status": active_gate_todo.get("status"),
+                "summary": _compact_text(active_gate_todo.get("summary"), limit=360),
+                "gate_ref": dict(active_gate_todo.get("gate_ref") or {}),
+                "items": active_items,
+            }.items()
+            if item not in (None, "", [], {})
+        }
     checklist = _compact_prompt_checklist(checkpoint_repair.get("repair_checklist"))
     if checklist:
         result["repair_checklist"] = checklist

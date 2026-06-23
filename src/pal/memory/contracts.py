@@ -24,6 +24,11 @@ class L3RecallView(StrEnum):
     ORIGIN = "origin"
 
 
+class CompactionProfile(StrEnum):
+    PAL = "pal"
+    MINION = "minion"
+
+
 class L1MessageKind(StrEnum):
     USER_REQUEST = "user_request"
     ASSISTANT_REPLY = "assistant_reply"
@@ -165,6 +170,7 @@ class MemoryPack:
 class MemoryCompactRequest:
     target_input_budget: int
     reserved_output_tokens: int
+    profile: CompactionProfile = CompactionProfile.PAL
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

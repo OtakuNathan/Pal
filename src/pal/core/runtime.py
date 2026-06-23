@@ -33,7 +33,7 @@ from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
 from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryCommitRequest
 from pal.memory.candidates import l3_commit_args_from_memory_candidate
 from pal.shared import ChannelEnvelope, EventKind, SourceKind
-from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus
+from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus, llm_tool_name
 from pal.shared.payloads import extract_text_from_payload
 
 
@@ -1145,7 +1145,7 @@ class PalCore:
             await self._complete_action_reply_async(action, f"Tool surface refresh failed: {exc}")
             return
 
-        resident_names = [str(item) for item in list(payload.get("resident_tool_names") or []) if str(item).strip()]
+        resident_names = [llm_tool_name(item) for item in list(payload.get("resident_tool_names") or []) if str(item).strip()]
         preview = ", ".join(resident_names[:12]) if resident_names else "-"
         if len(resident_names) > 12:
             preview = f"{preview}, ..."
@@ -1372,8 +1372,6 @@ class PalCore:
         if not source_text:
             await self._complete_compact_reply_async(action, "Nothing to compact - memory is already minimal.")
             return
-        if not control_interactions.is_interaction_action(action):
-            await self._reply_to_route_async(action.route, "Compacting memory...")
         metadata = await self.turn_executor.build_compaction_metadata_async(
             memory_service,
             target_input_budget=8192,
@@ -1395,14 +1393,23 @@ class PalCore:
             reserved_output_tokens=4096,
             metadata=metadata,
         )
-        result = compact_method(request)
-        if inspect.isawaitable(result):
-            result = await result
+        try:
+            result = compact_method(request)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            await self._complete_compact_reply_async(
+                action,
+                f"Compaction failed - memory state was left unchanged. {type(exc).__name__}: {exc}",
+            )
+            return
         entry_count = getattr(result, "metadata", {}).get("projected_entry_count", 0) if result else 0
+        summary_count = getattr(result, "metadata", {}).get("compact_summary_count", 0) if result else 0
         retired = getattr(result, "metadata", {}).get("retired_count", 0) if result else 0
+        storage_text = "L1 compact summary updated." if summary_count else "No compact summary was stored."
         await self._complete_compact_reply_async(
             action,
-            f"Memory compacted. {entry_count} entries projected, {retired} retired to L3.",
+            f"Context compacted. {storage_text} {entry_count} L2 entries projected, {retired} retired to L3.",
         )
         memory_candidates = _memory_candidates_from_compact_result(result)
         if memory_candidates:

@@ -13,6 +13,7 @@ from pal.minion.contracts import (
     SERIAL_MILESTONE_MODES,
     SERIAL_MODULE_MILESTONES_MODE,
 )
+from pal.minion.debug_log import minion_debug_log_enabled
 from pal.minion.ledger_store import MinionLedgerStore
 from pal.minion.plan_store import MinionPlanStore
 from pal.minion.prompt_adapter import prompt_scaffold_summary as _prompt_scaffold_summary
@@ -378,9 +379,14 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "review_gate_id": str(gate_payload.get("gate_id") or ""),
             }
         )
+        revision_task_id = str(
+            pack_metadata.get("revision_task_id")
+            or f"{artifact.task_id}_plan_revision_{next_revision}_{resolved_work_order_id}"
+        ).strip()
         pack_metadata.update(
             {
-                "task_id": artifact.task_id,
+                "task_id": revision_task_id,
+                "expected_plan_task_id": artifact.task_id,
                 "task_title": str(pack_metadata.get("task_title") or artifact.summary or artifact.task_id),
                 "work_order_title": str(pack_metadata.get("work_order_title") or f"Revise plan {artifact.plan_id}"),
                 "planner_work_order": planner_work_order,
@@ -1048,7 +1054,9 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 (task_id,),
             )
             if active is not None:
-                raise ValueError(f"task already has an active work order: {active['work_order_id']}")
+                active_work_order_id = str(active["work_order_id"])
+                if not _allow_plan_revision_with_active_source(metadata, active_work_order_id):
+                    raise ValueError(f"task already has an active work order: {active_work_order_id}")
             db.execute(
                 """
                 INSERT INTO minion_work_orders(
@@ -1241,7 +1249,9 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         run_id = str(event.get("run_id") or payload.get("run_id") or "")
         summary = str(payload.get("summary") or payload.get("title") or event_kind)
         with self._connect() as db:
-            self.ledger.insert_ledger(db, work_order_id, event_kind, summary, payload, minion_id, run_id, created_at)
+            event_log_enabled = _work_order_event_log_enabled(self, db, work_order_id, payload)
+            if event_log_enabled:
+                self.ledger.insert_ledger(db, work_order_id, event_kind, summary, payload, minion_id, run_id, created_at)
             if event_kind == "checkpoint":
                 self.ledger.insert_checkpoint(db, work_order_id, payload, minion_id, run_id, created_at)
                 self._record_payload_artifacts(db, work_order_id, payload)
@@ -1261,6 +1271,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 self._record_deferred_experience(db, work_order_id, payload)
                 self._record_payload_artifacts(db, work_order_id, payload)
             elif event_kind in {"phase_started", "progress"}:
+                if not event_log_enabled:
+                    return
                 status = "running" if event_kind == "phase_started" else None
                 if status:
                     self._update_work_order_status(db, work_order_id, status)
@@ -1827,6 +1839,17 @@ def _strip_raw_milestone_metadata_without_plan(metadata: dict[str, Any]) -> dict
     if str(module_execution.get("mode") or "") in SERIAL_MILESTONE_MODES:
         data.pop("module_execution", None)
     return data
+
+
+def _allow_plan_revision_with_active_source(metadata: dict[str, Any], active_work_order_id: str) -> bool:
+    planner_work_order = _loads_or_dict(metadata.get("planner_work_order"))
+    if not isinstance(planner_work_order.get("revision_source"), dict):
+        return False
+    plan_review = _loads_or_dict(metadata.get("plan_review"))
+    source_work_order_id = str(plan_review.get("source_work_order_id") or "").strip()
+    if source_work_order_id and source_work_order_id != str(active_work_order_id or "").strip():
+        return False
+    return True
 
 
 def _merge_existing_work_order_metadata(stored: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
@@ -2461,6 +2484,14 @@ def _loads_or_dict(value: Any) -> dict[str, Any]:
         loaded = _loads(value)
         return dict(loaded) if isinstance(loaded, dict) else {}
     return {}
+
+
+def _work_order_event_log_enabled(repo: Any, db: sqlite3.Connection, work_order_id: str, payload: dict[str, Any]) -> bool:
+    metadata = _loads_or_dict((payload or {}).get("metadata"))
+    row = repo._fetch_one(db, "SELECT metadata_json FROM minion_work_orders WHERE work_order_id = ?", (str(work_order_id),))
+    if row is not None:
+        metadata = _deep_merge_dict(_loads_or_dict(row["metadata_json"]), metadata)
+    return minion_debug_log_enabled(metadata)
 
 
 def _deep_merge_dict(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:

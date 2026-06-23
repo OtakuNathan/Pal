@@ -53,8 +53,9 @@ Important consequences:
 - A turn waits for the channel outbox to accept the final reply, not for remote
   platform delivery.
 - Delivery events are channel-side diagnostics.
-- Slash commands are not conversational input.
-- The LLM can observe governance state, not raw control command text.
+- Recognized slash control commands are not conversational input.
+- Slash-like text with no registered command match is conversational input.
+- The LLM can observe governance state, not raw matched control command text.
 
 ## Key Responsibilities
 
@@ -142,7 +143,7 @@ The runtime is no longer just a skeleton:
 - Tool call/results are persisted into the turn transcript in protocol order.
 - Memory compaction and L1 commit are active runtime effects.
 - Channel mailbox/outbox boundaries are implemented.
-- Control slash commands bypass the LLM path.
+- Recognized control slash commands bypass the LLM path. Slash-like text with no registered command match is re-emitted as an ordinary `user.message`.
 
 Remaining areas may still be intentionally minimal or provider-dependent:
 

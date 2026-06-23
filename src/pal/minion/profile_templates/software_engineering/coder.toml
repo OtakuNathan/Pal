@@ -103,14 +103,7 @@ requires_developer_tests = true
 test_evidence = "focused_tests_or_explained_blocker"
 
 [gate_policy]
-after_each_milestone = ["reviewer_gate"]
-reviewer_profile_group = "software_engineering"
-reviewer_profile_name = "reviewer"
-max_repair_attempts = 5
-require_test_or_blocker = true
-require_api_evidence = true
-require_lsp_when_applicable = true
-check_public_declarations_have_implementation = true
+gates = ["checkpoint_quality"]
 
 [output_policy]
 milestone_completion = "op_minion_checkpoint_commit"

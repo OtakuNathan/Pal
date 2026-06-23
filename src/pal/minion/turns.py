@@ -6,6 +6,7 @@ from pal.shared import TaskContextPack
 
 
 _RUNNER_PRESERVED_METADATA_KEYS = {
+    "active_gate_todo",
     "allow_text_only_completion",
     "checkpoint_repair",
     "checkpoint_review",
@@ -13,6 +14,7 @@ _RUNNER_PRESERVED_METADATA_KEYS = {
     "control_route",
     "debug_log",
     "defer_experience_until_module_complete",
+    "gate_specs",
     "heartbeat_interval_seconds",
     "injected_skill_refs",
     "manager_turn_timeout_seconds",
@@ -41,7 +43,9 @@ _RUNNER_PRESERVED_METADATA_KEYS = {
 }
 
 _TURN_METADATA_KEYS = {
+    "active_gate_todo",
     "checkpoint_repair",
+    "gate_specs",
     "module_execution",
     "module_id",
     "plan_ref",

@@ -125,14 +125,14 @@ class ControlPlane(ControlPlanePort):
         spec = self.registry.resolve(invocation.command_name)
         if spec is None:
             return ControlAction(
-                action_kind="unknown_command",
+                action_kind="fallback_user_message",
                 target_scope="control",
                 route=invocation.route,
                 args={
                     "command_name": invocation.command_name,
                     "raw_text": invocation.raw_text,
                 },
-                notes=f"Unknown command: /{invocation.command_name}",
+                notes=f"No slash command matched: /{invocation.command_name}",
             )
         action = spec.handler(invocation)
         if action is None:

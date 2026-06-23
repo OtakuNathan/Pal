@@ -18,8 +18,7 @@ mode = "none"
 evidence = "text_deliverable"
 
 [gate_policy]
-after_each_milestone = []
-terminal_gates = []
+gates = ["none"]
 
 [output_policy]
 milestone_completion = "text_deliverable"

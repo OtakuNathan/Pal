@@ -26,7 +26,7 @@ from pal.core.turns import (
 )
 from pal.failure import FailureSignal
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolResult, LLMPreflightRequest
-from pal.memory.contracts import L2Entry, MemoryCommitRequest, MemoryCompactRequest, MemoryPackRequest
+from pal.memory.contracts import CompactionProfile, L2Entry, MemoryCommitRequest, MemoryCompactRequest, MemoryPackRequest
 from pal.shared import (
     GuardAction,
     LLMFinishReason,
@@ -162,26 +162,37 @@ class TurnExecutor:
     async def _handle_memory_compact(self, effect, continuation):
         memory_service = self.context.require_port("memory:memory")
         metadata = dict(effect.assembly_context.metadata)
-        compaction_kind = _compaction_kind_for_context(effect.assembly_context, metadata=metadata)
-        metadata.setdefault("compaction_kind", compaction_kind)
+        profile = _compaction_profile_for_effect(effect)
         metadata.update(await self.build_compaction_metadata_async(
             memory_service,
             target_input_budget=effect.target_input_budget,
             reserved_output_tokens=effect.reserved_output_tokens,
             preferred_endpoint_id=metadata.get("preferred_endpoint_id"),
             preferred_model_id=metadata.get("preferred_model_id"),
-            compaction_kind=compaction_kind,
+            profile=profile,
         ))
-        compact_result = await self._call_port_async(
-            memory_service,
-            "acompact",
-            "compact",
-            MemoryCompactRequest(
-                target_input_budget=effect.target_input_budget,
-                reserved_output_tokens=effect.reserved_output_tokens,
-                metadata=metadata,
+        if not metadata.get("structured_compaction") and not str(metadata.get("semantic_summary") or "").strip():
+            return EffectResult(
+                status=RuntimeStatus.ERROR,
+                text="Memory compaction failed after retries; the current turn cannot safely continue.",
             )
-        )
+        try:
+            compact_result = await self._call_port_async(
+                memory_service,
+                "acompact",
+                "compact",
+                MemoryCompactRequest(
+                    target_input_budget=effect.target_input_budget,
+                    reserved_output_tokens=effect.reserved_output_tokens,
+                    profile=profile,
+                    metadata=metadata,
+                )
+            )
+        except Exception as exc:
+            return EffectResult(
+                status=RuntimeStatus.ERROR,
+                text=f"Memory compaction failed; the current turn cannot safely continue. {type(exc).__name__}: {exc}",
+            )
         return EffectResult(status=RuntimeStatus.OK, payload=compact_result)
 
     @_dispatch_effect.register(LLMRequestEffect)
@@ -1148,7 +1159,7 @@ class TurnExecutor:
         reserved_output_tokens: int,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
-        compaction_kind: str = "pal",
+        profile: CompactionProfile = CompactionProfile.PAL,
     ) -> str:
         llm_runtime = self.context.port_registry.get("llm:llm")
         if llm_runtime is None:
@@ -1163,7 +1174,7 @@ class TurnExecutor:
                 max_output_tokens=min(max(512, reserved_output_tokens or 0), 1024),
                 preferred_endpoint_id=preferred_endpoint_id,
                 preferred_model_id=preferred_model_id,
-                compaction_kind=compaction_kind,
+                profile=profile,
             )
             if inspect.isawaitable(result):
                 try:
@@ -1180,7 +1191,7 @@ class TurnExecutor:
                     max_output_tokens=min(max(512, reserved_output_tokens or 0), 1024),
                     preferred_endpoint_id=preferred_endpoint_id,
                     preferred_model_id=preferred_model_id,
-                    compaction_kind=compaction_kind,
+                    profile=profile,
                 )
             except Exception:
                 return ""
@@ -1195,28 +1206,36 @@ class TurnExecutor:
         reserved_output_tokens: int,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
-        compaction_kind: str = "pal",
+        profile: CompactionProfile = CompactionProfile.PAL,
+        retry_attempts: int = 3,
     ) -> dict[str, Any]:
-        structured_compaction = await self.build_structured_compaction_async(
-            memory_service,
-            target_input_budget=target_input_budget,
-            reserved_output_tokens=reserved_output_tokens,
-            preferred_endpoint_id=preferred_endpoint_id,
-            preferred_model_id=preferred_model_id,
-            compaction_kind=compaction_kind,
-        )
-        if structured_compaction:
-            return {"structured_compaction": structured_compaction}
-        semantic_summary = await self.summarize_compaction_async(
-            memory_service,
-            target_input_budget=target_input_budget,
-            reserved_output_tokens=reserved_output_tokens,
-            preferred_endpoint_id=preferred_endpoint_id,
-            preferred_model_id=preferred_model_id,
-            compaction_kind=compaction_kind,
-        )
-        if semantic_summary:
-            return {"semantic_summary": semantic_summary}
+        source_text = self.build_compaction_source_text(memory_service, target_input_budget=target_input_budget)
+        if not source_text:
+            return {"semantic_summary": _empty_compaction_summary(profile)}
+        attempts = max(1, min(5, int(retry_attempts or 1)))
+        for attempt in range(attempts):
+            structured_compaction = await self.build_structured_compaction_async(
+                memory_service,
+                target_input_budget=target_input_budget,
+                reserved_output_tokens=reserved_output_tokens,
+                preferred_endpoint_id=preferred_endpoint_id,
+                preferred_model_id=preferred_model_id,
+                profile=profile,
+            )
+            if _is_valid_structured_compaction_payload(structured_compaction):
+                return {"structured_compaction": structured_compaction}
+            semantic_summary = await self.summarize_compaction_async(
+                memory_service,
+                target_input_budget=target_input_budget,
+                reserved_output_tokens=reserved_output_tokens,
+                preferred_endpoint_id=preferred_endpoint_id,
+                preferred_model_id=preferred_model_id,
+                profile=profile,
+            )
+            if semantic_summary:
+                return {"semantic_summary": semantic_summary}
+            if attempt < attempts - 1:
+                await asyncio.sleep(0)
         return {}
 
     def build_compaction_source_text(self, memory_service, *, target_input_budget: int) -> str:
@@ -1236,7 +1255,7 @@ class TurnExecutor:
         reserved_output_tokens: int,
         preferred_endpoint_id: str | None = None,
         preferred_model_id: str | None = None,
-        compaction_kind: str = "pal",
+        profile: CompactionProfile = CompactionProfile.PAL,
     ) -> dict[str, Any]:
         llm_runtime = self.context.port_registry.get("llm:llm")
         if llm_runtime is None:
@@ -1251,7 +1270,7 @@ class TurnExecutor:
                 max_output_tokens=min(max(1536, reserved_output_tokens or 0), 4096),
                 preferred_endpoint_id=preferred_endpoint_id,
                 preferred_model_id=preferred_model_id,
-                compaction_kind=compaction_kind,
+                profile=profile,
             )
             if inspect.isawaitable(result):
                 try:
@@ -1264,10 +1283,28 @@ class TurnExecutor:
         return {}
 
 
-def _compaction_kind_for_context(assembly_context: Any, *, metadata: dict[str, Any]) -> str:
-    explicit = str(metadata.get("compaction_kind") or "").strip().lower()
-    if explicit in {"pal", "minion"}:
-        return explicit
+def _compaction_profile_for_effect(effect: MemoryCompactEffect) -> CompactionProfile:
+    if isinstance(effect.profile_override, CompactionProfile):
+        return effect.profile_override
+    assembly_context = effect.assembly_context
     turn_kind = str(getattr(assembly_context, "turn_kind", "") or "").strip().lower()
     core_mode = str(getattr(assembly_context, "core_mode", "") or "").strip().lower()
-    return "minion" if "minion" in {turn_kind, core_mode} else "pal"
+    return CompactionProfile.MINION if "minion" in {turn_kind, core_mode} else CompactionProfile.PAL
+
+
+def _empty_compaction_summary(profile: CompactionProfile) -> str:
+    if profile == CompactionProfile.MINION:
+        return "No prior minion runtime context was retained before this compaction request."
+    return "No prior runtime context was retained before this compaction request."
+
+
+def _is_valid_structured_compaction_payload(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    schema = str(payload.get("schema") or "").strip()
+    if schema not in {"pal.compaction.pal.v1", "pal.compaction.minion.v1", "pal.compaction.v2"}:
+        return False
+    summary = payload.get("summary")
+    if not isinstance(summary, dict):
+        return False
+    return bool(str(summary.get("summary") or "").strip())

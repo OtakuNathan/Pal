@@ -128,7 +128,7 @@ These are the lines that don't get crossed:
 - **`memory` does not import plugin implementations directly**
 - **`wizard` and `bootstrap` do not expose `register_with_core`**
 - **Secrets are write-only** — never returned through introspection
-- **Slash commands are runtime-private** — never exposed to the LLM
+- **Registered slash commands are runtime-private** — matched control commands are never exposed to the LLM; unmatched `/...` text falls back to ordinary chat
 - **Capability names use canonical namespace-first form** — always explicit, always stable
 
 ## License

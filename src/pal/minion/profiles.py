@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from pal.minion.utils import dedupe_strings as _dedupe
 from pal.minion.utils import dict_from as _dict
 from pal.minion.utils import string_list as _string_list
+from pal.minion.plan_builder import PLAN_BUILDER_CAPABILITIES
 from pal.shared import TaskContextPack
 
 
@@ -297,6 +298,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "tool_discovery": ("op_tool_search", "op_tool_read"),
     "capability_call": ("op_tool_call",),
     "minion_artifacts": ("op_minion_artifact_write", "op_minion_artifact_edit"),
+    "minion_plan_builder": PLAN_BUILDER_CAPABILITIES,
     "minion_review_gate": ("op_minion_review_gate_submit", "op_minion_review_checkpoint"),
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
@@ -383,6 +385,7 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
         "op_minion_review_gate_submit",
         "op_minion_review_checkpoint",
         "op_minion_memory_candidate_write",
+        *PLAN_BUILDER_CAPABILITIES,
     }
 )
 

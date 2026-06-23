@@ -12,6 +12,7 @@ from pal.shared import (
     HydratedCapabilityNode,
     MountedSubtreeHandle,
     SINGLETON_TARGET,
+    llm_tool_name,
 )
 
 _CANONICAL_NAMESPACE_ABBREVIATIONS = {
@@ -72,14 +73,20 @@ def compile_provider_subtree(provider: Any, *, module_id: str, lifecycle_scope: 
                     action_blueprint=action_blueprint,
                     node_blueprint=node_blueprint,
                 )
-                descriptor_name = canonical_path if target.target_id == SINGLETON_TARGET else f"{canonical_path}::{target.target_id}"
+                descriptor_name = _descriptor_name(
+                    canonical_path=canonical_path,
+                    module_id=node_blueprint.path_module_id or module_id,
+                    action_blueprint=action_blueprint,
+                    node_blueprint=node_blueprint,
+                    target=target,
+                )
                 descriptor = CapabilityDescriptor(
                     name=descriptor_name,
                     canonical_path=canonical_path,
                     family=action_blueprint.family or action_blueprint.namespace,
                     description=action_blueprint.description or f"{action_blueprint.action_name} {module_id} {node_blueprint.scope}",
                     source=node_blueprint.source,
-                    display_name=_display_name(canonical_path, node_blueprint, target),
+                    display_name=descriptor_name,
                     aliases=_aliases(module_id, action_blueprint, node_blueprint, target),
                     target_kind=node.target_kind,
                     target_id=target.target_id,
@@ -178,11 +185,22 @@ def _underscore_canonical_path(
     return f"{namespace}_{canonical_module_id}_{family}_{action_blueprint.action_name}"
 
 
-def _display_name(canonical_path: str, node_blueprint: CapabilityNodeBlueprint, target: HydrationTarget) -> str:
+def _descriptor_name(
+    *,
+    canonical_path: str,
+    module_id: str,
+    action_blueprint: CapabilityActionBlueprint,
+    node_blueprint: CapabilityNodeBlueprint,
+    target: HydrationTarget,
+) -> str:
     if target.target_id == SINGLETON_TARGET:
-        return canonical_path
-    path_parts = canonical_path.split("_")
-    return "_".join([*path_parts[:-1], target.target_label, path_parts[-1]])
+        return llm_tool_name(canonical_path)
+    scope = str(node_blueprint.scope or "").strip()
+    if scope and scope not in {"module", module_id}:
+        base_name = f"{module_id}_{scope}_{action_blueprint.action_name}"
+    else:
+        base_name = llm_tool_name(canonical_path)
+    return f"{base_name}::{target.target_id}"
 
 
 def _aliases(

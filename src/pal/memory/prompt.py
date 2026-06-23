@@ -34,7 +34,7 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
         messages = [
             message
             for message in list(pack.l1_recent_context)
-            if not _is_synthetic_compaction_summary(message, summary_text)
+            if not _is_synthetic_compaction_summary(message, summary_text, summary_context)
         ]
         cleared_indices = _build_cleared_tool_indices(messages, keep_recent=self._keep_recent)
 
@@ -243,13 +243,14 @@ def _render_current_summary_context(pack: MemoryPack) -> str:
     return _render_conversation_summary_context(text)
 
 
-def _is_synthetic_compaction_summary(message, summary_text: str) -> bool:
-    if not summary_text:
+def _is_synthetic_compaction_summary(message, *summary_texts: str) -> bool:
+    candidates = {str(item or "").strip() for item in summary_texts if str(item or "").strip()}
+    if not candidates:
         return False
     if str(getattr(message, "role", "") or "").strip() != "assistant":
         return False
     content = str(getattr(message, "content", "") or "").strip()
-    return content == summary_text
+    return content in candidates
 
 
 def _build_cleared_tool_indices(messages: list, *, keep_recent: int) -> set[int]:

@@ -8,7 +8,7 @@ import json
 import os
 import shlex
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
@@ -46,6 +46,7 @@ from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.lsp import build_lsp_plugin
 from pal.minion.contracts import SERIAL_MILESTONE_MODES
 from pal.memory import (
+    CompactionProfile,
     L1MessageKind,
     L1TranscriptMessage,
     L3ProviderSelector,
@@ -55,7 +56,9 @@ from pal.memory import (
     MemoryService,
     register_with_core as register_memory_with_core,
 )
+from pal.memory.rendering import COMPACTION_SCHEMA_MINION_V1, is_compaction_payload, render_compact_context_for_llm
 from pal.minion.git_env import inspect_milestone_checkpoint
+from pal.minion.gates import checkpoint_gate_spec_for_pack, pack_requires_plan_artifact_validation
 from pal.minion.llm_broker import MinionBrokerLLMRuntime
 from pal.minion.scoped_execution import (
     MINION_DIRECT_WORK_TOOL_SURFACE,
@@ -265,7 +268,8 @@ class _MinionLLMRuntimeAdapter:
         if callable(method):
             result = await asyncio.to_thread(method, *args, **kwargs)
             return dict(result or {}) if isinstance(result, dict) else {}
-        return {}
+        source_text = str(args[0] if args else kwargs.get("source_text") or "").strip()
+        return _fallback_minion_compaction_payload(source_text)
 
     async def asummarize_compaction(self, *args, **kwargs) -> str:
         method = getattr(self._base, "asummarize_compaction", None)
@@ -597,6 +601,12 @@ class MinionRunner:
         workspace.setdefault("minion_id", self.minion_id)
         workspace.setdefault("minion_profile", self.pack.minion_profile)
         workspace.setdefault("work_order_id", self.pack.work_order_id)
+        workspace.setdefault("goal", self.pack.instruction or self.pack.goal)
+        if isinstance(self.pack.metadata, dict):
+            workspace.setdefault("task_id", str(self.pack.metadata.get("task_id") or ""))
+            expected_plan_revision = _expected_planner_plan_revision(self.pack)
+            if expected_plan_revision >= 0:
+                workspace.setdefault("planner_plan_revision", expected_plan_revision)
         workspace.setdefault("review_tool_evidence_refs", self.review_tool_evidence_refs)
         workspace.setdefault("shell_mutation_violations", self.shell_mutation_violations)
         current_repair_attempt = self._current_repair_attempt_payload()
@@ -605,6 +615,9 @@ class MinionRunner:
         checkpoint_repair = (self.pack.metadata or {}).get("checkpoint_repair")
         if isinstance(checkpoint_repair, dict):
             workspace.setdefault("checkpoint_repair", dict(checkpoint_repair))
+        active_gate_todo = (self.pack.metadata or {}).get("active_gate_todo")
+        if isinstance(active_gate_todo, dict):
+            workspace.setdefault("active_gate_todo", dict(active_gate_todo))
         if isinstance((self.pack.metadata or {}).get("review_target"), dict):
             review_target = dict((self.pack.metadata["review_target"] or {}))
             workspace.setdefault("review_target_run_id", str(review_target.get("run_id") or ""))
@@ -857,11 +870,12 @@ class MinionRunner:
             return False
         if repair_attempt >= self._planner_artifact_repair_retry_limit():
             return False
-        if "op_minion_artifact_write" not in {str(item) for item in self.pack.allowed_capabilities}:
-            return False
         if str(checkpoint_payload.get("status") or "").strip().lower() != "blocked":
             return False
         if checkpoint_payload.get("ask_user_question"):
+            return False
+        allowed = {str(item) for item in self.pack.allowed_capabilities}
+        if "op_minion_artifact_write" not in allowed and "op_minion_plan_finalize" not in allowed:
             return False
         validation = dict(checkpoint_payload.get("plan_validation") or {})
         validation_status = str(validation.get("status") or "").strip().lower()
@@ -882,14 +896,11 @@ class MinionRunner:
             "unless the missing information is truly not discoverable from the task context.\n\n"
             "Validation errors:\n"
             f"{error_text}\n\n"
-            "Repair by calling `op_minion_artifact_write` with exactly these intent fields: "
-            "`relative_path=\"plan.json\"`, `role=\"primary\"`, `mime_type=\"application/json\"`, and `overwrite=true`. "
-            "The content must be one valid JSON object with `type=\"FinalPlanArtifact\"`.\n\n"
-            "The FinalPlanArtifact must include module-first decomposition: each module has `module_id`, `owned_area`, "
-            "`responsibility`, `provided_interfaces`, `consumed_interfaces`, and non-empty `internal_milestones` with "
-            "`milestone_id`, `task`, and `acceptance_criteria`. It must include `orchestration.execution_shape` = "
-            "`fork_join_linear` and `orchestration.topology.nodes` containing exactly one prelude node, one join node, "
-            "and module nodes whose dependencies form a valid topological order from prelude through modules to join."
+            "Repair by using the plan builder tools: start or rebuild the draft with `plan_begin`, define closed "
+            "prelude/module/join module boundaries, add concrete evidence-backed acceptance criteria for every "
+            "milestone, close every milestone and module, then call `plan_finalize`. Do not hand-write JSON. "
+            "`plan_finalize` writes the primary plan.json FinalPlanArtifact and the existing plan_acceptance gate "
+            "will review it."
         )
 
     def _build_minion_turn_executor(
@@ -964,6 +975,8 @@ class MinionRunner:
             preflight = self._preflight_minion_llm_round(state)
             if preflight is not None:
                 return preflight
+        if isinstance(effect, MemoryCompactEffect) and effect.profile_override is None:
+            effect = replace(effect, profile_override=CompactionProfile.MINION)
         before_protocol_len = len(state.tool_protocol_messages)
         result = await executor.execute_turn_effect_async(continuation, effect)
         self._sync_minion_state_from_continuation(state, continuation)
@@ -1080,8 +1093,9 @@ class MinionRunner:
     def _render_minion_memory_context(self, state: MinionAgentLoopState) -> str:
         pack = state.memory_service.build_pack(MemoryPackRequest(turn_kind="minion", work_order_id=self.pack.work_order_id))
         parts: list[str] = []
-        if pack.current_summary is not None and str(pack.current_summary.summary or "").strip():
-            parts.append(f"Current summary:\n{pack.current_summary.summary.strip()}")
+        summary_text = self._render_minion_current_summary(pack.current_summary)
+        if summary_text:
+            parts.append(f"Current summary:\n{summary_text}")
         entries = [entry for entry in list(pack.l2_working_memory or []) if str(entry.entry_id) != "memory.summary"]
         if entries:
             lines = [f"- {entry.kind}:{entry.title or entry.entry_id}: {entry.summary}" for entry in entries[:8]]
@@ -1091,6 +1105,17 @@ class MinionRunner:
             lines = [f"- {record.get('document_kind')}:{record.get('title')}: {record.get('summary')}" for record in records[:8]]
             parts.append("Candidate experience records:\n" + "\n".join(lines))
         return "\n\n".join(parts).strip()
+
+    @staticmethod
+    def _render_minion_current_summary(entry: Any) -> str:
+        if entry is None:
+            return ""
+        summary = str(getattr(entry, "summary", "") or "").strip()
+        rendered = str(getattr(entry, "rendered", "") or "").strip()
+        payload = getattr(entry, "payload", None)
+        if is_compaction_payload(payload):
+            return render_compact_context_for_llm(summary=summary, payload=dict(payload or {}))
+        return rendered or summary
 
     def _minion_compaction_source_text(self, state: MinionAgentLoopState, *, target_input_budget: int) -> str:
         parts: list[str] = []
@@ -1176,6 +1201,17 @@ class MinionRunner:
                 ok=False,
                 text=policy_error,
                 structured={"reason": "read_only_repo_git_policy", "capability": target_name},
+                call_id=tool_call.call_id,
+                llm_text=policy_error,
+                status=RuntimeStatus.ERROR,
+            )
+        policy_error = self._read_only_shell_command_error(target_name, tool_call)
+        if policy_error:
+            return CanonicalToolResult(
+                name=tool_call.name,
+                ok=False,
+                text=policy_error,
+                structured={"reason": "read_only_repo_shell_cwd_policy", "capability": target_name},
                 call_id=tool_call.call_id,
                 llm_text=policy_error,
                 status=RuntimeStatus.ERROR,
@@ -1277,7 +1313,7 @@ class MinionRunner:
         return ""
 
     def _runner_owned_git_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
-        if not _is_git_capability_name(target_name):
+        if not (_is_git_capability_name(target_name) or _is_shell_capability_name(target_name)):
             return ""
         completion_policy = self._completion_policy()
         if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
@@ -1301,6 +1337,23 @@ class MinionRunner:
         if not _git_command_is_mutating(cmd):
             return ""
         return "read_only_repo git capability is for inspection only; use a review scratch repo or dedicated repair workspace for mutations."
+
+    def _read_only_shell_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
+        if not _is_shell_capability_name(target_name):
+            return ""
+        workspace = dict(self.pack.workspace or {})
+        workspace_policy = dict(workspace.get("workspace_policy") or {})
+        if str(workspace_policy.get("mode") or "").strip().lower() != "read_only_repo":
+            return ""
+        scratch_repo = str(workspace.get("review_scratch_repo_path") or "").strip()
+        if not scratch_repo:
+            return ""
+        cwd = str(_effective_tool_args(tool_call).get("cwd") or "").strip()
+        if not cwd:
+            return ""
+        if _path_is_relative_to(Path(cwd), Path(scratch_repo)):
+            return ""
+        return "read_only_repo shell commands must run inside review_scratch_repo_path; use that cwd for reviewer commands."
 
     def _shell_audit_snapshot(self, target_name: str) -> dict[str, Any]:
         if not _is_shell_capability_name(target_name):
@@ -1591,10 +1644,7 @@ class MinionRunner:
         return checkpoint.get("status") == "committed"
 
     def _requires_checkpoint_review_gate(self) -> bool:
-        metadata = dict(self.pack.metadata or {})
-        module_execution = dict(metadata.get("module_execution") or {})
-        review = dict(module_execution.get("checkpoint_review") or metadata.get("checkpoint_review") or {})
-        return bool(review.get("enabled"))
+        return checkpoint_gate_spec_for_pack(self.pack) is not None
 
     def _current_repair_attempt_payload(self) -> dict[str, Any]:
         metadata = dict(self.pack.metadata or {})
@@ -1790,6 +1840,7 @@ class MinionRunner:
             "workspace_policy": self._workspace_policy(),
             "completion_policy": self._completion_policy(),
             "prompt_view": prompt_view,
+            "active_gate_todo": dict((self.pack.metadata or {}).get("active_gate_todo") or {}),
             "repair_context": self._repair_context_for_compaction(),
         }
 
@@ -1802,6 +1853,9 @@ class MinionRunner:
         checkpoint_repair = metadata.get("checkpoint_repair")
         if isinstance(checkpoint_repair, dict):
             result["checkpoint_repair"] = dict(checkpoint_repair)
+        active_gate_todo = metadata.get("active_gate_todo")
+        if isinstance(active_gate_todo, dict):
+            result["active_gate_todo"] = dict(active_gate_todo)
         return result
 
     def _workspace_policy(self) -> dict[str, Any]:
@@ -1917,7 +1971,18 @@ class MinionRunner:
                 "summary": "planner plan artifact must be a JSON object",
                 "plan_validation": {"status": "invalid", "errors": ["plan artifact must be an object"]},
             }
-        expected_task_id = str((self.pack.metadata or {}).get("task_id") or "").strip()
+        metadata = dict(self.pack.metadata or {})
+        planner_work_order = dict(metadata.get("planner_work_order") or {})
+        expected_task_id = str(
+            metadata.get("expected_plan_task_id")
+            or (
+                planner_work_order.get("task_id")
+                if isinstance(planner_work_order.get("revision_source"), dict)
+                else ""
+            )
+            or metadata.get("task_id")
+            or ""
+        ).strip()
         declared_task_id = str(payload.get("task_id") or "").strip()
         if expected_task_id:
             if declared_task_id and declared_task_id != expected_task_id:
@@ -2026,17 +2091,7 @@ class MinionRunner:
         return normalized, current_digest
 
     def _requires_planner_plan_artifact_validation(self) -> bool:
-        metadata = dict(self.pack.metadata or {})
-        profile = dict(self.pack.resolved_profile or {})
-        profile_text = " ".join(
-            [
-                str(self.pack.minion_profile or ""),
-                str(profile.get("profile_id") or ""),
-                str(profile.get("canonical_profile_id") or ""),
-                str(profile.get("display_name") or ""),
-            ]
-        ).lower()
-        return "planner" in profile_text or isinstance(metadata.get("planner_work_order"), dict)
+        return pack_requires_plan_artifact_validation(self.pack)
 
     def _select_planner_json_artifact(self) -> dict[str, Any]:
         candidates = [(index, dict(item)) for index, item in enumerate(self.produced_artifacts)]
@@ -2387,6 +2442,31 @@ def _preview_text(value: Any, *, limit: int = 400) -> str:
     return text[: max(0, limit - 3)].rstrip() + "..."
 
 
+def _fallback_minion_compaction_payload(source_text: str) -> dict[str, Any]:
+    source_preview = _preview_text(source_text, limit=1200)
+    summary = (
+        "Minion run memory was compacted with a deterministic fallback because no model compaction "
+        "method was available. Recheck the work order, plan artifact, current milestone, checkpoint "
+        "ledger, and workspace before acting."
+    )
+    return {
+        "schema": COMPACTION_SCHEMA_MINION_V1,
+        "kind": "minion",
+        "continuity": {
+            "current_goal": "Continue the assigned minion task from current source-of-truth artifacts.",
+            "completed_work": [],
+            "current_position": source_preview,
+            "next_actions": ["Reconstruct the current milestone state from the work order, plan, and workspace."],
+            "open_questions": [],
+            "risks": ["This fallback summary is conservative and must be verified against source-of-truth state."],
+        },
+        "summary": {
+            "summary": summary,
+            "search_text": f"{summary}\n{source_preview}".strip(),
+        },
+    }
+
+
 def _optional_positive_int(value: Any) -> int | None:
     try:
         parsed = int(value)
@@ -2593,6 +2673,8 @@ def _git_command_is_mutating(cmd: str) -> bool:
         tokens = shlex.split(str(cmd or ""))
     except ValueError:
         tokens = str(cmd or "").split()
+    if tokens and tokens[0] == "git":
+        tokens = tokens[1:]
     subcommand, args = _git_subcommand_from_tokens(tokens)
     if not subcommand:
         return False

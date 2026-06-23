@@ -533,6 +533,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
             if instance_targets:
                 return _target_id_required_result(canonical_path=call.name, available_target_ids=instance_targets)
         registered = self.capabilities.get(call.name)
+        if (
+            registered is not None
+            and target_id != SINGLETON_TARGET
+            and (registered.descriptor.target_id or SINGLETON_TARGET) != target_id
+        ):
+            registered = None
         if registered is None:
             resolved = self._resolve_descriptor(call.name, target_id=target_id)
             if isinstance(resolved, CapabilityResult):
@@ -593,6 +599,12 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if resolved_name and resolved_name not in lookup_names:
             lookup_names.append(resolved_name)
         for lookup_name in lookup_names:
+            if lookup_name in self.compiled_capability_index.records:
+                candidates.append(self.compiled_capability_index.records[lookup_name])
+            if target_id != SINGLETON_TARGET:
+                targeted_name = f"{lookup_name}::{target_id}"
+                if targeted_name in self.compiled_capability_index.records:
+                    candidates.append(self.compiled_capability_index.records[targeted_name])
             if lookup_name in self.compiled_capability_index.by_canonical:
                 candidates.extend(
                     self.compiled_capability_index.records[record_id]
@@ -610,6 +622,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 descriptor
                 for descriptor in self.compiled_capability_index.records.values()
                 if llm_tool_name(descriptor.canonical_path or descriptor.name) == name
+                or _descriptor_base_name(descriptor.name) == name
             )
         if not candidates:
             return None
@@ -794,9 +807,13 @@ def _target_id_required_result(
     )
 
 
+def _descriptor_base_name(name: str) -> str:
+    return str(name or "").split("::", 1)[0]
+
+
 def _capability_spec_payload(descriptor: CapabilityDescriptor) -> dict[str, Any]:
     canonical = descriptor.canonical_path or descriptor.name
-    display = descriptor.display_name or canonical
+    display = descriptor.display_name or descriptor.name
     call_names: list[str] = []
     for value in (canonical, descriptor.name, display, *descriptor.aliases):
         normalized = str(value or "").strip()
@@ -804,7 +821,7 @@ def _capability_spec_payload(descriptor: CapabilityDescriptor) -> dict[str, Any]
             call_names.append(normalized)
     return {
         "canonical_path": canonical,
-        "name": canonical,
+        "name": descriptor.name,
         "display_name": display,
         "family": descriptor.family,
         "description": descriptor.description,

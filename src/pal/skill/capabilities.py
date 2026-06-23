@@ -20,6 +20,7 @@ from pal.skill.builtin_skills import (
     PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID,
     PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID,
     PAL_LSP_TEMPLATE_DEVELOPMENT_SKILL_ID,
+    PAL_MINION_GATE_DEVELOPMENT_SKILL_ID,
     PAL_PLUGIN_DEVELOPMENT_SKILL_ID,
     builtin_declared_skills,
 )
@@ -186,6 +187,43 @@ if TYPE_CHECKING:
     priority=35,
     activation_threshold=0.2,
     metadata={"skill_trigger": True, "resident": False, "runtime_root_layout": "plugins/lsp/servers"},
+)
+@affordance(
+    affordance_id="declared.skill.pal_minion_gate_development",
+    title="Pal minion gate development skill",
+    scenario_text=(
+        "The user wants to add, repair, organize, or explain minion gate policy, GateDefinition entries, "
+        "GateChecklistEntry checks, reviewer gates, checkpoint_quality, plan_acceptance, repair loops, or gate ledgers."
+    ),
+    prompt_hint=(
+        "If this route is selected, inject skill `pal.minion.gate.development` before changing "
+        "minion gate definitions, profile gate_policy wiring, reviewer strategy behavior, or repair ledger projection."
+    ),
+    activation_terms=(
+        "minion gate",
+        "gate policy",
+        "gate definition",
+        "GateDefinition",
+        "GateChecklistEntry",
+        "GateSpec",
+        "checkpoint_quality",
+        "plan_acceptance",
+        "reviewer gate",
+        "repair loop",
+        "gate ledger",
+        "active_gate_todo",
+        "acceptance checklist",
+        "minion gate policy",
+        "reviewer repair",
+        "门禁",
+        "gate 策略",
+        "reviewer gate",
+        "检查清单",
+    ),
+    skill_refs=(PAL_MINION_GATE_DEVELOPMENT_SKILL_ID,),
+    priority=40,
+    activation_threshold=0.2,
+    metadata={"skill_trigger": True, "resident": False, "extension_boundary": "minion.gates"},
 )
 @dataclass
 class SkillIntrospectionProvider:

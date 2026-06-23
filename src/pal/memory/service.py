@@ -31,13 +31,13 @@ from pal.memory.contracts import (
     MemoryPack,
     MemoryPackRequest,
     MemoryServicePort,
+    CompactionProfile,
 )
 from pal.memory.repository import L3ProviderSelector
 from pal.memory.rendering import (
     COMPACTION_SCHEMA_MINION_V1,
     COMPACTION_SCHEMA_PAL_V1,
     COMPACTION_SCHEMA_V2,
-    compact_payload_kind,
     render_compact_context_for_llm,
 )
 from pal.shared import RuntimeStatus
@@ -231,31 +231,44 @@ class MemoryService(MemoryServicePort):
             self.l3_selector = L3ProviderSelector(resolver=lambda provider_id: DetachedL3Provider(provider_id=provider_id))
 
     def compact(self, request: MemoryCompactRequest) -> MemoryCompactResult:
+        if not request.metadata.get("structured_compaction") and not str(request.metadata.get("semantic_summary") or "").strip():
+            raise ValueError("memory compact requires structured_compaction or semantic_summary")
         payload = _coerce_structured_compaction_payload(
             request.metadata.get("structured_compaction"),
             fallback_summary=str(request.metadata.get("semantic_summary") or "").strip(),
-            existing_summary=self.l2_store.get_entry(SUMMARY_ENTRY_ID),
-            requested_kind=request.metadata.get("compaction_kind"),
+            existing_summary=_current_summary_from_l1(self.l1_store.items),
+            profile=request.profile,
         )
         summary_entry = payload["summary_entry"]
-        projected_entries = [summary_entry, *payload["stable_entries"]]
-        self.l1_store.items = [[
-            L1TranscriptMessage(
-                role="assistant",
-                content=summary_entry.summary,
-                kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
-            )
-        ]]
-        evicted = self.l2_store.upsert_entries(projected_entries, touch=True, top_of_mind=False)
-        retired = self._retire_entries(evicted)
+        projected_entries = [summary_entry]
+        previous_l1_items = list(self.l1_store.items)
+        previous_l2_items = dict(self.l2_store.items)
+        previous_top_of_mind_refs = list(self.l2_store.top_of_mind_refs)
+        previous_heat_registry = dict(self.l2_store.heat_registry)
+        try:
+            self.l1_store.items = [[
+                L1TranscriptMessage(
+                    role="assistant",
+                    content=summary_entry.rendered or summary_entry.summary,
+                    kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
+                )
+            ]]
+            self.remove_projected_entries([SUMMARY_ENTRY_ID])
+        except Exception:
+            self.l1_store.items = previous_l1_items
+            self.l2_store.items = previous_l2_items
+            self.l2_store.top_of_mind_refs = previous_top_of_mind_refs
+            self.l2_store.heat_registry = previous_heat_registry
+            raise
         return MemoryCompactResult(
             summary=summary_entry.summary,
             projected_entries=projected_entries,
             metadata={
                 "target_input_budget": request.target_input_budget,
                 "reserved_output_tokens": request.reserved_output_tokens,
-                "projected_entry_count": len(projected_entries),
-                "retired_count": retired,
+                "projected_entry_count": 0,
+                "compact_summary_count": 1,
+                "retired_count": 0,
             },
         )
 
@@ -294,7 +307,7 @@ class MemoryService(MemoryServicePort):
     def build_pack(self, request: MemoryPackRequest) -> MemoryPack:
         if request.turn_kind == "proactive_trigger":
             return MemoryPack(metadata={"turn_kind": request.turn_kind})
-        current_summary = self.l2_store.get_entry(SUMMARY_ENTRY_ID)
+        current_summary = _current_summary_from_l1(self.l1_store.items)
         hot_entries = self.l2_store.list_hot_entries()
         return MemoryPack(
             l1_recent_context=_flatten_recent_l1_context(self.l1_store.items),
@@ -311,7 +324,7 @@ class MemoryService(MemoryServicePort):
         return await asyncio.to_thread(self.build_pack, request)
 
     def build_compaction_source_text(self, *, target_input_budget: int) -> str:
-        current_summary = self.l2_store.get_entry(SUMMARY_ENTRY_ID)
+        current_summary = _current_summary_from_l1(self.l1_store.items)
         recent_l1 = _flatten_recent_l1_context(self.l1_store.items)
         rendered_turns = _render_l1_recent_context(recent_l1)
         limit = max(256, target_input_budget or 0)
@@ -516,6 +529,33 @@ def _flatten_recent_l1_context(items: list[list[L1TranscriptMessage]]) -> list[L
     return flattened
 
 
+def _current_summary_from_l1(items: list[list[L1TranscriptMessage]]) -> L2Entry | None:
+    for message in _flatten_recent_l1_context(items):
+        kind = _normalize_l1_message_kind(
+            message.kind,
+            role=str(message.role or "").strip(),
+            tool_calls=message.tool_calls,
+            tool_call_id=message.tool_call_id,
+        )
+        if kind != L1MessageKind.RUNTIME_CONTEXT_SUMMARY:
+            continue
+        content = str(message.content or "").strip()
+        if not content:
+            continue
+        return L2Entry(
+            entry_id=SUMMARY_ENTRY_ID,
+            kind="summary",
+            scope="system",
+            title=SUMMARY_TITLE,
+            summary=content,
+            source_kind="l1_compaction",
+            candidate_state="stable",
+            rendered=content,
+            search_text=content,
+        )
+    return None
+
+
 def _render_l1_recent_context(messages: list[L1TranscriptMessage]) -> str:
     lines: list[str] = []
     for message in messages:
@@ -684,7 +724,7 @@ def _coerce_structured_compaction_payload(
     *,
     fallback_summary: str,
     existing_summary: L2Entry | None,
-    requested_kind: object = None,
+    profile: CompactionProfile = CompactionProfile.PAL,
 ) -> dict[str, Any]:
     payload = raw if isinstance(raw, dict) else {}
     schema = str(payload.get("schema") or "").strip()
@@ -693,8 +733,28 @@ def _coerce_structured_compaction_payload(
             payload,
             fallback_summary=fallback_summary,
             existing_summary=existing_summary,
-            requested_kind=requested_kind,
+            profile=profile,
         )
+    if not payload and fallback_summary:
+        is_minion = profile == CompactionProfile.MINION
+        kind = "minion" if is_minion else "pal"
+        schema = COMPACTION_SCHEMA_MINION_V1 if kind == "minion" else COMPACTION_SCHEMA_PAL_V1
+        return _coerce_current_structured_compaction_payload(
+            {
+                "schema": schema,
+                "kind": kind,
+                "continuity": {},
+                "summary": {
+                    "summary": fallback_summary,
+                    "search_text": fallback_summary,
+                },
+            },
+            fallback_summary=fallback_summary,
+            existing_summary=existing_summary,
+            profile=profile,
+        )
+    if payload and not fallback_summary:
+        raise ValueError("structured compaction payload missing recognized schema")
     summary_payload = payload.get("summary") if isinstance(payload, dict) else None
     entries_payload = payload.get("entries") if isinstance(payload, dict) else None
 
@@ -715,14 +775,8 @@ def _coerce_structured_compaction_payload(
 
     if not summary_text and fallback_summary:
         summary_text = fallback_summary
-    if not summary_text and existing_summary is not None:
-        summary_text = existing_summary.summary
-        summary_title = existing_summary.title or summary_title
-        summary_rendered = existing_summary.rendered or summary_rendered
-        summary_search_text = existing_summary.search_text or summary_search_text
-        summary_payload_blob = dict(existing_summary.payload or {})
     if not summary_text:
-        summary_text = "No retained L1 memory."
+        raise ValueError("compact summary is empty")
 
     summary_entry = _normalize_l2_entry(
         L2Entry(
@@ -776,23 +830,9 @@ def _coerce_current_structured_compaction_payload(
     *,
     fallback_summary: str,
     existing_summary: L2Entry | None,
-    requested_kind: object = None,
+    profile: CompactionProfile = CompactionProfile.PAL,
 ) -> dict[str, Any]:
-    requested = str(requested_kind or "").strip().lower()
-    if requested == "minion":
-        return _coerce_minion_compaction_payload(
-            payload,
-            fallback_summary=fallback_summary,
-            existing_summary=existing_summary,
-        )
-    if requested == "pal":
-        return _coerce_pal_compaction_payload(
-            payload,
-            fallback_summary=fallback_summary,
-            existing_summary=existing_summary,
-        )
-    kind = compact_payload_kind(payload)
-    if kind == "minion":
+    if profile == CompactionProfile.MINION:
         return _coerce_minion_compaction_payload(
             payload,
             fallback_summary=fallback_summary,
@@ -817,10 +857,8 @@ def _coerce_pal_compaction_payload(
     summary_text = str(summary_payload.get("summary") or "").strip()
     if not summary_text and fallback_summary:
         summary_text = fallback_summary
-    if not summary_text and existing_summary is not None:
-        summary_text = existing_summary.summary
     if not summary_text:
-        summary_text = "No retained compact context."
+        raise ValueError("pal compact summary is empty")
     search_text = str(summary_payload.get("search_text") or "").strip() or summary_text
     summary_payload_blob = {
         "schema": COMPACTION_SCHEMA_PAL_V1,
@@ -866,10 +904,8 @@ def _coerce_minion_compaction_payload(
     summary_text = str(summary_payload.get("summary") or "").strip()
     if not summary_text and fallback_summary:
         summary_text = fallback_summary
-    if not summary_text and existing_summary is not None:
-        summary_text = existing_summary.summary
     if not summary_text:
-        summary_text = "No retained compact context."
+        raise ValueError("minion compact summary is empty")
     search_text = str(summary_payload.get("search_text") or "").strip() or summary_text
     summary_payload_blob = {
         "schema": COMPACTION_SCHEMA_MINION_V1,

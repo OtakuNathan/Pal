@@ -7,6 +7,7 @@ PAL_PLUGIN_DEVELOPMENT_SKILL_ID = "pal.plugin.development"
 PAL_LLM_ADAPTER_ENDPOINT_DEVELOPMENT_SKILL_ID = "pal.llm.adapter_endpoint.development"
 PAL_CHANNEL_PROVIDER_DEVELOPMENT_SKILL_ID = "pal.channel.provider.development"
 PAL_LSP_TEMPLATE_DEVELOPMENT_SKILL_ID = "pal.lsp.template.development"
+PAL_MINION_GATE_DEVELOPMENT_SKILL_ID = "pal.minion.gate.development"
 
 
 PAL_PLUGIN_DEVELOPMENT_MANUAL = """# Pal Plugin Development
@@ -605,6 +606,193 @@ Before calling the language support done:
 """
 
 
+PAL_MINION_GATE_DEVELOPMENT_MANUAL = """# Pal Minion Gate Development
+
+Use this skill when Pal needs to add, review, repair, or explain a minion gate, gate policy, reviewer gate, repair loop policy, or milestone acceptance checklist.
+
+## Boundary
+
+Minion gates are runtime orchestration policy. They decide what must be verified after a milestone result, which reviewer or strategy performs the verification, and how failed findings become repair checklist items.
+
+Keep these concepts separate:
+
+- Profile TOML chooses gate names through `[gate_policy] gates = [...]`.
+- `GateDefinition` owns the gate contract: target kind, gate kind, strategy, reviewer profile, repair/revision bounds, blocking classes, policy flags, and required checklist entry refs.
+- `GateChecklistEntry` owns one reusable checklist item. Gate definitions reference entries by stable ids.
+- `GateSpec` is the expanded runtime shape derived from profile policy plus gate definitions.
+- Gate strategies execute the gate. `reviewer` launches a reviewer minion; `none` means no gate.
+- Gate results and repair findings are projected into the active todo/repair ledger. Do not make the LLM hand-author that ledger when runtime can derive it.
+
+Do not hard-code planner-vs-coder behavior when a profile gate policy can express the difference. Profiles should share the same milestone event entrypoint; different gates and strategies provide the behavior.
+
+## Existing Builtins
+
+Current builtin gates live in `src/pal/minion/gates.py`:
+
+- `checkpoint_quality`: checkpoint verification for coder-style implementation milestones.
+- `plan_acceptance`: plan artifact review and optional revision for planner-style milestones.
+- `none`: explicit no-gate policy for profiles that should complete without review.
+
+Current builtin profiles reference these names:
+
+```toml
+[gate_policy]
+gates = ["checkpoint_quality"]
+```
+
+or:
+
+```toml
+[gate_policy]
+gates = ["none"]
+```
+
+The trigger is currently after each milestone result. Do not duplicate that trigger in every profile unless the runtime supports a new trigger shape and the profile genuinely needs it.
+
+## Adding A Checklist Entry
+
+Add a stable entry id and human check text:
+
+```python
+GateChecklistEntry(
+    "checkpoint.contract_match",
+    "Verify the checkpoint matches the milestone contract.",
+)
+```
+
+Guidelines:
+
+1. Use namespace-like ids: `checkpoint.contract_match`, `plan.dispatchable`, `docs.links_valid`.
+2. Make the text an action the reviewer can verify with evidence.
+3. Keep entries reusable. Put gate-specific details in the gate definition policy if needed.
+4. Do not encode transient task names, run ids, checkpoint ids, or user text in entry ids.
+
+## Adding A Gate Definition
+
+Add a `GateDefinition` with a stable `name`. The profile uses this name.
+
+```python
+GateDefinition(
+    name="docs_quality",
+    target_kind="artifact",
+    gate_kind="docs_quality",
+    strategy=REVIEWER_GATE_STRATEGY,
+    reviewer_profile_group="software_engineering",
+    reviewer_profile_name="reviewer",
+    max_repair_attempts=3,
+    required_check_refs=(
+        "docs.structure",
+        "docs.links_valid",
+        "docs.submit_gate",
+    ),
+    blocking=(
+        "missing_required_section",
+        "broken_link",
+        "contract_mismatch",
+    ),
+    policy={"require_source_evidence": True},
+)
+```
+
+Guidelines:
+
+1. `name` is the stable profile-facing gate name.
+2. `target_kind` describes what is reviewed, such as `checkpoint`, `plan_artifact`, or `artifact`.
+3. `gate_kind` is the reviewer submission kind expected by the gate store.
+4. `strategy` says how to run the gate. Use `reviewer` for reviewer-minion gates and `none` only for explicit no-gate policy.
+5. Put reviewer profile, fallback profile, repair limits, revision limits, and policy flags in the definition instead of repeating them in every profile.
+6. Put contract-critical blockers in `blocking`. These must not be downgraded to advisory findings.
+
+## Builtin Implementation Workflow
+
+When the gate is a first-party Pal behavior, make the change in the builtin minion gate stack:
+
+1. Add reusable `GateChecklistEntry` values in `src/pal/minion/gates.py`.
+2. Add one stable `GateDefinition` in `src/pal/minion/gates.py`; use the gate name as the profile-facing API.
+3. Wire builtin profiles in `src/pal/minion/profile_templates/.../*.toml` with only `[gate_policy] gates = ["<gate_name>"]` or `["none"]`.
+4. Keep milestone completion as the common trigger. Do not add planner/coder special branches in manager or runner code when a profile gate policy can express the behavior.
+5. If the gate needs a new execution mechanism, implement a `GateStrategy` and register it through the gate strategy registry instead of adding ad hoc if/else logic in the milestone loop.
+6. If reviewer prompt data changes, update the gate spec assembly path so reviewer minions receive required checks and policy as structured context.
+7. If failed gate findings should drive repairs, update the repair/todo ledger projection code, not the reviewer prompt alone.
+8. Update `docs/pal_minion_v1.md` when the gate becomes a supported product behavior.
+9. Update `scripts/build_package.sh` when a new builtin gate/profile/skill file must be present or semantically checked in release wheels.
+
+Prefer small, typed runtime changes over prompt-only behavior. A new gate should be representable from profile TOML plus `GateDefinition`; the LLM should review or repair against that spec, not invent the gate.
+
+## Test Targets
+
+Add focused tests near the changed layer:
+
+- `tests/test_minion.py` or gate-specific tests: profile policy expands with `normalize_gate_policy(...)`, checklist refs resolve, and missing/unknown gates fail clearly.
+- Review orchestration tests: the milestone completion path launches the expected strategy for the target kind and skips `none`.
+- Repair loop tests: fail findings become ordered repair checklist or active gate todo entries, max attempts are enforced, and pass gates clear the ledger.
+- Reviewer submission tests: pass requires required evidence and covers binding acceptance criteria; contract-impact findings cannot pass through `non_blocking=true`.
+- Package tests or `scripts/build_package.sh`: release wheel includes the new gate code, profile policy, and any internal skill route that future Pal turns need to maintain the gate.
+
+## Plugin Extension Shape
+
+For detachable extensions, provide declarations instead of editing builtin definitions. Implement one or more provider protocols from `pal.minion.gates`:
+
+- `MinionGateChecklistEntryProvider.declared_minion_gate_checklist_entries()`
+- `MinionGateDefinitionProvider.declared_minion_gate_definitions()`
+- `MinionGateStrategyProvider.declared_minion_gate_strategies()`
+
+Register the provider through the plugin's `ModuleHandle.provider_refs` or another minion-owned extension surface that the gate registry consumes. Keep provider output deterministic and side-effect free.
+
+## Profile Wiring
+
+Profiles should choose gates by name:
+
+```toml
+[gate_policy]
+gates = ["docs_quality"]
+```
+
+Avoid expanding reviewer fields, checklist text, or trigger details in the profile. A profile may override only when the runtime explicitly supports that override and the override is part of the profile's product behavior.
+
+Use `gates = ["none"]` when the profile intentionally has no gate. An empty or missing policy should not be used to smuggle in special-case behavior.
+
+## Reviewer Prompt Surface
+
+The reviewer should receive:
+
+- gate name and gate kind
+- target artifact or checkpoint reference
+- source contract and milestone acceptance checklist
+- required checks expanded from checklist entry refs
+- blocking classes and policy flags
+- evidence requirements that runtime can validate
+
+The reviewer should not need to know how profile TOML expanded into the gate spec, nor hand-copy command evidence that runtime can recover from recorded tool evidence.
+
+## Repair Loop Rules
+
+Reviewer failures should become repair checklist items. Runtime should preserve:
+
+- the finding text and severity
+- contract impact
+- suggested fix
+- linked acceptance criterion or checklist item
+- evidence reference
+
+Contract mismatches, missing required tests, unimplemented public APIs, and scope violations are blocking by default. Do not allow `non_blocking=true` to pass a gate when `contract_impact` is material.
+
+## Verification Checklist
+
+Before calling a gate extension done:
+
+1. Add or register required `GateChecklistEntry` ids and texts.
+2. Add or register one stable `GateDefinition` name.
+3. Wire the profile with `[gate_policy] gates = ["<gate_name>"]` or `["none"]`.
+4. Confirm `normalize_gate_policy(...)` expands the name into one `GateSpec`.
+5. Confirm required checklist refs resolve into reviewer-visible required checks.
+6. Confirm milestone completion schedules the expected strategy only for the matching target kind.
+7. Confirm pass, fail, repair, and max-attempt paths are covered by focused tests.
+8. Confirm gate results project into the active todo/repair ledger.
+9. Update docs when the new gate is a supported product behavior, not just a private test fixture.
+"""
+
+
 def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescriptor, ...]:
     return (
         SkillDescriptor(
@@ -796,5 +984,56 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
                 "runtime_root_layout": "plugins/lsp/servers/<server_id>.toml",
                 "may_require_code_changes": True,
             },
+        ),
+        SkillDescriptor(
+            skill_id=PAL_MINION_GATE_DEVELOPMENT_SKILL_ID,
+            module_id=module_id,
+            title="Pal Minion Gate Development",
+            summary="Develop and validate minion gate definitions, gate policy wiring, reviewer strategies, and repair ledger behavior.",
+            manual_text=PAL_MINION_GATE_DEVELOPMENT_MANUAL,
+            activation_terms=(
+                "minion gate",
+                "gate policy",
+                "gate definition",
+                "checkpoint_quality",
+                "plan_acceptance",
+                "reviewer gate",
+                "repair loop",
+                "acceptance checklist",
+                "GateDefinition",
+                "GateChecklistEntry",
+                "GateSpec",
+                "active_gate_todo",
+                "gate ledger",
+            ),
+            capability_refs=(
+                "op_minion_spawn",
+                "op_minion_status",
+                "op_minion_review_gate_submit",
+                "op_minion_review_checkpoint",
+            ),
+            applicability_star=SkillApplicabilitySTAR(
+                situation="Pal needs to add or repair a minion gate or make a profile use a new gate policy.",
+                task="Define reusable checklist entries and gate definitions, wire profiles by gate name, and verify reviewer/repair behavior.",
+                action="Use the gate boundary, provider protocols, profile wiring rules, and pass/fail/repair verification checklist.",
+                result="The gate is discoverable, profile-driven, reviewer-compatible, and projects failures into the repair ledger.",
+            ),
+            use_when=(
+                "Use when the user asks Pal to add a gate, change minion gate policy, organize reviewer gates, "
+                "extend checkpoint/plan acceptance checks, or document how future minion gates should be built."
+            ),
+            avoid_when=(
+                "Avoid for ordinary task planning, one-off review reports, LSP template work, channel providers, "
+                "or plugin work that does not change minion gate semantics."
+            ),
+            source_format="internal_skill",
+            source_refs=(
+                "pal.skill.builtin_skills",
+                "src/pal/minion/gates.py",
+                "src/pal/minion/review_orchestrator.py",
+                "src/pal/minion/profile_templates/",
+                "docs/pal_minion_v1.md",
+            ),
+            metadata={"internal": True, "may_require_code_changes": True, "extension_boundary": "minion.gates"},
         ),
     )

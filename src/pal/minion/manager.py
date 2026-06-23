@@ -18,6 +18,11 @@ from pal.foundation.sidecar import (
     read_sidecar_message,
 )
 from pal.minion.event_delivery import MinionEventDelivery
+from pal.minion.debug_log import minion_debug_log_enabled
+from pal.minion.gates import (
+    GATE_TRIGGER_AFTER_EACH_MILESTONE,
+    gate_specs_from_pack,
+)
 from pal.minion.git_env import finalize_work_order_branch, prepare_task_workspace
 from pal.minion.inflight import InflightTracker
 from pal.minion.ipc import cleanup_manager_endpoint, minion_log_path, minion_runner_log_path, start_manager_server
@@ -258,36 +263,15 @@ class MinionManager:
 
     def _with_profile_gate_policy(self, pack: TaskContextPack) -> tuple[TaskContextPack, dict[str, Any]]:
         metadata = dict(pack.metadata or {})
-        module_execution = dict(metadata.get("module_execution") or {})
-        if module_execution.get("checkpoint_review") is not None or metadata.get("checkpoint_review") is not None:
+        specs = [item.to_dict() for item in gate_specs_from_pack(pack)]
+        if not specs:
             return pack, {}
-        profile = dict(pack.resolved_profile or {})
-        gate_policy = dict(profile.get("effective_gate_policy") or profile.get("gate_policy") or {})
-        gates = {str(item).strip().lower() for item in list(gate_policy.get("after_each_milestone") or [])}
-        if "reviewer_gate" not in gates:
-            return pack, {}
-        reviewer_group = str(gate_policy.get("reviewer_profile_group") or "software_engineering").strip() or "software_engineering"
-        reviewer_name = str(gate_policy.get("reviewer_profile_name") or "reviewer").strip() or "reviewer"
-        scope = str(gate_policy.get("scope") or "").strip()
-        if not scope:
-            scope = "module_checkpoint" if str(module_execution.get("mode") or "").strip() else "bare_coder_checkpoint"
-        checkpoint_review = {
-            "enabled": True,
-            "scope": scope,
-            "reviewer_profile_group": reviewer_group,
-            "reviewer_profile_name": reviewer_name,
-            "reviewer_profile": f"{reviewer_group}.{reviewer_name}",
-            "max_repair_attempts": _coerce_int(gate_policy.get("max_repair_attempts"), 5),
-            "require_test_or_blocker": bool(gate_policy.get("require_test_or_blocker")),
-            "require_api_evidence": bool(gate_policy.get("require_api_evidence")),
-            "require_lsp_when_applicable": bool(gate_policy.get("require_lsp_when_applicable")),
-            "check_public_declarations_have_implementation": bool(gate_policy.get("check_public_declarations_have_implementation")),
-            "source": "profile_gate_policy",
-        }
-        module_execution["checkpoint_review"] = checkpoint_review
-        metadata["module_execution"] = module_execution
-        updates: dict[str, Any] = {"module_execution": module_execution}
+        metadata["gate_specs"] = specs
+        updates: dict[str, Any] = {"gate_specs": specs}
         if metadata.get("manager_turn_timeout_seconds") is None:
+            has_milestone_gate = bool(gate_specs_from_pack(pack, trigger=GATE_TRIGGER_AFTER_EACH_MILESTONE))
+            if not has_milestone_gate:
+                return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata}), updates
             metadata["manager_turn_timeout_seconds"] = _DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS
             updates["manager_turn_timeout_seconds"] = _DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS
         return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata}), updates
@@ -321,6 +305,9 @@ class MinionManager:
             self.tasking_repository.merge_work_order_metadata(pack.work_order_id, metadata_updates)
         self.tasking_repository.update_work_order_workspace(pack.work_order_id, dict(pack.workspace))
         pack = self._with_runner_debug_log(pack)
+        debug_log = dict((pack.metadata or {}).get("debug_log") or {})
+        if bool(debug_log.get("enabled")):
+            self.tasking_repository.merge_work_order_metadata(pack.work_order_id, {"debug_log": debug_log})
         pack = sanitize_runner_session_pack(pack)
         pack = with_minion_sandbox_metadata(self.runtime_root, pack, run_id=run_id)
         state = MinionRunState(minion_id=minion_id, run_id=run_id, pack=pack)
@@ -817,8 +804,7 @@ class MinionManager:
             self.logger.exception("failed to record minion tasking event: %s", state.run_id)
             return
         if event_kind == "checkpoint":
-            self.reviews.schedule_plan_review(state, event)
-            self.reviews.schedule_checkpoint_review(state, event)
+            self.reviews.schedule_event_gates(state, event)
         if event_kind == "terminal":
             self.reviews.schedule_reviewer_terminal_reconciliation(state, event)
         if event_kind == "milestone_completed":
@@ -932,11 +918,7 @@ class MinionManager:
 
 
 def _debug_log_requested(pack: TaskContextPack) -> bool:
-    metadata = dict(pack.metadata or {})
-    debug_log = metadata.get("debug_log")
-    if isinstance(debug_log, dict) and "enabled" in debug_log:
-        return bool(debug_log.get("enabled"))
-    return bool(metadata.get("minion_debug_log_enabled") or metadata.get("prompt_log_enabled"))
+    return minion_debug_log_enabled(pack.metadata)
 
 
 def _is_plan_parent_pack(pack: TaskContextPack) -> bool:
