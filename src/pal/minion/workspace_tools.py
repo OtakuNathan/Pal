@@ -57,10 +57,10 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
 def _workspace_root(workspace: dict[str, Any]) -> Path:
     repo_path = str((workspace or {}).get("repo_path") or "").strip()
     if not repo_path:
-        raise ValueError("current task repo is not available")
+        raise ValueError("current project repo is not available")
     root = Path(repo_path).expanduser().resolve()
     if not root.exists() or not root.is_dir():
-        raise ValueError(f"current task repo is not a directory: {root}")
+        raise ValueError(f"current project repo is not a directory: {root}")
     return root
 
 
@@ -94,7 +94,8 @@ def _write_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> d
     content = str(args.get("content") or "")
     if not content.strip():
         raise ValueError("artifact content is required")
-    if path.exists() and not bool(args.get("overwrite")):
+    overwrite = bool(args.get("overwrite")) if "overwrite" in args else bool((workspace or {}).get("artifact_overwrite_default"))
+    if path.exists() and not overwrite:
         path = _next_available_artifact_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -177,7 +178,7 @@ def _workspace_path(root: Path, raw_path: Any = "") -> Path:
     relative = str(raw_path or ".").strip() or "."
     candidate = (root / relative).resolve()
     if candidate != root and root not in candidate.parents:
-        raise ValueError("path must be relative to the current task repo; absolute paths and clone-source paths are not accepted")
+        raise ValueError("path must be relative to the current project repo; absolute paths and clone-source paths are not accepted")
     return candidate
 
 

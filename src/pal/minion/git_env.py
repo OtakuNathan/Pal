@@ -75,11 +75,22 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
     source_repo = _source_repo(workspace)
     if not source_repo:
         source_repo = str(workspace.get("repo_path") or "").strip()
-    repo_path = _task_repo_path(runtime_root, workspace, task_id)
+    project_name = _project_name(metadata, workspace, task_id=task_id, source_repo=source_repo)
+    module_name = _module_name(metadata, workspace)
+    repo_path = _project_repo_path(runtime_root, workspace, project_name, module_name=module_name)
     created_repo = not (repo_path / ".git").exists()
+    branch = str(workspace.get("work_order_branch") or f"work_order_{_safe_ref(pack.work_order_id)}").strip()
+    worktree_source = _local_git_worktree_source(source_repo, repo_path, workspace)
+    worktree_base_ref = ""
+    workspace_kind = "git_repo"
 
     if created_repo:
-        if source_repo and not _same_local_path(source_repo, repo_path):
+        if worktree_source is not None:
+            worktree_base_ref = _worktree_base_ref(worktree_source, workspace)
+            _add_worktree(worktree_source, repo_path, branch=branch, base_ref=worktree_base_ref)
+            workspace_kind = "git_worktree"
+            workspace["worktree_source_repo"] = str(worktree_source)
+        elif source_repo and not _same_local_path(source_repo, repo_path):
             _clone_repo(source_repo, repo_path)
         else:
             repo_path.mkdir(parents=True, exist_ok=True)
@@ -87,25 +98,29 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
             _git(repo_path, "checkout", "-B", "main", check=True)
     _ensure_git_identity(repo_path)
     if not _has_head(repo_path):
-        _git(repo_path, "commit", "--allow-empty", "-m", "minion: initialize task repo", check=True)
+        _git(repo_path, "commit", "--allow-empty", "-m", "minion: initialize project repo", check=True)
     _ensure_local_git_excludes(repo_path)
+    environment_baseline_ref = ""
     environment = prepare_workspace_environment(repo_path, pack, workspace, write_files=created_repo, runtime_root=runtime_root)
     if environment:
         workspace["languages"] = list(environment.get("languages") or [])
         workspace["lsp_setup"] = dict(environment.get("lsp_setup") or {})
+        execution_env = dict(environment.get("execution_env") or {})
+        if execution_env:
+            workspace["execution_env"] = execution_env
         created_files = [str(item) for item in list(environment.get("created_files") or []) if str(item).strip()]
         if created_files:
             _git(repo_path, "add", "--", *created_files, check=True)
             if _has_staged_changes(repo_path):
                 _git(repo_path, "commit", "-m", "minion: prepare workspace environment", check=True)
                 workspace["lsp_setup"]["baseline_commit_sha"] = _current_head(repo_path)
+                environment_baseline_ref = _current_branch(repo_path) or _current_head(repo_path)
 
-    base_ref = str(workspace.get("base_ref") or _current_branch(repo_path) or "HEAD").strip() or "HEAD"
+    base_ref = str(workspace.get("base_ref") or environment_baseline_ref or worktree_base_ref or _current_branch(repo_path) or "HEAD").strip() or "HEAD"
     if not _git(repo_path, "rev-parse", "--verify", base_ref).ok:
         base_ref = "HEAD"
     base_sha = _git(repo_path, "rev-parse", base_ref, check=True).stdout.strip()
-    branch = str(workspace.get("work_order_branch") or f"work_order_{_safe_ref(pack.work_order_id)}").strip()
-    merge_target = str(workspace.get("merge_target") or base_ref).strip() or base_ref
+    merge_target = str(workspace.get("merge_target") or worktree_base_ref or base_ref).strip() or base_ref
     if _git(repo_path, "rev-parse", "--verify", branch).ok:
         _git(repo_path, "checkout", branch, check=True)
     else:
@@ -114,11 +129,12 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
     workspace.update(
         {
             "repo_path": str(repo_path),
+            "project_name": project_name,
             "base_ref": base_ref,
             "base_sha": base_sha,
             "work_order_branch": branch,
             "merge_target": merge_target,
-            "workspace_kind": "git_repo",
+            "workspace_kind": workspace_kind,
         }
     )
     artifact_dir = repo_path / "minion_outputs" / _safe_ref(pack.work_order_id)
@@ -127,6 +143,8 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
     workspace["artifact_dir"] = str(artifact_dir)
     workspace["workspace_policy"] = {"mode": "writable_git_branch"}
     workspace["completion_policy"] = {"evidence": "git_commit", "requires_capability_evidence": True}
+    if module_name:
+        workspace["module_name"] = module_name
     if source_repo:
         workspace.setdefault("source_repo", source_repo)
     return _with_checkpoint_commit_capability(TaskContextPack.from_dict({**pack.to_dict(), "workspace": workspace}))
@@ -187,6 +205,7 @@ def commit_milestone(repo_path: Path, *, work_order_id: str, milestone_index: in
     repo = Path(repo_path)
     if not (repo / ".git").exists():
         return {"status": "error", "error": "workspace is not a git repository", "repo_path": str(repo)}
+    _ensure_git_identity(repo)
     status = _git(repo, "status", "--porcelain", check=True).stdout.strip()
     head = _current_head(repo)
     if not status:
@@ -252,6 +271,7 @@ def finalize_work_order_branch(repo_path: Path, *, work_order_branch: str, merge
     repo = Path(repo_path)
     if not (repo / ".git").exists():
         return {"status": "error", "error": "workspace is not a git repository", "repo_path": str(repo)}
+    _ensure_git_identity(repo)
     branch = str(work_order_branch or "").strip()
     target = str(merge_target or "").strip()
     if not branch or not target:
@@ -282,14 +302,18 @@ def finalize_work_order_branch(repo_path: Path, *, work_order_branch: str, merge
 
 
 def _ensure_git_identity(repo_path: Path) -> None:
-    if not _git(repo_path, "config", "user.email").stdout.strip():
-        _git(repo_path, "config", "user.email", "minion@pal.local", check=True)
-    if not _git(repo_path, "config", "user.name").stdout.strip():
-        _git(repo_path, "config", "user.name", "Pal Minion", check=True)
+    if not _git(repo_path, "config", "--local", "user.email").stdout.strip():
+        _git(repo_path, "config", "--local", "user.email", "minion@pal.local", check=True)
+    if not _git(repo_path, "config", "--local", "user.name").stdout.strip():
+        _git(repo_path, "config", "--local", "user.name", "Pal Minion", check=True)
 
 
 def _ensure_local_git_excludes(repo_path: Path) -> None:
-    exclude_path = Path(repo_path) / ".git" / "info" / "exclude"
+    git_path = _git(repo_path, "rev-parse", "--git-path", "info/exclude")
+    raw_path = git_path.stdout.strip() if git_path.ok else ""
+    exclude_path = Path(raw_path) if raw_path else Path(repo_path) / ".git" / "info" / "exclude"
+    if not exclude_path.is_absolute():
+        exclude_path = Path(repo_path) / exclude_path
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
     missing = [pattern for pattern in LOCAL_GIT_EXCLUDES if pattern not in existing.splitlines()]
@@ -346,7 +370,7 @@ def _clone_repo(source: str, repo_path: Path) -> None:
     repo_path = Path(repo_path)
     repo_path.parent.mkdir(parents=True, exist_ok=True)
     if repo_path.exists() and any(repo_path.iterdir()):
-        raise RuntimeError(f"target task repo is not empty and is not a git repository: {repo_path}")
+        raise RuntimeError(f"target project repo is not empty and is not a git repository: {repo_path}")
     completed = subprocess.run(
         ["git", "clone", str(source), str(repo_path)],
         cwd=str(repo_path.parent),
@@ -358,11 +382,102 @@ def _clone_repo(source: str, repo_path: Path) -> None:
         raise RuntimeError(completed.stderr or completed.stdout or f"git clone {source} failed")
 
 
-def _task_repo_path(runtime_root: Path, workspace: dict[str, Any], task_id: str) -> Path:
+def _local_git_worktree_source(source: str, repo_path: Path, workspace: dict[str, Any]) -> Path | None:
+    for key in ("use_worktree", "use_git_worktree"):
+        if key in workspace and str(workspace.get(key)).strip().lower() in {"0", "false", "no", "off"}:
+            return None
+    if not source or not _is_local_path(source) or _same_local_path(source, repo_path):
+        return None
+    candidate = Path(source).expanduser().resolve()
+    if not candidate.is_dir():
+        return None
+    if not _git(candidate, "rev-parse", "--is-inside-work-tree").ok:
+        return None
+    if not _has_head(candidate):
+        return None
+    return candidate
+
+
+def _worktree_base_ref(source_repo: Path, workspace: dict[str, Any]) -> str:
+    base_ref = str(workspace.get("base_ref") or _current_branch(source_repo) or "HEAD").strip() or "HEAD"
+    if not _git(source_repo, "rev-parse", "--verify", base_ref).ok:
+        base_ref = "HEAD"
+    return base_ref
+
+
+def _add_worktree(source_repo: Path, repo_path: Path, *, branch: str, base_ref: str) -> None:
+    repo_path = Path(repo_path)
+    repo_path.parent.mkdir(parents=True, exist_ok=True)
+    if repo_path.exists() and any(repo_path.iterdir()):
+        raise RuntimeError(f"target project repo is not empty and is not a git worktree: {repo_path}")
+    completed = subprocess.run(
+        ["git", "worktree", "add", "-B", str(branch), str(repo_path), str(base_ref or "HEAD")],
+        cwd=str(source_repo),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr or completed.stdout or f"git worktree add {repo_path} failed")
+
+
+def _project_repo_path(runtime_root: Path, workspace: dict[str, Any], project_name: str, *, module_name: str = "") -> Path:
     explicit = str(workspace.get("task_repo_path") or workspace.get("target_repo_path") or "").strip()
     if explicit:
         return Path(explicit).expanduser()
-    return runtime_root / "data" / "minion" / "repos" / task_id
+    project_root = runtime_root / "data" / "minion" / "repos" / _safe_ref(project_name)
+    if str(module_name or "").strip():
+        return project_root / _safe_ref(module_name)
+    return project_root
+
+
+def _project_name(metadata: dict[str, Any], workspace: dict[str, Any], *, task_id: str, source_repo: str) -> str:
+    for source in (metadata, workspace):
+        for key in ("project_name", "project_key", "project_id"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    plan_artifact = metadata.get("plan_artifact")
+    if isinstance(plan_artifact, dict):
+        plan_metadata = plan_artifact.get("metadata")
+        if isinstance(plan_metadata, dict):
+            for key in ("project_name", "project_key", "project_id"):
+                value = str(plan_metadata.get(key) or "").strip()
+                if value:
+                    return value
+    source_name = _source_repo_project_name(source_repo)
+    if source_name:
+        return source_name
+    return str(task_id or "").strip() or "default_project"
+
+
+def _module_name(metadata: dict[str, Any], workspace: dict[str, Any]) -> str:
+    for source in (metadata, workspace):
+        for key in ("module_name", "parent_module_name", "module_key", "module_id", "parent_module_id"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _source_repo_project_name(source_repo: str) -> str:
+    source = str(source_repo or "").strip()
+    if not source:
+        return ""
+    if _is_local_path(source):
+        try:
+            return Path(source).expanduser().resolve().name
+        except OSError:
+            return Path(source).expanduser().name
+    text = source.rstrip("/")
+    if not text:
+        return ""
+    leaf = text.rsplit("/", 1)[-1]
+    if leaf.endswith(".git"):
+        leaf = leaf[:-4]
+    if ":" in leaf:
+        leaf = leaf.rsplit(":", 1)[-1]
+    return leaf
 
 
 def _source_repo(workspace: dict[str, Any]) -> str:
@@ -386,8 +501,11 @@ def _normalize_workspace_paths(workspace: dict[str, Any]) -> dict[str, Any]:
 def _with_folder_workspace(runtime_root: Path, pack: TaskContextPack, workspace: dict[str, Any], *, run_id: str = "") -> TaskContextPack:
     prepared_workspace = dict(workspace)
     if str(run_id or "").strip():
-        for key in ("run_dir", "artifact_dir", "log_dir"):
+        preserved_artifact_dir = bool(prepared_workspace.get("preserve_artifact_dir"))
+        for key in ("run_dir", "log_dir"):
             prepared_workspace.pop(key, None)
+        if not preserved_artifact_dir:
+            prepared_workspace.pop("artifact_dir", None)
     profile = _safe_ref(pack.minion_profile or "generic")
     run_part = _safe_ref(run_id or str(pack.metadata.get("run_id") or "") or pack.work_order_id)
     run_dir = Path(str(prepared_workspace.get("run_dir") or runtime_root / "data" / "minion" / "workspaces" / f"{run_part}_{profile}"))

@@ -524,6 +524,8 @@ def planner_requirements() -> dict[str, Any]:
         "require_module_contracts": True,
         "require_internal_milestones": True,
         "require_orchestration": True,
+        "gate_contract_policy": "optional_when_provided",
+        "mechanical_checks_policy": "dispatch_topology_only",
         "required_execution_shape": "fork_join_linear",
         "require_topology_nodes": True,
         "topology_node_kinds": ["prelude", "module", "join"],
@@ -587,9 +589,21 @@ def compile_coder_work_order(
     artifact = plan if isinstance(plan, PlanArtifact) else PlanArtifact.from_dict(dict(plan or {}))
     module = _select_module(artifact.modules, module_id)
     milestone_index, milestone = _select_milestone_with_index(module.internal_milestones, milestone_id)
+    dependency_context = _module_dependency_context(artifact, module.module_id)
+    dependency_contracts = [
+        {
+            **dict(interface),
+            "producer_module_id": str(dependency.get("module_id") or ""),
+            "contract_visibility": "declared_public_interface",
+        }
+        for dependency in dependency_context
+        for interface in list(dependency.get("provided_interfaces") or [])
+        if isinstance(interface, dict)
+    ]
     relevant_contracts = [
         *module.provided_interfaces,
         *module.consumed_interfaces,
+        *dependency_contracts,
         *[
             dict(item)
             for item in artifact.cross_module_contracts
@@ -629,6 +643,7 @@ def compile_coder_work_order(
         metadata={
             "plan_id": artifact.plan_id,
             "milestone_index": milestone_index,
+            "module_dependency_context": dependency_context,
             "workspace": _prompt_workspace(workspace or {}),
         },
     )
@@ -639,15 +654,19 @@ def prompt_view_for_coder(work_order: CoderWorkOrder | dict[str, Any]) -> Prompt
     milestone = order.current_milestone.to_dict() if order.current_milestone is not None else {}
     if "milestone_index" in order.metadata:
         milestone.setdefault("milestone_index", _coerce_int(order.metadata.get("milestone_index"), default=0))
+    module_view = {
+        "module_id": order.module_id,
+        "owned_area": list(order.owned_area),
+        "responsibility": order.responsibility,
+    }
+    dependency_context = _dict_list(order.metadata.get("module_dependency_context"))
+    if dependency_context:
+        module_view["dependency_context"] = dependency_context
     return PromptView(
         role=order.role,
         task_id=order.task_id,
         work_order_id=order.work_order_id,
-        module={
-            "module_id": order.module_id,
-            "owned_area": list(order.owned_area),
-            "responsibility": order.responsibility,
-        },
+        module=module_view,
         milestone=milestone,
         relevant_contracts=[dict(item) for item in order.relevant_contracts],
         skill_refs=list(order.skill_refs),
@@ -1044,6 +1063,46 @@ def _planner_prompt_view(work_order: dict[str, Any], *, workspace: dict[str, Any
         "output_contract": _dict(work_order.get("output_contract")),
         "workspace": _prompt_workspace(workspace),
     }
+
+
+def _module_dependency_context(artifact: PlanArtifact, module_id: str) -> list[dict[str, Any]]:
+    wanted = str(module_id or "").strip()
+    if not wanted:
+        return []
+    try:
+        validation = dispatchable_plan_validation(artifact)
+    except Exception:
+        return []
+    nodes = [dict(item) for item in list(validation.get("nodes") or []) if isinstance(item, dict)]
+    current = next((node for node in nodes if str(node.get("module_id") or "") == wanted), None)
+    if current is None:
+        return []
+    dependency_map = {str(node.get("node_id") or ""): _node_dependencies(node) for node in nodes}
+    current_node_id = str(current.get("node_id") or "")
+    module_by_id = {module.module_id: module for module in artifact.modules}
+    result: list[dict[str, Any]] = []
+    for node in nodes:
+        node_id = str(node.get("node_id") or "")
+        dependency_module_id = str(node.get("module_id") or "")
+        if not node_id or dependency_module_id == wanted:
+            continue
+        if not _has_dependency_path(current_node_id, node_id, dependency_map):
+            continue
+        dependency = module_by_id.get(dependency_module_id)
+        if dependency is None:
+            continue
+        result.append(
+            {
+                "module_id": dependency.module_id,
+                "node_id": node_id,
+                "node_kind": str(node.get("kind") or ""),
+                "responsibility": dependency.responsibility,
+                "owned_area": list(dependency.owned_area),
+                "provided_interfaces": [dict(item) for item in dependency.provided_interfaces],
+                "visibility": "declared public interfaces only",
+            }
+        )
+    return result
 
 
 def _select_module(modules: list[ModulePlan], module_id: str) -> ModulePlan:

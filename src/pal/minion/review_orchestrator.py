@@ -4,8 +4,8 @@ import asyncio
 import json
 import logging
 import re
-import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,6 +16,7 @@ from pal.minion.contracts import SERIAL_MILESTONE_MODES
 from pal.minion.gates import (
     GATE_TRIGGER_AFTER_EACH_MILESTONE,
     GateSpec,
+    MODULE_QUALITY_GATE,
     checkpoint_gate_spec_for_pack,
     checkpoint_review_policy_from_spec,
     default_gate_strategy_registry,
@@ -25,7 +26,7 @@ from pal.minion.gates import (
     project_active_gate_todo,
 )
 from pal.minion.inflight import InflightTracker
-from pal.minion.profiles import MinionProfileRegistry
+from pal.minion.profiles import MinionProfileRegistry, PLAN_REVIEWER_CAPABILITIES
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.turns import apply_minion_turn_to_pack
 from pal.minion.utils import coerce_bool, coerce_int, safe_token
@@ -67,6 +68,92 @@ class ReviewOrchestrator:
 
     def schedule_checkpoint_review(self, state: MinionRunState, event: dict[str, Any]) -> None:
         self._schedule_checkpoint_review(state, event, checkpoint_gate_spec_for_pack(state.pack))
+
+    async def retry_checkpoint_review(self, *, checkpoint_id: str = "", work_order_id: str = "") -> dict[str, Any]:
+        checkpoint = self._load_retry_checkpoint(checkpoint_id=checkpoint_id, work_order_id=work_order_id)
+        resolved_checkpoint_id = str(checkpoint.get("checkpoint_id") or "").strip()
+        resolved_work_order_id = str(checkpoint.get("work_order_id") or work_order_id or "").strip()
+        if not resolved_checkpoint_id or not resolved_work_order_id:
+            return {
+                "status": "invalid",
+                "checkpoint_id": resolved_checkpoint_id,
+                "work_order_id": resolved_work_order_id,
+                "reason": "checkpoint_id and work_order_id are required",
+            }
+        latest = self.repository.latest_review_gate_for_checkpoint(resolved_checkpoint_id)
+        if latest.get("status") == "ok":
+            gate = dict(latest.get("review_gate") or {})
+            if str(gate.get("verdict") or "").strip().lower() == "pass":
+                return await self._continue_persisted_checkpoint_pass(resolved_checkpoint_id, latest, gate)
+            return {
+                "status": "review_gate_present",
+                "checkpoint_id": resolved_checkpoint_id,
+                "work_order_id": resolved_work_order_id,
+                "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                "verdict": str(gate.get("verdict") or ""),
+                "reason": "checkpoint already has a non-passing review gate",
+            }
+        if str(checkpoint.get("status") or "").strip().lower() != "claimed":
+            return {
+                "status": "not_claimed",
+                "checkpoint_id": resolved_checkpoint_id,
+                "work_order_id": resolved_work_order_id,
+                "checkpoint_status": str(checkpoint.get("status") or ""),
+            }
+        if not self.checkpoint_reviews.claim(resolved_checkpoint_id):
+            return {
+                "status": "in_progress",
+                "checkpoint_id": resolved_checkpoint_id,
+                "work_order_id": resolved_work_order_id,
+            }
+        from pal.minion.manager import MinionRunState
+
+        pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(self.repository.pack_for_work_order(resolved_work_order_id))
+        state = MinionRunState(
+            minion_id=str(checkpoint.get("minion_id") or "minion_recovered"),
+            run_id=str(checkpoint.get("run_id") or f"run_recovered_{safe_token(resolved_checkpoint_id)}"),
+            pack=pack,
+            status="blocked",
+        )
+        event = {
+            "event_kind": "checkpoint",
+            "minion_id": state.minion_id,
+            "run_id": state.run_id,
+            "work_order_id": resolved_work_order_id,
+            "minion_profile": state.pack.minion_profile,
+            "payload": checkpoint,
+            "created_at": str(checkpoint.get("created_at") or utc_now()),
+        }
+        spawned = await self._spawn_checkpoint_reviewer(state, event, resolved_checkpoint_id, checkpoint_gate_spec_for_pack(state.pack))
+        if not spawned:
+            return {
+                "status": "spawn_failed",
+                "checkpoint_id": resolved_checkpoint_id,
+                "work_order_id": resolved_work_order_id,
+            }
+        return {
+            "status": "reviewer_spawned",
+            "checkpoint_id": resolved_checkpoint_id,
+            "work_order_id": resolved_work_order_id,
+        }
+
+    def _load_retry_checkpoint(self, *, checkpoint_id: str = "", work_order_id: str = "") -> dict[str, Any]:
+        normalized_checkpoint_id = str(checkpoint_id or "").strip()
+        if normalized_checkpoint_id:
+            loaded = self.repository.load_checkpoint(normalized_checkpoint_id)
+            return dict(loaded.get("checkpoint") or {}) if loaded.get("status") == "ok" else {}
+        normalized_work_order_id = str(work_order_id or "").strip()
+        if not normalized_work_order_id:
+            return {}
+        snapshot = self.repository.read_work_order(normalized_work_order_id)
+        if snapshot.get("status") != "ok":
+            return {}
+        current = dict(snapshot.get("current_milestone") or {})
+        checkpoint = dict(current.get("latest_checkpoint") or {})
+        if checkpoint:
+            return checkpoint
+        latest = dict(snapshot.get("latest_checkpoint") or {})
+        return latest
 
     def schedule_event_gates(self, state: MinionRunState, event: dict[str, Any]) -> None:
         for spec in gate_specs_from_pack(state.pack, trigger=GATE_TRIGGER_AFTER_EACH_MILESTONE):
@@ -122,36 +209,40 @@ class ReviewOrchestrator:
             plan_review_policy = plan_review_policy_from_spec(spec, dict(planner_state.pack.metadata or {}))
             workspace = dict(planner_state.pack.workspace or {})
             repo_path = str(workspace.get("repo_path") or workspace.get("source_repo") or "").strip()
-            artifact_dir = str(workspace.get("artifact_dir") or "").strip()
+            source_artifact_dir = str(workspace.get("artifact_dir") or "").strip()
             source_contract = _source_contract_from_pack(planner_state.pack)
             review_target = {
                 "plan_ref": dict(plan_ref),
+                **({"plan_draft_ref": dict(plan_ref)} if str(plan_ref.get("ref_kind") or "") == "plan_draft" else {}),
                 "plan_validation": dict(payload.get("plan_validation") or {}),
                 "planner_work_order_id": planner_state.pack.work_order_id,
                 "planner_run_id": planner_state.run_id,
                 "planner_minion_id": planner_state.minion_id,
                 "repo_path": repo_path,
-                "artifact_dir": artifact_dir,
+                "artifact_dir": source_artifact_dir,
                 "summary": str(payload.get("summary") or ""),
                 "gate_spec": spec.to_dict(),
             }
             if source_contract:
                 review_target["source_contract"] = source_contract
             review_work_order_id = f"wo_plan_review_{safe_token(review_key)}"
-            review_scratch = prepare_review_scratch(self.runtime_root, review_work_order_id, repo_path=repo_path)
+            review_artifact = review_artifact_dir(self.runtime_root, review_work_order_id)
+            review_scratch = prepare_review_scratch(self.runtime_root, review_work_order_id)
             review_target.update(review_scratch)
             acceptance_criteria = list(spec.required_checks) or [
                 "Verify the plan is dispatchable and topology/module ordering is valid.",
                 "Verify referenced files, modules, and claimed APIs with source, LSP, docs, build, or explicit not-applicable evidence.",
                 "Verify the test strategy is executable for the repo and each milestone has concrete acceptance criteria.",
-                "Submit op_minion_review_gate_submit with gate_kind=plan_acceptance and target.plan_ref.",
+                "Use plan_read/plan_find/plan_get/plan_validate when available, cite target_handle for specific plan nodes, and submit op_minion_review_gate_submit with gate_kind=plan_acceptance and target.plan_ref.",
+                "Do not inspect the submitted plan artifact with shell/cat/grep/jq/Python; use the plan_* tools as the authoritative plan view.",
             ]
             if source_contract:
                 acceptance_criteria.insert(
                     0,
                     (
-                        "Verify the plan satisfies the planner source_contract exactly, including explicit names, "
-                        "counts, file boundaries, hard requirements, and acceptance criteria from the original work order."
+                        "Verify the plan preserves the planner source_contract as boundary-quality obligations: explicit public names, "
+                        "file/module ownership, input/output/error contracts, hard requirements, and acceptance evidence from the original work order. "
+                        "Do not fail solely because the module count differs from a heuristic or example unless the source contract explicitly makes that count binding or the topology becomes invalid."
                     ),
                 )
             review_workspace = {
@@ -196,13 +287,18 @@ class ReviewOrchestrator:
                     "work_order_id": review_work_order_id,
                     "goal": f"Review plan {plan_ref.get('plan_id') or review_key}",
                     "instruction": (
-                        "Review the referenced planner FinalPlanArtifact. Do not modify the source repository. "
+                        "Review the referenced submitted planner draft. Use plan_read/plan_find/plan_get/plan_validate when available; "
+                        "cite target_handle in findings for specific modules, milestones, or acceptance criteria. Do not modify the source repository. "
+                        "Do not inspect plan.draft.json or plan.json with shell/cat/grep/jq/Python; plan_* tools are the authoritative plan view. "
+                        "Once those tools prove a blocker or a pass, submit op_minion_review_gate_submit immediately. "
                         "You may create temporary probes only under /tmp, $TMPDIR, or your isolated minion artifact workspace. "
                         "You must submit a structured gate through op_minion_review_gate_submit before completing."
                     ),
                     "workspace": {
                         "repo_path": repo_path,
-                        "artifact_dir": artifact_dir,
+                        "artifact_dir": str(review_artifact),
+                        "preserve_artifact_dir": True,
+                        "artifact_overwrite_default": True,
                         **review_scratch,
                         "workspace_policy": {"mode": "read_only_repo"},
                         "review_target_plan_ref": dict(plan_ref),
@@ -212,24 +308,30 @@ class ReviewOrchestrator:
                     },
                     "profile_group": str(plan_review_policy.get("reviewer_profile_group") or spec.reviewer_profile_group or "software_engineering"),
                     "profile_name": str(plan_review_policy.get("reviewer_profile_name") or spec.reviewer_profile_name or "reviewer"),
+                    "allowed_capabilities": list(PLAN_REVIEWER_CAPABILITIES),
                     "metadata": metadata,
                 }
             )
             pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
             spawned = await self.manager.spawn(pack.to_dict())
+            review_state = {
+                **plan_review_policy,
+                "status": "reviewing",
+                "summary": "plan reviewer spawned",
+                "plan_ref": dict(plan_ref),
+                "review_key": review_key,
+                "review_work_order_id": review_work_order_id,
+                "review_run_id": str(spawned.get("run_id") or ""),
+                "review_minion_id": str(spawned.get("minion_id") or ""),
+                "reviewer_profile": str(spawned.get("minion_profile") or pack.minion_profile),
+                "updated_at": utc_now(),
+            }
+            self._merge_plan_review_state(planner_state.pack.work_order_id, review_state)
             self.manager._record_event(
                 planner_state,
                 {
                     "event_kind": "plan_review_started",
-                    "payload": {
-                        "status": "running",
-                        "summary": "plan reviewer spawned",
-                        "plan_ref": dict(plan_ref),
-                        "review_key": review_key,
-                        "review_work_order_id": review_work_order_id,
-                        "review_run_id": str(spawned.get("run_id") or ""),
-                        "reviewer_profile": str(spawned.get("minion_profile") or pack.minion_profile),
-                    },
+                    "payload": dict(review_state),
                     "created_at": utc_now(),
                 },
             )
@@ -277,7 +379,7 @@ class ReviewOrchestrator:
         event: dict[str, Any],
         checkpoint_id: str,
         spec: GateSpec,
-    ) -> None:
+    ) -> bool:
         try:
             payload = dict(event.get("payload") or {})
             workspace = dict(coder_state.pack.workspace or {})
@@ -311,6 +413,10 @@ class ReviewOrchestrator:
                 deferred_acceptance = _deferred_acceptance_criteria(source_contract, current_acceptance)
                 if deferred_acceptance:
                     review_target["deferred_acceptance_criteria"] = deferred_acceptance
+            if spec.gate == MODULE_QUALITY_GATE:
+                module_contract = _module_contract_from_pack(coder_state.pack)
+                if module_contract:
+                    review_target["module_contract"] = module_contract
             acceptance_checklist = build_acceptance_checklist(review_target.get("acceptance_criteria"))
             if acceptance_checklist:
                 review_target["acceptance_checklist"] = compact_checklist(acceptance_checklist)
@@ -320,11 +426,15 @@ class ReviewOrchestrator:
             reviewer_group = str(review_policy.get("reviewer_profile_group") or "software_engineering").strip() or "software_engineering"
             reviewer_name = str(review_policy.get("reviewer_profile_name") or "reviewer").strip() or "reviewer"
             review_work_order_id = f"wo_review_{safe_token(checkpoint_id)}"
-            review_scratch = prepare_review_scratch(self.runtime_root, review_work_order_id, repo_path=repo_path)
+            review_artifact = review_artifact_dir(self.runtime_root, review_work_order_id)
+            review_scratch = prepare_review_scratch(self.runtime_root, review_work_order_id)
             review_target.update(review_scratch)
             environment_workspace = _checkpoint_review_environment_workspace(workspace)
             reviewer_workspace = {
                 "repo_path": repo_path,
+                "artifact_dir": str(review_artifact),
+                "preserve_artifact_dir": True,
+                "artifact_overwrite_default": True,
                 **review_scratch,
                 **environment_workspace,
                 "workspace_policy": {"mode": "read_only_repo"},
@@ -384,6 +494,7 @@ class ReviewOrchestrator:
             )
             pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
             await self.manager.spawn(pack.to_dict())
+            return True
         except Exception:
             self.logger.exception("failed to spawn checkpoint reviewer: %s", checkpoint_id)
             try:
@@ -400,6 +511,7 @@ class ReviewOrchestrator:
                 )
             finally:
                 self.checkpoint_reviews.release(checkpoint_id)
+            return False
 
     def _checkpoint_review_gate_kind(self, coder_state: MinionRunState, payload: dict[str, Any]) -> str:
         expected = str(payload.get("expected_review_gate_kind") or "").strip().lower()
@@ -418,6 +530,27 @@ class ReviewOrchestrator:
 
     def schedule_reviewer_terminal_reconciliation(self, state: MinionRunState, event: dict[str, Any]) -> None:
         metadata = dict(state.pack.metadata or {})
+        workspace = dict(state.pack.workspace or {})
+        if bool(metadata.get("pre_plan_contract_compiler")) or str(workspace.get("pre_plan_contract_source_work_order_id") or "").strip():
+            source_work_order_id = str(
+                metadata.get("pre_plan_contract_source_work_order_id")
+                or workspace.get("pre_plan_contract_source_work_order_id")
+                or ""
+            ).strip()
+            if not source_work_order_id:
+                return
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            self._track_background_task(
+                loop.create_task(
+                    self._reconcile_pre_plan_contract(state, source_work_order_id),
+                    name=f"minion-pre-plan-contract-reconcile-{safe_token(source_work_order_id)}",
+                ),
+                label=f"pre-plan contract reconcile {source_work_order_id}",
+            )
+            return
         review_target = dict(metadata.get("review_target") or {})
         plan_ref = review_target.get("plan_ref")
         if isinstance(plan_ref, dict):
@@ -492,6 +625,113 @@ class ReviewOrchestrator:
             return
         self.repository.merge_work_order_metadata(work_order_id, {"plan_review": dict(payload or {})})
 
+    async def _reconcile_pre_plan_contract(self, reviewer_state: MinionRunState, source_work_order_id: str) -> None:
+        metadata = dict(reviewer_state.pack.metadata or {})
+        try:
+            snapshot = self.repository.read_work_order(source_work_order_id)
+            if snapshot.get("status") != "ok":
+                return
+            work_order = dict(snapshot.get("work_order") or {})
+            source_metadata = dict(work_order.get("metadata") or {})
+            pre_plan_state = dict(source_metadata.get("pre_plan_contract") or {})
+            gate_contract = pre_plan_state.get("gate_contract")
+            if not isinstance(gate_contract, dict):
+                gate_contract = source_metadata.get("gate_contract")
+            if not isinstance(gate_contract, dict) or not _active_gate_contract_checks(gate_contract):
+                failed = {
+                    **pre_plan_state,
+                    "status": "failed",
+                    "summary": "contract compiler finished without submitting gate_contract",
+                    "updated_at": utc_now(),
+                }
+                self.repository.merge_work_order_metadata(source_work_order_id, {"pre_plan_contract": failed})
+                self._record_work_order_event(
+                    work_order_id=source_work_order_id,
+                    event_kind="pre_plan_contract_failed",
+                    minion_id=reviewer_state.minion_id,
+                    run_id=reviewer_state.run_id,
+                    minion_profile=reviewer_state.pack.minion_profile,
+                    payload={
+                        "status": "failed",
+                        "summary": "contract compiler finished without submitting gate_contract",
+                        "compiler_work_order_id": reviewer_state.pack.work_order_id,
+                    },
+                )
+                return
+            source_pack_payload = metadata.get("pre_plan_contract_source_pack") or source_metadata.get("pre_plan_contract_source_pack")
+            if not isinstance(source_pack_payload, dict):
+                failed = {
+                    **pre_plan_state,
+                    "status": "failed",
+                    "summary": "contract compiler cannot recover original planner pack",
+                    "updated_at": utc_now(),
+                }
+                self.repository.merge_work_order_metadata(source_work_order_id, {"pre_plan_contract": failed})
+                return
+            source_pack = TaskContextPack.from_dict(dict(source_pack_payload))
+            restored_workspace = dict(source_pack.workspace or {})
+            restored_workspace["gate_contract"] = dict(gate_contract)
+            restored_metadata = dict(source_pack.metadata or {})
+            restored_metadata.update(source_metadata)
+            restored_metadata["gate_contract"] = dict(gate_contract)
+            restored_metadata["pre_plan_contract"] = {
+                **pre_plan_state,
+                "status": "compiled",
+                "summary": str(pre_plan_state.get("summary") or "pre-plan source contract compiled"),
+                "gate_contract": dict(gate_contract),
+                "planner_spawned_at": utc_now(),
+                "updated_at": utc_now(),
+            }
+            restored_metadata.pop("pre_plan_contract_compiler", None)
+            restored_pack = TaskContextPack.from_dict(
+                {
+                    **source_pack.to_dict(),
+                    "workspace": restored_workspace,
+                    "metadata": restored_metadata,
+                }
+            )
+            spawned = await self.manager.spawn(restored_pack.to_dict())
+            self.repository.merge_work_order_metadata(
+                source_work_order_id,
+                {
+                    "pre_plan_contract": {
+                        **restored_metadata["pre_plan_contract"],
+                        "status": "planner_started",
+                        "planner_run_id": str(spawned.get("run_id") or ""),
+                        "planner_minion_id": str(spawned.get("minion_id") or ""),
+                        "updated_at": utc_now(),
+                    }
+                },
+            )
+            self._record_work_order_event(
+                work_order_id=source_work_order_id,
+                event_kind="pre_plan_contract_planner_started",
+                minion_id=reviewer_state.minion_id,
+                run_id=reviewer_state.run_id,
+                minion_profile=reviewer_state.pack.minion_profile,
+                payload={
+                    "status": "planner_started",
+                    "summary": "pre-plan source contract compiled; planner spawned with gate_contract",
+                    "gate_contract": dict(gate_contract),
+                    "planner_run_id": str(spawned.get("run_id") or ""),
+                    "planner_minion_id": str(spawned.get("minion_id") or ""),
+                    "compiler_work_order_id": reviewer_state.pack.work_order_id,
+                },
+            )
+        except Exception as exc:
+            self.logger.exception("failed to reconcile pre-plan source contract: %s", source_work_order_id)
+            self.repository.merge_work_order_metadata(
+                source_work_order_id,
+                {
+                    "pre_plan_contract": {
+                        "status": "spawn_failed",
+                        "summary": "manager failed to spawn planner after source contract compilation",
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                        "updated_at": utc_now(),
+                    }
+                },
+            )
+
     async def _reconcile_plan_review(self, reviewer_state: MinionRunState, plan_ref: dict[str, Any], review_key: str) -> None:
         source_work_order_id = ""
         try:
@@ -527,6 +767,15 @@ class ReviewOrchestrator:
                 return
             gate = dict(latest.get("review_gate") or {})
             verdict = str(gate.get("verdict") or "").strip().lower()
+            reviewed_plan_ref = dict(plan_ref)
+            published_plan: dict[str, Any] = {}
+            if verdict == "pass" and str(reviewed_plan_ref.get("ref_kind") or "") == "plan_draft":
+                loaded_draft = self.repository.load_dispatchable_plan_ref(reviewed_plan_ref)
+                published_plan = self.repository.submit_plan_ref(
+                    dict(loaded_draft.get("plan_artifact") or {}),
+                    submission_notes=f"published from reviewed draft {reviewed_plan_ref.get('sha256') or ''}",
+                )
+                plan_ref = dict(published_plan.get("plan_ref") or plan_ref)
             event_kind = {
                 "pass": "plan_review_passed",
                 "fail": "plan_review_failed",
@@ -536,6 +785,7 @@ class ReviewOrchestrator:
                 "status": verdict or "failed",
                 "summary": gate.get("summary") or f"plan review {verdict or 'failed'}",
                 "plan_ref": dict(plan_ref),
+                **({"plan_draft_ref": reviewed_plan_ref} if reviewed_plan_ref != plan_ref else {}),
                 "review_gate": gate,
                 "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
             }
@@ -546,6 +796,7 @@ class ReviewOrchestrator:
                     "partial": "human_decision_required",
                 }.get(verdict, "failed"),
                 "plan_ref": dict(plan_ref),
+                **({"plan_draft_ref": reviewed_plan_ref} if reviewed_plan_ref != plan_ref else {}),
                 "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
                 "review_gate": gate,
                 "updated_at": utc_now(),
@@ -557,6 +808,15 @@ class ReviewOrchestrator:
             }
             plan_review_policy = dict(metadata.get("plan_review") or {})
             self._merge_plan_review_state(source_work_order_id, review_state)
+            upstream_work_order_id = str(plan_review_policy.get("source_work_order_id") or "").strip()
+            if verdict == "pass" and upstream_work_order_id and upstream_work_order_id != source_work_order_id:
+                upstream_review_state = {
+                    **review_state,
+                    "revision_work_order_id": source_work_order_id,
+                    "revision_review_work_order_id": reviewer_state.pack.work_order_id,
+                    "summary": gate.get("summary") or "plan revision review passed",
+                }
+                self._merge_plan_review_state(upstream_work_order_id, upstream_review_state)
             event = {
                 "event_kind": event_kind,
                 "minion_id": reviewer_state.minion_id,
@@ -579,9 +839,28 @@ class ReviewOrchestrator:
                         "status": "pending",
                         "summary": "plan review passed; op_minion_accept_plan or explicit policy is required before dispatch",
                         "plan_ref": dict(plan_ref),
+                        **({"plan_draft_ref": reviewed_plan_ref} if reviewed_plan_ref != plan_ref else {}),
                         "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                        **({"published_plan": dict(published_plan)} if published_plan else {}),
                     },
                 )
+                if upstream_work_order_id and upstream_work_order_id != source_work_order_id:
+                    self._record_work_order_event(
+                        work_order_id=upstream_work_order_id,
+                        event_kind="plan_acceptance_pending",
+                        minion_id=reviewer_state.minion_id,
+                        run_id=reviewer_state.run_id,
+                        minion_profile=reviewer_state.pack.minion_profile,
+                        payload={
+                            "status": "pending",
+                            "summary": "plan revision review passed; revised plan is ready for acceptance",
+                            "plan_ref": dict(plan_ref),
+                            **({"plan_draft_ref": reviewed_plan_ref} if reviewed_plan_ref != plan_ref else {}),
+                            "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                            "revision_work_order_id": source_work_order_id,
+                            **({"published_plan": dict(published_plan)} if published_plan else {}),
+                        },
+                    )
             elif verdict == "fail":
                 auto_revision_spawned: dict[str, Any] = {}
                 if plan_auto_revision_allowed(
@@ -760,6 +1039,26 @@ class ReviewOrchestrator:
             gate = dict(latest.get("review_gate") or {})
             coder_state = self.manager.runs.get(coder_run_id)
             if coder_state is None:
+                verdict = str(gate.get("verdict") or "").strip().lower()
+                if verdict == "pass":
+                    await self._continue_persisted_checkpoint_pass(checkpoint_id, latest, gate)
+                    return
+                self._record_work_order_event(
+                    work_order_id=str((gate.get("target") or {}).get("work_order_id") or ""),
+                    event_kind="checkpoint_review_blocked",
+                    payload={
+                        "status": "blocked",
+                        "summary": gate.get("summary") or "checkpoint review requires repair but the coder run is no longer active",
+                        "checkpoint_id": checkpoint_id,
+                        "review_gate": gate,
+                        "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                    },
+                    minion_id=str(reviewer_state.minion_id),
+                    run_id=str(reviewer_state.run_id),
+                    minion_profile=str(reviewer_state.pack.minion_profile),
+                )
+                return
+            if coder_state is None:
                 return
             verdict = str(gate.get("verdict") or "").strip().lower()
             if verdict == "pass":
@@ -805,6 +1104,54 @@ class ReviewOrchestrator:
             )
         finally:
             self.checkpoint_reviews.release(checkpoint_id)
+
+    async def _continue_persisted_checkpoint_pass(self, checkpoint_id: str, latest: dict[str, Any], gate: dict[str, Any]) -> dict[str, Any]:
+        closure = self.repository.close_checkpoint_from_review_gate(latest.get("review_gate_ref") or gate)
+        payload = dict(closure.get("payload") or {})
+        work_order_id = str(closure.get("work_order_id") or payload.get("work_order_id") or "").strip()
+        if work_order_id:
+            self._record_work_order_event(
+                work_order_id=work_order_id,
+                event_kind="milestone_completed",
+                payload={
+                    **payload,
+                    "status": "completed",
+                    "checkpoint_id": checkpoint_id,
+                    "closed_checkpoint": closure,
+                    "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                    "summary": gate.get("summary") or payload.get("summary") or "checkpoint review passed",
+                },
+            )
+        next_pack = self.repository.next_serial_module_pack(work_order_id) if work_order_id else None
+        if next_pack is not None:
+            next_pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(next_pack)
+            run = await self.manager.spawn(next_pack.to_dict())
+            return {
+                "status": "continued",
+                "checkpoint_id": checkpoint_id,
+                "work_order_id": work_order_id,
+                "closed_checkpoint": closure,
+                "run": run,
+            }
+        completion = self.repository.mark_serial_module_completed(work_order_id) if work_order_id else {"status": "skipped", "reason": "missing_work_order_id"}
+        parent_completion: dict[str, Any] = {}
+        if str(completion.get("status") or "") == "completed":
+            parent_completion = self.repository.record_plan_module_completion(work_order_id, completion)
+            event_work_order_id = str(parent_completion.get("parent_work_order_id") or work_order_id)
+            event_payload = {**completion, **parent_completion}
+            self._record_work_order_event(
+                work_order_id=event_work_order_id,
+                event_kind="module_completed",
+                payload=event_payload,
+            )
+        return {
+            "status": str(completion.get("status") or "closed"),
+            "checkpoint_id": checkpoint_id,
+            "work_order_id": work_order_id,
+            "closed_checkpoint": closure,
+            "module_completion": completion,
+            "parent_completion": parent_completion,
+        }
 
     async def _send_checkpoint_repair_turn(self, coder_state: MinionRunState, gate: dict[str, Any]) -> None:
         unavailable_reason = self.manager.runner_control_unavailable_reason(coder_state)
@@ -1297,6 +1644,25 @@ def _drop_empty(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _source_contract_from_pack(pack: TaskContextPack) -> dict[str, Any]:
+    metadata = dict(pack.metadata or {})
+    for key in ("original_source_contract", "source_contract"):
+        candidate = metadata.get(key)
+        if isinstance(candidate, dict) and any(value not in ("", [], {}) for value in candidate.values()):
+            return dict(candidate)
+    planner_work_order = metadata.get("planner_work_order")
+    if isinstance(planner_work_order, dict):
+        revision_source = planner_work_order.get("revision_source")
+        if isinstance(revision_source, dict):
+            candidate = revision_source.get("original_source_contract")
+            if isinstance(candidate, dict) and any(value not in ("", [], {}) for value in candidate.values()):
+                return dict(candidate)
+    prompt_view = metadata.get("prompt_view")
+    if isinstance(prompt_view, dict):
+        revision_source = prompt_view.get("revision_source")
+        if isinstance(revision_source, dict):
+            candidate = revision_source.get("original_source_contract")
+            if isinstance(candidate, dict) and any(value not in ("", [], {}) for value in candidate.values()):
+                return dict(candidate)
     contract: dict[str, Any] = {}
     goal = str(pack.goal or "").strip()
     instruction = str(pack.instruction or "").strip()
@@ -1313,6 +1679,61 @@ def _source_contract_from_pack(pack: TaskContextPack) -> dict[str, Any]:
     if _dedupe_texts(acceptance, exclude=current_acceptance):
         contract["overall_acceptance_criteria"] = acceptance
     return contract
+
+
+def _module_contract_from_pack(pack: TaskContextPack) -> dict[str, Any]:
+    metadata = dict(pack.metadata or {})
+    prompt_view = dict(metadata.get("prompt_view") or {})
+    coder_work_order = dict(metadata.get("coder_work_order") or {})
+    module = dict(prompt_view.get("module") or {})
+    if not module and coder_work_order:
+        module = {
+            "module_id": str(coder_work_order.get("module_id") or ""),
+            "owned_area": list(coder_work_order.get("owned_area") or []),
+            "responsibility": str(coder_work_order.get("responsibility") or ""),
+        }
+    milestone = dict(prompt_view.get("milestone") or coder_work_order.get("current_milestone") or {})
+    relevant_contracts = [
+        dict(item)
+        for item in list(prompt_view.get("relevant_contracts") or coder_work_order.get("relevant_contracts") or [])
+        if isinstance(item, dict)
+    ]
+    dependency_context = []
+    if isinstance(module.get("dependency_context"), list):
+        dependency_context = [dict(item) for item in list(module.get("dependency_context") or []) if isinstance(item, dict)]
+    if not dependency_context and isinstance(coder_work_order.get("metadata"), dict):
+        dependency_context = [
+            dict(item)
+            for item in list((coder_work_order.get("metadata") or {}).get("module_dependency_context") or [])
+            if isinstance(item, dict)
+        ]
+    test_plan = dict(prompt_view.get("test_plan") or coder_work_order.get("test_plan") or {})
+    result = _drop_empty(
+        {
+            "module": module,
+            "current_milestone": milestone,
+            "relevant_contracts": relevant_contracts,
+            "dependency_context": dependency_context,
+            "test_plan": test_plan,
+        }
+    )
+    if isinstance(metadata.get("plan_artifact"), dict):
+        result["plan_ref"] = _drop_empty(
+            {
+                "plan_id": str(metadata.get("plan_artifact", {}).get("plan_id") or ""),
+                "task_id": str(metadata.get("plan_artifact", {}).get("task_id") or ""),
+                "plan_revision": metadata.get("plan_artifact", {}).get("plan_revision"),
+            }
+        )
+    return result
+
+
+def _active_gate_contract_checks(contract: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        dict(item)
+        for item in list(contract.get("checks") or contract.get("checklist") or contract.get("items") or [])
+        if isinstance(item, dict) and not bool(item.get("deleted"))
+    ]
 
 
 def _checkpoint_review_acceptance_criteria(payload: dict[str, Any], source_contract: dict[str, Any]) -> list[str]:
@@ -1402,38 +1823,25 @@ def _git_text(repo: Path, *args: str) -> str:
 
 def prepare_review_scratch(runtime_root: Path, work_order_id: str, *, repo_path: str = "") -> dict[str, str]:
     scratch = review_scratch_dir(runtime_root, work_order_id)
-    payload = {"review_scratch_dir": str(scratch)}
-    source = Path(str(repo_path or "")).resolve() if str(repo_path or "").strip() else None
-    if source is not None and source.exists() and source.is_dir():
-        copy_path = scratch / "source"
-        if not copy_path.exists():
-            shutil.copytree(
-                source,
-                copy_path,
-                ignore=review_scratch_ignore,
-            )
-        payload["review_scratch_repo_path"] = str(copy_path)
-    return payload
+    _ = repo_path
+    return {"review_scratch_dir": str(scratch)}
 
 
 def review_scratch_dir(runtime_root: Path, work_order_id: str) -> Path:
-    path = Path(runtime_root) / "data" / "minion" / "review_scratch" / safe_token(work_order_id)
+    path = _review_ephemeral_root(runtime_root) / safe_token(work_order_id) / "scratch"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def review_scratch_ignore(directory: str, names: list[str]) -> set[str]:
-    ignored = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
-    root = Path(directory)
-    for name in names:
-        if name in ignored:
-            continue
-        try:
-            if (root / name).is_symlink():
-                ignored.add(name)
-        except OSError:
-            ignored.add(name)
-    return ignored.intersection(set(names))
+def review_artifact_dir(runtime_root: Path, work_order_id: str) -> Path:
+    path = _review_ephemeral_root(runtime_root) / safe_token(work_order_id) / "artifacts"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _review_ephemeral_root(runtime_root: Path) -> Path:
+    runtime_token = safe_token(str(Path(runtime_root).expanduser().resolve()), limit=80)
+    return Path(tempfile.gettempdir()) / "pal-minion-review" / runtime_token
 
 
 def review_gate_repair_note(gate: dict[str, Any]) -> str:
@@ -1626,6 +2034,20 @@ def _checkpoint_review_environment_workspace(workspace: dict[str, Any]) -> dict[
         }
         if safe:
             result["lsp_setup"] = {key: list(value) if isinstance(value, tuple) else value for key, value in safe.items()}
+    execution_env = workspace.get("execution_env")
+    if isinstance(execution_env, dict):
+        safe_env: dict[str, Any] = {}
+        path_prepend = execution_env.get("path_prepend")
+        if isinstance(path_prepend, dict):
+            safe_paths = {
+                str(key): [str(item) for item in list(value) if str(item).strip()]
+                for key, value in dict(path_prepend).items()
+                if isinstance(value, (list, tuple))
+            }
+            if safe_paths:
+                safe_env["path_prepend"] = safe_paths
+        if safe_env:
+            result["execution_env"] = safe_env
     return result
 
 

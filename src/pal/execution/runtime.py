@@ -345,6 +345,10 @@ class ExecutionRuntime(ExecutionRuntimePort):
         budget: ToolCallBudget | None = None,
         turn_id: str | None = None,
     ) -> CanonicalToolResult:
+        call_id = getattr(call, "call_id", None)
+        resolved_name = self.resolve_llm_tool_name(call.name)
+        if resolved_name != call.name:
+            call = CanonicalToolCall(name=resolved_name, args=dict(call.args), call_id=call_id)
         if not allow_tools:
             return self.execute_tool(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id)
         tool = self.tools.get(call.name)
@@ -373,12 +377,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
                         llm_text=f"tool execution failed: {exc.__class__.__name__}",
                         status=RuntimeStatus.ERROR,
                     )
-        loop = asyncio.get_running_loop()
-        executor = self.sync_executor
-        return await loop.run_in_executor(
-            executor,
-            lambda: self.execute_tool(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id),
-        )
+        return self.execute_tool(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id)
 
     def _apply_tool_budget(
         self,
@@ -702,8 +701,7 @@ class ExecutionRuntime(ExecutionRuntimePort):
             )
 
     async def execute_async(self, call: CapabilityCall) -> CapabilityResult:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self.sync_executor, lambda: self.execute(call))
+        return self.execute(call)
 
     async def interrupt_turn(self, turn_id: str) -> None:
         if not turn_id:

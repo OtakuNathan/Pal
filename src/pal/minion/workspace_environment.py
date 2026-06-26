@@ -81,6 +81,7 @@ class WorkspaceEnvironmentPatch:
     server_ids: list[str] = field(default_factory=list)
     created_files: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    env_path_prepend: dict[str, list[str]] = field(default_factory=dict)
 
     def merge(self, other: "WorkspaceEnvironmentPatch") -> None:
         for server_id in other.server_ids:
@@ -90,6 +91,19 @@ class WorkspaceEnvironmentPatch:
             if path not in self.created_files:
                 self.created_files.append(path)
         self.skipped.extend(other.skipped)
+        for name, paths in other.env_path_prepend.items():
+            target = self.env_path_prepend.setdefault(name, [])
+            for path in paths:
+                if path not in target:
+                    target.append(path)
+
+    def prepend_env_path(self, name: str, path: Path) -> None:
+        resolved = str(Path(path))
+        if not resolved:
+            return
+        target = self.env_path_prepend.setdefault(name, [])
+        if resolved not in target:
+            target.append(resolved)
 
 
 class WorkspaceEnvironmentPreparer(Protocol):
@@ -105,10 +119,12 @@ class PythonEnvironmentPreparer:
     required_lsp_server_ids = ("pyright",)
 
     def prepare(self, context: WorkspaceEnvironmentContext) -> WorkspaceEnvironmentPatch:
-        return WorkspaceEnvironmentPatch(
+        patch = WorkspaceEnvironmentPatch(
             server_ids=["pyright"],
             skipped=["python uses the pyright sidecar; no repo config required"],
         )
+        patch.prepend_env_path("PYTHONPATH", context.repo_path / "src")
+        return patch
 
 
 class ClangdEnvironmentPreparer:
@@ -190,8 +206,18 @@ def prepare_workspace_environment(
             "created_files": combined.created_files,
             "skipped": combined.skipped,
         },
+        "execution_env": _execution_env_payload(combined),
         "created_files": combined.created_files,
     }
+
+
+def _execution_env_payload(patch: WorkspaceEnvironmentPatch) -> dict[str, Any]:
+    path_prepend = {
+        key: list(paths)
+        for key, paths in sorted(patch.env_path_prepend.items())
+        if key and paths
+    }
+    return {"path_prepend": path_prepend} if path_prepend else {}
 
 
 def workspace_languages(pack: TaskContextPack, workspace: dict[str, Any]) -> list[str]:

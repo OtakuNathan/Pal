@@ -31,6 +31,9 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.skill.contracts import SkillDescriptor
 
 
+_STARTUP_RESCAN_TIMEOUT_SECONDS = 30.0
+
+
 class _McpManagerInvoker:
     def __init__(self, client: McpManagerClient) -> None:
         self.client = client
@@ -114,7 +117,10 @@ class McpManagerPluginProvider:
         _ = call
         try:
             self._ensure_manager_started()
-            self.client.rescan_sync()
+            McpManagerClient(
+                runtime_root=self.runtime_root,
+                request_timeout_seconds=_STARTUP_RESCAN_TIMEOUT_SECONDS,
+            ).rescan_sync()
             self._refresh_projection()
             self.last_error = ""
         except Exception as exc:

@@ -246,12 +246,19 @@ class FailureOrchestrator:
         if not active_provider_id:
             return
         title = f"{record.subsystem}:{record.failure_kind} repair"
+        search_text = (
+            f"Situation: {record.situation_text}\n"
+            f"Task: {record.task_text}\n"
+            f"Action: {record.action_text}\n"
+            f"Result: {record.result_text}"
+        )
         call_args = {
             "target_id": active_provider_id,
             "kind": "case",
             "scope": "system",
             "title": title,
             "summary": record.result_text,
+            "search_text": search_text,
             "topics": [record.subsystem, record.component, "self_healing"],
             "canonical_key": f"repair:{record.subsystem}:{record.component}:{record.failure_kind}",
             "situation_text": record.situation_text,
@@ -265,12 +272,6 @@ class FailureOrchestrator:
             "execute",
             CapabilityCall(name="op_memory_write", args=call_args),
         )
-        summary = (
-            f"Situation: {record.situation_text}\n"
-            f"Task: {record.task_text}\n"
-            f"Action: {record.action_text}\n"
-            f"Result: {record.result_text}"
-        )
         memory_service.l2_store.upsert_entries(
             [
                 L2Entry(
@@ -283,7 +284,7 @@ class FailureOrchestrator:
                     source_ref=call_args["canonical_key"],
                     candidate_state="stable",
                     touched_at=utc_now(),
-                    rendered=summary,
+                    rendered=search_text,
                     payload={
                         "subsystem": record.subsystem,
                         "component": record.component,

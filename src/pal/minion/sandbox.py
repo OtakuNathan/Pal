@@ -130,18 +130,30 @@ def build_sandboxed_runner_invocation(
     sandbox = dict(metadata.get("sandbox") or {})
     if not bool(sandbox.get("enabled")):
         final_env = dict(env or python_subprocess_env())
+        _apply_workspace_execution_env(final_env, pack)
         final_env["PAL_MINION_LLM_BROKER"] = "0"
         return argv, final_env
     backend = str(sandbox.get("backend") or "").strip()
     if backend == "bwrap":
-        final_env = scrub_minion_sandbox_env(env or python_subprocess_env(), runtime_root=runtime_root, run_id=str(sandbox.get("run_id") or ""))
+        final_env = scrub_minion_sandbox_env(
+            env or python_subprocess_env(),
+            runtime_root=runtime_root,
+            run_id=str(sandbox.get("run_id") or ""),
+            pack=pack,
+        )
         return _build_bwrap_invocation(runtime_root=runtime_root, pack=pack, sandbox=sandbox, argv=argv), final_env
     if backend == "docker":
         raise RuntimeError("macOS Docker minion sandbox requires PAL_MINION_DOCKER_IMAGE; the Docker launcher is not wired yet")
     raise RuntimeError(f"unsupported minion sandbox backend: {backend or 'unknown'}")
 
 
-def scrub_minion_sandbox_env(env: dict[str, str], *, runtime_root: Path, run_id: str) -> dict[str, str]:
+def scrub_minion_sandbox_env(
+    env: dict[str, str],
+    *,
+    runtime_root: Path,
+    run_id: str,
+    pack: TaskContextPack | None = None,
+) -> dict[str, str]:
     result: dict[str, str] = {}
     for key, value in dict(env or {}).items():
         upper = str(key or "").upper()
@@ -158,13 +170,40 @@ def scrub_minion_sandbox_env(env: dict[str, str], *, runtime_root: Path, run_id:
     result["XDG_CACHE_HOME"] = str(scratch / "cache")
     result["PYTHONPYCACHEPREFIX"] = str(scratch / "pycache")
     result["PYTHONDONTWRITEBYTECODE"] = "1"
+    python_user_base = _python_user_base()
+    if python_user_base is not None:
+        result["PYTHONUSERBASE"] = str(python_user_base)
     python_paths = [str(_pal_source_root()), *_python_dependency_paths()]
     existing_pythonpath = str(result.get("PYTHONPATH") or "").strip()
     if existing_pythonpath:
         python_paths.extend(item for item in existing_pythonpath.split(os.pathsep) if item)
     if python_paths:
         result["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(python_paths))
+    if pack is not None:
+        _apply_workspace_execution_env(result, pack)
     return result
+
+
+def _apply_workspace_execution_env(env: dict[str, str], pack: TaskContextPack) -> None:
+    execution_env = dict((pack.workspace or {}).get("execution_env") or {})
+    path_prepend = execution_env.get("path_prepend")
+    if not isinstance(path_prepend, dict):
+        return
+    for name, paths in dict(path_prepend).items():
+        key = str(name or "").strip()
+        if not key:
+            continue
+        if isinstance(paths, str):
+            raw_paths = [paths]
+        elif isinstance(paths, (list, tuple)):
+            raw_paths = list(paths)
+        else:
+            continue
+        additions = [str(item).strip() for item in raw_paths if str(item).strip()]
+        if not additions:
+            continue
+        existing = [item for item in str(env.get(key) or "").split(os.pathsep) if item]
+        env[key] = os.pathsep.join(dict.fromkeys([*additions, *existing]))
 
 
 def ensure_sandbox_files(runtime_root: Path, *, run_id: str, blacklist_commands: tuple[str, ...]) -> tuple[Path, Path]:
@@ -253,8 +292,8 @@ def _append_runtime_root_binds(args: list[str], runtime_root: Path) -> None:
     for dir_name, read_only in (
         ("data/minion", False),
         ("data/lsp", False),
+        ("data/tool_results", False),
         ("artifacts", False),
-        ("tool_results", False),
         ("plugins", True),
         ("SKILL", True),
     ):
@@ -322,6 +361,15 @@ def _python_dependency_paths() -> list[str]:
             continue
         paths.append(str(path))
     return list(dict.fromkeys(paths))
+
+
+def _python_user_base() -> Path | None:
+    with contextlib.suppress(Exception):
+        value = site.getuserbase()
+        path = Path(value).expanduser()
+        if path.is_absolute():
+            return path
+    return None
 
 
 def _pal_source_root() -> Path:

@@ -16,7 +16,9 @@ _STDOUT_REDIRECT: Any | None = None
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pal-minion-runner")
     parser.add_argument("--runtime-root", type=Path, required=True)
-    parser.add_argument("--task-json", required=True)
+    task_payload = parser.add_mutually_exclusive_group(required=True)
+    task_payload.add_argument("--task-json")
+    task_payload.add_argument("--task-json-file", type=Path)
     parser.add_argument("--minion-id", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--manager-liveness-fd", type=int, default=-1)
@@ -59,7 +61,7 @@ async def amain(args: argparse.Namespace) -> int:
     from pal.minion.runner import MinionRunner
     from pal.shared import TaskContextPack
 
-    pack = TaskContextPack.from_json(args.task_json)
+    pack = TaskContextPack.from_json(_load_task_json(args))
     runner = MinionRunner(
         runtime_root=args.runtime_root,
         pack=pack,
@@ -87,6 +89,13 @@ async def amain(args: argparse.Namespace) -> int:
         await liveness_task
     _ = pending
     return await runner_task
+
+
+def _load_task_json(args: argparse.Namespace) -> str:
+    task_json = getattr(args, "task_json", None)
+    if task_json is not None:
+        return str(task_json)
+    return Path(getattr(args, "task_json_file")).read_text(encoding="utf-8")
 
 
 async def _watch_manager_liveness(fd: int) -> None:

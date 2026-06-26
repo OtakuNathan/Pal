@@ -49,9 +49,10 @@ def ensure_minion_schema(runtime_root: Path, connection: sqlite3.Connection) -> 
             updated_at TEXT NOT NULL
         );
 
-        CREATE UNIQUE INDEX IF NOT EXISTS minion_one_active_work_order
-        ON minion_work_orders(task_id)
-        WHERE status IN ('active', 'running', 'blocked', 'approval_pending');
+        DROP INDEX IF EXISTS minion_one_active_work_order;
+
+        CREATE INDEX IF NOT EXISTS minion_work_orders_task_status
+        ON minion_work_orders(task_id, status);
 
         CREATE TABLE IF NOT EXISTS minion_work_order_milestones (
             milestone_id TEXT PRIMARY KEY,

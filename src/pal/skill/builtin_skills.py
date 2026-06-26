@@ -631,6 +631,7 @@ Current builtin gates live in `src/pal/minion/gates.py`:
 
 - `checkpoint_quality`: checkpoint verification for coder-style implementation milestones.
 - `plan_acceptance`: plan artifact review and optional revision for planner-style milestones.
+- `source_contract`: optional pre-plan source contract compiler for unusually risky or strongly constrained planning tasks. Do not add it to the default planner profile; use explicit work-order metadata such as `enable_pre_plan_contract=true` when this extra contract-locking layer is needed.
 - `none`: explicit no-gate policy for profiles that should complete without review.
 
 Current builtin profiles reference these names:

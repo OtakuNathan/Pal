@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -46,6 +46,7 @@ SUMMARY_ENTRY_ID = "memory_summary_current"
 SUMMARY_TITLE = "Conversation Summary"
 L2_WORKING_SET_CAPACITY = 128
 TOP_OF_MIND_LIMIT = 8
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -151,13 +152,17 @@ class InMemoryL2Store(L2Store):
         else:
             self.heat_registry.pop(entry_id, None)
         if transition.event == "hot_promoted":
-            print(f"[memory] memory_hot_promoted entry_id={entry_id} source={source}")
+            LOGGER.debug("memory_hot_promoted entry_id=%s source=%s", entry_id, source)
         elif transition.event == "hot_refreshed":
-            print(f"[memory] memory_hot_refreshed entry_id={entry_id} remaining_ttl={DEFAULT_HOT_TTL}")
+            LOGGER.debug("memory_hot_refreshed entry_id=%s remaining_ttl=%s", entry_id, DEFAULT_HOT_TTL)
         elif transition.event == "ghost_force_dormant":
-            print(f"[memory] memory_ghost_force_dormant entry_id={entry_id} renewal_count={current.renewal_count if current else 0}")
+            LOGGER.debug("memory_ghost_force_dormant entry_id=%s renewal_count=%s", entry_id, current.renewal_count if current else 0)
         elif transition.event == "ghost_reactivated":
-            print(f"[memory] memory_ghost_reactivated entry_id={entry_id} renewal_count={transition.state.renewal_count if transition.state else 0}")
+            LOGGER.debug(
+                "memory_ghost_reactivated entry_id=%s renewal_count=%s",
+                entry_id,
+                transition.state.renewal_count if transition.state else 0,
+            )
 
     def tick_heat(self) -> list[str]:
         expired: list[str] = []
@@ -171,11 +176,15 @@ class InMemoryL2Store(L2Store):
             if transition.expired:
                 expired.append(entry_id)
             if transition.event == "ghost_force_dormant":
-                print(f"[memory] memory_ghost_force_dormant entry_id={entry_id} renewal_count={current.renewal_count}")
+                LOGGER.debug("memory_ghost_force_dormant entry_id=%s renewal_count=%s", entry_id, current.renewal_count)
             elif transition.event == "hot_to_ghost":
-                print(f"[memory] memory_hot_to_ghost entry_id={entry_id} renewal_count={transition.state.renewal_count if transition.state else 0}")
+                LOGGER.debug(
+                    "memory_hot_to_ghost entry_id=%s renewal_count=%s",
+                    entry_id,
+                    transition.state.renewal_count if transition.state else 0,
+                )
             elif transition.event == "ghost_to_dormant":
-                print(f"[memory] memory_ghost_to_dormant entry_id={entry_id}")
+                LOGGER.debug("memory_ghost_to_dormant entry_id=%s", entry_id)
         return expired
 
     def upsert_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = False) -> list[L2Entry]:
@@ -273,7 +282,7 @@ class MemoryService(MemoryServicePort):
         )
 
     async def acompact(self, request: MemoryCompactRequest) -> MemoryCompactResult:
-        return await asyncio.to_thread(self.compact, request)
+        return self.compact(request)
 
     def commit_l1(self, request: MemoryCommitRequest) -> MemoryCommitResult:
         committed_transcript = _normalize_l1_transcript(request.transcript)
@@ -302,7 +311,7 @@ class MemoryService(MemoryServicePort):
         )
 
     async def acommit_l1(self, request: MemoryCommitRequest) -> MemoryCommitResult:
-        return await asyncio.to_thread(self.commit_l1, request)
+        return self.commit_l1(request)
 
     def build_pack(self, request: MemoryPackRequest) -> MemoryPack:
         if request.turn_kind == "proactive_trigger":
@@ -321,7 +330,7 @@ class MemoryService(MemoryServicePort):
         )
 
     async def abuild_pack(self, request: MemoryPackRequest) -> MemoryPack:
-        return await asyncio.to_thread(self.build_pack, request)
+        return self.build_pack(request)
 
     def build_compaction_source_text(self, *, target_input_budget: int) -> str:
         current_summary = _current_summary_from_l1(self.l1_store.items)
@@ -362,7 +371,7 @@ class MemoryService(MemoryServicePort):
         self.l2_store.heat_registry = {}
 
     async def asoft_reset(self) -> None:
-        await asyncio.to_thread(self.soft_reset)
+        self.soft_reset()
 
     def _retire_entries(self, entries: list[L2Entry]) -> int:
         retireable = [entry for entry in entries if _should_retire_entry(entry)]

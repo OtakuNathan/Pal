@@ -172,6 +172,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             "plan_id": artifact.plan_id,
             "plan_revision": plan_revision,
             "module_id": resolved_module_id,
+            "module_name": str((metadata or {}).get("module_name") or resolved_module_id),
             "profile_role": _role_from_profile(resolved_profile),
             "uses_coder_contract": _profile_uses_coder_contract(resolved_profile),
             "current_milestone_index": 0,
@@ -187,14 +188,22 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         }
         pack_metadata = dict(metadata or {})
         task_id = str(pack_metadata.get("task_id") or artifact.task_id).strip()
+        project_name = str(pack_metadata.get("project_name") or _plan_project_name(artifact, workspace=resolved_workspace, task_id=task_id)).strip()
+        module_name = str(pack_metadata.get("module_name") or resolved_module_id).strip()
+        if project_name:
+            resolved_workspace.setdefault("project_name", project_name)
+        if module_name:
+            resolved_workspace.setdefault("module_name", module_name)
         pack_metadata.update(
             {
                 "task_id": task_id,
+                "project_name": project_name,
                 "task_title": str(pack_metadata.get("task_title") or artifact.summary or artifact.task_id),
-                "work_order_title": str(pack_metadata.get("work_order_title") or f"{resolved_module_id} implementation"),
+                "work_order_title": str(pack_metadata.get("work_order_title") or f"{module_name} implementation"),
                 "plan_artifact": _plan_artifact_payload(artifact, plan_revision=plan_revision),
                 "plan_validation": validation,
                 "module_id": resolved_module_id,
+                "module_name": module_name,
                 "module_execution": module_execution,
                 "milestones": milestones,
             }
@@ -257,9 +266,14 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         plan_revision = _plan_revision_from_payload(plan_payload)
         validation = dispatchable_plan_validation(artifact)
         resolved_work_order_id = str(work_order_id or new_work_id("wo")).strip()
+        resolved_workspace = dict(workspace or {})
         module_order = plan_module_order_for_execution(artifact)
         milestones = _module_parent_milestones(artifact, module_order=module_order)
         pack_metadata = dict(metadata or {})
+        task_id = str(pack_metadata.get("task_id") or artifact.task_id).strip()
+        project_name = str(pack_metadata.get("project_name") or _plan_project_name(artifact, workspace=resolved_workspace, task_id=task_id)).strip()
+        if project_name:
+            resolved_workspace.setdefault("project_name", project_name)
         dispatch_profile_group = str(profile_group or pack_metadata.get("dispatch_profile_group") or "software_engineering").strip() or "software_engineering"
         dispatch_profile_name = str(profile_name or pack_metadata.get("dispatch_profile_name") or "coder").strip() or "coder"
         plan_execution = dict(pack_metadata.get("plan_execution") or {})
@@ -273,12 +287,14 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "module_order": module_order,
                 "current_module_index": int(plan_execution.get("current_module_index") or 0),
                 "status": str(plan_execution.get("status") or "active"),
+                "auto_advance_modules": bool(plan_execution.get("auto_advance_modules", True)),
                 "child_work_order_ids": dict(plan_execution.get("child_work_order_ids") or {}),
             }
         )
         pack_metadata.update(
             {
-                "task_id": artifact.task_id,
+                "task_id": task_id,
+                "project_name": project_name,
                 "task_title": str(pack_metadata.get("task_title") or artifact.summary or artifact.task_id),
                 "work_order_title": str(pack_metadata.get("work_order_title") or artifact.summary or "Plan implementation"),
                 "plan_artifact": _plan_artifact_payload(artifact, plan_revision=plan_revision),
@@ -296,7 +312,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "goal": str(goal or artifact.summary or "Implement plan"),
                 "instruction": str(instruction or "Execute the structured plan one module milestone at a time."),
                 "acceptance_criteria": [item for milestone in milestones for item in _coerce_text_list(milestone.get("acceptance"))],
-                "workspace": dict(workspace or {}),
+                "workspace": resolved_workspace,
                 "profile_group": dispatch_profile_group,
                 "profile_name": dispatch_profile_name,
                 "metadata": pack_metadata,
@@ -322,10 +338,16 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             raise ValueError("plan revision dispatch requires a failing or partial plan review gate")
         target = dict(gate_payload.get("target") or {})
         source_plan_ref = dict(target.get("plan_ref") or {})
+        original_source_contract = (
+            dict(target.get("source_contract") or {})
+            if isinstance(target.get("source_contract"), dict)
+            else {}
+        )
         loaded_plan = self.load_dispatchable_plan_ref(source_plan_ref)
         artifact = validate_dispatchable_plan_artifact(loaded_plan.get("plan_artifact") or {})
         source_revision = _plan_revision_from_payload(loaded_plan.get("plan_artifact"), loaded_plan.get("plan_ref"))
         next_revision = source_revision + 1
+        revision_checklist = _plan_revision_checklist(gate_payload)
         resolved_work_order_id = str(work_order_id or new_work_id("wo")).strip()
         resolved_workspace = dict(workspace or {})
         for key in ("repo_path", "source_repo", "artifact_dir"):
@@ -336,10 +358,17 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         planner_instruction = str(
             instruction
             or (
-                "Revise the referenced FinalPlanArtifact only. Address the reviewer gate findings and required fixes, "
-                f"preserve task_id={artifact.task_id} and plan_id={artifact.plan_id}, output plan_revision={next_revision}, "
-                "keep the fork_join_linear topology dispatchable, and write a primary plan.json FinalPlanArtifact. "
-                "Do not implement code."
+                "Revise the referenced submitted plan draft only. First call plan_checkout with {} so Pal uses the "
+                "workspace-bound source_plan_ref; do not construct or guess plan_ref/review_gate_ref objects. Then use "
+                "plan_read/plan_find/plan_get to locate reviewer target handles and repair locally with plan_update_*, "
+                "plan_delete_*, plan_move_milestone, or plan_replace_milestone_acceptance_criteria. "
+                "Follow revision_source.plan_revision_checklist in order before broad exploration; use any target_handle, "
+                "target_node, related_handles, and suggested_tool_route already supplied there. "
+                f"Preserve task_id={artifact.task_id} and plan_id={artifact.plan_id}; Pal owns plan_revision={next_revision}. "
+                "Keep the fork_join_linear topology dispatchable, call plan_validate, then plan_submit_for_review. "
+                "Do not implement code and do not rebuild the whole plan unless checkout reports the current draft cannot be repaired. "
+                "The original planner source_contract remains binding for this revision; satisfy it exactly, including explicit "
+                "counts, topology/module shape, names, hard requirements, and acceptance criteria."
             )
         )
         planner_work_order = build_planner_work_order(
@@ -353,18 +382,22 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             "source_plan_ref": dict(loaded_plan.get("plan_ref") or source_plan_ref),
             "review_gate_ref": dict(loaded_gate.get("review_gate_ref") or {}),
             "review_gate": _plan_revision_gate_summary(gate_payload),
+            "plan_revision_checklist": revision_checklist,
         }
+        if original_source_contract:
+            planner_work_order["revision_source"]["original_source_contract"] = dict(original_source_contract)
         milestones = [
             {
                 "milestone_id": "revise_plan",
                 "title": "Revise reviewed plan",
                 "summary": (
-                    "Produce one revised, dispatchable FinalPlanArtifact that resolves the plan reviewer findings."
+                    "Locally edit the reviewed plan draft and submit a revised draft that resolves the plan reviewer findings."
                 ),
                 "acceptance": [
-                    f"FinalPlanArtifact preserves task_id={artifact.task_id} and plan_id={artifact.plan_id}.",
-                    f"FinalPlanArtifact declares plan_revision={next_revision}.",
+                    f"Submitted draft preserves task_id={artifact.task_id} and plan_id={artifact.plan_id}.",
+                    f"Submitted draft is revision {next_revision}; Pal manages the revision identity.",
                     "Reviewer findings and required fixes are addressed or explicitly called out as remaining questions.",
+                    "Every plan_revision_checklist item is completed or has a concrete blocker.",
                     "Dispatch validation passes with fork_join_linear topology.",
                 ],
             }
@@ -393,10 +426,13 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "plan_revision": next_revision,
                 "source_plan_ref": dict(loaded_plan.get("plan_ref") or source_plan_ref),
                 "source_plan_artifact": _plan_artifact_payload(artifact, plan_revision=source_revision),
+                **({"original_source_contract": dict(original_source_contract)} if original_source_contract else {}),
                 "review_gate_ref": dict(loaded_gate.get("review_gate_ref") or {}),
                 "review_gate": _plan_revision_gate_summary(gate_payload),
+                "plan_revision_checklist": revision_checklist,
                 "milestones": milestones,
                 "plan_review": plan_review_state,
+                "skip_pre_plan_contract": True,
             }
         )
         pack_metadata.pop("prompt_view", None)
@@ -571,19 +607,24 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         if milestone_index >= len(module_order):
             return None
         module_id = module_order[int(milestone_index)]
+        module_name = module_id
         child_ids = dict(plan_execution.get("child_work_order_ids") or {})
         child_work_order_id = str(child_ids.get(module_id) or "").strip()
         if not child_work_order_id:
             child_work_order_id = f"wo_{_safe_id(str(work_order_id))}_{_safe_id(module_id)}"
             child_ids[module_id] = child_work_order_id
         task_id = str(work_order.get("task_id") or metadata.get("task_id") or artifact.task_id)
+        project_name = str(metadata.get("project_name") or _plan_project_name(artifact, workspace=_loads_or_dict(metadata.get("workspace")), task_id=task_id)).strip()
         child_metadata = {
-            "task_id": f"{_safe_id(task_id)}_{_safe_id(module_id)}",
+            "task_id": _safe_id(task_id),
+            "project_name": project_name,
             "task_title": str(metadata.get("task_title") or artifact.summary or task_id),
-            "work_order_title": f"{module_id} implementation",
+            "work_order_title": f"{module_name} implementation",
             "parent_work_order_id": str(work_order_id),
             "parent_milestone_index": int(milestone_index),
             "parent_module_id": module_id,
+            "parent_module_name": module_name,
+            "module_name": module_name,
         }
         dispatch_profile_group = str(metadata.get("dispatch_profile_group") or "software_engineering").strip() or "software_engineering"
         dispatch_profile_name = str(metadata.get("dispatch_profile_name") or "coder").strip() or "coder"
@@ -681,6 +722,19 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             completed_modules = _coerce_text_list(plan_execution.get("completed_modules"))
             completed_modules = _dedupe_text([*completed_modules, module_id])
             plan_execution["completed_modules"] = completed_modules
+            child_workspace = _loads_or_dict(child_metadata.get("workspace"))
+            updated_parent_workspace = _serial_parent_workspace_after_module(
+                parent_metadata.get("workspace"),
+                child_workspace,
+                module_id=module_id,
+                module_name=str(child_metadata.get("module_name") or completion.get("module_name") or module_id),
+                child_work_order_id=str(child_work_order_id),
+            )
+            if updated_parent_workspace:
+                parent_metadata["workspace"] = updated_parent_workspace
+                plan_execution["last_integrated_module_id"] = module_id
+                plan_execution["last_integrated_child_work_order_id"] = str(child_work_order_id)
+                plan_execution["last_integrated_repo_path"] = str(updated_parent_workspace.get("source_repo") or "")
             plan_execution.pop("active_child_work_order_id", None)
             if next_index is None:
                 plan_execution["status"] = "completed"
@@ -876,6 +930,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         module_execution["profile_role"] = _role_from_profile(profile)
         module_execution["uses_coder_contract"] = _profile_uses_coder_contract(profile)
         module_execution["status"] = "active"
+        module_execution.setdefault("module_name", str(metadata.get("module_name") or module_id).strip())
         metadata["module_execution"] = module_execution
         metadata.pop("prompt_view", None)
         if _profile_uses_coder_contract(profile):
@@ -943,14 +998,17 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "UPDATE minion_work_orders SET metadata_json = ?, updated_at = ? WHERE work_order_id = ?",
                 (_json(metadata), utc_now(), str(work_order_id)),
             )
+            self._update_work_order_status(db, str(work_order_id), "completed")
         module_id = str(module_execution.get("module_id") or metadata.get("module_id") or "").strip()
+        module_name = str(module_execution.get("module_name") or metadata.get("module_name") or module_id).strip()
         completed_count = len([item for item in list(snapshot.get("milestones") or []) if item.get("completed")])
         return {
             "status": "completed",
             "work_order_id": str(work_order_id),
             "task_id": str(task.get("task_id") or work_order.get("task_id") or ""),
             "module_id": module_id,
-            "summary": f"Module {module_id or work_order_id} completed {completed_count} milestone(s).",
+            "module_name": module_name,
+            "summary": f"Module {module_name or module_id or work_order_id} completed {completed_count} milestone(s).",
             "completed_milestone_count": completed_count,
             "metadata": {"control_route": dict(metadata.get("control_route") or {})} if isinstance(metadata.get("control_route"), dict) else {},
             **pending,
@@ -1004,13 +1062,16 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 db.execute(
                     """
                     UPDATE minion_work_orders
-                    SET title = ?, goal = ?, instruction = ?, minion_profile = ?, profile_group = ?, profile_name = ?, metadata_json = ?, updated_at = ?
+                    SET title = ?, goal = ?, instruction = ?, status = ?, ended_at = ?,
+                        minion_profile = ?, profile_group = ?, profile_name = ?, metadata_json = ?, updated_at = ?
                     WHERE work_order_id = ?
                     """,
                     (
                         next_title[:160],
                         next_goal,
                         next_instruction,
+                        "active",
+                        "",
                         next_profile,
                         next_profile_group,
                         next_profile_name,
@@ -1045,16 +1106,22 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                         now,
                     ),
                 )
-            active = self._fetch_one(
-                db,
+            active_rows = db.execute(
                 """
                 SELECT work_order_id FROM minion_work_orders
                 WHERE task_id = ? AND status IN ('active', 'running', 'blocked', 'approval_pending')
                 """,
                 (task_id,),
-            )
-            if active is not None:
-                active_work_order_id = str(active["work_order_id"])
+            ).fetchall()
+            active_work_order_ids = [str(row["work_order_id"]) for row in active_rows]
+            allowed_parent_id = str(metadata.get("parent_work_order_id") or "").strip()
+            blocking_active_ids = [
+                active_id
+                for active_id in active_work_order_ids
+                if active_id != allowed_parent_id
+            ]
+            if blocking_active_ids:
+                active_work_order_id = blocking_active_ids[0]
                 if not _allow_plan_revision_with_active_source(metadata, active_work_order_id):
                     raise ValueError(f"task already has an active work order: {active_work_order_id}")
             db.execute(
@@ -2272,6 +2339,37 @@ def _persistent_workspace_metadata(workspace: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _serial_parent_workspace_after_module(
+    parent_workspace: Any,
+    child_workspace: dict[str, Any],
+    *,
+    module_id: str,
+    module_name: str = "",
+    child_work_order_id: str,
+) -> dict[str, Any]:
+    repo_path = str((child_workspace or {}).get("repo_path") or "").strip()
+    if not repo_path:
+        return {}
+    result = _persistent_workspace_metadata(parent_workspace if isinstance(parent_workspace, dict) else {})
+    result["source_repo"] = repo_path
+    work_order_branch = str((child_workspace or {}).get("work_order_branch") or "").strip()
+    if work_order_branch:
+        result["base_ref"] = work_order_branch
+        result["merge_target"] = work_order_branch
+    else:
+        result.pop("base_ref", None)
+        result.pop("merge_target", None)
+    result["last_module_baseline"] = {
+        "mode": "serial_dependency_baseline",
+        "module_id": str(module_id or ""),
+        "module_name": str(module_name or module_id or ""),
+        "child_work_order_id": str(child_work_order_id or ""),
+        "repo_path": repo_path,
+        **({"branch": work_order_branch} if work_order_branch else {}),
+    }
+    return result
+
+
 def _prompt_safe_workspace(workspace: dict[str, Any]) -> dict[str, str]:
     allowed = {"repo_path", "artifact_dir", "task_repo_path", "target_repo_path"}
     return {key: str(value) for key, value in dict(workspace or {}).items() if key in allowed and str(value or "").strip()}
@@ -2508,6 +2606,34 @@ def _safe_id(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(value or "").strip())[:80] or uuid4().hex[:12]
 
 
+def _plan_project_name(artifact: PlanArtifact, *, workspace: dict[str, Any], task_id: str) -> str:
+    for source in (dict(artifact.metadata or {}), dict(workspace or {})):
+        for key in ("project_name", "project_key", "project_id"):
+            value = str(source.get(key) or "").strip()
+            if value:
+                return value
+    source_name = _workspace_source_name(workspace)
+    if source_name:
+        return source_name
+    return str(task_id or artifact.task_id or "").strip()
+
+
+def _workspace_source_name(workspace: dict[str, Any]) -> str:
+    for key in ("source_repo", "source_repo_path", "source_path", "clone_from", "repo_url", "remote_url", "repo_path"):
+        value = str((workspace or {}).get(key) or "").strip()
+        if not value:
+            continue
+        text = value.rstrip("/")
+        leaf = text.rsplit("/", 1)[-1]
+        if leaf.endswith(".git"):
+            leaf = leaf[:-4]
+        if ":" in leaf:
+            leaf = leaf.rsplit(":", 1)[-1]
+        if leaf:
+            return leaf
+    return ""
+
+
 def _plan_revision_from_payload(payload: Any, ref: Any | None = None) -> int:
     payload_dict = dict(payload) if isinstance(payload, dict) else {}
     ref_dict = dict(ref) if isinstance(ref, dict) else {}
@@ -2530,6 +2656,147 @@ def _plan_revision_gate_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "residual_risk": [dict(item) for item in list(payload.get("residual_risk") or []) if isinstance(item, dict)],
         "report_artifact_ref": dict(payload.get("report_artifact_ref") or {}),
     }
+
+
+def _plan_revision_checklist(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen_actions: set[str] = set()
+
+    def add_item(raw: dict[str, Any], *, source: str) -> None:
+        action = _first_text(raw, "description", "suggested_fix", "fix", "summary", "title", fallback="Address reviewer finding.")
+        action_key = " ".join(action.lower().split())
+        if not action_key or action_key in seen_actions:
+            return
+        seen_actions.add(action_key)
+        item: dict[str, Any] = {
+            "id": f"PRC-{len(result) + 1}",
+            "source": source,
+            "severity": _first_text(raw, "severity", fallback="required"),
+            "action": _compact_text(action, limit=700),
+        }
+        target_handle = _first_text(raw, "target_handle", "handle")
+        if target_handle:
+            item["target_handle"] = target_handle
+        target_node = raw.get("target_node")
+        if isinstance(target_node, dict):
+            item["target_node"] = {
+                key: value
+                for key, value in dict(target_node).items()
+                if key in {"node_kind", "handle", "path", "summary", "module_handle", "module_id", "milestone_handle", "milestone_id"}
+                and value not in (None, "", [], {})
+            }
+        contract_impact = _first_text(raw, "contract_impact", fallback="")
+        if contract_impact:
+            item["contract_impact"] = _compact_text(contract_impact, limit=420)
+        evidence = _compact_revision_evidence(raw.get("evidence"))
+        if evidence:
+            item["evidence"] = evidence
+        related = _related_plan_handles_and_ids(raw)
+        if related:
+            item["related_handles"] = related[:8]
+        route = _revision_suggested_tool_route(raw, action)
+        if route:
+            item["suggested_tool_route"] = route
+        result.append(item)
+
+    for raw_fix in [dict(item) for item in list(payload.get("required_fixes") or []) if isinstance(item, dict)]:
+        add_item(raw_fix, source="required_fix")
+    for raw_finding in [dict(item) for item in list(payload.get("findings") or []) if isinstance(item, dict)]:
+        severity = _first_text(raw_finding, "severity", fallback="").lower()
+        if result and severity not in {"blocker", "critical", "major", "high", "required"}:
+            continue
+        add_item(raw_finding, source="finding")
+    if result:
+        return result[:8]
+    summary = _compact_text(payload.get("summary"), limit=700)
+    return [
+        {
+            "id": "PRC-1",
+            "source": "review_summary",
+            "severity": "required",
+            "action": summary or "Revise the submitted plan so the plan_acceptance gate can pass.",
+            "suggested_tool_route": ["plan_checkout", "plan_read", "plan_find", "plan_update_* or plan_delete_*", "plan_validate", "plan_submit_for_review"],
+        }
+    ]
+
+
+def _compact_revision_evidence(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [_compact_text(value, limit=260)] if value.strip() else []
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [_compact_text(item, limit=260) for item in value if str(item or "").strip()][:4]
+
+
+def _related_plan_handles_and_ids(raw: dict[str, Any]) -> list[str]:
+    texts: list[str] = []
+    for key in ("description", "suggested_fix", "fix", "summary", "title", "contract_impact"):
+        value = raw.get(key)
+        if value:
+            texts.append(str(value))
+    evidence = raw.get("evidence")
+    if isinstance(evidence, str):
+        texts.append(evidence)
+    elif isinstance(evidence, (list, tuple)):
+        texts.extend(str(item) for item in evidence if str(item or "").strip())
+    target_node = raw.get("target_node")
+    if isinstance(target_node, dict):
+        for key in ("handle", "module_handle", "module_id", "milestone_handle", "milestone_id", "path"):
+            value = str(target_node.get(key) or "").strip()
+            if value:
+                texts.append(value)
+    result: list[str] = []
+    seen: set[str] = set()
+    separators = "()[]{}:,;'\"`\n\t"
+    for text in texts:
+        cleaned = str(text)
+        for separator in separators:
+            cleaned = cleaned.replace(separator, " ")
+        for token in cleaned.split():
+            stripped = token.strip(" .")
+            if not stripped:
+                continue
+            if not (
+                stripped.startswith(("module_", "milestone_", "ac_", "gate:", "constraint_", "decision_", "interface_"))
+                or "_module_" in stripped
+            ):
+                continue
+            if stripped in seen:
+                continue
+            seen.add(stripped)
+            result.append(stripped)
+    return result
+
+
+def _revision_suggested_tool_route(raw: dict[str, Any], action: str) -> list[str]:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            action,
+            raw.get("description"),
+            raw.get("suggested_fix"),
+            raw.get("summary"),
+            raw.get("contract_impact"),
+        )
+    ).lower()
+    route = ["plan_checkout"]
+    if "merge" in text or "consolidat" in text or "single implementation module" in text:
+        route.extend(["plan_find related modules", "plan_merge_modules", "plan_update_module"])
+    elif "delete" in text or "remove" in text:
+        route.extend(["plan_find target", "plan_delete_*"])
+    else:
+        route.extend(["plan_find target", "plan_update_*"])
+    route.extend(["plan_validate", "plan_submit_for_review"])
+    return route
+
+
+def _first_text(value: dict[str, Any], *keys: str, fallback: str = "") -> str:
+    for key in keys:
+        text = str(value.get(key) or "").strip()
+        if text:
+            return text
+    return fallback
+
 
 def _plan_artifact_payload(artifact: PlanArtifact, *, plan_revision: int = 0) -> dict[str, Any]:
     revision = max(0, int(plan_revision or 0))

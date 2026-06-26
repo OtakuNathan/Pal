@@ -10,10 +10,14 @@ from pal.shared import TaskContextPack
 
 
 GATE_TRIGGER_TERMINAL = "terminal"
+GATE_TRIGGER_BEFORE_PLAN = "before_plan"
 GATE_TRIGGER_AFTER_EACH_MILESTONE = "after_each_milestone"
 
 CHECKPOINT_QUALITY_GATE = "checkpoint_quality"
+CHECKPOINT_ADMISSION_GATE = "checkpoint_admission"
+MODULE_QUALITY_GATE = "module_quality"
 PLAN_ACCEPTANCE_GATE = "plan_acceptance"
+SOURCE_CONTRACT_GATE = "source_contract"
 NONE_GATE = "none"
 
 REVIEWER_GATE_STRATEGY = "reviewer"
@@ -314,10 +318,27 @@ def normalize_gate_policy(
 
 
 def checkpoint_gate_spec_for_pack(pack: TaskContextPack) -> GateSpec | None:
+    reviewer_specs = [
+        spec
+        for spec in gate_specs_from_pack(
+            pack,
+            trigger=GATE_TRIGGER_AFTER_EACH_MILESTONE,
+            target_kind="checkpoint",
+        )
+        if spec.strategy == REVIEWER_GATE_STRATEGY
+    ]
+    module_specs = [spec for spec in reviewer_specs if spec.gate == MODULE_QUALITY_GATE]
+    legacy_specs = [spec for spec in reviewer_specs if spec.gate == CHECKPOINT_QUALITY_GATE]
+    if module_specs:
+        return module_specs[0] if _pack_is_module_terminal_checkpoint(pack) else None
+    return legacy_specs[0] if legacy_specs else None
+
+
+def checkpoint_admission_gate_spec_for_pack(pack: TaskContextPack) -> GateSpec | None:
     specs = gate_specs_from_pack(
         pack,
         trigger=GATE_TRIGGER_AFTER_EACH_MILESTONE,
-        gate=CHECKPOINT_QUALITY_GATE,
+        gate=CHECKPOINT_ADMISSION_GATE,
     )
     return specs[0] if specs else None
 
@@ -354,6 +375,32 @@ def plan_gate_spec_for_pack(pack: TaskContextPack) -> GateSpec | None:
         gate=PLAN_ACCEPTANCE_GATE,
     )
     return specs[0] if specs else None
+
+
+def _pack_is_module_terminal_checkpoint(pack: TaskContextPack) -> bool:
+    metadata = dict(pack.metadata or {})
+    module_execution = dict(metadata.get("module_execution") or {})
+    mode = str(module_execution.get("mode") or "").strip()
+    if not mode:
+        return True
+    current = _pack_current_milestone_index(pack, module_execution)
+    count = coerce_int(module_execution.get("milestone_count"), 0)
+    return count <= 1 or current >= count - 1
+
+
+def _pack_current_milestone_index(pack: TaskContextPack, module_execution: dict[str, Any]) -> int:
+    for source in (
+        dict((pack.metadata or {}).get("prompt_view") or {}).get("milestone"),
+        dict((pack.metadata or {}).get("coder_work_order") or {}).get("current_milestone"),
+        dict(pack.continuity or {}).get("current_milestone"),
+        module_execution,
+    ):
+        if not isinstance(source, dict):
+            continue
+        for key in ("milestone_index", "current_milestone_index"):
+            if source.get(key) is not None:
+                return coerce_int(source.get(key), 0)
+    return 0
 
 
 def plan_review_policy_from_spec(spec: GateSpec | None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -666,12 +713,36 @@ def _linked_finding(item: dict[str, Any], findings: list[dict[str, Any]]) -> dic
 def _builtin_gate_checklist_entries() -> tuple[GateChecklistEntry, ...]:
     return (
         GateChecklistEntry(
+            "source_contract.compile",
+            "Compile the source task into indexed gate_contract checks before planner work starts.",
+        ),
+        GateChecklistEntry(
+            "source_contract.mechanical",
+            "Use mechanical predicates only for finite counts or bounds Pal can verify.",
+        ),
+        GateChecklistEntry(
+            "source_contract.submit",
+            "Submit op_minion_gate_contract_submit with the compiled gate_contract.",
+        ),
+        GateChecklistEntry(
             "checkpoint.contract_match",
             "Verify the checkpoint matches the milestone contract.",
         ),
         GateChecklistEntry(
+            "checkpoint.deliverable_complete",
+            "Verify the checkpoint has a structured commit/report, changed-file evidence, command/test evidence, and no owned-area or workspace-policy violation before allowing module-local progress.",
+        ),
+        GateChecklistEntry(
+            "checkpoint.lsp_or_equivalent_clean",
+            "Verify prepared LSP/type/build diagnostics are clean for touched code, or record the concrete unavailable/not-applicable reason and equivalent focused evidence.",
+        ),
+        GateChecklistEntry(
             "checkpoint.relevant_tests",
             "Run or inspect relevant tests when possible.",
+        ),
+        GateChecklistEntry(
+            "checkpoint.delivery_entrypoint",
+            "Verify declared user/downstream delivery surfaces through the real invocation path, or the smallest faithful wrapper/link/import/launch probe; internal helper calls do not satisfy wrapper, manifest, public API, service/UI, plugin, command, or persisted-format contracts.",
         ),
         GateChecklistEntry(
             "checkpoint.api_evidence",
@@ -680,6 +751,22 @@ def _builtin_gate_checklist_entries() -> tuple[GateChecklistEntry, ...]:
         GateChecklistEntry(
             "checkpoint.submit_gate",
             "Submit op_minion_review_checkpoint with evidence covering each acceptance criterion.",
+        ),
+        GateChecklistEntry(
+            "module.contract_semantics",
+            "Review the completed module against its module-level contract, public interfaces, cross-module handoffs, type/schema guarantees, lifecycle/ownership semantics, and error behavior.",
+        ),
+        GateChecklistEntry(
+            "module.corner_cases",
+            "Verify boundary, negative, empty/default, invalid-input, timeout/cancellation/retry, persistence, and compatibility cases that are relevant to the module contract.",
+        ),
+        GateChecklistEntry(
+            "module.delivery_dogfood",
+            "Dogfood exact declared delivery surfaces or downstream consumer paths when the module exposes CLI commands, public APIs, service/UI routes, plugin hooks, command wrappers, or persisted formats.",
+        ),
+        GateChecklistEntry(
+            "module.downstream_ready",
+            "Verify downstream modules can safely depend on only declared public interfaces/facades/contracts, with no sibling-internal imports or undeclared flywire coupling.",
         ),
         GateChecklistEntry(
             "plan.dispatchable",
@@ -694,6 +781,10 @@ def _builtin_gate_checklist_entries() -> tuple[GateChecklistEntry, ...]:
             "Verify the test strategy is executable for the repo and each milestone has concrete acceptance criteria.",
         ),
         GateChecklistEntry(
+            "plan.delivery_strategy",
+            "Verify the plan includes acceptance criteria for exact user/downstream delivery surfaces when the task exposes CLI commands, package entrypoints, public APIs, services, UI flows, plugin hooks, command wrappers, or persisted formats.",
+        ),
+        GateChecklistEntry(
             "plan.submit_gate",
             "Submit op_minion_review_gate_submit with gate_kind=plan_acceptance and target.plan_ref.",
         ),
@@ -703,6 +794,83 @@ def _builtin_gate_checklist_entries() -> tuple[GateChecklistEntry, ...]:
 def _builtin_gate_definitions() -> tuple[GateDefinition, ...]:
     return (
         GateDefinition(
+            name=SOURCE_CONTRACT_GATE,
+            target_kind="work_order",
+            gate_kind="source_contract",
+            strategy=REVIEWER_GATE_STRATEGY,
+            trigger=GATE_TRIGGER_BEFORE_PLAN,
+            reviewer_profile_group="software_engineering",
+            reviewer_profile_name="reviewer",
+            required_check_refs=(
+                "source_contract.compile",
+                "source_contract.mechanical",
+                "source_contract.submit",
+            ),
+            blocking=(
+                "missing_hard_requirement",
+                "invalid_mechanical_check",
+                "unclear_source_contract",
+            ),
+        ),
+        GateDefinition(
+            name=CHECKPOINT_ADMISSION_GATE,
+            target_kind="checkpoint",
+            gate_kind="checkpoint_admission",
+            strategy=NONE_GATE_STRATEGY,
+            max_repair_attempts=0,
+            required_check_refs=(
+                "checkpoint.deliverable_complete",
+                "checkpoint.lsp_or_equivalent_clean",
+                "checkpoint.relevant_tests",
+            ),
+            blocking=(
+                "missing_checkpoint_commit",
+                "missing_checkpoint_report",
+                "missing_evidence",
+                "lsp_or_type_diagnostics_failed",
+                "owned_area_violation",
+                "workspace_policy_violation",
+            ),
+            policy={
+                "reviewer_required": False,
+                "scope": "checkpoint_admission",
+            },
+        ),
+        GateDefinition(
+            name=MODULE_QUALITY_GATE,
+            target_kind="checkpoint",
+            gate_kind="checkpoint_verification",
+            strategy=REVIEWER_GATE_STRATEGY,
+            max_repair_attempts=5,
+            required_check_refs=(
+                "checkpoint.relevant_tests",
+                "module.contract_semantics",
+                "module.corner_cases",
+                "checkpoint.delivery_entrypoint",
+                "module.delivery_dogfood",
+                "checkpoint.api_evidence",
+                "module.downstream_ready",
+                "checkpoint.submit_gate",
+            ),
+            blocking=(
+                "contract_mismatch",
+                "missing_required_test",
+                "missing_delivery_entrypoint_verification",
+                "unimplemented_public_api",
+                "scope_violation",
+                "unsafe_or_unclear_module_boundary",
+                "undeclared_cross_module_import",
+            ),
+            policy={
+                "require_test_or_blocker": True,
+                "require_api_evidence": True,
+                "require_lsp_when_applicable": True,
+                "check_public_declarations_have_implementation": True,
+                "scope": "module_quality",
+                "terminal_module_only": True,
+            },
+        ),
+        GateDefinition(
             name=CHECKPOINT_QUALITY_GATE,
             target_kind="checkpoint",
             gate_kind="checkpoint_verification",
@@ -711,12 +879,14 @@ def _builtin_gate_definitions() -> tuple[GateDefinition, ...]:
             required_check_refs=(
                 "checkpoint.contract_match",
                 "checkpoint.relevant_tests",
+                "checkpoint.delivery_entrypoint",
                 "checkpoint.api_evidence",
                 "checkpoint.submit_gate",
             ),
             blocking=(
                 "contract_mismatch",
                 "missing_required_test",
+                "missing_delivery_entrypoint_verification",
                 "unimplemented_public_api",
                 "scope_violation",
             ),
@@ -725,6 +895,7 @@ def _builtin_gate_definitions() -> tuple[GateDefinition, ...]:
                 "require_api_evidence": True,
                 "require_lsp_when_applicable": True,
                 "check_public_declarations_have_implementation": True,
+                "scope": "checkpoint_quality_legacy",
             },
         ),
         GateDefinition(
@@ -738,12 +909,14 @@ def _builtin_gate_definitions() -> tuple[GateDefinition, ...]:
                 "plan.dispatchable",
                 "plan.source_evidence",
                 "plan.test_strategy",
+                "plan.delivery_strategy",
                 "plan.submit_gate",
             ),
             blocking=(
                 "schema_invalid",
                 "undispatchable_plan",
                 "missing_acceptance_criteria",
+                "missing_user_entrypoint_dogfood",
                 "unsafe_or_unclear_module_boundary",
             ),
         ),
@@ -802,7 +975,9 @@ def _default_strategy_for(gate_id: str, target_kind: str, trigger: str) -> str:
 
 
 def _default_target_for_gate(gate: str) -> str:
-    if gate == CHECKPOINT_QUALITY_GATE:
+    if gate == SOURCE_CONTRACT_GATE:
+        return "work_order"
+    if gate in {CHECKPOINT_QUALITY_GATE, CHECKPOINT_ADMISSION_GATE, MODULE_QUALITY_GATE}:
         return "checkpoint"
     if gate == PLAN_ACCEPTANCE_GATE:
         return "plan_artifact"
@@ -810,6 +985,12 @@ def _default_target_for_gate(gate: str) -> str:
 
 
 def _default_gate_kind_for_gate(gate: str) -> str:
+    if gate == SOURCE_CONTRACT_GATE:
+        return "source_contract"
+    if gate == CHECKPOINT_ADMISSION_GATE:
+        return "checkpoint_admission"
+    if gate == MODULE_QUALITY_GATE:
+        return "checkpoint_verification"
     if gate == CHECKPOINT_QUALITY_GATE:
         return "checkpoint_verification"
     if gate == PLAN_ACCEPTANCE_GATE:
@@ -819,6 +1000,8 @@ def _default_gate_kind_for_gate(gate: str) -> str:
 
 def _normalize_trigger(value: Any) -> str:
     text = str(value or "").strip().lower().replace("-", "_")
+    if text in {"before_plan", "pre_plan", "plan_preflight", "before_planning"}:
+        return GATE_TRIGGER_BEFORE_PLAN
     if text in {"after_milestone", "milestone", "checkpoint", "after_each_checkpoint"}:
         return GATE_TRIGGER_AFTER_EACH_MILESTONE
     if text in {"terminal", "final", "completion", "after_completion"}:

@@ -22,8 +22,9 @@ from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.prompt_compiler import PromptCompiler
 from pal.execution import register_with_core as register_execution_with_core
 from pal.foundation import EventEnvelope, PalV2Database
+from pal.llm.contracts import CanonicalToolCall
 from pal.llm.runtime import _coerce_messages_for_openai_chat
-from pal.shared import EventKind, PromptAssemblyContext, SourceKind
+from pal.shared import EventKind, PromptAssemblyContext, RuntimeStatus, SourceKind
 
 
 class _TurnIO:
@@ -484,24 +485,45 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("page_text", kinds)
         self.assertIn("chunk_text", kinds)
 
-    def test_artifact_tool_surface_exposes_schemas(self) -> None:
+    async def test_artifact_tools_are_discoverable_and_callable_when_not_resident(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_artifact_with_core(core.context, self.manager)
         core.publish_module_capabilities("artifact")
+        core.context.execution_runtime.register_provider_ref("core:turn_io", _TurnIO(self.scope_key))
+        ref = self._register_text("refund-policy.txt", "refund terms are on page one")
 
         contracts = {
             contract["function"]["name"]: contract["function"]["parameters"]
             for contract in core.tool_surface.build_llm_tool_contracts()
         }
 
-        self.assertIn("op_artifact_list", contracts)
-        self.assertIn("op_artifact_search", contracts)
-        self.assertIn("op_artifact_read", contracts)
-        self.assertIn("query", contracts["op_artifact_search"]["properties"])
-        self.assertIn("artifact_id", contracts["op_artifact_read"]["properties"])
-        self.assertIn("representation", contracts["op_artifact_read"]["properties"])
+        self.assertNotIn("list_artifacts", contracts)
+        search = await core.context.execution_runtime.execute_tool_async(
+            CanonicalToolCall(name="search_tools", args={"query": "artifact refund", "module_id": "artifact", "top_k": 10}),
+            turn_id=self.turn_id,
+        )
+        self.assertTrue(search.ok, search.text)
+        hit_names = {hit["name"] for hit in search.structured["hits"]}
+        self.assertIn("search_artifacts", hit_names)
+        self.assertIn("read_artifact", hit_names)
+
+        read_tool = await core.context.execution_runtime.execute_tool_async(
+            CanonicalToolCall(name="read_tool", args={"name": "read_artifact"}),
+            turn_id=self.turn_id,
+        )
+        self.assertTrue(read_tool.ok, read_tool.text)
+        schema = read_tool.structured["capability"]["parameters_schema"]
+        self.assertIn("artifact_id", schema["properties"])
+        self.assertIn("representation", schema["properties"])
+
+        called = await core.context.execution_runtime.execute_tool_async(
+            CanonicalToolCall(name="call_tool", args={"name": "read_artifact", "args": {"artifact_id": ref.artifact_id}}),
+            turn_id=self.turn_id,
+        )
+        self.assertEqual(called.status, RuntimeStatus.OK, called.text)
+        self.assertIn("refund terms", called.text)
 
     @unittest.skipUnless(importlib.util.find_spec("PIL") is not None, "Pillow is not installed")
     def test_image_source_url_passthrough_to_openai_chat(self) -> None:

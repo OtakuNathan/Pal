@@ -13,7 +13,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_file_read": {
         "name": "op_file_read",
         "description": (
-            "Use this first when you need to inspect a UTF-8 text file under the current task repo; do not use op_exec_shell with cat/head/tail for repo file reads when this tool is visible. "
+            "Use this first when you need to inspect a UTF-8 text file under the current project repo; do not use op_exec_shell with cat/head/tail for repo file reads when this tool is visible. "
             "Read using a repo-relative path. "
             "A successful read also caches the file for op_file_edit, op_file_write overwrite/append, "
             "and op_path_delete safety checks."
@@ -33,7 +33,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "name": "op_file_edit",
         "description": (
             "Use this first for precise repo text edits; do not use op_exec_shell with sed/awk/python one-liners for file edits when this tool is visible. "
-            "Edit a UTF-8 text file under the current task repo by replacing one exact old_string with new_string. "
+            "Edit a UTF-8 text file under the current project repo by replacing one exact old_string with new_string. "
             "The file must first be read with op_file_read so Pal can detect stale edits."
         ),
         "parameters_schema": {
@@ -50,8 +50,8 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_file_write": {
         "name": "op_file_write",
         "description": (
-            "Use this first for creating, overwriting, or appending UTF-8 text files under the current task repo; do not use op_exec_shell with tee/echo/printf redirection when this tool is visible. "
-            "Create, overwrite, or append to a UTF-8 text file under the current task repo. "
+            "Use this first for creating, overwriting, or appending UTF-8 text files under the current project repo; do not use op_exec_shell with tee/echo/printf redirection when this tool is visible. "
+            "Create, overwrite, or append to a UTF-8 text file under the current project repo. "
             "Create mode fails if the file exists. Overwrite and append require a current prior op_file_read snapshot."
         ),
         "parameters_schema": {
@@ -68,7 +68,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_path_delete": {
         "name": "op_path_delete",
         "description": (
-            "Use this first for deleting a file or directory under the current task repo; do not use op_exec_shell with rm/unlink/rmdir/git rm/find -delete when this tool is visible. "
+            "Use this first for deleting a file or directory under the current project repo; do not use op_exec_shell with rm/unlink/rmdir/git rm/find -delete when this tool is visible. "
             "Regular files must first be read with op_file_read, "
             "or expected_sha256 must match the current file bytes. Directories require recursive=true."
         ),

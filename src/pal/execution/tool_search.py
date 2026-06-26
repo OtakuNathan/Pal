@@ -269,8 +269,21 @@ class ToolCallTool:
         turn_id = str(kwargs.get("turn_id") or "").strip()
         meta = {"turn_id": turn_id} if turn_id else {}
         spec = self.runtime.get_capability_spec(target_name)
-        canonical_name = str((spec or {}).get("canonical_path") or (spec or {}).get("name") or target_name).strip()
+        resolve_tool_name = getattr(self.runtime, "resolve_llm_tool_name", None)
+        resolved_tool_name = str(resolve_tool_name(target_name) if callable(resolve_tool_name) else target_name).strip()
+        canonical_name = str((spec or {}).get("canonical_path") or (spec or {}).get("name") or resolved_tool_name or target_name).strip()
         if spec is not None and canonical_name != self.name and canonical_name in getattr(self.runtime, "tools", {}):
+            result = await self.runtime.execute_tool_async(
+                CanonicalToolCall(name=canonical_name, args=capability_args),
+                turn_id=str(kwargs.get("turn_id") or ""),
+            )
+            return CapabilityResult(
+                status=result.status,
+                text=result.text,
+                structured=result.structured,
+                llm_text=getattr(result, "llm_text", ""),
+            )
+        if spec is None and canonical_name != self.name and canonical_name in getattr(self.runtime, "tools", {}):
             result = await self.runtime.execute_tool_async(
                 CanonicalToolCall(name=canonical_name, args=capability_args),
                 turn_id=str(kwargs.get("turn_id") or ""),

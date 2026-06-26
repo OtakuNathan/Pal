@@ -247,11 +247,17 @@ class ScriptedLLMRuntime:
             reserved_output_tokens=request.max_output_tokens,
         )
 
+    async def apreflight(self, request) -> LLMPreflightAdvice:
+        return self.preflight(request)
+
     def generate(self, request):
         self.requests.append(("generate", request))
         if self.outcomes:
             return self.outcomes.pop(0)
         return CanonicalLLMOutcome(text="done", tool_calls=[], finish_reason="stop")
+
+    async def agenerate(self, request):
+        return self.generate(request)
 
     def generate_stream(self, request):
         self.requests.append(("generate_stream", request))
@@ -297,6 +303,9 @@ class ScriptedLLMRuntime:
             )
         )
         return events
+
+    async def agenerate_stream(self, request):
+        return self.generate_stream(request)
 
 
 class PalV2ArchitectureSkeletonTests(unittest.TestCase):
@@ -2808,7 +2817,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(result.structured["result_ref"], "call_spill")
             result_handle = result.structured["result_handle"]
             self.assertEqual(result_handle["result_ref"], "call_spill")
-            self.assertTrue(Path(str(result_handle["backing_path"])).exists())
+            backing_path = Path(str(result_handle["backing_path"]))
+            self.assertTrue(backing_path.exists())
+            self.assertEqual(backing_path.relative_to(Path(tmpdir)).parts[:2], ("data", "tool_results"))
             self.assertIn("<tool_result", result.llm_text)
             self.assertIn("result_ref=\"call_spill\"", result.llm_text)
             self.assertIn("next_page: read_tool_result_page", result.llm_text)

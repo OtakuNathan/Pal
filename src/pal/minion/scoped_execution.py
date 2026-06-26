@@ -3,11 +3,13 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 from typing import Any
 from uuid import uuid4
 
 from pal.execution import CapabilityResult
 from pal.execution.git_tool import GIT_TOOL_CMD_DESCRIPTION, GIT_TOOL_DESCRIPTION, classify_git_command
+from pal.foundation import utc_now
 from pal.execution.tool_search import ToolReadTool, ToolSearchTool
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.memory import L3CommitRequest
@@ -19,7 +21,13 @@ from pal.minion.checklist import (
     resolve_evidence_ref,
 )
 from pal.minion.git_env import commit_milestone, inspect_milestone_checkpoint
-from pal.minion.plan_builder import PLAN_BUILDER_CAPABILITIES, PLAN_BUILDER_TOOL_SPECS, plan_builder_tool_result
+from pal.minion.plan_builder import (
+    PLAN_BUILDER_CAPABILITIES,
+    PLAN_BUILDER_TOOL_SPECS,
+    enrich_plan_review_gate_node_refs,
+    normalize_gate_contract_payload,
+    plan_builder_tool_result,
+)
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.review_gate_store import plan_target_key
@@ -69,6 +77,7 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_git",
     "op_exec_shell",
     "op_minion_checkpoint_commit",
+    "op_minion_gate_contract_submit",
     "op_tree",
     "op_search",
     "op_minion_artifact_write",
@@ -86,7 +95,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_tree": {
         "name": "op_tree",
         "description": (
-            "Use this first for structured directory listings under the current task repo; do not use op_exec_shell with ls/find/git ls-files "
+            "Use this first for structured directory listings under the current project repo; do not use op_exec_shell with ls/find/git ls-files "
             "for repo listing when this tool is visible. This does not modify anything."
         ),
         "parameters_schema": {
@@ -101,7 +110,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_search": {
         "name": "op_search",
         "description": (
-            "Use this first for repository text search under the current task repo; do not use op_exec_shell with grep/rg/find text scans "
+            "Use this first for repository text search under the current project repo; do not use op_exec_shell with grep/rg/find text scans "
             "when this tool is visible. This does not modify anything."
         ),
         "parameters_schema": {
@@ -118,7 +127,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "name": "op_git",
         "description": (
             GIT_TOOL_DESCRIPTION
-            + " The working directory is fixed to the current task repo or reviewer scratch repo. "
+            + " The working directory is fixed to the current project repo or reviewed repo. "
             "Use this instead of op_exec_shell for git status, diff, log, show, changed-file evidence, "
             "and conservative audited git restore/revert mutations."
         ),
@@ -189,6 +198,32 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "required": ["kind", "summary"],
         },
     },
+    "op_minion_gate_contract_submit": {
+        "name": "op_minion_gate_contract_submit",
+        "description": (
+            "Submit the pre-plan source contract as a normalized gate_contract for the original work order. "
+            "Use this only for source_contract review targets before planner work starts. Include every hard user/work-order "
+            "requirement as a gate check; use mechanical_check only for finite count/bound predicates."
+        ),
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "source_work_order_id": {"type": "string", "description": "Original planner work order id. Defaults to workspace binding."},
+                "gate_contract": {
+                    "type": "object",
+                    "description": "Object with checks=[{claim, priority, kind, source_ref, rationale, mechanical_check?}]. Pal assigns refs gate:N.",
+                },
+                "checks": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "Compatibility shortcut when gate_contract is omitted.",
+                },
+            },
+            "required": ["summary"],
+            "additionalProperties": False,
+        },
+    },
     "op_minion_review_gate_submit": {
         "name": "op_minion_review_gate_submit",
         "description": (
@@ -210,12 +245,12 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "commands_run": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "For checkpoint/repair pass verdicts, include at least one command/check entry. Prefer evidence_ref_id or call_id plus covers=[acceptance index or exact criterion]; Pal fills command, cwd, status/exit_code, and output_summary from the recorded op_exec_shell evidence. Non-skipped command entries must match an op_exec_shell call from this reviewer run.",
+                    "description": "For checkpoint/repair pass verdicts, include at least one command/check entry. Prefer op_minion_review_checkpoint evidence_selectors for checkpoint reviews. If using commands_run directly, entries must describe real op_exec_shell evidence from this reviewer run and include covers=[acceptance index or exact criterion].",
                 },
                 "api_evidence": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "Source/docs/LSP/build evidence for API and call-shape claims. Prefer evidence_ref_id or call_id plus covers=[acceptance index or exact criterion]; Pal fills source/LSP details from recorded evidence when available. Pass verdicts require api_evidence or metadata.api_evidence_not_applicable=true with a reason. LSP entries must match an op_lsp_* call from this reviewer run.",
+                    "description": "Source/docs/LSP/build evidence for API and call-shape claims. Prefer op_minion_review_checkpoint evidence_selectors for checkpoint reviews. If using api_evidence directly, entries must describe real source/LSP evidence and include covers=[acceptance index or exact criterion]. LSP entries must match an op_lsp_* call from this reviewer run.",
                 },
                 "residual_risk": {"type": "array", "items": {"type": "object"}},
                 "report_artifact_ref": {"type": "object"},
@@ -249,17 +284,28 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "checks": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "Command/check evidence. Prefer call_id or evidence_ref_id plus covers=[acceptance index or exact criterion]; Pal fills command, status/exit_code, and output_summary from this reviewer run's op_exec_shell evidence.",
+                    "description": "Compatibility fallback for command/check evidence. Prefer evidence_selectors. If used, write semantic command intent and covers; Pal resolves matching recorded op_exec_shell evidence.",
                 },
                 "api_checks": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "Source/docs/LSP/build evidence for API and call-shape claims. Prefer call_id or evidence_ref_id plus covers=[acceptance index or exact criterion]; Pal fills source/LSP details from recorded evidence when available.",
+                    "description": "Compatibility fallback for source/docs/LSP/build evidence. Prefer evidence_selectors. If used, write semantic source/LSP intent and covers; Pal resolves matching recorded evidence.",
                 },
                 "evidence_refs": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "Preferred compact evidence references. Use evidence_id such as EV-1 plus covers=[AC-1]. Pal maps EV-* to this reviewer run's recorded command/source/LSP evidence and fills legacy gate evidence fields.",
+                    "description": "Legacy compact evidence references. Prefer evidence_selectors unless Pal explicitly returned a usable EV-* id in the current tool result.",
+                },
+                "evidence_selectors": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Preferred semantic evidence selectors. Examples: "
+                        "{\"kind\":\"command\",\"contains\":\"pytest tests/test_catalog.py\",\"latest_success\":true,\"covers\":[\"AC-1\"]}; "
+                        "{\"kind\":\"source\",\"path_contains\":\"src/pal_dogfood/catalog.py\",\"covers\":[\"AC-1\"]}; "
+                        "{\"kind\":\"lsp\",\"operation\":\"diagnostics\",\"latest_success\":true,\"covers\":[\"AC-1\"]}. "
+                        "Do not invent EV-* ids; Pal resolves selectors to recorded tool evidence."
+                    ),
                 },
                 "residual_risk": {"type": "array", "items": {"type": "object"}},
                 "api_evidence_not_applicable_reason": {"type": "string"},
@@ -287,6 +333,12 @@ WORKSPACE_TOOL_SPECS.update(WORKSPACE_FILE_TOOL_SPECS)
 WORKSPACE_TOOL_SPECS.update(PLAN_BUILDER_TOOL_SPECS)
 
 _REPAIR_EDIT_TOOL_NAMES = {
+    "op_file_edit",
+    "op_file_write",
+    "op_path_delete",
+}
+
+_WORKSPACE_MUTATION_TOOL_NAMES = {
     "op_file_edit",
     "op_file_write",
     "op_path_delete",
@@ -444,12 +496,20 @@ class MinionScopedExecutionRuntime:
         if resolved_name != call.name:
             call = CanonicalToolCall(name=resolved_name, args=dict(call.args), call_id=call.call_id)
         if not self._tool_visible_for_workspace(call.name):
-            text = "checkpoint and repair reviewers must use review_checkpoint; the generic review_gate_submit tool is hidden for this target"
+            if call.name == "op_minion_gate_contract_submit":
+                text = "gate_contract_submit is only available for source_contract pre-plan review targets"
+                structured = {"reason": "gate_contract_submit_target_mismatch", "required_gate_kind": "source_contract"}
+            elif call.name == "op_minion_review_gate_submit" and str(self.workspace.get("review_target_gate_kind") or "").strip() == "source_contract":
+                text = "source_contract reviewers must use gate_contract_submit; the generic review_gate_submit tool is hidden for this target"
+                structured = {"reason": "use_gate_contract_submit_for_source_contract", "required_tool": "gate_contract_submit"}
+            else:
+                text = "checkpoint and repair reviewers must use review_checkpoint; the generic review_gate_submit tool is hidden for this target"
+                structured = {"reason": "use_review_checkpoint_for_checkpoint_target", "required_tool": "review_checkpoint"}
             return CanonicalToolResult(
                 name=call.name,
                 ok=False,
                 text=text,
-                structured={"reason": "use_review_checkpoint_for_checkpoint_target", "required_tool": "review_checkpoint"},
+                structured=structured,
                 call_id=call.call_id,
                 llm_text=text,
                 status=RuntimeStatus.INVALID,
@@ -468,6 +528,12 @@ class MinionScopedExecutionRuntime:
         repair_guard = _repair_pre_edit_tool_guard(call, self.workspace)
         if repair_guard is not None:
             return repair_guard
+        read_only_file_guard = _read_only_repo_file_mutation_guard(call, self.workspace)
+        if read_only_file_guard is not None:
+            return read_only_file_guard
+        plan_review_shell_guard = _plan_review_plan_artifact_shell_guard(call, self.workspace)
+        if plan_review_shell_guard is not None:
+            return plan_review_shell_guard
         if call.name == "op_tool_search":
             return _capability_result_to_tool_result(
                 call,
@@ -485,6 +551,8 @@ class MinionScopedExecutionRuntime:
                 return plan_builder_tool_result(call, self.workspace, self.produced_artifacts)
             if call.name == "op_minion_memory_candidate_write":
                 return _minion_memory_candidate_result(call, self.memory_l3)
+            if call.name == "op_minion_gate_contract_submit":
+                return _minion_gate_contract_submit_result(call, self.workspace)
             if call.name == "op_minion_review_gate_submit":
                 return _minion_review_gate_submit_result(call, self.workspace)
             if call.name == "op_minion_review_checkpoint":
@@ -578,9 +646,14 @@ class MinionScopedExecutionRuntime:
 
     def _tool_visible_for_workspace(self, name: str) -> bool:
         canonical = str(name or "").strip()
+        if canonical == "op_minion_gate_contract_submit":
+            gate_kind = str(self.workspace.get("review_target_gate_kind") or "").strip()
+            return gate_kind == "source_contract" or bool(str(self.workspace.get("pre_plan_contract_source_work_order_id") or "").strip())
         if canonical != "op_minion_review_gate_submit":
             return True
         gate_kind = str(self.workspace.get("review_target_gate_kind") or "").strip()
+        if gate_kind == "source_contract":
+            return False
         if gate_kind in {"checkpoint_verification", "repair_verification"}:
             return False
         if str(self.workspace.get("review_target_checkpoint_id") or "").strip():
@@ -604,6 +677,98 @@ def _repair_pre_edit_tool_guard(call: CanonicalToolCall, workspace: dict[str, An
     if target_name == "op_exec_shell" and _is_pre_edit_verification_shell_command(args):
         return _repair_requires_first_edit_result(call, target_name, workspace)
     return None
+
+
+def _read_only_repo_file_mutation_guard(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult | None:
+    workspace_policy = dict((workspace or {}).get("workspace_policy") or {})
+    if str(workspace_policy.get("mode") or "").strip().lower() != "read_only_repo":
+        return None
+    if call.name not in _WORKSPACE_MUTATION_TOOL_NAMES:
+        return None
+    text = (
+        "read_only_repo reviewers cannot mutate files with file_edit, file_write, or delete_path. "
+        "Run verification commands in the target repo and submit blocking findings for the repair loop instead."
+    )
+    return CanonicalToolResult(
+        name=call.name,
+        ok=False,
+        text=text,
+        structured={
+            "reason": "read_only_repo_file_mutation_forbidden",
+            "capability": call.name,
+            "repo_path": str((workspace or {}).get("repo_path") or ""),
+        },
+        call_id=call.call_id,
+        llm_text=text,
+        status=RuntimeStatus.FORBIDDEN,
+    )
+
+
+def _plan_review_plan_artifact_shell_guard(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult | None:
+    if call.name not in {"op_exec_shell", "run_shell", "shell", "shell_exec"}:
+        return None
+    if str(workspace.get("review_target_gate_kind") or "").strip() != "plan_acceptance":
+        return None
+    args = dict(call.args or {})
+    command = " ".join(str(args.get("cmd") or args.get("command") or "").strip().split())
+    if not command:
+        return None
+    if not _plan_review_command_reads_plan_artifact(command, workspace):
+        return None
+    text = (
+        "Plan review route: inspect submitted plans with plan_read, plan_validate, plan_find, and plan_get. "
+        "Do not use run_shell to cat/grep/probe plan.draft.json or plan.json. "
+        "If those plan tools already prove a blocker or a pass, submit review_gate_submit next."
+    )
+    return CanonicalToolResult(
+        name=call.name,
+        ok=False,
+        text=text,
+        structured={
+            "reason": "plan_review_requires_plan_tools",
+            "required_tools": ["plan_read", "plan_validate", "plan_find", "plan_get"],
+            "submit_tool": "review_gate_submit",
+            "blocked_command": command,
+        },
+        call_id=call.call_id,
+        llm_text=text,
+        status=RuntimeStatus.INVALID,
+    )
+
+
+def _plan_review_command_reads_plan_artifact(command: str, workspace: dict[str, Any]) -> bool:
+    lowered = command.lower()
+    artifact_markers = {"plan.draft.json", "plan.json"}
+    plan_ref = workspace.get("review_target_plan_ref")
+    if isinstance(plan_ref, dict):
+        for key in ("path", "relative_path"):
+            value = str(plan_ref.get(key) or "").strip()
+            if value:
+                artifact_markers.add(value.lower())
+                artifact_markers.add(Path(value).name.lower())
+    artifact_dir = str(workspace.get("artifact_dir") or "").strip()
+    if artifact_dir:
+        artifact_markers.add(artifact_dir.lower())
+    if not any(marker and marker in lowered for marker in artifact_markers):
+        return False
+    plan_reader_commands = (
+        "cat",
+        "grep",
+        "rg",
+        "sed",
+        "awk",
+        "head",
+        "tail",
+        "less",
+        "more",
+        "jq",
+        "python",
+        "python3",
+        "node",
+        "ruby",
+        "perl",
+    )
+    return any(f" {name}" in f" {lowered}" for name in plan_reader_commands)
 
 
 def _is_checkpoint_repair_workspace(workspace: dict[str, Any]) -> bool:
@@ -839,7 +1004,7 @@ async def _minion_git_result(
     policy = classify_git_command((call.args or {}).get("cmd"))
     workspace_policy = dict((workspace or {}).get("workspace_policy") or {})
     if str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo" and policy.is_mutation:
-        text = "read_only_repo minions may use git for inspection only; git mutations are not allowed in reviewer scratch workspaces"
+        text = "read_only_repo minions may use git for inspection only; submit a blocking finding or use a dedicated repair workspace for mutations"
         return CanonicalToolResult(
             name=call.name,
             ok=False,
@@ -852,8 +1017,8 @@ async def _minion_git_result(
     if str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo" and not (root / ".git").exists():
         checkpoint_git = workspace.get("review_target_checkpoint_git")
         text = (
-            "review scratch workspace has no .git directory; use review_target.checkpoint_git for checkpoint commit metadata, "
-            "changed files, and stats instead of running git in the scratch tree"
+            "review workspace has no .git directory; use review_target.checkpoint_git for checkpoint commit metadata, "
+            "changed files, and stats instead of running git in this workspace"
         )
         return CanonicalToolResult(
             name=call.name,
@@ -863,7 +1028,7 @@ async def _minion_git_result(
                 "reason": "review_scratch_git_unavailable",
                 "workspace_root": str(root),
                 "checkpoint_git": dict(checkpoint_git or {}) if isinstance(checkpoint_git, dict) else {},
-                "hint": "Use review_target.checkpoint_git for commit_sha, changed_files, parent_commit_sha, and stat; use file/search/read tools for scratch source inspection.",
+                "hint": "Use review_target.checkpoint_git for commit_sha, changed_files, parent_commit_sha, and stat; use file/search/read tools for source inspection.",
             },
             call_id=call.call_id,
             llm_text=text,
@@ -880,7 +1045,10 @@ async def _minion_git_result(
 
 def _effective_git_workspace_root(workspace: dict[str, Any]) -> Path | None:
     workspace_policy = dict((workspace or {}).get("workspace_policy") or {})
-    keys = ("review_scratch_repo_path", "review_scratch_dir") if str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo" else ("repo_path", "task_repo_path", "target_repo_path")
+    if str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo":
+        keys = ("repo_path", "review_scratch_dir", "review_scratch_repo_path")
+    else:
+        keys = ("repo_path", "task_repo_path", "target_repo_path")
     for key in keys:
         raw = str((workspace or {}).get(key) or "").strip()
         if raw:
@@ -889,7 +1057,7 @@ def _effective_git_workspace_root(workspace: dict[str, Any]) -> Path | None:
 
 
 def _effective_lsp_workspace_root(workspace: dict[str, Any]) -> Path | None:
-    for key in ("review_scratch_repo_path", "repo_path"):
+    for key in ("repo_path", "review_scratch_repo_path"):
         raw = str((workspace or {}).get(key) or "").strip()
         if raw:
             return Path(raw).expanduser().resolve()
@@ -958,6 +1126,108 @@ def _minion_memory_candidate_result(call: CanonicalToolCall, memory_l3: MockL3Pl
         )
 
 
+def _minion_gate_contract_submit_result(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult:
+    runtime_root = str(workspace.get("runtime_root") or "").strip()
+    if not runtime_root:
+        text = "runtime_root is missing from minion workspace"
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=text,
+            structured={"reason": "runtime_root_missing"},
+            call_id=call.call_id,
+            llm_text=text,
+            status=RuntimeStatus.ERROR,
+        )
+    try:
+        args = dict(call.args or {})
+        source_work_order_id = str(
+            args.get("source_work_order_id")
+            or workspace.get("pre_plan_contract_source_work_order_id")
+            or workspace.get("review_source_work_order_id")
+            or workspace.get("work_order_id")
+            or ""
+        ).strip()
+        if not source_work_order_id:
+            raise ValueError("source_work_order_id is required")
+        contract_input: Any = args.get("gate_contract")
+        if contract_input is None:
+            contract_input = {"checks": list(args.get("checks") or [])}
+        gate_contract = normalize_gate_contract_payload(contract_input)
+        active_checks = [
+            dict(item)
+            for item in list(gate_contract.get("checks") or [])
+            if isinstance(item, dict) and not bool(item.get("deleted"))
+        ]
+        if not active_checks:
+            raise ValueError("gate_contract requires at least one active check")
+        summary = str(args.get("summary") or "").strip() or f"compiled {len(active_checks)} source contract checks"
+        repository = MinionTaskingRepository(runtime_root=Path(runtime_root))
+        state = {
+            "status": "compiled",
+            "summary": summary,
+            "gate_contract": gate_contract,
+            "compiler_work_order_id": str(workspace.get("work_order_id") or ""),
+            "compiler_run_id": str(workspace.get("run_id") or ""),
+            "compiler_minion_id": str(workspace.get("minion_id") or ""),
+            "updated_at": utc_now(),
+        }
+        repository.merge_work_order_metadata(
+            source_work_order_id,
+            {
+                "gate_contract": gate_contract,
+                "pre_plan_contract": state,
+            },
+        )
+        event = {
+            "event_kind": "pre_plan_contract_compiled",
+            "minion_id": str(workspace.get("minion_id") or ""),
+            "run_id": str(workspace.get("run_id") or ""),
+            "work_order_id": source_work_order_id,
+            "minion_profile": str(workspace.get("minion_profile") or ""),
+            "payload": {
+                "status": "compiled",
+                "summary": summary,
+                "gate_contract": gate_contract,
+                "compiler_work_order_id": state["compiler_work_order_id"],
+                "compiler_run_id": state["compiler_run_id"],
+            },
+            "created_at": utc_now(),
+        }
+        repository.record_minion_event(event)
+        return CanonicalToolResult(
+            name=call.name,
+            ok=True,
+            text="pre-plan gate contract recorded",
+            structured={"status": "compiled", "work_order_id": source_work_order_id, "gate_contract": gate_contract},
+            call_id=call.call_id,
+            llm_text="pre-plan gate contract recorded; finish now unless you need to correct the submitted contract",
+            status=RuntimeStatus.OK,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=message,
+            structured={"reason": "gate_contract_invalid", "error": message},
+            call_id=call.call_id,
+            llm_text=f"gate contract invalid: {message}. Fix only the invalid fields and resubmit.",
+            status=RuntimeStatus.INVALID,
+        )
+    except Exception as exc:
+        message = f"{exc.__class__.__name__}: {exc}"
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=message,
+            structured={"error": str(exc), "error_type": exc.__class__.__name__},
+            call_id=call.call_id,
+            llm_text=message,
+            status=RuntimeStatus.ERROR,
+        )
+
+
 def _minion_review_gate_submit_result(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult:
     runtime_root = str(workspace.get("runtime_root") or "").strip()
     if not runtime_root:
@@ -993,6 +1263,7 @@ def _minion_review_gate_submit_result(call: CanonicalToolCall, workspace: dict[s
                 status=RuntimeStatus.INVALID,
             )
         args["target"] = target
+        args = enrich_plan_review_gate_node_refs(args, workspace)
         repository = MinionTaskingRepository(runtime_root=Path(runtime_root))
         args = _with_review_tool_provenance(args, workspace, repository=repository)
         provenance_error = _review_gate_provenance_error(args, workspace)
@@ -1062,25 +1333,40 @@ def _minion_review_checkpoint_result(call: CanonicalToolCall, workspace: dict[st
             status=RuntimeStatus.INVALID,
         )
     ref_commands, ref_api_evidence, ref_error = _review_checkpoint_evidence_ref_checks(args.get("evidence_refs"), workspace)
-    if ref_error:
-        return CanonicalToolResult(
-            name=call.name,
-            ok=False,
-            text=ref_error,
-            structured={
-                "reason": "review_checkpoint_evidence_ref_invalid",
-                "error": ref_error,
-                "usable_evidence_refs": _usable_review_evidence_refs(workspace),
-            },
-            call_id=call.call_id,
-            llm_text=ref_error,
-            status=RuntimeStatus.INVALID,
-        )
+    selector_commands, selector_api_evidence, selector_error = _review_checkpoint_selector_checks(args.get("evidence_selectors"), workspace)
     target = {
         "checkpoint_id": str(args.get("checkpoint_id") or workspace.get("review_target_checkpoint_id") or ""),
         "commit_sha": str(args.get("commit_sha") or workspace.get("review_target_commit_sha") or ""),
         "run_id": str(workspace.get("review_target_run_id") or ""),
     }
+    manual_commands = _review_checkpoint_checks(args.get("checks"))
+    manual_api_evidence = _review_checkpoint_checks(args.get("api_checks"))
+    if _has_review_checkpoint_evidence_refs(args.get("evidence_refs")):
+        commands_run = ref_commands if ref_commands else manual_commands
+        api_evidence = ref_api_evidence if ref_api_evidence else manual_api_evidence
+    else:
+        commands_run = [*manual_commands, *ref_commands]
+        api_evidence = [*manual_api_evidence, *ref_api_evidence]
+    if selector_commands:
+        commands_run = [*commands_run, *selector_commands]
+    if selector_api_evidence:
+        api_evidence = [*api_evidence, *selector_api_evidence]
+    evidence_error = selector_error or ref_error
+    if evidence_error and not (commands_run or api_evidence):
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=evidence_error,
+            structured={
+                "reason": "review_checkpoint_evidence_ref_invalid",
+                "error": evidence_error,
+                "usable_evidence_refs": _usable_review_evidence_refs(workspace),
+                "next_payload_shape": _review_gate_next_payload_shape({}, workspace, _string_list(workspace.get("review_target_acceptance_criteria"))),
+            },
+            call_id=call.call_id,
+            llm_text=evidence_error,
+            status=RuntimeStatus.INVALID,
+        )
     gate_args: dict[str, Any] = {
         "gate_kind": gate_kind,
         "target": target,
@@ -1088,8 +1374,8 @@ def _minion_review_checkpoint_result(call: CanonicalToolCall, workspace: dict[st
         "summary": str(args.get("summary") or "").strip(),
         "findings": list(args.get("findings") or []),
         "required_fixes": list(args.get("required_fixes") or []),
-        "commands_run": [*_review_checkpoint_checks(args.get("checks")), *ref_commands],
-        "api_evidence": [*_review_checkpoint_checks(args.get("api_checks")), *ref_api_evidence],
+        "commands_run": commands_run,
+        "api_evidence": api_evidence,
         "residual_risk": list(args.get("residual_risk") or []),
     }
     metadata: dict[str, Any] = {}
@@ -1143,6 +1429,18 @@ def _review_checkpoint_checks(raw: Any) -> list[dict[str, Any]]:
     return checks
 
 
+def _has_review_checkpoint_evidence_refs(raw: Any) -> bool:
+    if isinstance(raw, dict):
+        return bool(raw)
+    if isinstance(raw, str):
+        return bool(raw.strip())
+    try:
+        items = list(raw or [])
+    except TypeError:
+        return bool(str(raw or "").strip())
+    return any(bool(item) for item in items)
+
+
 def _review_checkpoint_evidence_ref_checks(raw: Any, workspace: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
     commands: list[dict[str, Any]] = []
     api_evidence: list[dict[str, Any]] = []
@@ -1190,6 +1488,234 @@ def _review_checkpoint_evidence_ref_checks(raw: Any, workspace: dict[str, Any]) 
         else:
             return [], [], f"review evidence ref {requested_id or resolved.get('id')} has unsupported kind: {kind or '<missing>'}"
     return commands, api_evidence, ""
+
+
+def _review_checkpoint_selector_checks(raw: Any, workspace: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    commands: list[dict[str, Any]] = []
+    api_evidence: list[dict[str, Any]] = []
+    projection = build_evidence_projection(workspace.get("review_tool_evidence_refs"))
+    for item in list(raw or []):
+        if isinstance(item, str):
+            requested: dict[str, Any] = {"contains": item}
+        elif isinstance(item, dict):
+            requested = dict(item)
+        else:
+            continue
+        resolved = _match_review_evidence_selector(requested, projection)
+        if not resolved:
+            description = _selector_description(requested)
+            return [], [], f"no review evidence matched selector: {description or '<empty>'}"
+        entry = _review_checkpoint_entry_from_resolved_evidence(requested, resolved)
+        kind = str(entry.get("kind") or "").strip()
+        if kind == "command":
+            commands.append(entry)
+        elif kind in {"lsp", "source"}:
+            api_evidence.append(entry)
+        else:
+            return [], [], f"review evidence selector matched unsupported kind: {kind or '<missing>'}"
+    return commands, api_evidence, ""
+
+
+def _review_checkpoint_entry_from_resolved_evidence(requested: dict[str, Any], resolved: dict[str, Any]) -> dict[str, Any]:
+    entry = dict(requested)
+    for key in (
+        "id",
+        "contains",
+        "query",
+        "command_contains",
+        "path_contains",
+        "summary_contains",
+        "latest_success",
+    ):
+        entry.pop(key, None)
+    entry["evidence_id"] = str(resolved.get("id") or resolved.get("evidence_id") or "")
+    for key in (
+        "evidence_ref_id",
+        "call_id",
+        "ledger_id",
+        "kind",
+        "tool_name",
+        "operation",
+        "command",
+        "cwd",
+        "exit_code",
+        "status",
+        "summary",
+        "path",
+        "query",
+        "method",
+        "server_id",
+        "workspace_root",
+        "file",
+        "file_sha256",
+        "freshness",
+        "unavailable_reason",
+    ):
+        if key not in entry and resolved.get(key) not in (None, "", []):
+            entry[key] = resolved.get(key)
+    return {key: value for key, value in entry.items() if value not in ("", None, [])}
+
+
+def _match_review_evidence_selector(selector: dict[str, Any], projection: list[dict[str, Any]]) -> dict[str, Any]:
+    requested_kind = _selector_kind(selector)
+    candidates = [dict(item) for item in projection if _selector_kind_matches(requested_kind, str(item.get("kind") or ""))]
+    if not candidates:
+        return {}
+    if _selector_bool(selector, "latest_success"):
+        candidates = [item for item in candidates if _review_evidence_ref_success(item)]
+        if not candidates:
+            return {}
+    exact = resolve_evidence_ref(selector, candidates)
+    if exact:
+        return exact
+    query = _selector_query(selector)
+    best: dict[str, Any] = {}
+    best_score = 0
+    for index, candidate in enumerate(candidates):
+        score = _review_evidence_selector_score(selector, candidate, query)
+        if score <= 0:
+            continue
+        score = score * 1000 + index
+        if score > best_score:
+            best_score = score
+            best = dict(candidate)
+    if best and best_score >= 5000:
+        return best
+    if not query and len(candidates) == 1:
+        return candidates[0]
+    return {}
+
+
+def _selector_kind(selector: dict[str, Any]) -> str:
+    raw = str(
+        selector.get("kind")
+        or selector.get("evidence_kind")
+        or selector.get("type")
+        or selector.get("tool_kind")
+        or ""
+    ).strip().lower()
+    if raw in {"shell", "test", "tests", "pytest", "build", "command_check"}:
+        return "command"
+    if raw in {"diagnostics", "language_server", "typecheck", "type_check"}:
+        return "lsp"
+    if raw in {"file", "read", "code", "doc", "docs"}:
+        return "source"
+    return raw
+
+
+def _selector_kind_matches(requested: str, actual: str) -> bool:
+    actual = str(actual or "").strip().lower()
+    requested = str(requested or "").strip().lower()
+    if not requested:
+        return actual in {"command", "source", "lsp"}
+    if requested == actual:
+        return True
+    if requested == "api":
+        return actual in {"source", "lsp"}
+    return False
+
+
+def _selector_bool(selector: dict[str, Any], key: str) -> bool:
+    value = selector.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
+def _selector_query(selector: dict[str, Any]) -> str:
+    for key in ("contains", "query", "command_contains", "path_contains", "summary_contains", "tool_name", "operation", "method"):
+        text = str(selector.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _review_evidence_selector_score(selector: dict[str, Any], candidate: dict[str, Any], query: str) -> int:
+    score = 0
+    for selector_key, candidate_keys in (
+        ("tool_name", ("tool_name",)),
+        ("operation", ("operation", "method")),
+        ("method", ("method", "operation")),
+        ("path_contains", ("path", "file")),
+        ("command_contains", ("command",)),
+        ("summary_contains", ("summary", "command", "path", "query")),
+    ):
+        expected = str(selector.get(selector_key) or "").strip()
+        if not expected:
+            continue
+        actual = " ".join(str(candidate.get(key) or "") for key in candidate_keys)
+        if _text_contains_semantically(actual, expected):
+            score += 25
+        else:
+            return 0
+    if query:
+        haystack = " ".join(
+            str(candidate.get(key) or "")
+            for key in ("summary", "command", "path", "query", "operation", "method", "tool_name", "file")
+        )
+        if _text_contains_semantically(haystack, query):
+            score += 20
+        else:
+            overlap = _token_overlap_score(query, haystack)
+            if overlap <= 0:
+                return 0
+            score += overlap
+    if _review_evidence_ref_success(candidate):
+        score += 5
+    return score
+
+
+def _text_contains_semantically(haystack: Any, needle: Any) -> bool:
+    normalized_haystack = _normalize_semantic_text(haystack)
+    normalized_needle = _normalize_semantic_text(needle)
+    if not normalized_haystack or not normalized_needle:
+        return False
+    if normalized_needle in normalized_haystack or normalized_haystack in normalized_needle:
+        return True
+    return _token_overlap_score(normalized_needle, normalized_haystack) >= 8
+
+
+def _token_overlap_score(query: Any, text: Any) -> int:
+    query_tokens = _semantic_tokens(query)
+    text_tokens = _semantic_tokens(text)
+    if not query_tokens or not text_tokens:
+        return 0
+    overlap = query_tokens & text_tokens
+    score = len(overlap)
+    if {"pytest", "test"} & query_tokens and {"pytest", "test"} & text_tokens:
+        score += 4
+    path_tokens = {token for token in query_tokens if "/" in token or token.endswith(".py")}
+    score += len(path_tokens & text_tokens) * 3
+    return score
+
+
+def _semantic_tokens(value: Any) -> set[str]:
+    text = _normalize_semantic_text(value)
+    return {token for token in re.split(r"[^a-z0-9_./+-]+", text) if token and token not in {"cd", "and", "or", "the"}}
+
+
+def _normalize_semantic_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().replace('"', " ").replace("'", " ").split())
+
+
+def _selector_description(selector: dict[str, Any]) -> str:
+    parts = []
+    for key in ("kind", "contains", "query", "command_contains", "path_contains", "summary_contains", "tool_name", "operation", "method"):
+        text = str(selector.get(key) or "").strip()
+        if text:
+            parts.append(f"{key}={text}")
+    return ", ".join(parts)
+
+
+def _review_evidence_ref_success(ref: dict[str, Any]) -> bool:
+    if ref.get("ok") is True:
+        return True
+    if ref.get("exit_code") == 0:
+        return True
+    status = str(ref.get("status") or "").strip().lower()
+    return status in {"ok", "pass", "passed", "success", "succeeded"}
 
 
 def _bind_review_target_plan_ref(target: dict[str, Any], workspace: dict[str, Any]) -> str:
@@ -1357,13 +1883,17 @@ def _review_gate_next_payload_shape(args: dict[str, Any], workspace: dict[str, A
             "args": {
                 "verdict": str(args.get("verdict") or "pass"),
                 "summary": "<concise verdict summary>",
-                "evidence_refs": [
+                "evidence_selectors": [
                     {
-                        "evidence_id": command_ref.get("id") or "<EV command evidence id>",
+                        "kind": "command",
+                        "contains": _selector_hint_for_ref(command_ref) or "<pytest/build command substring>",
+                        "latest_success": True,
                         "covers": coverage or ["<acceptance ref>"],
                     },
                     {
-                        "evidence_id": api_ref.get("id") or "<EV source/lsp evidence id>",
+                        "kind": str(api_ref.get("kind") or "source"),
+                        "contains": _selector_hint_for_ref(api_ref) or "<source path or LSP operation>",
+                        "latest_success": True,
                         "covers": coverage or ["<acceptance ref>"],
                     },
                 ],
@@ -1381,6 +1911,14 @@ def _review_gate_next_payload_shape(args: dict[str, Any], workspace: dict[str, A
             "api_evidence": [{"call_id": api_ref.get("call_id") or "<source/lsp evidence call_id>"}],
         },
     }
+
+
+def _selector_hint_for_ref(ref: dict[str, Any]) -> str:
+    for key in ("command", "path", "file", "operation", "method", "summary", "query"):
+        text = str(ref.get(key) or "").strip()
+        if text:
+            return text[:160]
+    return ""
 
 
 def _with_review_tool_provenance(args: dict[str, Any], workspace: dict[str, Any], *, repository: MinionTaskingRepository) -> dict[str, Any]:
@@ -1403,6 +1941,7 @@ def _with_review_tool_provenance(args: dict[str, Any], workspace: dict[str, Any]
             workspace["review_tool_evidence_refs"] = refs
         _bind_command_evidence_refs(args, refs)
         _bind_api_evidence_refs(args, refs)
+        _default_review_checkpoint_runtime_evidence(args, refs, criteria)
         _normalize_review_gate_coverage(args, criteria)
         metadata["tool_evidence_refs"] = refs
         _default_lsp_not_applicable_from_status(args, refs, metadata)
@@ -1431,7 +1970,11 @@ def _bind_command_evidence_refs(args: dict[str, Any], refs: list[dict[str, Any]]
             continue
         entry = dict(item)
         command = _normalize_command_text(entry.get("command") or entry.get("cmd") or entry.get("name") or "")
-        ref = _matching_review_ref(entry, command_refs_by_id) or command_refs_by_command.get(command, {})
+        ref = (
+            _matching_review_ref(entry, command_refs_by_id)
+            or command_refs_by_command.get(command, {})
+            or _matching_semantic_command_ref(entry, command_refs)
+        )
         if ref:
             hydrated = _hydrate_command_evidence_entry(entry, ref)
             if hydrated != entry:
@@ -1454,7 +1997,7 @@ def _bind_api_evidence_refs(args: dict[str, Any], refs: list[dict[str, Any]]) ->
             api_evidence.append(item)
             continue
         entry = dict(item)
-        ref = _matching_review_ref(entry, refs_by_id) or _matching_lsp_ref(entry, api_refs)
+        ref = _matching_review_ref(entry, refs_by_id) or _matching_lsp_ref(entry, api_refs) or _matching_semantic_api_ref(entry, api_refs)
         if ref:
             hydrated = _hydrate_api_evidence_entry(entry, ref)
             if hydrated != entry:
@@ -1465,10 +2008,148 @@ def _bind_api_evidence_refs(args: dict[str, Any], refs: list[dict[str, Any]]) ->
         args["api_evidence"] = api_evidence
 
 
+def _default_review_checkpoint_runtime_evidence(args: dict[str, Any], refs: list[dict[str, Any]], criteria: list[str]) -> None:
+    if str(args.get("verdict") or "").strip().lower() != "pass":
+        return
+    if str(args.get("gate_kind") or "").strip() not in {"checkpoint_verification", "repair_verification"}:
+        return
+    covers = _all_acceptance_coverage_refs(criteria)
+    commands = [dict(item) if isinstance(item, dict) else item for item in list(args.get("commands_run") or [])]
+    api_evidence = [dict(item) if isinstance(item, dict) else item for item in list(args.get("api_evidence") or [])]
+    command_refs = [dict(item) for item in refs if str(item.get("kind") or "") == "command"]
+    api_refs = [dict(item) for item in refs if str(item.get("kind") or "") in {"source", "lsp"}]
+    if not _has_backed_command_evidence(commands):
+        command_ref = _latest_successful_ref(command_refs) or (command_refs[-1] if command_refs else {})
+        if command_ref:
+            commands.append(_runtime_evidence_entry(command_ref, covers=covers))
+    if not _has_source_api_evidence(api_evidence):
+        source_ref = _latest_successful_ref([item for item in api_refs if str(item.get("kind") or "") == "source"])
+        if source_ref:
+            api_evidence.append(_runtime_evidence_entry(source_ref, covers=covers))
+    if not _has_lsp_api_evidence(api_evidence):
+        lsp_ref = _latest_successful_ref([item for item in api_refs if str(item.get("kind") or "") == "lsp"])
+        if lsp_ref:
+            api_evidence.append(_runtime_evidence_entry(lsp_ref, covers=covers))
+    if commands:
+        args["commands_run"] = commands
+    if api_evidence:
+        args["api_evidence"] = api_evidence
+
+
+def _has_backed_command_evidence(items: list[Any]) -> bool:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        command = str(item.get("command") or item.get("cmd") or item.get("name") or "").strip()
+        if command and (item.get("exit_code") is not None or str(item.get("status") or "").strip()):
+            return True
+    return False
+
+
+def _has_source_api_evidence(items: list[Any]) -> bool:
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or item.get("source") or item.get("evidence_kind") or "").strip().lower()
+        if kind == "source":
+            return True
+    return False
+
+
+def _all_acceptance_coverage_refs(criteria: list[str]) -> list[str]:
+    return [str(index) for index, _criterion in enumerate(criteria, start=1)]
+
+
+def _runtime_evidence_entry(ref: dict[str, Any], *, covers: list[str]) -> dict[str, Any]:
+    entry = _review_checkpoint_entry_from_resolved_evidence({"covers": covers}, ref)
+    if covers and not entry.get("covers"):
+        entry["covers"] = list(covers)
+    if not str(entry.get("summary") or entry.get("output_summary") or "").strip():
+        summary = _review_ref_summary(ref)
+        if summary:
+            if str(entry.get("kind") or "") == "command":
+                entry["output_summary"] = summary
+            else:
+                entry["summary"] = summary
+    return entry
+
+
+def _latest_successful_ref(refs: list[dict[str, Any]]) -> dict[str, Any]:
+    for ref in reversed(refs):
+        if _review_evidence_ref_success(ref):
+            return dict(ref)
+    return {}
+
+
+def _matching_semantic_command_ref(entry: dict[str, Any], refs: list[dict[str, Any]]) -> dict[str, Any]:
+    if not refs:
+        return {}
+    selector = dict(entry)
+    command = str(entry.get("command") or entry.get("cmd") or entry.get("name") or "").strip()
+    if command:
+        selector.setdefault("kind", "command")
+        selector.setdefault("command_contains", command)
+        selector.setdefault("latest_success", _entry_claims_success(entry))
+        matched = _match_review_evidence_selector(selector, build_evidence_projection(refs))
+        if matched:
+            return _source_ref_for_projection_match(matched, refs)
+    if _entry_claims_success(entry):
+        latest = _latest_successful_ref(refs)
+        if latest and _looks_like_test_or_build_command(command or latest.get("command") or latest.get("summary")):
+            return latest
+    return {}
+
+
+def _matching_semantic_api_ref(entry: dict[str, Any], refs: list[dict[str, Any]]) -> dict[str, Any]:
+    if not refs:
+        return {}
+    selector = dict(entry)
+    source_ref = str(entry.get("source_ref") or entry.get("path") or entry.get("file") or "").strip()
+    if source_ref:
+        selector.setdefault("path_contains", source_ref.split(":", 1)[0])
+    if not _selector_kind(selector):
+        selector.setdefault("kind", "api")
+    matched = _match_review_evidence_selector(selector, build_evidence_projection(refs))
+    if matched:
+        return _source_ref_for_projection_match(matched, refs)
+    return {}
+
+
+def _source_ref_for_projection_match(match: dict[str, Any], refs: list[dict[str, Any]]) -> dict[str, Any]:
+    keys = {
+        str(match.get("evidence_ref_id") or "").strip(),
+        str(match.get("call_id") or "").strip(),
+        str(match.get("ledger_id") or "").strip(),
+        str(match.get("evidence_id") or "").strip(),
+    }
+    for ref in refs:
+        ref_keys = {
+            str(ref.get("evidence_ref_id") or "").strip(),
+            str(ref.get("call_id") or "").strip(),
+            str(ref.get("ledger_id") or "").strip(),
+            str(ref.get("evidence_id") or "").strip(),
+        }
+        if any(key and key in ref_keys for key in keys):
+            return dict(ref)
+    return dict(match)
+
+
+def _entry_claims_success(entry: dict[str, Any]) -> bool:
+    if entry.get("exit_code") == 0:
+        return True
+    status = str(entry.get("status") or entry.get("result") or "").strip().lower()
+    return status in {"ok", "pass", "passed", "success", "succeeded"}
+
+
+def _looks_like_test_or_build_command(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return any(token in text for token in ("pytest", " test", "tests/", "mypy", "pyright", "ruff", "cargo test", "npm test", "build"))
+
+
 def _review_refs_by_id(refs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for ref in refs:
-        for key in ("evidence_ref_id", "call_id", "tool_call_id", "ledger_id", "ref_id"):
+        for key in ("id", "evidence_id", "evidence_ref_id", "call_id", "tool_call_id", "ledger_id", "ref_id"):
             value = str(ref.get(key) or "").strip()
             if value:
                 result[value] = dict(ref)
@@ -1476,7 +2157,7 @@ def _review_refs_by_id(refs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def _matching_review_ref(entry: dict[str, Any], refs_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    for key in ("evidence_ref_id", "evidence_ref", "ref_id", "call_id", "tool_call_id", "ledger_id"):
+    for key in ("id", "evidence_id", "evidence_ref_id", "evidence_ref", "ref_id", "call_id", "tool_call_id", "ledger_id"):
         value = str(entry.get(key) or "").strip()
         if value and value in refs_by_id:
             return dict(refs_by_id[value])
@@ -1487,6 +2168,10 @@ def _hydrate_command_evidence_entry(entry: dict[str, Any], ref: dict[str, Any]) 
     hydrated = dict(entry)
     if str(ref.get("evidence_ref_id") or "").strip():
         hydrated["evidence_ref_id"] = str(ref.get("evidence_ref_id") or "").strip()
+    if str(ref.get("call_id") or "").strip():
+        hydrated["call_id"] = str(ref.get("call_id") or "").strip()
+    if str(ref.get("ledger_id") or "").strip():
+        hydrated["ledger_id"] = str(ref.get("ledger_id") or "").strip()
     command = str(ref.get("command") or "").strip()
     if command:
         hydrated["command"] = command
@@ -1510,6 +2195,10 @@ def _hydrate_api_evidence_entry(entry: dict[str, Any], ref: dict[str, Any]) -> d
         hydrated["kind"] = kind
     if str(ref.get("evidence_ref_id") or "").strip():
         hydrated["evidence_ref_id"] = str(ref.get("evidence_ref_id") or "").strip()
+    if str(ref.get("call_id") or "").strip():
+        hydrated["call_id"] = str(ref.get("call_id") or "").strip()
+    if str(ref.get("ledger_id") or "").strip():
+        hydrated["ledger_id"] = str(ref.get("ledger_id") or "").strip()
     for key in (
         "tool_name",
         "operation",
@@ -1853,15 +2542,17 @@ def _review_gate_provenance_error(args: dict[str, Any], workspace: dict[str, Any
     verdict = str(args.get("verdict") or "").strip().lower()
     if verdict != "pass":
         return ""
+    gate_kind = str(args.get("gate_kind") or "").strip()
     shell_violations = [dict(item) for item in list(workspace.get("shell_mutation_violations") or []) if isinstance(item, dict)]
     if shell_violations:
         return "reviewer shell mutated the audited workspace; pass verdict is blocked until the review is rerun from a clean read-only workspace"
     evidence_refs = [dict(item) for item in list(workspace.get("review_tool_evidence_refs") or []) if isinstance(item, dict)]
     command_refs = [item for item in evidence_refs if str(item.get("kind") or "") == "command"]
     lsp_refs = [item for item in evidence_refs if str(item.get("kind") or "") == "lsp"]
-    command_error = _command_evidence_provenance_error(list(args.get("commands_run") or []), command_refs)
-    if command_error:
-        return command_error
+    if gate_kind in {"checkpoint_verification", "repair_verification"}:
+        command_error = _command_evidence_provenance_error(list(args.get("commands_run") or []), command_refs)
+        if command_error:
+            return command_error
     lsp_error = _lsp_evidence_provenance_error(list(args.get("api_evidence") or []), lsp_refs)
     if lsp_error:
         return lsp_error
@@ -1927,7 +2618,7 @@ def _minion_checkpoint_commit_result(call: CanonicalToolCall, workspace: dict[st
     try:
         repo_path = str((workspace or {}).get("repo_path") or "").strip()
         if not repo_path:
-            raise ValueError("current task repo is not available")
+            raise ValueError("current project repo is not available")
         repo = Path(repo_path)
         title = str(call.args.get("title") or workspace.get("current_milestone_title") or "").strip()
         result = commit_milestone(

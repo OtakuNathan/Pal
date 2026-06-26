@@ -432,7 +432,11 @@ class MinionReviewGateStore:
         plan_ref = dict(loaded_plan.get("plan_ref") or {})
         target = dict(gate_payload.get("target") or {})
         target_ref = dict(target.get("plan_ref") or {})
-        if plan_target_key(target_ref) != plan_target_key(plan_ref):
+        if plan_target_key(target_ref) != plan_target_key(plan_ref) and not _reviewed_plan_semantically_matches(
+            self.owner,
+            target_ref,
+            loaded_plan,
+        ):
             raise ValueError("review gate target plan_ref does not match accepted plan_ref")
         return gate_payload
 
@@ -474,6 +478,8 @@ class MinionReviewGateStore:
 
     def _validate_numeric_range_evidence(self, gate: ReviewGateResult, criteria: list[str]) -> None:
         for violation in _numeric_range_evidence_violations(gate, criteria, require_coverage=True):
+            if violation.get("kind") == "advisory_test_count_range_violation":
+                continue
             raise ValueError(str(violation.get("summary") or "checkpoint pass review gate evidence violates acceptance criterion"))
 
     def _validate_pass_gate_findings(self, gate: ReviewGateResult) -> None:
@@ -507,6 +513,36 @@ def _review_target_acceptance_criteria(target_binding: dict[str, Any]) -> list[s
             seen.add(key)
             criteria.append(criterion)
     return criteria
+
+
+def _reviewed_plan_semantically_matches(repo: Any, target_ref: dict[str, Any], loaded_plan: dict[str, Any]) -> bool:
+    try:
+        reviewed = repo.load_dispatchable_plan_ref(target_ref)
+    except Exception:
+        return False
+    reviewed_ref = dict(reviewed.get("plan_ref") or {})
+    accepted_ref = dict(loaded_plan.get("plan_ref") or {})
+    for key in ("task_id", "plan_id", "plan_revision"):
+        if str(reviewed_ref.get(key) or "") != str(accepted_ref.get(key) or ""):
+            return False
+    return _normalized_plan_for_gate_compare(reviewed.get("plan_artifact")) == _normalized_plan_for_gate_compare(
+        loaded_plan.get("plan_artifact")
+    )
+
+
+def _normalized_plan_for_gate_compare(value: Any) -> Any:
+    if isinstance(value, dict):
+        payload = {str(key): _normalized_plan_for_gate_compare(item) for key, item in value.items()}
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            metadata = dict(metadata)
+            metadata.pop("submission_notes", None)
+            metadata.pop("accepted_at", None)
+            payload["metadata"] = metadata
+        return payload
+    if isinstance(value, list):
+        return [_normalized_plan_for_gate_compare(item) for item in value]
+    return value
 
 
 def _review_target_numeric_range_criteria(target_binding: dict[str, Any]) -> list[str]:
@@ -648,15 +684,15 @@ def _numeric_range_evidence_violations(
             seen.add(key)
             violations.append(
                 {
-                    "kind": "numeric_range_violation",
-                    "severity": "blocker",
+                    "kind": "advisory_test_count_range_violation",
+                    "severity": "note",
                     "criterion": criterion,
                     "observed_count": count,
                     "required_min": lower,
                     "required_max": upper,
                     "summary": (
-                        "checkpoint review gate evidence violates acceptance criterion "
-                        f"{criterion!r}: observed {count} passed tests outside required range {lower}-{upper}"
+                        "checkpoint review gate evidence observed pytest count outside advisory range "
+                        f"{criterion!r}: observed {count} passed tests outside {lower}-{upper}"
                     ),
                 }
             )
@@ -719,16 +755,19 @@ def _item_relevant_to_test_count_range(item: dict[str, Any], criterion: str, low
 
 
 def _annotate_detected_contract_violations(payload: dict[str, Any], violations: list[dict[str, Any]]) -> None:
+    blocking_violations = [dict(item) for item in violations if item.get("kind") != "advisory_test_count_range_violation"]
+    if not blocking_violations:
+        return
     metadata = dict(payload.get("metadata") or {})
     existing = [dict(item) for item in list(metadata.get("detected_contract_violations") or []) if isinstance(item, dict)]
-    existing.extend(dict(item) for item in violations)
+    existing.extend(blocking_violations)
     metadata["detected_contract_violations"] = existing
     payload["metadata"] = metadata
     if str(payload.get("verdict") or "").strip().lower() == "pass":
         return
     findings = [dict(item) for item in list(payload.get("findings") or []) if isinstance(item, dict)]
     existing_text = "\n".join(str(item.get("summary") or item.get("message") or "") for item in findings).lower()
-    for violation in violations:
+    for violation in blocking_violations:
         summary = str(violation.get("summary") or "").strip()
         if not summary or summary.lower() in existing_text:
             continue

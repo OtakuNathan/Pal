@@ -42,12 +42,24 @@ required_wheel_paths=(
   "pal/lsp/server_templates/yaml.toml"
   "pal/mcp/templates/stdio_server.toml"
   "pal/minion/gates.py"
+  "pal/minion/llm_broker.py"
+  "pal/minion/manager.py"
+  "pal/minion/plan_builder.py"
+  "pal/minion/plan_store.py"
   "pal/minion/profile_templates/generic.toml"
   "pal/minion/profile_templates/software_engineering/coder.toml"
   "pal/minion/profile_templates/software_engineering/planner.toml"
   "pal/minion/profile_templates/software_engineering/reviewer.toml"
+  "pal/minion/profile_templates/software_engineering/writer.toml"
+  "pal/minion/runner_process.py"
+  "pal/minion/sandbox.py"
+  "pal/minion/scoped_execution.py"
+  "pal/minion/serial_scheduler.py"
   "pal/minion/review_gate_store.py"
   "pal/minion/review_orchestrator.py"
+  "pal/minion/workspace_environment.py"
+  "pal/minion/workspace_file_tools.py"
+  "pal/minion/workspace_tools.py"
   "pal/plugins_builtin/lsp/plugin.toml"
   "pal/plugins_builtin/lsp/runtime.py"
   "pal/plugins_builtin/mcp/plugin.toml"
@@ -101,7 +113,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
 
     expected_profile_gates = {
         "pal/minion/profile_templates/generic.toml": ["none"],
-        "pal/minion/profile_templates/software_engineering/coder.toml": ["checkpoint_quality"],
+        "pal/minion/profile_templates/software_engineering/coder.toml": ["checkpoint_admission", "module_quality"],
         "pal/minion/profile_templates/software_engineering/planner.toml": ["plan_acceptance"],
     }
     for path, expected_gates in expected_profile_gates.items():
@@ -118,12 +130,21 @@ with zipfile.ZipFile(wheel_path) as wheel:
     if not isinstance(reviewer_gate_policy, dict) or reviewer_gate_policy.get("submits_review_gate") is not True:
         fail("reviewer.toml must declare gate_policy.submits_review_gate = true")
 
+    writer_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/writer.toml"))
+    if writer_profile.get("profile_id") != "writer" or writer_profile.get("profile_group") != "software_engineering":
+        fail("writer.toml must declare software_engineering writer profile")
+    writer_capabilities = writer_profile.get("default_allowed_capabilities")
+    if not isinstance(writer_capabilities, list) or "op_file_write" not in writer_capabilities:
+        fail("writer.toml must allow file writing for document artifacts")
+
     gates_source = read_text("pal/minion/gates.py")
     for token in (
         "GateDefinition",
         "GateChecklistEntry",
         "GateSpec",
         "checkpoint_quality",
+        "checkpoint_admission",
+        "module_quality",
         "plan_acceptance",
         "none",
         "normalize_gate_policy",
@@ -133,6 +154,69 @@ with zipfile.ZipFile(wheel_path) as wheel:
     ):
         if token not in gates_source:
             fail(f"pal/minion/gates.py missing {token!r}")
+
+    sandbox_source = read_text("pal/minion/sandbox.py")
+    for token in (
+        "MinionSandboxSpec",
+        "MINION_SANDBOX_BLACKLIST_COMMANDS",
+        "sandbox_supported_backend",
+        "with_minion_sandbox_metadata",
+        "build_sandboxed_runner_invocation",
+        "scrub_minion_sandbox_env",
+        "ensure_sandbox_files",
+        "PAL_MINION_LLM_BROKER",
+        "PAL_MINION_SANDBOXED",
+        "secret_policy",
+        "host_llm_broker",
+        "--share-net",
+        "bubblewrap is required for Linux minion sandboxing",
+    ):
+        if token not in sandbox_source:
+            fail(f"pal/minion/sandbox.py missing sandbox token {token!r}")
+
+    scoped_execution_source = read_text("pal/minion/scoped_execution.py")
+    for token in (
+        "MINION_DISCOVERY_TOOL_SURFACE",
+        "MINION_CODE_INTEL_TOOL_SURFACE",
+        "MINION_DIRECT_WORK_TOOL_SURFACE",
+        "WORKSPACE_TOOL_SPECS",
+        "PLAN_BUILDER_CAPABILITIES",
+        "WORKSPACE_FILE_TOOL_SPECS",
+        "op_path_delete",
+        "op_git",
+        "op_minion_review_checkpoint",
+        "op_minion_checkpoint_commit",
+    ):
+        if token not in scoped_execution_source:
+            fail(f"pal/minion/scoped_execution.py missing scoped execution token {token!r}")
+
+    plan_builder_source = read_text("pal/minion/plan_builder.py")
+    for token in (
+        "PLAN_BUILDER_READ_CAPABILITIES",
+        "PLAN_BUILDER_WRITE_CAPABILITIES",
+        "op_minion_plan_checkout",
+        "op_minion_plan_update_acceptance_criterion",
+        "op_minion_plan_delete_acceptance_criterion",
+        "module_quality_criteria",
+        "checkpoint_admission_evidence",
+        "negative_cases",
+        "depends_on_module_keys",
+        "fork_join_linear",
+    ):
+        if token not in plan_builder_source:
+            fail(f"pal/minion/plan_builder.py missing plan builder token {token!r}")
+
+    scheduler_source = read_text("pal/minion/serial_scheduler.py")
+    for token in (
+        "SerialMilestoneScheduler",
+        "auto_advance",
+        "next_serial_module_turn",
+        "mark_serial_module_completed",
+        "record_plan_module_completion",
+        "auto_continue_work_order",
+    ):
+        if token not in scheduler_source:
+            fail(f"pal/minion/serial_scheduler.py missing serial scheduler token {token!r}")
 
     skill_source = read_text("pal/skill/builtin_skills.py")
     for token in (
@@ -175,7 +259,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if token not in skill_capability_source:
             fail(f"pal/skill/capabilities.py missing gate skill affordance token {token!r}")
 
-print("Verified gate policy profiles and minion gate development skill semantics")
+print("Verified minion profile gates, sandbox, plan builder, scheduler, and gate development skill semantics")
 PY
 
 echo "Built $wheel_path"

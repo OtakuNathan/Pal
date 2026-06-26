@@ -89,6 +89,32 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertEqual(env["PAL_MINION_SANDBOXED"], "1")
             self.assertIn("run_env", env["TMPDIR"])
 
+    def test_sandbox_env_applies_workspace_execution_env(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_workspace_env_") as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            src = repo / "src"
+            src.mkdir(parents=True)
+            pack = TaskContextPack(
+                work_order_id="wo",
+                goal="g",
+                workspace={
+                    "repo_path": str(repo),
+                    "execution_env": {"path_prepend": {"PYTHONPATH": [str(src)]}},
+                },
+            )
+
+            env = scrub_minion_sandbox_env(
+                {"PATH": "/usr/bin", "PYTHONPATH": "/existing"},
+                runtime_root=root,
+                run_id="run_workspace_env",
+                pack=pack,
+            )
+
+            self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(src))
+            self.assertIn("/existing", env["PYTHONPATH"].split(os.pathsep))
+            self.assertIn("PYTHONUSERBASE", env)
+
     def test_blacklist_wrappers_are_generated_as_executable_route_blocks(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_wrappers_") as tmp:
             scratch, deny_dir = ensure_sandbox_files(Path(tmp), run_id="run_wrap", blacklist_commands=("sudo", "docker"))

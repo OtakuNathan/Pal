@@ -73,12 +73,21 @@ Drafts are not progress facts and are not PalCore state. They are searchable so 
 The intended route is:
 
 1. Pal captures user brainstorming with `minion_draft_work_order`.
-2. Planner reviews the draft as a bounded input.
-3. Pal/user confirms the reviewed candidate.
-4. The reviewed output is written as a `FinalPlanArtifact` and accepted as a `plan_ref`.
-5. `minion_spawn` starts the selected profile from the accepted plan or from a work order already bound to an accepted plan.
+2. Planner reviews the draft as a bounded input and builds a structured plan with planner tools, not hand-written JSON.
+3. `plan_validate_and_submit_for_review` freezes a primary draft snapshot for the `plan_acceptance` gate.
+4. Reviewer reads the plan through `plan_read`/`plan_find`/`plan_get` handles, submits a gate verdict, and cites target handles for required fixes.
+5. Pal/user accepts the reviewed `plan_ref`, or requests/rejects a revision through the plan control interaction.
+6. `minion_spawn` starts the selected profile from the accepted plan or from a work order already bound to an accepted plan.
 
 Planner must not invent task boundaries from raw chat history when a draft exists. The draft is the bounded source for review.
+
+Planner plan construction is structured and mutable during drafting:
+
+- `plan_begin` creates a draft handle.
+- Module and milestone tools add bounded structure. `module_key` is caller-chosen, stable, and human-readable; generated handles are internal mutation references.
+- `plan_add_module_outline` and `plan_add_milestone_outline` close their nodes in one call. `begin_*`/`end_*` tools are for incremental construction and return parent handles so the planner can continue at the correct layer.
+- Revision planners use `plan_checkout`, `plan_find`, `plan_get`, and `plan_update_*`/`plan_delete_*` tools to repair specific handles instead of rebuilding the whole plan from scratch.
+- The runtime validates topology, closed nodes, acceptance criteria, module dependencies, and gate evidence fields before a draft can be submitted for review.
 
 ## Checkpoint Cursor
 
@@ -99,6 +108,7 @@ Pal must not infer work order progress from chat text, progress text, or termina
 Minion work happens inside a task environment. There are two workspace kinds:
 
 - `git_repo`: used by coder-style profiles that produce code changes.
+- `git_worktree`: used by coder-style profiles when the source repository is a local Git repository and the task can share the same object store through `git worktree`.
 - `folder`: used by planner, reviewer, generic, and other one-shot profiles that only need a private output folder.
 
 All prepared workspaces expose:
@@ -111,15 +121,53 @@ Read-only profiles may still receive `repo_path` for source inspection, but thei
 
 Coder work remains Git-backed:
 
-- A task owns or resolves a task repo.
-- A work order runs on its own branch in that repo.
+- A task owns or resolves a project repo/workspace. `task_id` remains the tasking identity; `project_name` names the long-lived repository/workspace scope.
+- A work order runs on its own branch in that project repo.
 - A milestone completion is represented by one Git commit on the work order branch.
 - A completed checkpoint records the milestone index and the corresponding commit SHA.
-- Coder reports and test notes are written under `minion_outputs/{work_order_id}/` inside the task repo and are included in the commit when relevant.
+- Coder reports and test notes are written under `minion_outputs/{work_order_id}/` inside the project repo/workspace and are included in the commit when relevant.
 
 This keeps the minion ledger and workspace state aligned: the minion tasking store knows which milestone is complete, and Git can restore the files for that milestone.
 
-Spawn must read or initialize the task repo before starting a runner. For an existing work order, spawn must checkout or create the work order branch from the recorded base ref. A runner must not do task work on Pal's live branch unless that workspace was explicitly assigned as the task repo.
+Spawn must read or initialize the project repo before starting a runner. For an existing work order, spawn must checkout or create the work order branch from the recorded base ref. A runner must not do task work on Pal's live branch unless that workspace was explicitly assigned as the project repo.
+
+The default prepared repo layout is `data/minion/repos/{project_name}/{module_name}` for module work, with explicit `task_repo_path` or `target_repo_path` still taking precedence. `project_name` is read from metadata/workspace when present, otherwise it falls back to the source repo name and then `task_id`. `module_name` is the human-readable module folder name and remains compatible with existing `module_id` plan artifacts.
+
+Plan-parent module execution keeps module branches isolated while preserving declared dependency flow. After a module checkpoint passes its gate and the module completes, the parent records that child repo/branch as the next serial dependency baseline. The next module child still gets its own module workspace and work-order branch, but local Git baselines are materialized as `git worktree` checkouts instead of full clones; remote or nonlocal baselines fall back to clone. This makes prelude/contracts and accepted upstream public interfaces visible without copying the same repository repeatedly or allowing arbitrary sibling internals.
+
+Module boundaries are contract boundaries. Planner output must describe cross-module handoffs through `provided_interfaces`, `consumed_interfaces`, `cross_module_contracts`, and prelude/contracts stubs or public facades when downstream modules need importable types or APIs. Coder and reviewer profiles treat undeclared cross-module imports as contract violations, including in the join module. Join may compose modules only through declared public interfaces, exported facades, or prelude contracts.
+
+Plan-parent module scheduling is DAG-first. The accepted plan artifact remains the truth source, while the manager may compile a rebuildable `PlanDagProjection` file under `data/minion/plan_dags/{parent_work_order_id}.json` for scheduler reads. That projection contains module nodes, dependency edges, children, topology hash, and scheduler defaults such as `max_parallel_modules`; it must not become a second runtime-state database. If the file is missing or stale, it can be regenerated from the accepted plan artifact and validation output.
+
+The scheduler derives runtime state from minion-owned facts, not from the projection file: completed modules come from parent/module checkpoints, running modules come from active child work orders, and blocked/failed modules come from terminal ledger state. On each scheduling signal, the manager recomputes the ready set from the DAG:
+
+- a module is ready when it is not completed, not running, not blocked, and all dependency modules are completed
+- ready modules enter a waiting queue ordered by the validated topology order
+- the global `max_parallel_modules` limit controls how many ready modules may start
+- `max_parallel_modules=1` is the default and gives serial behavior without a manual module-boundary continue step
+- larger values allow independent ready modules to run concurrently in isolated worktrees
+
+Module completion, parent spawn, recovery, retry, and explicit continue are scheduling signals. `continue_work_order` is a manual recovery/control path, not the normal module-boundary driver. The normal path is: gate passes a child module checkpoint, parent records the module completion, the scheduler recomputes ready modules, and the manager starts the next available child module when a global concurrency slot is free.
+
+Concurrency is intentionally global at the minion scheduler layer. Per-endpoint request limits belong to the LLM broker or endpoint invoker because endpoint fallback can change the actual provider/model used by a child run. The parent module scheduler should not pre-resolve endpoint identity or duplicate broker fallback policy.
+
+## Runner Sandbox
+
+Minion runners may run inside a task sandbox. Sandbox setup is part of manager spawn preparation and is recorded in `TaskContextPack.metadata.sandbox`.
+
+Current behavior:
+
+- Linux uses `bubblewrap` (`bwrap`) when available.
+- Unsupported hosts or unwired backends record `backend="unavailable"` with a reason instead of pretending isolation exists.
+- Operators can disable sandboxing with `metadata.sandbox.enabled=false` or `PAL_MINION_SANDBOX=0`.
+- Network remains open so research-capable minions can use web tools and package managers when the task permits.
+- LLM credentials are not passed into the sandbox. Secret-like environment variables are scrubbed, and LLM calls go through the host minion LLM broker (`PAL_MINION_LLM_BROKER=1`).
+- The sandbox gives each run private `HOME`, `TMPDIR`, cache, and pycache paths under `runtime_root/data/minion/sandbox/runs/{run_id}`.
+- Pal source, Python dependency paths, config, plugin data, skills, and selected runtime data are mounted read-only unless the runner needs task-owned state.
+- The assigned repo/workspace is mounted writable only for coder-style workspaces that own that path.
+- A deny-bin projection replaces high-risk host commands such as `sudo`, `systemctl`, `docker`, `ssh`, and namespace/mount tools with wrappers that tell the runner to use resident Pal tools.
+
+The sandbox is a runtime boundary, not a replacement for profile policy. The runner still receives a scoped capability surface, minion deny rules still apply, and file/git tools still enforce workspace-relative behavior. The main goal is to reduce host mutation risk and tool-routing friction while keeping minions useful.
 
 Non-coder profiles get an isolated folder workspace:
 
@@ -158,13 +206,17 @@ The minion module exposes:
 - `minion_profile_read`
 - `minion_plan_search`
 - `minion_plan_read`
-- `minion_draft_work_order`
-- `minion_promote_work_order_draft`
 - `minion_submit_plan`
 - `minion_accept_plan`
 - `minion_revise_plan`
+- `minion_draft_work_order`
+- `minion_promote_work_order_draft`
 - `minion_spawn`
 - `minion_kill`
+- `minion_continue_work_order`
+- `minion_pause_work_order`
+- `minion_recover_work_order`
+- `minion_destroy_work_order_run`
 - `minion_finalize`
 
 `work_order_read` returns work order status, milestones, derived current milestone, latest checkpoint, latest completed checkpoint, recent ledger, current worker, task lessons, and pending system lesson candidates.
@@ -222,7 +274,7 @@ Minion compact must not create durable memory candidates. Reusable lessons or ca
 
 Minion profiles are declarative. Builtin profiles are package TOML templates, and runtime profiles are loaded from `runtime_root/plugins/minion/profiles/*.toml`.
 
-Current builtin profiles are `generic`, `planner`, `coder`, and `reviewer`. Public calls identify them as `profile_group` plus `profile_name`, such as `software_engineering` / `coder`; canonical internal ids such as `software_engineering.coder` remain runtime metadata. `planner` owns both planning and architecture review: work-order decomposition, module/interface boundaries, design tradeoffs, risks, migration notes, and verification steps.
+Current builtin profiles are `generic`, `planner`, `coder`, `reviewer`, and `writer`. Public calls identify them as `profile_group` plus `profile_name`, such as `software_engineering` / `coder`; canonical internal ids such as `software_engineering.coder` remain runtime metadata. `planner` owns both planning and architecture review: work-order decomposition, module/interface boundaries, design tradeoffs, risks, migration notes, and verification steps. `writer` is for bounded technical writing and evidence-based documentation artifacts; it is not a code implementation profile.
 
 Profile resolution order is builtin templates, runtime profile files, then currently mounted provider declarations. Later declarations with the same `profile_id` override earlier ones.
 
@@ -230,7 +282,9 @@ Profiles may declare capability groups. `core_minion_read` includes scoped disco
 
 Profiles may also use `capability_policy.mode = "inherit_filtered"`. In that mode, spawn starts from the manager-visible capability surface, adds profile defaults and provider hook results, then applies the minion deny policy. For `profile_only`, the profile is the upper bound; public spawn cannot expand it with ad hoc `allowed_capabilities`.
 
-Profiles may declare `gate_policy` and `output_policy`. Gate policy names gate definitions instead of expanding every reviewer/checklist detail into each profile. For example, coder uses `gates = ["checkpoint_quality"]`, planner uses `gates = ["plan_acceptance"]`, and generic uses `gates = ["none"]`. Runtime gate definitions expand those names into target kind, gate kind, execution strategy, reviewer profile, repair/revision bounds, required checks, and blocking classes. Milestone result events are the v1 gate trigger; profile TOML should not spell out trigger mechanics.
+Profiles may declare `gate_policy` and `output_policy`. Gate policy names gate definitions instead of expanding every reviewer/checklist detail into each profile. For example, coder uses `gates = ["checkpoint_admission", "module_quality"]`, planner uses `gates = ["plan_acceptance"]`, and generic uses `gates = ["none"]`. Runtime gate definitions expand those names into target kind, gate kind, execution strategy, reviewer profile, repair/revision bounds, required checks, and blocking classes. Milestone result events are the v1 gate trigger; profile TOML should not spell out trigger mechanics.
+
+The pre-plan `source_contract` compiler is an opt-in contract-locking layer for unusually risky or strongly constrained planning tasks. It is not part of the default planner path. Callers must explicitly request it through work-order metadata, such as `enable_pre_plan_contract=true`; otherwise the planner writes the structured plan directly and the `plan_acceptance` gate reviews the resulting artifact.
 
 Gate definitions and individual gate checklist entries are extension points. New minion plugins may declare additional gate definitions or checklist entries; profiles reference the gate name, while the definition owns the concrete checks and default strategy. The active gate result is projected into `active_gate_todo` so reviewer failures, repair checklist items, and milestone todo state use the same ledger shape. Reviewer requirements such as command/test evidence, API evidence, LSP evidence, and public declaration implementation checks belong in gate definitions/policy, not LLM prompt folklore. LSP stays a reviewer evidence tool rather than a separate manager gate.
 
@@ -263,9 +317,15 @@ Plan revisions write new immutable plan revisions. They must not mutate the orig
 
 ### Checkpoint Verification Gate
 
-`checkpoint_quality` applies to coder-style implementation milestones. When the runner sees a checkpoint review gate, a successful commit is emitted as `status=claimed`, not `completed`. The coder runner waits for a manager control message before advancing.
+Coder checkpoint gating is split by cost and semantic depth. `checkpoint_admission` applies to ordinary implementation checkpoints and is a cheap admission/router gate: the checkpoint must have a structured commit/report, changed-file evidence, relevant command/test evidence, owned-area/workspace-policy compliance, and clean LSP/type/build diagnostics when available or a concrete unavailable/not-applicable reason. It does not claim semantic module acceptance and does not spawn a reviewer by default.
+
+`module_quality` applies at the module boundary. The runner emits the terminal module checkpoint as `status=claimed`, not `completed`, and the coder runner waits for a manager control message before downstream modules may depend on the module. The reviewer checks semantic contract fit, public API/type/schema guarantees, module and cross-module handoffs, corner cases, lifecycle/ownership, delivery-surface dogfood, and downstream readiness. Legacy `checkpoint_quality` remains available for callers that explicitly want full reviewer gates on every checkpoint.
+
+Planner builder output should mirror that split. Module outlines may carry `module_quality_criteria`, `risk_surfaces`, and `delivery_surfaces`; milestone outlines may carry `checkpoint_admission_evidence`. These fields are language-neutral and describe what the gate must prove, not how a specific language's test tool works.
 
 The manager spawns a reviewer work order for the claimed checkpoint. The review target includes the checkpoint id, work order id, run id, module/milestone ids, acceptance criteria, source contract, commit SHA, checkpoint git context, and gate spec. Checkpoint and repair reviewers should submit through `op_minion_review_checkpoint`; the generic `op_minion_review_gate_submit` surface is hidden for these targets.
+
+Checkpoint review includes delivery-surface challenge, not only source and unit-test review. A delivery surface is any user/downstream-facing invocation or integration boundary: CLI binary/script, package entrypoint, public library/header/API consumer path, generated wrapper, service/unit launch, HTTP/UI route, plugin/provider hook, command wrapper, or persisted/import/export format. The reviewer should verify the actual downstream invocation when practical, or run the smallest faithful wrapper/link/import/launch/roundtrip probe that preserves that contract. Internal helper/function tests do not prove a wrapper, manifest, framework adapter, public consumer path, or persisted-format contract works. For machine-readable CLI contracts, parse-layer/framework errors are part of the output contract when the source says output is JSON or machine-readable.
 
 Manager reconciliation handles checkpoint verdicts as follows:
 
@@ -273,13 +333,13 @@ Manager reconciliation handles checkpoint verdicts as follows:
 - `fail`: send a bounded `repair_turn` to the same coder runner when runner control is available.
 - `partial`: send repair when the partial gate carries required fixes, blocker/high-severity findings, or material contract impact; otherwise block and surface the partial review.
 
-Repair turns carry `active_gate_todo`, `checkpoint_repair`, and structured reviewer feedback. The coder must treat the repair checklist as the complete scope, repair the same milestone, and produce a new checkpoint claim. Reusing the failed checkpoint commit as the repair checkpoint is blocked. Automatic repair attempts are bounded by the gate definition; builtin `checkpoint_quality` defaults to 5 attempts.
+Repair turns carry `active_gate_todo`, `checkpoint_repair`, and structured reviewer feedback. The coder must treat the repair checklist as the complete scope, repair the same milestone, and produce a new checkpoint claim. Reusing the failed checkpoint commit as the repair checkpoint is blocked. Automatic repair attempts are bounded by the gate definition; builtin `module_quality` and legacy `checkpoint_quality` default to 5 attempts.
 
 ### Gate Ledger And Evidence
 
 `submit_review_gate(...)` stores every gate decision in `minion_review_gates`, records ledger events, validates target binding, and projects failed/partial gate findings into `active_gate_todo` on the source work order. The same projection feeds reviewer repair context, active todo state, and future status inspection.
 
-Pass gates that cite command, API, source, or LSP evidence must be backed by recorded tool evidence whenever the runner can validate provenance. Reviewers should prefer compact evidence refs such as `EV-*`; runtime fills command, exit status, output summary, and LSP details from the recorded evidence instead of making the reviewer hand-copy every field.
+Pass gates that cite command, API, source, or LSP evidence must be backed by recorded tool evidence whenever the runner can validate provenance. Reviewers should prefer semantic `evidence_selectors` such as command substrings, source path substrings, or LSP operations; runtime resolves them to recorded tool evidence and fills command, exit status, output summary, and LSP details. `EV-*`, `call_id`, and `ledger_id` are runtime identifiers, not fields reviewers should invent by hand.
 
 ## Runner Capability Boundary
 
@@ -304,9 +364,9 @@ The runner is a thin execution entity, not a forked Pal. It starts a slim runtim
 
 If `TaskContextPack.metadata.preferred_endpoint_id` is present, the runner forwards it as `CanonicalLLMRequest.metadata.preferred_endpoint_id` and uses that endpoint's budget when resolving max output tokens. Without that metadata, no preferred endpoint is passed; the slim runtime reads the current active LLM endpoint from `pal.sqlite3`.
 
-`TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `tool_search`, `tool_read`, `tool_call`, `file_read`, `file_edit`, `file_write`, `shell`, `artifact_write`, planner `plan_*` builder tools, `web_search`, `web_read`, and `memory_recall` when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
+`TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `tool_search`, `tool_read`, `tool_call`, `file_read`, `file_edit`, `file_write`, `delete_path`, `git`, `shell`, `tree`, `search`, `artifact_write`/`artifact_edit`, planner `plan_*` builder tools, `web_search`, `web_read`, `memory_recall`, and LSP/code-intelligence tools when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
 
-When `artifact_write` is available, the runner prompt asks the minion to write the primary deliverable to `artifact_dir` and keep the final summary short. Software planner profiles instead use `plan_begin` / `plan_begin_module` / `plan_begin_milestone` / `plan_add_acceptance_criterion` / `plan_finalize`; `plan_finalize` writes the primary `plan.json` artifact and the existing `plan_acceptance` gate reviews that artifact. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
+When `artifact_write` is available, the runner prompt asks the minion to write the primary deliverable to `artifact_dir` and keep the final summary short. Software planner profiles instead use the plan builder tools, starting with `plan_begin`, adding module and milestone outlines plus acceptance criteria, then finishing with `plan_validate_and_submit_for_review`; that call validates the draft and submits the primary plan artifact for the existing `plan_acceptance` gate. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
 
 Tool calls are executed through the existing `ExecutionRuntime` path and must be present in `TaskContextPack.allowed_capabilities`.
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import queue
 import random
@@ -1432,7 +1431,7 @@ class LLMRuntime(LLMRuntimePort):
         )
 
     async def apreflight(self, request: LLMPreflightRequest) -> LLMPreflightAdvice:
-        return await asyncio.to_thread(self.preflight, request)
+        return self.preflight(request)
 
     def resolve_endpoint_facts(
         self,
@@ -1721,7 +1720,7 @@ class LLMRuntime(LLMRuntimePort):
         )
 
     async def agenerate(self, request: CanonicalLLMRequest) -> CanonicalLLMOutcome:
-        return await asyncio.to_thread(self.generate, request)
+        return self.generate(request)
 
     def generate_stream(self, request: CanonicalLLMRequest) -> list[NormalizedLLMStreamEvent]:
         self.refresh_runtime_settings()
@@ -1758,7 +1757,7 @@ class LLMRuntime(LLMRuntimePort):
         ]
 
     async def agenerate_stream(self, request: CanonicalLLMRequest) -> list[NormalizedLLMStreamEvent]:
-        return await asyncio.to_thread(self.generate_stream, request)
+        return self.generate_stream(request)
 
     def summarize_compaction(
         self,
@@ -1809,16 +1808,12 @@ class LLMRuntime(LLMRuntimePort):
         profile: CompactionProfile = CompactionProfile.PAL,
     ) -> str:
         try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.summarize_compaction,
-                    text,
-                    max_output_tokens=max_output_tokens,
-                    preferred_endpoint_id=preferred_endpoint_id,
-                    preferred_model_id=preferred_model_id,
-                    profile=profile,
-                ),
-                timeout=self._default_compaction_timeout_seconds,
+            return self.summarize_compaction(
+                text,
+                max_output_tokens=max_output_tokens,
+                preferred_endpoint_id=preferred_endpoint_id,
+                preferred_model_id=preferred_model_id,
+                profile=profile,
             )
         except TimeoutError:
             return ""
@@ -1973,16 +1968,12 @@ class LLMRuntime(LLMRuntimePort):
         profile: CompactionProfile = CompactionProfile.PAL,
     ) -> dict[str, Any]:
         try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.compact_memory_structured,
-                    text,
-                    max_output_tokens=max_output_tokens,
-                    preferred_endpoint_id=preferred_endpoint_id,
-                    preferred_model_id=preferred_model_id,
-                    profile=profile,
-                ),
-                timeout=self._default_compaction_timeout_seconds,
+            return self.compact_memory_structured(
+                text,
+                max_output_tokens=max_output_tokens,
+                preferred_endpoint_id=preferred_endpoint_id,
+                preferred_model_id=preferred_model_id,
+                profile=profile,
             )
         except TimeoutError:
             return {}

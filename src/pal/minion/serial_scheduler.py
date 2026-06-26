@@ -60,11 +60,14 @@ class SerialMilestoneScheduler:
             completion = manager.tasking_repository.mark_serial_module_completed(work_order_id)
             event_payload: dict[str, Any] = {**payload, **dict(completion)}
             event_work_order_id = work_order_id
+            auto_continue_parent_work_order_id = ""
             if str(completion.get("status") or "") == "completed":
                 parent_completion = manager.tasking_repository.record_plan_module_completion(work_order_id, completion)
                 if str(parent_completion.get("status") or "") in {"awaiting_continue", "completed"}:
                     event_work_order_id = str(parent_completion.get("parent_work_order_id") or work_order_id)
                     event_payload = {**completion, **parent_completion}
+                    if str(parent_completion.get("status") or "") == "awaiting_continue" and bool(parent_completion.get("has_next_module")):
+                        auto_continue_parent_work_order_id = event_work_order_id
             elif str(completion.get("status") or "") == "already_completed":
                 event_payload = {**completion, "summary": completion.get("summary") or "serial module was already completed"}
             if str(completion.get("status") or "") in {"completed", "already_completed"}:
@@ -97,7 +100,12 @@ class SerialMilestoneScheduler:
                     }
                     manager._queue_event_delivery(completed_event)
                     manager.tasking_repository.record_minion_event(completed_event)
-            await manager._send_runner_control_or_record(state, {"type": "complete", "completion": event_payload})
+            if auto_continue_parent_work_order_id:
+                await manager.auto_continue_work_order(auto_continue_parent_work_order_id, reason="module_completed")
+            try:
+                await manager._send_runner_control_or_record(state, {"type": "complete", "completion": event_payload})
+            except Exception:
+                manager.logger.exception("failed to send serial module completion control: %s", work_order_id)
             manager.logger.info("minion serial module sent completion run=%s work_order=%s", state.run_id, work_order_id)
         except Exception:
             manager.logger.exception("failed to send serial minion turn: %s", work_order_id)

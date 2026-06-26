@@ -200,7 +200,7 @@ class TurnManager:
                     result = await result
             else:
                 sync_method = getattr(memory_service, "commit_l1")
-                result = await asyncio.to_thread(sync_method, request)
+                result = sync_method(request)
         except Exception as exc:
             self.state.diagnostics.append(
                 {
@@ -1355,7 +1355,7 @@ class PalCore:
         else:
             sync_reset = getattr(memory_service, "soft_reset", None)
             if callable(sync_reset):
-                await asyncio.to_thread(sync_reset)
+                sync_reset()
         async with scope_state.transition_lock:
             scope_state.quiescing = False
             scope_state.drained_event.set()
@@ -1693,7 +1693,7 @@ class PalCore:
                 return await result
             return result
         sync_method = getattr(port, sync_name)
-        return await asyncio.to_thread(sync_method, *args, **kwargs)
+        return sync_method(*args, **kwargs)
 
     def publish_module_capabilities(self, module_id: str) -> list[str]:
         return self.module_lifecycle.publish_module_capabilities(module_id)

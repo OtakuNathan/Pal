@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from pal.minion.utils import dedupe_strings as _dedupe
 from pal.minion.utils import dict_from as _dict
 from pal.minion.utils import string_list as _string_list
-from pal.minion.plan_builder import PLAN_BUILDER_CAPABILITIES
+from pal.minion.plan_builder import PLAN_BUILDER_CAPABILITIES, PLAN_BUILDER_INITIAL_CAPABILITIES, PLAN_BUILDER_READ_CAPABILITIES
 from pal.shared import TaskContextPack
 
 
@@ -211,6 +211,8 @@ class MinionProfileRegistry:
         if isinstance(pack.workspace.get("output_policy"), dict):
             output_policy.update(dict(pack.workspace.get("output_policy") or {}))
         hook_capabilities = self._hook_capabilities(profile, pack)
+        if _is_planner_revision_pack(profile, pack):
+            hook_capabilities = _dedupe([*hook_capabilities, *PLAN_BUILDER_CAPABILITIES])
         if hook_capabilities:
             allowed_capabilities = _dedupe([*allowed_capabilities, *hook_capabilities])
         allowed_capabilities = filter_minion_allowed_capabilities(
@@ -298,8 +300,12 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "tool_discovery": ("op_tool_search", "op_tool_read"),
     "capability_call": ("op_tool_call",),
     "minion_artifacts": ("op_minion_artifact_write", "op_minion_artifact_edit"),
-    "minion_plan_builder": PLAN_BUILDER_CAPABILITIES,
-    "minion_review_gate": ("op_minion_review_gate_submit", "op_minion_review_checkpoint"),
+    "minion_plan_builder": PLAN_BUILDER_INITIAL_CAPABILITIES,
+    "minion_plan_builder_initial": PLAN_BUILDER_INITIAL_CAPABILITIES,
+    "minion_plan_builder_revision": PLAN_BUILDER_CAPABILITIES,
+    "minion_plan_builder_full": PLAN_BUILDER_CAPABILITIES,
+    "minion_plan_reader": PLAN_BUILDER_READ_CAPABILITIES,
+    "minion_review_gate": ("op_minion_review_gate_submit", "op_minion_review_checkpoint", "op_minion_gate_contract_submit"),
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
@@ -329,6 +335,29 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
         "op_minion_checkpoint_commit",
     ),
 }
+
+
+SOURCE_CONTRACT_REVIEWER_CAPABILITIES: tuple[str, ...] = (
+    "op_tree",
+    "op_search",
+    "op_file_read",
+    "op_minion_artifact_write",
+    "op_minion_artifact_edit",
+    "op_minion_gate_contract_submit",
+    "op_minion_memory_candidate_write",
+)
+
+
+PLAN_REVIEWER_CAPABILITIES: tuple[str, ...] = (
+    "op_tree",
+    "op_search",
+    "op_file_read",
+    "op_minion_artifact_write",
+    "op_minion_artifact_edit",
+    *PLAN_BUILDER_READ_CAPABILITIES,
+    "op_minion_review_gate_submit",
+    "op_minion_memory_candidate_write",
+)
 
 
 DEFAULT_MINION_DENIED_CAPABILITIES = frozenset(
@@ -382,6 +411,7 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
         "op_minion_artifact_write",
         "op_minion_artifact_edit",
         "op_minion_checkpoint_commit",
+        "op_minion_gate_contract_submit",
         "op_minion_review_gate_submit",
         "op_minion_review_checkpoint",
         "op_minion_memory_candidate_write",
@@ -420,6 +450,30 @@ def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] 
         return True
     fragments = (*DEFAULT_MINION_DENIED_FRAGMENTS, *tuple(_string_list(policy.get("deny_fragments"))))
     return any(fragment and fragment in capability for fragment in fragments)
+
+
+def _is_planner_revision_pack(profile: MinionProfile, pack: TaskContextPack) -> bool:
+    if profile.canonical_profile_id != "software_engineering.planner":
+        return False
+    metadata = dict(pack.metadata or {})
+    workspace = dict(pack.workspace or {})
+    if isinstance(workspace.get("source_plan_ref"), dict) or isinstance(workspace.get("review_target_plan_ref"), dict):
+        return True
+    if isinstance(metadata.get("source_plan_ref"), dict) or isinstance(metadata.get("review_target_plan_ref"), dict):
+        return True
+    if isinstance(metadata.get("revision_source"), dict) and metadata.get("revision_source"):
+        return True
+    planner_work_order = metadata.get("planner_work_order")
+    if isinstance(planner_work_order, dict) and _safe_int(planner_work_order.get("plan_revision")) > 0:
+        return True
+    return False
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
 
 
 def load_builtin_minion_profiles() -> tuple[MinionProfile, ...]:

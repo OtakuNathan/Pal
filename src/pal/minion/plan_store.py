@@ -405,6 +405,17 @@ def coerce_plan_ref(value: Any) -> dict[str, Any]:
     else:
         ref = {}
     if not str(ref.get("path") or "").strip():
+        artifact_dir = str(ref.get("artifact_dir") or "").strip()
+        relative_path = str(ref.get("relative_path") or "").strip()
+        if artifact_dir and not relative_path:
+            ref_kind = str(ref.get("ref_kind") or "").strip()
+            if ref_kind == "plan_draft":
+                relative_path = "plan.draft.json"
+            elif ref_kind in {"plan", "final_plan"}:
+                relative_path = "plan.json"
+        if artifact_dir and relative_path:
+            ref["path"] = str(Path(artifact_dir) / relative_path)
+    if not str(ref.get("path") or "").strip():
         raise ValueError("plan_ref.path is required")
     return ref
 

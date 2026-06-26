@@ -52,7 +52,7 @@ from pal.memory import HashingEmbedder, L3CommitRequest, L3CorrectRequest, L3Pro
 from pal.plugins.l3 import SQLiteVecL3Plugin
 from pal.plugins import PluginBundleRepository
 from pal.proactive import ProactiveDefinition, ProactiveRepository
-from pal.shared import LLMFinishReason, LLMStreamEventKind
+from pal.shared import LLMFinishReason, LLMStreamEventKind, llm_tool_name
 from pal.stream_events import NormalizedLLMStreamEvent
 from pal.wizard import WizardService
 from pal.web_fetch import DEFAULT_WEB_FETCH_USER_AGENT, BrowserServiceManager, WebFetchProviderRepository, plain_http_fetch
@@ -2080,9 +2080,11 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(handle.core.context.module_registry.get("web_search"))
         self.assertIsNotNone(handle.core.context.module_registry.get("web_fetch"))
         self.assertIsNotNone(handle.core.context.module_registry.get("mcp"))
-        self.assertIn("web_search", handle.core.context.capability_registry.descriptors)
-        self.assertIn("op_web_read", handle.core.context.capability_registry.descriptors)
-        self.assertIn("op_web_screenshot", handle.core.context.capability_registry.descriptors)
+        descriptors = handle.core.context.capability_registry.descriptors
+        canonical_paths = {descriptor.canonical_path for descriptor in descriptors.values()}
+        self.assertIn("op_web_search", canonical_paths)
+        self.assertIn("op_web_read", canonical_paths)
+        self.assertIn("op_web_screenshot", canonical_paths)
         self.assertIn("mcp_image_prepare", handle.core.context.capability_registry.descriptors)
         self.assertIn("web_search_show", handle.core.context.capability_registry.descriptors)
         self.assertIn("web_fetch_show", handle.core.context.capability_registry.descriptors)
@@ -2093,9 +2095,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(
             any(name.startswith("web_fetch_provider_set_config") for name in handle.core.context.capability_registry.descriptors)
         )
-        self.assertIn("web_search", tool_names)
-        self.assertIn("op_web_read", tool_names)
-        self.assertNotIn("op_web_screenshot", tool_names)
+        self.assertIn(llm_tool_name("op_web_search"), tool_names)
+        self.assertIn(llm_tool_name("op_web_read"), tool_names)
+        self.assertNotIn(llm_tool_name("op_web_screenshot"), tool_names)
 
     def test_compose_runtime_loads_minion_as_first_party_builtin_plugin(self) -> None:
         if not _local_sidecar_bind_available():
@@ -2122,7 +2124,6 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         minion_hit = self._find_search_hit_by_canonical(handle.core, search, "minion_spawn")
         self.assertEqual(minion_hit["name"], "minion_spawn")
-        self.assertEqual(minion_hit["canonical_path"], "minion_spawn")
         self.assertNotIn("module_id", minion_hit)
         self.assertIn("required_params", minion_hit)
 
@@ -2142,7 +2143,6 @@ class PalV2BootstrapTests(unittest.TestCase):
             )
             minion_hit = self._find_search_hit_by_canonical(handle.core, search, "minion_spawn")
             self.assertEqual(minion_hit["name"], "minion_spawn")
-            self.assertEqual(minion_hit["canonical_path"], "minion_spawn")
             self.assertNotIn("module_id", minion_hit)
             self.assertIn("required_params", minion_hit)
         finally:
@@ -2465,16 +2465,19 @@ class PalV2BootstrapTests(unittest.TestCase):
             database=self.database,
         )
 
-        self.assertIn("plugin_show", handle.core.context.capability_registry.descriptors)
-        self.assertIn("plugin_detach", handle.core.context.capability_registry.descriptors)
-        self.assertIn("memory_provider_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
+        try:
+            self.assertIn("plugins_show", handle.core.context.capability_registry.descriptors)
+            self.assertIn("plugin_detach", handle.core.context.capability_registry.descriptors)
+            self.assertIn("memory_provider_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
 
-        detached = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="plugin_detach", args={"plugin_id": "sqlite_vec_l3"})
-        )
+            detached = handle.core.context.execution_runtime.execute(
+                CapabilityCall(name="plugin_detach", args={"plugin_id": "sqlite_vec_l3"})
+            )
 
-        self.assertEqual(detached.status, "ok")
-        self.assertNotIn("memory_provider_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
+            self.assertEqual(detached.status, "ok")
+            self.assertNotIn("memory_provider_show::sqlite_vec_l3", handle.core.context.capability_registry.descriptors)
+        finally:
+            asyncio.run(handle.stop_async())
 
     def test_plugin_detach_runs_module_cleanup_callbacks(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -4058,7 +4061,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         result = handle.core.context.execution_runtime.execute(
             CapabilityCall(
-                name="web_search",
+                name="op_web_search",
                 args={"query": "pal runtime docs", "limit": 3},
             )
         )
@@ -4522,6 +4525,7 @@ class _FakeTelegramBot:
     def __init__(self) -> None:
         self.actions: list[tuple[str, dict[str, object]]] = []
         self.files: dict[str, _FakeTelegramFile] = {}
+        self.message_delays: dict[str, float] = {}
         self._next_message_id = 1000
 
     async def set_message_reaction(self, **kwargs):
@@ -4531,6 +4535,10 @@ class _FakeTelegramBot:
         self.actions.append(("typing", dict(kwargs)))
 
     async def send_message(self, **kwargs):
+        text = str(kwargs.get("text") or "")
+        delay = self.message_delays.get(text, self.message_delays.get(text.strip(), 0.0))
+        if delay > 0:
+            await asyncio.sleep(delay)
         self.actions.append(("message", dict(kwargs)))
         message_id = self._next_message_id
         self._next_message_id += 1
@@ -4729,13 +4737,32 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
 
         await self.endpoint._on_update(update, None)
 
+        await asyncio.sleep(0.05)
+        self.assertTrue(any(kind == "reaction" for kind, _ in self.fake_bot.actions))
+        self.assertFalse(any(kind == "typing" for kind, _ in self.fake_bot.actions))
+        self.assertEqual([item.kind for item in self.endpoint.status_outbox], ["typing_start"])
+
         envelopes = self.endpoint.poll()
         self.assertEqual(len(envelopes), 1)
         self.assertEqual(envelopes[0].event.payload["text"], "hello")
         self.endpoint.flush_status_outbox()
         await asyncio.sleep(0.05)
-        self.assertTrue(any(kind == "reaction" for kind, _ in self.fake_bot.actions))
         self.assertTrue(any(kind == "typing" for kind, _ in self.fake_bot.actions))
+
+    async def test_telegram_endpoint_serializes_replies_for_same_thread(self) -> None:
+        self.fake_bot.message_delays["first"] = 0.05
+        handle = self.endpoint.build_response_handle(
+            reply_target={"chat_id": "100", "message_id": "10", "thread_id": ""},
+        )
+
+        with patch("pal.channel.endpoints.telegram_endpoint._telegram_markdown", side_effect=lambda text: (str(text), None)):
+            self.endpoint.queue_reply("first", response_handle=handle)
+            self.endpoint.queue_reply("second", response_handle=handle)
+            self.endpoint.flush_outbox()
+            await asyncio.sleep(0.12)
+
+        sent_texts = [str(payload.get("text") or "").strip() for kind, payload in self.fake_bot.actions if kind == "message"]
+        self.assertEqual(sent_texts[-2:], ["first", "second"])
 
     async def test_telegram_endpoint_downloads_document_without_reading_contents_into_payload(self) -> None:
         self.fake_bot.files["doc-1"] = _FakeTelegramFile(content=b"hello telegram", file_path="docs/file.txt")

@@ -356,6 +356,7 @@ def render_minion_task_prompt(pack: TaskContextPack) -> str:
         instructions = [
             "Execute only the scoped work in this prompt_view.",
             "Use module contracts instead of inferring other module internals.",
+            "Do not use undeclared cross-module imports anywhere, including join; compose only through declared public interfaces, exported facades, or prelude contracts.",
             "Do not start later milestones or hidden plan steps; stop after this milestone and wait for manager input.",
         ]
         if str(prompt_view.get("role") or "").strip().lower() == "planner":

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 from dataclasses import dataclass, replace
 from functools import singledispatchmethod
 from typing import Any, Awaitable, Callable
@@ -41,6 +42,8 @@ from pal.shared import (
 from pal.shared.result_rendering import render_head_tail_preview_for_llm
 from pal.shared.payloads import extract_text_from_payload
 from pal.stream_events import NormalizedLLMStreamEvent
+
+LOGGER = logging.getLogger(__name__)
 
 _FORWARD_STREAM_KINDS = frozenset({
     LLMStreamEventKind.TEXT_DELTA,
@@ -422,49 +425,33 @@ class TurnExecutor:
                 )
 
     def _log_tool_call_start(self, continuation, tool_call: Any) -> None:
-        print(
-            " ".join(
-                [
-                    "[tool call]",
-                    f"turn_id={getattr(continuation, 'turn_id', '')}",
-                    f"name={getattr(tool_call, 'name', '')}",
-                    f"call_id={str(getattr(tool_call, 'call_id', '') or '')}",
-                    f"args={self._log_preview(getattr(tool_call, 'args', {}), max_chars=1200)}",
-                ]
-            ),
-            flush=True,
+        LOGGER.debug(
+            "[tool call] turn_id=%s name=%s call_id=%s args=%s",
+            getattr(continuation, "turn_id", ""),
+            getattr(tool_call, "name", ""),
+            str(getattr(tool_call, "call_id", "") or ""),
+            self._log_preview(getattr(tool_call, "args", {}), max_chars=1200),
         )
 
     def _log_tool_call_result(self, continuation, tool_call: Any, tool_result: CanonicalToolResult) -> None:
-        print(
-            " ".join(
-                [
-                    "[tool result]",
-                    f"turn_id={getattr(continuation, 'turn_id', '')}",
-                    f"name={getattr(tool_call, 'name', '')}",
-                    f"call_id={str(getattr(tool_call, 'call_id', '') or '')}",
-                    f"ok={bool(getattr(tool_result, 'ok', False))}",
-                    f"status={str(getattr(tool_result, 'status', '') or '')}",
-                    f"text={self._log_preview(getattr(tool_result, 'text', '') or getattr(tool_result, 'llm_text', ''), max_chars=1200)}",
-                ]
-            ),
-            flush=True,
+        LOGGER.debug(
+            "[tool result] turn_id=%s name=%s call_id=%s ok=%s status=%s text=%s",
+            getattr(continuation, "turn_id", ""),
+            getattr(tool_call, "name", ""),
+            str(getattr(tool_call, "call_id", "") or ""),
+            bool(getattr(tool_result, "ok", False)),
+            str(getattr(tool_result, "status", "") or ""),
+            self._log_preview(getattr(tool_result, "text", "") or getattr(tool_result, "llm_text", ""), max_chars=1200),
         )
 
     def _log_tool_call_exception(self, continuation, tool_call: Any, exc: Exception) -> None:
-        print(
-            " ".join(
-                [
-                    "[tool result]",
-                    f"turn_id={getattr(continuation, 'turn_id', '')}",
-                    f"name={getattr(tool_call, 'name', '')}",
-                    f"call_id={str(getattr(tool_call, 'call_id', '') or '')}",
-                    "ok=False",
-                    f"exception={type(exc).__name__}",
-                    f"text={self._log_preview(str(exc), max_chars=1200)}",
-                ]
-            ),
-            flush=True,
+        LOGGER.debug(
+            "[tool result] turn_id=%s name=%s call_id=%s ok=False exception=%s text=%s",
+            getattr(continuation, "turn_id", ""),
+            getattr(tool_call, "name", ""),
+            str(getattr(tool_call, "call_id", "") or ""),
+            type(exc).__name__,
+            self._log_preview(str(exc), max_chars=1200),
         )
 
     @staticmethod
@@ -1185,8 +1172,7 @@ class TurnExecutor:
         sync_method = getattr(llm_runtime, "summarize_compaction", None)
         if callable(sync_method):
             try:
-                result = await asyncio.to_thread(
-                    sync_method,
+                result = sync_method(
                     source_text,
                     max_output_tokens=min(max(512, reserved_output_tokens or 0), 1024),
                     preferred_endpoint_id=preferred_endpoint_id,

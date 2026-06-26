@@ -196,7 +196,7 @@ class MinionIntrospection(Protocol):
         "and intro_minion_work_order_search/read; do not infer progress or current worker from chat. If the user says to recover stale "
         "running_module state, use op_minion_recover_work_order. If the user says to replace or destroy a run, resolve the active run "
         "and work order, call op_minion_destroy_work_order_run, then respawn from the work-order continuity when appropriate. "
-        "A task may have only one active work order. Finalize only after reading the work-order fact snapshot."
+        "A task may have a parent work order plus one active module child; inspect the work-order fact snapshot before finalizing."
     ),
     activation_terms=(
         "minion",

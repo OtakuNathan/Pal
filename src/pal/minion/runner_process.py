@@ -5,6 +5,7 @@ import contextlib
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from pal.foundation import utc_now
@@ -12,6 +13,10 @@ from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
 from pal.minion.ipc import python_subprocess_env
 from pal.minion.lifecycle import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES
 from pal.minion.sandbox import build_sandboxed_runner_invocation
+from pal.minion.utils import safe_token
+
+
+RUNNER_PAYLOAD_DIR = Path("data") / "minion" / "runner_payloads"
 
 
 def runner_stderr_line_is_error(line: str) -> bool:
@@ -61,18 +66,24 @@ class RunnerProcessSupervisor:
                         "created_at": utc_now(),
                     },
                 )
+            self.cleanup_runner_payload(state)
 
     async def start_runner(self, state: Any) -> None:
         manager = self.manager
-        read_fd, write_fd = os.pipe()
+        task_payload_path = self.write_runner_payload(state)
+        try:
+            read_fd, write_fd = os.pipe()
+        except Exception:
+            self.cleanup_runner_payload(state)
+            raise
         argv = [
             sys.executable,
             "-m",
             "pal.minion.runner_main",
             "--runtime-root",
             str(manager.runtime_root),
-            "--task-json",
-            state.pack.to_json(),
+            "--task-json-file",
+            str(task_payload_path),
             "--minion-id",
             state.minion_id,
             "--run-id",
@@ -100,6 +111,7 @@ class RunnerProcessSupervisor:
                 os.close(read_fd)
             with contextlib.suppress(OSError):
                 os.close(write_fd)
+            self.cleanup_runner_payload(state)
             raise
         with contextlib.suppress(OSError):
             os.close(read_fd)
@@ -170,6 +182,7 @@ class RunnerProcessSupervisor:
 
     def record_runner_exit(self, state: Any, returncode: int | None) -> None:
         self.close_liveness_pipe(state)
+        self.cleanup_runner_payload(state)
         if state.status in TERMINAL_RUN_STATUSES:
             return
         status = "completed" if returncode == 0 else "failed"
@@ -260,6 +273,21 @@ class RunnerProcessSupervisor:
         with contextlib.suppress(OSError):
             os.close(fd)
 
+    def write_runner_payload(self, state: Any) -> Path:
+        path = runner_payload_path(self.manager.runtime_root, state.run_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(state.pack.to_json(), encoding="utf-8")
+        state.runner_payload_path = str(path)
+        return path
+
+    def cleanup_runner_payload(self, state: Any) -> None:
+        payload_path = str(getattr(state, "runner_payload_path", "") or "").strip()
+        if not payload_path:
+            return
+        state.runner_payload_path = ""
+        with contextlib.suppress(OSError):
+            Path(payload_path).unlink()
+
     def record_runner_stderr_line(self, state: Any, line: str) -> None:
         normalized = str(line or "").strip()
         if not normalized:
@@ -269,3 +297,7 @@ class RunnerProcessSupervisor:
             del state.stderr_tail[:-20]
         if runner_stderr_line_is_error(normalized):
             state.last_error = normalized
+
+
+def runner_payload_path(runtime_root: Path, run_id: str) -> Path:
+    return Path(runtime_root) / RUNNER_PAYLOAD_DIR / f"{safe_token(run_id, limit=120)}.json"

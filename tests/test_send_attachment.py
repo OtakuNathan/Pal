@@ -207,8 +207,11 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Status:", rendered)
         self.assertIn("Detail:", rendered)
         self.assertIn("Core", rendered)
+        self.assertIn("\n  Status:", rendered)
+        self.assertIn("\n  Detail:", rendered)
+        self.assertNotIn("OK; Detail", rendered)
 
-    def test_send_attachment_is_discoverable_but_not_resident_llm_tool(self) -> None:
+    def test_send_attachment_is_resident_and_discoverable_llm_tool(self) -> None:
         core, _, _ = self._build_core_with_channel()
         core.publish_module_capabilities("execution")
         core.publish_module_capabilities("channel")
@@ -218,13 +221,55 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
             for contract in core.tool_surface.build_llm_tool_contracts()
         }
 
-        self.assertNotIn("op_channel_send_attachment", names)
+        self.assertIn("send_channel_attachment", names)
         search = core.context.execution_runtime.execute_tool(
             CanonicalToolCall(name="op_tool_search", args={"query": "send attachment", "top_k": 5})
         )
         self.assertTrue(search.ok)
-        self.assertEqual(search.structured["hits"][0]["name"], "op_channel_send_attachment")
+        self.assertEqual(search.structured["hits"][0]["name"], "send_channel_attachment")
         self.assertNotIn("aliases", search.structured["hits"][0])
+
+    async def test_llm_alias_send_attachment_uses_async_turn_context(self) -> None:
+        core, channel_runtime, endpoint = self._build_core_with_channel()
+        continuation = self._start_turn(core, endpoint)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "alias-artifact.txt"
+            path.write_text("artifact", encoding="utf-8")
+
+            result = await core.context.execution_runtime.execute_tool_async(
+                CanonicalToolCall(name="send_channel_attachment", args={"path": str(path), "caption": "Alias"}),
+                turn_id=continuation.turn_id,
+            )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.status, "ok")
+            channel_runtime.sync_endpoints()
+            self.assertEqual(len(endpoint.attachments), 1)
+            self.assertEqual(endpoint.attachments[0][1].caption, "Alias")
+
+    async def test_call_tool_alias_send_attachment_uses_async_turn_context(self) -> None:
+        core, channel_runtime, endpoint = self._build_core_with_channel()
+        continuation = self._start_turn(core, endpoint)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "call-tool-artifact.txt"
+            path.write_text("artifact", encoding="utf-8")
+
+            result = await core.context.execution_runtime.execute_tool_async(
+                CanonicalToolCall(
+                    name="call_tool",
+                    args={
+                        "name": "send_channel_attachment",
+                        "args": {"path": str(path), "caption": "Call Tool"},
+                    },
+                ),
+                turn_id=continuation.turn_id,
+            )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.status, "ok")
+            channel_runtime.sync_endpoints()
+            self.assertEqual(len(endpoint.attachments), 1)
+            self.assertEqual(endpoint.attachments[0][1].caption, "Call Tool")
 
 
 if __name__ == "__main__":

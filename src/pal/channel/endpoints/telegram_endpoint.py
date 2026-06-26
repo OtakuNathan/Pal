@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from pal.channel.channel_endpoint_queue_base import ChannelEndpointQueueBase
 from pal.channel.contracts import ChannelDeliveryError, EndpointConfig, ResponseHandle
@@ -150,24 +150,21 @@ def _split_table_row(line: str) -> list[str]:
 
 def _render_table_rows_for_telegram(headers: list[str], rows: list[list[str]]) -> list[str]:
     rendered: list[str] = []
-    for row in rows:
+    for row_index, row in enumerate(rows, start=1):
         first = row[0].strip() if row else ""
-        details: list[str] = []
+        rendered.append(f"- {first or f'Row {row_index}'}")
         for idx, cell in enumerate(row[1:], start=1):
             value = cell.strip()
             if not value:
                 continue
             header = headers[idx].strip() if idx < len(headers) else ""
             if header:
-                details.append(f"{header}: {value}")
+                rendered.append(f"  {header}: {value}")
             else:
-                details.append(value)
-        if first and details:
-            rendered.append(f"- {first}: {'; '.join(details)}")
-        elif first:
-            rendered.append(f"- {first}")
-        elif details:
-            rendered.append(f"- {'; '.join(details)}")
+                rendered.append(f"  {value}")
+        rendered.append("")
+    if rendered and rendered[-1] == "":
+        rendered.pop()
     return rendered
 
 
@@ -220,6 +217,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
     _stop_event: asyncio.Event | None = None
     _ingestor: ArtifactIngestor | None = None
     _typing_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
+    _send_chains: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     _polling_running: bool = False
     _authorized: bool = False
     _last_poll_error: str = ""
@@ -285,16 +283,17 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         for task in list(self._typing_tasks.values()):
             task.cancel()
         self._typing_tasks.clear()
+        for task in list(self._send_chains.values()):
+            task.cancel()
+        self._send_chains.clear()
 
     def send_reply(self, response_handle: ResponseHandle, text: str) -> None:
         if self.application is None:
             raise ChannelDeliveryError("telegram application not running", permanent=False)
-        loop = asyncio.get_running_loop()
-        loop.create_task(self._send_reply_async(response_handle, text))
+        self._schedule_ordered_send(response_handle, lambda: self._send_reply_async(response_handle, text))
 
     def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
-        loop = asyncio.get_running_loop()
-        loop.create_task(self._send_attachment_async(response_handle, attachment))
+        self._schedule_ordered_send(response_handle, lambda: self._send_attachment_async(response_handle, attachment))
 
     def send_status(self, response_handle: ResponseHandle, kind: str, payload: dict[str, Any]) -> None:
         loop = asyncio.get_running_loop()
@@ -649,7 +648,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         )
         if envelope is None:
             return
-        self.queue_status("receipt_marker", response_handle=envelope.response_handle)
+        self._schedule_receipt_marker(envelope.response_handle)
         self.queue_status("typing_start", response_handle=envelope.response_handle)
 
     async def _interaction_result_from_update(self, update: Any) -> InteractionResult | None:
@@ -832,6 +831,13 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         except Exception as exc:
             self._last_status_error = str(exc)
 
+    def _schedule_receipt_marker(self, response_handle: ResponseHandle) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._send_receipt_marker_async(response_handle, {}))
+
     async def _typing_loop(self, response_handle: ResponseHandle) -> None:
         if self.application is None:
             return
@@ -851,6 +857,36 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         chat_id = str(response_handle.reply_target.get("chat_id") or "")
         thread_id = str(response_handle.reply_target.get("thread_id") or "")
         return f"{chat_id}:{thread_id}"
+
+    def _schedule_ordered_send(
+        self,
+        response_handle: ResponseHandle,
+        operation: Callable[[], Awaitable[None]],
+    ) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        key = self._typing_key(response_handle)
+        previous = self._send_chains.get(key)
+
+        async def run_after_previous(previous_task: asyncio.Task[None] | None) -> None:
+            if previous_task is not None:
+                try:
+                    await previous_task
+                except asyncio.CancelledError:
+                    if not previous_task.cancelled():
+                        raise
+                except Exception:
+                    pass
+            try:
+                await operation()
+            finally:
+                if self._send_chains.get(key) is task:
+                    self._send_chains.pop(key, None)
+
+        task = loop.create_task(run_after_previous(previous))
+        self._send_chains[key] = task
 
     def _stop_typing(self, response_handle: ResponseHandle) -> None:
         key = self._typing_key(response_handle)

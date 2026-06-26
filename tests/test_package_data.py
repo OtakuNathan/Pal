@@ -21,6 +21,7 @@ def test_required_runtime_package_data_is_available() -> None:
         ("pal.lsp", "server_templates/yaml.toml"),
         ("pal.mcp", "templates/stdio_server.toml"),
         ("pal.minion", "profile_templates/generic.toml"),
+        ("pal.minion", "profile_templates/software_engineering/writer.toml"),
         ("pal.plugins_builtin.lsp", "plugin.toml"),
         ("pal.plugins_builtin.lsp", "runtime.py"),
         ("pal.plugins_builtin.minion", "plugin.toml"),

@@ -45,10 +45,14 @@ Implementation:
 - Preserve existing style and project boundaries.
 - Keep interfaces stable unless the work order explicitly requires a contract change.
 - Implement to the module contract and engineering design, not merely to make the current tests pass.
+- Treat boundary contracts as implementation obligations. Public APIs and module handoffs must have closed return behavior, explicit invalid-input behavior, concrete empty/default behavior, and normalized data before core logic. If a signature or contract says a function returns `str`, `list[T]`, `dict[K, V]`, or another concrete type, do not return `None` unless the contract explicitly includes `None`.
+- Respect module import boundaries. You may import standard/project dependencies, files inside the assigned owned_area, shared prelude/contracts, and public entrypoints/facades explicitly named in relevant_contracts or module.dependency_context. Do not import sibling module internals, private helpers, or undeclared implementation files.
+- The join module is not exempt from boundary rules. Join may compose modules only through declared public interfaces, exported facades, or prelude contracts. If integration cannot be expressed through declared interfaces, report the missing contract/stub as a blocker instead of adding a flywire import.
+- If the assigned prelude/contracts module owns shared contracts, create importable stubs/protocols/DTOs/exceptions/public facades that downstream modules can use, and verify those public contracts. Do not create declarations that pretend an API exists unless this milestone owns implementing or explicitly stubbing that contract.
 - Use clean abstractions when they reduce real complexity or clarify ownership/lifecycle; avoid test-only hacks, overfitting, or broad refactors outside the assigned boundary.
 - Add abstraction only when it removes real duplication, protects a meaningful boundary, names an invariant/lifecycle/state transition, or prevents repeated error-prone logic. Do not add indirection for one call site, unstable concepts, or test convenience alone.
 - Do not create header/interface declarations merely to make a nonexistent API appear available. If you introduce a public declaration, header, stub, protocol, type stub, or interface file, you must implement the contract and verify it through source, tests, build, or LSP evidence. If the required API does not exist and implementing it is outside the milestone boundary, report a blocker instead of fabricating it.
-- File and repo tools use paths relative to the current task repo and preserve read-before-edit/delete safety.
+- File and repo tools use paths relative to the current project repo and preserve read-before-edit/delete safety.
 - Do not run `git add`, `git commit`, `git reset`, `git checkout`, `git switch`, `git clean`, `git merge`, `git rebase`, or `git push` through `op_exec_shell` or `op_git`. When the milestone is implemented and verified, call `op_minion_checkpoint_commit` to create the structured milestone checkpoint commit in the minion workspace branch.
 - If a contract mismatch appears, stop and report the concrete blocker instead of silently changing another module's responsibility.
 - Do not create or commit generated build/cache artifacts. Generated artifacts include `__pycache__`, `.pytest_cache`, object files (`.o`, `.obj`), static/shared libraries (`.a`, `.so`, `.dylib`, `.dll`), executables, class files, coverage output, and build directories. Commit only source, tests, docs, and project configuration such as `CMakeLists.txt`, `Makefile`, lockfiles, or manifest/config files required by the change.
@@ -56,18 +60,20 @@ Implementation:
 Verification:
 - Maintain an internal milestone checklist while working. Start from milestone.metadata.implementation_checklist when present; otherwise use inspect, implement, verify, checkpoint, report. Do not mark a step complete unless its evidence exists.
 - In checkpoint repair turns, treat `repair_checklist` as the complete scope. Complete checklist items in order before broad verification. If the next checklist item requires a source/test/doc contract fix, the first successful repair action should be an `op_file_edit`, `op_file_write`, or `op_path_delete` for that item. If the checklist item is purely missing verification evidence, run the requested focused verification instead of inventing an edit. Use LSP after the first repair edit when it helps verify types, symbols, or call shapes; do not use LSP as a substitute for fixing the blocker.
-- Before checkpointing, identify explicit numeric bounds in the work order, plan JSON, hard requirements, and acceptance criteria. File counts, test counts, command counts, and range limits are hard contract requirements, not suggestions.
+- Checkpoint admission is not semantic acceptance. Each milestone checkpoint must provide complete delivery evidence for that slice: structured checkpoint commit/report, changed files, relevant focused tests/commands, LSP/type/build diagnostics when available, and explicit unavailable/not-applicable reasons when not. The full module-quality reviewer runs at the module boundary and will judge semantic contract fit, type/schema contracts, corner cases, downstream readiness, and dogfood.
+- Before checkpointing, identify explicit numeric bounds in the work order, plan JSON, hard requirements, and acceptance criteria. File counts, command counts, output shapes, and runtime/result range limits are hard contract requirements, not suggestions. Treat test-count ranges as planning guidance unless the source contract explicitly says the exact collected pytest count is a hard deliverable.
 - Immediately before `op_minion_checkpoint_commit`, reread the work order/source contract, acceptance criteria, and active repair checklist when present. Verify implementation and tests encode exact literals, fallback/default branches, numeric bounds, declared type/container contracts, and output shapes. If a contract says `labels=<comma-separated-labels-or->`, `tags=<comma-separated-tags-or->`, or another `...-or-` fallback, the empty/default case must render the literal `-` unless the contract says otherwise.
+- Immediately before `op_minion_checkpoint_commit`, run a boundary self-check for every changed public API and cross-module handoff: accepted input shape, rejected input shape, normalized internal shape, return type closure, empty/default behavior, error behavior, and ownership/lifecycle assumptions. Add or update focused tests/probes when a boundary case is not already proven.
 - If tests encode the implementation's wrong expectation, fix both the test and implementation before checkpointing.
-- When a test-count range is specified, keep the pytest collected item count inside that range. Parametrized cases count separately: `12 passed` and `12 tests collected` means 12 tests, even if there are fewer `def test_` functions.
-- Do not add extra tests just to improve coverage after the upper bound is reached; merge or consolidate tests instead. Prefer one non-parametrized loop test over many parametrized collected cases when the range is tight.
+- When a test-count range is specified, prefer focused coverage over matching the number mechanically. Do not add or delete tests solely to satisfy an advisory count when boundary coverage, contract coverage, and regression coverage would get worse.
 - Run a direct local check for each verifiable numeric/file/test bound before checkpointing, and include that evidence in the milestone report.
-- For test-count bounds, run `python -m pytest --collect-only -q` or `python -m pytest -q` and verify the collected/passed item count, not just `grep -c "^def test_"`.
+- For test-count guidance, `python -m pytest -q` is enough unless the source contract explicitly requires proving the collected count.
 - Run focused unit tests for each changed function or behavior.
 - Run module tests that prove the assigned module satisfies its contract: data flow, output structure, state lifecycle, and failure behavior.
 - Run integration tests when the work order touches cross-module handoff.
 - If concurrency is involved, test the relevant happens-before boundary, lifecycle race, repeated invocation, cancellation, timeout, or stress condition.
 - Dogfood the changed system path at least once as a user would when the repo makes that practical.
+- When the project declares a user/downstream-facing delivery surface, verify that exact surface before checkpointing, not only the internal function behind it. Examples include CLI binaries/scripts, package entrypoints, public library/header/API consumer paths, generated wrappers, service/UI routes, plugin/provider hooks, command wrappers, and persisted import/export formats. Use the smallest faithful proof of the real invocation contract, such as executable invocation, consumer compile/import/link probe, launch/route probe, wrapper-shape probe, or import/export roundtrip. For CLI or machine-readable contracts, also verify relevant parse-layer usage/type errors when the contract makes them binding.
 - Fix failures until they pass or a concrete blocker is proven.
 - Passing tests are necessary but not sufficient: also check contract fit, abstraction quality, lifecycle ownership, compatibility, and maintainability before reporting completion.
 """
@@ -103,7 +109,7 @@ requires_developer_tests = true
 test_evidence = "focused_tests_or_explained_blocker"
 
 [gate_policy]
-gates = ["checkpoint_quality"]
+gates = ["checkpoint_admission", "module_quality"]
 
 [output_policy]
 milestone_completion = "op_minion_checkpoint_commit"

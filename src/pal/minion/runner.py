@@ -113,7 +113,7 @@ from pal.wizard.runtime import ALL_MODELS, DEFAULT_LLM_ENDPOINTS, DEFAULT_WEB_FE
 
 EventWriter = Callable[[dict[str, Any]], Awaitable[None]]
 DecisionReader = Callable[[float | None], Awaitable[dict[str, Any] | None]]
-_DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS = 1200.0
+_DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS = 3600.0
 _MAX_MANAGER_TURN_TIMEOUT_SECONDS = 3600.0
 
 
@@ -604,6 +604,17 @@ class MinionRunner:
         workspace.setdefault("goal", self.pack.instruction or self.pack.goal)
         if isinstance(self.pack.metadata, dict):
             workspace.setdefault("task_id", str(self.pack.metadata.get("task_id") or ""))
+            if isinstance(self.pack.metadata.get("source_plan_ref"), dict):
+                workspace.setdefault("source_plan_ref", dict(self.pack.metadata.get("source_plan_ref") or {}))
+            if isinstance(self.pack.metadata.get("review_gate_ref"), dict):
+                workspace.setdefault("review_gate_ref", dict(self.pack.metadata.get("review_gate_ref") or {}))
+            if isinstance(self.pack.metadata.get("plan_revision_checklist"), list):
+                workspace.setdefault(
+                    "plan_revision_checklist",
+                    [dict(item) for item in list(self.pack.metadata.get("plan_revision_checklist") or []) if isinstance(item, dict)],
+                )
+            if isinstance(self.pack.metadata.get("planner_work_order"), dict):
+                workspace.setdefault("planner_work_order", dict(self.pack.metadata.get("planner_work_order") or {}))
             expected_plan_revision = _expected_planner_plan_revision(self.pack)
             if expected_plan_revision >= 0:
                 workspace.setdefault("planner_plan_revision", expected_plan_revision)
@@ -896,11 +907,11 @@ class MinionRunner:
             "unless the missing information is truly not discoverable from the task context.\n\n"
             "Validation errors:\n"
             f"{error_text}\n\n"
-            "Repair by using the plan builder tools: start or rebuild the draft with `plan_begin`, define closed "
-            "prelude/module/join module boundaries, add concrete evidence-backed acceptance criteria for every "
-            "milestone, close every milestone and module, then call `plan_finalize`. Do not hand-write JSON. "
-            "`plan_finalize` writes the primary plan.json FinalPlanArtifact and the existing plan_acceptance gate "
-            "will review it."
+            "Repair by using the plan builder tools on the current draft: use `plan_read`, `plan_find`, and node-specific "
+            "`plan_update_*`/`plan_delete_*`/`plan_replace_*` tools when a local repair is possible. Rebuild with "
+            "`plan_begin` only if no editable draft exists. Close every milestone and module, then call "
+            "`plan_validate_and_submit_for_review`. Use `plan_validate` separately only while debugging a local draft. "
+            "Do not hand-write JSON."
         )
 
     def _build_minion_turn_executor(
@@ -1301,7 +1312,7 @@ class MinionRunner:
         workspace = dict(self.pack.workspace or {})
         workspace_policy = dict(workspace.get("workspace_policy") or {})
         if str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo":
-            for key in ("review_scratch_repo_path", "review_scratch_dir"):
+            for key in ("repo_path", "review_scratch_dir", "review_scratch_repo_path"):
                 value = str(workspace.get(key) or "").strip()
                 if value:
                     return value
@@ -1336,7 +1347,7 @@ class MinionRunner:
         cmd = str(_effective_tool_args(tool_call).get("cmd") or "").strip()
         if not _git_command_is_mutating(cmd):
             return ""
-        return "read_only_repo git capability is for inspection only; use a review scratch repo or dedicated repair workspace for mutations."
+        return "read_only_repo git capability is for inspection only; submit a blocking finding or use a dedicated repair workspace for mutations."
 
     def _read_only_shell_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
         if not _is_shell_capability_name(target_name):
@@ -1345,15 +1356,19 @@ class MinionRunner:
         workspace_policy = dict(workspace.get("workspace_policy") or {})
         if str(workspace_policy.get("mode") or "").strip().lower() != "read_only_repo":
             return ""
-        scratch_repo = str(workspace.get("review_scratch_repo_path") or "").strip()
-        if not scratch_repo:
+        allowed_roots = [
+            str(workspace.get(key) or "").strip()
+            for key in ("repo_path", "review_scratch_dir", "review_scratch_repo_path")
+            if str(workspace.get(key) or "").strip()
+        ]
+        if not allowed_roots:
             return ""
         cwd = str(_effective_tool_args(tool_call).get("cwd") or "").strip()
         if not cwd:
             return ""
-        if _path_is_relative_to(Path(cwd), Path(scratch_repo)):
+        if any(_path_is_relative_to(Path(cwd), Path(root)) for root in allowed_roots):
             return ""
-        return "read_only_repo shell commands must run inside review_scratch_repo_path; use that cwd for reviewer commands."
+        return "read_only_repo shell commands must run inside workspace.repo_path or review_scratch_dir; use those cwd values for reviewer commands."
 
     def _shell_audit_snapshot(self, target_name: str) -> dict[str, Any]:
         if not _is_shell_capability_name(target_name):
@@ -1388,7 +1403,7 @@ class MinionRunner:
         after_snapshot = _shell_audit_after_snapshot(before_snapshot)
         if not after_snapshot or not _shell_audit_snapshot_changed_meaningfully(before_snapshot, after_snapshot):
             return
-        repo_path = str(before_snapshot.get("review_scratch_repo_path") or before_snapshot.get("repo_path") or "")
+        repo_path = _shell_audit_changed_root_path(before_snapshot, after_snapshot)
         violation = {
             "violation_id": f"shell_mut_{uuid4().hex[:12]}",
             "kind": "shell_workspace_mutation",
@@ -1510,7 +1525,7 @@ class MinionRunner:
     async def _inspect_current_milestone_checkpoint(self) -> dict[str, Any]:
         repo_path = str((self.pack.workspace or {}).get("repo_path") or "").strip()
         if not repo_path:
-            return {"status": "error", "error": "current task repo is missing"}
+            return {"status": "error", "error": "current project repo is missing"}
         return inspect_milestone_checkpoint(
             Path(repo_path),
             base_sha=str((self.pack.workspace or {}).get("base_sha") or ""),
@@ -1945,8 +1960,8 @@ class MinionRunner:
         if not artifact:
             return {
                 "status": "blocked",
-                "summary": "planner milestone did not produce a primary plan.json artifact",
-                "plan_validation": {"status": "invalid", "errors": ["primary plan.json artifact is required"]},
+                "summary": "planner milestone did not submit a primary plan draft artifact",
+                "plan_validation": {"status": "invalid", "errors": ["primary submitted plan draft artifact is required"]},
             }
         path = self._artifact_file_path(artifact)
         if path is None:
@@ -1994,6 +2009,7 @@ class MinionRunner:
             payload["task_id"] = expected_task_id
         output_type = str(payload.get("type") or payload.get("output_type") or "").strip()
         payload_metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
+        plan_builder_metadata = dict(payload_metadata.get("plan_builder") or {}) if isinstance(payload_metadata.get("plan_builder"), dict) else {}
         plan_revision = _coerce_int(payload.get("plan_revision"), default=-1)
         if plan_revision < 0:
             plan_revision = _coerce_int(payload_metadata.get("plan_revision"), default=0)
@@ -2014,6 +2030,15 @@ class MinionRunner:
             "relative_path": str(artifact.get("relative_path") or ""),
             "plan_revision": plan_revision,
         }
+        plan_handle = str(plan_builder_metadata.get("plan_handle") or "").strip()
+        if plan_handle:
+            plan_ref["plan_handle"] = plan_handle
+        lifecycle = str(plan_builder_metadata.get("lifecycle") or "").strip()
+        if lifecycle == "submitted" or str(artifact.get("relative_path") or "").endswith(".draft.json"):
+            plan_ref["ref_kind"] = "plan_draft"
+            artifact_dir = str((self.pack.workspace or {}).get("artifact_dir") or "").strip()
+            if artifact_dir:
+                plan_ref["artifact_dir"] = artifact_dir
         if output_type == "AskUserQuestion":
             return {
                 "status": "blocked",
@@ -2055,6 +2080,7 @@ class MinionRunner:
         )
         return {
             "plan_ref": plan_ref,
+            **({"plan_draft_ref": dict(plan_ref)} if plan_ref.get("ref_kind") == "plan_draft" else {}),
             "plan_validation": validation,
         }
 
@@ -2828,6 +2854,24 @@ def _shell_audit_snapshot_changed_meaningfully(before: dict[str, Any], after: di
         )
         return source_changed or scratch_changed
     return _git_workspace_snapshot_changed_meaningfully(before, after)
+
+
+def _shell_audit_changed_root_path(before: dict[str, Any], after: dict[str, Any]) -> str:
+    if str(before.get("snapshot_kind") or "") != "read_only_repo":
+        return str(before.get("repo_path") or "")
+    source_changed = _git_workspace_snapshot_changed_meaningfully(
+        dict(before.get("source_git") or {}),
+        dict(after.get("source_git") or {}),
+    )
+    scratch_changed = _file_tree_snapshot_changed_meaningfully(
+        dict(before.get("scratch_tree") or {}),
+        dict(after.get("scratch_tree") or {}),
+    )
+    if source_changed:
+        return str(before.get("repo_path") or "")
+    if scratch_changed:
+        return str(before.get("review_scratch_repo_path") or "")
+    return str(before.get("repo_path") or before.get("review_scratch_repo_path") or "")
 
 
 def _file_tree_snapshot_changed_meaningfully(before: dict[str, Any], after: dict[str, Any]) -> bool:

@@ -82,6 +82,7 @@ from pal.minion.inflight import InflightTracker
 from pal.minion.ipc import minion_runner_log_path, open_manager_connection, python_subprocess_env
 from pal.minion.lifecycle import RunStatusTransitionError, transition_run_status
 from pal.minion.manager import MinionRunState
+from pal.minion.plan_builder import PLAN_BUILDER_CAPABILITIES, PLAN_BUILDER_INITIAL_CAPABILITIES, enrich_plan_review_gate_node_refs
 from pal.minion.runner import (
     MinionAgentLoopState,
     MinionRunner,
@@ -104,8 +105,11 @@ from pal.minion.review_orchestrator import (
     _checkpoint_git_context,
     _checkpoint_review_environment_workspace,
     _checkpoint_repair_payload,
+    review_artifact_dir,
     review_gate_repair_note,
+    review_scratch_dir,
 )
+from pal.minion.workspace_tools import _write_minion_artifact
 from pal.minion.workspace_environment import prepare_workspace_environment
 from pal.minion.prompt_adapter import (
     build_minion_task_envelope as _build_minion_task_envelope,
@@ -186,10 +190,10 @@ def _without_checkpoint_review(pack: TaskContextPack) -> TaskContextPack:
 
     def is_checkpoint_gate(item: Any) -> bool:
         if isinstance(item, str):
-            return item == "checkpoint_quality"
+            return item in {"checkpoint_quality", "module_quality"}
         if not isinstance(item, dict):
             return False
-        return str(item.get("gate") or item.get("id") or item.get("strategy") or "") == "checkpoint_quality"
+        return str(item.get("gate") or item.get("id") or item.get("strategy") or "") in {"checkpoint_quality", "module_quality"}
 
     metadata = dict(payload.get("metadata") or {})
     module_execution = dict(metadata.get("module_execution") or {})
@@ -228,10 +232,10 @@ def _with_checkpoint_gate_overrides(pack: TaskContextPack, **overrides: Any) -> 
 
     def is_checkpoint_gate(item: Any) -> bool:
         if isinstance(item, str):
-            return item == "checkpoint_quality"
+            return item in {"checkpoint_quality", "module_quality"}
         if not isinstance(item, dict):
             return False
-        return str(item.get("gate") or item.get("id") or item.get("strategy") or "") == "checkpoint_quality"
+        return str(item.get("gate") or item.get("id") or item.get("strategy") or "") in {"checkpoint_quality", "module_quality"}
 
     def update_policy(raw: dict[str, Any]) -> dict[str, Any]:
         policy = dict(raw or {})
@@ -295,6 +299,14 @@ def _init_git_source_repo(path: Path, files: dict[str, str], *, message: str = "
         target.write_text(content, encoding="utf-8")
     _git(path, "add", "-A", check=True)
     _git(path, "commit", "-m", message, check=True)
+
+
+def _git_common_dir(repo: Path) -> Path:
+    raw = _git(repo, "rev-parse", "--git-common-dir", check=True).stdout.strip()
+    common_dir = Path(raw)
+    if not common_dir.is_absolute():
+        common_dir = repo / common_dir
+    return common_dir.resolve()
 
 
 def _plan_module(module_id: str, *, title: str = "", task: str = "", acceptance: str = "") -> dict:
@@ -428,6 +440,7 @@ def _builder_plan_calls_from_handles(
                 "module_handle": prelude_handle,
                 "title": "Contract prelude",
                 "task": "Define the implementation contract and setup requirements.",
+                "checkpoint_admission_evidence": ["Reviewer can inspect the plan prelude module and linked constraints."],
             },
             call_id=f"{call_prefix}_prelude_ms",
         ),
@@ -454,6 +467,11 @@ def _builder_plan_calls_from_handles(
                 "responsibility": f"Implement {module_key}.",
                 "owned_area": [f"src/{module_key}.py", f"tests/test_{module_key}.py"],
                 "constraint_handles": linked,
+                "module_quality_criteria": [
+                    f"{module_key} preserves its public contract, focused tests, and downstream integration readiness."
+                ],
+                "risk_surfaces": ["public_api_contract"],
+                "delivery_surfaces": [f"public import path for {module_key}"],
             },
             call_id=f"{call_prefix}_module",
         ),
@@ -492,6 +510,7 @@ def _builder_plan_calls_from_handles(
                 "title": f"{module_key} implementation",
                 "task": f"Implement and test {module_key}.",
                 "tests_required": [f"python -m pytest tests/test_{module_key}.py"],
+                "checkpoint_admission_evidence": [f"python -m pytest tests/test_{module_key}.py passes."],
             },
             call_id=f"{call_prefix}_module_ms",
         ),
@@ -540,6 +559,7 @@ def _builder_plan_calls_from_handles(
                 "module_handle": join_handle,
                 "title": "Integration verification",
                 "task": "Verify the full planned workflow after module implementation.",
+                "checkpoint_admission_evidence": ["Integration test or dogfood evidence is recorded."],
             },
             call_id=f"{call_prefix}_join_ms",
         ),
@@ -556,13 +576,13 @@ def _builder_plan_calls_from_handles(
         CanonicalToolCall(name="plan_end_milestone", args={"milestone_handle": join_milestone_handle}, call_id=f"{call_prefix}_join_end_ms"),
         CanonicalToolCall(name="plan_end_module", args={"module_handle": join_handle}, call_id=f"{call_prefix}_join_end"),
         CanonicalToolCall(
-            name="plan_finalize",
+            name="plan_validate_and_submit_for_review",
             args={
                 "plan_handle": plan_handle,
                 "summary": f"Dispatchable plan {plan_id}.",
                 "system_test_plan": [{"level": "system", "evidence": "Run the integration workflow."}],
             },
-            call_id=f"{call_prefix}_finalize",
+            call_id=f"{call_prefix}_submit_for_review",
         ),
     ]
 
@@ -601,21 +621,36 @@ def _builder_calls_from_plan_payload(plan: dict, *, call_prefix: str = "call_pla
             for candidate_module_id, node_id in node_by_module.items()
             if node_id in dependency_node_ids
         ]
+        kind = str(node.get("kind") or (module.get("metadata") or {}).get("module_kind") or "module")
         calls.append(
             CanonicalToolCall(
                 name="plan_begin_module",
                 args={
                     "plan_handle": plan_handle,
                     "module_key": module_id,
-                    "kind": str(node.get("kind") or (module.get("metadata") or {}).get("module_kind") or "module"),
+                    "kind": kind,
                     "depends_on_module_handles": [module_handle_by_id[item] for item in dependency_module_ids if item in module_handle_by_id],
                     "responsibility": str(module.get("responsibility") or f"Implement {module_id}."),
                     "owned_area": list(module.get("owned_area") or [module_id]),
+                    **(
+                        {
+                            "module_quality_criteria": list(
+                                ((module.get("metadata") or {}).get("module_quality_criteria") or [])
+                            )
+                            or [
+                                f"{module_id} satisfies its semantic contract, boundary behavior, and downstream readiness."
+                            ],
+                            "risk_surfaces": list(((module.get("metadata") or {}).get("risk_surfaces") or [])) or ["public_api_contract"],
+                            "delivery_surfaces": list(((module.get("metadata") or {}).get("delivery_surfaces") or []))
+                            or [f"{module_id} public behavior"],
+                        }
+                        if kind == "module"
+                        else {}
+                    ),
                 },
                 call_id=f"{call_prefix}_module_{module_index}",
             )
         )
-        kind = str(node.get("kind") or (module.get("metadata") or {}).get("module_kind") or "module")
         if kind != "join":
             calls.append(
                 CanonicalToolCall(
@@ -660,6 +695,11 @@ def _builder_calls_from_plan_payload(plan: dict, *, call_prefix: str = "call_pla
                         "module_handle": module_handle,
                         "title": str(milestone.get("title") or milestone.get("milestone_id") or f"Milestone {milestone_index}"),
                         "task": str(milestone.get("task") or milestone.get("title") or f"Complete milestone {milestone_index}."),
+                        "checkpoint_admission_evidence": list(
+                            ((milestone.get("metadata") or {}).get("checkpoint_admission_evidence") or [])
+                        )
+                        or list(((milestone.get("test_plan") or {}).get("checkpoint_admission") or []))
+                        or ["Focused verification evidence is recorded for this milestone."],
                     },
                     call_id=f"{call_prefix}_module_{module_index}_milestone_{milestone_index}",
                 )
@@ -694,26 +734,38 @@ def _builder_calls_from_plan_payload(plan: dict, *, call_prefix: str = "call_pla
         )
     calls.append(
         CanonicalToolCall(
-            name="plan_finalize",
+            name="plan_validate_and_submit_for_review",
             args={
                 "plan_handle": plan_handle,
                 "summary": str(plan.get("summary") or f"Dispatchable plan {plan_id}."),
                 "system_test_plan": list(plan.get("system_test_plan") or [{"level": "system", "evidence": "Run system verification."}]),
             },
-            call_id=f"{call_prefix}_finalize",
+            call_id=f"{call_prefix}_submit_for_review",
         )
     )
     return calls
 
 
-def _submit_plan_review_gate(repository: MinionTaskingRepository, plan_ref: dict, *, verdict: str = "pass") -> dict:
+def _submit_plan_review_gate(
+    repository: MinionTaskingRepository,
+    plan_ref: dict,
+    *,
+    verdict: str = "pass",
+    source_contract: dict | None = None,
+    findings: list[dict] | None = None,
+    required_fixes: list[dict] | None = None,
+) -> dict:
+    target = {"plan_ref": dict(plan_ref)}
+    if source_contract:
+        target["source_contract"] = dict(source_contract)
     payload = repository.submit_review_gate(
         {
             "gate_kind": "plan_acceptance",
-            "target": {"plan_ref": dict(plan_ref)},
+            "target": target,
             "verdict": verdict,
             "summary": f"plan review {verdict}",
-            "findings": [{"severity": "blocker", "summary": "plan is not executable"}] if verdict == "fail" else [],
+            "findings": findings if findings is not None else ([{"severity": "blocker", "summary": "plan is not executable"}] if verdict == "fail" else []),
+            "required_fixes": required_fixes or [],
             "evidence": [{"kind": "source", "summary": "dispatchable plan validation inspected"}] if verdict == "pass" else [],
             "api_evidence": [{"kind": "not_applicable", "summary": "test plan has no API claims"}] if verdict == "pass" else [],
             "metadata": {
@@ -783,6 +835,43 @@ class SidecarFoundationTests(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
         self.assertEqual(completed.stdout.decode("utf-8").strip(), "ok")
+
+    def test_runner_main_loads_task_json_from_file(self) -> None:
+        from pal.minion import runner_main
+
+        with tempfile.TemporaryDirectory(prefix="pal_runner_payload_test_") as tmp:
+            payload_path = Path(tmp) / "task.json"
+            payload = TaskContextPack(work_order_id="wo_file_payload", goal="read payload from file").to_json()
+            payload_path.write_text(payload, encoding="utf-8")
+
+            loaded = runner_main._load_task_json(SimpleNamespace(task_json=None, task_json_file=payload_path))
+
+        self.assertEqual(loaded, payload)
+
+    def test_runner_process_uses_file_payload_for_large_task_context(self) -> None:
+        from pal.minion.runner_process import RunnerProcessSupervisor, runner_payload_path
+
+        with tempfile.TemporaryDirectory(prefix="pal_runner_payload_test_") as tmp:
+            root = Path(tmp)
+            supervisor = RunnerProcessSupervisor(SimpleNamespace(runtime_root=root))
+            pack = TaskContextPack(
+                work_order_id="wo_large_payload",
+                goal="avoid argv bloat",
+                metadata={"large_review_context": "x" * 200_000},
+            )
+            state = SimpleNamespace(run_id="run/large payload", pack=pack, runner_payload_path="")
+
+            path = supervisor.write_runner_payload(state)
+
+            self.assertEqual(path, runner_payload_path(root, "run/large payload"))
+            self.assertEqual(Path(state.runner_payload_path), path)
+            self.assertEqual(path.read_text(encoding="utf-8"), pack.to_json())
+            self.assertLess(len(str(path)), 4096)
+
+            supervisor.cleanup_runner_payload(state)
+
+            self.assertEqual(state.runner_payload_path, "")
+            self.assertFalse(path.exists())
 
     def test_python_subprocess_env_includes_source_root_for_sidecars(self) -> None:
         env = python_subprocess_env()
@@ -918,7 +1007,17 @@ class MinionContractTests(unittest.TestCase):
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_builder"},
                 )
 
-                for call in _builder_plan_calls_from_handles(plan_id="plan_builder_direct", module_key="module_builder_direct"):
+                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_direct", module_key="module_builder_direct")
+                calls[-1] = CanonicalToolCall(
+                    name="plan_finalize",
+                    args={
+                        "plan_handle": "plan_builder_direct",
+                        "summary": "Dispatchable plan plan_builder_direct.",
+                        "system_test_plan": [{"level": "system", "evidence": "Run the integration workflow."}],
+                    },
+                    call_id="call_builder_finalize",
+                )
+                for call in calls:
                     result = await scoped.execute_tool_async(call)
                     self.assertTrue(result.ok, result.text)
 
@@ -930,6 +1029,913 @@ class MinionContractTests(unittest.TestCase):
                 checklist = artifact.modules[1].internal_milestones[0].metadata["acceptance_checklist"]
                 self.assertEqual(checklist[0]["evidence_expectation"], "pytest for tests/test_module_builder_direct.py passes.")
                 self.assertEqual(scoped.produced_artifacts[0]["relative_path"], "plan.json")
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_submits_review_draft_and_exposes_query_handles(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_draft_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_read",
+                        "op_minion_plan_find",
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_constraint",
+                        "op_minion_plan_begin_module",
+                        "op_minion_plan_add_module_interface",
+                        "op_minion_plan_begin_milestone",
+                        "op_minion_plan_add_acceptance_criterion",
+                        "op_minion_plan_end_milestone",
+                        "op_minion_plan_end_module",
+                        "op_minion_plan_submit_for_review",
+                    ],
+                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_builder_draft"},
+                )
+
+                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_draft", module_key="module_builder_draft")[:-1]
+                calls.append(
+                    CanonicalToolCall(
+                        name="plan_submit_for_review",
+                        args={
+                            "plan_handle": "plan_builder_draft",
+                            "summary": "Dispatchable draft plan.",
+                            "system_test_plan": [{"level": "system", "evidence": "Run integration workflow."}],
+                        },
+                    )
+                )
+                last = None
+                for call in calls:
+                    last = await scoped.execute_tool_async(call)
+                    self.assertTrue(last.ok, last.text)
+                self.assertIsNotNone(last)
+                draft_ref = dict(last.structured["plan_draft_ref"])
+                self.assertEqual(draft_ref["ref_kind"], "plan_draft")
+                self.assertEqual(draft_ref["plan_handle"], "plan_builder_draft")
+                self.assertTrue((root / "artifacts" / "plan.draft.json").exists())
+                self.assertFalse((root / "artifacts" / "plan.json").exists())
+
+                read = await scoped.execute_tool_async(CanonicalToolCall(name="plan_read", args={"plan_ref": draft_ref}))
+                self.assertTrue(read.ok, read.text)
+                self.assertEqual(read.structured["plan_handle"], "plan_builder_draft")
+                self.assertEqual(read.structured["handle_tree"][1]["module_id"], "module_builder_draft")
+
+                reviewer_scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    ["op_minion_plan_read", "op_minion_plan_validate"],
+                    workspace={
+                        "runtime_root": str(root),
+                        "artifact_dir": str(root / "review_artifacts"),
+                        "task_id": "task_builder_draft",
+                        "review_target_plan_ref": dict(draft_ref),
+                    },
+                )
+                read_by_handle = await reviewer_scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_read", args={"plan_handle": "plan_builder_draft"})
+                )
+                self.assertTrue(read_by_handle.ok, read_by_handle.text)
+                self.assertEqual(read_by_handle.structured["plan_handle"], "plan_builder_draft")
+                validate_by_handle = await reviewer_scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_validate", args={"plan_handle": "plan_builder_draft"})
+                )
+                self.assertTrue(validate_by_handle.ok, validate_by_handle.text)
+                self.assertEqual(validate_by_handle.structured["plan_validation"]["status"], "valid")
+
+                found = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_find", args={"plan_ref": draft_ref, "type": "module", "query": "module_builder_draft"})
+                )
+                self.assertTrue(found.ok, found.text)
+                self.assertEqual(found.structured["matches"][0]["handle"], "module_plan_builder_draft_2")
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_outline_tools_submit_dispatchable_draft(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_outline_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_constraints_batch",
+                        "op_minion_plan_add_module_outline",
+                        "op_minion_plan_add_milestone_outline",
+                        "op_minion_plan_validate_and_submit_for_review",
+                    ],
+                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_outline"},
+                )
+
+                begin = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_begin",
+                        args={
+                            "goal": "Plan outline workflow",
+                            "plan_id": "plan_outline",
+                            "summary": "Outline plan.",
+                            "languages": ["python"],
+                        },
+                    )
+                )
+                self.assertTrue(begin.ok, begin.text)
+                constraints = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_constraints_batch",
+                        args={
+                            "plan_handle": "plan_outline",
+                            "constraints": [
+                                {
+                                    "statement": "Public APIs must reject invalid input at module boundaries.",
+                                    "kind": "boundary",
+                                    "strength": "hard_contract",
+                                }
+                            ],
+                        },
+                    )
+                )
+                self.assertTrue(constraints.ok, constraints.text)
+                constraint_handle = constraints.structured["constraint_handles"][0]
+
+                prelude = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_module_outline",
+                        args={
+                            "plan_handle": "plan_outline",
+                            "module_key": "module_prelude",
+                            "kind": "prelude",
+                            "responsibility": "Define boundary contracts before implementation.",
+                            "owned_area": ["SPEC.md"],
+                            "constraint_handles": [constraint_handle],
+                            "provided_interfaces": [
+                                {
+                                    "name": "planning.contracts",
+                                    "shape": "Boundary contract notes and source constraints.",
+                                    "lifecycle": "Produced before implementation modules start.",
+                                    "ownership": "Prelude owns planning contracts.",
+                                    "error_behavior": "Missing contracts block implementation dispatch.",
+                                    "compatibility": "Implementation modules consume stable planning contracts.",
+                                }
+                            ],
+                            "milestones": [
+                                {
+                                    "title": "Contract prelude",
+                                    "task": "Capture source constraints and boundary expectations.",
+                                    "checkpoint_admission_evidence": [
+                                        "Plan prelude names source constraints and downstream boundary expectations."
+                                    ],
+                                    "acceptance_criteria": [
+                                        {
+                                            "criterion": "Boundary contracts are explicit before implementation starts.",
+                                            "evidence_expectation": "Plan prelude links the source constraint to downstream work.",
+                                            "linked_constraint_handles": [constraint_handle],
+                                            "negative_cases": [],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    )
+                )
+                self.assertTrue(prelude.ok, prelude.text)
+                self.assertEqual(prelude.structured["module_key"], "module_prelude")
+                self.assertTrue(prelude.structured["module_closed"])
+                self.assertEqual(prelude.structured["parent_plan_handle"], "plan_outline")
+                self.assertIn("Do not add milestones to this closed module", prelude.structured["next_tool_hint"])
+                self.assertIn("Use plan_handle=plan_outline to add the next module", prelude.text)
+
+                closed_milestone = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_milestone_outline",
+                        args={
+                            "plan_handle": "plan_outline",
+                            "module_key": "module_prelude",
+                            "task": "This should not be appended to a closed module.",
+                            "acceptance_criteria": [
+                                {
+                                    "criterion": "Closed module rejects new milestones.",
+                                    "evidence_expectation": "Tool returns a route hint.",
+                                    "negative_cases": [],
+                                }
+                            ],
+                        },
+                    )
+                )
+                self.assertFalse(closed_milestone.ok)
+                self.assertIn("module is already closed for milestone edits", closed_milestone.text)
+                self.assertIn("Use the returned plan_handle to add the next module", closed_milestone.text)
+
+                implementation = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_module_outline",
+                        args={
+                            "plan_handle": "plan_outline",
+                            "module_key": "module_parser",
+                            "kind": "module",
+                            "depends_on_module_keys": ["module_prelude"],
+                            "responsibility": "Implement parser boundary validation.",
+                            "owned_area": ["src/pal_dogfood/changelog.py", "tests/test_changelog.py"],
+                            "constraint_handles": [constraint_handle],
+                            "module_quality_criteria": [
+                                "Parser public API rejects invalid boundary inputs before normalized Entry objects reach downstream modules.",
+                                "Release notes consumers can depend on a non-null Entry contract and documented error behavior.",
+                            ],
+                            "risk_surfaces": ["public_api_contract", "cross_module_handoff", "invalid_input_boundary"],
+                            "delivery_surfaces": ["public library parse_entry import path"],
+                            "provided_interfaces": [
+                                {
+                                    "name": "parser.api",
+                                    "shape": "parse_entry(mapping) -> Entry with validated Version and Label.",
+                                    "lifecycle": "Produced by parser milestone before join verification.",
+                                    "ownership": "Parser owns validation and normalized Entry construction.",
+                                    "error_behavior": "Invalid mappings raise ChangelogError before core grouping.",
+                                    "compatibility": "Release notes consume Entry objects, not raw mappings.",
+                                }
+                            ],
+                            "milestones": [
+                                {
+                                    "title": "Parser validation",
+                                    "task": "Implement strict parse_entry validation and tests.",
+                                    "tests_required": ["python -m pytest tests/test_changelog.py"],
+                                    "checkpoint_admission_evidence": [
+                                        "Focused pytest for parser validation passes.",
+                                        "LSP/type/build diagnostics are clean or explicitly not applicable.",
+                                    ],
+                                    "acceptance_criteria": [
+                                        {
+                                            "criterion": "parse_entry accepts exactly version, label, and description mappings and returns Entry.",
+                                            "evidence_expectation": "Focused pytest covers valid mapping and returned Entry fields.",
+                                            "linked_constraint_handles": [constraint_handle],
+                                            "negative_cases": ["missing label", "extra key", "blank description"],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    )
+                )
+                self.assertTrue(implementation.ok, implementation.text)
+                self.assertEqual(implementation.structured["module_key"], "module_parser")
+
+                join = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_module_outline",
+                        args={
+                            "plan_handle": "plan_outline",
+                            "module_key": "module_join",
+                            "kind": "join",
+                            "depends_on_module_keys": ["module_parser"],
+                            "responsibility": "Run final integration verification.",
+                            "owned_area": ["tests/test_release_notes.py"],
+                            "consumed_interfaces": [
+                                {
+                                    "name": "parser.api",
+                                    "shape": "Validated Entry objects and parser tests.",
+                                    "lifecycle": "Consumed after parser milestone completes.",
+                                    "ownership": "Parser owns API behavior; join owns final verification.",
+                                    "error_behavior": "Join fails if parser evidence is missing.",
+                                    "compatibility": "Join verifies observable parser behavior only.",
+                                }
+                            ],
+                            "milestones": [
+                                {
+                                    "title": "Final verification",
+                                    "task": "Verify the package-level behavior.",
+                                    "checkpoint_admission_evidence": [
+                                        "python -m pytest -q passes for the planned package."
+                                    ],
+                                    "acceptance_criteria": [
+                                        {
+                                            "criterion": "Package workflow is verified end to end.",
+                                            "evidence_expectation": "python -m pytest -q passes for the planned package.",
+                                            "negative_cases": [],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    )
+                )
+                self.assertTrue(join.ok, join.text)
+
+                submitted = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_validate_and_submit_for_review",
+                        args={
+                            "plan_handle": "plan_outline",
+                            "summary": "Outline plan ready for review.",
+                            "system_test_plan": [{"level": "system", "evidence": "Run python -m pytest -q."}],
+                        },
+                    )
+                )
+                self.assertTrue(submitted.ok, submitted.text)
+                self.assertEqual(submitted.structured["plan_validation"]["status"], "valid")
+                draft = json.loads((root / "artifacts" / "plan.draft.json").read_text(encoding="utf-8"))
+                artifact = validate_dispatchable_plan_artifact(draft)
+                self.assertEqual([module.module_id for module in artifact.modules], ["module_prelude", "module_parser", "module_join"])
+                self.assertEqual(
+                    artifact.modules[1].internal_milestones[0].metadata["acceptance_checklist"][0]["negative_cases"],
+                    ["missing label", "extra key", "blank description"],
+                )
+                self.assertEqual(
+                    artifact.modules[1].metadata["module_quality_criteria"][0],
+                    "Parser public API rejects invalid boundary inputs before normalized Entry objects reach downstream modules.",
+                )
+                self.assertEqual(artifact.modules[1].metadata["risk_surfaces"], ["public_api_contract", "cross_module_handoff", "invalid_input_boundary"])
+                self.assertEqual(artifact.modules[1].metadata["delivery_surfaces"], ["public library parse_entry import path"])
+                self.assertEqual(
+                    artifact.modules[1].test_plan["module_quality"][1],
+                    "Release notes consumers can depend on a non-null Entry contract and documented error behavior.",
+                )
+                self.assertEqual(
+                    artifact.modules[1].internal_milestones[0].metadata["checkpoint_admission_evidence"],
+                    ["Focused pytest for parser validation passes.", "LSP/type/build diagnostics are clean or explicitly not applicable."],
+                )
+                self.assertEqual(
+                    artifact.modules[1].internal_milestones[0].test_plan["checkpoint_admission"][0],
+                    "Focused pytest for parser validation passes.",
+                )
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_update_tools_repair_gate_evidence_handoff(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_gate_handoff_repair_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_module_outline",
+                        "op_minion_plan_update_module",
+                        "op_minion_plan_update_milestone",
+                        "op_minion_plan_validate_and_submit_for_review",
+                    ],
+                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_gate_handoff_repair"},
+                )
+
+                begin = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_begin",
+                        args={"plan_id": "gate_handoff", "goal": "Build a small package.", "languages": ["python"]},
+                    )
+                )
+                self.assertTrue(begin.ok, begin.text)
+
+                prelude = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_module_outline",
+                        args={
+                            "plan_handle": "plan_gate_handoff",
+                            "module_key": "module_prelude",
+                            "kind": "prelude",
+                            "responsibility": "Prepare contracts.",
+                            "owned_area": ["SPEC.md"],
+                            "provided_interfaces": [
+                                {
+                                    "name": "contracts",
+                                    "shape": "Public package contract notes.",
+                                    "lifecycle": "Available before implementation.",
+                                    "ownership": "Prelude owns the notes.",
+                                    "error_behavior": "Missing notes block implementation.",
+                                    "compatibility": "Implementation modules consume stable notes.",
+                                }
+                            ],
+                            "milestones": [
+                                {
+                                    "title": "Contract notes",
+                                    "task": "Prepare package contracts.",
+                                    "checkpoint_admission_evidence": ["Contract notes exist."],
+                                    "acceptance_criteria": [
+                                        {
+                                            "criterion": "Package contracts are ready.",
+                                            "evidence_expectation": "Contract notes are present.",
+                                            "negative_cases": [],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    )
+                )
+                self.assertTrue(prelude.ok, prelude.text)
+
+                core = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_module_outline",
+                        args={
+                            "plan_handle": "plan_gate_handoff",
+                            "module_key": "module_core",
+                            "kind": "module",
+                            "depends_on_module_keys": ["module_prelude"],
+                            "responsibility": "Implement public function.",
+                            "owned_area": ["src/pkg/core.py", "tests/test_core.py"],
+                            "provided_interfaces": [
+                                {
+                                    "name": "core.api",
+                                    "shape": "normalize(value: str) -> str.",
+                                    "lifecycle": "Available before final verification.",
+                                    "ownership": "Core owns validation and normalization.",
+                                    "error_behavior": "Invalid values raise ValueError.",
+                                    "compatibility": "Join verifies public behavior only.",
+                                }
+                            ],
+                            "milestones": [
+                                {
+                                    "title": "Core behavior",
+                                    "task": "Implement normalize.",
+                                    "acceptance_criteria": [
+                                        {
+                                            "criterion": "normalize returns a non-empty string for valid input.",
+                                            "evidence_expectation": "Focused pytest covers valid input.",
+                                            "negative_cases": ["blank input"],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    )
+                )
+                self.assertTrue(core.ok, core.text)
+
+                join = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_module_outline",
+                        args={
+                            "plan_handle": "plan_gate_handoff",
+                            "module_key": "module_join",
+                            "kind": "join",
+                            "depends_on_module_keys": ["module_core"],
+                            "responsibility": "Verify package workflow.",
+                            "owned_area": ["tests/test_integration.py"],
+                            "consumed_interfaces": [
+                                {
+                                    "name": "core.api",
+                                    "shape": "normalize(value: str) -> str.",
+                                    "lifecycle": "Consumed after core implementation.",
+                                    "ownership": "Core owns behavior; join owns verification.",
+                                    "error_behavior": "Join fails if public behavior regresses.",
+                                    "compatibility": "Join uses the public import path.",
+                                }
+                            ],
+                            "milestones": [
+                                {
+                                    "title": "Integration verification",
+                                    "task": "Verify public workflow.",
+                                    "checkpoint_admission_evidence": ["python -m pytest -q passes."],
+                                    "acceptance_criteria": [
+                                        {
+                                            "criterion": "Public workflow is verified end to end.",
+                                            "evidence_expectation": "Full pytest suite passes.",
+                                            "negative_cases": [],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    )
+                )
+                self.assertTrue(join.ok, join.text)
+
+                invalid = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_validate_and_submit_for_review",
+                        args={"plan_handle": "plan_gate_handoff", "summary": "Should require module-quality criteria."},
+                    )
+                )
+                self.assertFalse(invalid.ok)
+                self.assertIn("module_core must declare module_quality_criteria", invalid.text)
+                self.assertIn("module_core.module_core_m1 must declare checkpoint_admission_evidence", invalid.text)
+
+                update = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_update_module",
+                        args={
+                            "plan_handle": "plan_gate_handoff",
+                            "module_key": "module_core",
+                            "module_quality_criteria": [
+                                "Core public API preserves str return type closure and rejects invalid boundary inputs."
+                            ],
+                            "risk_surfaces": ["public_api_contract", "invalid_input_boundary"],
+                            "delivery_surfaces": ["public import path pkg.core.normalize"],
+                        },
+                    )
+                )
+                self.assertTrue(update.ok, update.text)
+
+                milestone_update = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_update_milestone",
+                        args={
+                            "milestone_handle": core.structured["milestone_handles"][0],
+                            "checkpoint_admission_evidence": ["python -m pytest tests/test_core.py -q passes."],
+                        },
+                    )
+                )
+                self.assertTrue(milestone_update.ok, milestone_update.text)
+
+                valid = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_validate_and_submit_for_review",
+                        args={"plan_handle": "plan_gate_handoff", "summary": "Gate handoff repaired."},
+                    )
+                )
+                self.assertTrue(valid.ok, valid.text)
+                self.assertEqual(valid.structured["plan_validation"]["status"], "valid")
+                review_scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    ["op_minion_plan_read", "op_minion_plan_validate"],
+                    workspace={
+                        "runtime_root": str(root),
+                        "artifact_dir": str(root / "review_artifacts"),
+                        "review_target_plan_ref": dict(valid.structured["plan_ref"]),
+                    },
+                )
+                default_read = await review_scoped.execute_tool_async(CanonicalToolCall(name="plan_read", args={}))
+                self.assertTrue(default_read.ok, default_read.text)
+                submitted_validate = await review_scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_validate", args={"plan_handle": "plan_gate_handoff"})
+                )
+                self.assertTrue(submitted_validate.ok, submitted_validate.text)
+                self.assertEqual(submitted_validate.text, "Submitted plan is dispatchable.")
+                self.assertEqual(submitted_validate.structured["plan_validation"]["status"], "valid")
+                handle_only_read = await review_scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_read", args={"plan_ref": {"plan_handle": "plan_gate_handoff"}})
+                )
+                self.assertTrue(handle_only_read.ok, handle_only_read.text)
+                enriched = enrich_plan_review_gate_node_refs(
+                    {
+                        "gate_kind": "plan_acceptance",
+                        "target": {"plan_ref": dict(valid.structured["plan_ref"])},
+                        "findings": [{"target_handle": "milestones module_core_m1", "summary": "example"}],
+                    },
+                    {
+                        "runtime_root": str(root),
+                        "artifact_dir": str(root / "review_artifacts"),
+                        "review_target_plan_ref": dict(valid.structured["plan_ref"]),
+                    },
+                )
+                self.assertEqual(enriched["findings"][0]["target_node"]["node_kind"], "milestone")
+                self.assertEqual(enriched["findings"][0]["target_node"]["milestone_id"], "module_core_m1")
+                self.assertTrue(str(enriched["findings"][0]["target_handle"]).startswith("milestone_"))
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_accepts_module_key_for_closed_module_interface_repair(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_module_key_lookup_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_module_outline",
+                        "op_minion_plan_add_module_interface",
+                        "op_minion_plan_read",
+                    ],
+                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_module_key_lookup"},
+                )
+
+                begin = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_begin",
+                        args={"goal": "Plan module key lookup.", "plan_id": "plan_module_key_lookup", "languages": ["python"]},
+                    )
+                )
+                self.assertTrue(begin.ok, begin.text)
+
+                module = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_module_outline",
+                        args={
+                            "plan_handle": "plan_module_key_lookup",
+                            "module_key": "module_parser",
+                            "kind": "module",
+                            "responsibility": "Own parser implementation.",
+                            "owned_area": ["src/parser.py", "tests/test_parser.py"],
+                            "milestones": [
+                                {
+                                    "title": "Parser core",
+                                    "task": "Implement parser behavior.",
+                                    "acceptance_criteria": [
+                                        {
+                                            "criterion": "Parser behavior has focused tests.",
+                                            "evidence_expectation": "python -m pytest tests/test_parser.py passes.",
+                                            "negative_cases": [],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    )
+                )
+                self.assertTrue(module.ok, module.text)
+
+                interface = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_module_interface",
+                        args={
+                            "plan_handle": "plan_module_key_lookup",
+                            "module_key": "module_parser",
+                            "direction": "provided",
+                            "name": "parser.api",
+                            "shape": "parse(text: str) -> ParsedResult",
+                            "lifecycle": "Available after parser milestone.",
+                            "ownership": "Parser module owns the API.",
+                            "error_behavior": "Invalid text raises ValueError.",
+                            "compatibility": "Callers depend on ParsedResult fields.",
+                        },
+                    )
+                )
+                self.assertTrue(interface.ok, interface.text)
+                self.assertEqual(interface.structured["module_key"], "module_parser")
+
+                read = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_read", args={"plan_handle": "plan_module_key_lookup", "detail": "full"})
+                )
+                self.assertTrue(read.ok, read.text)
+                modules = read.structured["state"]["modules"]
+                self.assertEqual(modules[0]["provided_interfaces"][0]["name"], "parser.api")
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_merge_modules_moves_milestones_and_rewrites_dependencies(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_merge_"))
+            try:
+                plan = _dispatchable_plan_payload(
+                    plan_id="plan_merge_modules",
+                    task_id="task_merge_modules",
+                    modules=[
+                        _plan_module("module_changelog", title="Changelog core"),
+                        _plan_module("module_release_notes", title="Release notes"),
+                    ],
+                )
+                plan["metadata"] = {"languages": ["python"]}
+                plan["modules"][-1]["consumed_interfaces"] = [
+                    {
+                        "name": "implementation.contracts",
+                        "shape": "Merged implementation module behavior and tests.",
+                        "lifecycle": "Consumed by final verification after implementation checkpoints.",
+                        "ownership": "Implementation module owns behavior; join owns final verification.",
+                        "error_behavior": "Final verification fails if implementation behavior is missing.",
+                        "compatibility": "Join verifies observable implementation contracts.",
+                    }
+                ]
+                artifact_path = root / "plan.json"
+                artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+                source_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_checkout",
+                        "op_minion_plan_merge_modules",
+                        "op_minion_plan_read",
+                        "op_minion_plan_validate",
+                        "op_minion_plan_submit_for_review",
+                    ],
+                    workspace={
+                        "runtime_root": str(root),
+                        "artifact_dir": str(root / "artifacts"),
+                        "task_id": "task_merge_modules",
+                        "planner_plan_revision": 1,
+                        "plan_revision_checklist": [
+                            {
+                                "id": "PRC-1",
+                                "target_handle": "module_plan_merge_modules_2",
+                                "target_node": {"handle": "module_plan_merge_modules_2", "module_handle": "module_plan_merge_modules_2"},
+                                "suggested_tool_route": ["plan_checkout", "plan_merge_modules"],
+                            }
+                        ],
+                    },
+                )
+
+                checkout = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_checkout",
+                        args={"source_plan_ref": source_ref, "plan_handle": "plan_merge_modules_r1"},
+                    )
+                )
+                self.assertTrue(checkout.ok, checkout.text)
+                self.assertEqual(checkout.structured["plan_revision_checklist"][0]["target_handle"], "module_plan_merge_modules_r1_2")
+                self.assertIn("Revision checklist", checkout.text)
+                self.assertIn("plan_merge_modules", checkout.text)
+                self.assertEqual(
+                    checkout.structured["plan_revision_checklist"][0]["target_node"]["module_handle"],
+                    "module_plan_merge_modules_r1_2",
+                )
+
+                read_from_incomplete_ref = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_read",
+                        args={"detail": "summary", "plan_ref": {"gate_ref": "rg_test_plan_merge"}},
+                    )
+                )
+                self.assertTrue(read_from_incomplete_ref.ok, read_from_incomplete_ref.text)
+                self.assertEqual(read_from_incomplete_ref.structured["plan_handle"], "plan_merge_modules_r1")
+                self.assertIn("Active revision checklist", read_from_incomplete_ref.text)
+
+                premature_validation = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_validate", args={"plan_handle": "plan_merge_modules_r1"})
+                )
+                self.assertTrue(premature_validation.ok, premature_validation.text)
+                self.assertEqual(premature_validation.structured["plan_validation"]["status"], "invalid")
+                self.assertIn("requires merging implementation modules", premature_validation.text)
+
+                premature_submit = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_submit_for_review", args={"plan_handle": "plan_merge_modules_r1"})
+                )
+                self.assertFalse(premature_submit.ok)
+                self.assertIn("requires merging implementation modules", premature_submit.text)
+
+                merged = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_merge_modules",
+                        args={
+                            "target_module_handle": "module_plan_merge_modules_r1_2",
+                            "source_module_handle": "module_plan_merge_modules_r1_3",
+                        },
+                    )
+                )
+                self.assertTrue(merged.ok, merged.text)
+                self.assertEqual(merged.structured["deleted_source_module_handle"], "module_plan_merge_modules_r1_3")
+
+                read = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_read", args={"plan_handle": "plan_merge_modules_r1", "detail": "full"})
+                )
+                self.assertTrue(read.ok, read.text)
+                state = read.structured["state"]
+                self.assertEqual([module["module_id"] for module in state["modules"]], ["module_prelude", "module_changelog", "module_join"])
+                implementation = state["modules"][1]
+                join = state["modules"][2]
+                self.assertEqual(len(implementation["internal_milestones"]), 2)
+                self.assertEqual(implementation["owned_area"], ["src/module_changelog.py", "src/module_release_notes.py"])
+                self.assertEqual(join["depends_on_module_handles"], ["module_plan_merge_modules_r1_2"])
+
+                validation = await scoped.execute_tool_async(CanonicalToolCall(name="plan_validate", args={"plan_handle": "plan_merge_modules_r1"}))
+                self.assertTrue(validation.ok, validation.text)
+                self.assertEqual(validation.structured["plan_validation"]["status"], "valid")
+
+                submitted = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_submit_for_review", args={"plan_handle": "plan_merge_modules_r1"})
+                )
+                self.assertTrue(submitted.ok, submitted.text)
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_checkout_repairs_single_acceptance_criterion(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_checkout_"))
+            try:
+                base_allowed = [
+                    "op_minion_plan_read",
+                    "op_minion_plan_find",
+                    "op_minion_plan_checkout",
+                    "op_minion_plan_update_acceptance_criterion",
+                    "op_minion_plan_validate",
+                    "op_minion_plan_begin",
+                    "op_minion_plan_add_constraint",
+                    "op_minion_plan_begin_module",
+                    "op_minion_plan_add_module_interface",
+                    "op_minion_plan_begin_milestone",
+                    "op_minion_plan_add_acceptance_criterion",
+                    "op_minion_plan_end_milestone",
+                    "op_minion_plan_end_module",
+                    "op_minion_plan_submit_for_review",
+                ]
+                first = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    base_allowed,
+                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_builder_checkout"},
+                )
+                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_checkout", module_key="module_builder_checkout")[:-1]
+                calls.append(CanonicalToolCall(name="plan_submit_for_review", args={"plan_handle": "plan_builder_checkout"}))
+                draft_ref = {}
+                for call in calls:
+                    result = await first.execute_tool_async(call)
+                    self.assertTrue(result.ok, result.text)
+                    if call.name == "plan_submit_for_review":
+                        draft_ref = dict(result.structured["plan_draft_ref"])
+                pathless_ref = dict(draft_ref)
+                pathless_ref.pop("path", None)
+                read_pathless = await first.execute_tool_async(CanonicalToolCall(name="plan_read", args={"plan_ref": pathless_ref}))
+                self.assertTrue(read_pathless.ok, read_pathless.text)
+
+                revision = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    base_allowed,
+                    workspace={
+                        "runtime_root": str(root),
+                        "artifact_dir": str(root / "revision_artifacts"),
+                        "task_id": "task_builder_checkout",
+                        "planner_plan_revision": 1,
+                        "source_plan_ref": pathless_ref,
+                    },
+                )
+                checkout = await revision.execute_tool_async(
+                    CanonicalToolCall(name="plan_checkout", args={"source_plan_ref": {"plan_id": "plan_builder_checkout"}})
+                )
+                self.assertTrue(checkout.ok, checkout.text)
+                plan_handle = checkout.structured["plan_handle"]
+
+                found = await revision.execute_tool_async(
+                    CanonicalToolCall(name="plan_find", args={"plan_handle": plan_handle, "type": "acceptance_criterion", "query": "regression tests"})
+                )
+                self.assertTrue(found.ok, found.text)
+                ac_handle = found.structured["matches"][0]["handle"]
+                updated = await revision.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_update_acceptance_criterion",
+                        args={
+                            "acceptance_handle": ac_handle,
+                            "criterion": "module_builder_checkout behavior is implemented with focused regression and boundary tests.",
+                            "evidence_expectation": "pytest for tests/test_module_builder_checkout.py passes with boundary coverage.",
+                            "negative_cases": ["boundary input is rejected or normalized according to the module contract"],
+                        },
+                    )
+                )
+                self.assertTrue(updated.ok, updated.text)
+                validation = await revision.execute_tool_async(CanonicalToolCall(name="plan_validate", args={"plan_handle": plan_handle}))
+                self.assertTrue(validation.ok, validation.text)
+                submitted = await revision.execute_tool_async(CanonicalToolCall(name="plan_submit_for_review", args={"plan_handle": plan_handle}))
+                self.assertTrue(submitted.ok, submitted.text)
+                self.assertEqual(submitted.structured["plan_draft_ref"]["plan_revision"], 1)
+                payload = json.loads((root / "revision_artifacts" / "plan.draft.json").read_text(encoding="utf-8"))
+                self.assertEqual(payload["task_id"], "task_builder_checkout")
+                self.assertEqual(payload["plan_id"], "plan_builder_checkout")
+                self.assertIn("boundary tests", payload["modules"][1]["internal_milestones"][0]["acceptance_criteria"][0])
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_reviewed_draft_gate_can_accept_published_plan_ref(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_publish_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_constraint",
+                        "op_minion_plan_begin_module",
+                        "op_minion_plan_add_module_interface",
+                        "op_minion_plan_begin_milestone",
+                        "op_minion_plan_add_acceptance_criterion",
+                        "op_minion_plan_end_milestone",
+                        "op_minion_plan_end_module",
+                        "op_minion_plan_submit_for_review",
+                    ],
+                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_builder_publish"},
+                )
+                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_publish", module_key="module_builder_publish")[:-1]
+                calls.append(CanonicalToolCall(name="plan_submit_for_review", args={"plan_handle": "plan_builder_publish"}))
+                draft_ref = {}
+                for call in calls:
+                    result = await scoped.execute_tool_async(call)
+                    self.assertTrue(result.ok, result.text)
+                    if call.name == "plan_submit_for_review":
+                        draft_ref = dict(result.structured["plan_draft_ref"])
+
+                repository = MinionTaskingRepository(runtime_root=root)
+                gate_record = repository.submit_review_gate(
+                    {
+                        "gate_kind": "plan_acceptance",
+                        "target": {"plan_ref": draft_ref},
+                        "verdict": "pass",
+                        "summary": "draft plan accepted",
+                        "evidence": [{"summary": "plan draft validated and inspected"}],
+                        "metadata": {
+                            "api_evidence_not_applicable": True,
+                            "api_evidence_not_applicable_reason": "plan-only review; no source API claims",
+                            "lsp_evidence_not_applicable": True,
+                            "lsp_evidence_not_applicable_reason": "plan-only review; no code diagnostics apply",
+                        },
+                    },
+                    reviewer_profile="software_engineering.reviewer",
+                    work_order_id="wo_builder_publish",
+                    run_id="run_builder_publish",
+                )
+                draft_payload = json.loads((root / "artifacts" / "plan.draft.json").read_text(encoding="utf-8"))
+                published = repository.submit_plan_ref(draft_payload, submission_notes="publish reviewed draft")
+                accepted = repository.accept_plan_ref(
+                    published["plan_ref"],
+                    reason="accept reviewed draft",
+                    review_gate_ref=gate_record["review_gate_ref"],
+                )
+                self.assertTrue(accepted["plan_ref"]["accepted"])
+                self.assertEqual(accepted["plan_ref"]["plan_id"], "plan_builder_publish")
             finally:
                 shutil.rmtree(root, ignore_errors=True)
 
@@ -1107,6 +2113,877 @@ class MinionContractTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_plan_builder_compiles_gate_contract_and_coverage_refs(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_gate_contract_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_gate_check",
+                        "op_minion_plan_add_constraint",
+                        "op_minion_plan_begin_module",
+                        "op_minion_plan_add_module_interface",
+                        "op_minion_plan_begin_milestone",
+                        "op_minion_plan_add_acceptance_criterion",
+                        "op_minion_plan_end_milestone",
+                        "op_minion_plan_end_module",
+                        "op_minion_plan_finalize",
+                    ],
+                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_contract"},
+                )
+                calls = _builder_plan_calls_from_handles(plan_id="plan_gate_contract", module_key="module_gate_contract")
+                calls.insert(
+                    1,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_contract",
+                            "claim": "The user contract is covered by implementation acceptance criteria.",
+                            "priority": "hard",
+                            "kind": "semantic",
+                            "source_ref": "user_request",
+                        },
+                    ),
+                )
+                constraint_args = dict(calls[2].args)
+                constraint_args["gate_check_refs"] = ["gate:0"]
+                calls[2] = CanonicalToolCall(name=calls[2].name, args=constraint_args, call_id=calls[2].call_id)
+                ac_args = dict(calls[13].args)
+                ac_args["gate_check_refs"] = ["gate:0"]
+                calls[13] = CanonicalToolCall(name=calls[13].name, args=ac_args, call_id=calls[13].call_id)
+
+                for call in calls:
+                    result = await scoped.execute_tool_async(call)
+                    self.assertTrue(result.ok, result.text)
+
+                payload = json.loads((root / "artifacts" / "plan.json").read_text(encoding="utf-8"))
+                gate_contract = payload["metadata"]["gate_contract"]
+                self.assertEqual(gate_contract["checks"][0]["ref"], "gate:0")
+                self.assertEqual(gate_contract["checks"][0]["index"], 0)
+                constraints = payload["metadata"]["constraints"]
+                self.assertEqual(constraints[0]["gate_check_refs"], ["gate:0"])
+                checklist = payload["modules"][1]["internal_milestones"][0]["metadata"]["acceptance_checklist"]
+                self.assertEqual(checklist[0]["gate_check_refs"], ["gate:0"])
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_validate_rejects_dangling_gate_check_refs_from_checkout(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_dangling_gate_ref_"))
+            try:
+                plan = _dispatchable_plan_payload(
+                    plan_id="plan_dangling_gate_ref",
+                    task_id="task_dangling_gate_ref",
+                    modules=[_plan_module("module_dangling_gate_ref", title="Dangling gate ref module")],
+                )
+                plan["metadata"] = {
+                    "languages": ["python"],
+                    "plan_builder": {"version": 1, "plan_handle": "plan_dangling_gate_ref", "lifecycle": "submitted"},
+                    "gate_contract": {
+                        "checks": [
+                            {
+                                "index": 0,
+                                "ref": "gate:0",
+                                "claim": "The hard source contract is represented in the plan.",
+                                "priority": "hard",
+                                "kind": "semantic",
+                            }
+                        ]
+                    },
+                }
+                plan["modules"][-1]["consumed_interfaces"] = [
+                    {
+                        "name": "implementation.contract",
+                        "shape": "Implementation behavior contract.",
+                        "lifecycle": "Consumed by final verification.",
+                        "ownership": "Implementation module owns behavior; join owns verification.",
+                        "error_behavior": "Final verification fails if behavior is missing.",
+                        "compatibility": "Join verifies the implementation contract.",
+                    }
+                ]
+                plan["modules"][1]["metadata"] = {"module_kind": "module", "gate_check_refs": ["gate:0"]}
+                plan["modules"][1]["internal_milestones"][0]["metadata"] = {
+                    "acceptance_checklist": [
+                        {
+                            "id": "AC-1",
+                            "criterion": "Implementation behavior is verified.",
+                            "evidence_expectation": "Focused tests pass.",
+                            "gate_check_refs": ["gate:9"],
+                        }
+                    ]
+                }
+                artifact_path = root / "plan.json"
+                artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+                source_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    ["op_minion_plan_checkout", "op_minion_plan_validate"],
+                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_dangling_gate_ref"},
+                )
+
+                source_validation = await scoped.execute_tool_async(CanonicalToolCall(name="plan_validate", args={"plan_ref": source_ref}))
+                self.assertTrue(source_validation.ok, source_validation.text)
+                self.assertEqual(source_validation.structured["plan_validation"]["status"], "invalid")
+                self.assertIn("unknown gate_check_ref gate:9", source_validation.text)
+
+                checkout = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_checkout", args={"source_plan_ref": source_ref, "plan_handle": "plan_dangling_gate_ref_r1"})
+                )
+                self.assertTrue(checkout.ok, checkout.text)
+                validation = await scoped.execute_tool_async(CanonicalToolCall(name="plan_validate", args={"plan_handle": "plan_dangling_gate_ref_r1"}))
+
+                self.assertTrue(validation.ok, validation.text)
+                self.assertEqual(validation.structured["plan_validation"]["status"], "invalid")
+                self.assertIn("unknown gate_check_ref gate:9", validation.text)
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_rejects_failed_mechanical_gate_check(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_gate_mechanical_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_gate_check",
+                        "op_minion_plan_add_constraint",
+                        "op_minion_plan_begin_module",
+                        "op_minion_plan_add_module_interface",
+                        "op_minion_plan_begin_milestone",
+                        "op_minion_plan_add_acceptance_criterion",
+                        "op_minion_plan_end_milestone",
+                        "op_minion_plan_end_module",
+                        "op_minion_plan_finalize",
+                    ],
+                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_mechanical"},
+                )
+                calls = _builder_plan_calls_from_handles(plan_id="plan_gate_mechanical", module_key="module_gate_mechanical")
+                calls.insert(
+                    1,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_mechanical",
+                            "claim": "The plan must contain exactly two implementation modules.",
+                            "priority": "hard",
+                            "kind": "mechanical",
+                            "mechanical_check": {"type": "implementation_module_count", "op": "eq", "value": 2},
+                        },
+                    ),
+                )
+
+                for call in calls[:-1]:
+                    result = await scoped.execute_tool_async(call)
+                    self.assertTrue(result.ok, result.text)
+
+                result = await scoped.execute_tool_async(calls[-1])
+                self.assertFalse(result.ok)
+                self.assertIn("gate contract validation failed", result.text)
+                self.assertIn("expected count == 2, got 1", result.text)
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_normalizes_mechanical_gate_aliases_and_between_value(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_gate_alias_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_gate_check",
+                        "op_minion_plan_add_constraint",
+                        "op_minion_plan_begin_module",
+                        "op_minion_plan_add_module_interface",
+                        "op_minion_plan_begin_milestone",
+                        "op_minion_plan_add_acceptance_criterion",
+                        "op_minion_plan_end_milestone",
+                        "op_minion_plan_end_module",
+                        "op_minion_plan_finalize",
+                    ],
+                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_alias"},
+                )
+                calls = _builder_plan_calls_from_handles(plan_id="plan_gate_alias", module_key="module_gate_alias")
+                calls.insert(
+                    1,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The plan must contain exactly three modules.",
+                            "priority": "hard",
+                            "kind": "mechanical",
+                            "mechanical_check": {"type": "plan_module_count", "op": "between", "value": [3, 3]},
+                        },
+                    ),
+                )
+                calls.insert(
+                    2,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The plan must contain three total modules.",
+                            "priority": "high",
+                            "kind": "mechanical",
+                            "mechanical_check": "count(modules) == 3",
+                        },
+                    ),
+                )
+                calls.insert(
+                    3,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The plan has one prelude, one implementation, and one join module.",
+                            "priority": "P0",
+                            "kind": "mechanical",
+                            "mechanical_check": {
+                                "kind": "exact_count",
+                                "subject": "plan modules in fork_join_linear FinalPlanArtifact",
+                                "expected": 3,
+                                "breakdown": {"prelude": 1, "implementation": 1, "join": 1},
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    4,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The plan must contain exactly one prelude module.",
+                            "priority": "hard",
+                            "kind": "requirement",
+                            "mechanical_check": {
+                                "predicate": "count_equals",
+                                "subject": "prelude modules in the plan",
+                                "value": 1,
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    5,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The plan must contain exactly one implementation module.",
+                            "priority": "must",
+                            "kind": "mechanical",
+                            "mechanical_check": {
+                                "type": "count",
+                                "operator": "==",
+                                "subject": "modules with role=implementation",
+                                "value": 1,
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    6,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The plan must contain exactly one join module.",
+                            "priority": "must",
+                            "kind": "mechanical",
+                            "mechanical_check": {
+                                "type": "module_kind_count",
+                                "op": "eq",
+                                "kind": "join",
+                                "expected": 1,
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    7,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The plan module count must match the requested topology.",
+                            "priority": "critical",
+                            "kind": "hard_requirement",
+                            "mechanical_check": {
+                                "metric": "plan_module_count",
+                                "operator": "eq",
+                                "value": 3,
+                                "breakdown": {"prelude": 1, "implementation": 1, "join": 1},
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    8,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The implementation module must contain exactly one implementation milestone.",
+                            "priority": "P1",
+                            "kind": "hybrid",
+                            "mechanical_check": {
+                                "metric": "implementation_milestone_count",
+                                "operator": "eq",
+                                "expected": 1,
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    9,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The path-style prelude module count must normalize.",
+                            "priority": "high",
+                            "kind": "mechanical",
+                            "mechanical_check": {
+                                "path": "plan.modules.prelude.count",
+                                "op": "eq",
+                                "value": 1,
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    10,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The path-style implementation module count must normalize.",
+                            "priority": "high",
+                            "kind": "mechanical",
+                            "mechanical_check": {
+                                "path": "plan.modules.implementation.count",
+                                "operator": "eq",
+                                "expected": 1,
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    11,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The plan_modules_by_type subject should normalize to total module count.",
+                            "priority": "hard",
+                            "kind": "mechanical",
+                            "mechanical_check": {
+                                "operator": "equals",
+                                "subject": "plan_modules_by_type",
+                                "value": {"prelude": 1, "implementation": 1, "join": 1},
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    12,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The implementation_internal_milestones subject should normalize.",
+                            "priority": "high",
+                            "kind": "mechanical",
+                            "mechanical_check": {
+                                "operator": "equals",
+                                "subject": "implementation_internal_milestones",
+                                "value": 1,
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    13,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "The mechanical_check kind alias should normalize.",
+                            "priority": "hard",
+                            "kind": "mechanical_check",
+                            "mechanical_check": {
+                                "predicate": "count_equals",
+                                "subject": "prelude modules in the plan",
+                                "value": 1,
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    14,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "Public symbols must be defined in pal_dogfood.changelog.",
+                            "priority": "hard",
+                            "kind": "mechanical",
+                            "mechanical_check": {
+                                "predicate": "count_equals",
+                                "subject": "required public symbols defined in pal_dogfood.changelog",
+                                "value": 13,
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    15,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "Named public symbols must be present in pal_dogfood.changelog.",
+                            "priority": "hard",
+                            "kind": "mechanical",
+                            "mechanical_check": {
+                                "type": "count_equals",
+                                "subject": "named public symbols in pal_dogfood.changelog",
+                                "expected": 13,
+                                "method": "count named public symbols in the implementation",
+                            },
+                        },
+                    ),
+                )
+                calls.insert(
+                    16,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "Prefer concise module boundaries.",
+                            "priority": "preferred",
+                            "kind": "design_preference",
+                        },
+                    ),
+                )
+                calls.insert(
+                    17,
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_alias",
+                            "claim": "Hybrid without a mechanical predicate should be treated as semantic.",
+                            "priority": "preferred",
+                            "kind": "hybrid",
+                        },
+                    ),
+                )
+                for index, call in enumerate(list(calls)):
+                    if call.name == "plan_begin_module" and call.args.get("module_key") == "module_prelude":
+                        args = dict(call.args)
+                        args["gate_check_refs"] = ["gate:3", "gate:6", "gate:7", "gate:8", "gate:9", "gate:13", "gate:14"]
+                        calls[index] = CanonicalToolCall(name=call.name, args=args, call_id=call.call_id)
+
+                for call in calls:
+                    result = await scoped.execute_tool_async(call)
+                    self.assertTrue(result.ok, result.text)
+
+                payload = json.loads((root / "artifacts" / "plan.json").read_text(encoding="utf-8"))
+                mechanical = payload["metadata"]["gate_contract"]["checks"][0]["mechanical_check"]
+                self.assertEqual(mechanical["type"], "module_count")
+                self.assertEqual(mechanical["min"], 3)
+                self.assertEqual(mechanical["max"], 3)
+                self.assertNotIn("value", mechanical)
+                self.assertEqual(payload["metadata"]["gate_contract"]["checks"][1]["priority"], "hard")
+                self.assertEqual(payload["metadata"]["gate_contract"]["checks"][1]["mechanical_check"], {"type": "module_count", "op": "eq", "value": 3})
+                self.assertEqual(payload["metadata"]["gate_contract"]["checks"][2]["priority"], "hard")
+                self.assertEqual(payload["metadata"]["gate_contract"]["checks"][2]["mechanical_check"], {"type": "module_count", "op": "eq", "value": 3})
+                self.assertEqual(payload["metadata"]["gate_contract"]["checks"][3]["kind"], "hybrid")
+                self.assertEqual(
+                    payload["metadata"]["gate_contract"]["checks"][3]["mechanical_check"],
+                    {"type": "module_kind_count", "op": "eq", "module_kind": "prelude", "value": 1},
+                )
+                self.assertEqual(
+                    payload["metadata"]["gate_contract"]["checks"][4]["mechanical_check"],
+                    {"type": "implementation_module_count", "op": "eq", "value": 1},
+                )
+                self.assertEqual(
+                    payload["metadata"]["gate_contract"]["checks"][5]["mechanical_check"],
+                    {"type": "module_kind_count", "op": "eq", "module_kind": "join", "value": 1},
+                )
+                self.assertEqual(payload["metadata"]["gate_contract"]["checks"][6]["priority"], "hard")
+                self.assertEqual(payload["metadata"]["gate_contract"]["checks"][6]["kind"], "hybrid")
+                self.assertEqual(
+                    payload["metadata"]["gate_contract"]["checks"][6]["mechanical_check"],
+                    {"type": "module_count", "op": "eq", "value": 3},
+                )
+                self.assertEqual(
+                    payload["metadata"]["gate_contract"]["checks"][7]["mechanical_check"],
+                    {"type": "implementation_milestone_count", "op": "eq", "value": 1},
+                )
+                self.assertEqual(
+                    payload["metadata"]["gate_contract"]["checks"][8]["mechanical_check"],
+                    {"type": "module_kind_count", "op": "eq", "module_kind": "prelude", "value": 1},
+                )
+                self.assertEqual(
+                    payload["metadata"]["gate_contract"]["checks"][9]["mechanical_check"],
+                    {"type": "implementation_module_count", "op": "eq", "value": 1},
+                )
+                self.assertEqual(
+                    payload["metadata"]["gate_contract"]["checks"][10]["mechanical_check"],
+                    {"type": "module_count", "op": "eq", "value": 3},
+                )
+                self.assertEqual(
+                    payload["metadata"]["gate_contract"]["checks"][11]["mechanical_check"],
+                    {"type": "implementation_milestone_count", "op": "eq", "value": 1},
+                )
+                self.assertEqual(
+                    payload["metadata"]["gate_contract"]["checks"][12]["mechanical_check"],
+                    {"type": "module_kind_count", "op": "eq", "module_kind": "prelude", "value": 1},
+                )
+                self.assertEqual(payload["metadata"]["gate_contract"]["checks"][13]["kind"], "semantic")
+                self.assertNotIn("mechanical_check", payload["metadata"]["gate_contract"]["checks"][13])
+                self.assertEqual(payload["metadata"]["gate_contract"]["checks"][14]["kind"], "semantic")
+                self.assertNotIn("mechanical_check", payload["metadata"]["gate_contract"]["checks"][14])
+                self.assertEqual(payload["metadata"]["gate_contract"]["checks"][15]["kind"], "semantic")
+                self.assertNotIn("mechanical_check", payload["metadata"]["gate_contract"]["checks"][15])
+                self.assertEqual(payload["metadata"]["gate_contract"]["checks"][16]["kind"], "semantic")
+                self.assertEqual(payload["metadata"]["gate_contract"]["checks"][16]["priority"], "preference")
+                self.assertNotIn("mechanical_check", payload["metadata"]["gate_contract"]["checks"][16])
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_rejects_unknown_mechanical_gate_type_early(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_gate_unknown_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    ["op_minion_plan_begin", "op_minion_plan_add_gate_check"],
+                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_unknown"},
+                )
+                started = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_begin", args={"goal": "Plan gate unknown.", "plan_id": "plan_gate_unknown", "languages": ["python"]})
+                )
+                self.assertTrue(started.ok, started.text)
+                result = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_unknown",
+                            "claim": "Canonical labels must contain exactly six values.",
+                            "priority": "hard",
+                            "kind": "mechanical",
+                            "mechanical_check": {"type": "canonical_label_count", "op": "eq", "value": 6},
+                        },
+                    )
+                )
+                self.assertFalse(result.ok)
+                self.assertIn("unsupported mechanical_check.type: canonical_label_count", result.text)
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_normalizes_range_operator_alias(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_gate_range_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    ["op_minion_plan_begin", "op_minion_plan_add_gate_check", "op_minion_plan_read"],
+                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_range"},
+                )
+                started = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_begin", args={"goal": "Plan gate range.", "plan_id": "plan_gate_range", "languages": ["python"]})
+                )
+                self.assertTrue(started.ok, started.text)
+                result = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_range",
+                            "claim": "Collected pytest tests are between 10 and 16 inclusive.",
+                            "priority": "hard",
+                            "kind": "hybrid",
+                            "mechanical_check": {"type": "acceptance_count", "op": "range", "min": 10, "max": 16},
+                        },
+                    )
+                )
+                self.assertTrue(result.ok, result.text)
+                read = await scoped.execute_tool_async(CanonicalToolCall(name="plan_read", args={"plan_handle": "plan_gate_range"}))
+                self.assertTrue(read.ok, read.text)
+                self.assertEqual(
+                    read.structured["gate_contract"]["checks"][0]["mechanical_check"],
+                    {"type": "acceptance_count", "op": "between", "min": 10, "max": 16},
+                )
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_rejects_mechanical_gate_missing_count_value_early(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_gate_missing_value_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    ["op_minion_plan_begin", "op_minion_plan_add_gate_check"],
+                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_missing_value"},
+                )
+                started = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_begin", args={"goal": "Plan gate missing value.", "plan_id": "plan_gate_missing_value", "languages": ["python"]})
+                )
+                self.assertTrue(started.ok, started.text)
+                result = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_missing_value",
+                            "claim": "The plan must contain exactly one prelude module.",
+                            "priority": "hard",
+                            "kind": "mechanical",
+                            "mechanical_check": {"type": "module_kind_count", "op": "eq", "module_kind": "prelude"},
+                        },
+                    )
+                )
+                self.assertFalse(result.ok)
+                self.assertIn("mechanical_check.value is required when op is eq", result.text)
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_downgrades_loose_nonstatic_mechanical_gate_to_semantic(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_gate_loose_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    ["op_minion_plan_begin", "op_minion_plan_add_gate_check", "op_minion_plan_read"],
+                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_loose"},
+                )
+                started = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_begin", args={"goal": "Plan gate loose.", "plan_id": "plan_gate_loose", "languages": ["python"]})
+                )
+                self.assertTrue(started.ok, started.text)
+                added = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_loose",
+                            "claim": "Collected pytest tests must be between 10 and 16.",
+                            "priority": "P0",
+                            "kind": "mechanical",
+                            "mechanical_check": {
+                                "kind": "bounded_count",
+                                "subject": "pytest collected tests",
+                                "min": 10,
+                                "max": 16,
+                            },
+                        },
+                    )
+                )
+                self.assertTrue(added.ok, added.text)
+                read = await scoped.execute_tool_async(CanonicalToolCall(name="plan_read", args={"plan_handle": "plan_gate_loose"}))
+                self.assertTrue(read.ok, read.text)
+                check = read.structured["gate_contract"]["checks"][0]
+                self.assertEqual(check["priority"], "hard")
+                self.assertEqual(check["kind"], "semantic")
+                self.assertNotIn("mechanical_check", check)
+                equals_added = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_loose",
+                            "claim": "The plan topology must be fork_join_linear.",
+                            "priority": "must",
+                            "kind": "mechanical",
+                            "mechanical_check": {
+                                "type": "equals",
+                                "operator": "==",
+                                "subject": "plan.kind / FinalPlanArtifact topology",
+                                "value": "fork_join_linear",
+                            },
+                        },
+                    )
+                )
+                self.assertTrue(equals_added.ok, equals_added.text)
+                read = await scoped.execute_tool_async(CanonicalToolCall(name="plan_read", args={"plan_handle": "plan_gate_loose"}))
+                self.assertTrue(read.ok, read.text)
+                check = read.structured["gate_contract"]["checks"][1]
+                self.assertEqual(check["priority"], "hard")
+                self.assertEqual(check["kind"], "semantic")
+                self.assertNotIn("mechanical_check", check)
+                complex_added = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={
+                            "plan_handle": "plan_gate_loose",
+                            "claim": "The plan topology and module counts must match the source contract.",
+                            "priority": "must",
+                            "kind": "mechanical",
+                            "mechanical_check": {
+                                "predicate": "plan.kind == 'fork_join_linear' AND count(plan.modules where role=='prelude') == 1",
+                                "verifiable_from": "plan artifact topology",
+                            },
+                        },
+                    )
+                )
+                self.assertTrue(complex_added.ok, complex_added.text)
+                read = await scoped.execute_tool_async(CanonicalToolCall(name="plan_read", args={"plan_handle": "plan_gate_loose"}))
+                self.assertTrue(read.ok, read.text)
+                check = read.structured["gate_contract"]["checks"][2]
+                self.assertEqual(check["priority"], "hard")
+                self.assertEqual(check["kind"], "semantic")
+                self.assertNotIn("mechanical_check", check)
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_gate_check_update_delete_preserves_indexes(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_gate_crud_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_gate_check",
+                        "op_minion_plan_update_gate_check",
+                        "op_minion_plan_delete_gate_check",
+                        "op_minion_plan_read",
+                    ],
+                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_crud"},
+                )
+                calls = [
+                    CanonicalToolCall(
+                        name="plan_begin",
+                        args={"goal": "Plan gate CRUD.", "plan_id": "plan_gate_crud", "languages": ["python"]},
+                    ),
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={"plan_handle": "plan_gate_crud", "claim": "Obsolete check.", "priority": "hard"},
+                    ),
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={"plan_handle": "plan_gate_crud", "claim": "Original active check.", "priority": "hard"},
+                    ),
+                    CanonicalToolCall(
+                        name="plan_update_gate_check",
+                        args={"plan_handle": "plan_gate_crud", "check_ref": "gate:1", "claim": "Updated active check."},
+                    ),
+                    CanonicalToolCall(
+                        name="plan_delete_gate_check",
+                        args={"plan_handle": "plan_gate_crud", "check_index": 0},
+                    ),
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={"plan_handle": "plan_gate_crud", "claim": "New check after deletion.", "priority": "hard"},
+                    ),
+                    CanonicalToolCall(
+                        name="plan_read",
+                        args={"plan_handle": "plan_gate_crud"},
+                    ),
+                ]
+                last = None
+                for call in calls:
+                    last = await scoped.execute_tool_async(call)
+                    self.assertTrue(last.ok, last.text)
+                self.assertIsNotNone(last)
+                checks = last.structured["gate_contract"]["checks"]
+                self.assertEqual([item["ref"] for item in checks], ["gate:1", "gate:2"])
+                self.assertEqual(checks[0]["claim"], "Updated active check.")
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_rejects_mutation_of_source_gate_checks(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_locked_gate_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_gate_check",
+                        "op_minion_plan_update_gate_check",
+                        "op_minion_plan_delete_gate_check",
+                        "op_minion_plan_read",
+                    ],
+                    workspace={
+                        "artifact_dir": str(root / "artifacts"),
+                        "task_id": "task_locked_gate",
+                        "gate_contract": {
+                            "checks": [
+                                {
+                                    "claim": "The source contract requires exactly one implementation module.",
+                                    "priority": "hard",
+                                    "kind": "mechanical",
+                                    "mechanical_check": {"type": "implementation_module_count", "op": "eq", "value": 1},
+                                }
+                            ]
+                        },
+                    },
+                )
+
+                begun = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_begin", args={"goal": "Plan with locked gates.", "plan_id": "plan_locked_gate", "languages": ["python"]})
+                )
+                self.assertTrue(begun.ok, begun.text)
+                update_locked = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_update_gate_check",
+                        args={"plan_handle": "plan_locked_gate", "check_ref": "gate:0", "priority": "advisory"},
+                    )
+                )
+                self.assertFalse(update_locked.ok)
+                self.assertIn("source gate_contract and is immutable", update_locked.text)
+                delete_locked = await scoped.execute_tool_async(
+                    CanonicalToolCall(name="plan_delete_gate_check", args={"plan_handle": "plan_locked_gate", "check_ref": "gate:0"})
+                )
+                self.assertFalse(delete_locked.ok)
+                self.assertIn("source gate_contract and is immutable", delete_locked.text)
+
+                added = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_gate_check",
+                        args={"plan_handle": "plan_locked_gate", "claim": "Planner-local refinement.", "priority": "preference"},
+                    )
+                )
+                self.assertTrue(added.ok, added.text)
+                update_local = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_update_gate_check",
+                        args={"plan_handle": "plan_locked_gate", "check_ref": "gate:1", "claim": "Updated planner-local refinement."},
+                    )
+                )
+                self.assertTrue(update_local.ok, update_local.text)
+                read = await scoped.execute_tool_async(CanonicalToolCall(name="plan_read", args={"plan_handle": "plan_locked_gate"}))
+                self.assertTrue(read.ok, read.text)
+                checks = read.structured["gate_contract"]["checks"]
+                self.assertEqual(checks[0]["priority"], "hard")
+                self.assertEqual(checks[1]["claim"], "Updated planner-local refinement.")
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
     def test_plan_builder_rejects_unlinked_hard_constraint(self) -> None:
         async def scenario() -> None:
             root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_unlinked_"))
@@ -1234,13 +3111,49 @@ class MinionContractTests(unittest.TestCase):
         coder_specs = gate_specs_from_pack(coder)
         planner_specs = gate_specs_from_pack(planner)
 
-        self.assertEqual([spec.gate for spec in coder_specs], ["checkpoint_quality"])
-        self.assertEqual([spec.strategy for spec in coder_specs], ["reviewer"])
+        self.assertEqual([spec.gate for spec in coder_specs], ["checkpoint_admission", "module_quality"])
+        self.assertEqual([spec.strategy for spec in coder_specs], ["none", "reviewer"])
         self.assertEqual(coder_specs[0].trigger, "after_each_milestone")
+        self.assertEqual(coder_specs[1].trigger, "after_each_milestone")
+        admission_required = "\n".join(coder_specs[0].required_checks)
+        self.assertIn("structured commit/report", admission_required)
+        self.assertIn("LSP/type/build diagnostics", admission_required)
+        coder_required = "\n".join(coder_specs[1].required_checks)
+        self.assertIn("Verify declared user/downstream delivery surfaces", coder_required)
+        self.assertIn("smallest faithful wrapper/link/import/launch probe", coder_required)
+        self.assertIn("missing_delivery_entrypoint_verification", coder_specs[1].blocking)
+        self.assertIn("unsafe_or_unclear_module_boundary", coder_specs[1].blocking)
         self.assertEqual([spec.gate for spec in planner_specs], ["plan_acceptance"])
         self.assertEqual([spec.strategy for spec in planner_specs], ["reviewer"])
-        self.assertEqual(planner_specs[0].trigger, "after_each_milestone")
+        self.assertEqual([spec.trigger for spec in planner_specs], ["after_each_milestone"])
+        planner_required = "\n".join(planner_specs[0].required_checks)
+        self.assertIn("exact user/downstream delivery surfaces", planner_required)
+        self.assertIn("missing_user_entrypoint_dogfood", planner_specs[0].blocking)
         self.assertEqual(gate_specs_from_pack(generic), [])
+
+        nonterminal = registry.resolve_pack(
+            TaskContextPack(
+                work_order_id="wo_gate_nonterminal",
+                minion_profile="software_engineering.coder",
+                metadata={"module_execution": {"mode": "serial_module_milestones", "current_milestone_index": 0, "milestone_count": 2}},
+            )
+        )
+        terminal = registry.resolve_pack(
+            TaskContextPack(
+                work_order_id="wo_gate_terminal",
+                minion_profile="software_engineering.coder",
+                metadata={"module_execution": {"mode": "serial_module_milestones", "current_milestone_index": 1, "milestone_count": 2}},
+            )
+        )
+        bare = registry.resolve_pack(TaskContextPack(work_order_id="wo_gate_bare", minion_profile="software_engineering.coder"))
+        self.assertIsNone(checkpoint_gate_spec_for_pack(nonterminal))
+        terminal_spec = checkpoint_gate_spec_for_pack(terminal)
+        bare_spec = checkpoint_gate_spec_for_pack(bare)
+        self.assertIsNotNone(terminal_spec)
+        self.assertIsNotNone(bare_spec)
+        assert terminal_spec is not None and bare_spec is not None
+        self.assertEqual(terminal_spec.gate, "module_quality")
+        self.assertEqual(bare_spec.gate, "module_quality")
 
     def test_gate_policy_expands_named_gate_definition_and_checklist_entries(self) -> None:
         registry = GateDefinitionRegistry()
@@ -1747,6 +3660,10 @@ class MinionContractTests(unittest.TestCase):
         self.assertTrue(planner["planning_requirements"]["ask_user_policy"]["do_not_ask_if_repo_discoverable"])
         self.assertTrue(planner["planning_requirements"]["require_language_metadata"])
         self.assertEqual(planner["planning_requirements"]["language_metadata_field"], "metadata.languages")
+        self.assertEqual(planner["planning_requirements"]["gate_contract_policy"], "optional_when_provided")
+        self.assertEqual(planner["planning_requirements"]["mechanical_checks_policy"], "dispatch_topology_only")
+        self.assertNotIn("mechanical_gate_check_types", planner["planning_requirements"])
+        self.assertNotIn("require_task_gate_contract", planner["planning_requirements"])
         self.assertIn("python", planner["planning_requirements"]["canonical_language_ids"])
         self.assertIn("cpp", planner["planning_requirements"]["canonical_language_ids"])
         self.assertEqual(question.to_dict()["type"], "ask_user_question")
@@ -2345,7 +4262,7 @@ class MinionContractTests(unittest.TestCase):
         self.assertTrue(injected.metadata["minion_debug_log_enabled"])
         self.assertNotIn("minion_debug_log_enabled", skipped.metadata)
 
-    def test_declarative_profiles_expand_web_research_group(self) -> None:
+    def test_declarative_planner_profile_expands_plan_builder_group(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_profile_registry_test_") as tmp:
             registry = MinionProfileRegistry(runtime_root=Path(tmp))
             pack = registry.resolve_pack(TaskContextPack(work_order_id="wo_profile", goal="research"), requested_profile="software_engineering.planner")
@@ -2354,36 +4271,19 @@ class MinionContractTests(unittest.TestCase):
             self.assertIn("op_tree", pack.allowed_capabilities)
             self.assertIn("op_search", pack.allowed_capabilities)
             self.assertIn("op_file_read", pack.allowed_capabilities)
-            self.assertIn("op_web_search", pack.allowed_capabilities)
-            self.assertIn("op_web_read", pack.allowed_capabilities)
+            self.assertNotIn("op_web_search", pack.allowed_capabilities)
+            self.assertNotIn("op_web_read", pack.allowed_capabilities)
             self.assertFalse(any(name.startswith("intro_") for name in pack.allowed_capabilities))
             self.assertEqual(
                 [name for name in pack.allowed_capabilities if name.startswith("op_minion_")],
-                [
-                    "op_minion_plan_begin",
-                    "op_minion_plan_add_constraint",
-                    "op_minion_plan_add_design_decision",
-                    "op_minion_plan_begin_module",
-                    "op_minion_plan_add_module_interface",
-                    "op_minion_plan_begin_milestone",
-                    "op_minion_plan_add_acceptance_criterion",
-                    "op_minion_plan_end_milestone",
-                    "op_minion_plan_end_module",
-                    "op_minion_plan_finalize",
-                    "op_minion_memory_candidate_write",
-                ],
+                list(PLAN_BUILDER_INITIAL_CAPABILITIES),
             )
             self.assertEqual(pack.workspace["workspace_policy"]["mode"], "read_only_repo")
             self.assertEqual(pack.workspace["completion_policy"]["evidence"], "text_deliverable")
             self.assertEqual(pack.minion_profile, "software_engineering.planner")
             self.assertEqual(pack.resolved_profile["canonical_profile_id"], "software_engineering.planner")
             self.assertEqual(pack.resolved_profile["profile_group"], "software_engineering")
-            self.assertEqual(
-                pack.allowed_skills,
-                [
-                    "software_planning",
-                ],
-            )
+            self.assertEqual(pack.allowed_skills, [])
             self.assertEqual(pack.resolved_profile["skill_refs"], pack.allowed_skills)
             self.assertEqual(pack.resolved_profile["effective_skill_refs"], pack.allowed_skills)
             self.assertNotIn("default_allowed_skills", pack.resolved_profile)
@@ -2674,6 +4574,34 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_prepare_existing_work_order_reactivates_failed_retry(self) -> None:
+        pack = TaskContextPack(
+            work_order_id="wo_retry_existing",
+            goal="retry failed work order",
+            instruction="Retry the same work order id.",
+            acceptance_criteria=["retry succeeds"],
+            metadata={"task_id": "task_retry_existing"},
+        )
+        self.repository.prepare_pack_for_spawn(pack)
+        self.repository.record_minion_event(
+            {
+                "event_kind": "terminal",
+                "work_order_id": "wo_retry_existing",
+                "minion_id": "m1",
+                "run_id": "r1",
+                "payload": {"status": "failed", "summary": "first attempt failed"},
+            }
+        )
+        failed = self.repository.read_work_order("wo_retry_existing")
+        self.assertEqual(failed["work_order"]["status"], "failed")
+        self.assertTrue(failed["work_order"]["ended_at"])
+
+        self.repository.prepare_pack_for_spawn(pack)
+
+        retried = self.repository.read_work_order("wo_retry_existing")
+        self.assertEqual(retried["work_order"]["status"], "active")
+        self.assertEqual(retried["work_order"]["ended_at"], "")
 
     def test_checkpoint_is_milestone_cursor_and_lessons_wait_for_approval(self) -> None:
         module = _plan_module("module_cursor", title="Ship feature")
@@ -3109,7 +5037,31 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         artifact_path = self.root / "gate-revision-plan.json"
         artifact_path.write_text(json.dumps(plan), encoding="utf-8")
         source_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
-        review_gate_ref = _submit_plan_review_gate(self.repository, source_ref, verdict="fail")
+        source_contract = {
+            "goal": "Plan gate revision.",
+            "instruction": "Produce exactly one prelude module, one implementation module, and one final verification join module.",
+            "acceptance_criteria": ["The implementation module contains exactly three internal milestones."],
+        }
+        review_gate_ref = _submit_plan_review_gate(
+            self.repository,
+            source_ref,
+            verdict="fail",
+            source_contract=source_contract,
+            findings=[
+                {
+                    "severity": "blocker",
+                    "summary": "plan has the wrong module split",
+                    "target_handle": "module_plan_gate_revision_2",
+                }
+            ],
+            required_fixes=[
+                {
+                    "severity": "blocker",
+                    "description": "Merge module_extra into module_gate_revision so there is exactly one implementation module.",
+                    "target_handle": "module_plan_gate_revision_2",
+                }
+            ],
+        )
 
         class FakeClient:
             def __init__(self) -> None:
@@ -3143,9 +5095,19 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(spawned["metadata"]["planner_work_order"]["task_id"], "task_gate_revision")
         self.assertEqual(spawned["metadata"]["planner_work_order"]["plan_revision"], 1)
         self.assertEqual(spawned["metadata"]["source_plan_ref"]["path"], str(artifact_path))
+        self.assertEqual(spawned["metadata"]["original_source_contract"], source_contract)
+        self.assertEqual(spawned["metadata"]["planner_work_order"]["revision_source"]["original_source_contract"], source_contract)
         self.assertEqual(spawned["metadata"]["review_gate_ref"]["gate_id"], review_gate_ref["gate_id"])
         self.assertEqual(spawned["metadata"]["prompt_view"]["revision_source"]["review_gate"]["verdict"], "fail")
+        self.assertEqual(spawned["metadata"]["prompt_view"]["revision_source"]["original_source_contract"], source_contract)
+        revision_checklist = spawned["metadata"]["planner_work_order"]["revision_source"]["plan_revision_checklist"]
+        self.assertEqual(revision_checklist[0]["id"], "PRC-1")
+        self.assertEqual(revision_checklist[0]["target_handle"], "module_plan_gate_revision_2")
+        self.assertIn("plan_merge_modules", revision_checklist[0]["suggested_tool_route"])
+        self.assertEqual(spawned["metadata"]["prompt_view"]["revision_source"]["plan_revision_checklist"][0]["id"], "PRC-1")
         self.assertIn("plan_revision=1", spawned["instruction"])
+        self.assertIn("revision_source.plan_revision_checklist", spawned["instruction"])
+        self.assertIn("original planner source_contract remains binding", spawned["instruction"])
         self.assertEqual(spawned["metadata"]["plan_review"]["status"], "revision_in_progress")
 
     def test_plan_ref_revision_rejects_identity_drift_and_bad_revision(self) -> None:
@@ -3305,7 +5267,18 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                     goal="Plan auto review.",
                     instruction="Hard requirement: the main module id must be module_auto_review.",
                     acceptance_criteria=["The plan preserves exact module names from the planner instruction."],
-                    workspace={"artifact_dir": str(self.root / "planner_artifacts")},
+                    workspace={
+                        "artifact_dir": str(self.root / "planner_artifacts"),
+                        "gate_contract": {
+                            "checks": [
+                                {
+                                    "claim": "The main module id must be module_auto_review.",
+                                    "priority": "hard",
+                                    "kind": "semantic",
+                                }
+                            ]
+                        },
+                    },
                     minion_profile="software_engineering.planner",
                     metadata={
                         "task_id": "task_auto_review",
@@ -3337,9 +5310,13 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             self.assertEqual(len(manager.started_reviewers), 1)
             reviewer_state = manager.started_reviewers[0]
             self.assertEqual(reviewer_state.pack.minion_profile, "software_engineering.reviewer")
+            self.assertNotIn("op_exec_shell", reviewer_state.pack.allowed_capabilities)
+            self.assertIn("op_minion_plan_read", reviewer_state.pack.allowed_capabilities)
+            self.assertIn("op_minion_review_gate_submit", reviewer_state.pack.allowed_capabilities)
             self.assertEqual(reviewer_state.pack.workspace["review_target_plan_ref"]["plan_id"], "plan_auto_review")
             self.assertIn("review_scratch_dir", reviewer_state.pack.workspace)
             self.assertTrue(Path(reviewer_state.pack.workspace["review_scratch_dir"]).exists())
+            self.assertNotIn("review_scratch_repo_path", reviewer_state.pack.workspace)
             self.assertIn("review_scratch_dir", reviewer_state.pack.metadata["prompt_view"]["workspace"])
             self.assertEqual(reviewer_state.pack.metadata["review_target"]["plan_ref"]["sha256"], plan_ref["sha256"])
             source_contract = reviewer_state.pack.metadata["review_target"]["source_contract"]
@@ -3358,6 +5335,11 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             started_events = [event for event in manager.event_queue if event.get("event_kind") == "plan_review_started"]
             self.assertEqual(len(started_events), 1)
             self.assertEqual(started_events[0]["payload"]["review_work_order_id"], reviewer_state.pack.work_order_id)
+            reviewing_snapshot = manager.tasking_repository.read_work_order("wo_auto_plan")
+            reviewing_state = reviewing_snapshot["work_order"]["metadata"]["plan_review"]
+            self.assertEqual(reviewing_state["status"], "reviewing")
+            self.assertEqual(reviewing_state["review_work_order_id"], reviewer_state.pack.work_order_id)
+            self.assertEqual(reviewing_state["review_run_id"], reviewer_state.run_id)
 
             gate = manager.tasking_repository.submit_review_gate(
                 {
@@ -3391,6 +5373,264 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 manager.tasking_repository.load_accepted_plan_ref(plan_ref)
             snapshot = manager.tasking_repository.read_work_order("wo_auto_plan")
             self.assertEqual(snapshot["work_order"]["metadata"]["plan_review"]["status"], "acceptance_pending")
+
+        asyncio.run(scenario())
+
+    def test_revision_plan_review_uses_original_source_contract(self) -> None:
+        class FakePlanReviewManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started_reviewers: list[MinionRunState] = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                if state.pack.minion_profile == "software_engineering.reviewer":
+                    self.started_reviewers.append(state)
+
+        async def scenario() -> None:
+            manager = FakePlanReviewManager(runtime_root=self.root)
+            artifact = _dispatchable_plan_payload(
+                plan_id="plan_revision_contract",
+                task_id="task_revision_contract",
+                modules=[_plan_module("module_revision_contract", title="Revision contract module")],
+            )
+            plan_path = self.root / "plans" / "revision-contract.json"
+            plan_path.parent.mkdir(parents=True)
+            plan_path.write_text(json.dumps(artifact), encoding="utf-8")
+            plan_ref = {
+                "path": str(plan_path),
+                "sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+                "plan_id": "plan_revision_contract",
+                "task_id": "task_revision_contract",
+                "plan_revision": 1,
+            }
+            original_source_contract = {
+                "goal": "Original plan goal.",
+                "instruction": "Original hard requirement: produce exactly one implementation module.",
+                "acceptance_criteria": ["Implementation module contains exactly three internal milestones."],
+            }
+            planner_work_order = build_planner_work_order(
+                goal="Revise plan after review.",
+                task_id="task_revision_contract",
+                work_order_id="wo_revision_contract",
+                plan_revision=1,
+            )
+            planner_work_order["revision_source"] = {
+                "source_plan_ref": dict(plan_ref),
+                "original_source_contract": dict(original_source_contract),
+            }
+            planner_pack = MinionProfileRegistry(runtime_root=self.root).resolve_pack(
+                TaskContextPack(
+                    work_order_id="wo_revision_contract",
+                    goal="Revise plan after review.",
+                    instruction="Revision task: preserve identity and fix reviewer findings.",
+                    acceptance_criteria=["Submitted draft preserves task_id and plan_id."],
+                    workspace={"artifact_dir": str(self.root / "revision_contract_artifacts")},
+                    minion_profile="software_engineering.planner",
+                    metadata={
+                        "task_id": "task_revision_contract_revision",
+                        "expected_plan_task_id": "task_revision_contract",
+                        "milestones": ["Revise plan"],
+                        "original_source_contract": original_source_contract,
+                        "skip_pre_plan_contract": True,
+                        "planner_work_order": planner_work_order,
+                    },
+                ),
+                requested_profile="software_engineering.planner",
+            )
+            spawned = await manager.spawn(planner_pack.to_dict())
+            planner_state = manager.runs[spawned["run_id"]]
+            manager._record_event(
+                planner_state,
+                {
+                    "event_kind": "checkpoint",
+                    "payload": {
+                        "status": "completed",
+                        "summary": "revision planner produced valid plan",
+                        "plan_ref": dict(plan_ref),
+                        "plan_validation": {"status": "valid", "node_order": ["prelude", "module_revision_contract", "join"]},
+                    },
+                    "created_at": utc_now(),
+                },
+            )
+            for _ in range(50):
+                if manager.started_reviewers:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(len(manager.started_reviewers), 1)
+            reviewer_state = manager.started_reviewers[0]
+            source_contract = reviewer_state.pack.metadata["review_target"]["source_contract"]
+            self.assertEqual(source_contract, original_source_contract)
+            self.assertEqual(reviewer_state.pack.workspace["review_target_source_contract"], original_source_contract)
+
+        asyncio.run(scenario())
+
+    def test_planner_spawn_without_pre_plan_opt_in_starts_planner_directly(self) -> None:
+        class PrePlanManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started: list[MinionRunState] = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                self.started.append(state)
+
+        async def scenario() -> None:
+            manager = PrePlanManager(runtime_root=self.root)
+            result = await manager.spawn(
+                TaskContextPack(
+                    work_order_id="wo_pre_plan_default",
+                    goal="Plan a small parser.",
+                    instruction="Hard requirement: create exactly two implementation modules.",
+                    acceptance_criteria=["The plan has exactly two implementation modules."],
+                    workspace={"artifact_dir": str(self.root / "pre_plan_default_artifacts")},
+                    minion_profile="software_engineering.planner",
+                    metadata={"task_id": "task_pre_plan_default", "milestones": ["Produce plan artifact"]},
+                ).to_dict()
+            )
+
+            self.assertEqual(result["status"], "running")
+            self.assertNotIn("planner_deferred", result)
+            self.assertEqual(len(manager.started), 1)
+            planner_state = manager.started[0]
+            self.assertEqual(planner_state.pack.minion_profile, "software_engineering.planner")
+            self.assertNotIn("pre_plan_contract_compiler", planner_state.pack.metadata)
+            snapshot = manager.tasking_repository.read_work_order("wo_pre_plan_default")
+            self.assertNotIn("pre_plan_contract", snapshot["work_order"]["metadata"])
+
+        asyncio.run(scenario())
+
+    def test_planner_spawn_with_explicit_pre_plan_gate_starts_contract_compiler(self) -> None:
+        class PrePlanManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started: list[MinionRunState] = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                self.started.append(state)
+
+        async def scenario() -> None:
+            manager = PrePlanManager(runtime_root=self.root)
+            result = await manager.spawn(
+                TaskContextPack(
+                    work_order_id="wo_pre_plan_defer",
+                    goal="Plan a small parser.",
+                    instruction="Hard requirement: create exactly two implementation modules.",
+                    acceptance_criteria=["The plan has exactly two implementation modules."],
+                    workspace={"artifact_dir": str(self.root / "pre_plan_artifacts")},
+                    minion_profile="software_engineering.planner",
+                    metadata={
+                        "task_id": "task_pre_plan_defer",
+                        "milestones": ["Produce plan artifact"],
+                        "enable_pre_plan_contract": True,
+                    },
+                ).to_dict()
+            )
+
+            self.assertEqual(result["status"], "pre_plan_contract_started")
+            self.assertTrue(result["planner_deferred"])
+            self.assertEqual(len(manager.started), 1)
+            compiler_state = manager.started[0]
+            self.assertEqual(compiler_state.pack.minion_profile, "software_engineering.reviewer")
+            self.assertTrue(compiler_state.pack.metadata["pre_plan_contract_compiler"])
+            self.assertEqual(compiler_state.pack.workspace["review_target_gate_kind"], "source_contract")
+            self.assertEqual(compiler_state.pack.workspace["pre_plan_contract_source_work_order_id"], "wo_pre_plan_defer")
+            self.assertNotIn("op_exec_shell", compiler_state.pack.allowed_capabilities)
+            self.assertIn("op_minion_gate_contract_submit", compiler_state.pack.allowed_capabilities)
+            snapshot = manager.tasking_repository.read_work_order("wo_pre_plan_defer")
+            self.assertEqual(snapshot["work_order"]["metadata"]["pre_plan_contract"]["status"], "running")
+
+        asyncio.run(scenario())
+
+    def test_pre_plan_contract_terminal_spawns_planner_with_gate_contract(self) -> None:
+        class PrePlanManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started: list[MinionRunState] = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                self.started.append(state)
+
+        async def scenario() -> None:
+            manager = PrePlanManager(runtime_root=self.root)
+            await manager.spawn(
+                TaskContextPack(
+                    work_order_id="wo_pre_plan_resume",
+                    goal="Plan a small renderer.",
+                    instruction="Hard requirement: create exactly three implementation milestones.",
+                    acceptance_criteria=["The plan has exactly three implementation milestones."],
+                    workspace={"artifact_dir": str(self.root / "pre_plan_resume_artifacts")},
+                    minion_profile="software_engineering.planner",
+                    metadata={
+                        "task_id": "task_pre_plan_resume",
+                        "milestones": ["Produce plan artifact"],
+                        "enable_pre_plan_contract": True,
+                    },
+                ).to_dict()
+            )
+            compiler_state = manager.started[0]
+            scoped = MinionScopedExecutionRuntime(
+                base_runtime=SimpleNamespace(),
+                allowed_capabilities=compiler_state.pack.allowed_capabilities,
+                workspace={
+                    **dict(compiler_state.pack.workspace),
+                    "runtime_root": str(self.root),
+                    "work_order_id": compiler_state.pack.work_order_id,
+                    "run_id": compiler_state.run_id,
+                    "minion_id": compiler_state.minion_id,
+                    "minion_profile": compiler_state.pack.minion_profile,
+                },
+            )
+            submitted = await scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="op_minion_gate_contract_submit",
+                    call_id="call_gate_contract_submit",
+                    args={
+                        "summary": "compiled exact milestone count",
+                        "gate_contract": {
+                            "checks": [
+                                {
+                                    "claim": "The plan has exactly three implementation milestones.",
+                                    "priority": "hard",
+                                    "kind": "mechanical",
+                                    "mechanical_check": {
+                                        "type": "implementation_milestone_count",
+                                        "op": "eq",
+                                        "value": 3,
+                                    },
+                                }
+                            ]
+                        },
+                    },
+                )
+            )
+            self.assertTrue(submitted.ok, submitted.text)
+
+            manager._record_event(
+                compiler_state,
+                {
+                    "event_kind": "terminal",
+                    "payload": {"status": "completed", "summary": "contract compiler completed"},
+                    "created_at": utc_now(),
+                },
+            )
+            for _ in range(100):
+                if len(manager.started) >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertEqual(len(manager.started), 2)
+            planner_state = manager.started[1]
+            self.assertEqual(planner_state.pack.minion_profile, "software_engineering.planner")
+            self.assertEqual(planner_state.pack.workspace["gate_contract"]["checks"][0]["ref"], "gate:0")
+            self.assertEqual(
+                planner_state.pack.workspace["gate_contract"]["checks"][0]["mechanical_check"]["type"],
+                "implementation_milestone_count",
+            )
+            snapshot = manager.tasking_repository.read_work_order("wo_pre_plan_resume")
+            self.assertEqual(snapshot["work_order"]["metadata"]["pre_plan_contract"]["status"], "planner_started")
+            self.assertEqual(snapshot["work_order"]["metadata"]["gate_contract"]["checks"][0]["ref"], "gate:0")
 
         asyncio.run(scenario())
 
@@ -3581,6 +5821,103 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             snapshot = manager.tasking_repository.read_work_order("wo_auto_revision_source")
             self.assertEqual(snapshot["work_order"]["metadata"]["plan_review"]["status"], "revision_spawned")
+
+        asyncio.run(scenario())
+
+    def test_revision_plan_review_pass_updates_original_work_order(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root)
+            artifact = _dispatchable_plan_payload(
+                plan_id="plan_revision_pass",
+                task_id="task_revision_pass",
+                modules=[_plan_module("module_revision_pass", title="Revision pass module")],
+            )
+            plan_path = self.root / "plans" / "revision-pass.json"
+            plan_path.parent.mkdir(parents=True)
+            plan_path.write_text(json.dumps(artifact), encoding="utf-8")
+            plan_ref = {
+                "path": str(plan_path),
+                "sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+                "plan_id": "plan_revision_pass",
+                "task_id": "task_revision_pass",
+                "plan_revision": 1,
+            }
+            manager.tasking_repository.prepare_pack_for_spawn(
+                TaskContextPack(
+                    work_order_id="wo_revision_parent",
+                    goal="Original planner work order.",
+                    minion_profile="software_engineering.planner",
+                    metadata={
+                        "task_id": "task_revision_pass",
+                        "milestones": ["Produce plan"],
+                        "plan_review": {"status": "revision_spawned"},
+                    },
+                )
+            )
+            manager.tasking_repository.prepare_pack_for_spawn(
+                TaskContextPack(
+                    work_order_id="wo_revision_child",
+                    goal="Revise plan.",
+                    minion_profile="software_engineering.planner",
+                    metadata={
+                        "task_id": "task_revision_pass_revision",
+                        "milestones": ["Revise plan"],
+                        "plan_review": {"status": "reviewing", "source_work_order_id": "wo_revision_parent"},
+                    },
+                )
+            )
+            reviewer_pack = TaskContextPack(
+                work_order_id="wo_revision_child_review",
+                goal="Review revised plan.",
+                minion_profile="software_engineering.reviewer",
+                metadata={
+                    "review_target": {"plan_ref": dict(plan_ref), "planner_work_order_id": "wo_revision_child"},
+                    "plan_review_for_work_order_id": "wo_revision_child",
+                    "plan_review_key": _plan_review_key_for_test(plan_ref),
+                    "plan_review": {"source_work_order_id": "wo_revision_parent"},
+                },
+            )
+            reviewer_state = MinionRunState(
+                minion_id="m_revision_child_reviewer",
+                run_id="r_revision_child_reviewer",
+                pack=reviewer_pack,
+                status="running",
+            )
+            manager.runs[reviewer_state.run_id] = reviewer_state
+            manager.tasking_repository.submit_review_gate(
+                {
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": dict(plan_ref)},
+                    "verdict": "pass",
+                    "summary": "revised plan accepted",
+                    "evidence": [{"kind": "plan_review", "summary": "revision reviewed"}],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "plan-only review"}],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "plan-only review",
+                    },
+                    "reviewer_profile": "software_engineering.reviewer",
+                },
+                reviewer_profile="software_engineering.reviewer",
+                work_order_id=reviewer_pack.work_order_id,
+                run_id=reviewer_state.run_id,
+            )
+
+            await manager.reviews._reconcile_plan_review(reviewer_state, plan_ref, _plan_review_key_for_test(plan_ref))
+
+            child = manager.tasking_repository.read_work_order("wo_revision_child")
+            parent = manager.tasking_repository.read_work_order("wo_revision_parent")
+            self.assertEqual(child["work_order"]["metadata"]["plan_review"]["status"], "acceptance_pending")
+            parent_review = parent["work_order"]["metadata"]["plan_review"]
+            self.assertEqual(parent_review["status"], "acceptance_pending")
+            self.assertEqual(parent_review["revision_work_order_id"], "wo_revision_child")
+            self.assertEqual(parent_review["plan_ref"]["plan_id"], "plan_revision_pass")
+            pending = [
+                event for event in manager.event_queue
+                if event.get("event_kind") == "plan_acceptance_pending"
+                and event.get("work_order_id") == "wo_revision_parent"
+            ]
+            self.assertEqual(len(pending), 1)
 
         asyncio.run(scenario())
 
@@ -3865,7 +6202,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(recorded["review_gate_ref"]["verdict"], "pass")
 
-    def test_checkpoint_pass_uses_current_acceptance_for_coverage_and_source_contract_for_bounds(self) -> None:
+    def test_checkpoint_pass_uses_current_acceptance_for_coverage_and_treats_test_count_as_advisory(self) -> None:
         checkpoint_id = "chk_source_contract_coverage"
         self.repository.record_minion_event(
             {
@@ -3911,33 +6248,33 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(current_only["review_gate_ref"]["verdict"], "pass")
 
-        with self.assertRaisesRegex(ValueError, "observed 16 passed tests outside required range 6-10"):
-            self.repository.submit_review_gate(
-                {
-                    "gate_kind": "checkpoint_verification",
-                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
-                    "verdict": "pass",
-                    "summary": "source contract range violated",
-                    "evidence": [{"kind": "review", "summary": "reviewed"}],
-                    "commands_run": [
-                        {
-                            "command": "pytest tests/test_feature.py",
-                            "status": "passed",
-                            "output_summary": "16 passed in 0.08s",
-                            "summary": "test command passed",
-                            "covers": [
-                                "Broad feature result is verified.",
-                                "6-10 focused pytest tests exist and all pass via pytest",
-                            ],
-                        }
-                    ],
-                    "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
-                    "metadata": {
-                        "lsp_evidence_not_applicable": True,
-                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
-                    },
-                }
-            )
+        advisory_count = self.repository.submit_review_gate(
+            {
+                "gate_kind": "checkpoint_verification",
+                "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                "verdict": "pass",
+                "summary": "source contract coverage present despite advisory count mismatch",
+                "evidence": [{"kind": "review", "summary": "reviewed"}],
+                "commands_run": [
+                    {
+                        "command": "pytest tests/test_feature.py",
+                        "status": "passed",
+                        "output_summary": "16 passed in 0.08s",
+                        "summary": "test command passed",
+                        "covers": [
+                            "Broad feature result is verified.",
+                            "6-10 focused pytest tests exist and all pass via pytest",
+                        ],
+                    }
+                ],
+                "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                "metadata": {
+                    "lsp_evidence_not_applicable": True,
+                    "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                },
+            }
+        )
+        self.assertNotIn("detected_contract_violations", advisory_count["review_gate"]["metadata"])
 
         recorded = self.repository.submit_review_gate(
             {
@@ -3967,7 +6304,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(recorded["review_gate"]["target"]["source_contract"], source_contract)
 
-    def test_checkpoint_pass_rejects_numeric_bounds_from_source_instruction(self) -> None:
+    def test_checkpoint_pass_allows_advisory_test_count_from_source_instruction(self) -> None:
         checkpoint_id = "chk_instruction_numeric_contract"
         self.repository.record_minion_event(
             {
@@ -3996,38 +6333,38 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             ),
         }
 
-        with self.assertRaisesRegex(ValueError, "observed 12 passed tests outside required range 6-10"):
-            self.repository.submit_review_gate(
-                {
-                    "gate_kind": "checkpoint_verification",
-                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
-                    "verdict": "pass",
-                    "summary": "checkpoint passed despite too many focused tests",
-                    "evidence": [{"kind": "review", "summary": "reviewed"}],
-                    "commands_run": [
-                        {
-                            "command": "python -m pytest -q",
-                            "status": "passed",
-                            "output_summary": "12 passed in 0.07s",
-                            "summary": "pytest passed",
-                            "covers": ["Focused pytest suite passes with python -m pytest -q."],
-                        }
-                    ],
-                    "api_evidence": [
-                        {
-                            "kind": "source",
-                            "summary": "source inspection verified the feature",
-                            "covers": ["Focused pytest suite passes with python -m pytest -q."],
-                        }
-                    ],
-                    "metadata": {
-                        "lsp_evidence_not_applicable": True,
-                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
-                    },
-                }
-            )
+        recorded = self.repository.submit_review_gate(
+            {
+                "gate_kind": "checkpoint_verification",
+                "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                "verdict": "pass",
+                "summary": "checkpoint passed with adequate focused test coverage",
+                "evidence": [{"kind": "review", "summary": "reviewed"}],
+                "commands_run": [
+                    {
+                        "command": "python -m pytest -q",
+                        "status": "passed",
+                        "output_summary": "12 passed in 0.07s",
+                        "summary": "pytest passed",
+                        "covers": ["Focused pytest suite passes with python -m pytest -q."],
+                    }
+                ],
+                "api_evidence": [
+                    {
+                        "kind": "source",
+                        "summary": "source inspection verified the feature",
+                        "covers": ["Focused pytest suite passes with python -m pytest -q."],
+                    }
+                ],
+                "metadata": {
+                    "lsp_evidence_not_applicable": True,
+                    "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                },
+            }
+        )
+        self.assertNotIn("detected_contract_violations", recorded["review_gate"]["metadata"])
 
-    def test_checkpoint_pass_rejects_json_plan_numeric_bound_with_output_summary_alias(self) -> None:
+    def test_checkpoint_pass_allows_advisory_json_plan_test_count_with_output_summary_alias(self) -> None:
         checkpoint_id = "chk_json_plan_numeric_contract"
         self.repository.record_minion_event(
             {
@@ -4059,38 +6396,38 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             "instruction": "PLAN_JSON:\n" + json.dumps(plan_json, sort_keys=True) + "\nHard requirements:\n- Run python -m pytest -q.",
         }
 
-        with self.assertRaisesRegex(ValueError, "observed 12 passed tests outside required range 6-10"):
-            self.repository.submit_review_gate(
-                {
-                    "gate_kind": "checkpoint_verification",
-                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
-                    "verdict": "pass",
-                    "summary": "checkpoint passed despite too many collected tests",
-                    "evidence": [{"kind": "review", "summary": "reviewed"}],
-                    "commands_run": [
-                        {
-                            "command": "python3 -m pytest -q",
-                            "status": "passed",
-                            "output summary": "12 passed in 0.07s",
-                            "summary": "pytest passed",
-                            "covers": ["Focused pytest suite passes with python -m pytest -q."],
-                        }
-                    ],
-                    "api_evidence": [
-                        {
-                            "kind": "source",
-                            "summary": "source inspection verified the feature",
-                            "covers": ["Focused pytest suite passes with python -m pytest -q."],
-                        }
-                    ],
-                    "metadata": {
-                        "lsp_evidence_not_applicable": True,
-                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
-                    },
-                }
-            )
+        recorded = self.repository.submit_review_gate(
+            {
+                "gate_kind": "checkpoint_verification",
+                "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                "verdict": "pass",
+                "summary": "checkpoint passed with adequate collected tests",
+                "evidence": [{"kind": "review", "summary": "reviewed"}],
+                "commands_run": [
+                    {
+                        "command": "python3 -m pytest -q",
+                        "status": "passed",
+                        "output summary": "12 passed in 0.07s",
+                        "summary": "pytest passed",
+                        "covers": ["Focused pytest suite passes with python -m pytest -q."],
+                    }
+                ],
+                "api_evidence": [
+                    {
+                        "kind": "source",
+                        "summary": "source inspection verified the feature",
+                        "covers": ["Focused pytest suite passes with python -m pytest -q."],
+                    }
+                ],
+                "metadata": {
+                    "lsp_evidence_not_applicable": True,
+                    "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                },
+            }
+        )
+        self.assertNotIn("detected_contract_violations", recorded["review_gate"]["metadata"])
 
-    def test_checkpoint_pass_rejects_numeric_bound_from_collect_only_output(self) -> None:
+    def test_checkpoint_pass_allows_advisory_test_count_from_collect_only_output(self) -> None:
         checkpoint_id = "chk_collect_only_numeric_contract"
         self.repository.record_minion_event(
             {
@@ -4115,38 +6452,38 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             "instruction": "Hard requirements:\n- Add 6-10 focused pytest tests and verify the collected count.",
         }
 
-        with self.assertRaisesRegex(ValueError, "observed 12 passed tests outside required range 6-10"):
-            self.repository.submit_review_gate(
-                {
-                    "gate_kind": "checkpoint_verification",
-                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
-                    "verdict": "pass",
-                    "summary": "checkpoint passed despite too many collected tests",
-                    "evidence": [{"kind": "review", "summary": "reviewed"}],
-                    "commands_run": [
-                        {
-                            "command": "python -m pytest --collect-only -q",
-                            "status": "passed",
-                            "output_summary": "12 tests collected in 0.03s",
-                            "summary": "pytest collected tests",
-                            "covers": ["Focused pytest suite passes with python -m pytest -q."],
-                        }
-                    ],
-                    "api_evidence": [
-                        {
-                            "kind": "source",
-                            "summary": "source inspection verified the feature",
-                            "covers": ["Focused pytest suite passes with python -m pytest -q."],
-                        }
-                    ],
-                    "metadata": {
-                        "lsp_evidence_not_applicable": True,
-                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
-                    },
-                }
-            )
+        recorded = self.repository.submit_review_gate(
+            {
+                "gate_kind": "checkpoint_verification",
+                "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123", "source_contract": source_contract},
+                "verdict": "pass",
+                "summary": "checkpoint passed despite advisory count mismatch",
+                "evidence": [{"kind": "review", "summary": "reviewed"}],
+                "commands_run": [
+                    {
+                        "command": "python -m pytest --collect-only -q",
+                        "status": "passed",
+                        "output_summary": "12 tests collected in 0.03s",
+                        "summary": "pytest collected tests",
+                        "covers": ["Focused pytest suite passes with python -m pytest -q."],
+                    }
+                ],
+                "api_evidence": [
+                    {
+                        "kind": "source",
+                        "summary": "source inspection verified the feature",
+                        "covers": ["Focused pytest suite passes with python -m pytest -q."],
+                    }
+                ],
+                "metadata": {
+                    "lsp_evidence_not_applicable": True,
+                    "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                },
+            }
+        )
+        self.assertNotIn("detected_contract_violations", recorded["review_gate"]["metadata"])
 
-    def test_failed_checkpoint_gate_records_detected_numeric_contract_violation(self) -> None:
+    def test_failed_checkpoint_gate_does_not_promote_advisory_test_count_to_contract_violation(self) -> None:
         checkpoint_id = "chk_failed_numeric_contract"
         self.repository.record_minion_event(
             {
@@ -4192,13 +6529,11 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
 
         metadata = recorded["review_gate"]["metadata"]
-        violations = metadata["detected_contract_violations"]
-        self.assertEqual(violations[0]["observed_count"], 18)
-        self.assertIn("6-10", violations[0]["summary"])
+        self.assertNotIn("detected_contract_violations", metadata)
         findings = recorded["review_gate"]["findings"]
-        self.assertTrue(any(item.get("source") == "system_detected" for item in findings))
+        self.assertFalse(any(item.get("source") == "system_detected" for item in findings))
 
-    def test_failed_checkpoint_gate_records_instruction_numeric_contract_violation(self) -> None:
+    def test_failed_checkpoint_gate_does_not_promote_instruction_test_count_to_contract_violation(self) -> None:
         checkpoint_id = "chk_failed_instruction_numeric_contract"
         self.repository.record_minion_event(
             {
@@ -4247,11 +6582,9 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
 
         metadata = recorded["review_gate"]["metadata"]
-        violations = metadata["detected_contract_violations"]
-        self.assertEqual(violations[0]["observed_count"], 12)
-        self.assertIn("6-10", violations[0]["summary"])
+        self.assertNotIn("detected_contract_violations", metadata)
         findings = recorded["review_gate"]["findings"]
-        self.assertTrue(any(item.get("source") == "system_detected" for item in findings))
+        self.assertFalse(any(item.get("source") == "system_detected" for item in findings))
 
     def test_review_gate_numeric_range_ignores_line_number_ranges(self) -> None:
         checkpoint_id = "chk_line_number_range_not_test_count"
@@ -4857,6 +7190,44 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(prepared_child.metadata["prompt_view"]["module"]["module_id"], "module_prelude")
         self.assertEqual(prepared_child.metadata["prompt_view"]["milestone"]["milestone_id"], "module_prelude_m1")
 
+    def test_coder_work_order_includes_dependency_public_interfaces(self) -> None:
+        module_a = _plan_module("module_a", title="A", task="Do A.")
+        module_a["provided_interfaces"] = [
+            {
+                "name": "module_a.public_api",
+                "entrypoint": "pal_dogfood.module_a",
+                "contract": "Public API for module B.",
+            }
+        ]
+        module_b = _plan_module("module_b", title="B", task="Use A through its public API.")
+        module_b["consumed_interfaces"] = [
+            {
+                "name": "module_a.public_api",
+                "consumer": "module_b",
+                "contract": "Module B consumes module A through the declared public API only.",
+            }
+        ]
+        plan = _dispatchable_plan_payload(plan_id="plan_dependency_context", task_id="task_dependency_context", modules=[module_a, module_b])
+        nodes = plan["orchestration"]["topology"]["nodes"]
+        for node in nodes:
+            if node["module_id"] == "module_b":
+                node["depends_on"] = ["node_module_a"]
+        plan["orchestration"]["topology"]["order"] = ["prelude", "node_module_a", "node_module_b", "join"]
+
+        order = compile_coder_work_order(plan, module_id="module_b", milestone_id="module_b_m1", work_order_id="wo_dep_context")
+        prompt_view = prompt_view_for_coder(order).to_dict()
+
+        dependency_modules = [item["module_id"] for item in order.metadata["module_dependency_context"]]
+        self.assertIn("module_prelude", dependency_modules)
+        self.assertIn("module_a", dependency_modules)
+        self.assertTrue(
+            any(
+                item.get("producer_module_id") == "module_a" and item.get("name") == "module_a.public_api"
+                for item in order.relevant_contracts
+            )
+        )
+        self.assertEqual(prompt_view["module"]["dependency_context"], order.metadata["module_dependency_context"])
+
     def test_plan_parent_completion_advances_parent_cursor_and_waits(self) -> None:
         module_b = _plan_module("module_b", title="B1", task="Do B.")
         module_b["internal_milestones"][0]["milestone_id"] = "b1"
@@ -4871,6 +7242,14 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         child = self.repository.next_plan_module_pack("wo_parent_cursor", allow_paused=True)
         assert child is not None
         self.repository.prepare_pack_for_spawn(child)
+        self.repository.update_work_order_workspace(
+            child.work_order_id,
+            {
+                "repo_path": str(self.root / "child_module_repo"),
+                "work_order_branch": "work_order_child_module",
+                "artifact_dir": str(self.root / "child_module_repo" / "minion_outputs" / child.work_order_id),
+            },
+        )
         self.repository.record_minion_event(
             {
                 "event_kind": "checkpoint",
@@ -4895,6 +7274,89 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(parent_completion["next_module_id"], "module_b")
         self.assertEqual(snapshot["current_milestone"]["title"], "module_b")
         self.assertEqual(snapshot["work_order"]["metadata"]["plan_execution"]["status"], "awaiting_continue")
+        parent_workspace = snapshot["work_order"]["metadata"]["workspace"]
+        self.assertEqual(parent_workspace["source_repo"], str(self.root / "child_module_repo"))
+        self.assertEqual(parent_workspace["base_ref"], "work_order_child_module")
+        self.assertEqual(parent_workspace["merge_target"], "work_order_child_module")
+        self.assertNotIn("artifact_dir", parent_workspace)
+        next_child = self.repository.next_plan_module_pack("wo_parent_cursor", allow_paused=True)
+        assert next_child is not None
+        self.assertEqual(next_child.workspace["source_repo"], str(self.root / "child_module_repo"))
+        self.assertEqual(next_child.workspace["base_ref"], "work_order_child_module")
+
+    def test_next_plan_module_uses_worktree_from_completed_module_baseline(self) -> None:
+        source = self.root / "plan_source_repo"
+        source.mkdir()
+        _git(source, "init", check=True)
+        _git(source, "config", "user.email", "test@example.com", check=True)
+        _git(source, "config", "user.name", "Test User", check=True)
+        (source / "SPEC.md").write_text("Taskflow spec\n", encoding="utf-8")
+        _git(source, "add", "SPEC.md", check=True)
+        _git(source, "commit", "-m", "initial spec", check=True)
+
+        module_b = _plan_module("module_b", title="B1", task="Use prelude contract.")
+        module_b["internal_milestones"][0]["milestone_id"] = "b1"
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_parent_git_cursor",
+            task_id="task_parent_git_cursor",
+            modules=[module_b],
+            prelude_module_id="module_contracts",
+        )
+        parent = self.repository.build_plan_parent_pack_from_plan(
+            plan,
+            work_order_id="wo_parent_git_cursor",
+            workspace={"source_repo": str(source)},
+        )
+        self.repository.prepare_pack_for_spawn(parent)
+        first_child = self.repository.next_plan_module_pack("wo_parent_git_cursor", allow_paused=True)
+        assert first_child is not None
+        first_child = MinionProfileRegistry(runtime_root=self.root).resolve_pack(first_child)
+        first_child = self.repository.prepare_pack_for_spawn(first_child)
+        first_prepared = prepare_task_workspace(self.root, first_child)
+        first_repo = Path(first_prepared.workspace["repo_path"])
+        (first_repo / "src" / "pal_dogfood" / "taskflow").mkdir(parents=True)
+        (first_repo / "src" / "pal_dogfood" / "taskflow" / "contracts.py").write_text("CONTRACT = 'ready'\n", encoding="utf-8")
+        commit = commit_milestone(
+            first_repo,
+            work_order_id=first_child.work_order_id,
+            milestone_index=0,
+            title="contracts",
+        )
+        self.assertEqual(commit["status"], "committed")
+        self.repository.update_work_order_workspace(first_child.work_order_id, dict(first_prepared.workspace))
+        self.repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": first_child.work_order_id,
+                "payload": {"status": "completed", "milestone_index": 0, "summary": "contracts done"},
+            }
+        )
+        self.repository.record_minion_event(
+            {
+                "event_kind": "terminal",
+                "work_order_id": first_child.work_order_id,
+                "payload": {"status": "completed", "summary": "contracts terminal"},
+            }
+        )
+        child_completion = self.repository.mark_serial_module_completed(first_child.work_order_id)
+        self.repository.record_plan_module_completion(first_child.work_order_id, child_completion)
+
+        second_child = self.repository.next_plan_module_pack("wo_parent_git_cursor", allow_paused=True)
+        assert second_child is not None
+        second_child = MinionProfileRegistry(runtime_root=self.root).resolve_pack(second_child)
+        second_child = self.repository.prepare_pack_for_spawn(second_child)
+        second_prepared = prepare_task_workspace(self.root, second_child)
+        second_repo = Path(second_prepared.workspace["repo_path"])
+
+        self.assertEqual(second_child.metadata["task_id"], "task_parent_git_cursor")
+        self.assertEqual(second_child.metadata["project_name"], "plan_source_repo")
+        self.assertEqual(second_child.metadata["module_name"], "module_b")
+        self.assertEqual(second_repo, self.root / "data" / "minion" / "repos" / "plan_source_repo" / "module_b")
+        self.assertEqual((second_repo / "src" / "pal_dogfood" / "taskflow" / "contracts.py").read_text(encoding="utf-8"), "CONTRACT = 'ready'\n")
+        self.assertNotEqual(second_repo, first_repo)
+        self.assertEqual(_git_common_dir(second_repo), _git_common_dir(first_repo))
+        self.assertEqual(second_prepared.workspace["workspace_kind"], "git_worktree")
+        self.assertIn("work_order_wo_wo_parent_git_cursor_module_b", second_prepared.workspace["work_order_branch"])
 
     def test_record_clarification_answer_appends_to_work_order_metadata(self) -> None:
         self.repository.prepare_pack_for_spawn(
@@ -5368,6 +7830,56 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertNotIn("log_dir", stored.workspace)
         self.assertIn("run_next_software_engineering_planner", prepared.workspace["run_dir"])
 
+    def test_folder_workspace_can_preserve_explicit_artifact_dir_across_runs(self) -> None:
+        artifact_dir = self.root / "review_artifacts" / "wo_review_checkpoint"
+        pack = TaskContextPack(
+            work_order_id="wo_preserve_artifact_dir",
+            goal="review with stable artifacts",
+            minion_profile="software_engineering.reviewer",
+            workspace={
+                "artifact_dir": str(artifact_dir),
+                "preserve_artifact_dir": True,
+                "workspace_policy": {"mode": "read_only_repo"},
+                "completion_policy": {"evidence": "text_deliverable"},
+            },
+            metadata={"task_id": "task_preserve_artifact_dir", "milestones": ["review"]},
+        )
+
+        prepared = prepare_task_workspace(self.root, pack, run_id="run_review_next")
+
+        self.assertEqual(Path(prepared.workspace["artifact_dir"]), artifact_dir)
+        self.assertTrue(artifact_dir.is_dir())
+        self.assertIn("run_review_next_software_engineering_reviewer", prepared.workspace["run_dir"])
+        self.assertIn("run_review_next_software_engineering_reviewer", prepared.workspace["log_dir"])
+
+    def test_review_ephemeral_dirs_live_under_tmp(self) -> None:
+        scratch = review_scratch_dir(self.root, "wo_review_tmp")
+        artifacts = review_artifact_dir(self.root, "wo_review_tmp")
+        tmp_root = Path(tempfile.gettempdir()).resolve()
+
+        self.assertTrue(scratch.resolve().is_relative_to(tmp_root))
+        self.assertTrue(artifacts.resolve().is_relative_to(tmp_root))
+        self.assertIn("pal-minion-review", str(scratch))
+        self.assertNotIn(str(self.root / "data" / "minion" / "workspaces"), str(scratch))
+
+    def test_minion_artifact_write_can_default_overwrite_for_ephemeral_review_outputs(self) -> None:
+        artifact_dir = self.root / "review_artifacts"
+        workspace = {"artifact_dir": str(artifact_dir), "artifact_overwrite_default": True}
+
+        first = _write_minion_artifact(
+            workspace,
+            {"relative_path": "review_report.md", "content": "first\n", "title": "Review report"},
+        )
+        second = _write_minion_artifact(
+            workspace,
+            {"relative_path": "review_report.md", "content": "second\n", "title": "Review report"},
+        )
+
+        self.assertEqual(first["relative_path"], "review_report.md")
+        self.assertEqual(second["relative_path"], "review_report.md")
+        self.assertEqual((artifact_dir / "review_report.md").read_text(encoding="utf-8"), "second\n")
+        self.assertFalse((artifact_dir / "review_report-1.md").exists())
+
     def test_promote_work_order_draft_respects_single_active_work_order_invariant(self) -> None:
         self.repository.prepare_pack_for_spawn(
             TaskContextPack(work_order_id="wo_existing", goal="already active", metadata={"task_id": "task_collision", "milestones": ["existing"]})
@@ -5515,6 +8027,9 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         prepared = prepare_git_task_environment(self.root, pack)
         repo = Path(prepared.workspace["repo_path"])
 
+        self.assertEqual(repo, self.root / "data" / "minion" / "repos" / "source_cpp_lsp" / "module_cpp_lsp")
+        self.assertEqual(prepared.workspace["project_name"], "source_cpp_lsp")
+        self.assertEqual(prepared.workspace["module_name"], "module_cpp_lsp")
         self.assertEqual(prepared.workspace["languages"], ["cpp"])
         self.assertEqual(prepared.workspace["lsp_setup"]["servers"], ["clangd"])
         self.assertEqual(prepared.workspace["lsp_setup"]["created_files"], [".clangd"])
@@ -5525,6 +8040,25 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             _git(repo, "log", "-1", "--format=%s", prepared.workspace["base_sha"], check=True).stdout.strip(),
             "minion: prepare workspace environment",
         )
+
+    def test_git_task_environment_can_disable_local_worktree(self) -> None:
+        source = self.root / "source_no_worktree"
+        _init_git_source_repo(source, {"app.py": "print('hello')\n"})
+        pack = self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_no_worktree",
+                goal="git backed work",
+                metadata={"task_id": "task_no_worktree", "milestones": ["git backed work"]},
+                workspace={"source_repo": str(source), "use_worktree": False},
+            )
+        )
+
+        prepared = prepare_git_task_environment(self.root, pack)
+        repo = Path(prepared.workspace["repo_path"])
+
+        self.assertEqual(prepared.workspace["workspace_kind"], "git_repo")
+        self.assertNotEqual(_git_common_dir(repo), _git_common_dir(source))
+        self.assertEqual((repo / "app.py").read_text(encoding="utf-8"), "print('hello')\n")
 
     def test_git_task_environment_does_not_overwrite_existing_clangd_config(self) -> None:
         source = self.root / "source_existing_clangd"
@@ -5563,6 +8097,45 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(prepared.workspace["lsp_setup"]["servers"], ["pyright"])
         self.assertFalse((repo / "pyrightconfig.json").exists())
         self.assertIn("python uses the pyright sidecar", "\n".join(prepared.workspace["lsp_setup"]["skipped"]))
+
+    def test_git_task_environment_prepares_python_src_layout_runtime_env(self) -> None:
+        source = self.root / "source_python_src_layout"
+        _init_git_source_repo(
+            source,
+            {
+                "pyproject.toml": "\n".join(
+                    [
+                        "[build-system]",
+                        'requires = ["setuptools>=68"]',
+                        'build-backend = "setuptools.build_meta"',
+                        "",
+                        "[tool.setuptools.packages.find]",
+                        'where = ["src"]',
+                        "",
+                    ]
+                ),
+                "src/example_pkg/__init__.py": "VALUE = 1\n",
+                "tests/test_example.py": "from example_pkg import VALUE\n\ndef test_value():\n    assert VALUE == 1\n",
+            },
+        )
+        pack = self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_python_src_layout",
+                goal="implement python feature",
+                metadata={"task_id": "task_python_src_layout", "languages": ["python"]},
+                workspace={"source_repo": str(source)},
+            )
+        )
+
+        prepared = prepare_git_task_environment(self.root, pack)
+        repo = Path(prepared.workspace["repo_path"])
+
+        self.assertEqual(prepared.workspace["languages"], ["python"])
+        self.assertEqual(
+            prepared.workspace["execution_env"]["path_prepend"]["PYTHONPATH"],
+            [str(repo / "src")],
+        )
+        self.assertNotIn("PYTHONPATH", "\n".join(prepared.workspace["lsp_setup"]["skipped"]))
 
     def test_workspace_environment_skips_language_preparer_without_lsp_template(self) -> None:
         repo = self.root / "missing_lsp_template_repo"
@@ -5666,6 +8239,10 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                     "skipped": ["cpp skipped; missing LSP server template(s): clangd"],
                     "unsafe": {"do": "not copy"},
                 },
+                "execution_env": {
+                    "path_prepend": {"PYTHONPATH": ["/tmp/source/src"]},
+                    "unsafe": {"do": "not copy"},
+                },
             }
         )
 
@@ -5673,8 +8250,10 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(inherited["lsp_setup"]["languages"], ["cpp"])
         self.assertEqual(inherited["lsp_setup"]["servers"], [])
         self.assertIn("missing LSP server template", inherited["lsp_setup"]["skipped"][0])
+        self.assertEqual(inherited["execution_env"]["path_prepend"]["PYTHONPATH"], ["/tmp/source/src"])
         self.assertNotIn("source_repo", inherited)
         self.assertNotIn("unsafe", inherited["lsp_setup"])
+        self.assertNotIn("unsafe", inherited["execution_env"])
 
     def test_commit_milestone_excludes_generated_artifacts(self) -> None:
         pack = self.repository.prepare_pack_for_spawn(
@@ -5701,7 +8280,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         status = _git(repo, "status", "--porcelain", check=True).stdout
         self.assertEqual(status, "")
 
-    def test_git_task_environment_clones_source_repo_into_task_repo(self) -> None:
+    def test_git_task_environment_uses_worktree_for_local_source_repo(self) -> None:
         source = self.root / "source_repo"
         source.mkdir()
         _git(source, "init")
@@ -5722,10 +8301,32 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
 
         repo = Path(prepared.workspace["repo_path"])
-        self.assertEqual(repo, self.root / "data" / "minion" / "repos" / "task_clone")
+        self.assertEqual(repo, self.root / "data" / "minion" / "repos" / "source_repo")
+        self.assertEqual(prepared.workspace["project_name"], "source_repo")
         self.assertTrue((repo / ".git").exists())
+        self.assertEqual(prepared.workspace["workspace_kind"], "git_worktree")
+        self.assertEqual(prepared.workspace["worktree_source_repo"], str(source.resolve()))
+        self.assertEqual(_git_common_dir(repo), _git_common_dir(source))
         self.assertEqual((repo / "app.py").read_text(encoding="utf-8"), "print('hello')\n")
         self.assertEqual(prepared.workspace["source_repo"], str(source))
+
+    def test_git_task_environment_project_name_overrides_source_repo_name(self) -> None:
+        source = self.root / "temporary_clone_name"
+        _init_git_source_repo(source, {"app.py": "print('hello')\n"})
+
+        prepared = prepare_git_task_environment(
+            self.root,
+            TaskContextPack(
+                work_order_id="wo_project_name",
+                goal="extend existing project",
+                workspace={"source_repo": str(source)},
+                metadata={"task_id": "task_project_name", "project_name": "real_project"},
+            ),
+        )
+
+        repo = Path(prepared.workspace["repo_path"])
+        self.assertEqual(repo, self.root / "data" / "minion" / "repos" / "real_project")
+        self.assertEqual(prepared.workspace["project_name"], "real_project")
 
     def test_policy_workspace_keeps_planner_read_only_and_coder_writable(self) -> None:
         source = self.root / "source_repo_readonly"
@@ -5899,7 +8500,7 @@ class MinionManagerTests(unittest.TestCase):
             )
 
             self.assertFalse(result.ok)
-            self.assertIn("relative to the current task repo", result.text)
+            self.assertIn("relative to the current project repo", result.text)
 
         asyncio.run(scenario())
 
@@ -6016,15 +8617,14 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_reviewer_lsp_tools_prefer_review_scratch_root(self) -> None:
+    def test_reviewer_lsp_tools_prefer_repo_root(self) -> None:
         async def scenario() -> None:
             repo_path = self.root / "source_repo"
             scratch_repo = self.root / "review_scratch" / "source"
             (repo_path / "src").mkdir(parents=True)
             (scratch_repo / "src").mkdir(parents=True)
             (repo_path / "src" / "app.py").write_text("source_value = 1\n", encoding="utf-8")
-            scratch_file = scratch_repo / "src" / "app.py"
-            scratch_file.write_text("scratch_value = 1\n", encoding="utf-8")
+            (scratch_repo / "src" / "app.py").write_text("scratch_value = 1\n", encoding="utf-8")
             calls = []
 
             class FakeExecution:
@@ -6058,8 +8658,8 @@ class MinionManagerTests(unittest.TestCase):
             )
 
             self.assertTrue(result.ok, result.text)
-            self.assertEqual(calls[-1].args["workspace_root"], str(scratch_repo.resolve()))
-            self.assertEqual(calls[-1].args["file"], str(scratch_file.resolve()))
+            self.assertEqual(calls[-1].args["workspace_root"], str(repo_path.resolve()))
+            self.assertEqual(calls[-1].args["file"], str((repo_path / "src" / "app.py").resolve()))
 
         asyncio.run(scenario())
 
@@ -6655,13 +9255,16 @@ class MinionManagerTests(unittest.TestCase):
             )
             state = manager.runs[spawned["run_id"]]
             gate_specs = state.pack.metadata["gate_specs"]
-            self.assertEqual(gate_specs[0]["gate"], "checkpoint_quality")
-            self.assertEqual(gate_specs[0]["strategy"], "reviewer")
+            self.assertEqual([item["gate"] for item in gate_specs], ["checkpoint_admission", "module_quality"])
+            self.assertEqual([item["strategy"] for item in gate_specs], ["none", "reviewer"])
             self.assertEqual(gate_specs[0]["trigger"], "after_each_milestone")
-            self.assertEqual(gate_specs[0]["max_repair_attempts"], 5)
-            self.assertEqual(state.pack.metadata["manager_turn_timeout_seconds"], 1200)
+            self.assertEqual(gate_specs[1]["max_repair_attempts"], 5)
+            self.assertEqual(state.pack.metadata["manager_turn_timeout_seconds"], 3600)
             snapshot = manager.tasking_repository.read_work_order("wo_bare_coder_review")
-            self.assertEqual(snapshot["work_order"]["metadata"]["gate_specs"][0]["gate"], "checkpoint_quality")
+            self.assertEqual(
+                [item["gate"] for item in snapshot["work_order"]["metadata"]["gate_specs"]],
+                ["checkpoint_admission", "module_quality"],
+            )
 
             checkpoint_id = "chk_bare_coder_review"
             manager._record_event(
@@ -6688,6 +9291,9 @@ class MinionManagerTests(unittest.TestCase):
             reviewer_state = manager.started_reviewers[0]
             self.assertEqual(reviewer_state.pack.metadata["review_target"]["checkpoint_id"], checkpoint_id)
             self.assertEqual(reviewer_state.pack.metadata["review_target"]["gate_kind"], "checkpoint_verification")
+            self.assertEqual(reviewer_state.pack.metadata["review_target"]["gate_spec"]["gate"], "module_quality")
+            self.assertIn("review_scratch_dir", reviewer_state.pack.workspace)
+            self.assertNotIn("review_scratch_repo_path", reviewer_state.pack.workspace)
             source_contract = reviewer_state.pack.metadata["review_target"]["source_contract"]
             self.assertEqual(source_contract["goal"], "Implement one bare coder task.")
             self.assertEqual(source_contract["instruction"], "Hard requirement: create exactly one file.")
@@ -6779,7 +9385,7 @@ class MinionManagerTests(unittest.TestCase):
                 state,
                 event,
                 "chk_checklist_scope_m1",
-                checkpoint_gate_spec_for_pack(state.pack),
+                normalize_gate_policy({"gates": ["checkpoint_quality"]})[0],
             )
 
             self.assertEqual(len(manager.spawned_packs), 1)
@@ -6997,6 +9603,8 @@ class MinionManagerTests(unittest.TestCase):
                 },
             )
             for _ in range(250):
+                if manager.reviews.background_tasks:
+                    await asyncio.gather(*list(manager.reviews.background_tasks))
                 if "repair_verification" in manager.started_review_gate_kinds:
                     break
                 await asyncio.sleep(0.01)
@@ -7070,7 +9678,7 @@ class MinionManagerTests(unittest.TestCase):
                 state,
                 checkpoint_event,
                 checkpoint_id,
-                checkpoint_gate_spec_for_pack(state.pack),
+                normalize_gate_policy({"gates": ["checkpoint_quality"]})[0],
             )
             for _ in range(50):
                 if any(event.get("event_kind") == "manager_control_failed" for event in manager.event_queue):
@@ -7097,6 +9705,99 @@ class MinionManagerTests(unittest.TestCase):
             assert resume_pack is not None
             self.assertEqual(resume_pack.work_order_id, "wo_reviewed_resume")
             self.assertEqual(resume_pack.metadata["coder_work_order"]["milestone_id"], "m2")
+
+        asyncio.run(scenario())
+
+    def test_persisted_checkpoint_pass_continues_serial_module_after_coder_run_is_gone(self) -> None:
+        class RestartedReviewManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started_milestones = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                if state.pack.minion_profile == "software_engineering.coder":
+                    prompt_view = dict(state.pack.metadata.get("prompt_view") or {})
+                    self.started_milestones.append(
+                        str(
+                            (state.pack.metadata.get("coder_work_order") or {}).get("milestone_id")
+                            or (prompt_view.get("milestone") or {}).get("milestone_id")
+                            or ""
+                        )
+                    )
+
+        async def scenario() -> None:
+            manager = RestartedReviewManager(runtime_root=self.root)
+            module = _plan_module("module_restart_resume", title="Restart resume module")
+            module["internal_milestones"] = [
+                {"milestone_id": "m1", "title": "First", "task": "Do first.", "acceptance_criteria": ["First is done."]},
+                {"milestone_id": "m2", "title": "Second", "task": "Do second.", "acceptance_criteria": ["Second is done."]},
+            ]
+            plan = _dispatchable_plan_payload(plan_id="plan_restart_resume", task_id="task_restart_resume", modules=[module])
+            pack = manager.tasking_repository.build_coder_module_pack_from_plan(
+                plan,
+                module_id="module_restart_resume",
+                work_order_id="wo_restart_resume",
+            )
+            spawned = await manager.spawn(pack.to_dict())
+            state = manager.runs[spawned["run_id"]]
+            checkpoint_id = "chk_restart_resume_m1"
+            manager.tasking_repository.record_minion_event(
+                {
+                    "event_kind": "checkpoint",
+                    "minion_id": state.minion_id,
+                    "run_id": state.run_id,
+                    "work_order_id": state.pack.work_order_id,
+                    "minion_profile": state.pack.minion_profile,
+                    "payload": {
+                        "checkpoint_id": checkpoint_id,
+                        "status": "claimed",
+                        "milestone_index": 0,
+                        "milestone_id": "m1",
+                        "summary": "m1 claimed before restart",
+                        "commit_sha": "abc123",
+                        "expected_review_gate_kind": "checkpoint_verification",
+                    },
+                    "created_at": utc_now(),
+                }
+            )
+            manager.runs.pop(state.run_id)
+            gate = manager.tasking_repository.submit_review_gate(
+                {
+                    "gate_kind": "checkpoint_verification",
+                    "target": {"checkpoint_id": checkpoint_id, "commit_sha": "abc123"},
+                    "verdict": "pass",
+                    "summary": "m1 passed after restart",
+                    "evidence": [{"kind": "review", "summary": "checkpoint accepted"}],
+                    "commands_run": [{"command": "not run in unit fixture", "status": "not_run", "reason": "manager routing unit test"}],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                    "metadata": {
+                        "api_evidence_not_applicable": True,
+                        "api_evidence_not_applicable_reason": "fixture has no API claims",
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                    "reviewer_profile": "software_engineering.reviewer",
+                }
+            )
+            reviewer_state = MinionRunState(
+                minion_id="reviewer",
+                run_id="reviewer_run",
+                pack=TaskContextPack(
+                    work_order_id="wo_review_restart_resume",
+                    goal="review",
+                    minion_profile="software_engineering.reviewer",
+                    metadata={"review_target": {"checkpoint_id": checkpoint_id, "run_id": state.run_id}},
+                ),
+            )
+
+            await manager.reviews._reconcile_checkpoint_review(reviewer_state, checkpoint_id, state.run_id)
+
+            snapshot = manager.tasking_repository.read_work_order("wo_restart_resume")
+            self.assertEqual(snapshot["latest_completed_checkpoint"]["status"], "completed")
+            self.assertEqual(snapshot["current_milestone"]["milestone_index"], 1)
+            self.assertIn("m2", manager.started_milestones)
+            self.assertEqual(gate["review_gate"]["target"]["checkpoint_id"], checkpoint_id)
 
         asyncio.run(scenario())
 
@@ -7916,21 +10617,23 @@ class MinionManagerTests(unittest.TestCase):
                 if event.get("event_kind") == "checkpoint" and event.get("work_order_id") == "wo_dogfood_code"
             ]
             claimed_checkpoints = [event for event in checkpoint_events if event["payload"].get("status") == "claimed"]
-            self.assertEqual([event["payload"]["milestone_id"] for event in claimed_checkpoints], ["m1", "m2"])
-            self.assertEqual([event["payload"]["milestone_index"] for event in claimed_checkpoints], [0, 1])
+            completed_checkpoints = [event for event in checkpoint_events if event["payload"].get("status") == "completed"]
+            self.assertEqual([event["payload"]["milestone_id"] for event in completed_checkpoints], ["m1"])
+            self.assertEqual([event["payload"]["milestone_index"] for event in completed_checkpoints], [0])
+            self.assertEqual([event["payload"]["milestone_id"] for event in claimed_checkpoints], ["m2"])
+            self.assertEqual([event["payload"]["milestone_index"] for event in claimed_checkpoints], [1])
             gate_events = [
                 item
                 for item in manager.tasking_repository.read_work_order("wo_dogfood_code")["recent_ledger"]
                 if item.get("event_kind") == "milestone_closed"
             ]
-            self.assertEqual([event["payload"]["milestone_index"] for event in reversed(gate_events)], [0, 1])
-            self.assertEqual([event["payload"]["status"] for event in reversed(gate_events)], ["completed", "completed"])
+            self.assertEqual([event["payload"]["milestone_index"] for event in reversed(gate_events)], [1])
+            self.assertEqual([event["payload"]["status"] for event in reversed(gate_events)], ["completed"])
             self.assertEqual({event["payload"]["task_id"] for event in claimed_checkpoints}, {"task_dogfood_flow"})
             self.assertEqual({event["work_order_id"] for event in claimed_checkpoints}, {"wo_dogfood_code"})
             commit_shas = [event["payload"].get("commit_sha") for event in claimed_checkpoints]
-            self.assertEqual(len(commit_shas), 2)
+            self.assertEqual(len(commit_shas), 1)
             self.assertTrue(all(commit_shas))
-            self.assertNotEqual(commit_shas[0], commit_shas[1])
             self.assertEqual({event["run_id"] for event in claimed_checkpoints}, set(manager.started_run_ids))
 
             module_event = next(event for event in manager.event_queue if event.get("event_kind") == "module_completed")
@@ -8501,7 +11204,7 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_manager_parent_plan_waits_for_continue_between_modules(self) -> None:
+    def test_manager_parent_plan_auto_advances_between_modules(self) -> None:
         class FakePlanManager(MinionManager):
             def __post_init__(self) -> None:
                 super().__post_init__()
@@ -8544,10 +11247,16 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(len(manager.started_run_ids), 1)
 
             async def wait_for_module_completion_count(count: int) -> None:
-                for _ in range(20):
+                for _ in range(100):
                     if len([event for event in manager.event_queue if event.get("event_kind") == "module_completed"]) >= count:
                         return
-                    await asyncio.sleep(0.01)
+                    await asyncio.sleep(0.05)
+
+            async def wait_for_started_module_count(count: int) -> None:
+                for _ in range(100):
+                    if len(manager.started_modules) >= count:
+                        return
+                    await asyncio.sleep(0.05)
 
             manager._record_event(
                 child_a,
@@ -8566,25 +11275,30 @@ class MinionManagerTests(unittest.TestCase):
                 },
             )
             await wait_for_module_completion_count(1)
+            await wait_for_started_module_count(2)
 
-            self.assertEqual(manager.started_modules, ["module_a"])
+            self.assertEqual(manager.started_modules, ["module_a", "module_b"])
+            child_a_snapshot = manager.tasking_repository.read_work_order(child_a.pack.work_order_id)
+            self.assertEqual(child_a_snapshot["work_order"]["status"], "completed")
             parent_snapshot = manager.tasking_repository.read_work_order("wo_parent_manager")
             self.assertEqual(parent_snapshot["current_milestone"]["title"], "module_b")
-            self.assertEqual(parent_snapshot["work_order"]["metadata"]["plan_execution"]["status"], "awaiting_continue")
+            self.assertEqual(parent_snapshot["work_order"]["metadata"]["plan_execution"]["status"], "running_module")
             module_event = next(event for event in manager.event_queue if event.get("event_kind") == "module_completed")
             self.assertEqual(module_event["work_order_id"], "wo_parent_manager")
             self.assertTrue(module_event["payload"]["has_next_module"])
+            auto_continue_event = next(event for event in manager.event_queue if event.get("event_kind") == "plan_parent_auto_continue")
+            self.assertEqual(auto_continue_event["payload"]["status"], "running_module")
+            self.assertEqual(auto_continue_event["payload"]["module_id"], "module_b")
 
             continued = await manager.continue_work_order("wo_parent_manager")
 
             self.assertEqual(continued["status"], "running_module")
-            self.assertEqual(continued["module_id"], "module_b")
-            self.assertEqual(continued["child_work_order_id"], "wo_wo_parent_manager_module_b")
-            self.assertNotEqual(continued["run"]["run_id"], child_a.run_id)
+            self.assertEqual(continued["reason"], "active_child_running")
+            self.assertEqual(continued["active_child_work_order_id"], "wo_wo_parent_manager_module_b")
             self.assertEqual(manager.started_modules, ["module_a", "module_b"])
             self.assertEqual(manager.started_work_orders[-1], "wo_wo_parent_manager_module_b")
 
-            child_b = manager.runs[continued["run"]["run_id"]]
+            child_b = next(state for state in manager.runs.values() if state.pack.work_order_id == "wo_wo_parent_manager_module_b")
             manager._record_event(
                 child_b,
                 {
@@ -8602,18 +11316,22 @@ class MinionManagerTests(unittest.TestCase):
                 },
             )
             await wait_for_module_completion_count(2)
+            await wait_for_started_module_count(3)
 
-            self.assertEqual(manager.started_modules, ["module_a", "module_b"])
+            self.assertEqual(manager.started_modules, ["module_a", "module_b", "module_c"])
+            child_b_snapshot = manager.tasking_repository.read_work_order(child_b.pack.work_order_id)
+            self.assertEqual(child_b_snapshot["work_order"]["status"], "completed")
             parent_snapshot = manager.tasking_repository.read_work_order("wo_parent_manager")
             self.assertEqual(parent_snapshot["current_milestone"]["title"], "module_c")
-            self.assertEqual(parent_snapshot["work_order"]["metadata"]["plan_execution"]["status"], "awaiting_continue")
+            self.assertEqual(parent_snapshot["work_order"]["metadata"]["plan_execution"]["status"], "running_module")
 
             continued_c = await manager.continue_work_order("wo_parent_manager")
 
             self.assertEqual(continued_c["status"], "running_module")
-            self.assertEqual(continued_c["module_id"], "module_c")
-            self.assertEqual(continued_c["child_work_order_id"], "wo_wo_parent_manager_module_c")
-            self.assertNotIn(continued_c["run"]["run_id"], {child_a.run_id, child_b.run_id})
+            self.assertEqual(continued_c["reason"], "active_child_running")
+            self.assertEqual(continued_c["active_child_work_order_id"], "wo_wo_parent_manager_module_c")
+            child_c = next(state for state in manager.runs.values() if state.pack.work_order_id == "wo_wo_parent_manager_module_c")
+            self.assertNotIn(child_c.run_id, {child_a.run_id, child_b.run_id})
             self.assertEqual(manager.started_modules, ["module_a", "module_b", "module_c"])
 
         asyncio.run(scenario())
@@ -8933,6 +11651,26 @@ class MinionManagerTests(unittest.TestCase):
                         os.close(write_fd)
                 with contextlib.suppress(OSError):
                     os.close(read_fd)
+
+        asyncio.run(scenario())
+
+    def test_manager_kill_is_noop_for_terminal_run(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root)
+            state = MinionRunState(
+                minion_id="m_failed_noop",
+                run_id="r_failed_noop",
+                pack=TaskContextPack(work_order_id="wo_failed_noop", goal="already failed"),
+                status="failed",
+            )
+            state.process = SimpleNamespace(pid=123, returncode=1)
+            manager.runs[state.run_id] = state
+
+            result = await manager.kill(state.run_id, "late kill")
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(state.status, "failed")
+            self.assertEqual(manager.event_queue, [])
 
         asyncio.run(scenario())
 
@@ -11124,6 +13862,34 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(result.structured["reason"], "repair_reused_failed_checkpoint")
         self.assertIn(failed["commit_sha"], result.text)
 
+    def test_checkpoint_commit_tool_sets_repo_local_git_identity(self) -> None:
+        repo_path = self.root / "checkpoint_identity_repo"
+        repo_path.mkdir()
+        _git(repo_path, "init", check=True)
+        _git(repo_path, "checkout", "-B", "main", check=True)
+        _git(repo_path, "config", "--local", "user.email", "initial@example.invalid", check=True)
+        _git(repo_path, "config", "--local", "user.name", "Initial User", check=True)
+        (repo_path / "README.md").write_text("# checkpoint identity\n", encoding="utf-8")
+        _git(repo_path, "add", "README.md", check=True)
+        _git(repo_path, "commit", "-m", "initial", check=True)
+        _git(repo_path, "config", "--local", "--unset", "user.email", check=True)
+        _git(repo_path, "config", "--local", "--unset", "user.name", check=True)
+        (repo_path / "feature.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+        result = _minion_checkpoint_commit_result(
+            CanonicalToolCall(name="checkpoint_commit", args={"title": "identity"}, call_id="call_identity"),
+            {
+                "repo_path": str(repo_path),
+                "work_order_id": "wo_identity",
+                "current_milestone_index": 0,
+                "current_milestone_title": "Identity",
+            },
+        )
+
+        self.assertTrue(result.ok, result.text)
+        self.assertEqual(_git(repo_path, "config", "--local", "user.email", check=True).stdout.strip(), "minion@pal.local")
+        self.assertEqual(_git(repo_path, "config", "--local", "user.name", check=True).stdout.strip(), "Pal Minion")
+
     def test_runner_ignores_cache_only_shell_workspace_changes(self) -> None:
         async def scenario() -> None:
             repo_path = self.root / "shell_cache_mutation_repo"
@@ -11251,31 +14017,32 @@ class MinionManagerTests(unittest.TestCase):
                 CanonicalToolCall(name="shell", args={"cmd": "printf mutation > mutated_by_reviewer.txt"}, call_id="call_review_shell_denied"),
             )
             self.assertTrue(defaulted.ok)
-            self.assertEqual(shell_calls[-1].args["cwd"], pack.workspace["review_scratch_repo_path"])
-            self.assertEqual(runner.review_tool_evidence_refs[-1]["cwd"], pack.workspace["review_scratch_repo_path"])
-            denied_root = await runner._execute_allowed_tool(
+            self.assertEqual(shell_calls[-1].args["cwd"], pack.workspace["repo_path"])
+            self.assertEqual(runner.review_tool_evidence_refs[-1]["cwd"], pack.workspace["repo_path"])
+            denied_outside = await runner._execute_allowed_tool(
                 FakeExecution(),
                 CanonicalToolCall(
                     name="shell",
-                    args={"cmd": "printf mutation > mutated_by_reviewer.txt", "cwd": pack.workspace["review_scratch_dir"]},
+                    args={"cmd": "printf mutation > mutated_by_reviewer.txt", "cwd": str(self.root / "outside_review_roots")},
                     call_id="call_review_shell_root_denied",
                 ),
             )
-            self.assertFalse(denied_root.ok)
-            self.assertIn("review_scratch_repo_path", denied_root.text)
+            self.assertFalse(denied_outside.ok)
+            self.assertIn("workspace.repo_path", denied_outside.text)
             result = await runner._execute_allowed_tool(
                 FakeExecution(),
                 CanonicalToolCall(
                     name="shell",
                     args={
                         "cmd": "printf mutation > mutated_by_reviewer.txt",
-                        "cwd": pack.workspace["review_scratch_repo_path"],
+                        "cwd": pack.workspace["repo_path"],
                     },
                     call_id="call_review_shell",
                 ),
             )
             self.assertTrue(result.ok)
             self.assertEqual(len(runner.shell_mutation_violations), 1)
+            self.assertEqual(runner.shell_mutation_violations[0]["repo_path"], str(repo_path))
 
             gate = _minion_review_gate_submit_result(
                 CanonicalToolCall(
@@ -11289,9 +14056,9 @@ class MinionManagerTests(unittest.TestCase):
                         "commands_run": [
                             {
                                 "command": "printf mutation > mutated_by_reviewer.txt",
-                                "cwd": pack.workspace["review_scratch_repo_path"],
+                                "cwd": pack.workspace["repo_path"],
                                 "status": "passed",
-                                "summary": "fixture shell command ran from review scratch",
+                                "summary": "fixture shell command ran from reviewed repo",
                             }
                         ],
                         "api_evidence": [{"kind": "not_applicable", "summary": "no API claims"}],
@@ -11460,6 +14227,47 @@ class MinionManagerTests(unittest.TestCase):
         self.assertFalse(command_gate.ok)
         self.assertEqual(command_gate.status, RuntimeStatus.INVALID)
         self.assertIn("lacks matching shell evidence", command_gate.text)
+
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_command_summary_not_provenance",
+            task_id="task_command_summary_not_provenance",
+            modules=[_plan_module("module_command_summary", title="Command summary module")],
+        )
+        artifact_path = self.root / "command-summary-plan.json"
+        artifact_path.write_text(json.dumps(plan), encoding="utf-8")
+        source_ref = {"path": str(artifact_path), "sha256": hashlib.sha256(artifact_path.read_bytes()).hexdigest()}
+        plan_gate = _minion_review_gate_submit_result(
+            CanonicalToolCall(
+                name="review_gate_submit",
+                args={
+                    "gate_kind": "plan_acceptance",
+                    "target": {"plan_ref": source_ref},
+                    "verdict": "pass",
+                    "summary": "plan accepted from structural review",
+                    "evidence": [{"kind": "plan_review", "summary": "plan_read and plan_validate reviewed the plan"}],
+                    "commands_run": [
+                        {
+                            "command": "plan_validate plan_command_summary_not_provenance",
+                            "status": "passed",
+                            "summary": "plan validation was reviewed as part of the plan gate",
+                        }
+                    ],
+                    "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                    "metadata": {
+                        "lsp_evidence_not_applicable": True,
+                        "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                    },
+                },
+            ),
+            {
+                "runtime_root": str(self.root),
+                "work_order_id": "wo_plan_command_summary",
+                "run_id": "r_plan_command_summary",
+                "review_tool_evidence_refs": [],
+                "shell_mutation_violations": [],
+            },
+        )
+        self.assertTrue(plan_gate.ok, plan_gate.text)
 
         plan = _dispatchable_plan_payload(
             plan_id="plan_lsp_provenance",
@@ -11653,6 +14461,297 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(review_gate["commands_run"][0]["covers"], ["1"])
         refs = review_gate["metadata"]["tool_evidence_refs"]
         self.assertTrue(str(refs[0].get("ledger_id") or "").startswith("led_"))
+
+    def test_review_checkpoint_evidence_refs_override_stale_manual_checks(self) -> None:
+        checkpoint_id = "chk_runtime_evidence_refs_prefer_runtime"
+        acceptance = "Catalog behavior is verified."
+        repository = MinionTaskingRepository(runtime_root=self.root)
+        repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_runtime_evidence_refs_prefer_runtime_source",
+                "minion_id": "m_runtime_evidence_refs_prefer_runtime_source",
+                "run_id": "r_runtime_evidence_refs_prefer_runtime_source",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "expected_review_gate_kind": "checkpoint_verification",
+                    "acceptance_criteria": [acceptance],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        full_command = "PYTHONDONTWRITEBYTECODE=1 python -m pytest tests/test_catalog.py -q 2>&1 | tail -30"
+        workspace = {
+            "runtime_root": str(self.root),
+            "work_order_id": "wo_runtime_evidence_refs_prefer_runtime",
+            "run_id": "r_review_runtime_evidence_refs_prefer_runtime",
+            "minion_profile": "software_engineering.reviewer",
+            "review_target_checkpoint_id": checkpoint_id,
+            "review_target_commit_sha": "abc123",
+            "review_target_gate_kind": "checkpoint_verification",
+            "review_tool_evidence_refs": [
+                {
+                    "kind": "command",
+                    "tool_name": "shell",
+                    "call_id": "call_pytest_catalog",
+                    "command": full_command,
+                    "status": "ok",
+                    "exit_code": 0,
+                    "summary": "42 passed in 0.17s",
+                },
+                {
+                    "kind": "source",
+                    "tool_name": "op_file_read",
+                    "call_id": "call_source_catalog",
+                    "path": "src/pal_dogfood/catalog/__init__.py",
+                    "status": "ok",
+                    "summary": "source contract checked",
+                },
+                {
+                    "kind": "lsp",
+                    "tool_name": "op_lsp_diagnostics",
+                    "call_id": "call_lsp_catalog",
+                    "operation": "diagnostics",
+                    "method": "textDocument/publishDiagnostics",
+                    "evidence_id": "lsp_catalog_clean",
+                    "status": "ok",
+                    "summary": "0 diagnostics",
+                },
+            ],
+            "shell_mutation_violations": [],
+        }
+
+        gate = _minion_review_checkpoint_result(
+            CanonicalToolCall(
+                name="op_minion_review_checkpoint",
+                args={
+                    "verdict": "pass",
+                    "summary": "runtime evidence refs prove the checkpoint",
+                    "evidence_refs": [
+                        {"evidence_id": "EV-1", "covers": [acceptance]},
+                        {"evidence_id": "EV-2", "covers": [acceptance]},
+                        {"evidence_id": "EV-3", "covers": [acceptance]},
+                    ],
+                    "checks": [
+                        {
+                            "command": "python -m pytest tests/test_catalog.py -q",
+                            "status": "passed",
+                            "exit_code": 0,
+                            "summary": "stale manual command shape from the model",
+                            "covers": [acceptance],
+                        }
+                    ],
+                    "api_checks": [
+                        {
+                            "kind": "lsp",
+                            "evidence_id": "fake_lsp_manual_entry",
+                            "method": "textDocument/publishDiagnostics",
+                            "summary": "stale manual LSP shape from the model",
+                            "covers": [acceptance],
+                        }
+                    ],
+                },
+            ),
+            workspace,
+        )
+
+        self.assertTrue(gate.ok, gate.llm_text)
+        review_gate = gate.structured["review_gate"]
+        self.assertEqual(review_gate["commands_run"][0]["command"], full_command)
+        self.assertEqual(review_gate["commands_run"][0]["covers"], ["1"])
+        self.assertTrue(any(item.get("kind") == "lsp" for item in review_gate["api_evidence"]))
+        self.assertFalse(review_gate["metadata"].get("lsp_evidence_not_applicable"))
+
+    def test_review_checkpoint_binds_semantic_evidence_when_model_invents_ref(self) -> None:
+        checkpoint_id = "chk_runtime_semantic_evidence_binding"
+        acceptance = "Catalog behavior is verified."
+        repository = MinionTaskingRepository(runtime_root=self.root)
+        repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_runtime_semantic_evidence_binding_source",
+                "minion_id": "m_runtime_semantic_evidence_binding_source",
+                "run_id": "r_runtime_semantic_evidence_binding_source",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "expected_review_gate_kind": "checkpoint_verification",
+                    "acceptance_criteria": [acceptance],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        real_command = (
+            "cd /tmp/review && VENV=/tmp/review/venv && "
+            "PYTHONPATH=src $VENV/bin/python -m pytest tests/test_catalog.py -q"
+        )
+        workspace = {
+            "runtime_root": str(self.root),
+            "work_order_id": "wo_runtime_semantic_evidence_binding",
+            "run_id": "r_review_runtime_semantic_evidence_binding",
+            "minion_profile": "software_engineering.reviewer",
+            "review_target_checkpoint_id": checkpoint_id,
+            "review_target_commit_sha": "abc123",
+            "review_target_gate_kind": "checkpoint_verification",
+            "review_tool_evidence_refs": [
+                {
+                    "kind": "command",
+                    "tool_name": "shell",
+                    "call_id": "call_real_pytest_catalog",
+                    "command": real_command,
+                    "status": "ok",
+                    "exit_code": 0,
+                    "summary": "45 passed in 0.16s",
+                },
+                {
+                    "kind": "source",
+                    "tool_name": "op_file_read",
+                    "call_id": "call_real_source_catalog",
+                    "path": "src/pal_dogfood/catalog.py",
+                    "status": "ok",
+                    "summary": "catalog source verified",
+                },
+                {
+                    "kind": "lsp",
+                    "tool_name": "op_lsp_diagnostics",
+                    "call_id": "call_real_lsp_catalog",
+                    "operation": "diagnostics",
+                    "method": "textDocument/publishDiagnostics",
+                    "evidence_id": "lsp_catalog_clean",
+                    "status": "ok",
+                    "summary": "0 diagnostics",
+                },
+            ],
+            "shell_mutation_violations": [],
+        }
+
+        gate = _minion_review_checkpoint_result(
+            CanonicalToolCall(
+                name="op_minion_review_checkpoint",
+                args={
+                    "verdict": "pass",
+                    "summary": "runtime evidence proves the checkpoint",
+                    "evidence_refs": [{"evidence_id": "EV-pytest", "covers": [acceptance]}],
+                    "checks": [
+                        {
+                            "command": "PYTHONPATH=src python -m pytest tests/test_catalog.py -v",
+                            "status": "pass",
+                            "exit_code": 0,
+                            "summary": "model-written command is semantically right but not exact",
+                            "covers": [acceptance],
+                        }
+                    ],
+                    "api_checks": [
+                        {
+                            "source_ref": "src/pal_dogfood/catalog.py:20",
+                            "summary": "source verified",
+                            "covers": [acceptance],
+                        }
+                    ],
+                },
+            ),
+            workspace,
+        )
+
+        self.assertTrue(gate.ok, gate.llm_text)
+        review_gate = gate.structured["review_gate"]
+        self.assertEqual(review_gate["commands_run"][0]["command"], real_command)
+        self.assertEqual(review_gate["commands_run"][0]["call_id"], "call_real_pytest_catalog")
+        self.assertTrue(any(item.get("kind") == "source" for item in review_gate["api_evidence"]))
+        self.assertTrue(any(item.get("kind") == "lsp" for item in review_gate["api_evidence"]))
+
+    def test_review_checkpoint_accepts_semantic_evidence_selectors(self) -> None:
+        checkpoint_id = "chk_runtime_semantic_evidence_selectors"
+        acceptance = "Focused behavior is verified."
+        repository = MinionTaskingRepository(runtime_root=self.root)
+        repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_runtime_semantic_evidence_selectors_source",
+                "minion_id": "m_runtime_semantic_evidence_selectors_source",
+                "run_id": "r_runtime_semantic_evidence_selectors_source",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "expected_review_gate_kind": "checkpoint_verification",
+                    "acceptance_criteria": [acceptance],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        workspace = {
+            "runtime_root": str(self.root),
+            "work_order_id": "wo_runtime_semantic_evidence_selectors",
+            "run_id": "r_review_runtime_semantic_evidence_selectors",
+            "minion_profile": "software_engineering.reviewer",
+            "review_target_checkpoint_id": checkpoint_id,
+            "review_target_commit_sha": "abc123",
+            "review_target_gate_kind": "checkpoint_verification",
+            "review_tool_evidence_refs": [
+                {
+                    "kind": "command",
+                    "tool_name": "shell",
+                    "call_id": "call_selector_pytest",
+                    "command": "python -m pytest tests/test_feature.py -q",
+                    "status": "ok",
+                    "exit_code": 0,
+                    "summary": "7 passed",
+                },
+                {
+                    "kind": "source",
+                    "tool_name": "op_file_read",
+                    "call_id": "call_selector_source",
+                    "path": "src/pal/feature.py",
+                    "status": "ok",
+                    "summary": "feature source checked",
+                },
+                {
+                    "kind": "lsp",
+                    "tool_name": "op_lsp_diagnostics",
+                    "call_id": "call_selector_lsp",
+                    "operation": "diagnostics",
+                    "method": "textDocument/publishDiagnostics",
+                    "evidence_id": "lsp_feature_clean",
+                    "status": "ok",
+                    "summary": "0 diagnostics",
+                },
+            ],
+            "shell_mutation_violations": [],
+        }
+
+        gate = _minion_review_checkpoint_result(
+            CanonicalToolCall(
+                name="op_minion_review_checkpoint",
+                args={
+                    "verdict": "pass",
+                    "summary": "semantic selectors prove the checkpoint",
+                    "evidence_selectors": [
+                        {"kind": "command", "contains": "pytest tests/test_feature.py", "latest_success": True, "covers": [acceptance]},
+                        {"kind": "source", "path_contains": "src/pal/feature.py", "covers": [acceptance]},
+                        {"kind": "lsp", "operation": "diagnostics", "latest_success": True, "covers": [acceptance]},
+                    ],
+                },
+            ),
+            workspace,
+        )
+
+        self.assertTrue(gate.ok, gate.llm_text)
+        review_gate = gate.structured["review_gate"]
+        self.assertEqual(review_gate["commands_run"][0]["call_id"], "call_selector_pytest")
+        self.assertEqual({item.get("kind") for item in review_gate["api_evidence"]}, {"source", "lsp"})
 
     def test_review_checkpoint_rejects_unknown_runtime_evidence_ref(self) -> None:
         gate = _minion_review_checkpoint_result(
@@ -13187,11 +16286,77 @@ class MinionManagerTests(unittest.TestCase):
         shell_description = str(shell_spec["description"])
         self.assertIn("read_file for reading repo text files", shell_description)
         self.assertIn("tree for structured repo listings", shell_description)
+        self.assertIn("plan_read for reading submitted plan drafts", shell_description)
+        self.assertIn("plan_validate for validating plan topology and gate coverage", shell_description)
         self.assertNotIn("edit_file for precise repo text edits", shell_description)
         self.assertNotIn("write_file for creating", shell_description)
         denied = asyncio.run(scoped.execute_tool_async(CanonicalToolCall(name="op_file_write", args={"path": "x.py", "content": "bad"})))
         self.assertFalse(denied.ok)
         self.assertEqual(denied.structured["reason"], "capability_not_allowed")
+        guarded_scoped = MinionScopedExecutionRuntime(
+            FakeExecution(),
+            ["op_file_write"],
+            workspace={"repo_path": str(self.root / "reviewed_repo"), "workspace_policy": {"mode": "read_only_repo"}},
+        )
+        guarded = asyncio.run(
+            guarded_scoped.execute_tool_async(CanonicalToolCall(name="op_file_write", args={"path": "x.py", "content": "bad"}))
+        )
+        self.assertFalse(guarded.ok)
+        self.assertEqual(guarded.status, RuntimeStatus.FORBIDDEN)
+        self.assertEqual(guarded.structured["reason"], "read_only_repo_file_mutation_forbidden")
+
+    def test_plan_reviewer_shell_plan_artifact_read_routes_to_plan_tools(self) -> None:
+        async def scenario() -> None:
+            class FakeExecution:
+                async def execute_tool_async(self, call, *, allow_tools=True, turn_id=None):
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text="shell executed",
+                        llm_text="shell executed",
+                        status=RuntimeStatus.OK,
+                    )
+
+            plan_path = self.root / "planner" / "deliverables" / "plan.draft.json"
+            scoped = MinionScopedExecutionRuntime(
+                FakeExecution(),
+                [
+                    "op_exec_shell",
+                    "op_minion_plan_read",
+                    "op_minion_plan_find",
+                    "op_minion_plan_get",
+                    "op_minion_plan_validate",
+                    "op_minion_review_gate_submit",
+                ],
+                workspace={
+                    "review_target_gate_kind": "plan_acceptance",
+                    "artifact_dir": str(plan_path.parent),
+                    "review_target_plan_ref": {"path": str(plan_path), "relative_path": "plan.draft.json"},
+                },
+            )
+
+            blocked = await scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="run_shell",
+                    args={"cmd": f"cat {plan_path}"},
+                    call_id="call_cat_plan",
+                )
+            )
+            allowed = await scoped.execute_tool_async(
+                CanonicalToolCall(
+                    name="run_shell",
+                    args={"cmd": "python -m pytest -q"},
+                    call_id="call_pytest",
+                )
+            )
+
+            self.assertFalse(blocked.ok)
+            self.assertEqual(blocked.status, RuntimeStatus.INVALID)
+            self.assertEqual(blocked.structured["reason"], "plan_review_requires_plan_tools")
+            self.assertIn("plan_read", blocked.text)
+            self.assertTrue(allowed.ok)
+
+        asyncio.run(scenario())
 
     def test_checkpoint_reviewer_scoped_runtime_hides_generic_review_gate(self) -> None:
         async def scenario() -> None:
@@ -13280,6 +16445,44 @@ class MinionManagerTests(unittest.TestCase):
 
             self.assertTrue(result.ok)
             self.assertEqual(calls, [{"name": "op_git", "args": {"cmd": "status --short", "cwd": str(repo_path.resolve())}}])
+
+        asyncio.run(scenario())
+
+    def test_scoped_read_only_git_tool_falls_back_to_repo_path_without_scratch(self) -> None:
+        async def scenario() -> None:
+            repo_path = self.root / "scoped_git_read_only_repo"
+            repo_path.mkdir()
+            _git(repo_path, "init", check=True)
+            calls: list[dict] = []
+
+            class FakeExecution:
+                async def execute_tool_async(self, call, **kwargs):
+                    _ = kwargs
+                    calls.append({"name": call.name, "args": dict(call.args or {})})
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text="git ok",
+                        llm_text="git ok",
+                        structured={"ok": True},
+                        call_id=call.call_id,
+                        status=RuntimeStatus.OK,
+                    )
+
+            scoped = MinionScopedExecutionRuntime(
+                FakeExecution(),
+                ["op_git"],
+                workspace={
+                    "repo_path": str(repo_path),
+                    "workspace_policy": {"mode": "read_only_repo"},
+                },
+            )
+            result = await scoped.execute_tool_async(
+                CanonicalToolCall(name="git", args={"cmd": "log --oneline -1", "cwd": "/tmp/not-the-repo"}, call_id="call_git")
+            )
+
+            self.assertTrue(result.ok)
+            self.assertEqual(calls, [{"name": "op_git", "args": {"cmd": "log --oneline -1", "cwd": str(repo_path.resolve())}}])
 
         asyncio.run(scenario())
 
@@ -13374,35 +16577,67 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("manager owns task identity", prompt)
         self.assertIn("Prefer official documentation", prompt)
         self.assertIn("module-first", prompt)
+        self.assertIn("complete a compact mental outline of the whole plan", prompt)
+        self.assertIn("Do not start committing builder state while still deciding basic topology", prompt)
+        self.assertIn("clear ownership and contract boundaries", prompt)
+        self.assertIn("not for a predetermined number of modules", prompt)
         self.assertIn("Prefer the simplest architecture", prompt)
         self.assertIn("explicit ownership, explicit data flow", prompt)
         self.assertIn("Reduce uncertainty at boundaries", prompt)
         self.assertIn("In statically typed/system modules", prompt)
         self.assertIn("In dynamic modules", prompt)
         self.assertIn("Design for failure early", prompt)
+        self.assertIn("Make boundary contracts explicit", prompt)
+        self.assertIn("return type closure", prompt)
+        self.assertIn("whether `None` is a valid value", prompt)
+        self.assertIn("For module interactions, define the interface contract", prompt)
+        self.assertIn("input type/shape", prompt)
+        self.assertIn("communication mechanism", prompt)
+        self.assertIn("Do not over-constrain module internals", prompt)
+        self.assertIn("Make tradeoff decisions explicit", prompt)
         self.assertIn("Do not plan premature optimization", prompt)
         self.assertIn("AskUserQuestion", prompt)
+        self.assertIn("boundary tradeoffs", prompt)
+        self.assertIn("strict failure vs best-effort fallback", prompt)
+        self.assertIn("Each option should map to a concrete plan effect", prompt)
+        self.assertIn("different module boundary, API contract, failure mode", prompt)
         self.assertIn("conservative explicit assumption", prompt)
         self.assertIn("input record shape", prompt)
         self.assertIn("Unit tests", prompt)
         self.assertIn("Module tests", prompt)
         self.assertIn("Integration tests", prompt)
         self.assertIn("dogfood", prompt)
+        self.assertIn("user/downstream-facing delivery surface", prompt)
+        self.assertIn("smallest faithful verification path", prompt)
+        self.assertIn("parse-layer", prompt)
         self.assertIn("metadata.languages", prompt)
         self.assertIn("canonical implementation language ids", prompt)
         self.assertIn("python, cpp, c", prompt)
         self.assertIn("Build the plan with the plan builder tools", prompt)
         self.assertIn("plan_begin", prompt)
+        self.assertIn("plan_add_constraints_batch", prompt)
         self.assertIn("plan_add_constraint", prompt)
+        self.assertIn("Only include them when the active workspace/draft actually contains a source gate_contract", prompt)
+        self.assertIn("plan_add_module_outline", prompt)
+        self.assertIn("A closed module cannot accept more milestones", prompt)
+        self.assertIn("After the tool returns, use the returned plan_handle/parent_plan_handle for the next module", prompt)
+        self.assertIn("module_quality_criteria", prompt)
+        self.assertIn("risk_surfaces", prompt)
+        self.assertIn("delivery_surfaces", prompt)
+        self.assertIn("checkpoint_admission_evidence", prompt)
+        self.assertIn("plan_add_milestone_outline", prompt)
         self.assertIn("plan_begin_module", prompt)
         self.assertIn("module_key is required", prompt)
         self.assertIn("stable readable module id", prompt)
+        self.assertIn("plan_add_acceptance_criteria_batch", prompt)
         self.assertIn("plan_add_acceptance_criterion", prompt)
         self.assertIn("negative_cases array", prompt)
+        self.assertIn("fail cases are the seed for coder/reviewer test cases", prompt)
+        self.assertIn("Acceptance criteria should prove boundary quality", prompt)
         self.assertIn("mutually satisfiable", prompt)
         self.assertIn("stable input order conflicts", prompt)
         self.assertIn("Boundary/error criteria", prompt)
-        self.assertIn("plan_finalize", prompt)
+        self.assertIn("plan_validate_and_submit_for_review", prompt)
         self.assertIn("structured metadata.acceptance_checklist", prompt)
         self.assertIn("Artifact output must satisfy the current output_contract", prompt)
         self.assertIn("FinalPlanArtifact", prompt)
@@ -13414,7 +16649,14 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("<workspace_policy>", prompt)
         self.assertNotIn("shell", pack.allowed_capabilities)
         self.assertIn("op_minion_plan_begin", pack.allowed_capabilities)
-        self.assertIn("op_minion_plan_finalize", pack.allowed_capabilities)
+        self.assertIn("op_minion_plan_add_module_outline", pack.allowed_capabilities)
+        self.assertIn("op_minion_plan_validate_and_submit_for_review", pack.allowed_capabilities)
+        self.assertNotIn("op_minion_plan_submit_for_review", pack.allowed_capabilities)
+        self.assertNotIn("op_web_search", pack.allowed_capabilities)
+        self.assertNotIn("op_minion_memory_candidate_write", pack.allowed_capabilities)
+        self.assertNotIn("op_minion_plan_finalize", pack.allowed_capabilities)
+        self.assertNotIn("op_minion_plan_checkout", pack.allowed_capabilities)
+        self.assertNotIn("op_minion_plan_update_module", pack.allowed_capabilities)
         self.assertNotIn("op_minion_artifact_write", pack.allowed_capabilities)
         self.assertNotIn("Stay read-only", prompt)
         self.assertNotIn("disposable task runner", prompt)
@@ -13447,6 +16689,9 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("Completion requires developer test evidence", prompt)
         self.assertIn("Fix failures", prompt)
         self.assertIn("Dogfood", prompt)
+        self.assertIn("exact surface before checkpointing", prompt)
+        self.assertIn("smallest faithful proof of the real invocation contract", prompt)
+        self.assertIn("parse-layer usage/type errors", prompt)
         self.assertIn("tests/commands run with pass/fail evidence", prompt)
         self.assertIn("workspace.languages", prompt)
         self.assertIn("workspace.lsp_setup", prompt)
@@ -13478,8 +16723,12 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("In dynamic code", prompt)
         self.assertIn("Do not prematurely optimize", prompt)
         self.assertIn("Keep hot paths boring", prompt)
+        self.assertIn("Treat boundary contracts as implementation obligations", prompt)
+        self.assertIn("do not return `None` unless the contract explicitly includes `None`", prompt)
         self.assertIn("Add abstraction only when it removes real duplication", prompt)
         self.assertIn("Start from milestone.metadata.implementation_checklist", prompt)
+        self.assertIn("run a boundary self-check", prompt)
+        self.assertIn("return type closure", prompt)
         self.assertIn("op_file_read", pack.allowed_capabilities)
         self.assertIn("op_file_edit", pack.allowed_capabilities)
         self.assertIn("op_file_write", pack.allowed_capabilities)
@@ -13575,6 +16824,16 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("Batch independent inspection tool calls", prompt)
         self.assertIn("read changed source and matching tests together", prompt)
         self.assertIn("contract alignment", prompt)
+        self.assertIn("semantic requirements, preferences, and only the mechanical dispatch/topology predicates", prompt)
+        self.assertIn("Module count and module split are design choices", prompt)
+        self.assertIn("do not fail only because the implementation work is split into a different number of modules", prompt)
+        self.assertIn("boundaries are unclear or unsafe", prompt)
+        self.assertIn("public API return types are not closed", prompt)
+        self.assertIn("boundary-quality gate", prompt)
+        self.assertIn("challenge declared delivery surfaces aggressively", prompt)
+        self.assertIn("smallest equivalent wrapper/link/import/launch probe", prompt)
+        self.assertIn("parse-layer usage/type error", prompt)
+        self.assertIn("delivery/dogfood evidence", prompt)
         self.assertIn("container element types as binding contract", prompt)
         self.assertIn("labels: tuple[str, ...]", prompt)
         self.assertIn("Type-contract mismatches are real contract_impact", prompt)
@@ -14282,7 +17541,7 @@ class MinionIntegrationTests(unittest.TestCase):
                             "goal": "plan",
                             "task_id": "task_explicit",
                             "proposed_work_order_id": "wo_explicit",
-                            "minion_profile": "software_engineering.planner",
+                            "minion_profile": "software_engineering.coder",
                             "milestones": ["plan"],
                         },
                     )
@@ -14293,7 +17552,7 @@ class MinionIntegrationTests(unittest.TestCase):
                         name="op_minion_spawn",
                         args={
                             "profile_group": "software_engineering",
-                            "profile_name": "planner",
+                            "profile_name": "coder",
                             "draft_id": explicit_draft.structured["draft"]["draft_id"],
                             "allowed_skills": ["skill.only"],
                             "approval_policy": {"custom": True},

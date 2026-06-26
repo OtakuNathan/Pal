@@ -21,7 +21,11 @@ from pal.minion.event_delivery import MinionEventDelivery
 from pal.minion.debug_log import minion_debug_log_enabled
 from pal.minion.gates import (
     GATE_TRIGGER_AFTER_EACH_MILESTONE,
+    GATE_TRIGGER_BEFORE_PLAN,
+    SOURCE_CONTRACT_GATE,
+    GateSpec,
     gate_specs_from_pack,
+    normalize_gate_policy,
 )
 from pal.minion.git_env import finalize_work_order_branch, prepare_task_workspace
 from pal.minion.inflight import InflightTracker
@@ -36,7 +40,7 @@ from pal.minion.llm_broker import (
     preflight_advice_to_payload,
     preflight_request_from_payload,
 )
-from pal.minion.profiles import MinionProfileRegistry
+from pal.minion.profiles import MinionProfileRegistry, SOURCE_CONTRACT_REVIEWER_CAPABILITIES
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.review_orchestrator import ReviewOrchestrator
 from pal.minion.runner_process import RunnerProcessSupervisor
@@ -44,12 +48,15 @@ from pal.minion.sandbox import with_minion_sandbox_metadata
 from pal.minion.serial_scheduler import SerialMilestoneScheduler
 from pal.minion.turns import sanitize_runner_session_pack
 from pal.minion.utils import coerce_int as _coerce_int
+from pal.minion.utils import coerce_bool as _coerce_bool
 from pal.minion.utils import dedupe_strings as _dedupe_strings
+from pal.minion.utils import safe_token
 from pal.minion.utils import string_list as _string_list
+from pal.minion.work_order import ReviewerWorkOrder, prompt_view_for_reviewer
 from pal.shared import MinionApprovalDecision, TaskContextPack
 
 
-_DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS = 1200
+_DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS = 3600
 
 
 @dataclass
@@ -76,6 +83,7 @@ class MinionRunState:
     stderr_task: asyncio.Task[None] | None = None
     wait_task: asyncio.Task[None] | None = None
     manager_liveness_write_fd: int | None = None
+    runner_payload_path: str = ""
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -228,6 +236,11 @@ class MinionManager:
             return await self.continue_work_order(str(params.get("work_order_id") or ""))
         if method == "recover_work_order":
             return self.recover_work_order(str(params.get("work_order_id") or ""), str(params.get("reason") or ""))
+        if method == "retry_checkpoint_review":
+            return await self.reviews.retry_checkpoint_review(
+                checkpoint_id=str(params.get("checkpoint_id") or ""),
+                work_order_id=str(params.get("work_order_id") or ""),
+            )
         if method == "destroy_work_order_run":
             return await self.destroy_work_order_run(str(params.get("work_order_id") or ""), str(params.get("reason") or ""))
         if method == "pause_work_order":
@@ -291,6 +304,12 @@ class MinionManager:
                 "plan_parent": True,
                 "continuation": continued,
             }
+        pack, metadata_updates = self._with_profile_gate_policy(pack)
+        if metadata_updates:
+            self.tasking_repository.merge_work_order_metadata(pack.work_order_id, metadata_updates)
+        pre_plan_result = await self._maybe_spawn_pre_plan_contract_compiler(pack)
+        if pre_plan_result:
+            return pre_plan_result
         pack = self._inject_skill_manual_context(pack)
         minion_id = f"minion_{uuid4().hex[:10]}"
         run_id = f"run_{uuid4().hex[:12]}"
@@ -300,9 +319,6 @@ class MinionManager:
         pack = TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
         pack = prepare_task_workspace(self.runtime_root, pack, run_id=run_id)
         pack = await self._with_lsp_prewarm(pack)
-        pack, metadata_updates = self._with_profile_gate_policy(pack)
-        if metadata_updates:
-            self.tasking_repository.merge_work_order_metadata(pack.work_order_id, metadata_updates)
         self.tasking_repository.update_work_order_workspace(pack.work_order_id, dict(pack.workspace))
         pack = self._with_runner_debug_log(pack)
         debug_log = dict((pack.metadata or {}).get("debug_log") or {})
@@ -323,6 +339,78 @@ class MinionManager:
             },
         )
         return state.summary()
+
+    async def _maybe_spawn_pre_plan_contract_compiler(self, pack: TaskContextPack) -> dict[str, Any]:
+        spec = _pre_plan_gate_spec(pack)
+        if spec is None:
+            return {}
+        if _is_pre_plan_contract_compiler_pack(pack):
+            return {}
+        contract_state = _pre_plan_contract_state(pack)
+        if _gate_contract_from_pack(pack):
+            return {}
+        status = str(contract_state.get("status") or "").strip().lower()
+        if status == "running":
+            return {
+                "work_order_id": pack.work_order_id,
+                "minion_profile": pack.minion_profile,
+                "status": "pre_plan_contract_running",
+                "planner_deferred": True,
+                "pre_plan_contract": contract_state,
+            }
+        compiler_pack = _build_pre_plan_contract_compiler_pack(pack, spec)
+        compiler_work_order_id = compiler_pack.work_order_id
+        running_state = {
+            "status": "running",
+            "summary": "pre-plan source contract compiler spawned",
+            "compiler_work_order_id": compiler_work_order_id,
+            "gate_spec": spec.to_dict(),
+            "updated_at": utc_now(),
+        }
+        self.tasking_repository.merge_work_order_metadata(
+            pack.work_order_id,
+            {
+                "pre_plan_contract": running_state,
+                "pre_plan_contract_source_pack": pack.to_dict(),
+            },
+        )
+        try:
+            spawned = await self.spawn(compiler_pack.to_dict())
+        except Exception as exc:
+            failed = {
+                **running_state,
+                "status": "spawn_failed",
+                "summary": "manager failed to spawn pre-plan source contract compiler",
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "updated_at": utc_now(),
+            }
+            self.tasking_repository.merge_work_order_metadata(pack.work_order_id, {"pre_plan_contract": failed})
+            raise
+        event = {
+            "event_kind": "pre_plan_contract_started",
+            "minion_id": str(spawned.get("minion_id") or ""),
+            "run_id": str(spawned.get("run_id") or ""),
+            "work_order_id": pack.work_order_id,
+            "minion_profile": str(spawned.get("minion_profile") or compiler_pack.minion_profile),
+            "payload": {
+                "status": "running",
+                "summary": "pre-plan source contract compiler spawned; planner is deferred until the contract is compiled",
+                "compiler_work_order_id": compiler_work_order_id,
+                "compiler_run_id": str(spawned.get("run_id") or ""),
+                "gate_spec": spec.to_dict(),
+            },
+            "created_at": utc_now(),
+        }
+        self._queue_event_delivery(event)
+        self.tasking_repository.record_minion_event(event)
+        return {
+            "work_order_id": pack.work_order_id,
+            "minion_profile": pack.minion_profile,
+            "status": "pre_plan_contract_started",
+            "planner_deferred": True,
+            "pre_plan_contract": dict(event["payload"]),
+            "contract_compiler": spawned,
+        }
 
     async def _with_lsp_prewarm(self, pack: TaskContextPack) -> TaskContextPack:
         metadata = dict(pack.metadata or {})
@@ -349,6 +437,7 @@ class MinionManager:
 
     async def kill(self, run_id: str, reason: str = "") -> dict[str, Any]:
         state = self._require_run(run_id)
+        already_terminal = state.status not in _ACTIVE_RUN_STATUSES
         self._close_liveness_pipe(state)
         process = state.process
         if process is not None and process.returncode is None:
@@ -360,6 +449,10 @@ class MinionManager:
                 with contextlib.suppress(ProcessLookupError):
                     process.kill()
                 await process.wait()
+        if state.status not in _ACTIVE_RUN_STATUSES:
+            return state.summary()
+        if already_terminal:
+            return state.summary()
         self._transition_run_status(state, "killed")
         state.ended_at = utc_now()
         self._record_event(
@@ -525,6 +618,37 @@ class MinionManager:
             "module_id": str(pack.metadata.get("module_id") or pack.metadata.get("parent_module_id") or ""),
             "run": run,
         }
+
+    async def auto_continue_work_order(self, work_order_id: str, *, reason: str = "") -> dict[str, Any]:
+        normalized = str(work_order_id or "").strip()
+        if not normalized:
+            return {"status": "skipped", "reason": "work_order_id_required"}
+        snapshot = self.tasking_repository.read_work_order(normalized)
+        metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {}
+        plan_execution = dict(metadata.get("plan_execution") or {})
+        if str(plan_execution.get("mode") or "") != "module_parent_milestones":
+            return {"status": "skipped", "reason": "not_plan_parent", "work_order_id": normalized}
+        if str(plan_execution.get("status") or "").strip().lower() != "awaiting_continue":
+            return {
+                "status": str(plan_execution.get("status") or snapshot.get("status") or "not_available"),
+                "reason": "not_awaiting_continue",
+                "work_order_id": normalized,
+            }
+        if not bool(plan_execution.get("auto_advance_modules", True)):
+            return {"status": "skipped", "reason": "auto_advance_modules_disabled", "work_order_id": normalized}
+        result = await self.continue_work_order(normalized)
+        event = {
+            "event_kind": "plan_parent_auto_continue",
+            "minion_id": "",
+            "run_id": "",
+            "work_order_id": normalized,
+            "minion_profile": "",
+            "payload": {"reason": reason or "module_completed", **dict(result)},
+            "created_at": utc_now(),
+        }
+        self._queue_event_delivery(event)
+        self.tasking_repository.record_minion_event(event)
+        return result
 
     def pause_work_order(self, work_order_id: str, reason: str = "") -> dict[str, Any]:
         return self.tasking_repository.set_plan_parent_status(work_order_id, "paused", reason=reason)
@@ -925,6 +1049,183 @@ def _is_plan_parent_pack(pack: TaskContextPack) -> bool:
     metadata = dict(pack.metadata or {})
     plan_execution = dict(metadata.get("plan_execution") or {})
     return str(plan_execution.get("mode") or "") == "module_parent_milestones"
+
+
+def _pre_plan_gate_spec(pack: TaskContextPack) -> GateSpec | None:
+    if not _pre_plan_contract_requested(pack):
+        return None
+    for spec in gate_specs_from_pack(pack, trigger=GATE_TRIGGER_BEFORE_PLAN):
+        if spec.strategy == "reviewer" and spec.target_kind in {"", "work_order"}:
+            return spec
+    for spec in _explicit_pre_plan_gate_specs(pack):
+        if spec.trigger == GATE_TRIGGER_BEFORE_PLAN and spec.strategy == "reviewer" and spec.target_kind in {"", "work_order"}:
+            return spec
+    return None
+
+
+def _explicit_pre_plan_gate_specs(pack: TaskContextPack) -> list[GateSpec]:
+    for source in (dict(pack.metadata or {}), dict(pack.workspace or {})):
+        policy = source.get("pre_plan_gate_policy") or source.get("source_contract_gate_policy")
+        if isinstance(policy, dict):
+            return normalize_gate_policy(policy)
+    return normalize_gate_policy({"gates": [SOURCE_CONTRACT_GATE]})
+
+
+def _pre_plan_contract_requested(pack: TaskContextPack) -> bool:
+    metadata = dict(pack.metadata or {})
+    workspace = dict(pack.workspace or {})
+    if _coerce_bool(metadata.get("skip_pre_plan_contract")) or _coerce_bool(workspace.get("skip_pre_plan_contract")):
+        return False
+    for source in (metadata, workspace):
+        for key in ("enable_pre_plan_contract", "require_pre_plan_contract", "pre_plan_contract_required"):
+            if _coerce_bool(source.get(key)):
+                return True
+        state = source.get("pre_plan_contract")
+        if isinstance(state, dict):
+            if _coerce_bool(state.get("enabled")) or _coerce_bool(state.get("required")):
+                return True
+            if str(state.get("status") or "").strip():
+                return True
+            if str(state.get("compiler_work_order_id") or "").strip():
+                return True
+    return False
+
+
+def _is_pre_plan_contract_compiler_pack(pack: TaskContextPack) -> bool:
+    metadata = dict(pack.metadata or {})
+    return bool(metadata.get("pre_plan_contract_compiler"))
+
+
+def _pre_plan_contract_state(pack: TaskContextPack) -> dict[str, Any]:
+    metadata = dict(pack.metadata or {})
+    state = metadata.get("pre_plan_contract")
+    return dict(state) if isinstance(state, dict) else {}
+
+
+def _gate_contract_from_pack(pack: TaskContextPack) -> dict[str, Any]:
+    for value in (
+        pack.workspace.get("gate_contract"),
+        pack.workspace.get("source_gate_contract"),
+        pack.metadata.get("gate_contract"),
+        _pre_plan_contract_state(pack).get("gate_contract"),
+    ):
+        if isinstance(value, dict) and _active_gate_contract_checks(value):
+            return dict(value)
+    return {}
+
+
+def _active_gate_contract_checks(contract: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        dict(item)
+        for item in list(contract.get("checks") or contract.get("checklist") or contract.get("items") or [])
+        if isinstance(item, dict) and not bool(item.get("deleted"))
+    ]
+
+
+def _build_pre_plan_contract_compiler_pack(pack: TaskContextPack, spec: GateSpec) -> TaskContextPack:
+    source_contract = _source_contract_from_pack(pack)
+    compiler_work_order_id = f"wo_pre_plan_contract_{safe_token(pack.work_order_id)}_{uuid4().hex[:8]}"
+    workspace = dict(pack.workspace or {})
+    repo_path = str(workspace.get("repo_path") or workspace.get("source_repo") or "").strip()
+    artifact_dir = str(workspace.get("artifact_dir") or "").strip()
+    review_target = {
+        "gate_kind": "source_contract",
+        "work_order_id": pack.work_order_id,
+        "source_work_order_id": pack.work_order_id,
+        "source_profile": pack.minion_profile,
+        "source_contract": source_contract,
+        "gate_spec": spec.to_dict(),
+        "repo_path": repo_path,
+        "artifact_dir": artifact_dir,
+    }
+    acceptance_criteria = list(spec.required_checks) or [
+        "Compile the source task into indexed semantic-first gate_contract checks before planner work starts.",
+        "Hard user/work-order requirements must be preserved exactly and outrank planning heuristics.",
+        "Use mechanical predicates only for dispatch/topology invariants Pal can verify and that must block plan execution; keep API, type, implementation, test-quality, and behavior requirements semantic.",
+        "Submit gate_contract_submit with the compiled gate_contract.",
+    ]
+    review_workspace = {
+        "repo_path": repo_path,
+        "artifact_dir": artifact_dir,
+        "workspace_policy": {"mode": "read_only_repo"},
+        "pre_plan_contract_source_work_order_id": pack.work_order_id,
+        "review_source_work_order_id": pack.work_order_id,
+        "review_target_gate_kind": "source_contract",
+        "review_target_source_contract": source_contract,
+        "review_target_gate_spec": spec.to_dict(),
+    }
+    reviewer_order = ReviewerWorkOrder(
+        work_order_id=compiler_work_order_id,
+        task_id=f"compile_contract_{safe_token(pack.work_order_id)}",
+        review_target=review_target,
+        acceptance_criteria=acceptance_criteria,
+        allowed_capabilities=[],
+        output_contract={"must_submit": "op_minion_gate_contract_submit"},
+        metadata={"workspace": review_workspace},
+    )
+    metadata = {
+        "task_id": reviewer_order.task_id,
+        "task_title": f"Compile source contract for {pack.work_order_id}",
+        "work_order_title": f"Compile source contract for {pack.work_order_id}",
+        "review_target": review_target,
+        "reviewer_work_order": reviewer_order.to_dict(),
+        "prompt_view": prompt_view_for_reviewer(reviewer_order),
+        "milestones": ["Compile source contract and submit gate_contract"],
+        "pre_plan_contract_compiler": True,
+        "pre_plan_contract_source_work_order_id": pack.work_order_id,
+        "pre_plan_contract_source_pack": pack.to_dict(),
+        "gate_spec": spec.to_dict(),
+    }
+    if isinstance(pack.metadata.get("control_route"), dict):
+        metadata["control_route"] = dict(pack.metadata.get("control_route") or {})
+    return TaskContextPack.from_dict(
+        {
+            "work_order_id": compiler_work_order_id,
+            "goal": f"Compile source contract for {pack.work_order_id}",
+            "instruction": (
+                "Compile the original work order into a structured gate_contract before planner work starts. "
+                "Do not create an implementation plan and do not modify the source repository. "
+                "Convert each hard user/work-order requirement into a semantic gate check by default. "
+                "Use kind=mechanical or hybrid only for dispatch/topology invariants Pal can verify and that must block plan execution, "
+                "such as dangling refs, impossible dependency order, or an explicitly binding structural bound. "
+                "Do not encode public API symbols, label sets, type contracts, test-count quality, or implementation behavior as mechanical count checks; keep those semantic with concrete evidence expectations. "
+                "Submit the result with gate_contract_submit before completing."
+            ),
+            "acceptance_criteria": acceptance_criteria,
+            "workspace": review_workspace,
+            "profile_group": spec.reviewer_profile_group or "software_engineering",
+            "profile_name": spec.reviewer_profile_name or "reviewer",
+            "allowed_capabilities": list(SOURCE_CONTRACT_REVIEWER_CAPABILITIES),
+            "metadata": metadata,
+        }
+    )
+
+
+def _source_contract_from_pack(pack: TaskContextPack) -> dict[str, Any]:
+    metadata = dict(pack.metadata or {})
+    prompt_view = dict(metadata.get("prompt_view") or {})
+    criteria: list[str] = []
+    criteria.extend(_string_list(pack.acceptance_criteria))
+    criteria.extend(_string_list(metadata.get("acceptance_criteria")))
+    criteria.extend(_string_list(prompt_view.get("acceptance_criteria")))
+    contract = {
+        "goal": str(pack.goal or "").strip(),
+        "instruction": str(pack.instruction or "").strip(),
+        "acceptance_criteria": _dedupe_strings(criteria),
+    }
+    overall = _dedupe_strings(
+        [
+            *_string_list(metadata.get("overall_acceptance_criteria")),
+            *_string_list(prompt_view.get("overall_acceptance_criteria")),
+        ]
+    )
+    if overall:
+        contract["overall_acceptance_criteria"] = overall
+    for key in ("task_id", "task_title", "work_order_title"):
+        value = str(metadata.get(key) or "").strip()
+        if value:
+            contract[key] = value
+    return {key: value for key, value in contract.items() if value not in ("", [], {})}
 
 
 def _skill_refs_for_pack(pack: TaskContextPack) -> list[str]:

@@ -206,7 +206,7 @@ class ToolResultPagerStore:
     def _ephemeral_root(runtime_root: Path | None) -> Path | None:
         if runtime_root is None:
             return None
-        return Path(runtime_root) / "tool_results" / "ephemeral"
+        return Path(runtime_root) / "data" / "tool_results" / "ephemeral"
 
 
 @dataclass

@@ -172,31 +172,46 @@ Current capability surface:
 - `minion_read`
 - `minion_profile_list`
 - `minion_profile_read`
+- `minion_plan_search`
+- `minion_plan_read`
+- `minion_submit_plan`
+- `minion_accept_plan`
+- `minion_revise_plan`
 - `minion_draft_work_order`
 - `minion_promote_work_order_draft`
 - `minion_spawn`
 - `minion_kill`
+- `minion_continue_work_order`
+- `minion_pause_work_order`
+- `minion_recover_work_order`
+- `minion_destroy_work_order_run`
 - `minion_finalize`
 
 Work order drafts are minion-owned planning artifacts for user brainstorming and module-boundary discussion. They are searchable, but they are not progress truth. The route is draft -> planner review -> user/Pal confirmation -> formal work order. Promotion is explicit through `minion_promote_work_order_draft`; `minion_spawn` can also accept `draft_id` and let the minion subsystem promote before spawning through the same main entry.
+
+Planning is plan-first. Software planner profiles use the structured `plan_*` builder tools: begin a draft, add constraints/decisions/modules/milestones/acceptance criteria, validate, and submit a frozen draft for `plan_acceptance`. Reviewer minions inspect that draft through plan read/find/get handles and return handle-targeted fixes. Revision planners check out the prior draft and update/delete specific plan nodes instead of rebuilding the whole plan.
 
 Checkpoint is the milestone cursor fact. Completed checkpoints advance the derived current milestone; partial or blocked checkpoints do not.
 
 Progress and checkpoint events are manager/tasking telemetry. They are written to the minion ledger and checkpoint tables, but they are not direct chat notifications. Pal should answer progress questions by inspecting active runs and work order snapshots. Terminal events are the user-facing completion notification path and also synchronize a recent completion observation into Pal's prompt context.
 
-Minion deliverables are file-first. Coder profiles keep their Git task repo/branch and write reports under `minion_outputs/{work_order_id}`. Planner, reviewer, generic, and other one-shot profiles get a manager-allocated folder workspace under `data/minion/workspaces/{run_id}_{profile}` with `work_order.json`, `metadata.json`, `logs/`, and `deliverables/`. The runner exposes `artifact_write`, scoped only to `workspace.artifact_dir`, for report-style deliverables. Software planner profiles use planner `plan_*` builder tools instead of hand-writing JSON; `plan_finalize` compiles the draft into the normal primary `plan.json` artifact. Terminal/checkpoint payloads carry `artifacts[]` plus `primary_artifact`. Large reports should be read from those files instead of being pushed as chat text.
+Minion deliverables are file-first. Coder profiles keep their Git project repo/work-order branch and write reports under `minion_outputs/{work_order_id}`. Planner, reviewer, generic, and other one-shot profiles get a manager-allocated folder workspace under `data/minion/workspaces/{run_id}_{profile}` with `work_order.json`, `metadata.json`, `logs/`, and `deliverables/`. The runner exposes `artifact_write`, scoped only to `workspace.artifact_dir`, for report-style deliverables. Software planner profiles use planner `plan_*` builder tools instead of hand-writing JSON; `plan_finalize` compiles the draft into the normal primary `plan.json` artifact. Terminal/checkpoint payloads carry `artifacts[]` plus `primary_artifact`. Large reports should be read from those files instead of being pushed as chat text.
 
 Terminal event summaries are cleaned before display: `Task Lesson` and `System Lesson` sections are extracted into structured fields and removed from the final completion text. When lessons are present, Pal opens a separate `minion_lesson_approval` interaction with `Accept`, `Reject`, and `Edit` buttons. Accept stores task lessons as tasking continuity, stores system lessons as accepted candidates, and attempts a durable memory commit through `memory_write` when it is available. Reject discards them. Edit pauses absorption and asks for revised lesson text. Pure terminal `memory_candidates` use Pal's generic `memory_candidate_approval` interaction and are committed only after `memory_candidate_decision` approval.
 
 Minion compact is separate from Pal compact. It uses `pal.compaction.minion.v1`, renders as `<compact_context kind="minion" authority="reference_only">`, and carries only task recovery fields such as goal, milestone hint, claimed completed/pending work, repair hints, verification hints, and `must_verify_against`. It does not generate `memory_candidates`; reusable lessons or case memory are proposed at work-order terminal/finalization time.
 
-Coder minion task execution is Git-backed by design. A task owns or resolves a task repo, each work order runs on its own branch, and each completed milestone should correspond to a commit on that branch. A completed checkpoint should carry the milestone index, commit SHA, and artifact references. User acceptance/finalization can later squash milestone commits and merge/apply them to the target branch.
+Coder minion task execution is Git-backed by design. A task owns or resolves a project repo/workspace named by `project_name`; each work order runs on its own branch, and each completed milestone should correspond to a commit on that branch. Module workspaces default to `data/minion/repos/{project_name}/{module_name}` while `task_id` remains the tasking identity. A completed checkpoint should carry the milestone index, commit SHA, and artifact references. User acceptance/finalization can later squash milestone commits and merge/apply them to the target branch.
 
-Minion profiles are declarative TOML templates plus optional runtime overrides in `runtime_root/plugins/minion/profiles/*.toml`. Builtin profiles use `capability_policy.mode = "inherit_filtered"`: spawn starts from Pal's current capability registry, adds profile defaults/provider hooks, then applies the minion deny policy. `core_minion_read` includes scoped discovery/read/call and read-only `memory_recall`; `web_research` ensures `web_search` and `web_read` are available when the slim runner runtime supports them.
+Module execution is serial by default but shaped as a DAG. Accepted plans can compile a rebuildable projection under `data/minion/plan_dags/{parent_work_order_id}.json`. `max_parallel_modules=1` gives automatic serial progression without manual continue prompts; larger values can run independent ready modules concurrently when the scheduler and resources allow it. Local Git baselines use worktrees where possible to avoid cloning the same repo repeatedly.
+
+Minion profiles are declarative TOML templates plus optional runtime overrides in `runtime_root/plugins/minion/profiles/*.toml`. Builtin profiles include generic, software planner, coder, reviewer, and writer profiles. Builtin profiles use either `profile_only` or `inherit_filtered` capability policy depending on their role; inherit-filtered profiles start from Pal's current capability registry, add profile defaults/provider hooks, then apply the minion deny policy. `core_minion_read` includes scoped discovery/read/call and read-only `memory_recall`; `web_research` ensures `web_search` and `web_read` are available when the slim runner runtime supports them.
 
 Runner capability exposure has a default deny policy. The runner can use task tools, report through events, and request approval, but it does not see `intro_*`, `op_minion_*`, memory-write, behavior/skill mutation, channel/plugin management, or lifecycle attach/detach/rescan style operations. This keeps recursive minion spawning and Pal state mutation out of the runner context.
 
-The internal allowed pool can be broad, but the LLM-facing tool surface stays small. Normal minion runs expose scoped discovery/read/call plus direct work tools when allowed: `file_read`, `file_edit`, `file_write`, `shell`, `web_search`, `web_read`, and `memory_recall`. Discovery and read are backed by a scoped runtime view that returns only allowed and non-denied capabilities.
+Minion runners may be launched through the sandbox layer. Linux uses `bubblewrap` when available; unsupported hosts record an unavailable sandbox marker. The sandbox keeps network open, scrubs secret-like environment variables, routes LLM calls through the host broker, assigns run-local HOME/TMP/cache paths under `data/minion/sandbox/runs/{run_id}`, mounts only the required runtime/workspace paths, and replaces high-risk host commands with resident-tool guidance wrappers. Sandbox isolation complements profile/capability policy; it does not replace scoped tool exposure.
+
+The internal allowed pool can be broad, but the LLM-facing tool surface stays small. Normal minion runs expose scoped discovery/read/call plus direct work tools when allowed: `file_read`, `file_edit`, `file_write`, `delete_path`, `git`, `tree`, `search`, `shell`, `artifact_write`/`artifact_edit`, planner `plan_*` builder tools, `web_search`, `web_read`, `memory_recall`, and LSP/code-intelligence tools. Discovery and read are backed by a scoped runtime view that returns only allowed and non-denied capabilities.
 
 The runner prompt requires `memory_recall` after a failed tool/capability call when recall is allowed, before retrying, debugging further, or reporting the milestone blocked.
 
