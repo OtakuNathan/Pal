@@ -15,6 +15,7 @@ GENERATED_COMMIT_EXCLUDES = (
     ":(exclude,glob)**/.pytest_cache/**",
     ":(exclude,glob)**/.mypy_cache/**",
     ":(exclude,glob)**/.ruff_cache/**",
+    ":(exclude,glob)**/.cache/**",
     ":(exclude,glob)**/.coverage",
     ":(exclude,glob)**/htmlcov/**",
     ":(exclude,glob)**/coverage/**",
@@ -38,6 +39,7 @@ LOCAL_GIT_EXCLUDES = (
     ".pytest_cache/",
     ".mypy_cache/",
     ".ruff_cache/",
+    ".cache/",
     ".coverage",
     "htmlcov/",
     "coverage/",
@@ -101,7 +103,17 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
         _git(repo_path, "commit", "--allow-empty", "-m", "minion: initialize project repo", check=True)
     _ensure_local_git_excludes(repo_path)
     environment_baseline_ref = ""
-    environment = prepare_workspace_environment(repo_path, pack, workspace, write_files=created_repo, runtime_root=runtime_root)
+    workspace_environment_policy = _policy_from_pack(pack, "workspace_environment_policy")
+    if workspace_environment_policy:
+        workspace["workspace_environment_policy"] = dict(workspace_environment_policy)
+    environment = prepare_workspace_environment(
+        repo_path,
+        pack,
+        workspace,
+        write_files=created_repo,
+        runtime_root=runtime_root,
+        policy=workspace_environment_policy,
+    )
     if environment:
         workspace["languages"] = list(environment.get("languages") or [])
         workspace["lsp_setup"] = dict(environment.get("lsp_setup") or {})
@@ -242,7 +254,7 @@ def inspect_milestone_checkpoint(repo_path: Path, *, base_sha: str = "") -> dict
     repo = Path(repo_path)
     if not (repo / ".git").exists():
         return {"status": "error", "error": "workspace is not a git repository", "repo_path": str(repo)}
-    status_result = _git(repo, "status", "--porcelain", check=True)
+    status_result = _git_status_excluding_generated(repo)
     head = _current_head(repo)
     base = str(base_sha or "").strip()
     changed_since_base = bool(base and head and head != base)
@@ -265,6 +277,10 @@ def inspect_milestone_checkpoint(repo_path: Path, *, base_sha: str = "") -> dict
             "summary": "milestone checkpoint commit exists",
         }
     return {**payload, "status": "no_changes", "summary": "no milestone checkpoint commit exists"}
+
+
+def _git_status_excluding_generated(repo: Path) -> GitCommandResult:
+    return _git(repo, "status", "--porcelain", "--", ".", *GENERATED_COMMIT_EXCLUDES, check=True)
 
 
 def finalize_work_order_branch(repo_path: Path, *, work_order_branch: str, merge_target: str, message: str) -> dict[str, Any]:
@@ -500,6 +516,25 @@ def _normalize_workspace_paths(workspace: dict[str, Any]) -> dict[str, Any]:
 
 def _with_folder_workspace(runtime_root: Path, pack: TaskContextPack, workspace: dict[str, Any], *, run_id: str = "") -> TaskContextPack:
     prepared_workspace = dict(workspace)
+    workspace_environment_policy = _policy_from_pack(pack, "workspace_environment_policy")
+    if workspace_environment_policy:
+        prepared_workspace["workspace_environment_policy"] = dict(workspace_environment_policy)
+    repo_path = str(prepared_workspace.get("repo_path") or "").strip()
+    if repo_path:
+        environment = prepare_workspace_environment(
+            Path(repo_path).expanduser(),
+            pack,
+            prepared_workspace,
+            write_files=False,
+            runtime_root=runtime_root,
+            policy=workspace_environment_policy,
+        )
+        if environment:
+            prepared_workspace["languages"] = list(environment.get("languages") or [])
+            prepared_workspace["lsp_setup"] = dict(environment.get("lsp_setup") or {})
+            execution_env = dict(environment.get("execution_env") or {})
+            if execution_env:
+                prepared_workspace["execution_env"] = execution_env
     if str(run_id or "").strip():
         preserved_artifact_dir = bool(prepared_workspace.get("preserve_artifact_dir"))
         for key in ("run_dir", "log_dir"):

@@ -648,7 +648,7 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         )
         if envelope is None:
             return
-        self._schedule_receipt_marker(envelope.response_handle)
+        self.queue_status("receipt_marker", response_handle=envelope.response_handle)
         self.queue_status("typing_start", response_handle=envelope.response_handle)
 
     async def _interaction_result_from_update(self, update: Any) -> InteractionResult | None:
@@ -830,13 +830,6 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
             )
         except Exception as exc:
             self._last_status_error = str(exc)
-
-    def _schedule_receipt_marker(self, response_handle: ResponseHandle) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(self._send_receipt_marker_async(response_handle, {}))
 
     async def _typing_loop(self, response_handle: ResponseHandle) -> None:
         if self.application is None:

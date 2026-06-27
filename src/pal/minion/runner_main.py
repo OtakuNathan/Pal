@@ -39,11 +39,40 @@ async def _read_decision(timeout: float | None = None) -> dict[str, Any] | None:
     try:
         if timeout is None:
             return await asyncio.to_thread(read_sidecar_message_sync, sys.stdin.buffer)
-        if not await asyncio.to_thread(_stdin_readable, timeout):
+        if not await _stdin_readable_async(timeout):
             return None
         return read_sidecar_message_sync(sys.stdin.buffer)
     except (asyncio.TimeoutError, EOFError, ValueError):
         return None
+
+
+async def _stdin_readable_async(timeout: float | None) -> bool:
+    try:
+        fd = sys.stdin.buffer.fileno()
+    except Exception:
+        return True
+    loop = asyncio.get_running_loop()
+    ready = loop.create_future()
+
+    def mark_ready() -> None:
+        if not ready.done():
+            ready.set_result(True)
+
+    def mark_timeout() -> None:
+        if not ready.done():
+            ready.set_result(False)
+
+    try:
+        loop.add_reader(fd, mark_ready)
+    except (NotImplementedError, RuntimeError, OSError):
+        return _stdin_readable(timeout)
+    timeout_handle = loop.call_later(max(0.0, float(timeout or 0.0)), mark_timeout)
+    try:
+        return bool(await ready)
+    finally:
+        timeout_handle.cancel()
+        with contextlib.suppress(Exception):
+            loop.remove_reader(fd)
 
 
 def _stdin_readable(timeout: float | None) -> bool:

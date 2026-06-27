@@ -25,10 +25,18 @@ from pal.minion.runner import MinionRunner, MinionRuntimeBundle
 from pal.minion.sandbox import (
     build_sandboxed_runner_invocation,
     ensure_sandbox_files,
+    _git_worktree_metadata_bind_paths,
     scrub_minion_sandbox_env,
     with_minion_sandbox_metadata,
 )
 from pal.shared import RuntimeStatus, TaskContextPack
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise AssertionError(result.stderr or result.stdout or f"git {' '.join(args)} failed")
+    return result
 
 
 class MinionSandboxTests(unittest.TestCase):
@@ -68,6 +76,21 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertEqual(sandbox["backend"], "unavailable")
             self.assertIn("unsupported", sandbox["reason"])
 
+    def test_git_worktree_metadata_bind_paths_resolve_common_git_dir(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_gitmeta_") as tmp:
+            root = Path(tmp)
+            common_dir = root / "source" / ".git"
+            git_dir = common_dir / "worktrees" / "repo"
+            workspace = root / "repo"
+            git_dir.mkdir(parents=True)
+            workspace.mkdir()
+            (workspace / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+            (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+
+            bind_paths = _git_worktree_metadata_bind_paths(workspace)
+
+            self.assertEqual(bind_paths, (common_dir.resolve(),))
+
     def test_sandbox_env_scrubs_secret_like_values_and_enables_broker(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_env_") as tmp:
             env = scrub_minion_sandbox_env(
@@ -100,7 +123,13 @@ class MinionSandboxTests(unittest.TestCase):
                 goal="g",
                 workspace={
                     "repo_path": str(repo),
-                    "execution_env": {"path_prepend": {"PYTHONPATH": [str(src)]}},
+                    "execution_env": {
+                        "vars": {
+                            "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                            "PAL_TOKEN": "secret",
+                        },
+                        "path_prepend": {"PYTHONPATH": [str(src)]},
+                    },
                 },
             )
 
@@ -113,6 +142,8 @@ class MinionSandboxTests(unittest.TestCase):
 
             self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(src))
             self.assertIn("/existing", env["PYTHONPATH"].split(os.pathsep))
+            self.assertEqual(env["CMAKE_EXPORT_COMPILE_COMMANDS"], "ON")
+            self.assertNotIn("PAL_TOKEN", env)
             self.assertIn("PYTHONUSERBASE", env)
 
     def test_blacklist_wrappers_are_generated_as_executable_route_blocks(self) -> None:
@@ -158,6 +189,40 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertNotIn("OPENAI_API_KEY", env)
             self.assertEqual(env["PAL_MINION_LLM_BROKER"], "1")
             self.assertIn("PYTHONPATH", env)
+
+    def test_sandboxed_git_worktree_can_resolve_external_git_dir(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_git_worktree_") as tmp:
+            root = Path(tmp)
+            runtime_root = root / "runtime"
+            source = root / "source"
+            workspace = root / "workspace"
+            source.mkdir()
+            _git(source, "init")
+            _git(source, "checkout", "-B", "main")
+            _git(source, "config", "user.email", "pal-test@example.invalid")
+            _git(source, "config", "user.name", "Pal Test")
+            (source / "README.md").write_text("# source\n", encoding="utf-8")
+            _git(source, "add", "README.md")
+            _git(source, "commit", "-m", "initial")
+            _git(source, "worktree", "add", "-B", "work", str(workspace), "main")
+            pack = with_minion_sandbox_metadata(
+                runtime_root,
+                TaskContextPack(work_order_id="wo", goal="g", workspace={"repo_path": str(workspace)}),
+                run_id="run_git_worktree",
+            )
+
+            argv, env = build_sandboxed_runner_invocation(
+                runtime_root=runtime_root,
+                pack=pack,
+                argv=["git", "status", "--porcelain"],
+                env={"PATH": "/usr/bin:/bin"},
+            )
+            result = subprocess.run(argv, env=env, cwd=str(workspace), capture_output=True, text=True, timeout=20)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "")
 
     def test_sandboxed_python_can_import_runtime_dependencies(self) -> None:
         if not shutil.which("bwrap"):

@@ -30,7 +30,7 @@ from pal.minion.profiles import MinionProfileRegistry, PLAN_REVIEWER_CAPABILITIE
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.turns import apply_minion_turn_to_pack
 from pal.minion.utils import coerce_bool, coerce_int, safe_token
-from pal.minion.work_order import ReviewerWorkOrder, prompt_view_for_reviewer
+from pal.minion.work_order import ReviewerWorkOrder, _prompt_execution_env, prompt_view_for_reviewer
 from pal.shared import TaskContextPack
 
 if TYPE_CHECKING:
@@ -2036,16 +2036,7 @@ def _checkpoint_review_environment_workspace(workspace: dict[str, Any]) -> dict[
             result["lsp_setup"] = {key: list(value) if isinstance(value, tuple) else value for key, value in safe.items()}
     execution_env = workspace.get("execution_env")
     if isinstance(execution_env, dict):
-        safe_env: dict[str, Any] = {}
-        path_prepend = execution_env.get("path_prepend")
-        if isinstance(path_prepend, dict):
-            safe_paths = {
-                str(key): [str(item) for item in list(value) if str(item).strip()]
-                for key, value in dict(path_prepend).items()
-                if isinstance(value, (list, tuple))
-            }
-            if safe_paths:
-                safe_env["path_prepend"] = safe_paths
+        safe_env = _prompt_execution_env(execution_env)
         if safe_env:
             result["execution_env"] = safe_env
     return result

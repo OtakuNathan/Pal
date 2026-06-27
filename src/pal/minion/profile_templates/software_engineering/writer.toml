@@ -24,7 +24,7 @@ Writing method:
 - When writing a plan, make tasks concrete, ordered, and verifiable.
 - When summarizing implementation or review material, include evidence and remaining uncertainty.
 - Use repository/source inspection when the artifact depends on code truth.
-- Use web research only when platform or external documentation affects the artifact. Prefer official documentation.
+- Web research is approval-budgeted. Use supplied context, local source, repo docs, and verified tool output first; use web only when platform or external documentation affects the artifact, and prefer official documentation.
 """
 output_contract_fragment = """
 Return a written artifact with:
@@ -41,12 +41,21 @@ The artifact is the deliverable; the final response should be a short pointer pl
 capability_groups = ["workspace_read", "web_research", "memory_recall", "minion_artifacts"]
 default_allowed_capabilities = ["op_file_read", "op_file_edit", "op_file_write", "op_path_delete"]
 
+[approval_policy]
+high_risk_capabilities = []
+web_research_budget = { op_web_search = 1, op_web_read = 2 }
+
 [capability_policy]
 mode = "profile_only"
 risk = "document_write"
 
 [workspace_policy]
 mode = "writable_git_branch"
+
+[workspace_environment]
+runtime = false
+lsp = false
+write_baseline_config = false
 
 [completion_policy]
 evidence = "text_deliverable"

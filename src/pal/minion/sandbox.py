@@ -59,6 +59,7 @@ class MinionSandboxSpec:
     scratch_dir: Path | None = None
     deny_dir: Path | None = None
     blacklist_commands: tuple[str, ...] = field(default_factory=lambda: MINION_SANDBOX_BLACKLIST_COMMANDS)
+    git_metadata_bind_paths: tuple[Path, ...] = field(default_factory=tuple)
 
     def to_metadata(self) -> dict[str, Any]:
         return {
@@ -68,6 +69,7 @@ class MinionSandboxSpec:
             "workspace_path": str(self.workspace_path or ""),
             "scratch_dir": str(self.scratch_dir or ""),
             "blacklist_commands": list(self.blacklist_commands),
+            "git_metadata_bind_paths": [str(path) for path in self.git_metadata_bind_paths],
             "network": "open",
             "secret_policy": "host_llm_broker",
         }
@@ -109,6 +111,7 @@ def with_minion_sandbox_metadata(runtime_root: Path, pack: TaskContextPack, *, r
             for item in list(sandbox_config.get("blacklist_commands") or MINION_SANDBOX_BLACKLIST_COMMANDS)
             if str(item).strip()
         ),
+        git_metadata_bind_paths=_git_worktree_metadata_bind_paths(workspace_path),
     ).to_metadata()
     return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
 
@@ -186,6 +189,15 @@ def scrub_minion_sandbox_env(
 
 def _apply_workspace_execution_env(env: dict[str, str], pack: TaskContextPack) -> None:
     execution_env = dict((pack.workspace or {}).get("execution_env") or {})
+    vars_payload = execution_env.get("vars")
+    if isinstance(vars_payload, dict):
+        for name, value in dict(vars_payload).items():
+            key = str(name or "").strip()
+            if not _safe_workspace_env_var_name(key):
+                continue
+            text = str(value or "").strip()
+            if text:
+                env[key] = text
     path_prepend = execution_env.get("path_prepend")
     if not isinstance(path_prepend, dict):
         return
@@ -204,6 +216,14 @@ def _apply_workspace_execution_env(env: dict[str, str], pack: TaskContextPack) -
             continue
         existing = [item for item in str(env.get(key) or "").split(os.pathsep) if item]
         env[key] = os.pathsep.join(dict.fromkeys([*additions, *existing]))
+
+
+def _safe_workspace_env_var_name(name: str) -> bool:
+    if not name:
+        return False
+    if any(marker in name.upper() for marker in _SECRET_ENV_MARKERS):
+        return False
+    return all(char.isalnum() or char == "_" for char in name)
 
 
 def ensure_sandbox_files(runtime_root: Path, *, run_id: str, blacklist_commands: tuple[str, ...]) -> tuple[Path, Path]:
@@ -267,6 +287,8 @@ def _build_bwrap_invocation(
     nvm_root = Path.home() / ".nvm"
     if nvm_root.exists():
         _append_bind_path(args, nvm_root, read_only=True)
+    for bind_path in _sandbox_git_metadata_bind_paths(sandbox):
+        _append_bind_path(args, bind_path, read_only=False)
     if workspace_path and workspace_path.exists():
         _append_bind_path(args, workspace_path, read_only=False)
     for command in blacklist:
@@ -307,6 +329,90 @@ def _append_bind_path(args: list[str], path: Path, *, read_only: bool) -> None:
     path = Path(path).expanduser()
     _append_dir_scaffold(args, path)
     args.extend(["--ro-bind" if read_only else "--bind", str(path), str(path)])
+
+
+def _sandbox_git_metadata_bind_paths(sandbox: dict[str, Any]) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for raw in list(sandbox.get("git_metadata_bind_paths") or []):
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        path = Path(value).expanduser()
+        if path.exists():
+            paths.append(path.resolve())
+    return _dedupe_bind_roots(paths)
+
+
+def _git_worktree_metadata_bind_paths(workspace_path: Path | None) -> tuple[Path, ...]:
+    if not workspace_path:
+        return ()
+    workspace = Path(workspace_path).expanduser()
+    git_file = workspace / ".git"
+    if not git_file.is_file():
+        return ()
+    try:
+        text = git_file.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ()
+    prefix = "gitdir:"
+    if not text.lower().startswith(prefix):
+        return ()
+    git_dir_text = text.split(":", 1)[1].strip()
+    if not git_dir_text:
+        return ()
+    git_dir = Path(git_dir_text).expanduser()
+    if not git_dir.is_absolute():
+        git_dir = workspace / git_dir
+    try:
+        git_dir = git_dir.resolve()
+    except OSError:
+        return ()
+    if not git_dir.exists():
+        return ()
+    common_dir = _git_common_dir_from_worktree_admin(git_dir)
+    candidates = [path for path in (common_dir, git_dir) if path is not None and path.exists()]
+    return _dedupe_bind_roots(candidates)
+
+
+def _git_common_dir_from_worktree_admin(git_dir: Path) -> Path | None:
+    common_file = git_dir / "commondir"
+    if not common_file.is_file():
+        return None
+    try:
+        common_text = common_file.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if not common_text:
+        return None
+    common_dir = Path(common_text).expanduser()
+    if not common_dir.is_absolute():
+        common_dir = git_dir / common_dir
+    try:
+        return common_dir.resolve()
+    except OSError:
+        return None
+
+
+def _dedupe_bind_roots(paths: list[Path]) -> tuple[Path, ...]:
+    roots: list[Path] = []
+    for raw_path in paths:
+        try:
+            path = raw_path.resolve()
+        except OSError:
+            continue
+        if any(_path_is_relative_to(path, existing) for existing in roots):
+            continue
+        roots = [existing for existing in roots if not _path_is_relative_to(existing, path)]
+        roots.append(path)
+    return tuple(roots)
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _append_dir_scaffold(args: list[str], path: Path) -> None:

@@ -14,6 +14,7 @@ from pal.lsp.config import LspServerConfig, LspServerFileConfig, load_builtin_ls
 from pal.lsp.connector import AsyncLspConnector
 from pal.lsp.ipc import LspManagerClient
 from pal.lsp.manager import LspManager, LspServerState
+from pal.minion.ipc import MinionManagerClient
 from pal.minion.lsp_prewarm import lsp_prewarm_plan, prewarm_workspace_lsp
 from pal.shared import RuntimeStatus
 
@@ -88,6 +89,18 @@ install_hint = "install pyright"
 
         self.assertGreaterEqual(
             int(LspManagerClient(self.root).request_timeout_seconds * 1000),
+            slowest_window_ms + 10_000,
+        )
+
+    def test_minion_manager_rpc_timeout_covers_lsp_prewarm_window(self) -> None:
+        templates = load_builtin_lsp_templates()
+        slowest_window_ms = max(
+            item.config.startup_timeout_ms + item.config.diagnostics_timeout_ms
+            for item in templates
+        )
+
+        self.assertGreaterEqual(
+            int(MinionManagerClient(self.root).request_timeout_seconds * 1000),
             slowest_window_ms + 10_000,
         )
 

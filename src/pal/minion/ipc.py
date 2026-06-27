@@ -53,10 +53,13 @@ class MinionManagerRpcError(SidecarRpcError):
     pass
 
 
+DEFAULT_MINION_MANAGER_REQUEST_TIMEOUT_SECONDS = 300.0
+
+
 @dataclass
 class MinionManagerClient:
     runtime_root: Path
-    request_timeout_seconds: float = 30.0
+    request_timeout_seconds: float = DEFAULT_MINION_MANAGER_REQUEST_TIMEOUT_SECONDS
     _client: SidecarRpcClient = field(init=False, repr=False)
 
     def __post_init__(self) -> None:

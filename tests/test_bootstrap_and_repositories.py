@@ -3166,6 +3166,54 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(events[3]["next_endpoint_id"], "fallback")
         self.assertEqual(events[-1]["endpoint_id"], "fallback")
 
+    def test_llm_runtime_agenerate_does_not_block_event_loop(self) -> None:
+        endpoint_repository = LLMEndpointRepository()
+        settings_repository = RuntimeSettingRepository()
+        endpoint_repository.ensure_defaults(
+            [
+                {
+                    "endpoint_id": "blocking",
+                    "provider": "stub",
+                    "model_id": "blocking-model",
+                    "api_mode": "openai_chat",
+                    "base_url": "stub://local/blocking",
+                    "credential_ref": "stub-blocking",
+                    "priority": 0,
+                    "enabled": True,
+                }
+            ]
+        )
+
+        class BlockingInvoker:
+            def invoke(self, endpoint, request):
+                _ = endpoint, request
+                time.sleep(0.08)
+                return CanonicalLLMOutcome(text="done", tool_calls=[], finish_reason=LLMFinishReason.STOP)
+
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
+            settings_repository=settings_repository,
+            endpoint_invoker=BlockingInvoker(),
+        )
+
+        async def scenario() -> CanonicalLLMOutcome:
+            task = asyncio.create_task(
+                runtime.agenerate(
+                    CanonicalLLMRequest(
+                        messages=[{"role": "user", "content": "hello"}],
+                        max_output_tokens=64,
+                    )
+                )
+            )
+            started_at = time.monotonic()
+            await asyncio.sleep(0.01)
+            self.assertLess(time.monotonic() - started_at, 0.05)
+            return await asyncio.wait_for(task, timeout=1.0)
+
+        outcome = asyncio.run(scenario())
+
+        self.assertEqual(outcome.text, "done")
+
     def test_llm_runtime_generate_stream_returns_normalized_events(self) -> None:
         endpoint_repository = LLMEndpointRepository()
         settings_repository = RuntimeSettingRepository()
@@ -4738,15 +4786,16 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         await self.endpoint._on_update(update, None)
 
         await asyncio.sleep(0.05)
-        self.assertTrue(any(kind == "reaction" for kind, _ in self.fake_bot.actions))
+        self.assertFalse(any(kind == "reaction" for kind, _ in self.fake_bot.actions))
         self.assertFalse(any(kind == "typing" for kind, _ in self.fake_bot.actions))
-        self.assertEqual([item.kind for item in self.endpoint.status_outbox], ["typing_start"])
+        self.assertEqual([item.kind for item in self.endpoint.status_outbox], ["receipt_marker", "typing_start"])
 
         envelopes = self.endpoint.poll()
         self.assertEqual(len(envelopes), 1)
         self.assertEqual(envelopes[0].event.payload["text"], "hello")
         self.endpoint.flush_status_outbox()
         await asyncio.sleep(0.05)
+        self.assertTrue(any(kind == "reaction" for kind, _ in self.fake_bot.actions))
         self.assertTrue(any(kind == "typing" for kind, _ in self.fake_bot.actions))
 
     async def test_telegram_endpoint_serializes_replies_for_same_thread(self) -> None:

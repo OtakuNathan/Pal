@@ -30,6 +30,7 @@ class MinionProfile:
     default_approval_policy: dict[str, Any] = field(default_factory=dict)
     checkpoint_policy: dict[str, Any] = field(default_factory=dict)
     workspace_policy: dict[str, Any] = field(default_factory=dict)
+    workspace_environment_policy: dict[str, Any] = field(default_factory=dict)
     completion_policy: dict[str, Any] = field(default_factory=dict)
     capability_policy: dict[str, Any] = field(default_factory=dict)
     gate_policy: dict[str, Any] = field(default_factory=dict)
@@ -58,6 +59,7 @@ class MinionProfile:
             "approval_policy": dict(self.default_approval_policy),
             "checkpoint_policy": dict(self.checkpoint_policy),
             "workspace_policy": dict(self.workspace_policy),
+            "workspace_environment_policy": dict(self.workspace_environment_policy),
             "completion_policy": dict(self.completion_policy),
             "capability_policy": dict(self.capability_policy),
             "gate_policy": dict(self.gate_policy),
@@ -100,6 +102,7 @@ class MinionProfile:
             default_approval_policy=_dict(payload.get("default_approval_policy") or payload.get("approval_policy")),
             checkpoint_policy=_dict(payload.get("checkpoint_policy")),
             workspace_policy=_dict(payload.get("workspace_policy")),
+            workspace_environment_policy=_dict(payload.get("workspace_environment_policy") or payload.get("workspace_environment")),
             completion_policy=_dict(payload.get("completion_policy")),
             capability_policy=_dict(payload.get("capability_policy")),
             gate_policy=_dict(payload.get("gate_policy")),
@@ -201,6 +204,12 @@ class MinionProfileRegistry:
         workspace_policy = dict(profile.workspace_policy)
         if isinstance(pack.workspace.get("workspace_policy"), dict):
             workspace_policy.update(dict(pack.workspace.get("workspace_policy") or {}))
+        workspace_environment_policy = dict(profile.workspace_environment_policy)
+        workspace_environment_override = pack.workspace.get("workspace_environment_policy")
+        if not isinstance(workspace_environment_override, dict):
+            workspace_environment_override = pack.workspace.get("workspace_environment")
+        if isinstance(workspace_environment_override, dict):
+            workspace_environment_policy.update(dict(workspace_environment_override or {}))
         completion_policy = dict(profile.completion_policy)
         if isinstance(pack.workspace.get("completion_policy"), dict):
             completion_policy.update(dict(pack.workspace.get("completion_policy") or {}))
@@ -224,6 +233,7 @@ class MinionProfileRegistry:
         resolved_profile["effective_approval_policy"] = dict(approval_policy)
         resolved_profile["effective_checkpoint_policy"] = dict(checkpoint_policy)
         resolved_profile["effective_workspace_policy"] = dict(workspace_policy)
+        resolved_profile["effective_workspace_environment_policy"] = dict(workspace_environment_policy)
         resolved_profile["effective_completion_policy"] = dict(completion_policy)
         resolved_profile["effective_capability_policy"] = dict(capability_policy)
         resolved_profile["effective_gate_policy"] = dict(gate_policy)
@@ -233,6 +243,8 @@ class MinionProfileRegistry:
             workspace["checkpoint_policy"] = dict(checkpoint_policy)
         if workspace_policy:
             workspace["workspace_policy"] = dict(workspace_policy)
+        if workspace_environment_policy:
+            workspace["workspace_environment_policy"] = dict(workspace_environment_policy)
         if completion_policy:
             workspace["completion_policy"] = dict(completion_policy)
         if gate_policy:

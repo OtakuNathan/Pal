@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -245,7 +246,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "commands_run": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "For checkpoint/repair pass verdicts, include at least one command/check entry. Prefer op_minion_review_checkpoint evidence_selectors for checkpoint reviews. If using commands_run directly, entries must describe real op_exec_shell evidence from this reviewer run and include covers=[acceptance index or exact criterion].",
+                    "description": "For checkpoint/repair pass verdicts, include at least one command/check entry. Prefer op_minion_review_checkpoint evidence_selectors for checkpoint reviews. If using commands_run directly, entries must describe real op_exec_shell/op_git evidence from this reviewer run and include covers=[acceptance index or exact criterion].",
                 },
                 "api_evidence": {
                     "type": "array",
@@ -284,7 +285,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "checks": {
                     "type": "array",
                     "items": {"type": "object"},
-                    "description": "Compatibility fallback for command/check evidence. Prefer evidence_selectors. If used, write semantic command intent and covers; Pal resolves matching recorded op_exec_shell evidence.",
+                    "description": "Compatibility fallback for command/check evidence. Prefer evidence_selectors. If used, write semantic command intent and covers; Pal resolves matching recorded op_exec_shell/op_git evidence.",
                 },
                 "api_checks": {
                     "type": "array",
@@ -1353,18 +1354,19 @@ def _minion_review_checkpoint_result(call: CanonicalToolCall, workspace: dict[st
         api_evidence = [*api_evidence, *selector_api_evidence]
     evidence_error = selector_error or ref_error
     if evidence_error and not (commands_run or api_evidence):
+        structured = {
+            "reason": "review_checkpoint_evidence_ref_invalid",
+            "error": evidence_error,
+            "usable_evidence_refs": _usable_review_evidence_refs(workspace),
+            "next_payload_shape": _review_gate_next_payload_shape({}, workspace, _string_list(workspace.get("review_target_acceptance_criteria"))),
+        }
         return CanonicalToolResult(
             name=call.name,
             ok=False,
             text=evidence_error,
-            structured={
-                "reason": "review_checkpoint_evidence_ref_invalid",
-                "error": evidence_error,
-                "usable_evidence_refs": _usable_review_evidence_refs(workspace),
-                "next_payload_shape": _review_gate_next_payload_shape({}, workspace, _string_list(workspace.get("review_target_acceptance_criteria"))),
-            },
+            structured=structured,
             call_id=call.call_id,
-            llm_text=evidence_error,
+            llm_text=_review_gate_validation_llm_text(evidence_error, structured),
             status=RuntimeStatus.INVALID,
         )
     gate_args: dict[str, Any] = {
@@ -1481,7 +1483,7 @@ def _review_checkpoint_evidence_ref_checks(raw: Any, workspace: dict[str, Any]) 
             if key not in entry and resolved.get(key) not in (None, "", []):
                 entry[key] = resolved.get(key)
         kind = str(entry.get("kind") or "").strip()
-        if kind == "command":
+        if _is_command_review_evidence_kind(kind):
             commands.append(entry)
         elif kind in {"lsp", "source"}:
             api_evidence.append(entry)
@@ -1507,7 +1509,7 @@ def _review_checkpoint_selector_checks(raw: Any, workspace: dict[str, Any]) -> t
             return [], [], f"no review evidence matched selector: {description or '<empty>'}"
         entry = _review_checkpoint_entry_from_resolved_evidence(requested, resolved)
         kind = str(entry.get("kind") or "").strip()
-        if kind == "command":
+        if _is_command_review_evidence_kind(kind):
             commands.append(entry)
         elif kind in {"lsp", "source"}:
             api_evidence.append(entry)
@@ -1541,6 +1543,8 @@ def _review_checkpoint_entry_from_resolved_evidence(requested: dict[str, Any], r
         "exit_code",
         "status",
         "summary",
+        "stdout_preview",
+        "stderr_preview",
         "path",
         "query",
         "method",
@@ -1596,6 +1600,8 @@ def _selector_kind(selector: dict[str, Any]) -> str:
     ).strip().lower()
     if raw in {"shell", "test", "tests", "pytest", "build", "command_check"}:
         return "command"
+    if raw in {"git", "op_git"}:
+        return "git"
     if raw in {"diagnostics", "language_server", "typecheck", "type_check"}:
         return "lsp"
     if raw in {"file", "read", "code", "doc", "docs"}:
@@ -1607,12 +1613,18 @@ def _selector_kind_matches(requested: str, actual: str) -> bool:
     actual = str(actual or "").strip().lower()
     requested = str(requested or "").strip().lower()
     if not requested:
-        return actual in {"command", "source", "lsp"}
+        return actual in {"command", "git", "source", "lsp"}
     if requested == actual:
         return True
+    if requested == "command":
+        return _is_command_review_evidence_kind(actual)
     if requested == "api":
         return actual in {"source", "lsp"}
     return False
+
+
+def _is_command_review_evidence_kind(kind: str) -> bool:
+    return str(kind or "").strip().lower() in {"command", "git"}
 
 
 def _selector_bool(selector: dict[str, Any], key: str) -> bool:
@@ -1638,7 +1650,7 @@ def _review_evidence_selector_score(selector: dict[str, Any], candidate: dict[st
         ("tool_name", ("tool_name",)),
         ("operation", ("operation", "method")),
         ("method", ("method", "operation")),
-        ("path_contains", ("path", "file")),
+        ("path_contains", ("path", "file", "summary", "query")),
         ("command_contains", ("command",)),
         ("summary_contains", ("summary", "command", "path", "query")),
     ):
@@ -1653,7 +1665,18 @@ def _review_evidence_selector_score(selector: dict[str, Any], candidate: dict[st
     if query:
         haystack = " ".join(
             str(candidate.get(key) or "")
-            for key in ("summary", "command", "path", "query", "operation", "method", "tool_name", "file")
+            for key in (
+                "summary",
+                "command",
+                "stdout_preview",
+                "stderr_preview",
+                "path",
+                "query",
+                "operation",
+                "method",
+                "tool_name",
+                "file",
+            )
         )
         if _text_contains_semantically(haystack, query):
             score += 20
@@ -1771,10 +1794,19 @@ def _review_gate_validation_error_payload(error: str, args: dict[str, Any], work
 
 
 def _review_gate_validation_llm_text(error: str, payload: dict[str, Any]) -> str:
-    lines = [f"review gate validation failed: {error}"]
+    reason = str(payload.get("reason") or "").strip()
+    label = "review checkpoint evidence selection failed" if reason == "review_checkpoint_evidence_ref_invalid" else "review gate validation failed"
+    lines = [f"{label}: {error}"]
     missing = [str(item) for item in list(payload.get("missing_acceptance_criteria") or []) if str(item).strip()]
     if missing:
         lines.append("missing_acceptance_criteria: " + "; ".join(missing[:5]))
+    missing_refs = [
+        str(item.get("id") or item.get("ref") or "").strip()
+        for item in list((payload.get("next_payload_shape") or {}).get("missing_cover_refs") or [])
+        if isinstance(item, dict) and str(item.get("id") or item.get("ref") or "").strip()
+    ]
+    if missing_refs:
+        lines.append("missing_cover_refs: " + ", ".join(missing_refs[:10]))
     refs = list(payload.get("usable_evidence_refs") or [])
     if refs:
         rendered = []
@@ -1787,7 +1819,15 @@ def _review_gate_validation_llm_text(error: str, payload: dict[str, Any]) -> str
             rendered.append(f"{ref} ({kind}: {summary})".strip())
         if rendered:
             lines.append("usable_evidence_refs: " + "; ".join(rendered))
-    lines.append("Fix only the named invalid fields and resubmit the gate.")
+    next_shape = payload.get("next_payload_shape")
+    if isinstance(next_shape, dict) and next_shape:
+        lines.append("next_payload_shape:\n```json\n" + _json_preview(next_shape, limit=2400) + "\n```")
+        lines.append(
+            "Resubmit the review gate using this shape now; preserve already-valid evidence and add the missing covers. "
+            "Do not run more tools unless no listed evidence can prove a missing acceptance criterion."
+        )
+    else:
+        lines.append("Fix only the named invalid fields and resubmit the gate.")
     return "\n".join(lines)
 
 
@@ -1820,17 +1860,33 @@ def _deduped_criteria(sources: list[Any]) -> list[str]:
 
 
 def _missing_acceptance_criteria(args: dict[str, Any], criteria: list[str]) -> list[str]:
+    return [str(item.get("criterion") or "") for item in _missing_acceptance_items(args, criteria)]
+
+
+def _missing_acceptance_items(args: dict[str, Any], criteria: list[str]) -> list[dict[str, str]]:
     if str(args.get("verdict") or "").strip().lower() != "pass":
         return []
     if str(args.get("gate_kind") or "").strip() not in {"checkpoint_verification", "repair_verification"}:
         return []
     covered = _gate_coverage_refs(args)
-    missing: list[str] = []
+    missing: list[dict[str, str]] = []
     for index, criterion in enumerate(criteria, start=1):
-        aliases = {str(index), f"#{index}", f"ac{index}", f"acceptance_{index}", _loose_coverage_token(criterion)}
-        if not any(alias in covered for alias in aliases):
-            missing.append(criterion)
+        if not _acceptance_criterion_covered(index, criterion, covered):
+            missing.append({"id": f"AC-{index}", "ref": str(index), "criterion": criterion})
     return missing
+
+
+def _acceptance_criterion_covered(index: int, criterion: str, covered: set[str]) -> bool:
+    aliases = {
+        str(index),
+        f"#{index}",
+        f"ac{index}",
+        f"ac-{index}",
+        f"acceptance_{index}",
+        f"acceptance-{index}",
+        _loose_coverage_token(criterion),
+    }
+    return any(alias in covered for alias in aliases)
 
 
 def _gate_coverage_refs(args: dict[str, Any]) -> set[str]:
@@ -1874,18 +1930,25 @@ def _review_gate_next_payload_shape(args: dict[str, Any], workspace: dict[str, A
         str(dict(args.get("target") or {}).get("checkpoint_id") or workspace.get("review_target_checkpoint_id") or "").strip()
     )
     checklist = build_acceptance_checklist(criteria)
-    coverage = ["AC-1"] if checklist else []
-    command_ref = next((item for item in _usable_review_evidence_refs(workspace) if item.get("kind") == "command"), {})
+    missing_cover_refs = _missing_acceptance_items(args, criteria)
+    coverage = [str(item.get("id") or "") for item in missing_cover_refs if str(item.get("id") or "").strip()]
+    if not coverage and checklist:
+        coverage = [str(item.get("id") or f"AC-{index}") for index, item in enumerate(checklist, start=1)]
+    command_ref = next(
+        (item for item in _usable_review_evidence_refs(workspace) if _is_command_review_evidence_kind(str(item.get("kind") or ""))),
+        {},
+    )
     api_ref = next((item for item in _usable_review_evidence_refs(workspace) if item.get("kind") in {"source", "lsp"}), {})
     if checkpoint_target:
         return {
             "tool": "review_checkpoint",
+            "missing_cover_refs": missing_cover_refs,
             "args": {
                 "verdict": str(args.get("verdict") or "pass"),
                 "summary": "<concise verdict summary>",
                 "evidence_selectors": [
                     {
-                        "kind": "command",
+                        "kind": str(command_ref.get("kind") or "command"),
                         "contains": _selector_hint_for_ref(command_ref) or "<pytest/build command substring>",
                         "latest_success": True,
                         "covers": coverage or ["<acceptance ref>"],
@@ -1902,6 +1965,7 @@ def _review_gate_next_payload_shape(args: dict[str, Any], workspace: dict[str, A
         }
     return {
         "tool": "review_gate_submit",
+        "missing_cover_refs": missing_cover_refs,
         "args": {
             "gate_kind": str(args.get("gate_kind") or "<gate_kind>"),
             "target": dict(args.get("target") or {}),
@@ -1919,6 +1983,16 @@ def _selector_hint_for_ref(ref: dict[str, Any]) -> str:
         if text:
             return text[:160]
     return ""
+
+
+def _json_preview(value: Any, *, limit: int) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=True, indent=2, default=str)
+    except TypeError:
+        text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
 
 
 def _with_review_tool_provenance(args: dict[str, Any], workspace: dict[str, Any], *, repository: MinionTaskingRepository) -> dict[str, Any]:
@@ -1955,7 +2029,7 @@ def _with_review_tool_provenance(args: dict[str, Any], workspace: dict[str, Any]
 
 
 def _bind_command_evidence_refs(args: dict[str, Any], refs: list[dict[str, Any]]) -> None:
-    command_refs = [dict(item) for item in refs if str(item.get("kind") or "") == "command"]
+    command_refs = [dict(item) for item in refs if _is_command_review_evidence_kind(str(item.get("kind") or ""))]
     command_refs_by_command = {
         _normalize_command_text(item.get("command") or ""): dict(item)
         for item in command_refs
@@ -2016,7 +2090,7 @@ def _default_review_checkpoint_runtime_evidence(args: dict[str, Any], refs: list
     covers = _all_acceptance_coverage_refs(criteria)
     commands = [dict(item) if isinstance(item, dict) else item for item in list(args.get("commands_run") or [])]
     api_evidence = [dict(item) if isinstance(item, dict) else item for item in list(args.get("api_evidence") or [])]
-    command_refs = [dict(item) for item in refs if str(item.get("kind") or "") == "command"]
+    command_refs = [dict(item) for item in refs if _is_command_review_evidence_kind(str(item.get("kind") or ""))]
     api_refs = [dict(item) for item in refs if str(item.get("kind") or "") in {"source", "lsp"}]
     if not _has_backed_command_evidence(commands):
         command_ref = _latest_successful_ref(command_refs) or (command_refs[-1] if command_refs else {})
@@ -2547,7 +2621,7 @@ def _review_gate_provenance_error(args: dict[str, Any], workspace: dict[str, Any
     if shell_violations:
         return "reviewer shell mutated the audited workspace; pass verdict is blocked until the review is rerun from a clean read-only workspace"
     evidence_refs = [dict(item) for item in list(workspace.get("review_tool_evidence_refs") or []) if isinstance(item, dict)]
-    command_refs = [item for item in evidence_refs if str(item.get("kind") or "") == "command"]
+    command_refs = [item for item in evidence_refs if _is_command_review_evidence_kind(str(item.get("kind") or ""))]
     lsp_refs = [item for item in evidence_refs if str(item.get("kind") or "") == "lsp"]
     if gate_kind in {"checkpoint_verification", "repair_verification"}:
         command_error = _command_evidence_provenance_error(list(args.get("commands_run") or []), command_refs)
@@ -2572,7 +2646,7 @@ def _command_evidence_provenance_error(commands_run: list[Any], command_refs: li
             continue
         if item.get("exit_code") is not None or status in {"passed", "pass", "ok", "failed", "fail"}:
             if command and command not in normalized_refs:
-                return f"commands_run entry lacks matching shell evidence: {command}"
+                return f"commands_run entry lacks matching command evidence: {command}"
     return ""
 
 
@@ -2729,13 +2803,22 @@ def _review_tool_evidence_ref(target_name: str, tool_call: CanonicalToolCall, re
         "status": str(result.status or ""),
         "summary": _preview_text(_tool_result_text(result), limit=240),
     }
-    if kind == "command":
-        ref["command"] = str(args.get("cmd") or args.get("command") or "").strip()
-        ref["cwd"] = str(args.get("cwd") or args.get("workdir") or "")
+    if _is_command_review_evidence_kind(kind):
+        command = str(args.get("cmd") or args.get("command") or "").strip()
+        if kind == "git" and command and not command.lstrip().startswith("git "):
+            command = f"git {command}"
+        ref["command"] = command
+        ref["cwd"] = str(args.get("cwd") or args.get("workdir") or structured.get("cwd") or "")
         if isinstance(structured, dict):
+            if kind == "git" and "returncode" in structured:
+                ref["exit_code"] = structured.get("returncode")
             for key in ("exit_code", "stdout_preview", "stderr_preview"):
                 if key in structured:
                     ref[key] = structured.get(key)
+            if kind == "git":
+                for source_key, target_key in (("stdout", "stdout_preview"), ("stderr", "stderr_preview")):
+                    if str(structured.get(source_key) or "").strip():
+                        ref[target_key] = _preview_text(str(structured.get(source_key) or ""), limit=2000)
     if kind == "lsp":
         ref["operation"] = _lsp_operation_name(normalized_target)
         if ref["operation"] == "status":
@@ -2764,6 +2847,8 @@ def _review_tool_evidence_ref(target_name: str, tool_call: CanonicalToolCall, re
 def _review_tool_evidence_kind(target_name: str) -> str:
     if target_name in {"op_exec_shell", "run_shell", "shell", "shell_exec"}:
         return "command"
+    if target_name in {"op_git", "git"}:
+        return "git"
     if _is_lsp_capability_name(target_name):
         return "lsp"
     if target_name in {"op_tree", "op_search", "op_file_read"}:

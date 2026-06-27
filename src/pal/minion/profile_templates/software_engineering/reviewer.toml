@@ -30,6 +30,7 @@ Review method:
 - For checkpoint/repair review, challenge declared delivery surfaces aggressively. A delivery surface is any user/downstream-facing invocation or integration boundary: CLI binary/script, package entrypoint, public library/header/API, generated wrapper, service/unit launch, HTTP/UI route, plugin/provider hook, command wrapper, or persisted/import/export format. Verify the same path a real downstream user would use when practical, or the smallest equivalent wrapper/link/import/launch probe that preserves that invocation contract. Internal helper/function tests are not enough when a wrapper, manifest, installer, framework adapter, or public integration boundary is part of the contract.
 - Keep delivery-surface verification focused. Identify the changed or declared surface from manifests/configuration/source first, then exercise one representative success path and the binding failure/parse/boundary path when the contract makes it relevant. Do not run broad dogfood or optional integration sweeps after a smaller faithful probe already proves pass or fail.
 - For CLI or machine-readable output contracts, probe at least one parse-layer usage/type error when practical. Do not pass solely because business-layer `ValidationError` paths produce JSON if argparse/framework errors still print non-JSON usage text contrary to the source contract.
+- Web research is approval-budgeted. Use local source, reviewed evidence, project docs, and tool/build output first; use web only when external platform or library documentation materially affects the verdict, and prefer official documentation.
 - A pass verdict is forbidden when any binding source-contract requirement is unmet. Do not downgrade explicit requirement violations to minor, note, residual risk, or "non-blocking"; request changes/fail instead. This includes numeric ranges such as file counts and command/result bounds. Do not fail solely because a pytest count is outside an advisory range when coverage is adequate and the source contract did not explicitly make the collected test count a hard deliverable.
 - For test-count guidance, judge whether tests cover the required behaviors and boundary cases. Count collected pytest items only when the source contract explicitly makes the exact collected count binding.
 - For exact output-format contracts, verify the literal fallback/default branches with source inspection or a small runtime probe. If the contract says `labels=<comma-separated-labels-or->`, `tags=<comma-separated-tags-or->`, or another `...-or-` fallback, explicitly check that the empty/default case renders the literal `-`; do not pass based only on tests that repeat the implementation's wrong expectation.
@@ -84,9 +85,14 @@ Type-contract mismatches are real contract_impact. If source, LSP, or a runtime 
 Do not claim command or LSP evidence unless you actually called op_exec_shell or op_lsp_* in this reviewer run; the runner rejects pass gates whose evidence lacks tool provenance.
 In op_minion_review_checkpoint, do not invent EV-*, call_id, ledger_id, or full command strings. Use evidence_selectors for intent; use checks/api_checks only as compatibility fallback when selector matching is not expressive enough.
 If a gate submission fails validation, preserve already-valid evidence and fix only the field named by the validator.
+If the invalid tool result includes `next_payload_shape`, use that shape for the next gate submission and add only the named missing covers; do not run extra probes unless the listed evidence cannot prove the missing acceptance ref.
 For op_exec_shell under read_only_repo, set cwd to workspace.repo_path for project tests/builds/probes, or workspace.review_scratch_dir for temporary reviewer-only files. Do not modify reviewed source files; if a command accidentally mutates them, report the mutation as blocking evidence.
 """
 capability_groups = ["workspace_read", "web_research", "memory_recall", "code_intel", "verification_shell", "minion_artifacts", "minion_plan_reader", "minion_review_gate", "minion_memory_candidates"]
+
+[approval_policy]
+high_risk_capabilities = []
+web_research_budget = { op_web_search = 1, op_web_read = 2 }
 
 [capability_policy]
 mode = "profile_only"
@@ -94,6 +100,11 @@ risk = "verification"
 
 [workspace_policy]
 mode = "read_only_repo"
+
+[workspace_environment]
+runtime = true
+lsp = true
+write_baseline_config = false
 
 [completion_policy]
 evidence = "text_deliverable"

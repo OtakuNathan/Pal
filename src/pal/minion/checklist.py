@@ -85,6 +85,8 @@ def build_evidence_projection(refs: Any) -> list[dict[str, Any]]:
             "file_sha256",
             "freshness",
             "unavailable_reason",
+            "stdout_preview",
+            "stderr_preview",
         ):
             if ref.get(key) not in (None, "", []):
                 item[key] = ref.get(key)

@@ -876,6 +876,7 @@ def _has_review_command_evidence(commands_run: list[dict[str, Any]]) -> bool:
 def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict[str, Any]:
     artifact = validate_final_plan_artifact(payload)
     errors: list[str] = []
+    errors.extend(_plan_artifact_gate_check_ref_errors(artifact))
     module_ids: list[str] = []
     modules_by_id: dict[str, ModulePlan] = {}
     for module_index, module in enumerate(artifact.modules):
@@ -1016,6 +1017,52 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
         ).encode("utf-8")
     ).hexdigest()
     return validation
+
+
+def _plan_artifact_gate_check_ref_errors(artifact: PlanArtifact) -> list[str]:
+    metadata = dict(artifact.metadata or {})
+    active_refs = _plan_artifact_gate_check_refs(metadata)
+    errors: list[str] = []
+    seen: set[tuple[str, str]] = set()
+
+    def visit(location: str, value: Any) -> None:
+        for ref in _string_list(value):
+            if ref in active_refs:
+                continue
+            key = (location, ref)
+            if key in seen:
+                continue
+            seen.add(key)
+            errors.append(f"{location} references unknown gate_check_ref {ref}")
+
+    for item in _dict_list(metadata.get("constraints")):
+        visit(f"constraint {item.get('id') or item.get('handle') or '-'}", item.get("gate_check_refs"))
+    for item in _dict_list(metadata.get("design_decisions")):
+        visit(f"decision {item.get('id') or item.get('handle') or '-'}", item.get("gate_check_refs"))
+    for module in artifact.modules:
+        module_label = f"module {module.module_id or '-'}"
+        module_metadata = dict(module.metadata or {})
+        visit(module_label, module_metadata.get("gate_check_refs"))
+        for milestone in module.internal_milestones:
+            milestone_label = f"milestone {milestone.milestone_id or '-'}"
+            milestone_metadata = dict(milestone.metadata or {})
+            visit(milestone_label, milestone_metadata.get("gate_check_refs"))
+            for item in _dict_list(milestone_metadata.get("acceptance_checklist")):
+                visit(f"acceptance {item.get('id') or '-'}", item.get("gate_check_refs"))
+    return errors
+
+
+def _plan_artifact_gate_check_refs(metadata: dict[str, Any]) -> set[str]:
+    gate_contract = _dict(metadata.get("gate_contract"))
+    refs: set[str] = set()
+    for index, item in enumerate(_dict_list(gate_contract.get("checks"))):
+        ref = str(item.get("ref") or "").strip()
+        if not ref:
+            raw_index = item.get("index")
+            check_index = _coerce_int(raw_index, default=index)
+            ref = f"gate:{check_index}"
+        refs.add(ref)
+    return refs
 
 
 def plan_module_order_for_execution(payload: PlanArtifact | dict[str, Any]) -> list[str]:
@@ -1241,7 +1288,45 @@ def _prompt_workspace(workspace: dict[str, Any]) -> dict[str, Any]:
                 key: list(value) if isinstance(value, tuple) else value
                 for key, value in safe_lsp_setup.items()
             }
+    execution_env = _prompt_execution_env(data.get("execution_env"))
+    if execution_env:
+        result["execution_env"] = execution_env
     return result
+
+
+def _prompt_execution_env(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    vars_payload = value.get("vars")
+    if isinstance(vars_payload, dict):
+        safe_vars = {
+            str(key): str(var_value)
+            for key, var_value in dict(vars_payload).items()
+            if _safe_prompt_env_key(str(key)) and isinstance(var_value, (str, int, float, bool))
+        }
+        if safe_vars:
+            result["vars"] = safe_vars
+    path_prepend = value.get("path_prepend")
+    if isinstance(path_prepend, dict):
+        safe_paths = {
+            str(key): [str(item) for item in list(paths) if str(item).strip()]
+            for key, paths in dict(path_prepend).items()
+            if _safe_prompt_env_key(str(key)) and isinstance(paths, (list, tuple))
+        }
+        if safe_paths:
+            result["path_prepend"] = safe_paths
+    return result
+
+
+def _safe_prompt_env_key(value: str) -> bool:
+    key = str(value or "").strip()
+    if not key:
+        return False
+    upper = key.upper()
+    if any(marker in upper for marker in ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "ACCESS_KEY", "PRIVATE_KEY")):
+        return False
+    return all(char.isalnum() or char == "_" for char in key)
 
 
 def _merge_prompt_workspace(existing: Any, workspace: dict[str, Any]) -> dict[str, Any]:

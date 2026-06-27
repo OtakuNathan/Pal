@@ -472,6 +472,7 @@ class MinionRunner:
     shell_mutation_violations: list[dict[str, Any]] = field(default_factory=list)
     review_tool_evidence_refs: list[dict[str, Any]] = field(default_factory=list)
     git_mutation_approved: bool = False
+    web_research_usage: dict[str, int] = field(default_factory=dict)
     auto_accept_approvals: bool = False
     user_interaction: MinionUserInteractionPort | None = field(default=None, init=False, repr=False)
     _memory_l3: MockL3Plugin | None = field(default=None, init=False, repr=False)
@@ -886,7 +887,11 @@ class MinionRunner:
         if checkpoint_payload.get("ask_user_question"):
             return False
         allowed = {str(item) for item in self.pack.allowed_capabilities}
-        if "op_minion_artifact_write" not in allowed and "op_minion_plan_finalize" not in allowed:
+        if not {
+            "op_minion_artifact_write",
+            "op_minion_plan_finalize",
+            "op_minion_plan_validate_and_submit_for_review",
+        }.intersection(allowed):
             return False
         validation = dict(checkpoint_payload.get("plan_validation") or {})
         validation_status = str(validation.get("status") or "").strip().lower()
@@ -1243,8 +1248,38 @@ class MinionRunner:
                 )
             self.git_mutation_approved = True
             git_mutation_approval_handled = True
-        if not git_mutation_approval_handled and await self._requires_approval(target_name, tool_call):
+        approval_handled = git_mutation_approval_handled
+        if not approval_handled and await self._requires_approval(target_name, tool_call):
             decision = await self._request_approval(target_name, tool_call)
+            if decision != "accept":
+                self.blocked_summary = f"approval {decision or 'timeout'} for {target_name}"
+                return CanonicalToolResult(
+                    name=tool_call.name,
+                    ok=False,
+                    text=f"approval {decision or 'timeout'}",
+                    structured={"reason": "approval_not_accepted", "decision": decision or "timeout", "capability": target_name},
+                    call_id=tool_call.call_id,
+                    llm_text=f"approval {decision or 'timeout'}",
+                    status=RuntimeStatus.ERROR,
+                )
+            approval_handled = True
+        if not approval_handled and await self._requires_web_research_approval(target_name, tool_call):
+            status = self._web_research_budget_status(target_name)
+            used = status["used"] if status else 0
+            budget = status["budget"] if status else 0
+            decision = await self._request_approval(
+                target_name,
+                tool_call,
+                approval_kind="web_research_budget",
+                title="Minion web research budget",
+                risk="medium",
+                impact="Minion used the included web research budget for this run and requested permission before another web call.",
+                metadata={
+                    "web_research_budget": budget,
+                    "web_research_used": used,
+                    "web_research_budget_key": str(status.get("key") or "") if status else "",
+                },
+            )
             if decision != "accept":
                 self.blocked_summary = f"approval {decision or 'timeout'} for {target_name}"
                 return CanonicalToolResult(
@@ -1258,6 +1293,7 @@ class MinionRunner:
                 )
         before_snapshot = {} if self._sandboxed() else self._shell_audit_snapshot(target_name)
         result = await execution_runtime.execute_tool_async(tool_call, allow_tools=True, turn_id=self.run_id)
+        self._record_web_research_usage(target_name)
         self._record_shell_audit_violation(target_name, tool_call, before_snapshot)
         self._record_review_tool_evidence(target_name, tool_call, result)
         return result
@@ -1461,6 +1497,54 @@ class MinionRunner:
             return False
         return self._user_interaction_port().should_request_approval(capability_name, self.pack.approval_policy or {})
 
+    async def _requires_web_research_approval(self, capability_name: str, tool_call: CanonicalToolCall) -> bool:
+        _ = tool_call
+        if self.auto_accept_approvals:
+            return False
+        status = self._web_research_budget_status(capability_name)
+        if not status:
+            return False
+        return int(status["used"]) >= int(status["budget"])
+
+    def _web_research_budget_status(self, capability_name: str) -> dict[str, Any] | None:
+        canonical_name = _web_research_capability_name(capability_name)
+        if canonical_name is None:
+            return None
+        budget_policy = (self.pack.approval_policy or {}).get("web_research_budget")
+        if budget_policy is None:
+            return None
+        statuses: list[dict[str, Any]] = []
+        if isinstance(budget_policy, dict):
+            total_budget = _optional_nonnegative_int(
+                budget_policy.get("total", budget_policy.get("web", budget_policy.get("all")))
+            )
+            if total_budget is not None:
+                statuses.append({"key": "total", "used": self.web_research_usage.get("total", 0), "budget": total_budget})
+            capability_budget = None
+            for key in _web_research_budget_keys(canonical_name):
+                if key in budget_policy:
+                    capability_budget = _optional_nonnegative_int(budget_policy.get(key))
+                    break
+            if capability_budget is not None:
+                statuses.append(
+                    {"key": canonical_name, "used": self.web_research_usage.get(canonical_name, 0), "budget": capability_budget}
+                )
+        else:
+            total_budget = _optional_nonnegative_int(budget_policy)
+            if total_budget is not None:
+                statuses.append({"key": "total", "used": self.web_research_usage.get("total", 0), "budget": total_budget})
+        if not statuses:
+            return None
+        exceeded = [status for status in statuses if int(status["used"]) >= int(status["budget"])]
+        return exceeded[0] if exceeded else statuses[0]
+
+    def _record_web_research_usage(self, capability_name: str) -> None:
+        canonical_name = _web_research_capability_name(capability_name)
+        if canonical_name is None:
+            return
+        self.web_research_usage[canonical_name] = self.web_research_usage.get(canonical_name, 0) + 1
+        self.web_research_usage["total"] = self.web_research_usage.get("total", 0) + 1
+
     async def _requires_git_mutation_approval(self, capability_name: str, tool_call: CanonicalToolCall) -> bool:
         if not _is_git_capability_name(capability_name):
             return False
@@ -1469,11 +1553,26 @@ class MinionRunner:
         cmd = str(_effective_tool_args(tool_call).get("cmd") or "").strip()
         return _git_command_is_mutating(cmd)
 
-    async def _request_approval(self, capability_name: str, tool_call: CanonicalToolCall) -> str:
+    async def _request_approval(
+        self,
+        capability_name: str,
+        tool_call: CanonicalToolCall,
+        *,
+        approval_kind: str = "high_risk",
+        title: str | None = None,
+        risk: str = "high",
+        impact: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         decision = await self._user_interaction_port().request_approval(
             capability_name=capability_name,
             args_summary=dict(tool_call.args),
             approval_policy=self.pack.approval_policy or {},
+            approval_kind=approval_kind,
+            title=title,
+            risk=risk,
+            impact=impact,
+            metadata=metadata,
         )
         self.auto_accept_approvals = self._user_interaction_port().auto_accept_approvals
         return decision
@@ -2619,6 +2718,35 @@ def _is_shell_capability_name(name: object) -> bool:
 
 def _is_git_capability_name(name: object) -> bool:
     return str(name or "").strip() in {"op_git", "git"}
+
+
+def _web_research_capability_name(name: object) -> str | None:
+    normalized = str(name or "").strip()
+    if normalized in {"op_web_search", "search_web", "web_search"}:
+        return "op_web_search"
+    if normalized in {"op_web_read", "read_web", "web_read"}:
+        return "op_web_read"
+    return None
+
+
+def _web_research_budget_keys(canonical_name: str) -> tuple[str, ...]:
+    if canonical_name == "op_web_search":
+        return ("op_web_search", "search_web", "web_search", "search")
+    if canonical_name == "op_web_read":
+        return ("op_web_read", "read_web", "web_read", "read")
+    return (canonical_name,)
+
+
+def _optional_nonnegative_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0:
+        return None
+    return number
 
 
 _GIT_MUTATION_COMMANDS = {

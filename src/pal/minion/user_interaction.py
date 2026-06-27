@@ -30,18 +30,26 @@ class MinionUserInteractionPort:
         capability_name: str,
         args_summary: dict[str, Any],
         approval_policy: dict[str, Any],
+        approval_kind: str = "high_risk",
+        title: str | None = None,
+        risk: str = "high",
+        impact: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         approval_id = f"appr_{uuid4().hex[:16]}"
+        event_metadata = {"approval_kind": str(approval_kind or "approval")}
+        event_metadata.update(dict(metadata or {}))
         await self.emit_event(
             "approval_requested",
             {
                 "approval_id": approval_id,
-                "title": "Minion high-risk operation",
+                "title": title or "Minion high-risk operation",
                 "requested_action": capability_name,
-                "risk": "high",
-                "impact": "Minion requested permission before running a high-risk operation.",
+                "risk": risk,
+                "impact": impact or "Minion requested permission before running a high-risk operation.",
                 "target": capability_name,
                 "args_summary": dict(args_summary),
+                "metadata": event_metadata,
             },
         )
         timeout = float((approval_policy or {}).get("decision_timeout_seconds") or 300)

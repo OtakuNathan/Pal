@@ -432,6 +432,7 @@ Run the workflow.
         self.assertEqual(skill.module_id, "skill")
         self.assertTrue(skill.active)
         self.assertIn("<runtime_root>/plugins/lsp/servers/<server_id>.toml", skill.manual_text)
+        self.assertIn("<runtime_root>/plugins/minion/workspace_environment/<preparer_id>.toml", skill.manual_text)
         self.assertIn("WorkspaceEnvironmentPreparer", skill.manual_text)
         self.assertIn("workspace_environment.py", skill.manual_text)
         self.assertIn("op_lsp_mgmt_rescan", skill.capability_refs)

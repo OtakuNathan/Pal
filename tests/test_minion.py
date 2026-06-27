@@ -69,7 +69,14 @@ from pal.minion import (
     register_with_core as register_minion_with_core,
 )
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice
-from pal.minion.git_env import _git, commit_milestone, finalize_work_order_branch, prepare_git_task_environment, prepare_task_workspace
+from pal.minion.git_env import (
+    _git,
+    commit_milestone,
+    finalize_work_order_branch,
+    inspect_milestone_checkpoint,
+    prepare_git_task_environment,
+    prepare_task_workspace,
+)
 from pal.minion.gates import (
     GateChecklistEntry,
     GateDefinition,
@@ -99,6 +106,7 @@ from pal.minion.scoped_execution import (
     _minion_checkpoint_commit_result,
     _minion_review_checkpoint_result,
     _minion_review_gate_submit_result,
+    _review_tool_evidence_ref,
 )
 from pal.minion.review_orchestrator import (
     _checkpoint_gate_requires_repair,
@@ -110,7 +118,7 @@ from pal.minion.review_orchestrator import (
     review_scratch_dir,
 )
 from pal.minion.workspace_tools import _write_minion_artifact
-from pal.minion.workspace_environment import prepare_workspace_environment
+from pal.minion.workspace_environment import prepare_workspace_environment, workspace_languages
 from pal.minion.prompt_adapter import (
     build_minion_task_envelope as _build_minion_task_envelope,
     build_minion_prompt_messages,
@@ -1681,6 +1689,16 @@ class MinionContractTests(unittest.TestCase):
                     ],
                 )
                 plan["metadata"] = {"languages": ["python"]}
+                for module_index, module in enumerate(plan["modules"]):
+                    module_metadata = module.setdefault("metadata", {})
+                    if 0 < module_index < len(plan["modules"]) - 1:
+                        module_metadata["module_quality_criteria"] = [
+                            f"{module['module_id']} preserves its module contract after revision."
+                        ]
+                    for milestone in list(module.get("internal_milestones") or []):
+                        milestone.setdefault("metadata", {})["checkpoint_admission_evidence"] = [
+                            f"{milestone['milestone_id']} has checkpoint evidence before dispatch."
+                        ]
                 plan["modules"][-1]["consumed_interfaces"] = [
                     {
                         "name": "implementation.contracts",
@@ -2129,7 +2147,7 @@ class MinionContractTests(unittest.TestCase):
                         "op_minion_plan_add_acceptance_criterion",
                         "op_minion_plan_end_milestone",
                         "op_minion_plan_end_module",
-                        "op_minion_plan_finalize",
+                        "op_minion_plan_validate_and_submit_for_review",
                     ],
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_contract"},
                 )
@@ -2158,7 +2176,7 @@ class MinionContractTests(unittest.TestCase):
                     result = await scoped.execute_tool_async(call)
                     self.assertTrue(result.ok, result.text)
 
-                payload = json.loads((root / "artifacts" / "plan.json").read_text(encoding="utf-8"))
+                payload = json.loads((root / "artifacts" / "plan.draft.json").read_text(encoding="utf-8"))
                 gate_contract = payload["metadata"]["gate_contract"]
                 self.assertEqual(gate_contract["checks"][0]["ref"], "gate:0")
                 self.assertEqual(gate_contract["checks"][0]["index"], 0)
@@ -2205,8 +2223,18 @@ class MinionContractTests(unittest.TestCase):
                         "compatibility": "Join verifies the implementation contract.",
                     }
                 ]
-                plan["modules"][1]["metadata"] = {"module_kind": "module", "gate_check_refs": ["gate:0"]}
+                for module in plan["modules"]:
+                    for milestone in list(module.get("internal_milestones") or []):
+                        milestone.setdefault("metadata", {})["checkpoint_admission_evidence"] = [
+                            f"{milestone['milestone_id']} has checkpoint evidence."
+                        ]
+                plan["modules"][1]["metadata"] = {
+                    "module_kind": "module",
+                    "gate_check_refs": ["gate:0"],
+                    "module_quality_criteria": ["Dangling gate ref module quality is reviewable."],
+                }
                 plan["modules"][1]["internal_milestones"][0]["metadata"] = {
+                    "checkpoint_admission_evidence": ["module_dangling_gate_ref_m1 has checkpoint evidence."],
                     "acceptance_checklist": [
                         {
                             "id": "AC-1",
@@ -2260,7 +2288,7 @@ class MinionContractTests(unittest.TestCase):
                         "op_minion_plan_add_acceptance_criterion",
                         "op_minion_plan_end_milestone",
                         "op_minion_plan_end_module",
-                        "op_minion_plan_finalize",
+                        "op_minion_plan_validate_and_submit_for_review",
                     ],
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_mechanical"},
                 )
@@ -2308,7 +2336,7 @@ class MinionContractTests(unittest.TestCase):
                         "op_minion_plan_add_acceptance_criterion",
                         "op_minion_plan_end_milestone",
                         "op_minion_plan_end_module",
-                        "op_minion_plan_finalize",
+                        "op_minion_plan_validate_and_submit_for_review",
                     ],
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_alias"},
                 )
@@ -2599,7 +2627,7 @@ class MinionContractTests(unittest.TestCase):
                     result = await scoped.execute_tool_async(call)
                     self.assertTrue(result.ok, result.text)
 
-                payload = json.loads((root / "artifacts" / "plan.json").read_text(encoding="utf-8"))
+                payload = json.loads((root / "artifacts" / "plan.draft.json").read_text(encoding="utf-8"))
                 mechanical = payload["metadata"]["gate_contract"]["checks"][0]["mechanical_check"]
                 self.assertEqual(mechanical["type"], "module_count")
                 self.assertEqual(mechanical["min"], 3)
@@ -2999,7 +3027,7 @@ class MinionContractTests(unittest.TestCase):
                         "op_minion_plan_add_acceptance_criterion",
                         "op_minion_plan_end_milestone",
                         "op_minion_plan_end_module",
-                        "op_minion_plan_finalize",
+                        "op_minion_plan_validate_and_submit_for_review",
                     ],
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_unlinked"},
                 )
@@ -3045,7 +3073,7 @@ class MinionContractTests(unittest.TestCase):
                         "op_minion_plan_add_acceptance_criterion",
                         "op_minion_plan_end_milestone",
                         "op_minion_plan_end_module",
-                        "op_minion_plan_finalize",
+                        "op_minion_plan_validate_and_submit_for_review",
                     ],
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_no_languages"},
                 )
@@ -3081,7 +3109,7 @@ class MinionContractTests(unittest.TestCase):
                         "op_minion_plan_add_acceptance_criterion",
                         "op_minion_plan_end_milestone",
                         "op_minion_plan_end_module",
-                        "op_minion_plan_finalize",
+                        "op_minion_plan_validate_and_submit_for_review",
                     ],
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_no_interfaces"},
                 )
@@ -3565,6 +3593,13 @@ class MinionContractTests(unittest.TestCase):
                     "servers": [],
                     "skipped": ["cpp skipped; missing LSP server template(s): clangd"],
                 },
+                "execution_env": {
+                    "vars": {
+                        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                        "PAL_TOKEN": "secret",
+                    },
+                    "path_prepend": {"PATH": ["/tmp/prepared-bin"]},
+                },
             },
             allowed_capabilities=["op_file_read", "op_file_write"],
             metadata={
@@ -3588,6 +3623,12 @@ class MinionContractTests(unittest.TestCase):
         self.assertEqual(parsed["prompt_view"]["workspace"]["languages"], ["cpp"])
         self.assertEqual(parsed["prompt_view"]["workspace"]["lsp_setup"]["servers"], [])
         self.assertIn("missing LSP server template", parsed["prompt_view"]["workspace"]["lsp_setup"]["skipped"][0])
+        self.assertEqual(
+            parsed["prompt_view"]["workspace"]["execution_env"]["vars"]["CMAKE_EXPORT_COMPILE_COMMANDS"],
+            "ON",
+        )
+        self.assertNotIn("PAL_TOKEN", parsed["prompt_view"]["workspace"]["execution_env"]["vars"])
+        self.assertEqual(parsed["prompt_view"]["workspace"]["execution_env"]["path_prepend"]["PATH"], ["/tmp/prepared-bin"])
         self.assertEqual(parsed["prompt_view"]["allowed_capabilities"], ["read_file", "write_file"])
 
     def test_fallback_task_prompt_hides_source_repo(self) -> None:
@@ -4098,7 +4139,7 @@ class MinionContractTests(unittest.TestCase):
             self.assertEqual(checkpoint["payload"]["status"], "completed")
             self.assertEqual(checkpoint["payload"]["plan_validation"]["status"], "valid")
             self.assertEqual(checkpoint["payload"]["plan_ref"]["plan_id"], "plan_glm_repaired")
-            self.assertEqual(checkpoint["payload"]["plan_ref"]["relative_path"], "plan.json")
+            self.assertEqual(checkpoint["payload"]["plan_ref"]["relative_path"], "plan.draft.json")
             terminal = next(event for event in events if event["event_kind"] == "terminal")
             self.assertEqual(terminal["payload"]["status"], "completed")
 
@@ -4279,10 +4320,18 @@ class MinionContractTests(unittest.TestCase):
                 list(PLAN_BUILDER_INITIAL_CAPABILITIES),
             )
             self.assertEqual(pack.workspace["workspace_policy"]["mode"], "read_only_repo")
+            self.assertEqual(
+                pack.workspace["workspace_environment_policy"],
+                {"runtime": False, "lsp": True, "write_baseline_config": False},
+            )
             self.assertEqual(pack.workspace["completion_policy"]["evidence"], "text_deliverable")
             self.assertEqual(pack.minion_profile, "software_engineering.planner")
             self.assertEqual(pack.resolved_profile["canonical_profile_id"], "software_engineering.planner")
             self.assertEqual(pack.resolved_profile["profile_group"], "software_engineering")
+            self.assertEqual(
+                pack.resolved_profile["effective_workspace_environment_policy"],
+                {"runtime": False, "lsp": True, "write_baseline_config": False},
+            )
             self.assertEqual(pack.allowed_skills, [])
             self.assertEqual(pack.resolved_profile["skill_refs"], pack.allowed_skills)
             self.assertEqual(pack.resolved_profile["effective_skill_refs"], pack.allowed_skills)
@@ -4371,6 +4420,43 @@ class MinionContractTests(unittest.TestCase):
         self.assertEqual(profiles["generic"].preferred_endpoint_id, "")
         for profile in profiles.values():
             self.assertIn("preferred_endpoint_id", profile.to_dict())
+
+    def test_builtin_software_profiles_expose_workspace_environment_policy(self) -> None:
+        profiles = {profile.canonical_profile_id: profile for profile in MinionProfileRegistry().list_profiles()}
+
+        self.assertEqual(
+            profiles["software_engineering.coder"].workspace_environment_policy,
+            {"runtime": True, "lsp": True, "write_baseline_config": True},
+        )
+        self.assertEqual(
+            profiles["software_engineering.reviewer"].workspace_environment_policy,
+            {"runtime": True, "lsp": True, "write_baseline_config": False},
+        )
+        self.assertEqual(
+            profiles["software_engineering.planner"].workspace_environment_policy,
+            {"runtime": False, "lsp": True, "write_baseline_config": False},
+        )
+        self.assertEqual(
+            profiles["software_engineering.writer"].workspace_environment_policy,
+            {"runtime": False, "lsp": False, "write_baseline_config": False},
+        )
+        self.assertIn("workspace_environment_policy", profiles["generic"].to_dict())
+
+    def test_builtin_web_profiles_define_web_research_approval_budget(self) -> None:
+        registry = MinionProfileRegistry()
+        profiles = {profile.canonical_profile_id: profile for profile in registry.list_profiles()}
+        expected_budget = {"op_web_search": 1, "op_web_read": 2}
+
+        for profile_id in ("software_engineering.coder", "software_engineering.reviewer", "software_engineering.writer"):
+            self.assertEqual(profiles[profile_id].default_approval_policy["web_research_budget"], expected_budget)
+            pack = registry.resolve_pack(
+                TaskContextPack(work_order_id=f"wo_{profile_id.replace('.', '_')}", goal="use profile"),
+                requested_profile=profile_id,
+            )
+            self.assertEqual(pack.approval_policy["web_research_budget"], expected_budget)
+            self.assertEqual(pack.resolved_profile["effective_approval_policy"]["web_research_budget"], expected_budget)
+
+        self.assertNotIn("web_research_budget", profiles["software_engineering.planner"].default_approval_policy)
 
     def test_profile_string_fields_are_not_split_into_characters(self) -> None:
         profile = MinionProfile.from_dict(
@@ -4472,8 +4558,8 @@ class MinionContractTests(unittest.TestCase):
         self.assertNotIn("op_exec_shell", pack.allowed_capabilities)
         self.assertIn("op_file_read", pack.allowed_capabilities)
         self.assertIn("op_memory_recall", pack.allowed_capabilities)
-        self.assertIn("op_web_search", pack.allowed_capabilities)
-        self.assertIn("op_web_read", pack.allowed_capabilities)
+        self.assertNotIn("op_web_search", pack.allowed_capabilities)
+        self.assertNotIn("op_web_read", pack.allowed_capabilities)
         self.assertNotIn("llm_set_active_endpoint", pack.allowed_capabilities)
         self.assertNotIn("op_fake_ambient", pack.allowed_capabilities)
         self.assertNotIn("op_minion_task_read", pack.allowed_capabilities)
@@ -4526,6 +4612,10 @@ class MinionContractTests(unittest.TestCase):
                         'capability_groups = ["workspace_read"]',
                         "[workspace_policy]",
                         'mode = "read_only_repo"',
+                        "[workspace_environment]",
+                        "runtime = false",
+                        "lsp = true",
+                        "write_baseline_config = false",
                         "[completion_policy]",
                         'evidence = "text_deliverable"',
                     ]
@@ -4542,6 +4632,10 @@ class MinionContractTests(unittest.TestCase):
             self.assertEqual(profile.profile_group, "runtime_software")
             self.assertEqual(profile.canonical_profile_id, "runtime_software.planner")
             self.assertEqual(profile.workspace_policy["mode"], "read_only_repo")
+            self.assertEqual(
+                profile.workspace_environment_policy,
+                {"runtime": False, "lsp": True, "write_baseline_config": False},
+            )
             self.assertIsNone(registry.get("planner"))
 
     def test_runtime_profile_file_overrides_builtin_profile(self) -> None:
@@ -8137,6 +8231,252 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
         self.assertNotIn("PYTHONPATH", "\n".join(prepared.workspace["lsp_setup"]["skipped"]))
 
+    def test_git_task_environment_detects_existing_python_project_runtime_env(self) -> None:
+        source = self.root / "source_python_detected_src_layout"
+        _init_git_source_repo(
+            source,
+            {
+                "pyproject.toml": "[project]\nname = \"example-pkg\"\n",
+                "src/example_pkg/__init__.py": "VALUE = 1\n",
+                "tests/test_example.py": "from example_pkg import VALUE\n\ndef test_value():\n    assert VALUE == 1\n",
+            },
+        )
+        pack = self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_python_detected_src_layout",
+                goal="implement python feature in existing project",
+                metadata={"task_id": "task_python_detected_src_layout"},
+                workspace={"source_repo": str(source)},
+            )
+        )
+
+        prepared = prepare_git_task_environment(self.root, pack)
+        repo = Path(prepared.workspace["repo_path"])
+
+        self.assertEqual(prepared.workspace["languages"][0], "python")
+        self.assertEqual(
+            prepared.workspace["execution_env"]["path_prepend"]["PYTHONPATH"],
+            [str(repo / "src")],
+        )
+
+    def test_python_runtime_env_does_not_depend_on_lsp_template(self) -> None:
+        repo = self.root / "python_runtime_without_pyright"
+        (repo / "src" / "example_pkg").mkdir(parents=True)
+        (repo / "pyproject.toml").write_text("[project]\nname = \"example-pkg\"\n", encoding="utf-8")
+        (repo / "src" / "example_pkg" / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+        environment = prepare_workspace_environment(
+            repo,
+            TaskContextPack(work_order_id="wo_python_no_pyright", goal="prepare python"),
+            {},
+            write_files=True,
+            available_lsp_server_ids=set(),
+        )
+
+        self.assertEqual(environment["languages"][0], "python")
+        self.assertEqual(environment["execution_env"]["path_prepend"]["PYTHONPATH"], [str(repo / "src")])
+        self.assertEqual(environment["lsp_setup"]["servers"], [])
+        self.assertIn("missing LSP server template", "\n".join(environment["lsp_setup"]["skipped"]))
+
+    def test_cpp_cmake_runtime_env_does_not_depend_on_lsp_template(self) -> None:
+        repo = self.root / "cpp_cmake_runtime_without_clangd"
+        repo.mkdir()
+        (repo / "CMakeLists.txt").write_text(
+            "\n".join(
+                [
+                    "cmake_minimum_required(VERSION 3.16)",
+                    "project(example LANGUAGES CXX)",
+                    "add_executable(example src/main.cpp)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (repo / "src").mkdir()
+        (repo / "src" / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+
+        environment = prepare_workspace_environment(
+            repo,
+            TaskContextPack(work_order_id="wo_cpp_cmake_no_clangd", goal="prepare cpp"),
+            {},
+            write_files=True,
+            available_lsp_server_ids=set(),
+        )
+
+        self.assertEqual(environment["languages"][0], "cpp")
+        self.assertEqual(environment["execution_env"]["vars"]["CMAKE_EXPORT_COMPILE_COMMANDS"], "ON")
+        self.assertEqual(environment["execution_env"]["vars"]["CTEST_OUTPUT_ON_FAILURE"], "1")
+        self.assertIn("CMAKE_BUILD_PARALLEL_LEVEL", environment["execution_env"]["vars"])
+        self.assertEqual(environment["lsp_setup"]["servers"], [])
+        self.assertIn("missing LSP server template", "\n".join(environment["lsp_setup"]["skipped"]))
+
+    def test_workspace_environment_policy_can_disable_runtime_and_lsp(self) -> None:
+        repo = self.root / "cpp_cmake_policy_disabled"
+        repo.mkdir()
+        (repo / "CMakeLists.txt").write_text(
+            "\n".join(
+                [
+                    "cmake_minimum_required(VERSION 3.16)",
+                    "project(example LANGUAGES CXX)",
+                    "add_executable(example src/main.cpp)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (repo / "src").mkdir()
+        (repo / "src" / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+
+        environment = prepare_workspace_environment(
+            repo,
+            TaskContextPack(work_order_id="wo_cpp_policy_disabled", goal="prepare cpp"),
+            {"workspace_environment_policy": {"runtime": False, "lsp": False}},
+            write_files=True,
+        )
+
+        self.assertEqual(environment["languages"][0], "cpp")
+        self.assertEqual(environment["execution_env"], {})
+        self.assertEqual(environment["lsp_setup"]["servers"], [])
+        self.assertEqual(environment["lsp_setup"]["created_files"], [])
+        self.assertFalse((repo / ".clangd").exists())
+
+    def test_workspace_environment_policy_can_select_preparer_by_id(self) -> None:
+        repo = self.root / "cpp_cmake_preparer_selected"
+        repo.mkdir()
+        (repo / "CMakeLists.txt").write_text(
+            "\n".join(
+                [
+                    "cmake_minimum_required(VERSION 3.16)",
+                    "project(example LANGUAGES CXX)",
+                    "add_executable(example src/main.cpp)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (repo / "src").mkdir()
+        (repo / "src" / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+
+        environment = prepare_workspace_environment(
+            repo,
+            TaskContextPack(work_order_id="wo_cpp_policy_preparer", goal="prepare cpp"),
+            {"workspace_environment_policy": {"preparers": ["clangd"]}},
+            write_files=True,
+        )
+
+        self.assertEqual(environment["languages"][0], "cpp")
+        self.assertEqual(environment["execution_env"], {})
+        self.assertEqual(environment["lsp_setup"]["servers"], ["clangd"])
+        self.assertEqual(environment["lsp_setup"]["created_files"], [".clangd"])
+        self.assertTrue((repo / ".clangd").exists())
+
+    def test_workspace_environment_uses_runtime_environment_template_for_new_language(self) -> None:
+        repo = self.root / "runtime_workspace_environment_template_repo"
+        repo.mkdir()
+        (repo / "build_tools").mkdir()
+        (repo / "main.foo").write_text("print 1\n", encoding="utf-8")
+        config_dir = self.root / "plugins" / "minion" / "workspace_environment"
+        config_dir.mkdir(parents=True)
+        (config_dir / "foo-runtime.toml").write_text(
+            "\n".join(
+                [
+                    'preparer_id = "foo-runtime"',
+                    'kind = "runtime"',
+                    'language_ids = ["foo"]',
+                    "",
+                    "[env.vars]",
+                    'FOO_ENV = "ready"',
+                    "",
+                    "[[env.path_prepend]]",
+                    'name = "FOO_PATH"',
+                    'path = "build_tools"',
+                    'if_exists = "build_tools"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        environment = prepare_workspace_environment(
+            repo,
+            TaskContextPack(work_order_id="wo_runtime_env_template", goal="prepare foo", metadata={"languages": ["foo"]}),
+            {},
+            write_files=True,
+            runtime_root=self.root,
+        )
+
+        self.assertEqual(environment["languages"], ["foo"])
+        self.assertEqual(environment["execution_env"]["vars"]["FOO_ENV"], "ready")
+        self.assertEqual(environment["execution_env"]["path_prepend"]["FOO_PATH"], [str(repo / "build_tools")])
+        self.assertEqual(environment["lsp_setup"]["servers"], [])
+        self.assertIn("no LSP server template advertises language_id=foo", "\n".join(environment["lsp_setup"]["skipped"]))
+
+    def test_workspace_environment_runtime_template_can_override_builtin_preparer(self) -> None:
+        repo = self.root / "runtime_workspace_environment_override_repo"
+        repo.mkdir()
+        (repo / "CMakeLists.txt").write_text(
+            "\n".join(
+                [
+                    "cmake_minimum_required(VERSION 3.16)",
+                    "project(example LANGUAGES CXX)",
+                    "add_executable(example src/main.cpp)",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        (repo / "src").mkdir()
+        (repo / "src" / "main.cpp").write_text("int main() { return 0; }\n", encoding="utf-8")
+        config_dir = self.root / "plugins" / "minion" / "workspace_environment"
+        config_dir.mkdir(parents=True)
+        (config_dir / "cpp-cmake-runtime.toml").write_text(
+            "\n".join(
+                [
+                    'preparer_id = "cpp-cmake-runtime"',
+                    'kind = "runtime"',
+                    'language_ids = ["cpp"]',
+                    'repo_markers = ["CMakeLists.txt"]',
+                    "",
+                    "[env.vars]",
+                    'CMAKE_EXPORT_COMPILE_COMMANDS = "OFF"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        environment = prepare_workspace_environment(
+            repo,
+            TaskContextPack(work_order_id="wo_runtime_env_override", goal="prepare cpp"),
+            {},
+            write_files=True,
+            runtime_root=self.root,
+        )
+
+        self.assertEqual(environment["languages"][0], "cpp")
+        self.assertEqual(environment["execution_env"]["vars"], {"CMAKE_EXPORT_COMPILE_COMMANDS": "OFF"})
+        self.assertEqual(environment["lsp_setup"]["servers"], ["clangd"])
+
+    def test_workspace_languages_keep_primary_before_secondary_source_languages(self) -> None:
+        repo = self.root / "python_primary_with_shell"
+        (repo / "src" / "example_pkg").mkdir(parents=True)
+        (repo / "scripts").mkdir(parents=True)
+        (repo / "pyproject.toml").write_text("[project]\nname = \"example-pkg\"\n", encoding="utf-8")
+        (repo / "src" / "example_pkg" / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (repo / "scripts" / "build.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+        languages = workspace_languages(
+            TaskContextPack(
+                work_order_id="wo_python_primary_with_shell",
+                goal="prepare mixed project",
+                metadata={"primary_language": "python"},
+            ),
+            {},
+            repo_path=repo,
+        )
+
+        self.assertEqual(languages[:2], ["python", "shell"])
+
     def test_workspace_environment_skips_language_preparer_without_lsp_template(self) -> None:
         repo = self.root / "missing_lsp_template_repo"
         repo.mkdir()
@@ -8240,6 +8580,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                     "unsafe": {"do": "not copy"},
                 },
                 "execution_env": {
+                    "vars": {"CMAKE_EXPORT_COMPILE_COMMANDS": "ON", "PAL_TOKEN": "secret"},
                     "path_prepend": {"PYTHONPATH": ["/tmp/source/src"]},
                     "unsafe": {"do": "not copy"},
                 },
@@ -8250,6 +8591,8 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(inherited["lsp_setup"]["languages"], ["cpp"])
         self.assertEqual(inherited["lsp_setup"]["servers"], [])
         self.assertIn("missing LSP server template", inherited["lsp_setup"]["skipped"][0])
+        self.assertEqual(inherited["execution_env"]["vars"]["CMAKE_EXPORT_COMPILE_COMMANDS"], "ON")
+        self.assertNotIn("PAL_TOKEN", inherited["execution_env"]["vars"])
         self.assertEqual(inherited["execution_env"]["path_prepend"]["PYTHONPATH"], ["/tmp/source/src"])
         self.assertNotIn("source_repo", inherited)
         self.assertNotIn("unsafe", inherited["lsp_setup"])
@@ -8268,6 +8611,8 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         (repo / "__pycache__" / "app.cpython-313.pyc").write_bytes(b"pyc")
         (repo / "build").mkdir()
         (repo / "build" / "thing.o").write_bytes(b"obj")
+        (repo / ".cache" / "clangd" / "index").mkdir(parents=True)
+        (repo / ".cache" / "clangd" / "index" / "app.cpp.idx").write_bytes(b"clangd-index")
         (repo / "libthing.a").write_bytes(b"archive")
         (repo / "minion_outputs" / "wo_generated").mkdir(parents=True, exist_ok=True)
         (repo / "minion_outputs" / "wo_generated" / "report.md").write_text("report\n", encoding="utf-8")
@@ -8279,6 +8624,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(committed_files, ["src/app.py"])
         status = _git(repo, "status", "--porcelain", check=True).stdout
         self.assertEqual(status, "")
+        self.assertIn(".cache/", (repo / ".git" / "info" / "exclude").read_text(encoding="utf-8"))
 
     def test_git_task_environment_uses_worktree_for_local_source_repo(self) -> None:
         source = self.root / "source_repo"
@@ -8381,7 +8727,11 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         self.assertEqual(coder_prepared.workspace["workspace_policy"]["mode"], "writable_git_branch")
         self.assertEqual(coder_prepared.workspace["completion_policy"]["evidence"], "git_commit")
-        self.assertEqual(coder_prepared.workspace["workspace_kind"], "git_repo")
+        self.assertEqual(
+            coder_prepared.workspace["workspace_environment_policy"],
+            {"runtime": True, "lsp": True, "write_baseline_config": True},
+        )
+        self.assertEqual(coder_prepared.workspace["workspace_kind"], "git_worktree")
         self.assertTrue(Path(coder_prepared.workspace["artifact_dir"]).is_dir())
         self.assertTrue(str(coder_prepared.workspace["artifact_dir"]).replace("\\", "/").endswith("minion_outputs/wo_code_writable"))
         self.assertIn("work_order_branch", coder_prepared.workspace)
@@ -8400,6 +8750,53 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual((coder_repo / "README.md").read_text(encoding="utf-8"), "SPEC\n")
         self.assertTrue(Path(coder_from_repo_path_prepared.workspace["artifact_dir"]).is_relative_to(coder_repo))
         self.assertFalse((source / "minion_outputs").exists())
+
+    def test_profile_workspace_environment_policy_controls_readonly_cpp_setup(self) -> None:
+        source = self.root / "source_repo_cpp_readonly"
+        _init_git_source_repo(
+            source,
+            {
+                "CMakeLists.txt": "\n".join(
+                    [
+                        "cmake_minimum_required(VERSION 3.16)",
+                        "project(example LANGUAGES CXX)",
+                        "add_executable(example src/main.cpp)",
+                        "",
+                    ]
+                ),
+                "src/main.cpp": "int main() { return 0; }\n",
+            },
+        )
+        registry = MinionProfileRegistry(runtime_root=self.root)
+
+        planner = registry.resolve_pack(
+            TaskContextPack(work_order_id="wo_plan_cpp_readonly", goal="plan", workspace={"source_repo": str(source)}),
+            requested_profile="software_engineering.planner",
+        )
+        planner_prepared = prepare_task_workspace(self.root, planner, run_id="run_plan_cpp")
+
+        self.assertEqual(Path(planner_prepared.workspace["repo_path"]), source)
+        self.assertEqual(planner_prepared.workspace["workspace_kind"], "folder")
+        self.assertEqual(planner_prepared.workspace["workspace_environment_policy"]["runtime"], False)
+        self.assertEqual(planner_prepared.workspace["languages"], ["cpp"])
+        self.assertEqual(planner_prepared.workspace["lsp_setup"]["servers"], ["clangd"])
+        self.assertNotIn("execution_env", planner_prepared.workspace)
+        self.assertFalse((source / ".clangd").exists())
+
+        reviewer = registry.resolve_pack(
+            TaskContextPack(work_order_id="wo_review_cpp_readonly", goal="review", workspace={"source_repo": str(source)}),
+            requested_profile="software_engineering.reviewer",
+        )
+        reviewer_prepared = prepare_task_workspace(self.root, reviewer, run_id="run_review_cpp")
+
+        self.assertEqual(Path(reviewer_prepared.workspace["repo_path"]), source)
+        self.assertEqual(reviewer_prepared.workspace["workspace_kind"], "folder")
+        self.assertEqual(reviewer_prepared.workspace["workspace_environment_policy"]["write_baseline_config"], False)
+        self.assertEqual(reviewer_prepared.workspace["languages"], ["cpp"])
+        self.assertEqual(reviewer_prepared.workspace["lsp_setup"]["servers"], ["clangd"])
+        self.assertEqual(reviewer_prepared.workspace["execution_env"]["vars"]["CMAKE_EXPORT_COMPILE_COMMANDS"], "ON")
+        self.assertEqual(reviewer_prepared.workspace["execution_env"]["vars"]["CTEST_OUTPUT_ON_FAILURE"], "1")
+        self.assertFalse((source / ".clangd").exists())
 
 
 class MinionManagerTests(unittest.TestCase):
@@ -8967,7 +9364,6 @@ class MinionManagerTests(unittest.TestCase):
             module = _plan_module("module_repair_bound", title="Repair bound module")
             module["internal_milestones"] = [
                 {"milestone_id": "m1", "title": "First", "task": "Do first.", "acceptance_criteria": ["First is done."]},
-                {"milestone_id": "m2", "title": "Second", "task": "Do second.", "acceptance_criteria": ["Second is done."]},
             ]
             plan = _dispatchable_plan_payload(plan_id="plan_repair_bound", task_id="task_repair_bound", modules=[module])
             pack = manager.tasking_repository.build_coder_module_pack_from_plan(
@@ -11219,6 +11615,9 @@ class MinionManagerTests(unittest.TestCase):
                 prompt_view = dict(state.pack.metadata.get("prompt_view") or {})
                 self.started_modules.append(str((prompt_view.get("module") or {}).get("module_id") or ""))
 
+            async def _with_lsp_prewarm(self, pack: TaskContextPack) -> TaskContextPack:
+                return pack
+
         async def scenario() -> None:
             manager = FakePlanManager(runtime_root=self.root)
             module_b = _plan_module("module_b", title="B1", task="Do B.")
@@ -11549,6 +11948,90 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(len(approval_events), 1)
             self.assertEqual(decision_events[0]["payload"]["decision"], "accept_all")
             self.assertEqual(executed, [{"value": 1}, {"value": 2}])
+
+        asyncio.run(scenario())
+
+    def test_runner_web_research_budget_requests_approval_after_free_calls(self) -> None:
+        async def scenario() -> None:
+            events = []
+            decisions = [{"decision": {"decision": "accept"}}]
+            executed = []
+
+            class FakeLLM:
+                def __init__(self):
+                    self.calls = 0
+
+                async def agenerate(self, request):
+                    self.calls += 1
+                    if self.calls == 1:
+                        return CanonicalLLMOutcome(
+                            text="",
+                            tool_calls=[
+                                CanonicalToolCall(name="op_web_search", args={"query": "first"}, call_id="web_1"),
+                                CanonicalToolCall(name="op_web_search", args={"query": "second"}, call_id="web_2"),
+                            ],
+                        )
+                    return CanonicalLLMOutcome(text="done")
+
+            class FakeExecution:
+                def get_capability_spec(self, name):
+                    if name != "op_web_search":
+                        return None
+                    return {"name": "op_web_search", "description": "fake web search", "parameters_schema": {}}
+
+                async def execute_tool_async(self, call, **kwargs):
+                    _ = kwargs
+                    executed.append(dict(call.args))
+                    return CanonicalToolResult(
+                        name=call.name,
+                        ok=True,
+                        text="ok",
+                        llm_text="ok",
+                        call_id=call.call_id,
+                        status=RuntimeStatus.OK,
+                    )
+
+            async def write_event(event):
+                events.append(event)
+
+            async def read_decision(timeout):
+                _ = timeout
+                return decisions.pop(0)
+
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=TaskContextPack(
+                    work_order_id="wo_web_budget",
+                    goal="web budget approval",
+                    allowed_capabilities=["op_web_search"],
+                    approval_policy={
+                        "high_risk_capabilities": [],
+                        "web_research_budget": {"op_web_search": 1},
+                        "decision_timeout_seconds": 5,
+                    },
+                    metadata={"allow_text_only_completion": True},
+                ),
+                minion_id="m_web_budget",
+                run_id="r_web_budget",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=FakeLLM(), execution_runtime=FakeExecution()),
+            )
+
+            code = await runner.run()
+
+            approval_events = [event for event in events if event["event_kind"] == "approval_requested"]
+            self.assertEqual(code, 0)
+            self.assertEqual(executed, [{"query": "first"}, {"query": "second"}])
+            self.assertEqual(runner.web_research_usage["op_web_search"], 2)
+            self.assertEqual(runner.web_research_usage["total"], 2)
+            self.assertEqual(len(approval_events), 1)
+            approval_payload = approval_events[0]["payload"]
+            self.assertEqual(approval_payload["title"], "Minion web research budget")
+            self.assertEqual(approval_payload["risk"], "medium")
+            self.assertEqual(approval_payload["metadata"]["approval_kind"], "web_research_budget")
+            self.assertEqual(approval_payload["metadata"]["web_research_budget"], 1)
+            self.assertEqual(approval_payload["metadata"]["web_research_used"], 1)
 
         asyncio.run(scenario())
 
@@ -13890,6 +14373,31 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(_git(repo_path, "config", "--local", "user.email", check=True).stdout.strip(), "minion@pal.local")
         self.assertEqual(_git(repo_path, "config", "--local", "user.name", check=True).stdout.strip(), "Pal Minion")
 
+    def test_checkpoint_inspection_ignores_untracked_minion_outputs(self) -> None:
+        repo_path = self.root / "checkpoint_generated_outputs_repo"
+        repo_path.mkdir()
+        _git(repo_path, "init", check=True)
+        _git(repo_path, "checkout", "-B", "main", check=True)
+        _git(repo_path, "config", "user.email", "pal-test@example.invalid", check=True)
+        _git(repo_path, "config", "user.name", "Pal Test", check=True)
+        (repo_path / "README.md").write_text("# checkpoint outputs\n", encoding="utf-8")
+        _git(repo_path, "add", "README.md", check=True)
+        _git(repo_path, "commit", "-m", "initial", check=True)
+        base_sha = _git(repo_path, "rev-parse", "HEAD", check=True).stdout.strip()
+        (repo_path / "feature.py").write_text("VALUE = 1\n", encoding="utf-8")
+        committed = commit_milestone(repo_path, work_order_id="wo_generated_outputs", milestone_index=0, title="feature")
+        self.assertEqual(committed["status"], "committed")
+        (repo_path / "minion_outputs" / "wo_generated_outputs").mkdir(parents=True)
+        (repo_path / "minion_outputs" / "wo_generated_outputs" / "milestone.md").write_text(
+            "report\n",
+            encoding="utf-8",
+        )
+
+        inspected = inspect_milestone_checkpoint(repo_path, base_sha=base_sha)
+
+        self.assertEqual(inspected["status"], "committed")
+        self.assertEqual(inspected["commit_sha"], committed["commit_sha"])
+
     def test_runner_ignores_cache_only_shell_workspace_changes(self) -> None:
         async def scenario() -> None:
             repo_path = self.root / "shell_cache_mutation_repo"
@@ -14084,6 +14592,26 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_reviewer_git_tool_records_selectable_review_evidence(self) -> None:
+        evidence = _review_tool_evidence_ref(
+            "git",
+            CanonicalToolCall(name="git", args={"cmd": "status --short", "cwd": "/tmp/review-repo"}, call_id="call_review_git"),
+            CanonicalToolResult(
+                name="git",
+                ok=True,
+                text="git status (read, exit 0)",
+                llm_text="git status (read, exit 0)",
+                structured={"cmd": "status --short", "cwd": "/tmp/review-repo", "returncode": 0, "stdout": ""},
+                status=RuntimeStatus.OK,
+            ),
+        )
+
+        self.assertEqual(evidence["kind"], "git")
+        self.assertEqual(evidence["tool_name"], "git")
+        self.assertEqual(evidence["command"], "git status --short")
+        self.assertEqual(evidence["cwd"], "/tmp/review-repo")
+        self.assertEqual(evidence["exit_code"], 0)
+
     def test_reviewer_readonly_scratch_mutation_blocks_review_gate_pass(self) -> None:
         async def scenario() -> None:
             repo_path = self.root / "reviewer_scratch_source_repo"
@@ -14226,7 +14754,7 @@ class MinionManagerTests(unittest.TestCase):
         )
         self.assertFalse(command_gate.ok)
         self.assertEqual(command_gate.status, RuntimeStatus.INVALID)
-        self.assertIn("lacks matching shell evidence", command_gate.text)
+        self.assertIn("lacks matching command evidence", command_gate.text)
 
         plan = _dispatchable_plan_payload(
             plan_id="plan_command_summary_not_provenance",
@@ -14753,6 +15281,155 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(review_gate["commands_run"][0]["call_id"], "call_selector_pytest")
         self.assertEqual({item.get("kind") for item in review_gate["api_evidence"]}, {"source", "lsp"})
 
+    def test_review_checkpoint_accepts_git_evidence_selectors_as_command_evidence(self) -> None:
+        checkpoint_id = "chk_runtime_git_evidence_selectors"
+        acceptance = "Checkpoint git commit is verified."
+        repository = MinionTaskingRepository(runtime_root=self.root)
+        repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_runtime_git_evidence_selectors_source",
+                "minion_id": "m_runtime_git_evidence_selectors_source",
+                "run_id": "r_runtime_git_evidence_selectors_source",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "git_commit": {
+                        "status": "committed",
+                        "commit_sha": "abc123",
+                        "changed_files": ["src/pal/feature.py"],
+                    },
+                    "expected_review_gate_kind": "checkpoint_verification",
+                    "acceptance_criteria": [acceptance],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        workspace = {
+            "runtime_root": str(self.root),
+            "work_order_id": "wo_runtime_git_evidence_selectors",
+            "run_id": "r_review_runtime_git_evidence_selectors",
+            "minion_profile": "software_engineering.reviewer",
+            "review_target_checkpoint_id": checkpoint_id,
+            "review_target_commit_sha": "abc123",
+            "review_target_gate_kind": "checkpoint_verification",
+            "review_tool_evidence_refs": [
+                {
+                    "kind": "git",
+                    "tool_name": "git",
+                    "call_id": "call_selector_git_show",
+                    "command": "git diff base HEAD",
+                    "cwd": "/tmp/review-repo",
+                    "status": "ok",
+                    "exit_code": 0,
+                    "summary": "commit abc123 changed src/pal/feature.py",
+                    "stdout_preview": "diff --git a/src/pal/feature.py b/src/pal/feature.py\n+def triple(value):\n+    return value * 3",
+                }
+            ],
+            "shell_mutation_violations": [],
+        }
+
+        gate = _minion_review_checkpoint_result(
+            CanonicalToolCall(
+                name="op_minion_review_checkpoint",
+                args={
+                    "verdict": "pass",
+                    "summary": "git selector proves the checkpoint commit",
+                    "evidence_selectors": [
+                        {"kind": "git", "contains": "def triple", "latest_success": True, "covers": [acceptance]}
+                    ],
+                    "api_evidence_not_applicable_reason": "fixture only validates checkpoint commit evidence",
+                    "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                },
+            ),
+            workspace,
+        )
+
+        self.assertTrue(gate.ok, gate.llm_text)
+        command = gate.structured["review_gate"]["commands_run"][0]
+        self.assertEqual(command["kind"], "git")
+        self.assertEqual(command["call_id"], "call_selector_git_show")
+        self.assertEqual(command["command"], "git diff base HEAD")
+        self.assertEqual(command["exit_code"], 0)
+        self.assertIn("def triple", command["stdout_preview"])
+
+    def test_review_checkpoint_source_path_selector_matches_tree_summary(self) -> None:
+        checkpoint_id = "chk_runtime_source_tree_selector"
+        acceptance = "Changed C++ source path is inspected."
+        repository = MinionTaskingRepository(runtime_root=self.root)
+        repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_runtime_source_tree_selector_source",
+                "minion_id": "m_runtime_source_tree_selector_source",
+                "run_id": "r_runtime_source_tree_selector_source",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "expected_review_gate_kind": "checkpoint_verification",
+                    "acceptance_criteria": [acceptance],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        workspace = {
+            "runtime_root": str(self.root),
+            "work_order_id": "wo_runtime_source_tree_selector",
+            "run_id": "r_review_runtime_source_tree_selector",
+            "minion_profile": "software_engineering.reviewer",
+            "review_target_checkpoint_id": checkpoint_id,
+            "review_target_commit_sha": "abc123",
+            "review_target_gate_kind": "checkpoint_verification",
+            "review_tool_evidence_refs": [
+                {
+                    "kind": "command",
+                    "tool_name": "shell",
+                    "call_id": "call_selector_ctest",
+                    "command": "ctest --test-dir build --output-on-failure",
+                    "status": "ok",
+                    "exit_code": 0,
+                    "summary": "100% tests passed",
+                },
+                {
+                    "kind": "source",
+                    "tool_name": "tree",
+                    "call_id": "call_selector_tree",
+                    "status": "ok",
+                    "summary": "build include src src/math.cpp tests CMakeLists.txt",
+                },
+            ],
+            "shell_mutation_violations": [],
+        }
+
+        gate = _minion_review_checkpoint_result(
+            CanonicalToolCall(
+                name="op_minion_review_checkpoint",
+                args={
+                    "verdict": "pass",
+                    "summary": "tree evidence proves the changed source path",
+                    "evidence_selectors": [
+                        {"kind": "command", "contains": "ctest --test-dir build", "latest_success": True, "covers": [acceptance]},
+                        {"kind": "source", "path_contains": "src/math.cpp", "covers": [acceptance]},
+                    ],
+                    "lsp_evidence_not_applicable_reason": "fixture has no language server",
+                },
+            ),
+            workspace,
+        )
+
+        self.assertTrue(gate.ok, gate.llm_text)
+        api_evidence = gate.structured["review_gate"]["api_evidence"]
+        self.assertEqual(api_evidence[0]["kind"], "source")
+        self.assertEqual(api_evidence[0]["call_id"], "call_selector_tree")
+
     def test_review_checkpoint_rejects_unknown_runtime_evidence_ref(self) -> None:
         gate = _minion_review_checkpoint_result(
             CanonicalToolCall(
@@ -14777,6 +15454,8 @@ class MinionManagerTests(unittest.TestCase):
         self.assertFalse(gate.ok)
         self.assertEqual(gate.status, RuntimeStatus.INVALID)
         self.assertIn("unknown review evidence ref", gate.text)
+        self.assertIn("next_payload_shape", gate.llm_text)
+        self.assertIn("Resubmit the review gate", gate.llm_text)
 
     def test_review_gate_provenance_keeps_runner_evidence_list_live_after_submit(self) -> None:
         plan = _dispatchable_plan_payload(
@@ -15308,7 +15987,13 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(gate.structured["accepted_cover_refs"][1]["ref"], "2")
         self.assertEqual(gate.structured["usable_evidence_refs"][0]["call_id"], "call_pytest_structured_error")
         self.assertEqual(gate.structured["next_payload_shape"]["tool"], "review_checkpoint")
+        self.assertEqual(gate.structured["next_payload_shape"]["missing_cover_refs"][0]["id"], "AC-2")
+        self.assertEqual(gate.structured["next_payload_shape"]["args"]["evidence_selectors"][0]["covers"], ["AC-2"])
         self.assertIn("missing_acceptance_criteria", gate.llm_text)
+        self.assertIn("next_payload_shape", gate.llm_text)
+        self.assertIn("evidence_selectors", gate.llm_text)
+        self.assertIn("AC-2", gate.llm_text)
+        self.assertIn("Do not run more tools", gate.llm_text)
 
     def test_review_checkpoint_tool_rejects_pass_with_contract_finding(self) -> None:
         repository = MinionTaskingRepository(runtime_root=self.root)

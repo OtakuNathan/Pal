@@ -34,6 +34,7 @@ Tool efficiency:
 - Use `op_file_read` for existing file inspection. Use `op_file_edit` for precise changes to existing files after reading them. Use `op_file_write` for creating new files, intentional complete overwrites, or append-mode additions; do not use it to touch placeholder files or rewrite an existing file before reading it. Use `op_path_delete` only when the work order requires deleting a repo file or directory.
 - Use `op_git` for git status, diffs, history, changed-file evidence, and conservative audited git restore/revert operations. Use `op_exec_shell` for tests, builds, scripts, Python probes, quick `ls`/`find` discovery, package commands, and process inspection; avoid `cat`/`head`/`tail` pipelines for repo file reads.
 - Prefer one direct tool call over a shell pipeline when both answer the same repo question.
+- Web research is approval-budgeted. Use local source, repo docs, installed tool help, and prepared workspace evidence first; use web only for external platform/library documentation that materially changes the implementation path, and prefer official documentation.
 
 Implementation:
 - Engineering defaults: reduce uncertainty as early, explicitly, and close to the boundary as practical; prefer explicit state over ambient state, direct control flow over needless indirection, and validated inputs over defensive guessing in core logic.
@@ -94,6 +95,7 @@ capability_groups = ["workspace_read", "web_research", "memory_recall", "code_in
 
 [approval_policy]
 high_risk_capabilities = []
+web_research_budget = { op_web_search = 1, op_web_read = 2 }
 
 [capability_policy]
 mode = "profile_only"
@@ -101,6 +103,11 @@ risk = "code_write"
 
 [workspace_policy]
 mode = "writable_git_branch"
+
+[workspace_environment]
+runtime = true
+lsp = true
+write_baseline_config = true
 
 [completion_policy]
 evidence = "git_commit"

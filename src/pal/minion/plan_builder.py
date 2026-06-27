@@ -9,7 +9,14 @@ from typing import Any
 
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.plan_store import coerce_plan_ref, plan_revision_from_payload, resolve_plan_ref_path
-from pal.minion.work_order import PlanArtifact, dispatchable_plan_validation, new_work_id, planner_requirements, validate_dispatchable_plan_artifact
+from pal.minion.work_order import (
+    PlanArtifact,
+    dispatchable_plan_validation,
+    new_work_id,
+    planner_requirements,
+    validate_dispatchable_plan_artifact,
+    validate_final_plan_artifact,
+)
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
 
@@ -932,6 +939,21 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
 }
 
 
+def _plan_validate_result(payload: dict[str, Any], *, plan_handle: str, valid_text: str, invalid_prefix: str) -> dict[str, Any]:
+    try:
+        validation = dispatchable_plan_validation(payload)
+    except ValueError as exc:
+        message = str(exc) or exc.__class__.__name__
+        return {
+            "text": f"{invalid_prefix}: {message}",
+            "structured": {"plan_handle": plan_handle, "plan_validation": {"status": "invalid", "errors": [message]}},
+        }
+    return {
+        "text": valid_text,
+        "structured": {"plan_handle": plan_handle, "plan_validation": validation},
+    }
+
+
 @dataclass
 class PlanBuilderRuntime:
     workspace: dict[str, Any]
@@ -1088,11 +1110,7 @@ class PlanBuilderRuntime:
         if _text(state.get("lifecycle")).lower() in {"submitted", "finalized"} and isinstance(state.get("source_plan_ref"), dict):
             source_payload = state.get("_source_plan_payload")
             if isinstance(source_payload, dict):
-                validation = dispatchable_plan_validation(source_payload)
-                return {
-                    "text": "Submitted plan is dispatchable.",
-                    "structured": {"plan_handle": state["plan_handle"], "plan_validation": validation},
-                }
+                return _plan_validate_result(source_payload, plan_handle=state["plan_handle"], valid_text="Submitted plan is dispatchable.", invalid_prefix="Submitted plan is invalid")
             try:
                 artifact = self._compile_artifact(state, {})
             except ValueError as exc:
@@ -1105,11 +1123,7 @@ class PlanBuilderRuntime:
                     },
                 }
             payload = artifact
-            validation = dispatchable_plan_validation(payload)
-            return {
-                "text": "Submitted plan is dispatchable.",
-                "structured": {"plan_handle": state["plan_handle"], "plan_validation": validation},
-            }
+            return _plan_validate_result(payload, plan_handle=state["plan_handle"], valid_text="Submitted plan is dispatchable.", invalid_prefix="Submitted plan is invalid")
         try:
             artifact = self._compile_artifact(state, {})
         except ValueError as exc:
@@ -1121,7 +1135,10 @@ class PlanBuilderRuntime:
                     "plan_validation": {"status": "invalid", "errors": [message]},
                 },
             }
-        validation = dispatchable_plan_validation(artifact)
+        validation_result = _plan_validate_result(artifact, plan_handle=state["plan_handle"], valid_text="Plan draft is dispatchable.", invalid_prefix="Plan draft is invalid")
+        validation = dict(validation_result.get("structured", {}).get("plan_validation") or {})
+        if str(validation.get("status") or "").strip().lower() == "invalid":
+            return validation_result
         revision_errors = _revision_checklist_submit_errors(state)
         if revision_errors:
             validation = _validation_with_extra_errors(validation, revision_errors)
@@ -1129,10 +1146,7 @@ class PlanBuilderRuntime:
                 "text": "Plan draft topology is dispatchable, but revision checklist is not satisfied: " + "; ".join(revision_errors),
                 "structured": {"plan_handle": state["plan_handle"], "plan_validation": validation},
             }
-        return {
-            "text": "Plan draft is dispatchable.",
-            "structured": {"plan_handle": state["plan_handle"], "plan_validation": validation},
-        }
+        return validation_result
 
     def _plan_begin(self, args: dict[str, Any]) -> dict[str, Any]:
         _reject_unknown_args(args, {"goal", "plan_id", "summary", "languages", "source_refs"})
@@ -2731,7 +2745,7 @@ class PlanBuilderRuntime:
         payload = json.loads(content.decode("utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("plan_ref JSON must be an object")
-        artifact = validate_dispatchable_plan_artifact(payload)
+        artifact = validate_final_plan_artifact(payload)
         normalized_ref = {
             **dict(ref),
             "path": str(path),
@@ -2901,7 +2915,7 @@ def _state_from_plan_payload(
     source_plan_ref: dict[str, Any] | None = None,
     plan_revision: int = 0,
 ) -> dict[str, Any]:
-    artifact = validate_dispatchable_plan_artifact(payload)
+    artifact = validate_final_plan_artifact(payload)
     metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
     plan_builder = dict(metadata.get("plan_builder") or {}) if isinstance(metadata.get("plan_builder"), dict) else {}
     resolved_handle = _text(plan_handle or plan_builder.get("plan_handle"))

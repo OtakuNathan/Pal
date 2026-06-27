@@ -125,6 +125,11 @@ risk = "read_only"
 [workspace_policy]
 mode = "read_only_repo"
 
+[workspace_environment]
+runtime = false
+lsp = true
+write_baseline_config = false
+
 [completion_policy]
 evidence = "text_deliverable"
 requires_capability_evidence = true
