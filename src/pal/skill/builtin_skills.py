@@ -1058,7 +1058,7 @@ def builtin_declared_skills(*, module_id: str = "skill") -> tuple[SkillDescripto
                 "gate ledger",
             ),
             capability_refs=(
-                "op_minion_spawn",
+                "op_minion_dispatch_workflow",
                 "op_minion_status",
                 "op_minion_review_gate_submit",
                 "op_minion_review_checkpoint",

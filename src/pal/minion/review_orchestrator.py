@@ -240,7 +240,7 @@ class ReviewOrchestrator:
                 acceptance_criteria.insert(
                     0,
                     (
-                        "Verify the plan preserves the planner source_contract as boundary-quality obligations: explicit public names, "
+                        "Verify the plan preserves the architect source_contract as boundary-quality obligations: explicit public names, "
                         "file/module ownership, input/output/error contracts, hard requirements, and acceptance evidence from the original work order. "
                         "Do not fail solely because the module count differs from a heuristic or example unless the source contract explicitly makes that count binding or the topology becomes invalid."
                     ),
@@ -287,7 +287,7 @@ class ReviewOrchestrator:
                     "work_order_id": review_work_order_id,
                     "goal": f"Review plan {plan_ref.get('plan_id') or review_key}",
                     "instruction": (
-                        "Review the referenced submitted planner draft. Use plan_read/plan_find/plan_get/plan_validate when available; "
+                        "Review the referenced submitted architecture draft. Use plan_read/plan_find/plan_get/plan_validate when available; "
                         "cite target_handle in findings for specific modules, milestones, or acceptance criteria. Do not modify the source repository. "
                         "Do not inspect plan.draft.json or plan.json with shell/cat/grep/jq/Python; plan_* tools are the authoritative plan view. "
                         "Once those tools prove a blocker or a pass, submit op_minion_review_gate_submit immediately. "
@@ -829,38 +829,66 @@ class ReviewOrchestrator:
             self.manager._queue_event_delivery(event)
             self.repository.record_minion_event(event)
             if verdict == "pass" and review_state.get("status") == "acceptance_pending":
-                self._record_work_order_event(
-                    work_order_id=source_work_order_id,
-                    event_kind="plan_acceptance_pending",
-                    minion_id=reviewer_state.minion_id,
-                    run_id=reviewer_state.run_id,
-                    minion_profile=reviewer_state.pack.minion_profile,
-                    payload={
-                        "status": "pending",
-                        "summary": "plan review passed; op_minion_accept_plan or explicit policy is required before dispatch",
-                        "plan_ref": dict(plan_ref),
-                        **({"plan_draft_ref": reviewed_plan_ref} if reviewed_plan_ref != plan_ref else {}),
-                        "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
-                        **({"published_plan": dict(published_plan)} if published_plan else {}),
-                    },
-                )
-                if upstream_work_order_id and upstream_work_order_id != source_work_order_id:
+                if _plan_auto_accept_allowed(plan_review_policy):
+                    acceptance = self.repository.accept_plan_ref(
+                        plan_ref,
+                        reason="plan review passed under autonomous minion workflow",
+                        review_gate_ref=dict(latest.get("review_gate_ref") or {}),
+                    )
+                    dispatch = await self.manager.dispatch_accepted_plan(
+                        {
+                            "work_order_id": source_work_order_id,
+                            "plan_ref": dict(acceptance.get("plan_ref") or plan_ref),
+                            "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                        }
+                    )
                     self._record_work_order_event(
-                        work_order_id=upstream_work_order_id,
+                        work_order_id=source_work_order_id,
+                        event_kind="plan_accepted",
+                        minion_id=reviewer_state.minion_id,
+                        run_id=reviewer_state.run_id,
+                        minion_profile=reviewer_state.pack.minion_profile,
+                        payload={
+                            "status": "accepted",
+                            "summary": "plan review passed; manager accepted and dispatched the plan",
+                            "plan_ref": dict(acceptance.get("plan_ref") or plan_ref),
+                            "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                            "dispatch": dict(dispatch),
+                        },
+                    )
+                else:
+                    self._record_work_order_event(
+                        work_order_id=source_work_order_id,
                         event_kind="plan_acceptance_pending",
                         minion_id=reviewer_state.minion_id,
                         run_id=reviewer_state.run_id,
                         minion_profile=reviewer_state.pack.minion_profile,
                         payload={
                             "status": "pending",
-                            "summary": "plan revision review passed; revised plan is ready for acceptance",
+                            "summary": "plan review passed; user/control acceptance is required before dispatch",
                             "plan_ref": dict(plan_ref),
                             **({"plan_draft_ref": reviewed_plan_ref} if reviewed_plan_ref != plan_ref else {}),
                             "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
-                            "revision_work_order_id": source_work_order_id,
                             **({"published_plan": dict(published_plan)} if published_plan else {}),
                         },
                     )
+                    if upstream_work_order_id and upstream_work_order_id != source_work_order_id:
+                        self._record_work_order_event(
+                            work_order_id=upstream_work_order_id,
+                            event_kind="plan_acceptance_pending",
+                            minion_id=reviewer_state.minion_id,
+                            run_id=reviewer_state.run_id,
+                            minion_profile=reviewer_state.pack.minion_profile,
+                            payload={
+                                "status": "pending",
+                                "summary": "plan revision review passed; revised plan is ready for acceptance",
+                                "plan_ref": dict(plan_ref),
+                                **({"plan_draft_ref": reviewed_plan_ref} if reviewed_plan_ref != plan_ref else {}),
+                                "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                                "revision_work_order_id": source_work_order_id,
+                                **({"published_plan": dict(published_plan)} if published_plan else {}),
+                            },
+                        )
             elif verdict == "fail":
                 auto_revision_spawned: dict[str, Any] = {}
                 if plan_auto_revision_allowed(
@@ -887,7 +915,7 @@ class ReviewOrchestrator:
                     payload={
                         "status": "revision_spawned" if auto_revision_spawned.get("status") == "spawned" else "revision_required",
                         "summary": (
-                            "plan reviewer requested revision and manager spawned a revision planner"
+                            "plan reviewer requested revision and manager spawned a revision architect"
                             if auto_revision_spawned.get("status") == "spawned"
                             else gate.get("summary") or "plan reviewer requested revision"
                         ),
@@ -1003,7 +1031,7 @@ class ReviewOrchestrator:
                 "auto_revision_attempt": attempt,
             }
         except Exception as exc:
-            self.logger.exception("failed to spawn plan revision planner")
+            self.logger.exception("failed to spawn plan revision architect")
             self._record_work_order_event(
                 work_order_id=source_work_order_id,
                 event_kind="plan_revision_spawn_failed",
@@ -1012,7 +1040,7 @@ class ReviewOrchestrator:
                 minion_profile=reviewer_state.pack.minion_profile,
                 payload={
                     "status": "failed",
-                    "summary": "manager failed to spawn plan revision planner",
+                    "summary": "manager failed to spawn plan revision architect",
                     "source_plan_ref": dict(plan_ref),
                     "review_gate_ref": dict(review_gate_ref),
                     "error": f"{exc.__class__.__name__}: {exc}",
@@ -2047,3 +2075,8 @@ def plan_auto_revision_allowed(policy: dict[str, Any], *, spawned_count: int) ->
         return False
     max_attempts = max(0, coerce_int(policy.get("max_auto_revision_attempts") or policy.get("max_auto_revisions"), 1))
     return max(0, int(spawned_count or 0)) < max_attempts
+
+
+def _plan_auto_accept_allowed(policy: dict[str, Any]) -> bool:
+    interaction_mode = str(policy.get("interaction_mode") or "").strip().lower()
+    return interaction_mode == "autonomous" or coerce_bool(policy.get("auto_accept_on_review_pass"))

@@ -230,6 +230,14 @@ def render_minion_system_prompt(scaffold: dict[str, Any]) -> str:
             "run the relevant tests/checks available through listed capabilities, fix failures you caused, "
             "and report blocked instead of completed if tests cannot be run or cannot pass with concrete evidence.\n"
         )
+    artifact_completion_guidance = ""
+    if isinstance(completion_policy, dict) and bool(completion_policy.get("allow_artifact_evidence")):
+        artifact_completion_guidance = (
+            "This milestone may complete with artifact evidence when it is verification-only and there are no source, "
+            "test, doc, or config changes to commit. In that case, write a verification report artifact with the "
+            "commands/checks run and finish with a concise summary; do not call `op_minion_checkpoint_commit` solely "
+            "to create an empty checkpoint commit.\n"
+        )
     operating_rules = (
         "Your context is the prompt work view, the current milestone, and the listed capabilities.\n"
         "Treat the prompt work view as the complete scoped assignment; do not infer or implement hidden modules or later milestones.\n"
@@ -237,6 +245,7 @@ def render_minion_system_prompt(scaffold: dict[str, Any]) -> str:
         "Use `op_memory_recall` when prior Pal experience, project lessons, or user preferences may materially improve the result.\n"
         "If capability evidence is required, use a relevant listed capability before completing the milestone.\n"
         f"{testing_guidance}"
+        f"{artifact_completion_guidance}"
         "If completion evidence cannot be produced, report blocked instead of completed.\n"
         "When completion policy requires git_commit, do not run git add, git commit, or other checkpoint git mutation commands through shell or the git wrapper. "
         "After implementing and verifying the milestone, call `op_minion_checkpoint_commit` to create the structured checkpoint commit in the minion workspace branch.\n"

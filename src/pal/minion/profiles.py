@@ -385,7 +385,6 @@ DEFAULT_MINION_DENIED_CAPABILITIES = frozenset(
         "op_minion_finalize",
         "op_minion_kill",
         "op_minion_promote_work_order_draft",
-        "op_minion_spawn",
         "op_plugin_mgmt_disable",
         "op_plugin_mgmt_enable",
         "op_plugin_mgmt_rescan",
@@ -465,7 +464,7 @@ def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] 
 
 
 def _is_planner_revision_pack(profile: MinionProfile, pack: TaskContextPack) -> bool:
-    if profile.canonical_profile_id != "software_engineering.planner":
+    if profile.canonical_profile_id != "software_engineering.architect":
         return False
     metadata = dict(pack.metadata or {})
     workspace = dict(pack.workspace or {})

@@ -52,7 +52,7 @@ from pal.minion.utils import coerce_bool as _coerce_bool
 from pal.minion.utils import dedupe_strings as _dedupe_strings
 from pal.minion.utils import safe_token
 from pal.minion.utils import string_list as _string_list
-from pal.minion.work_order import ReviewerWorkOrder, prompt_view_for_reviewer
+from pal.minion.work_order import ReviewerWorkOrder, build_planner_work_order, prompt_view_for_reviewer
 from pal.shared import MinionApprovalDecision, TaskContextPack
 
 
@@ -234,6 +234,12 @@ class MinionManager:
             return self.finalize_work_order(dict(params))
         if method == "continue_work_order":
             return await self.continue_work_order(str(params.get("work_order_id") or ""))
+        if method == "dispatch_accepted_plan":
+            return await self.dispatch_accepted_plan(dict(params))
+        if method == "dispatch_plan_revision":
+            return await self.dispatch_plan_revision(dict(params))
+        if method == "dispatch_architect_from_requirements":
+            return await self.dispatch_architect_from_requirements(dict(params))
         if method == "recover_work_order":
             return self.recover_work_order(str(params.get("work_order_id") or ""), str(params.get("reason") or ""))
         if method == "retry_checkpoint_review":
@@ -619,6 +625,323 @@ class MinionManager:
             "run": run,
         }
 
+    async def dispatch_accepted_plan(self, params: dict[str, Any]) -> dict[str, Any]:
+        work_order_id = str(params.get("work_order_id") or "").strip()
+        if not work_order_id:
+            raise ValueError("work_order_id is required")
+        plan_ref = params.get("plan_ref")
+        if not plan_ref:
+            raise ValueError("plan_ref is required")
+        loaded = self.tasking_repository.load_accepted_plan_ref(plan_ref)
+        snapshot = self.tasking_repository.read_work_order(work_order_id)
+        if snapshot.get("status") != "ok":
+            raise KeyError(f"unknown work order: {work_order_id}")
+        work_order = dict(snapshot.get("work_order") or {})
+        source_metadata = dict(work_order.get("metadata") or {})
+        workspace = dict(source_metadata.get("workspace") or {})
+        workflow = dict(source_metadata.get("workflow") or {})
+        plan_review = dict(source_metadata.get("plan_review") or {})
+        auto_advance = params.get("auto_advance_modules")
+        if auto_advance is None:
+            auto_advance = workflow.get("auto_advance_modules", plan_review.get("auto_advance_modules", True))
+        workflow.update(
+            {
+                "status": "executing",
+                "accepted_plan_ref": dict(loaded.get("plan_ref") or {}),
+                "updated_at": utc_now(),
+            }
+        )
+        plan_review.update(
+            {
+                "status": "accepted",
+                "plan_ref": dict(loaded.get("plan_ref") or {}),
+                "review_gate_ref": dict(params.get("review_gate_ref") or plan_review.get("review_gate_ref") or {}),
+                "accepted_at": utc_now(),
+                "next_action": "dispatch_plan_parent",
+            }
+        )
+        metadata = {
+            "task_id": str(source_metadata.get("task_id") or work_order.get("task_id") or ""),
+            "project_name": str(source_metadata.get("project_name") or workspace.get("project_name") or ""),
+            "task_title": str(source_metadata.get("task_title") or work_order.get("title") or ""),
+            "work_order_title": str(source_metadata.get("work_order_title") or work_order.get("title") or "Plan implementation"),
+            "workflow": workflow,
+            "plan_review": plan_review,
+            "plan_ref": dict(loaded.get("plan_ref") or {}),
+            "plan_validation": dict(loaded.get("plan_validation") or {}),
+            "plan_execution": {"auto_advance_modules": bool(auto_advance)},
+        }
+        for key in (
+            "control_route",
+            "preferred_endpoint_id",
+            "preferred_endpoint_source",
+            "minion_debug_log_enabled",
+            "debug_log",
+            "approval_policy",
+        ):
+            if key in source_metadata:
+                metadata[key] = source_metadata[key]
+        parent_pack = self.tasking_repository.build_plan_parent_pack_from_plan(
+            dict(loaded.get("plan_artifact") or {}),
+            work_order_id=work_order_id,
+            workspace=workspace,
+            metadata=metadata,
+            goal=str(work_order.get("goal") or ""),
+            instruction="Execute the accepted structured plan one module at a time.",
+        )
+        spawned = await self.spawn(parent_pack.to_dict())
+        event = {
+            "event_kind": "plan_dispatch_started",
+            "minion_id": str((spawned.get("continuation") or {}).get("run", {}).get("minion_id") or ""),
+            "run_id": str((spawned.get("continuation") or {}).get("run", {}).get("run_id") or ""),
+            "work_order_id": work_order_id,
+            "minion_profile": str((spawned.get("continuation") or {}).get("run", {}).get("minion_profile") or ""),
+            "payload": {
+                "status": "dispatched",
+                "plan_ref": dict(loaded.get("plan_ref") or {}),
+                "auto_advance_modules": bool(auto_advance),
+                "dispatch": dict(spawned),
+            },
+            "created_at": utc_now(),
+        }
+        self._queue_event_delivery(event)
+        self.tasking_repository.record_minion_event(event)
+        return {
+            "status": "dispatched",
+            "work_order_id": work_order_id,
+            "plan_ref": dict(loaded.get("plan_ref") or {}),
+            "auto_advance_modules": bool(auto_advance),
+            "dispatch": dict(spawned),
+        }
+
+    async def dispatch_plan_revision(self, params: dict[str, Any]) -> dict[str, Any]:
+        source_work_order_id = str(params.get("work_order_id") or "").strip()
+        if not source_work_order_id:
+            raise ValueError("work_order_id is required")
+        plan_ref = params.get("plan_ref")
+        if not plan_ref:
+            raise ValueError("plan_ref is required")
+        snapshot = self.tasking_repository.read_work_order(source_work_order_id)
+        if snapshot.get("status") != "ok":
+            raise KeyError(f"unknown work order: {source_work_order_id}")
+        work_order = dict(snapshot.get("work_order") or {})
+        source_metadata = dict(work_order.get("metadata") or {})
+        workspace = dict(source_metadata.get("workspace") or {})
+        metadata = {
+            "source_work_order_id": source_work_order_id,
+            "task_title": str(source_metadata.get("task_title") or work_order.get("title") or ""),
+            "control_route": dict(source_metadata.get("control_route") or {}) if isinstance(source_metadata.get("control_route"), dict) else {},
+            "plan_review": {
+                **dict(source_metadata.get("plan_review") or {}),
+                "source_work_order_id": source_work_order_id,
+            },
+        }
+        for key in ("workflow", "preferred_endpoint_id", "preferred_endpoint_source", "minion_debug_log_enabled", "debug_log"):
+            if key in source_metadata:
+                metadata[key] = source_metadata[key]
+        review_gate_ref = params.get("review_gate_ref")
+        pack: TaskContextPack
+        if review_gate_ref:
+            try:
+                pack = self.tasking_repository.build_planner_revision_pack_from_review_gate(
+                    review_gate_ref,
+                    workspace=workspace,
+                    metadata=metadata,
+                    goal=str(params.get("goal") or ""),
+                    instruction=str(params.get("instruction") or ""),
+                )
+            except ValueError:
+                pack = self.tasking_repository.build_planner_revision_pack_from_plan_decision(
+                    plan_ref,
+                    workspace=workspace,
+                    metadata=metadata,
+                    reason=str(params.get("reason") or ""),
+                    edit_instruction=str(params.get("edit_instruction") or ""),
+                )
+        else:
+            pack = self.tasking_repository.build_planner_revision_pack_from_plan_decision(
+                plan_ref,
+                workspace=workspace,
+                metadata=metadata,
+                reason=str(params.get("reason") or ""),
+                edit_instruction=str(params.get("edit_instruction") or ""),
+            )
+        spawned = await self.spawn(pack.to_dict())
+        event = {
+            "event_kind": "plan_revision_spawned",
+            "minion_id": str(spawned.get("minion_id") or ""),
+            "run_id": str(spawned.get("run_id") or ""),
+            "work_order_id": source_work_order_id,
+            "minion_profile": str(spawned.get("minion_profile") or pack.minion_profile),
+            "payload": {
+                "status": "spawned",
+                "source_plan_ref": dict(plan_ref) if isinstance(plan_ref, dict) else plan_ref,
+                "revision_work_order_id": pack.work_order_id,
+                "revision_run": dict(spawned),
+            },
+            "created_at": utc_now(),
+        }
+        self._queue_event_delivery(event)
+        self.tasking_repository.record_minion_event(event)
+        return {
+            "status": "spawned",
+            "work_order_id": source_work_order_id,
+            "revision_work_order_id": pack.work_order_id,
+            "run": dict(spawned),
+        }
+
+    async def dispatch_architect_from_requirements(self, params: dict[str, Any]) -> dict[str, Any]:
+        work_order_id = str(params.get("work_order_id") or "").strip()
+        if not work_order_id:
+            raise ValueError("work_order_id is required")
+        snapshot = self.tasking_repository.read_work_order(work_order_id)
+        if snapshot.get("status") != "ok":
+            raise KeyError(f"unknown work order: {work_order_id}")
+        work_order = dict(snapshot.get("work_order") or {})
+        source_metadata = dict(work_order.get("metadata") or {})
+        workspace = dict(source_metadata.get("workspace") or {})
+        workflow = dict(source_metadata.get("workflow") or {})
+        requirements_review = dict(source_metadata.get("requirements_review") or {})
+        artifact = params.get("requirements_artifact")
+        if not isinstance(artifact, dict):
+            artifact = dict(source_metadata.get("primary_artifact") or {})
+        architecture_mode = str(
+            source_metadata.get("architecture_mode")
+            or workflow.get("architecture_mode")
+            or requirements_review.get("architecture_mode")
+            or "micro"
+        ).strip() or "micro"
+        requested_architecture_mode = str(
+            source_metadata.get("requested_architecture_mode")
+            or workflow.get("requested_architecture_mode")
+            or requirements_review.get("requested_architecture_mode")
+            or architecture_mode
+        ).strip() or architecture_mode
+        workflow.update(
+            {
+                "status": "architecting",
+                "requirements_review": "accepted",
+                "requirements_artifact": dict(artifact),
+                "updated_at": utc_now(),
+            }
+        )
+        requirements_review.update(
+            {
+                "status": "accepted",
+                "artifact": dict(artifact),
+                "accepted_at": utc_now(),
+                "reason": str(params.get("reason") or "").strip(),
+                "next_action": "dispatch_architect",
+            }
+        )
+        planner_work_order = build_planner_work_order(
+            goal=str(work_order.get("goal") or ""),
+            task_id=str(source_metadata.get("task_id") or work_order.get("task_id") or ""),
+            work_order_id=work_order_id,
+        )
+        planner_work_order["role"] = "architect"
+        planning_requirements = dict(planner_work_order.get("planning_requirements") or {})
+        planning_requirements["architecture_mode"] = architecture_mode
+        planning_requirements["requested_architecture_mode"] = requested_architecture_mode
+        planning_requirements["coder_requires_accepted_plan"] = True
+        planning_requirements["module_slug_policy"] = (
+            "Use short module ids such as implementation, parser, runtime, tests, final_verification; do not add a module_ prefix."
+        )
+        if architecture_mode == "micro":
+            planning_requirements["micro_plan"] = True
+            planning_requirements["preferred_implementation_modules"] = 1
+            planning_requirements["max_implementation_modules"] = 2
+            planning_requirements["prelude_policy"] = (
+                "For narrow micro changes, do not create a prelude/setup_contracts/contracts/baseline/setup module. A no-prelude topology "
+                "is valid. Use a prelude only when it must produce real shared importable contracts, stubs, DTOs, facades, generated files, "
+                "or setup artifacts before multiple independent implementation modules can start."
+            )
+            planning_requirements["escalation_allowed"] = True
+        else:
+            planning_requirements["micro_plan"] = False
+        planner_work_order["planning_requirements"] = planning_requirements
+        planner_work_order["architecture_mode"] = architecture_mode
+        planner_work_order["requested_architecture_mode"] = requested_architecture_mode
+        plan_review = {
+            "interaction_mode": str(source_metadata.get("interaction_mode") or workflow.get("interaction_mode") or "auto_after_plan"),
+            "auto_accept_on_review_pass": bool(workflow.get("auto_accept_on_review_pass", False)),
+            "auto_advance_modules": bool(workflow.get("auto_advance_modules", True)),
+        }
+        metadata = dict(source_metadata)
+        metadata.update(
+            {
+                "workflow": workflow,
+                "requirements_review": requirements_review,
+                "requirements_brief": {
+                    "source": "accepted_requirements_artifact",
+                    "artifact": dict(artifact),
+                    "accepted_at": utc_now(),
+                    "accepted_by": str(params.get("actor") or "human").strip() or "human",
+                    "reason": str(params.get("reason") or "").strip(),
+                },
+                "planner_work_order": planner_work_order,
+                "architecture_mode": architecture_mode,
+                "requested_architecture_mode": requested_architecture_mode,
+                "plan_review": plan_review,
+                "work_order_title": str(source_metadata.get("work_order_title") or work_order.get("title") or "Plan implementation"),
+                "milestones": [
+                    {
+                        "milestone_id": "produce_architecture",
+                        "title": "Produce reviewed architecture plan",
+                        "summary": "Read the accepted requirements artifact and submit a dispatchable plan draft for plan acceptance review.",
+                        "acceptance": [
+                            "Architect submits a canonical dispatchable plan draft.",
+                            "Plan preserves accepted requirements and includes module contracts, acceptance criteria, and test strategy.",
+                            "Architecture mode constraints are satisfied or escalated with a concrete reason.",
+                        ],
+                    }
+                ],
+            }
+        )
+        metadata.pop("prompt_view", None)
+        pack = TaskContextPack.from_dict(
+            {
+                "work_order_id": work_order_id,
+                "goal": str(work_order.get("goal") or ""),
+                "instruction": (
+                    f"Produce a {architecture_mode} canonical architecture plan from the accepted requirements brief. "
+                    "Use architect plan builder tools only; do not implement code."
+                ),
+                "acceptance_criteria": [
+                    "Submit a dispatchable plan draft through the plan builder tools.",
+                    "Preserve accepted requirements from requirements_brief.",
+                    "Do not implement code in the architect run.",
+                ],
+                "workspace": workspace,
+                "profile_group": "software_engineering",
+                "profile_name": "architect",
+                "metadata": metadata,
+            }
+        )
+        spawned = await self.spawn(pack.to_dict())
+        event = {
+            "event_kind": "architect_dispatched",
+            "minion_id": str(spawned.get("minion_id") or ""),
+            "run_id": str(spawned.get("run_id") or ""),
+            "work_order_id": work_order_id,
+            "minion_profile": str(spawned.get("minion_profile") or pack.minion_profile),
+            "payload": {
+                "status": "spawned",
+                "requirements_artifact": dict(artifact),
+                "architecture_mode": architecture_mode,
+                "run": dict(spawned),
+            },
+            "created_at": utc_now(),
+        }
+        self._queue_event_delivery(event)
+        self.tasking_repository.record_minion_event(event)
+        return {
+            "status": "spawned",
+            "work_order_id": work_order_id,
+            "architecture_mode": architecture_mode,
+            "run": dict(spawned),
+        }
+
     async def auto_continue_work_order(self, work_order_id: str, *, reason: str = "") -> dict[str, Any]:
         normalized = str(work_order_id or "").strip()
         if not normalized:
@@ -931,8 +1254,53 @@ class MinionManager:
             self.reviews.schedule_event_gates(state, event)
         if event_kind == "terminal":
             self.reviews.schedule_reviewer_terminal_reconciliation(state, event)
+            self._maybe_emit_requirements_review_pending(state, event)
         if event_kind == "milestone_completed":
             self.serial_scheduler.schedule(state, event)
+
+    def _maybe_emit_requirements_review_pending(self, state: MinionRunState, event: dict[str, Any]) -> None:
+        if str(state.pack.minion_profile or "").strip() != "software_engineering.planner":
+            return
+        metadata = dict(state.pack.metadata or {})
+        workflow = dict(metadata.get("workflow") or {})
+        if str(workflow.get("requirements_review") or "").strip() != "required":
+            return
+        requirements_review = dict(metadata.get("requirements_review") or {})
+        payload = dict(event.get("payload") or {})
+        if str(payload.get("status") or "").strip().lower() != "completed":
+            return
+        artifact = payload.get("primary_artifact")
+        if not isinstance(artifact, dict):
+            artifact = {}
+        review_state = {
+            **requirements_review,
+            "status": "acceptance_pending",
+            "artifact": dict(artifact),
+            "summary": str(payload.get("summary") or ""),
+            "updated_at": utc_now(),
+            "next_action": "await_human_requirements_review",
+        }
+        self.tasking_repository.merge_work_order_metadata(state.pack.work_order_id, {"requirements_review": review_state})
+        pending_event = {
+            "event_kind": "requirements_review_pending",
+            "minion_id": state.minion_id,
+            "run_id": state.run_id,
+            "work_order_id": state.pack.work_order_id,
+            "minion_profile": state.pack.minion_profile,
+            "payload": {
+                "status": "acceptance_pending",
+                "summary": str(payload.get("summary") or ""),
+                "requirements_artifact": dict(artifact),
+                "architecture_mode": str(metadata.get("architecture_mode") or workflow.get("architecture_mode") or ""),
+                "requested_architecture_mode": str(
+                    metadata.get("requested_architecture_mode") or workflow.get("requested_architecture_mode") or ""
+                ),
+                "metadata": dict(payload.get("metadata") or {}),
+            },
+            "created_at": utc_now(),
+        }
+        self._queue_event_delivery(pending_event)
+        self.tasking_repository.record_minion_event(pending_event)
 
     async def _send_runner_control_or_record(self, state: MinionRunState, message: dict[str, Any]) -> dict[str, Any]:
         unavailable_reason = self.runner_control_unavailable_reason(state)

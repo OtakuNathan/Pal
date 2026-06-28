@@ -531,7 +531,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                     "type": "string",
                     "description": (
                         "Required stable, human-readable module id/name. Use snake_case names such as "
-                        "module_setup_contracts, module_slug_tools, or module_final_verification; Pal will not invent one."
+                        "setup_contracts, slug_tools, implementation, or final_verification; Pal will not invent one."
                     ),
                 },
                 "kind": {"type": "string", "enum": ["prelude", "module", "join"], "default": "module"},
@@ -2301,8 +2301,8 @@ class PlanBuilderRuntime:
             for milestone in _dict_list(module.get("internal_milestones")):
                 _validate_acceptance_consistency(milestone)
         kinds = [_text(module.get("kind")).lower() for module in modules]
-        if kinds.count("prelude") != 1:
-            raise ValueError("plan must contain exactly one prelude module")
+        if kinds.count("prelude") > 1:
+            raise ValueError("plan must contain at most one prelude module")
         if kinds.count("join") != 1:
             raise ValueError("plan must contain exactly one join module")
         if "module" not in kinds:

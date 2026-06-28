@@ -938,8 +938,8 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
     prelude_nodes = [node for node in nodes if node["kind"] == "prelude"]
     module_nodes = [node for node in nodes if node["kind"] == "module"]
     join_nodes = [node for node in nodes if node["kind"] == "join"]
-    if len(prelude_nodes) != 1:
-        errors.append("orchestration.topology.nodes must contain exactly one prelude node")
+    if len(prelude_nodes) > 1:
+        errors.append("orchestration.topology.nodes must contain at most one prelude node")
     if not module_nodes:
         errors.append("orchestration.topology.nodes must contain at least one module node")
     if len(join_nodes) != 1:
@@ -953,15 +953,15 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
         raise ValueError("invalid dispatchable FinalPlanArtifact: " + "; ".join(errors))
     sorted_node_ids = _topological_sort([str(node["node_id"]) for node in nodes], dependency_map)
     nodes_by_id = {str(node["node_id"]): node for node in nodes}
-    if nodes_by_id[sorted_node_ids[0]]["kind"] != "prelude":
-        raise ValueError("invalid dispatchable FinalPlanArtifact: topology must start with the prelude node")
+    if prelude_nodes and nodes_by_id[sorted_node_ids[0]]["kind"] != "prelude":
+        raise ValueError("invalid dispatchable FinalPlanArtifact: topology must start with the prelude node when present")
     if nodes_by_id[sorted_node_ids[-1]]["kind"] != "join":
         raise ValueError("invalid dispatchable FinalPlanArtifact: topology must end with the join node")
-    prelude_id = str(prelude_nodes[0]["node_id"])
+    prelude_id = str(prelude_nodes[0]["node_id"]) if prelude_nodes else ""
     join_id = str(join_nodes[0]["node_id"])
     for node in nodes:
         node_id = str(node["node_id"])
-        if node_id != prelude_id and not _has_dependency_path(node_id, prelude_id, dependency_map):
+        if prelude_id and node_id != prelude_id and not _has_dependency_path(node_id, prelude_id, dependency_map):
             raise ValueError(
                 f"invalid dispatchable FinalPlanArtifact: node {node_id} must depend on the prelude node"
             )

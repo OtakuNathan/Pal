@@ -79,25 +79,19 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
         source_repo = str(workspace.get("repo_path") or "").strip()
     project_name = _project_name(metadata, workspace, task_id=task_id, source_repo=source_repo)
     module_name = _module_name(metadata, workspace)
-    repo_path = _project_repo_path(runtime_root, workspace, project_name, module_name=module_name)
+    work_order_root_id = str(metadata.get("parent_work_order_id") or workspace.get("parent_work_order_id") or pack.work_order_id).strip()
+    project_root = _project_root_path(runtime_root, workspace, project_name, work_order_id=work_order_root_id)
+    repo_path = _project_repo_path(runtime_root, workspace, project_name, work_order_id=work_order_root_id, module_name=module_name)
+    common_git_dir = project_root / ".git"
     created_repo = not (repo_path / ".git").exists()
     branch = str(workspace.get("work_order_branch") or f"work_order_{_safe_ref(pack.work_order_id)}").strip()
-    worktree_source = _local_git_worktree_source(source_repo, repo_path, workspace)
     worktree_base_ref = ""
-    workspace_kind = "git_repo"
+    workspace_kind = "git_worktree"
 
     if created_repo:
-        if worktree_source is not None:
-            worktree_base_ref = _worktree_base_ref(worktree_source, workspace)
-            _add_worktree(worktree_source, repo_path, branch=branch, base_ref=worktree_base_ref)
-            workspace_kind = "git_worktree"
-            workspace["worktree_source_repo"] = str(worktree_source)
-        elif source_repo and not _same_local_path(source_repo, repo_path):
-            _clone_repo(source_repo, repo_path)
-        else:
-            repo_path.mkdir(parents=True, exist_ok=True)
-            _git(repo_path, "init", check=True)
-            _git(repo_path, "checkout", "-B", "main", check=True)
+        _ensure_project_git_store(common_git_dir, source_repo=source_repo, workspace=workspace)
+        worktree_base_ref = _worktree_base_ref_from_git_dir(common_git_dir, workspace)
+        _add_worktree_from_git_dir(common_git_dir, repo_path, branch=branch, base_ref=worktree_base_ref)
     _ensure_git_identity(repo_path)
     if not _has_head(repo_path):
         _git(repo_path, "commit", "--allow-empty", "-m", "minion: initialize project repo", check=True)
@@ -142,6 +136,9 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
         {
             "repo_path": str(repo_path),
             "project_name": project_name,
+            "runtime_project_path": str(project_root),
+            "work_order_repo_root": str(project_root),
+            "common_git_dir": str(common_git_dir),
             "base_ref": base_ref,
             "base_sha": base_sha,
             "work_order_branch": branch,
@@ -149,7 +146,7 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
             "workspace_kind": workspace_kind,
         }
     )
-    artifact_dir = repo_path / "minion_outputs" / _safe_ref(pack.work_order_id)
+    artifact_dir = project_root / "_artifacts" / _safe_ref(pack.work_order_id)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     workspace.setdefault("run_dir", str(artifact_dir))
     workspace["artifact_dir"] = str(artifact_dir)
@@ -382,53 +379,136 @@ def _git(repo_path: Path, *args: str, check: bool = False) -> GitCommandResult:
     return result
 
 
-def _clone_repo(source: str, repo_path: Path) -> None:
-    repo_path = Path(repo_path)
-    repo_path.parent.mkdir(parents=True, exist_ok=True)
-    if repo_path.exists() and any(repo_path.iterdir()):
-        raise RuntimeError(f"target project repo is not empty and is not a git repository: {repo_path}")
+def _git_bare(git_dir: Path, *args: str, check: bool = False) -> GitCommandResult:
     completed = subprocess.run(
-        ["git", "clone", str(source), str(repo_path)],
-        cwd=str(repo_path.parent),
+        ["git", f"--git-dir={git_dir}", *args],
+        cwd=str(Path(git_dir).parent),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    result = GitCommandResult(
+        ok=completed.returncode == 0,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
+        returncode=int(completed.returncode),
+    )
+    if check and not result.ok:
+        raise RuntimeError(result.stderr or result.stdout or f"git --git-dir={git_dir} {' '.join(args)} failed")
+    return result
+
+
+def _git_bare_input(git_dir: Path, *args: str, input_text: str, check: bool = False) -> GitCommandResult:
+    completed = subprocess.run(
+        ["git", f"--git-dir={git_dir}", *args],
+        cwd=str(Path(git_dir).parent),
+        input=input_text,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    result = GitCommandResult(
+        ok=completed.returncode == 0,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
+        returncode=int(completed.returncode),
+    )
+    if check and not result.ok:
+        raise RuntimeError(result.stderr or result.stdout or f"git --git-dir={git_dir} {' '.join(args)} failed")
+    return result
+
+
+def _ensure_project_git_store(git_dir: Path, *, source_repo: str, workspace: dict[str, Any]) -> None:
+    git_dir = Path(git_dir)
+    if git_dir.exists() and _git_bare(git_dir, "rev-parse", "--git-dir").ok:
+        return
+    git_dir.parent.mkdir(parents=True, exist_ok=True)
+    source = str(source_repo or "").strip()
+    if source:
+        _clone_bare_repo(source, git_dir)
+    else:
+        _init_bare_repo(git_dir)
+        _create_initial_bare_commit(git_dir, branch=str(workspace.get("base_ref") or "main").strip() or "main")
+    _ensure_bare_git_identity(git_dir)
+
+
+def _clone_bare_repo(source: str, git_dir: Path) -> None:
+    git_dir = Path(git_dir)
+    if git_dir.exists() and any(git_dir.iterdir()):
+        raise RuntimeError(f"target common git dir is not empty: {git_dir}")
+    completed = subprocess.run(
+        ["git", "clone", "--bare", str(source), str(git_dir)],
+        cwd=str(git_dir.parent),
         capture_output=True,
         text=True,
         timeout=180,
     )
     if completed.returncode != 0:
-        raise RuntimeError(completed.stderr or completed.stdout or f"git clone {source} failed")
+        raise RuntimeError(completed.stderr or completed.stdout or f"git clone --bare {source} failed")
+    _ensure_bare_git_identity(git_dir)
 
 
-def _local_git_worktree_source(source: str, repo_path: Path, workspace: dict[str, Any]) -> Path | None:
-    for key in ("use_worktree", "use_git_worktree"):
-        if key in workspace and str(workspace.get(key)).strip().lower() in {"0", "false", "no", "off"}:
-            return None
-    if not source or not _is_local_path(source) or _same_local_path(source, repo_path):
-        return None
-    candidate = Path(source).expanduser().resolve()
-    if not candidate.is_dir():
-        return None
-    if not _git(candidate, "rev-parse", "--is-inside-work-tree").ok:
-        return None
-    if not _has_head(candidate):
-        return None
-    return candidate
+def _init_bare_repo(git_dir: Path) -> None:
+    git_dir = Path(git_dir)
+    git_dir.parent.mkdir(parents=True, exist_ok=True)
+    completed = subprocess.run(
+        ["git", "init", "--bare", str(git_dir)],
+        cwd=str(git_dir.parent),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr or completed.stdout or f"git init --bare {git_dir} failed")
+    _ensure_bare_git_identity(git_dir)
 
 
-def _worktree_base_ref(source_repo: Path, workspace: dict[str, Any]) -> str:
-    base_ref = str(workspace.get("base_ref") or _current_branch(source_repo) or "HEAD").strip() or "HEAD"
-    if not _git(source_repo, "rev-parse", "--verify", base_ref).ok:
+def _create_initial_bare_commit(git_dir: Path, *, branch: str) -> None:
+    if _git_bare(git_dir, "rev-parse", "--verify", "HEAD").ok:
+        return
+    tree = _git_bare_input(git_dir, "mktree", input_text="", check=True).stdout.strip()
+    commit = _git_bare(
+        git_dir,
+        "-c",
+        "user.email=minion@pal.local",
+        "-c",
+        "user.name=Pal Minion",
+        "commit-tree",
+        tree,
+        "-m",
+        "minion: initialize project repo",
+        check=True,
+    ).stdout.strip()
+    ref = f"refs/heads/{_safe_ref(branch or 'main')}"
+    _git_bare(git_dir, "update-ref", ref, commit, check=True)
+    _git_bare(git_dir, "symbolic-ref", "HEAD", ref, check=True)
+
+
+def _ensure_bare_git_identity(git_dir: Path) -> None:
+    if not _git_bare(git_dir, "config", "user.email").stdout.strip():
+        _git_bare(git_dir, "config", "user.email", "minion@pal.local", check=True)
+    if not _git_bare(git_dir, "config", "user.name").stdout.strip():
+        _git_bare(git_dir, "config", "user.name", "Pal Minion", check=True)
+
+
+def _worktree_base_ref_from_git_dir(git_dir: Path, workspace: dict[str, Any]) -> str:
+    base_ref = str(workspace.get("base_ref") or "").strip()
+    if not base_ref:
+        branch = _git_bare(git_dir, "symbolic-ref", "--short", "HEAD").stdout.strip()
+        base_ref = branch or "HEAD"
+    if not _git_bare(git_dir, "rev-parse", "--verify", base_ref).ok:
         base_ref = "HEAD"
     return base_ref
 
 
-def _add_worktree(source_repo: Path, repo_path: Path, *, branch: str, base_ref: str) -> None:
+def _add_worktree_from_git_dir(git_dir: Path, repo_path: Path, *, branch: str, base_ref: str) -> None:
     repo_path = Path(repo_path)
     repo_path.parent.mkdir(parents=True, exist_ok=True)
     if repo_path.exists() and any(repo_path.iterdir()):
         raise RuntimeError(f"target project repo is not empty and is not a git worktree: {repo_path}")
     completed = subprocess.run(
-        ["git", "worktree", "add", "-B", str(branch), str(repo_path), str(base_ref or "HEAD")],
-        cwd=str(source_repo),
+        ["git", f"--git-dir={git_dir}", "worktree", "add", "-B", str(branch), str(repo_path), str(base_ref or "HEAD")],
+        cwd=str(git_dir.parent),
         capture_output=True,
         text=True,
         timeout=180,
@@ -437,14 +517,26 @@ def _add_worktree(source_repo: Path, repo_path: Path, *, branch: str, base_ref: 
         raise RuntimeError(completed.stderr or completed.stdout or f"git worktree add {repo_path} failed")
 
 
-def _project_repo_path(runtime_root: Path, workspace: dict[str, Any], project_name: str, *, module_name: str = "") -> Path:
+def _project_root_path(runtime_root: Path, workspace: dict[str, Any], project_name: str, *, work_order_id: str) -> Path:
+    explicit = str(workspace.get("task_project_path") or workspace.get("target_project_path") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return runtime_root / "data" / "minion" / "repos" / _safe_ref(work_order_id or "work_order") / _safe_ref(project_name)
+
+
+def _project_repo_path(
+    runtime_root: Path,
+    workspace: dict[str, Any],
+    project_name: str,
+    *,
+    work_order_id: str,
+    module_name: str = "",
+) -> Path:
     explicit = str(workspace.get("task_repo_path") or workspace.get("target_repo_path") or "").strip()
     if explicit:
         return Path(explicit).expanduser()
-    project_root = runtime_root / "data" / "minion" / "repos" / _safe_ref(project_name)
-    if str(module_name or "").strip():
-        return project_root / _safe_ref(module_name)
-    return project_root
+    project_root = _project_root_path(runtime_root, workspace, project_name, work_order_id=work_order_id)
+    return project_root / _safe_ref(str(module_name or "").strip() or "workspace")
 
 
 def _project_name(metadata: dict[str, Any], workspace: dict[str, Any], *, task_id: str, source_repo: str) -> str:
@@ -578,13 +670,6 @@ def _write_folder_workspace_metadata(run_dir: Path, pack: TaskContextPack) -> No
         json.dumps(metadata, ensure_ascii=False, sort_keys=True, indent=2),
         encoding="utf-8",
     )
-
-
-def _same_local_path(source: str, repo_path: Path) -> bool:
-    try:
-        return Path(source).expanduser().resolve() == Path(repo_path).expanduser().resolve()
-    except Exception:
-        return False
 
 
 def _is_local_path(value: str) -> bool:

@@ -140,7 +140,7 @@ Policy:
 - Use `op_minion_review_gate_submit` for `plan_acceptance`.
 - Use `op_minion_review_checkpoint` for `checkpoint_verification` and `repair_verification`; Pal binds the checkpoint target and tool evidence.
 
-Plan acceptance should then change from:
+Plan acceptance is now a manager/control action, not a public capability call. It should change from the old direct call shape:
 
 ```text
 accept_plan(plan_ref)
@@ -149,16 +149,16 @@ accept_plan(plan_ref)
 to:
 
 ```text
-accept_plan(plan_ref, review_gate_ref)
+manager/control accepts reviewed plan_ref with review_gate_ref
 ```
 
 with optional explicit override:
 
 ```text
-accept_plan(plan_ref, human_override={reason, actor})
+control action includes human_override={reason, actor}
 ```
 
-Overrides must be visible in the acceptance marker and ledger.
+Overrides must be visible in the acceptance marker and ledger; accepted plans are dispatched internally by the manager workflow.
 
 ## Manager Loop
 

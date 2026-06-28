@@ -310,7 +310,7 @@ The reviewer must submit the verdict with `op_minion_review_gate_submit` and `ga
 Manager reconciliation handles verdicts as follows:
 
 - `pass`: update plan review state to acceptance pending and emit `plan_acceptance_pending`. Implementation spawn still requires `minion_accept_plan` or an explicit human override marker; a valid JSON plan plus reviewer pass is not enough by itself.
-- `fail`: spawn an automatic revision planner when the gate policy allows it and revision attempts remain; otherwise record `plan_revision_required`.
+- `fail`: spawn an automatic revision architect when the gate policy allows it and revision attempts remain; otherwise record `plan_revision_required`.
 - `partial`: record `plan_review_human_decision_required`.
 
 Plan revisions write new immutable plan revisions. They must not mutate the original plan artifact.

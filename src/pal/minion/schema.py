@@ -41,7 +41,7 @@ def ensure_minion_schema(runtime_root: Path, connection: sqlite3.Connection) -> 
             goal TEXT NOT NULL DEFAULT '',
             source_summary TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'draft',
-            minion_profile TEXT NOT NULL DEFAULT 'software_engineering.planner',
+            minion_profile TEXT NOT NULL DEFAULT 'software_engineering.architect',
             task_id TEXT NOT NULL DEFAULT '',
             proposed_work_order_id TEXT NOT NULL DEFAULT '',
             payload_json TEXT NOT NULL DEFAULT '{}',

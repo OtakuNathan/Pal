@@ -498,6 +498,91 @@ def minion_plan_acceptance_delivery(payload: dict[str, Any], route: ControlRoute
     return delivery_for_interaction(route, "interactive_open", interaction)
 
 
+def minion_requirements_review_delivery(payload: dict[str, Any], route: ControlRoute) -> ControlDelivery | None:
+    interaction = build_minion_requirements_review_interaction(payload, route)
+    if interaction is None:
+        return None
+    return delivery_for_interaction(route, "interactive_open", interaction)
+
+
+def build_minion_requirements_review_interaction(payload: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec | None:
+    work_order_id = str(payload.get("work_order_id") or "").strip()
+    artifact = payload.get("requirements_artifact") or payload.get("primary_artifact")
+    if not isinstance(artifact, dict):
+        artifact = {}
+    target_id = work_order_id or str(artifact.get("relative_path") or artifact.get("path") or "").strip()
+    if not target_id:
+        return None
+    interaction_id = f"minion_requirements_accept_{target_id}"
+    summary = str(payload.get("summary") or "").strip()
+    relative_path = str(artifact.get("relative_path") or "").strip()
+    artifact_path = str(artifact.get("path") or "").strip()
+    architecture_mode = str(payload.get("architecture_mode") or "").strip()
+    lines = [
+        "Minion requirements draft is ready.",
+        "",
+        f"Work order: {work_order_id or '-'}",
+    ]
+    if relative_path or artifact_path:
+        lines.append(f"Artifact: {relative_path or artifact_path}")
+    if architecture_mode:
+        lines.append(f"Architecture mode: {architecture_mode}")
+    if summary:
+        lines.extend(["", "Summary:", _truncate_text(summary, 900)])
+    lines.append("")
+    lines.append("Accept these requirements and dispatch the architect?")
+    base_args = {
+        "work_order_id": work_order_id,
+        "requirements_artifact": dict(artifact),
+    }
+    return InteractionMessageSpec(
+        interaction_id=interaction_id,
+        interaction_kind="minion_requirements_review",
+        route=route,
+        text="\n".join(lines),
+        buttons=(
+            (
+                InteractionButtonSpec(
+                    label="Accept Requirements",
+                    action_key="control.action.dispatch",
+                    action_args=_minion_interaction_action_payload(
+                        action_kind="minion_requirements_accept",
+                        target_id=target_id,
+                        args={
+                            **base_args,
+                            "reason": "human accepted requirements from channel interaction",
+                        },
+                    ),
+                ),
+                InteractionButtonSpec(
+                    label="Reject Requirements",
+                    action_key="control.action.dispatch",
+                    action_args=_minion_interaction_action_payload(
+                        action_kind="minion_requirements_reject",
+                        target_id=target_id,
+                        args={
+                            **base_args,
+                            "reason": "human rejected requirements from channel interaction",
+                        },
+                    ),
+                ),
+                InteractionButtonSpec(
+                    label="Edit Requirements",
+                    action_key="control.action.dispatch",
+                    action_args=_minion_interaction_action_payload(
+                        action_kind="minion_requirements_edit",
+                        target_id=target_id,
+                        args={
+                            **base_args,
+                            "reason": "human requested requirements edits from channel interaction",
+                        },
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
 def build_minion_plan_acceptance_interaction(payload: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec | None:
     plan_ref = payload.get("plan_ref")
     if not isinstance(plan_ref, dict):
