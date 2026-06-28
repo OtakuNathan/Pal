@@ -311,6 +311,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "residual_risk": {"type": "array", "items": {"type": "object"}},
                 "api_evidence_not_applicable_reason": {"type": "string"},
                 "lsp_evidence_not_applicable_reason": {"type": "string"},
+                "warning_clean_not_applicable_reason": {"type": "string"},
             },
             "required": ["verdict", "summary"],
         },
@@ -362,6 +363,73 @@ _PRE_EDIT_VERIFICATION_COMMAND_MARKERS = (
     "yarn test",
     "tox",
     "nox",
+)
+
+_WARNING_CLEAN_DEFAULT_LANGUAGES = (
+    "c",
+    "cpp",
+    "objc",
+    "objcpp",
+    "python",
+    "javascript",
+    "typescript",
+    "rust",
+    "go",
+    "java",
+    "kotlin",
+    "swift",
+    "csharp",
+    "ruby",
+    "php",
+    "shell",
+)
+
+_WARNING_CLEAN_LANGUAGE_ALIASES = {
+    "bash": "shell",
+    "c++": "cpp",
+    "cc": "cpp",
+    "cxx": "cpp",
+    "c#": "csharp",
+    "cs": "csharp",
+    "golang": "go",
+    "js": "javascript",
+    "objc": "objc",
+    "objective-c": "objc",
+    "objective-c++": "objcpp",
+    "objective-cpp": "objcpp",
+    "py": "python",
+    "rs": "rust",
+    "sh": "shell",
+    "ts": "typescript",
+}
+
+_WARNING_CLEAN_COMMAND_MARKERS = (
+    "-werror",
+    "/wx",
+    "warnings=error",
+    "warnings-as-errors",
+    "warnings as errors",
+    "pythonwarnings=error",
+    "-w error",
+    "-d warnings",
+    "-dwarnings",
+    "--deny warnings",
+    "--max-warnings=0",
+    "compileall",
+    "py_compile",
+    "tsc --noemit",
+    "cargo clippy",
+    "go vet",
+    "shellcheck",
+    "bash -n",
+    "ruby -c",
+    "php -l",
+    "javac",
+    "dotnet build",
+    "swift build",
+    "kotlinc",
+    "warning-clean",
+    "warning clean",
 )
 
 
@@ -1278,6 +1346,18 @@ def _minion_review_gate_submit_result(call: CanonicalToolCall, workspace: dict[s
                 llm_text=provenance_error,
                 status=RuntimeStatus.INVALID,
             )
+        warning_clean_error = _review_gate_warning_clean_error(args, workspace)
+        if warning_clean_error:
+            structured = _review_gate_validation_error_payload(warning_clean_error, args, workspace)
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text=warning_clean_error,
+                structured=structured,
+                call_id=call.call_id,
+                llm_text=_review_gate_validation_llm_text(warning_clean_error, structured),
+                status=RuntimeStatus.INVALID,
+            )
         payload = repository.submit_review_gate(
             args,
             reviewer_profile=str(args.get("reviewer_profile") or ""),
@@ -1389,6 +1469,10 @@ def _minion_review_checkpoint_result(call: CanonicalToolCall, workspace: dict[st
     if lsp_reason:
         metadata["lsp_evidence_not_applicable"] = True
         metadata["lsp_evidence_not_applicable_reason"] = lsp_reason
+    warning_clean_reason = str(args.get("warning_clean_not_applicable_reason") or "").strip()
+    if warning_clean_reason:
+        metadata["warning_clean_not_applicable"] = True
+        metadata["warning_clean_not_applicable_reason"] = warning_clean_reason
     if metadata:
         gate_args["metadata"] = metadata
     result = _minion_review_gate_submit_result(
@@ -1779,7 +1863,7 @@ def _bind_review_target_plan_ref(target: dict[str, Any], workspace: dict[str, An
 def _review_gate_validation_error_payload(error: str, args: dict[str, Any], workspace: dict[str, Any]) -> dict[str, Any]:
     criteria = _validation_acceptance_criteria(args, workspace)
     checklist = build_acceptance_checklist(criteria)
-    return {
+    payload = {
         "reason": "review_gate_validation_failed",
         "error": str(error or ""),
         "missing_acceptance_criteria": _missing_acceptance_criteria(args, criteria),
@@ -1791,6 +1875,27 @@ def _review_gate_validation_error_payload(error: str, args: dict[str, Any], work
         "usable_evidence_refs": _usable_review_evidence_refs(workspace),
         "next_payload_shape": _review_gate_next_payload_shape(args, workspace, criteria),
     }
+    warning_clean = _missing_warning_clean_verification(args, workspace)
+    if warning_clean:
+        payload["missing_warning_clean_verification"] = warning_clean
+    return payload
+
+
+def _missing_warning_clean_verification(args: dict[str, Any], workspace: dict[str, Any]) -> dict[str, Any]:
+    requirement = _warning_clean_requirement(args, workspace)
+    if not requirement:
+        return {}
+    metadata = dict(args.get("metadata") or {})
+    if _warning_clean_not_applicable_reason(metadata):
+        return {}
+    if _has_warning_clean_command_evidence(list(args.get("commands_run") or []), requirement["languages"]):
+        return {}
+    policy = dict(requirement.get("policy") or {})
+    return {
+        "languages": list(requirement["languages"]),
+        "gate_scope": str(requirement.get("scope") or ""),
+        "not_applicable_reason_field": str(policy.get("not_applicable_reason_field") or "warning_clean_not_applicable_reason"),
+    }
 
 
 def _review_gate_validation_llm_text(error: str, payload: dict[str, Any]) -> str:
@@ -1800,6 +1905,15 @@ def _review_gate_validation_llm_text(error: str, payload: dict[str, Any]) -> str
     missing = [str(item) for item in list(payload.get("missing_acceptance_criteria") or []) if str(item).strip()]
     if missing:
         lines.append("missing_acceptance_criteria: " + "; ".join(missing[:5]))
+    warning_clean = payload.get("missing_warning_clean_verification")
+    if isinstance(warning_clean, dict) and warning_clean:
+        languages = ", ".join(str(item) for item in list(warning_clean.get("languages") or []) if str(item).strip())
+        reason_field = str(warning_clean.get("not_applicable_reason_field") or "warning_clean_not_applicable_reason")
+        lines.append(
+            "missing_warning_clean_verification: "
+            + (f"languages={languages}; " if languages else "")
+            + f"run/select warning-clean command evidence or provide {reason_field}"
+        )
     missing_refs = [
         str(item.get("id") or item.get("ref") or "").strip()
         for item in list((payload.get("next_payload_shape") or {}).get("missing_cover_refs") or [])
@@ -1822,10 +1936,16 @@ def _review_gate_validation_llm_text(error: str, payload: dict[str, Any]) -> str
     next_shape = payload.get("next_payload_shape")
     if isinstance(next_shape, dict) and next_shape:
         lines.append("next_payload_shape:\n```json\n" + _json_preview(next_shape, limit=2400) + "\n```")
-        lines.append(
-            "Resubmit the review gate using this shape now; preserve already-valid evidence and add the missing covers. "
-            "Do not run more tools unless no listed evidence can prove a missing acceptance criterion."
-        )
+        if isinstance(warning_clean, dict) and warning_clean:
+            lines.append(
+                "Run a warning-clean verification command if no listed command evidence already proves it, or resubmit "
+                "with the concrete warning-clean not-applicable reason."
+            )
+        else:
+            lines.append(
+                "Resubmit the review gate using this shape now; preserve already-valid evidence and add the missing covers. "
+                "Do not run more tools unless no listed evidence can prove a missing acceptance criterion."
+            )
     else:
         lines.append("Fix only the named invalid fields and resubmit the gate.")
     return "\n".join(lines)
@@ -1934,34 +2054,54 @@ def _review_gate_next_payload_shape(args: dict[str, Any], workspace: dict[str, A
     coverage = [str(item.get("id") or "") for item in missing_cover_refs if str(item.get("id") or "").strip()]
     if not coverage and checklist:
         coverage = [str(item.get("id") or f"AC-{index}") for index, item in enumerate(checklist, start=1)]
+    missing_warning_clean = _missing_warning_clean_verification(args, workspace)
+    warning_clean_selector: dict[str, Any] = {}
+    if missing_warning_clean:
+        languages = [str(item) for item in list(missing_warning_clean.get("languages") or []) if str(item).strip()]
+        warning_ref = _latest_successful_warning_clean_ref(_usable_review_evidence_refs(workspace), languages)
+        warning_clean_selector = {
+            "kind": str(warning_ref.get("kind") or "command"),
+            "contains": _selector_hint_for_ref(warning_ref)
+            or "<warning-clean command substring, e.g. -Werror build or PYTHONWARNINGS=error pytest>",
+            "latest_success": True,
+            "covers": coverage or ["<acceptance ref>"],
+        }
     command_ref = next(
         (item for item in _usable_review_evidence_refs(workspace) if _is_command_review_evidence_kind(str(item.get("kind") or ""))),
         {},
     )
     api_ref = next((item for item in _usable_review_evidence_refs(workspace) if item.get("kind") in {"source", "lsp"}), {})
     if checkpoint_target:
+        evidence_selectors = [
+            {
+                "kind": str(command_ref.get("kind") or "command"),
+                "contains": _selector_hint_for_ref(command_ref) or "<pytest/build command substring>",
+                "latest_success": True,
+                "covers": coverage or ["<acceptance ref>"],
+            },
+            {
+                "kind": str(api_ref.get("kind") or "source"),
+                "contains": _selector_hint_for_ref(api_ref) or "<source path or LSP operation>",
+                "latest_success": True,
+                "covers": coverage or ["<acceptance ref>"],
+            },
+        ]
+        if warning_clean_selector:
+            evidence_selectors.insert(0, warning_clean_selector)
+        payload_args = {
+            "verdict": str(args.get("verdict") or "pass"),
+            "summary": "<concise verdict summary>",
+            "evidence_selectors": evidence_selectors,
+            "lsp_evidence_not_applicable_reason": "<reason only when LSP is unavailable or irrelevant>",
+        }
+        if missing_warning_clean:
+            payload_args[str(missing_warning_clean.get("not_applicable_reason_field") or "warning_clean_not_applicable_reason")] = (
+                "<reason only when warning-clean verification is impossible or explicitly out of scope>"
+            )
         return {
             "tool": "review_checkpoint",
             "missing_cover_refs": missing_cover_refs,
-            "args": {
-                "verdict": str(args.get("verdict") or "pass"),
-                "summary": "<concise verdict summary>",
-                "evidence_selectors": [
-                    {
-                        "kind": str(command_ref.get("kind") or "command"),
-                        "contains": _selector_hint_for_ref(command_ref) or "<pytest/build command substring>",
-                        "latest_success": True,
-                        "covers": coverage or ["<acceptance ref>"],
-                    },
-                    {
-                        "kind": str(api_ref.get("kind") or "source"),
-                        "contains": _selector_hint_for_ref(api_ref) or "<source path or LSP operation>",
-                        "latest_success": True,
-                        "covers": coverage or ["<acceptance ref>"],
-                    },
-                ],
-                "lsp_evidence_not_applicable_reason": "<reason only when LSP is unavailable or irrelevant>",
-            },
+            "args": payload_args,
         }
     return {
         "tool": "review_gate_submit",
@@ -2016,6 +2156,7 @@ def _with_review_tool_provenance(args: dict[str, Any], workspace: dict[str, Any]
         _bind_command_evidence_refs(args, refs)
         _bind_api_evidence_refs(args, refs)
         _default_review_checkpoint_runtime_evidence(args, refs, criteria)
+        _default_warning_clean_runtime_evidence(args, refs, workspace, criteria)
         _normalize_review_gate_coverage(args, criteria)
         metadata["tool_evidence_refs"] = refs
         _default_lsp_not_applicable_from_status(args, refs, metadata)
@@ -2108,6 +2249,217 @@ def _default_review_checkpoint_runtime_evidence(args: dict[str, Any], refs: list
         args["commands_run"] = commands
     if api_evidence:
         args["api_evidence"] = api_evidence
+
+
+def _default_warning_clean_runtime_evidence(
+    args: dict[str, Any],
+    refs: list[dict[str, Any]],
+    workspace: dict[str, Any],
+    criteria: list[str],
+) -> None:
+    requirement = _warning_clean_requirement(args, workspace)
+    if not requirement:
+        return
+    if _warning_clean_not_applicable_reason(dict(args.get("metadata") or {})):
+        return
+    commands = [dict(item) if isinstance(item, dict) else item for item in list(args.get("commands_run") or [])]
+    if _has_warning_clean_command_evidence(commands, requirement["languages"]):
+        return
+    command_ref = _latest_successful_warning_clean_ref(
+        [dict(item) for item in refs if _is_command_review_evidence_kind(str(item.get("kind") or ""))],
+        requirement["languages"],
+    )
+    if not command_ref:
+        return
+    commands.append(_runtime_evidence_entry(command_ref, covers=_all_acceptance_coverage_refs(criteria)))
+    args["commands_run"] = commands
+
+
+def _review_gate_warning_clean_error(args: dict[str, Any], workspace: dict[str, Any]) -> str:
+    requirement = _warning_clean_requirement(args, workspace)
+    if not requirement:
+        return ""
+    metadata = dict(args.get("metadata") or {})
+    if _warning_clean_not_applicable_reason(metadata):
+        return ""
+    if _has_warning_clean_command_evidence(list(args.get("commands_run") or []), requirement["languages"]):
+        return ""
+    return (
+        "checkpoint pass review gate lacks warning-clean verification evidence for "
+        + ", ".join(requirement["languages"])
+        + "; run/select a successful compile/static/test diagnostic with warnings treated as failures, "
+        + "or provide warning_clean_not_applicable_reason"
+    )
+
+
+def _warning_clean_requirement(args: dict[str, Any], workspace: dict[str, Any]) -> dict[str, Any]:
+    if str(args.get("verdict") or "").strip().lower() != "pass":
+        return {}
+    if str(args.get("gate_kind") or "").strip() not in {"checkpoint_verification", "repair_verification"}:
+        return {}
+    policy = _warning_clean_policy(workspace)
+    if not _warning_clean_policy_enabled(policy):
+        return {}
+    scope = _review_target_gate_scope(workspace)
+    required_scopes = _string_list(policy.get("required_gate_scopes") or policy.get("gate_scopes"))
+    if required_scopes:
+        if not scope or scope not in set(required_scopes):
+            return {}
+    languages = _warning_clean_applicable_languages(workspace, policy)
+    if not languages:
+        return {}
+    return {"languages": languages, "policy": policy, "scope": scope}
+
+
+def _warning_clean_policy(workspace: dict[str, Any]) -> dict[str, Any]:
+    gate_policy = dict(workspace.get("gate_policy") or workspace.get("effective_gate_policy") or {})
+    raw = gate_policy.get("warning_clean_verification")
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, bool):
+        return {"enabled": raw, "required_for_checkpoint_pass": raw}
+    if bool(gate_policy.get("require_warning_clean_verification_for_checkpoint_pass")):
+        return {
+            "enabled": True,
+            "required_for_checkpoint_pass": True,
+            "required_gate_scopes": _string_list(gate_policy.get("warning_clean_required_gate_scopes")),
+        }
+    return {}
+
+
+def _warning_clean_policy_enabled(policy: dict[str, Any]) -> bool:
+    if not policy:
+        return False
+    if policy.get("enabled") is False or str(policy.get("enabled") or "").strip().lower() in {"false", "0", "no", "off"}:
+        return False
+    value = policy.get("required_for_checkpoint_pass")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(policy.get("enabled"))
+
+
+def _review_target_gate_scope(workspace: dict[str, Any]) -> str:
+    spec = workspace.get("review_target_gate_spec")
+    if isinstance(spec, dict):
+        for key in ("gate", "id", "name"):
+            value = str(spec.get(key) or "").strip()
+            if value:
+                return value
+    target = workspace.get("review_target")
+    if isinstance(target, dict):
+        spec = target.get("gate_spec")
+        if isinstance(spec, dict):
+            value = str(spec.get("gate") or spec.get("id") or spec.get("name") or "").strip()
+            if value:
+                return value
+    return ""
+
+
+def _warning_clean_applicable_languages(workspace: dict[str, Any], policy: dict[str, Any]) -> list[str]:
+    allowed = {
+        _normalize_warning_clean_language(item)
+        for item in (_string_list(policy.get("languages")) or list(_WARNING_CLEAN_DEFAULT_LANGUAGES))
+    }
+    allowed.discard("")
+    detected = _workspace_warning_clean_languages(workspace)
+    if "*" in allowed:
+        return detected
+    return [language for language in detected if language in allowed]
+
+
+def _workspace_warning_clean_languages(workspace: dict[str, Any]) -> list[str]:
+    languages: list[str] = []
+
+    def add(value: Any) -> None:
+        for item in _string_list(value):
+            normalized = _normalize_warning_clean_language(item)
+            if normalized and normalized not in languages:
+                languages.append(normalized)
+
+    add(workspace.get("languages"))
+    lsp_setup = workspace.get("lsp_setup")
+    if isinstance(lsp_setup, dict):
+        add(lsp_setup.get("languages"))
+    for key in ("review_target_source_contract", "review_target_module_contract"):
+        contract = workspace.get(key)
+        if not isinstance(contract, dict):
+            continue
+        add(contract.get("languages") or contract.get("language") or contract.get("implementation_languages"))
+        metadata = contract.get("metadata")
+        if isinstance(metadata, dict):
+            add(metadata.get("languages") or metadata.get("language") or metadata.get("primary_language"))
+    return languages
+
+
+def _normalize_warning_clean_language(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    if not text:
+        return ""
+    return _WARNING_CLEAN_LANGUAGE_ALIASES.get(text) or "".join(ch for ch in text if ch.isalnum() or ch in {"-", "+", "#", "."})
+
+
+def _warning_clean_not_applicable_reason(metadata: dict[str, Any]) -> str:
+    for key in (
+        "warning_clean_not_applicable_reason",
+        "warning_clean_verification_not_applicable_reason",
+        "warning_clean_evidence_not_applicable_reason",
+    ):
+        reason = str(metadata.get(key) or "").strip()
+        if reason:
+            return reason
+    if _metadata_bool(metadata, "warning_clean_not_applicable"):
+        return str(metadata.get("warning_clean_reason") or "").strip()
+    return ""
+
+
+def _latest_successful_warning_clean_ref(refs: list[dict[str, Any]], languages: list[str]) -> dict[str, Any]:
+    for ref in reversed(refs):
+        if _review_evidence_ref_success(ref) and _is_warning_clean_command_evidence(ref, languages):
+            return dict(ref)
+    return {}
+
+
+def _has_warning_clean_command_evidence(items: list[Any], languages: list[str]) -> bool:
+    for item in items:
+        if isinstance(item, dict) and _is_warning_clean_command_evidence(item, languages):
+            return True
+    return False
+
+
+def _is_warning_clean_command_evidence(item: dict[str, Any], languages: list[str]) -> bool:
+    if not _review_evidence_ref_success(item):
+        return False
+    text = _warning_clean_evidence_text(item)
+    if not text:
+        return False
+    if re.search(r"\b0 warnings?\b", text) or re.search(r"\bno warnings?\b", text):
+        return True
+    for marker in _WARNING_CLEAN_COMMAND_MARKERS:
+        if marker and marker in text:
+            return True
+    if any(language in {"typescript", "javascript"} for language in languages) and "tsc" in text and "noemit" in text:
+        return True
+    if any(language in {"c", "cpp", "objc", "objcpp"} for language in languages) and "werror" in text:
+        return True
+    if "python" in languages and ("pythonwarnings=error" in text or "-w error" in text):
+        return True
+    return False
+
+
+def _warning_clean_evidence_text(item: dict[str, Any]) -> str:
+    parts = [
+        item.get("command"),
+        item.get("cmd"),
+        item.get("name"),
+        item.get("summary"),
+        item.get("output_summary"),
+        item.get("stdout_preview"),
+        item.get("stderr_preview"),
+    ]
+    normalized = _normalize_semantic_text(" ".join(str(part or "") for part in parts))
+    return normalized.replace(" --no emit", " --noemit").replace("--no emit", "--noemit")
 
 
 def _has_backed_command_evidence(items: list[Any]) -> bool:

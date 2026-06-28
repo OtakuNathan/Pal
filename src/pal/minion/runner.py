@@ -650,6 +650,10 @@ class MinionRunner:
                 workspace.setdefault("review_target_checkpoint_git", dict(review_target.get("checkpoint_git") or {}))
             if isinstance(review_target.get("source_contract"), dict):
                 workspace.setdefault("review_target_source_contract", dict(review_target.get("source_contract") or {}))
+            if isinstance(review_target.get("gate_spec"), dict):
+                workspace.setdefault("review_target_gate_spec", dict(review_target.get("gate_spec") or {}))
+            if isinstance(review_target.get("module_contract"), dict):
+                workspace.setdefault("review_target_module_contract", dict(review_target.get("module_contract") or {}))
         workspace.setdefault("current_milestone_index", self._current_milestone_index())
         workspace.setdefault("current_milestone_title", self._current_milestone_title())
         execution_runtime = MinionScopedExecutionRuntime(

@@ -4442,6 +4442,26 @@ class MinionContractTests(unittest.TestCase):
         )
         self.assertIn("workspace_environment_policy", profiles["generic"].to_dict())
 
+    def test_builtin_software_profiles_expose_warning_clean_gate_policy(self) -> None:
+        registry = MinionProfileRegistry()
+        profiles = {profile.canonical_profile_id: profile for profile in registry.list_profiles()}
+
+        for profile_id in ("software_engineering.coder", "software_engineering.reviewer"):
+            policy = dict(profiles[profile_id].gate_policy["warning_clean_verification"])
+            self.assertTrue(policy["enabled"])
+            self.assertTrue(policy["required_for_checkpoint_pass"])
+            self.assertEqual(policy["required_gate_scopes"], ["module_quality"])
+            self.assertIn("python", policy["languages"])
+            self.assertIn("cpp", policy["languages"])
+            self.assertIn("-Werror", policy["command_examples"])
+            self.assertIn("PYTHONWARNINGS=error python -m pytest", policy["command_examples"])
+            pack = registry.resolve_pack(
+                TaskContextPack(work_order_id=f"wo_{profile_id.replace('.', '_')}_warning_gate", goal="use profile"),
+                requested_profile=profile_id,
+            )
+            self.assertEqual(pack.workspace["gate_policy"]["warning_clean_verification"], policy)
+            self.assertEqual(pack.resolved_profile["effective_gate_policy"]["warning_clean_verification"], policy)
+
     def test_builtin_web_profiles_define_web_research_approval_budget(self) -> None:
         registry = MinionProfileRegistry()
         profiles = {profile.canonical_profile_id: profile for profile in registry.list_profiles()}
@@ -14923,6 +14943,166 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(len(refs), 1)
         self.assertTrue(str(refs[0].get("ledger_id") or "").startswith("led_"))
 
+    def test_review_checkpoint_requires_warning_clean_evidence_for_module_quality(self) -> None:
+        checkpoint_id = "chk_warning_clean_required"
+        acceptance = "Feature result is verified."
+        repository = MinionTaskingRepository(runtime_root=self.root)
+        repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_warning_clean_required_source",
+                "minion_id": "m_warning_clean_required_source",
+                "run_id": "r_warning_clean_required_source",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "expected_review_gate_kind": "checkpoint_verification",
+                    "acceptance_criteria": [acceptance],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        workspace = {
+            "runtime_root": str(self.root),
+            "work_order_id": "wo_warning_clean_required",
+            "run_id": "r_warning_clean_required",
+            "minion_profile": "software_engineering.reviewer",
+            "review_target_checkpoint_id": checkpoint_id,
+            "review_target_commit_sha": "abc123",
+            "review_target_gate_kind": "checkpoint_verification",
+            "review_target_gate_spec": {"gate": "module_quality"},
+            "review_target_acceptance_criteria": [acceptance],
+            "languages": ["python"],
+            "gate_policy": {
+                "warning_clean_verification": {
+                    "enabled": True,
+                    "required_for_checkpoint_pass": True,
+                    "required_gate_scopes": ["module_quality"],
+                    "languages": ["python"],
+                    "not_applicable_reason_field": "warning_clean_not_applicable_reason",
+                }
+            },
+            "review_tool_evidence_refs": [
+                {
+                    "kind": "command",
+                    "tool_name": "shell",
+                    "call_id": "call_pytest_without_warning_clean",
+                    "command": "python -m pytest tests/test_feature.py -q",
+                    "status": "passed",
+                    "summary": "fixture command passed",
+                }
+            ],
+            "shell_mutation_violations": [],
+        }
+
+        gate = _minion_review_checkpoint_result(
+            CanonicalToolCall(
+                name="op_minion_review_checkpoint",
+                args={
+                    "verdict": "pass",
+                    "summary": "checkpoint passes but lacks warning-clean evidence",
+                    "checks": [{"command": "python -m pytest tests/test_feature.py -q", "status": "passed", "covers": [acceptance]}],
+                    "api_checks": [{"kind": "source", "summary": "fixture source verified the feature", "covers": [acceptance]}],
+                    "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                },
+            ),
+            workspace,
+        )
+
+        self.assertFalse(gate.ok)
+        self.assertEqual(gate.status, RuntimeStatus.INVALID)
+        self.assertIn("warning-clean verification evidence", gate.text)
+        self.assertEqual(gate.structured["missing_warning_clean_verification"]["languages"], ["python"])
+        shape_args = gate.structured["next_payload_shape"]["args"]
+        self.assertIn("warning_clean_not_applicable_reason", shape_args)
+        self.assertIn("PYTHONWARNINGS=error", shape_args["evidence_selectors"][0]["contains"])
+
+    def test_review_checkpoint_auto_adds_backed_warning_clean_evidence(self) -> None:
+        checkpoint_id = "chk_warning_clean_auto_add"
+        acceptance = "Feature result is verified."
+        repository = MinionTaskingRepository(runtime_root=self.root)
+        repository.record_minion_event(
+            {
+                "event_kind": "checkpoint",
+                "work_order_id": "wo_warning_clean_auto_add_source",
+                "minion_id": "m_warning_clean_auto_add_source",
+                "run_id": "r_warning_clean_auto_add_source",
+                "payload": {
+                    "checkpoint_id": checkpoint_id,
+                    "status": "claimed",
+                    "milestone_index": 0,
+                    "milestone_id": "m1",
+                    "summary": "claimed checkpoint",
+                    "commit_sha": "abc123",
+                    "expected_review_gate_kind": "checkpoint_verification",
+                    "acceptance_criteria": [acceptance],
+                },
+                "created_at": utc_now(),
+            }
+        )
+        workspace = {
+            "runtime_root": str(self.root),
+            "work_order_id": "wo_warning_clean_auto_add",
+            "run_id": "r_warning_clean_auto_add",
+            "minion_profile": "software_engineering.reviewer",
+            "review_target_checkpoint_id": checkpoint_id,
+            "review_target_commit_sha": "abc123",
+            "review_target_gate_kind": "checkpoint_verification",
+            "review_target_gate_spec": {"gate": "module_quality"},
+            "review_target_acceptance_criteria": [acceptance],
+            "languages": ["python"],
+            "gate_policy": {
+                "warning_clean_verification": {
+                    "enabled": True,
+                    "required_for_checkpoint_pass": True,
+                    "required_gate_scopes": ["module_quality"],
+                    "languages": ["python"],
+                    "not_applicable_reason_field": "warning_clean_not_applicable_reason",
+                }
+            },
+            "review_tool_evidence_refs": [
+                {
+                    "kind": "command",
+                    "tool_name": "shell",
+                    "call_id": "call_pytest_normal",
+                    "command": "python -m pytest tests/test_feature.py -q",
+                    "status": "passed",
+                    "summary": "fixture command passed",
+                },
+                {
+                    "kind": "command",
+                    "tool_name": "shell",
+                    "call_id": "call_pytest_warning_clean",
+                    "command": "PYTHONWARNINGS=error python -m pytest tests/test_feature.py -q",
+                    "status": "passed",
+                    "summary": "fixture warning-clean command passed",
+                },
+            ],
+            "shell_mutation_violations": [],
+        }
+
+        gate = _minion_review_checkpoint_result(
+            CanonicalToolCall(
+                name="op_minion_review_checkpoint",
+                args={
+                    "verdict": "pass",
+                    "summary": "checkpoint passes with backed warning-clean evidence available",
+                    "checks": [{"command": "python -m pytest tests/test_feature.py -q", "status": "passed", "covers": [acceptance]}],
+                    "api_checks": [{"kind": "source", "summary": "fixture source verified the feature", "covers": [acceptance]}],
+                    "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                },
+            ),
+            workspace,
+        )
+
+        self.assertTrue(gate.ok, gate.text)
+        commands = gate.structured["review_gate"]["commands_run"]
+        self.assertTrue(any("PYTHONWARNINGS=error" in str(item.get("command") or "") for item in commands))
+
     def test_review_checkpoint_accepts_runtime_evidence_refs(self) -> None:
         checkpoint_id = "chk_runtime_evidence_refs"
         repository = MinionTaskingRepository(runtime_root=self.root)
@@ -17414,6 +17594,10 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("Start from milestone.metadata.implementation_checklist", prompt)
         self.assertIn("run a boundary self-check", prompt)
         self.assertIn("return type closure", prompt)
+        self.assertIn("warning-clean verification command", prompt)
+        self.assertIn("PYTHONWARNINGS=error", prompt)
+        self.assertIn("-Werror", prompt)
+        self.assertIn("tsc --noEmit", prompt)
         self.assertIn("op_file_read", pack.allowed_capabilities)
         self.assertIn("op_file_edit", pack.allowed_capabilities)
         self.assertIn("op_file_write", pack.allowed_capabilities)
@@ -17515,6 +17699,11 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("boundaries are unclear or unsafe", prompt)
         self.assertIn("public API return types are not closed", prompt)
         self.assertIn("boundary-quality gate", prompt)
+        self.assertIn("warning-clean verification gate", prompt)
+        self.assertIn("PYTHONWARNINGS=error", prompt)
+        self.assertIn("-Werror", prompt)
+        self.assertIn("tsc --noEmit", prompt)
+        self.assertIn("warning_clean_not_applicable_reason", prompt)
         self.assertIn("challenge declared delivery surfaces aggressively", prompt)
         self.assertIn("smallest equivalent wrapper/link/import/launch probe", prompt)
         self.assertIn("parse-layer usage/type error", prompt)
@@ -18829,6 +19018,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 "next_module_id": "module_b",
                 "parent_milestone_index": 0,
                 "has_next_module": True,
+                "auto_advance_modules": False,
                 "minion_profile": "software_engineering.coder",
                 "route": {
                     "endpoint_id": "telegram_main",
@@ -18851,6 +19041,40 @@ class MinionIntegrationTests(unittest.TestCase):
         self.assertEqual([button.label for button in interaction.buttons[0]], ["Continue", "Pause"])
         self.assertEqual(interaction.buttons[0][0].action_args["action_kind"], "minion_plan_continue")
         self.assertEqual(interaction.buttons[0][0].action_args["args"]["work_order_id"], "wo_parent_continue")
+
+    def test_minion_module_completed_auto_advance_sends_completion_trigger_not_continue_interaction(self) -> None:
+        event = EventEnvelope(
+            event_kind=EventKind.MINION_MODULE_COMPLETED,
+            source_kind=SourceKind.MINION,
+            payload={
+                "status": "awaiting_continue",
+                "summary": "Module A is done.",
+                "parent_work_order_id": "wo_parent_continue",
+                "work_order_id": "wo_parent_continue",
+                "module_id": "module_a",
+                "next_module_id": "module_b",
+                "parent_milestone_index": 0,
+                "has_next_module": True,
+                "auto_advance_modules": True,
+                "minion_profile": "software_engineering.coder",
+                "route": {
+                    "endpoint_id": "telegram_main",
+                    "channel_kind": "telegram",
+                    "reply_target": {"chat_id": "42"},
+                },
+            },
+        )
+
+        derived = MinionControlEventHandler().handle(event, context=None)
+
+        self.assertEqual(len(derived), 1)
+        self.assertEqual(derived[0].event_kind, EventKind.USER_MESSAGE)
+        channel_envelope = derived[0].payload
+        self.assertIn("minion_completion_trigger", channel_envelope.event.payload)
+        self.assertEqual(
+            channel_envelope.event.payload["minion_completion_trigger"]["event_kind"],
+            EventKind.MINION_MODULE_COMPLETED,
+        )
 
     def test_minion_plan_acceptance_pending_opens_accept_interaction(self) -> None:
         event = EventEnvelope(

@@ -128,6 +128,7 @@ class MinionControlEventHandler(EventHandler):
             module_continue_delivery = (
                 minion_module_continue_delivery(payload, route)
                 if event.event_kind == EventKind.MINION_MODULE_COMPLETED
+                and not _payload_bool(payload.get("auto_advance_modules"), default=True)
                 else None
             )
             if module_continue_delivery is not None:
@@ -327,6 +328,22 @@ def _memory_candidate_approval_payload_from_minion(payload: dict[str, Any]) -> d
         "candidate_batch_id": source_ref or run_id,
         "memory_candidates": payload.get("memory_candidates"),
     }
+
+
+def _payload_bool(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
 
 
 def _build_minion_completion_trigger_event(

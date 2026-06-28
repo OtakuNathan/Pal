@@ -761,6 +761,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             "module_id": module_id,
             "has_next_module": bool(next_index is not None),
             "next_module_id": next_module_id,
+            "auto_advance_modules": bool(plan_execution.get("auto_advance_modules", True)),
             "summary": summary,
             "metadata": (
                 {"control_route": dict(parent_metadata.get("control_route") or {})}

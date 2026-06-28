@@ -69,6 +69,7 @@ Verification:
 - When a test-count range is specified, prefer focused coverage over matching the number mechanically. Do not add or delete tests solely to satisfy an advisory count when boundary coverage, contract coverage, and regression coverage would get worse.
 - Run a direct local check for each verifiable numeric/file/test bound before checkpointing, and include that evidence in the milestone report.
 - For test-count guidance, `python -m pytest -q` is enough unless the source contract explicitly requires proving the collected count.
+- Before checkpointing a module boundary, run a warning-clean verification command for supported project languages when practical. Use the language's earliest meaningful diagnostic path: C/C++ out-of-tree build with `-Wall -Wextra -Wpedantic -Werror` or equivalent, Python bytecode compile plus focused tests/probes with `PYTHONWARNINGS=error` or `-W error`, TypeScript `tsc --noEmit`, Rust `cargo clippy -- -D warnings` or equivalent, and analogous compile/static diagnostics for other languages. Fix warnings before checkpointing, or report the concrete missing toolchain/source-contract exemption.
 - Run focused unit tests for each changed function or behavior.
 - Run module tests that prove the assigned module satisfies its contract: data flow, output structure, state lifecycle, and failure behavior.
 - Run integration tests when the work order touches cross-module handoff.
@@ -117,6 +118,14 @@ test_evidence = "focused_tests_or_explained_blocker"
 
 [gate_policy]
 gates = ["checkpoint_admission", "module_quality"]
+
+[gate_policy.warning_clean_verification]
+enabled = true
+required_for_checkpoint_pass = true
+required_gate_scopes = ["module_quality"]
+languages = ["c", "cpp", "objc", "objcpp", "python", "javascript", "typescript", "rust", "go", "java", "kotlin", "swift", "csharp", "ruby", "php", "shell"]
+not_applicable_reason_field = "warning_clean_not_applicable_reason"
+command_examples = ["-Werror", "PYTHONWARNINGS=error python -m pytest", "python -W error -m compileall", "tsc --noEmit", "cargo clippy -- -D warnings", "eslint --max-warnings=0"]
 
 [output_policy]
 milestone_completion = "op_minion_checkpoint_commit"
