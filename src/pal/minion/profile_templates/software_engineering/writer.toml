@@ -61,6 +61,15 @@ write_baseline_config = false
 evidence = "text_deliverable"
 requires_capability_evidence = true
 
+[execution_strategy.prepare]
+kind = "git_worktree"
+
+[execution_strategy.repair_loop]
+kind = "none"
+
+[execution_strategy.gate]
+kind = "none"
+
 [metadata]
 builtin = true
 recommended_for = "Technical writing, specs, design notes, plan summaries, release notes, decision records, and evidence-based documentation"

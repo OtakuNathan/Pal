@@ -31,6 +31,14 @@ from pal.minion.profiles import (
     MinionProfileProvider,
     MinionProfileRegistry,
 )
+from pal.minion.execution_strategy import (
+    EXECUTION_STRATEGY_VERSION,
+    PREPARE_ARTIFACT_WORKSPACE,
+    PREPARE_GIT_WORKTREE,
+    PREPARE_READ_ONLY_REPO,
+    execution_strategy_from_pack,
+    normalize_execution_strategy,
+)
 from pal.minion.gates import (
     GateChecklistEntry,
     GateChecklistEntryRegistry,
@@ -98,6 +106,12 @@ __all__ = [
     "MinionProfileCapabilityProvider",
     "MinionProfileProvider",
     "MinionProfileRegistry",
+    "EXECUTION_STRATEGY_VERSION",
+    "PREPARE_ARTIFACT_WORKSPACE",
+    "PREPARE_GIT_WORKTREE",
+    "PREPARE_READ_ONLY_REPO",
+    "execution_strategy_from_pack",
+    "normalize_execution_strategy",
     "GateChecklistEntry",
     "GateChecklistEntryRegistry",
     "GateDefinition",

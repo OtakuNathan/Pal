@@ -129,8 +129,23 @@ class FactoryChannelProvider:
         )
 
     def detach_endpoint(self, endpoint_id: str, context: ChannelProviderContext) -> IntrospectionResult:
-        record = context.repository.set_attached(endpoint_id, False)
         endpoint = context.runtime.get_endpoint(endpoint_id)
+        record = context.repository.get(endpoint_id)
+        if is_recovery_socket_endpoint(record, endpoint, context.runtime_root):
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="recovery socket endpoint cannot be detached",
+                structured={
+                    "endpoint_id": endpoint_id,
+                    "endpoint_type": "socket",
+                    "channel_kind": "socket",
+                    "binding_key": str(recovery_socket_path(context.runtime_root)),
+                    "attached": True,
+                    "reason": "recovery_socket_control_channel",
+                },
+                llm_text="recovery socket endpoint cannot be detached",
+            )
+        record = context.repository.set_attached(endpoint_id, False)
         if record is None and endpoint is None:
             return _not_found(endpoint_id)
         if endpoint is not None:
@@ -771,6 +786,40 @@ def _endpoint_snapshot(
         "paired": bool(getattr(endpoint, "paired", False)) if endpoint is not None else False,
         "runtime_endpoint_present": endpoint is not None,
     }
+
+
+def recovery_socket_path(runtime_root: Path) -> Path:
+    return Path(runtime_root).expanduser() / "pal.sock"
+
+
+def _normalized_path(value: str | Path) -> Path:
+    return Path(value).expanduser().resolve(strict=False)
+
+
+def is_recovery_socket_endpoint(
+    record: ChannelEndpointModel | None,
+    endpoint: ChannelEndpointBase | None,
+    runtime_root: Path,
+) -> bool:
+    endpoint_type = (
+        record.channel_kind
+        if record is not None
+        else endpoint.endpoint.channel_kind
+        if endpoint is not None
+        else ""
+    )
+    if str(endpoint_type or "").strip() != "socket":
+        return False
+    binding_key = (
+        record.binding_key
+        if record is not None
+        else endpoint.endpoint.binding_key
+        if endpoint is not None
+        else ""
+    )
+    if not str(binding_key or "").strip():
+        return False
+    return _normalized_path(binding_key) == _normalized_path(recovery_socket_path(runtime_root))
 
 
 def _ok(text: str, payload: dict[str, Any]) -> IntrospectionResult:

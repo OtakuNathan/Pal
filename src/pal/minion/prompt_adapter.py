@@ -39,6 +39,7 @@ def prompt_scaffold_summary(scaffold: dict[str, Any]) -> dict[str, Any]:
         "current_milestone": milestone,
         "workspace_policy": dict(scaffold.get("workspace_policy") or {}),
         "completion_policy": dict(scaffold.get("completion_policy") or {}),
+        "execution_strategy": dict(scaffold.get("execution_strategy") or {}),
         "repair_context": repair_context,
     }
 
@@ -267,6 +268,7 @@ def render_minion_system_prompt(scaffold: dict[str, Any]) -> str:
         ("operating_rules", replace_internal_tool_names(operating_rules).strip()),
         ("workspace_policy", replace_internal_tool_names(json.dumps(scaffold.get("workspace_policy") or {}, ensure_ascii=False, sort_keys=True))),
         ("completion_policy", replace_internal_tool_names(json.dumps(scaffold.get("completion_policy") or {}, ensure_ascii=False, sort_keys=True))),
+        ("execution_strategy", replace_internal_tool_names(json.dumps(scaffold.get("execution_strategy") or {}, ensure_ascii=False, sort_keys=True))),
         ("output_contract", replace_internal_tool_names(str(scaffold.get("output_contract") or "").strip())),
         ("allowed_capabilities", json.dumps(allowed_aliases, ensure_ascii=False)),
     ]

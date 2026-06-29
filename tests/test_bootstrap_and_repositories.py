@@ -3721,6 +3721,48 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(endpoint.endpoint.channel_kind, "socket")
         self.assertEqual(Path(endpoint.endpoint.binding_key), self.registration.runtime.runtime_root / "pal.sock")
 
+    def test_open_runtime_reattaches_recovery_socket_by_binding(self) -> None:
+        from pal.runtime_app import open_runtime
+
+        self.database.close()
+        runtime_root = Path(tempfile.mkdtemp(prefix="pal_open_runtime_recovery_socket_"))
+        handle = None
+        try:
+            wizard = WizardService()
+            registration = wizard.provision_runtime(
+                display_name="PalV2 Test",
+                runtime_root=runtime_root,
+                db_filename="pal.sqlite3",
+                pal_entrypoint="pal.runtime.test",
+            )
+            database = wizard.create_database(registration)
+            ChannelEndpointRepository().upsert(
+                endpoint_id="sock-1",
+                channel_kind="socket",
+                binding_key=str(runtime_root / "pal.sock"),
+                enabled=False,
+                detached_at="2026-01-01T00:00:00+00:00",
+                supports_typing=False,
+                supports_receipt_marker=False,
+                binding_metadata={},
+                send_policy_blob={},
+            )
+            database.close()
+
+            handle = open_runtime(runtime_root)
+
+            record = ChannelEndpointRepository().get("sock-1")
+            self.assertIsNotNone(record)
+            self.assertTrue(record.enabled)
+            self.assertIsNone(record.detached_at)
+            self.assertIsNone(ChannelEndpointRepository().get("socket_default"))
+            self.assertIsNotNone(handle.channel_runtime.get_endpoint("sock-1"))
+        finally:
+            if handle is not None:
+                asyncio.run(handle.stop_async())
+                handle.database.close()
+            shutil.rmtree(runtime_root, ignore_errors=True)
+
     def test_compose_runtime_hydrates_channel_endpoints_inside_running_event_loop(self) -> None:
         self.wizard.seed_defaults(self.registration)
 
@@ -3738,6 +3780,16 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_channel_endpoint_provider_reload_rebuilds_provider_without_detaching_channel_bus(self) -> None:
         self.wizard.seed_defaults(self.registration)
+        ChannelEndpointRepository().upsert(
+            endpoint_id="socket_aux",
+            channel_kind="socket",
+            binding_key=str(self.registration.runtime.runtime_root / "aux.sock"),
+            enabled=True,
+            supports_typing=False,
+            supports_receipt_marker=False,
+            binding_metadata={},
+            send_policy_blob={},
+        )
         handle = compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
@@ -3745,7 +3797,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         )
         runtime = handle.core.context.execution_runtime
         old_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+        old_aux_endpoint = handle.channel_runtime.get_endpoint("socket_aux")
         self.assertIsNotNone(old_endpoint)
+        self.assertIsNotNone(old_aux_endpoint)
         self.assertIn("channel", handle.core.context.module_registry.modules)
         self.assertIn("channel_reload_provider", handle.core.context.capability_registry.descriptors)
 
@@ -3773,22 +3827,37 @@ class PalV2BootstrapTests(unittest.TestCase):
             self.assertIn("channel", handle.core.context.module_registry.modules)
             self.assertIn("channel_reload_provider", handle.core.context.capability_registry.descriptors)
 
-            detached = runtime.execute(
+            blocked = runtime.execute(
                 CapabilityCall(name="channel_detach", args={"target_id": "socket_default"})
             )
+            self.assertEqual(blocked.status, "invalid")
+            self.assertEqual(blocked.structured["reason"], "recovery_socket_control_channel")
+            self.assertIs(handle.channel_runtime.get_endpoint("socket_default"), new_endpoint)
+            self.assertTrue(new_endpoint.attached)
+
+            blocked_disable = runtime.execute(
+                CapabilityCall(name="channel_disable", args={"target_id": "socket_default"})
+            )
+            self.assertEqual(blocked_disable.status, "invalid")
+            self.assertEqual(blocked_disable.structured["reason"], "recovery_socket_control_channel")
+            self.assertTrue(new_endpoint.enabled)
+
+            detached = runtime.execute(
+                CapabilityCall(name="channel_detach", args={"target_id": "socket_aux"})
+            )
             self.assertEqual(detached.status, "ok")
-            detached_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+            detached_endpoint = handle.channel_runtime.get_endpoint("socket_aux")
             self.assertIsNone(detached_endpoint)
-            self.assertFalse(new_endpoint.attached)
+            self.assertFalse(old_aux_endpoint.attached)
 
             attached = runtime.execute(
-                CapabilityCall(name="channel_attach", args={"target_id": "socket_default"})
+                CapabilityCall(name="channel_attach", args={"target_id": "socket_aux"})
             )
 
             self.assertEqual(attached.status, "ok")
-            attached_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+            attached_endpoint = handle.channel_runtime.get_endpoint("socket_aux")
             self.assertIsNotNone(attached_endpoint)
-            self.assertIsNot(attached_endpoint, new_endpoint)
+            self.assertIsNot(attached_endpoint, old_aux_endpoint)
             self.assertTrue(attached_endpoint.attached)
             self.assertIn("pal.channel.endpoints.socket_endpoint", attached.structured["reload_modules"])
         finally:
@@ -3799,13 +3868,23 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_core_lifecycle_owner_can_reload_channel_endpoint_provider(self) -> None:
         self.wizard.seed_defaults(self.registration)
+        ChannelEndpointRepository().upsert(
+            endpoint_id="socket_aux",
+            channel_kind="socket",
+            binding_key=str(self.registration.runtime.runtime_root / "aux.sock"),
+            enabled=True,
+            supports_typing=False,
+            supports_receipt_marker=False,
+            binding_metadata={},
+            send_policy_blob={},
+        )
         handle = compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
         )
-        endpoint_module_id = "channel.endpoint:socket_default"
-        old_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+        endpoint_module_id = "channel.endpoint:socket_aux"
+        old_endpoint = handle.channel_runtime.get_endpoint("socket_aux")
         self.assertIsNotNone(old_endpoint)
         self.assertIsNotNone(handle.core.context.lifecycle_owner_registry.resolve(endpoint_module_id))
         prefixes = ("pal.channel.factory", "pal.channel.endpoints.socket_endpoint")
@@ -3818,14 +3897,14 @@ class PalV2BootstrapTests(unittest.TestCase):
         try:
             detached = handle.core.detach_module(endpoint_module_id)
             self.assertEqual(detached, "ok")
-            detached_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+            detached_endpoint = handle.channel_runtime.get_endpoint("socket_aux")
             self.assertIsNone(detached_endpoint)
             self.assertFalse(old_endpoint.attached)
 
             reattached = handle.core.reattach_module(endpoint_module_id)
 
             self.assertEqual(reattached, "ok")
-            new_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+            new_endpoint = handle.channel_runtime.get_endpoint("socket_aux")
             self.assertIsNotNone(new_endpoint)
             self.assertIsNot(new_endpoint, old_endpoint)
             self.assertTrue(new_endpoint.attached)
@@ -3835,6 +3914,23 @@ class PalV2BootstrapTests(unittest.TestCase):
                 if any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes):
                     sys.modules.pop(name, None)
             sys.modules.update(original_modules)
+
+    def test_core_lifecycle_owner_cannot_detach_recovery_socket_endpoint(self) -> None:
+        self.wizard.seed_defaults(self.registration)
+        handle = compose_runtime(
+            wizard=self.wizard,
+            registration=self.registration,
+            database=self.database,
+        )
+        endpoint_module_id = "channel.endpoint:socket_default"
+        old_endpoint = handle.channel_runtime.get_endpoint("socket_default")
+        self.assertIsNotNone(old_endpoint)
+
+        detached = handle.core.detach_module(endpoint_module_id)
+
+        self.assertEqual(detached, "invalid")
+        self.assertIs(handle.channel_runtime.get_endpoint("socket_default"), old_endpoint)
+        self.assertTrue(old_endpoint.attached)
 
     def test_compose_runtime_registers_telegram_endpoint_via_provider_registry(self) -> None:
         self.wizard.seed_defaults(self.registration)

@@ -8,6 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pal.minion.execution_strategy import (
+    PREPARE_GIT_WORKTREE,
+    PREPARE_READ_ONLY_REPO,
+    execution_strategy_from_pack,
+    normalize_execution_strategy,
+    prepare_kind,
+)
 from pal.minion.workspace_environment import prepare_workspace_environment
 from pal.shared import TaskContextPack
 
@@ -154,6 +161,13 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
     workspace["artifact_dir"] = str(artifact_dir)
     workspace["workspace_policy"] = {"mode": "writable_git_branch"}
     workspace["completion_policy"] = {"evidence": "git_commit", "requires_capability_evidence": True}
+    workspace["execution_strategy"] = normalize_execution_strategy(
+        workspace.get("execution_strategy"),
+        workspace_policy=workspace["workspace_policy"],
+        completion_policy=workspace["completion_policy"],
+        gate_policy=_policy_from_pack(pack, "gate_policy"),
+        output_policy=_policy_from_pack(pack, "output_policy"),
+    )
     if module_name:
         workspace["module_name"] = module_name
     if source_repo:
@@ -165,21 +179,25 @@ def prepare_task_workspace(runtime_root: Path, pack: TaskContextPack, *, run_id:
     workspace = _normalize_workspace_paths(pack.workspace)
     workspace_policy = _policy_from_pack(pack, "workspace_policy")
     completion_policy = _policy_from_pack(pack, "completion_policy")
-    mode = str(workspace_policy.get("mode") or "").strip().lower()
-    evidence = str(completion_policy.get("evidence") or "").strip().lower()
-    if not mode and not evidence and "op_exec_shell" in {str(item) for item in pack.allowed_capabilities}:
-        mode = "writable_git_branch"
-        evidence = "git_commit"
-        workspace_policy = {"mode": mode}
-        completion_policy = {"evidence": evidence, "requires_capability_evidence": True}
-    if mode == "writable_git_branch" or evidence == "git_commit":
+    gate_policy = _policy_from_pack(pack, "gate_policy")
+    output_policy = _policy_from_pack(pack, "output_policy")
+    execution_strategy = execution_strategy_from_pack(
+        pack,
+        workspace_policy=workspace_policy,
+        completion_policy=completion_policy,
+        gate_policy=gate_policy,
+        output_policy=output_policy,
+    )
+    kind = prepare_kind(execution_strategy)
+    if kind == PREPARE_GIT_WORKTREE:
         prepared = prepare_git_task_environment(runtime_root, pack)
         prepared_workspace = dict(prepared.workspace)
         prepared_workspace["workspace_policy"] = {**workspace_policy, "mode": "writable_git_branch"}
         if completion_policy:
             prepared_workspace["completion_policy"] = dict(completion_policy)
+        prepared_workspace["execution_strategy"] = dict(execution_strategy)
         return _with_checkpoint_commit_capability(TaskContextPack.from_dict({**prepared.to_dict(), "workspace": prepared_workspace}))
-    if mode == "read_only_repo":
+    if kind == PREPARE_READ_ONLY_REPO:
         source_repo = _source_repo(workspace)
         repo_path = str(workspace.get("repo_path") or "").strip()
         if not repo_path and source_repo and _is_local_path(source_repo):
@@ -191,11 +209,13 @@ def prepare_task_workspace(runtime_root: Path, pack: TaskContextPack, *, run_id:
         workspace["workspace_policy"] = {**workspace_policy, "mode": "read_only_repo"}
         if completion_policy:
             workspace["completion_policy"] = dict(completion_policy)
+        workspace["execution_strategy"] = dict(execution_strategy)
         return _with_folder_workspace(runtime_root, pack, workspace, run_id=run_id)
     if workspace_policy:
         workspace["workspace_policy"] = dict(workspace_policy)
     if completion_policy:
         workspace["completion_policy"] = dict(completion_policy)
+    workspace["execution_strategy"] = dict(execution_strategy)
     return _with_folder_workspace(runtime_root, pack, workspace, run_id=run_id)
 
 

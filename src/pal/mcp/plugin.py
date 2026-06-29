@@ -31,7 +31,7 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 from pal.skill.contracts import SkillDescriptor
 
 
-_STARTUP_RESCAN_TIMEOUT_SECONDS = 30.0
+_STARTUP_RESCAN_TIMEOUT_SECONDS = 5.0
 
 
 class _McpManagerInvoker:

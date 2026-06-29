@@ -5,7 +5,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pal.channel.models import ChannelEndpointModel
-from pal.channel.provider_manager import ChannelEndpointProviderManager, build_default_channel_provider_manager
+from pal.channel.provider_manager import (
+    ChannelEndpointProviderManager,
+    build_default_channel_provider_manager,
+    is_recovery_socket_endpoint,
+    recovery_socket_path,
+)
 from pal.channel.repository import ChannelEndpointRepository
 from pal.channel.runtime import ChannelRuntime
 from pal.channel.source import ChannelEventSource
@@ -471,6 +476,21 @@ class ChannelIntrospectionProvider:
                 llm_text="target_id is required",
             )
         endpoint = self.runtime.get_endpoint(endpoint_id)
+        record = self.repository.get(endpoint_id)
+        if not enabled and is_recovery_socket_endpoint(record, endpoint, self.runtime_root or Path.cwd()):
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="recovery socket endpoint cannot be disabled",
+                structured={
+                    "endpoint_id": endpoint_id,
+                    "endpoint_type": "socket",
+                    "channel_kind": "socket",
+                    "binding_key": str(recovery_socket_path(self.runtime_root or Path.cwd())),
+                    "enabled": True,
+                    "reason": "recovery_socket_control_channel",
+                },
+                llm_text="recovery socket endpoint cannot be disabled",
+            )
         if endpoint is not None:
             if enabled:
                 self.runtime.enable_endpoint(endpoint_id)

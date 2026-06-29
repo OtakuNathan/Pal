@@ -51,6 +51,15 @@ write_baseline_config = false
 evidence = "text_deliverable"
 requires_capability_evidence = true
 
+[execution_strategy.prepare]
+kind = "read_only_repo"
+
+[execution_strategy.repair_loop]
+kind = "none"
+
+[execution_strategy.gate]
+kind = "none"
+
 [output_policy]
 primary_artifact = "requirements.md"
 allowed_output_types = ["MarkdownRequirements", "AskUserQuestion"]

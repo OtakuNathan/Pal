@@ -4544,6 +4544,8 @@ class MinionContractTests(unittest.TestCase):
                 pack.resolved_profile["effective_workspace_environment_policy"],
                 {"runtime": False, "lsp": True, "write_baseline_config": False},
             )
+            self.assertEqual(pack.workspace["execution_strategy"]["prepare"]["kind"], "read_only_repo")
+            self.assertEqual(pack.resolved_profile["effective_execution_strategy"]["gate"]["kind"], "plan_acceptance")
             self.assertEqual(pack.allowed_skills, [])
             self.assertEqual(pack.resolved_profile["skill_refs"], pack.allowed_skills)
             self.assertEqual(pack.resolved_profile["effective_skill_refs"], pack.allowed_skills)
@@ -4677,6 +4679,25 @@ class MinionContractTests(unittest.TestCase):
             {"runtime": False, "lsp": False, "write_baseline_config": False},
         )
         self.assertIn("workspace_environment_policy", profiles["generic"].to_dict())
+
+    def test_builtin_profiles_expose_execution_strategy_policy(self) -> None:
+        registry = MinionProfileRegistry()
+        profiles = {profile.canonical_profile_id: profile for profile in registry.list_profiles()}
+
+        self.assertEqual(profiles["generic"].execution_strategy["prepare"]["kind"], "artifact_workspace")
+        self.assertEqual(profiles["software_engineering.planner"].execution_strategy["prepare"]["kind"], "read_only_repo")
+        self.assertEqual(profiles["software_engineering.architect"].execution_strategy["gate"]["kind"], "plan_acceptance")
+        self.assertEqual(profiles["software_engineering.coder"].execution_strategy["prepare"]["kind"], "git_worktree")
+        self.assertEqual(profiles["software_engineering.coder"].execution_strategy["repair_loop"]["kind"], "checkpoint_repair")
+        self.assertEqual(profiles["software_engineering.reviewer"].execution_strategy["gate"]["kind"], "review_gate")
+
+        coder = registry.resolve_pack(TaskContextPack(work_order_id="wo_strategy_coder", goal="code"), requested_profile="software_engineering.coder")
+        generic = registry.resolve_pack(TaskContextPack(work_order_id="wo_strategy_generic", goal="report"), requested_profile="generic")
+
+        self.assertEqual(coder.workspace["execution_strategy"]["prepare"]["kind"], "git_worktree")
+        self.assertEqual(coder.resolved_profile["effective_execution_strategy"]["repair_loop"]["kind"], "checkpoint_repair")
+        self.assertEqual(generic.workspace["execution_strategy"]["prepare"]["kind"], "artifact_workspace")
+        self.assertEqual(generic.resolved_profile["effective_execution_strategy"]["gate"]["kind"], "none")
 
     def test_builtin_software_profiles_expose_warning_clean_gate_policy(self) -> None:
         registry = MinionProfileRegistry()
@@ -7540,6 +7561,11 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 "completion_policy": {"evidence": "text_deliverable"},
                 "gate_policy": {"gates": ["plan_acceptance"]},
                 "output_policy": {"requires_plan_artifact": True},
+                "execution_strategy": {
+                    "prepare": {"kind": "read_only_repo"},
+                    "repair_loop": {"kind": "plan_revision"},
+                    "gate": {"kind": "plan_acceptance"},
+                },
             },
         )
         self.repository.prepare_pack_for_spawn(parent)
@@ -7557,6 +7583,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             "completion_policy",
             "gate_policy",
             "output_policy",
+            "execution_strategy",
         ):
             self.assertNotIn(key, child.workspace)
 
@@ -7564,6 +7591,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         self.assertEqual(resolved.workspace["workspace_policy"]["mode"], "writable_git_branch")
         self.assertEqual(resolved.workspace["completion_policy"]["evidence"], "git_commit")
+        self.assertEqual(resolved.workspace["execution_strategy"]["prepare"]["kind"], "git_worktree")
         self.assertEqual(
             resolved.workspace["workspace_environment_policy"],
             {"runtime": True, "lsp": True, "write_baseline_config": True},
@@ -9221,6 +9249,46 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual((coder_repo / "README.md").read_text(encoding="utf-8"), "SPEC\n")
         self.assertTrue(Path(coder_from_repo_path_prepared.workspace["artifact_dir"]).is_relative_to(Path(coder_from_repo_path_prepared.workspace["work_order_repo_root"])))
         self.assertFalse((source / "minion_outputs").exists())
+
+    def test_shell_capability_does_not_imply_git_workspace_for_text_profile(self) -> None:
+        data_dir = self.root / "nutrition_data"
+        data_dir.mkdir()
+        (data_dir / "foods.json").write_text('{"apple": 95}\n', encoding="utf-8")
+        profile = MinionProfile(
+            profile_id="shell_report",
+            display_name="Shell Report",
+            identity_fragment="Write a report from local data.",
+            default_allowed_capabilities=("op_exec_shell",),
+            workspace_policy={"mode": "none"},
+            completion_policy={"evidence": "text_deliverable"},
+            execution_strategy={
+                "prepare": {"kind": "artifact_workspace"},
+                "repair_loop": {"kind": "none"},
+                "gate": {"kind": "none"},
+            },
+        )
+        registry = MinionProfileRegistry(runtime_root=self.root, builtin_profiles=(profile,))
+        pack = registry.resolve_pack(
+            TaskContextPack(
+                work_order_id="wo_shell_text_no_git",
+                goal="summarize nutrition data",
+                workspace={"repo_path": str(data_dir), "source_repo": str(data_dir)},
+            ),
+            requested_profile="shell_report",
+        )
+
+        self.assertIn("op_exec_shell", pack.allowed_capabilities)
+        prepared = prepare_task_workspace(self.root, pack, run_id="run_shell_text")
+
+        self.assertEqual(prepared.workspace["workspace_kind"], "folder")
+        self.assertEqual(prepared.workspace["workspace_policy"]["mode"], "none")
+        self.assertEqual(prepared.workspace["completion_policy"]["evidence"], "text_deliverable")
+        self.assertEqual(prepared.workspace["execution_strategy"]["prepare"]["kind"], "artifact_workspace")
+        self.assertEqual(Path(prepared.workspace["repo_path"]), data_dir)
+        self.assertNotIn("work_order_branch", prepared.workspace)
+        self.assertNotIn("common_git_dir", prepared.workspace)
+        self.assertNotIn("op_minion_checkpoint_commit", prepared.allowed_capabilities)
+        self.assertTrue(Path(prepared.workspace["artifact_dir"]).is_dir())
 
     def test_profile_workspace_environment_policy_controls_readonly_cpp_setup(self) -> None:
         source = self.root / "source_repo_cpp_readonly"

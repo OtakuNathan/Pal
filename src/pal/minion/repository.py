@@ -57,6 +57,8 @@ _PROFILE_SCOPED_WORKSPACE_KEYS = {
     "completion_policy",
     "gate_policy",
     "output_policy",
+    "execution_strategy",
+    "execution_policy",
 }
 _RAW_WORK_ORDER_METADATA_KEY_PARTS = ("payload", "raw", "transcript", "messages", "full_context", "conversation")
 def _profile_ref_parts_from_canonical(value: str) -> tuple[str, str]:

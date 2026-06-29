@@ -140,6 +140,15 @@ requires_capability_evidence = true
 [gate_policy]
 gates = ["plan_acceptance"]
 
+[execution_strategy.prepare]
+kind = "read_only_repo"
+
+[execution_strategy.repair_loop]
+kind = "plan_revision"
+
+[execution_strategy.gate]
+kind = "plan_acceptance"
+
 [output_policy]
 requires_plan_artifact = true
 primary_artifact = "plan.json"

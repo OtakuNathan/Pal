@@ -6,6 +6,7 @@ from pathlib import Path
 import tomllib
 from typing import Any, Protocol
 
+from pal.minion.execution_strategy import merge_execution_strategy, normalize_execution_strategy
 from pal.minion.utils import dedupe_strings as _dedupe
 from pal.minion.utils import dict_from as _dict
 from pal.minion.utils import string_list as _string_list
@@ -46,6 +47,7 @@ class MinionProfile:
     capability_policy: dict[str, Any] = field(default_factory=dict)
     gate_policy: dict[str, Any] = field(default_factory=dict)
     output_policy: dict[str, Any] = field(default_factory=dict)
+    execution_strategy: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -75,6 +77,7 @@ class MinionProfile:
             "capability_policy": dict(self.capability_policy),
             "gate_policy": dict(self.gate_policy),
             "output_policy": dict(self.output_policy),
+            "execution_strategy": dict(self.execution_strategy),
             "metadata": dict(self.metadata),
         }
 
@@ -118,6 +121,7 @@ class MinionProfile:
             capability_policy=_dict(payload.get("capability_policy")),
             gate_policy=_dict(payload.get("gate_policy")),
             output_policy=_dict(payload.get("output_policy")),
+            execution_strategy=_dict(payload.get("execution_strategy") or payload.get("execution_policy")),
             metadata=metadata,
         )
 
@@ -230,6 +234,17 @@ class MinionProfileRegistry:
         output_policy = dict(profile.output_policy)
         if isinstance(pack.workspace.get("output_policy"), dict):
             output_policy.update(dict(pack.workspace.get("output_policy") or {}))
+        execution_strategy = merge_execution_strategy(
+            profile.execution_strategy,
+            _dict(pack.workspace.get("execution_strategy") or pack.workspace.get("execution_policy")),
+        )
+        execution_strategy = normalize_execution_strategy(
+            execution_strategy,
+            workspace_policy=workspace_policy,
+            completion_policy=completion_policy,
+            gate_policy=gate_policy,
+            output_policy=output_policy,
+        )
         hook_capabilities = self._hook_capabilities(profile, pack)
         if _is_planner_revision_pack(profile, pack):
             hook_capabilities = _dedupe([*hook_capabilities, *PLAN_BUILDER_CAPABILITIES])
@@ -249,6 +264,7 @@ class MinionProfileRegistry:
         resolved_profile["effective_capability_policy"] = dict(capability_policy)
         resolved_profile["effective_gate_policy"] = dict(gate_policy)
         resolved_profile["effective_output_policy"] = dict(output_policy)
+        resolved_profile["effective_execution_strategy"] = dict(execution_strategy)
         workspace = dict(pack.workspace)
         if checkpoint_policy:
             workspace["checkpoint_policy"] = dict(checkpoint_policy)
@@ -262,6 +278,8 @@ class MinionProfileRegistry:
             workspace["gate_policy"] = dict(gate_policy)
         if output_policy:
             workspace["output_policy"] = dict(output_policy)
+        if execution_strategy:
+            workspace["execution_strategy"] = dict(execution_strategy)
         metadata = dict(pack.metadata)
         for key in _PROFILE_RUNTIME_METADATA_KEYS:
             if key not in metadata and key in profile.metadata:

@@ -57,6 +57,7 @@ from pal.memory import (
     register_with_core as register_memory_with_core,
 )
 from pal.memory.rendering import COMPACTION_SCHEMA_MINION_V1, is_compaction_payload, render_compact_context_for_llm
+from pal.minion.execution_strategy import execution_strategy_from_pack
 from pal.minion.git_env import inspect_milestone_checkpoint
 from pal.minion.gates import checkpoint_gate_spec_for_pack, pack_requires_plan_artifact_validation
 from pal.minion.llm_broker import MinionBrokerLLMRuntime
@@ -1968,6 +1969,7 @@ class MinionRunner:
             "output_contract": str(profile.get("output_contract_fragment") or ""),
             "workspace_policy": self._workspace_policy(),
             "completion_policy": self._completion_policy(),
+            "execution_strategy": self._execution_strategy(),
             "prompt_view": prompt_view,
             "active_gate_todo": dict((self.pack.metadata or {}).get("active_gate_todo") or {}),
             "repair_context": self._repair_context_for_compaction(),
@@ -2003,6 +2005,33 @@ class MinionRunner:
         profile = dict(self.pack.resolved_profile or {})
         if isinstance(profile.get("effective_completion_policy"), dict):
             return dict(profile.get("effective_completion_policy") or {})
+        return {}
+
+    def _execution_strategy(self) -> dict[str, Any]:
+        execution_strategy = self.pack.workspace.get("execution_strategy")
+        if isinstance(execution_strategy, dict):
+            return dict(execution_strategy)
+        profile = dict(self.pack.resolved_profile or {})
+        if isinstance(profile.get("effective_execution_strategy"), dict):
+            return dict(profile.get("effective_execution_strategy") or {})
+        return execution_strategy_from_pack(
+            self.pack,
+            workspace_policy=self._workspace_policy(),
+            completion_policy=self._completion_policy(),
+            gate_policy=self._policy_from_workspace_or_profile("gate_policy"),
+            output_policy=self._policy_from_workspace_or_profile("output_policy"),
+        )
+
+    def _policy_from_workspace_or_profile(self, key: str) -> dict[str, Any]:
+        value = self.pack.workspace.get(key)
+        if isinstance(value, dict):
+            return dict(value)
+        profile = dict(self.pack.resolved_profile or {})
+        effective_key = f"effective_{key}"
+        if isinstance(profile.get(effective_key), dict):
+            return dict(profile.get(effective_key) or {})
+        if isinstance(profile.get(key), dict):
+            return dict(profile.get(key) or {})
         return {}
 
     def _current_milestone(self) -> dict[str, Any]:

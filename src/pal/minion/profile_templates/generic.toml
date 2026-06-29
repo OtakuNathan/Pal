@@ -20,6 +20,15 @@ evidence = "text_deliverable"
 [gate_policy]
 gates = ["none"]
 
+[execution_strategy.prepare]
+kind = "artifact_workspace"
+
+[execution_strategy.repair_loop]
+kind = "none"
+
+[execution_strategy.gate]
+kind = "none"
+
 [output_policy]
 milestone_completion = "text_deliverable"
 

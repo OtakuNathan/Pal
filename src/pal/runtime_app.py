@@ -12,7 +12,7 @@ from pathlib import Path
 from pal.bootstrap import StubRuntimeHandle, compose_runtime
 from pal.channel import ChannelEndpointRepository
 from pal.core.debug_dump import write_runtime_debug_dump
-from pal.wizard.runtime import DEFAULT_DB_FILENAME, DEFAULT_PAL_ENTRYPOINT
+from pal.wizard.runtime import DEFAULT_DB_FILENAME, DEFAULT_PAL_ENTRYPOINT, ensure_recovery_socket_channel
 from pal.wizard import PalRegistration, WizardService
 
 
@@ -48,7 +48,10 @@ def open_runtime(runtime_root: Path) -> StubRuntimeHandle:
         )
         database = wizard.create_database(registration)
         _ensure_plugin_layout(runtime_root, wizard, registration)
-        if not ChannelEndpointRepository().list_all():
+        channel_repository = ChannelEndpointRepository()
+        had_channel_endpoints = bool(channel_repository.list_all())
+        ensure_recovery_socket_channel(channel_repository, runtime_root)
+        if not had_channel_endpoints:
             wizard.seed_defaults(registration)
     else:
         provisioned = wizard.provision_stub_runtime(runtime_root)

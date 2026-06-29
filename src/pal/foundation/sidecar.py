@@ -76,6 +76,17 @@ class SidecarRpcClient:
     request_timeout_seconds: float = 300.0
 
     async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        timeout = max(float(self.request_timeout_seconds), 0.001)
+        try:
+            return await asyncio.wait_for(self._request_once(method, params), timeout=timeout)
+        except TimeoutError as exc:
+            raise SidecarRpcError(
+                f"sidecar request timed out after {timeout:.3g}s",
+                kind="timeout",
+                payload={"method": method, "timeout_seconds": timeout},
+            ) from exc
+
+    async def _request_once(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         request_id = str(uuid4())
         reader, writer = await open_sidecar_connection(self.endpoint)
         try:
@@ -90,7 +101,7 @@ class SidecarRpcClient:
                 )
             )
             await writer.drain()
-            response = await asyncio.wait_for(read_sidecar_message(reader), timeout=self.request_timeout_seconds)
+            response = await read_sidecar_message(reader)
         finally:
             writer.close()
             await writer.wait_closed()

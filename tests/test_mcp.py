@@ -7,11 +7,12 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from pal.behavior import BehaviorAffordanceModel, BehaviorRepository, BehaviorService, BehaviorSkillModel, register_with_core as register_behavior_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
-from pal.foundation import PalV2Database
+from pal.foundation import PalV2Database, SidecarEndpoint, SidecarRpcClient, SidecarRpcError
 from pal.mcp import AsyncStdioMcpConnector, McpCompiler, McpDiscoverySnapshot, McpProtocolError, McpServerConfig, load_mcp_server_file
 from pal.mcp.ipc import McpManagerClient
 from pal.mcp.manager import McpManager
@@ -159,6 +160,24 @@ class McpConnectorAndManagerTests(unittest.TestCase):
         self.assertEqual(McpServerConfig(server_id="demo", command=("cmd",)).request_timeout_ms, 300_000)
         self.assertEqual(file_config.config.request_timeout_ms, 300_000)
         self.assertEqual(McpManagerClient(runtime_root=self.root).request_timeout_seconds, 300.0)
+
+    def test_sidecar_rpc_timeout_covers_connection_phase(self) -> None:
+        async def slow_open_connection(endpoint):
+            _ = endpoint
+            await asyncio.sleep(1.0)
+
+        async def run() -> None:
+            client = SidecarRpcClient(
+                endpoint=SidecarEndpoint(runtime_root=self.root, name="mcp-timeout-test"),
+                request_timeout_seconds=0.01,
+            )
+            with patch("pal.foundation.sidecar.open_sidecar_connection", side_effect=slow_open_connection):
+                with self.assertRaises(SidecarRpcError) as raised:
+                    await client.request("health")
+            self.assertEqual(raised.exception.kind, "timeout")
+            self.assertEqual(raised.exception.payload["method"], "health")
+
+        asyncio.run(run())
 
     def _write_fake_server(self) -> Path:
         server = self.root / "fake_mcp_server.py"
