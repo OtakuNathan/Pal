@@ -47,6 +47,7 @@ required_wheel_paths=(
   "pal/minion/plan_builder.py"
   "pal/minion/plan_store.py"
   "pal/minion/profile_templates/generic.toml"
+  "pal/minion/profile_templates/software_engineering/architect.toml"
   "pal/minion/profile_templates/software_engineering/coder.toml"
   "pal/minion/profile_templates/software_engineering/planner.toml"
   "pal/minion/profile_templates/software_engineering/reviewer.toml"
@@ -58,6 +59,10 @@ required_wheel_paths=(
   "pal/minion/review_gate_store.py"
   "pal/minion/review_orchestrator.py"
   "pal/minion/workspace_environment.py"
+  "pal/minion/workspace_environment_templates/clangd.toml"
+  "pal/minion/workspace_environment_templates/cpp-cmake-runtime.toml"
+  "pal/minion/workspace_environment_templates/python-lsp.toml"
+  "pal/minion/workspace_environment_templates/python-runtime.toml"
   "pal/minion/workspace_file_tools.py"
   "pal/minion/workspace_tools.py"
   "pal/plugins_builtin/lsp/plugin.toml"
@@ -114,7 +119,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
     expected_profile_gates = {
         "pal/minion/profile_templates/generic.toml": ["none"],
         "pal/minion/profile_templates/software_engineering/coder.toml": ["checkpoint_admission", "module_quality"],
-        "pal/minion/profile_templates/software_engineering/planner.toml": ["plan_acceptance"],
+        "pal/minion/profile_templates/software_engineering/architect.toml": ["plan_acceptance"],
     }
     for path, expected_gates in expected_profile_gates.items():
         payload = tomllib.loads(read_text(path))
@@ -124,6 +129,39 @@ with zipfile.ZipFile(wheel_path) as wheel:
         gates = gate_policy.get("gates")
         if gates != expected_gates:
             fail(f"{path} gate_policy.gates={gates!r}, expected {expected_gates!r}")
+
+    planner_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/planner.toml"))
+    if planner_profile.get("profile_id") != "planner" or planner_profile.get("profile_group") != "software_engineering":
+        fail("planner.toml must declare software_engineering planner profile")
+    if "gate_policy" in planner_profile:
+        fail("planner.toml must not declare gate_policy; requirements review is user-facing workflow state")
+    planner_capabilities = planner_profile.get("capability_groups")
+    if not isinstance(planner_capabilities, list) or "minion_plan_builder" in planner_capabilities:
+        fail("planner.toml must not expose plan builder capabilities")
+    if "minion_artifacts" not in planner_capabilities:
+        fail("planner.toml must allow minion_artifacts for requirements.md output")
+    planner_output_policy = planner_profile.get("output_policy")
+    if not isinstance(planner_output_policy, dict):
+        fail("planner.toml missing [output_policy]")
+    if planner_output_policy.get("primary_artifact") != "requirements.md":
+        fail("planner.toml must emit requirements.md as the primary artifact")
+    planner_output_types = planner_output_policy.get("allowed_output_types")
+    if not isinstance(planner_output_types, list) or "MarkdownRequirements" not in planner_output_types:
+        fail("planner.toml must allow MarkdownRequirements output")
+
+    architect_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/architect.toml"))
+    if architect_profile.get("profile_id") != "architect" or architect_profile.get("profile_group") != "software_engineering":
+        fail("architect.toml must declare software_engineering architect profile")
+    architect_capabilities = architect_profile.get("capability_groups")
+    if not isinstance(architect_capabilities, list) or "minion_plan_builder" not in architect_capabilities:
+        fail("architect.toml must expose plan builder capabilities")
+    architect_output_policy = architect_profile.get("output_policy")
+    if not isinstance(architect_output_policy, dict):
+        fail("architect.toml missing [output_policy]")
+    if architect_output_policy.get("requires_plan_artifact") is not True:
+        fail("architect.toml must require a plan artifact")
+    if architect_output_policy.get("primary_artifact") != "plan.json":
+        fail("architect.toml must emit plan.json as the primary artifact")
 
     reviewer_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/reviewer.toml"))
     reviewer_gate_policy = reviewer_profile.get("gate_policy")
@@ -136,6 +174,30 @@ with zipfile.ZipFile(wheel_path) as wheel:
     writer_capabilities = writer_profile.get("default_allowed_capabilities")
     if not isinstance(writer_capabilities, list) or "op_file_write" not in writer_capabilities:
         fail("writer.toml must allow file writing for document artifacts")
+
+    expected_workspace_preparers = {
+        "pal/minion/workspace_environment_templates/python-runtime.toml": ("python-runtime", "runtime", {"python"}),
+        "pal/minion/workspace_environment_templates/python-lsp.toml": ("python-lsp", "lsp", {"python"}),
+        "pal/minion/workspace_environment_templates/cpp-cmake-runtime.toml": (
+            "cpp-cmake-runtime",
+            "runtime",
+            {"c", "cpp", "objc", "objcpp"},
+        ),
+        "pal/minion/workspace_environment_templates/clangd.toml": (
+            "clangd",
+            "lsp",
+            {"c", "cpp", "objc", "objcpp"},
+        ),
+    }
+    for path, (preparer_id, kind, language_ids) in expected_workspace_preparers.items():
+        payload = tomllib.loads(read_text(path))
+        if payload.get("preparer_id") != preparer_id:
+            fail(f"{path} preparer_id={payload.get('preparer_id')!r}, expected {preparer_id!r}")
+        if payload.get("kind") != kind:
+            fail(f"{path} kind={payload.get('kind')!r}, expected {kind!r}")
+        found_language_ids = set(payload.get("language_ids") or [])
+        if found_language_ids != language_ids:
+            fail(f"{path} language_ids={sorted(found_language_ids)!r}, expected {sorted(language_ids)!r}")
 
     gates_source = read_text("pal/minion/gates.py")
     for token in (
@@ -259,7 +321,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if token not in skill_capability_source:
             fail(f"pal/skill/capabilities.py missing gate skill affordance token {token!r}")
 
-print("Verified minion profile gates, sandbox, plan builder, scheduler, and gate development skill semantics")
+print("Verified minion profiles, workspace environment templates, sandbox, plan builder, scheduler, and gate development skill semantics")
 PY
 
 echo "Built $wheel_path"
