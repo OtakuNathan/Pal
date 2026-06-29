@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 import json
+import shutil
+import contextlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -312,6 +314,234 @@ def finalize_work_order_branch(repo_path: Path, *, work_order_branch: str, merge
         "merge_target": target,
         "merge_base": merge_base,
     }
+
+
+def prepare_dependency_integration_baseline(
+    runtime_root: Path,
+    workspace: dict[str, Any],
+    *,
+    project_name: str,
+    parent_work_order_id: str,
+    module_id: str,
+    dependency_outputs: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Create a git baseline that contains all completed dependency branches."""
+    _ = runtime_root
+    outputs = _integration_dependency_outputs(dependency_outputs)
+    if len(outputs) <= 1:
+        return {}
+    first_repo = Path(str(outputs[0].get("repo_path") or "")).expanduser()
+    if not (first_repo / ".git").exists():
+        return {}
+    common_git_dir = _git_common_dir(first_repo)
+    if common_git_dir is None:
+        return {}
+    base_ref = str(outputs[0].get("ref") or "").strip()
+    if not base_ref or not _git_bare(common_git_dir, "rev-parse", "--verify", base_ref).ok:
+        return {}
+    integration_branch = f"integration_{_safe_ref(parent_work_order_id)}_{_safe_ref(module_id)}"
+    integration_dir = common_git_dir.parent / "_integrations" / _safe_ref(module_id or "join")
+    _remove_integration_worktree(common_git_dir, integration_dir)
+    _add_worktree_from_git_dir(common_git_dir, integration_dir, branch=integration_branch, base_ref=base_ref)
+    _ensure_git_identity(integration_dir)
+    merged_outputs = [dict(outputs[0])]
+    for output in outputs[1:]:
+        ref = str(output.get("ref") or "").strip()
+        if not ref:
+            continue
+        if not _git(integration_dir, "rev-parse", "--verify", ref).ok:
+            raise RuntimeError(f"unknown dependency ref for {module_id}: {ref}")
+        merged = _git(integration_dir, "merge", "--no-ff", "--no-edit", ref)
+        if not merged.ok:
+            _git(integration_dir, "merge", "--abort")
+            module = str(output.get("module_id") or "")
+            detail = merged.stderr or merged.stdout or f"git merge {ref} failed"
+            raise RuntimeError(f"failed to integrate dependency {module or ref} for {module_id}: {detail}")
+        merged_outputs.append(dict(output))
+    return {
+        "source_repo": str(integration_dir),
+        "base_ref": integration_branch,
+        "merge_target": integration_branch,
+        "dependency_integration_baseline": {
+            "mode": "parallel_dependency_baseline",
+            "module_id": str(module_id or ""),
+            "project_name": str(project_name or workspace.get("project_name") or ""),
+            "repo_path": str(integration_dir),
+            "branch": integration_branch,
+            "commit_sha": _current_head(integration_dir),
+            "dependencies": merged_outputs,
+        },
+    }
+
+
+def cleanup_completed_plan_worktrees(
+    workspace: dict[str, Any],
+    *,
+    module_outputs: list[dict[str, Any]],
+    keep_repo_path: str,
+) -> dict[str, Any]:
+    keep = Path(str(keep_repo_path or "")).expanduser() if str(keep_repo_path or "").strip() else None
+    if keep is None or not (keep / ".git").exists():
+        return {"status": "skipped", "reason": "missing_keep_repo_path"}
+    common_git_dir = _git_common_dir(keep)
+    if common_git_dir is None:
+        return {"status": "skipped", "reason": "missing_common_git_dir", "keep_repo_path": str(keep)}
+    project_root = _cleanup_project_root(workspace, common_git_dir=common_git_dir)
+    if project_root is None:
+        return {"status": "skipped", "reason": "missing_project_root", "keep_repo_path": str(keep)}
+    keep_resolved = keep.resolve()
+    candidates: list[Path] = []
+    for output in module_outputs:
+        if not isinstance(output, dict):
+            continue
+        repo_path = str(output.get("repo_path") or "").strip()
+        if repo_path:
+            candidates.append(Path(repo_path).expanduser())
+    integration = workspace.get("dependency_integration_baseline")
+    if isinstance(integration, dict):
+        repo_path = str(integration.get("repo_path") or "").strip()
+        if repo_path:
+            candidates.append(Path(repo_path).expanduser())
+    integrations_root = project_root / "_integrations"
+    if integrations_root.is_dir():
+        candidates.extend([item for item in integrations_root.iterdir() if item.is_dir()])
+    removed: list[str] = []
+    skipped: list[dict[str, str]] = []
+    errors: list[dict[str, str]] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved == keep_resolved:
+            skipped.append({"path": str(resolved), "reason": "keep_repo_path"})
+            continue
+        if not _is_relative_to(resolved, project_root):
+            skipped.append({"path": str(resolved), "reason": "outside_project_root"})
+            continue
+        if resolved == common_git_dir or _is_relative_to(common_git_dir, resolved):
+            skipped.append({"path": str(resolved), "reason": "common_git_dir"})
+            continue
+        if not resolved.exists():
+            continue
+        removed_result = _remove_completed_worktree(common_git_dir, resolved)
+        if removed_result.ok:
+            removed.append(str(resolved))
+        else:
+            errors.append({"path": str(resolved), "error": removed_result.stderr or removed_result.stdout or "worktree remove failed"})
+    _git_bare(common_git_dir, "worktree", "prune")
+    with contextlib.suppress(OSError):
+        integrations_root.rmdir()
+    return {
+        "status": "ok" if not errors else "partial",
+        "mode": "keep_final_worktree",
+        "keep_repo_path": str(keep_resolved),
+        "project_root": str(project_root),
+        "removed": removed,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+
+def _integration_dependency_outputs(dependency_outputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen_refs: set[str] = set()
+    for item in dependency_outputs:
+        if not isinstance(item, dict):
+            continue
+        repo_path = str(item.get("repo_path") or "").strip()
+        ref = str(item.get("branch") or item.get("work_order_branch") or item.get("commit_sha") or "").strip()
+        if not repo_path or not ref or ref in seen_refs:
+            continue
+        seen_refs.add(ref)
+        result.append(
+            {
+                "module_id": str(item.get("module_id") or ""),
+                "module_name": str(item.get("module_name") or item.get("module_id") or ""),
+                "child_work_order_id": str(item.get("child_work_order_id") or ""),
+                "repo_path": repo_path,
+                "ref": ref,
+                "branch": str(item.get("branch") or item.get("work_order_branch") or ""),
+                "commit_sha": str(item.get("commit_sha") or ""),
+            }
+        )
+    return result
+
+
+def _cleanup_project_root(workspace: dict[str, Any], *, common_git_dir: Path) -> Path | None:
+    for key in ("work_order_repo_root", "runtime_project_path"):
+        value = str((workspace or {}).get(key) or "").strip()
+        if value:
+            path = Path(value).expanduser()
+            if path.exists():
+                return path.resolve()
+    parent = common_git_dir.parent
+    return parent.resolve() if parent.exists() else None
+
+
+def _git_common_dir(repo_path: Path) -> Path | None:
+    result = _git(repo_path, "rev-parse", "--git-common-dir")
+    if not result.ok:
+        return None
+    raw = result.stdout.strip()
+    if not raw:
+        return None
+    common = Path(raw)
+    if not common.is_absolute():
+        common = Path(repo_path) / common
+    return common.resolve()
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _remove_integration_worktree(git_dir: Path, path: Path) -> None:
+    path = Path(path)
+    if path.exists():
+        subprocess.run(
+            ["git", f"--git-dir={git_dir}", "worktree", "remove", "--force", str(path)],
+            cwd=str(Path(git_dir).parent),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    if path.exists():
+        shutil.rmtree(path)
+    _git_bare(git_dir, "worktree", "prune")
+
+
+def _remove_completed_worktree(git_dir: Path, path: Path) -> GitCommandResult:
+    completed = subprocess.run(
+        ["git", f"--git-dir={git_dir}", "worktree", "remove", "--force", str(path)],
+        cwd=str(Path(git_dir).parent),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if completed.returncode == 0:
+        return GitCommandResult(ok=True, stdout=completed.stdout or "", stderr=completed.stderr or "", returncode=0)
+    if path.exists():
+        try:
+            shutil.rmtree(path)
+            return GitCommandResult(ok=True, stdout=completed.stdout or "", stderr=completed.stderr or "", returncode=0)
+        except OSError as exc:
+            return GitCommandResult(
+                ok=False,
+                stdout=completed.stdout or "",
+                stderr=str(exc) or completed.stderr or "",
+                returncode=int(completed.returncode),
+            )
+    return GitCommandResult(ok=True, stdout=completed.stdout or "", stderr=completed.stderr or "", returncode=0)
 
 
 def _ensure_git_identity(repo_path: Path) -> None:

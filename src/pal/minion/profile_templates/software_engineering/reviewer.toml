@@ -133,4 +133,5 @@ primary_artifact = "review_report"
 
 [metadata]
 builtin = true
+llm_round_timeout_seconds = 3000
 recommended_for = "Code review, plan review, risk review, test gap review"

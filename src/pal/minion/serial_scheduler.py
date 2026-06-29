@@ -61,13 +61,16 @@ class SerialMilestoneScheduler:
             event_payload: dict[str, Any] = {**payload, **dict(completion)}
             event_work_order_id = work_order_id
             auto_continue_parent_work_order_id = ""
+            schedule_global_ready = False
             if str(completion.get("status") or "") == "completed":
                 parent_completion = manager.tasking_repository.record_plan_module_completion(work_order_id, completion)
-                if str(parent_completion.get("status") or "") in {"awaiting_continue", "completed"}:
+                if str(parent_completion.get("status") or "") in {"awaiting_continue", "running_module", "completed"}:
                     event_work_order_id = str(parent_completion.get("parent_work_order_id") or work_order_id)
                     event_payload = {**completion, **parent_completion}
-                    if str(parent_completion.get("status") or "") == "awaiting_continue" and bool(parent_completion.get("has_next_module")):
+                    if str(parent_completion.get("status") or "") in {"awaiting_continue", "running_module"} and bool(parent_completion.get("has_next_module")):
                         auto_continue_parent_work_order_id = event_work_order_id
+                    elif str(parent_completion.get("status") or "") == "completed":
+                        schedule_global_ready = True
             elif str(completion.get("status") or "") == "already_completed":
                 event_payload = {**completion, "summary": completion.get("summary") or "serial module was already completed"}
             if str(completion.get("status") or "") in {"completed", "already_completed"}:
@@ -102,6 +105,9 @@ class SerialMilestoneScheduler:
                     manager.tasking_repository.record_minion_event(completed_event)
             if auto_continue_parent_work_order_id:
                 await manager.auto_continue_work_order(auto_continue_parent_work_order_id, reason="module_completed")
+            elif schedule_global_ready:
+                with contextlib.suppress(Exception):
+                    await manager.schedule_ready_plan_modules(reason="module_completed")
             try:
                 await manager._send_runner_control_or_record(state, {"type": "complete", "completion": event_payload})
             except Exception:

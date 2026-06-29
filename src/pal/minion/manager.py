@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import signal
 import sqlite3
 from dataclasses import dataclass, field
@@ -57,6 +58,20 @@ from pal.shared import MinionApprovalDecision, TaskContextPack
 
 
 _DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS = 3600
+_DEFAULT_MAX_PARALLEL_MODULES = 5
+_RUN_MEMORY_LEDGER_LIMIT = 500
+_RUNNER_TELEMETRY_EVENT_KINDS = {"phase_started", "progress"}
+
+
+def _default_max_parallel_modules() -> int:
+    return max(1, _coerce_int(os.environ.get("PAL_MINION_MAX_PARALLEL_MODULES"), _DEFAULT_MAX_PARALLEL_MODULES) or _DEFAULT_MAX_PARALLEL_MODULES)
+
+
+def _default_auto_resume_ready_modules() -> bool:
+    raw = os.environ.get("PAL_MINION_AUTO_RESUME_READY_MODULES")
+    if raw is None:
+        return True
+    return _coerce_bool(raw)
 
 
 @dataclass
@@ -123,6 +138,8 @@ class MinionRunState:
 class MinionManager:
     runtime_root: Path
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("pal.minion.manager"))
+    max_parallel_modules: int | None = None
+    auto_resume_ready_modules: bool | None = None
     tasking_repository: MinionTaskingRepository = field(init=False)
     server: asyncio.base_events.Server | None = None
     endpoint_info: dict[str, Any] = field(default_factory=dict)
@@ -138,6 +155,14 @@ class MinionManager:
     _serial_turns_inflight: InflightTracker = field(default_factory=InflightTracker)
 
     def __post_init__(self) -> None:
+        if self.max_parallel_modules is None:
+            self.max_parallel_modules = _default_max_parallel_modules()
+        else:
+            self.max_parallel_modules = max(1, _coerce_int(self.max_parallel_modules, _DEFAULT_MAX_PARALLEL_MODULES) or _DEFAULT_MAX_PARALLEL_MODULES)
+        if self.auto_resume_ready_modules is None:
+            self.auto_resume_ready_modules = _default_auto_resume_ready_modules()
+        else:
+            self.auto_resume_ready_modules = _coerce_bool(self.auto_resume_ready_modules)
         self.tasking_repository = MinionTaskingRepository(runtime_root=self.runtime_root)
         self.tasking_repository.ensure_schema()
         self.events = MinionEventDelivery()
@@ -157,16 +182,26 @@ class MinionManager:
         state.status = transition_run_status(state.status, status)
 
     async def run(self) -> None:
-        self.tasking_repository.recover_stale_running_modules(
-            active_child_work_order_ids=set(),
-            reason="manager startup recovered stale running module",
-        )
+        startup_recovery = self._recover_stale_modules_on_startup()
         self.server, self.endpoint_info = await start_manager_server(self.runtime_root, self._handle_client)
         self.logger.info("minion manager listening: %s", self.endpoint_info)
         remove_signal_handlers = self._install_signal_handlers()
         async with self.server:
             serve_task = asyncio.create_task(self.server.serve_forever(), name="minion-manager-serve")
             try:
+                try:
+                    startup_schedule = await self._schedule_ready_modules_on_startup()
+                    if (
+                        int(startup_recovery.get("recovered_count") or 0) > 0
+                        or int(startup_schedule.get("scheduled_count") or 0) > 0
+                    ):
+                        self.logger.info(
+                            "minion manager startup recovery=%s schedule=%s",
+                            startup_recovery,
+                            startup_schedule,
+                        )
+                except Exception:
+                    self.logger.exception("minion manager startup auto-resume failed")
                 await self._shutdown_event.wait()
             finally:
                 remove_signal_handlers()
@@ -179,6 +214,17 @@ class MinionManager:
                 await self.events.close()
                 await cleanup_manager_endpoint(self.runtime_root)
                 self.logger.info("minion manager stopped")
+
+    def _recover_stale_modules_on_startup(self) -> dict[str, Any]:
+        return self.tasking_repository.recover_stale_running_modules(
+            active_child_work_order_ids=set(),
+            reason="manager startup recovered stale running module",
+        )
+
+    async def _schedule_ready_modules_on_startup(self) -> dict[str, Any]:
+        if not _coerce_bool(self.auto_resume_ready_modules):
+            return {"status": "skipped", "reason": "auto_resume_ready_modules_disabled", "scheduled_count": 0}
+        return await self.schedule_ready_plan_modules(reason="manager_startup_recovery")
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -260,11 +306,16 @@ class MinionManager:
 
     def health(self) -> dict[str, Any]:
         active = [state for state in self.runs.values() if state.status in _ACTIVE_RUN_STATUSES]
+        active_module_count = self._active_module_child_count()
         return {
             "ok": True,
             "started_at": self.started_at,
             "run_count": len(self.runs),
             "active_count": len(active),
+            "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
+            "auto_resume_ready_modules": bool(self.auto_resume_ready_modules),
+            "active_module_count": active_module_count,
+            "available_module_slots": max(0, int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES) - active_module_count),
             "pending_event_count": len(self.event_queue),
             "event_subscriber_count": len(self.event_subscribers),
             "log_path": str(minion_log_path(self.runtime_root)),
@@ -407,7 +458,8 @@ class MinionManager:
             },
             "created_at": utc_now(),
         }
-        self._queue_event_delivery(event)
+        if self._should_queue_event_delivery(event):
+            self._queue_event_delivery(event)
         self.tasking_repository.record_minion_event(event)
         return {
             "work_order_id": pack.work_order_id,
@@ -594,7 +646,8 @@ class MinionManager:
             "payload": result,
             "created_at": utc_now(),
         }
-        self._queue_event_delivery(event)
+        if self._should_queue_event_delivery(event):
+            self._queue_event_delivery(event)
         self.tasking_repository.record_minion_event(event)
         return {"status": "ok" if result.get("status") in {"committed", "no_changes"} else "error", "work_order_id": work_order_id, **result}
 
@@ -602,27 +655,81 @@ class MinionManager:
         normalized = str(work_order_id or "").strip()
         if not normalized:
             raise ValueError("work_order_id is required")
-        pack = self.tasking_repository.next_plan_module_pack(normalized, allow_paused=True)
-        if pack is None:
+        available_slots = self._available_module_slots()
+        if available_slots <= 0:
             snapshot = self.tasking_repository.read_work_order(normalized)
             metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {}
             plan_execution = dict(metadata.get("plan_execution") or {})
             status = str(plan_execution.get("status") or snapshot.get("status") or "not_available")
-            active_child_work_order_id = str(plan_execution.get("active_child_work_order_id") or "").strip()
+            active_child_work_order_ids = _active_child_work_order_ids_from_plan_execution(plan_execution)
+            ready_module_ids = _string_list(dict(plan_execution.get("module_dag") or {}).get("ready_modules"))
+            waiting_for_slot = bool(ready_module_ids)
+            return {
+                "status": "waiting_for_slot" if waiting_for_slot else status,
+                "work_order_id": normalized,
+                "reason": "global_parallel_limit" if waiting_for_slot else ("active_child_running" if active_child_work_order_ids else "no_available_module_slot"),
+                "active_child_work_order_id": active_child_work_order_ids[0] if active_child_work_order_ids else "",
+                "active_child_work_order_ids": active_child_work_order_ids,
+                "ready_module_ids": ready_module_ids,
+                "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
+                "active_module_count": self._active_module_child_count(),
+            }
+        packs = self.tasking_repository.next_ready_plan_module_packs(normalized, allow_paused=True, limit=available_slots)
+        if not packs:
+            snapshot = self.tasking_repository.read_work_order(normalized)
+            metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {}
+            plan_execution = dict(metadata.get("plan_execution") or {})
+            status = str(plan_execution.get("status") or snapshot.get("status") or "not_available")
+            active_child_work_order_ids = _active_child_work_order_ids_from_plan_execution(plan_execution)
             return {
                 "status": status,
                 "work_order_id": normalized,
-                "reason": "active_child_running" if status == "running_module" and active_child_work_order_id else "no_next_module",
-                "active_child_work_order_id": active_child_work_order_id,
+                "reason": "active_child_running" if status == "running_module" and active_child_work_order_ids else "no_next_module",
+                "active_child_work_order_id": active_child_work_order_ids[0] if active_child_work_order_ids else "",
+                "active_child_work_order_ids": active_child_work_order_ids,
             }
-        pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
-        run = await self.spawn(pack.to_dict())
+        registry = MinionProfileRegistry(runtime_root=self.runtime_root)
+        runs: list[dict[str, Any]] = []
+        module_ids: list[str] = []
+        child_work_order_ids: list[str] = []
+        for pack in packs:
+            resolved_pack = registry.resolve_pack(pack)
+            run = await self.spawn(resolved_pack.to_dict())
+            runs.append(dict(run))
+            module_ids.append(str(resolved_pack.metadata.get("module_id") or resolved_pack.metadata.get("parent_module_id") or ""))
+            child_work_order_ids.append(resolved_pack.work_order_id)
         return {
             "status": "running_module",
             "work_order_id": normalized,
-            "child_work_order_id": pack.work_order_id,
-            "module_id": str(pack.metadata.get("module_id") or pack.metadata.get("parent_module_id") or ""),
-            "run": run,
+            "child_work_order_id": child_work_order_ids[0] if child_work_order_ids else "",
+            "child_work_order_ids": child_work_order_ids,
+            "module_id": module_ids[0] if module_ids else "",
+            "module_ids": module_ids,
+            "run": runs[0] if runs else {},
+            "runs": runs,
+            "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
+            "active_module_count": self._active_module_child_count(),
+        }
+
+    async def schedule_ready_plan_modules(self, *, preferred_work_order_id: str = "", reason: str = "") -> dict[str, Any]:
+        preferred = str(preferred_work_order_id or "").strip()
+        parent_ids = self.tasking_repository.ready_plan_parent_work_order_ids()
+        if preferred and preferred in parent_ids:
+            parent_ids = [preferred, *[item for item in parent_ids if item != preferred]]
+        scheduled: list[dict[str, Any]] = []
+        for parent_id in parent_ids:
+            if self._available_module_slots() <= 0:
+                break
+            result = await self.continue_work_order(parent_id)
+            if str(result.get("status") or "") == "running_module":
+                scheduled.append(dict(result))
+        return {
+            "status": "scheduled" if scheduled else "idle",
+            "reason": reason,
+            "scheduled": scheduled,
+            "scheduled_count": len(scheduled),
+            "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
+            "active_module_count": self._active_module_child_count(),
         }
 
     async def dispatch_accepted_plan(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -951,7 +1058,7 @@ class MinionManager:
         plan_execution = dict(metadata.get("plan_execution") or {})
         if str(plan_execution.get("mode") or "") != "module_parent_milestones":
             return {"status": "skipped", "reason": "not_plan_parent", "work_order_id": normalized}
-        if str(plan_execution.get("status") or "").strip().lower() != "awaiting_continue":
+        if str(plan_execution.get("status") or "").strip().lower() not in {"awaiting_continue", "running_module"}:
             return {
                 "status": str(plan_execution.get("status") or snapshot.get("status") or "not_available"),
                 "reason": "not_awaiting_continue",
@@ -960,13 +1067,14 @@ class MinionManager:
         if not bool(plan_execution.get("auto_advance_modules", True)):
             return {"status": "skipped", "reason": "auto_advance_modules_disabled", "work_order_id": normalized}
         result = await self.continue_work_order(normalized)
+        global_schedule = await self.schedule_ready_plan_modules(preferred_work_order_id=normalized, reason=reason or "module_completed")
         event = {
             "event_kind": "plan_parent_auto_continue",
             "minion_id": "",
             "run_id": "",
             "work_order_id": normalized,
             "minion_profile": "",
-            "payload": {"reason": reason or "module_completed", **dict(result)},
+            "payload": {"reason": reason or "module_completed", **dict(result), "global_schedule": dict(global_schedule)},
             "created_at": utc_now(),
         }
         self._queue_event_delivery(event)
@@ -1152,6 +1260,15 @@ class MinionManager:
     def _active_runner_work_order_ids(self) -> set[str]:
         return self.runner_process.active_runner_work_order_ids()
 
+    def _active_module_child_work_order_ids(self) -> set[str]:
+        return set(self.tasking_repository.running_plan_module_child_work_order_ids())
+
+    def _active_module_child_count(self) -> int:
+        return len(self._active_module_child_work_order_ids())
+
+    def _available_module_slots(self) -> int:
+        return max(0, int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES) - self._active_module_child_count())
+
     def _find_active_run_for_work_order(self, work_order_id: str) -> MinionRunState | None:
         return self.runner_process.find_active_run_for_work_order(work_order_id)
 
@@ -1236,20 +1353,25 @@ class MinionManager:
         state.last_event = event
         state.last_event_at = str(event.get("created_at") or utc_now())
         state.ledger.append(event)
-        self._queue_event_delivery(event)
-        self.logger.info(
-            "minion event run=%s kind=%s status=%s phase=%s summary=%s",
-            state.run_id,
-            event_kind,
-            event["payload"].get("status", ""),
-            event["payload"].get("phase", ""),
-            str(event["payload"].get("summary") or "")[:240],
-        )
-        try:
-            self.tasking_repository.record_minion_event(event)
-        except Exception:
-            self.logger.exception("failed to record minion tasking event: %s", state.run_id)
-            return
+        if len(state.ledger) > _RUN_MEMORY_LEDGER_LIMIT:
+            del state.ledger[:-_RUN_MEMORY_LEDGER_LIMIT]
+        if self._should_queue_event_delivery(event):
+            self._queue_event_delivery(event)
+        if _should_log_runner_event(state.pack, event):
+            self.logger.info(
+                "minion event run=%s kind=%s status=%s phase=%s summary=%s",
+                state.run_id,
+                event_kind,
+                event["payload"].get("status", ""),
+                event["payload"].get("phase", ""),
+                str(event["payload"].get("summary") or "")[:240],
+            )
+        if _should_record_runner_event(state.pack, event):
+            try:
+                self.tasking_repository.record_minion_event(event)
+            except Exception:
+                self.logger.exception("failed to record minion tasking event: %s", state.run_id)
+                return
         if event_kind == "checkpoint":
             self.reviews.schedule_event_gates(state, event)
         if event_kind == "terminal":
@@ -1355,6 +1477,12 @@ class MinionManager:
     def _queue_event_delivery(self, event: dict[str, Any]) -> None:
         self.events.queue_event(event)
 
+    def _should_queue_event_delivery(self, event: dict[str, Any]) -> bool:
+        event_kind = str((event or {}).get("event_kind") or "")
+        if event_kind in _RUNNER_TELEMETRY_EVENT_KINDS and not self.event_subscribers:
+            return False
+        return True
+
     async def _send_serial_module_turn(self, state: MinionRunState, event: dict[str, Any], inflight_key: str) -> None:
         await self.serial_scheduler._send_serial_module_turn(state, event, inflight_key)
 
@@ -1413,10 +1541,44 @@ def _debug_log_requested(pack: TaskContextPack) -> bool:
     return minion_debug_log_enabled(pack.metadata)
 
 
+def _event_debug_log_requested(pack: TaskContextPack, event: dict[str, Any]) -> bool:
+    metadata = dict(pack.metadata or {})
+    payload = dict(event.get("payload") or {})
+    payload_metadata = payload.get("metadata")
+    if isinstance(payload_metadata, dict):
+        metadata.update(dict(payload_metadata))
+    return minion_debug_log_enabled(metadata)
+
+
+def _should_record_runner_event(pack: TaskContextPack, event: dict[str, Any]) -> bool:
+    event_kind = str(event.get("event_kind") or "")
+    if event_kind in _RUNNER_TELEMETRY_EVENT_KINDS and not _event_debug_log_requested(pack, event):
+        return False
+    return True
+
+
+def _should_log_runner_event(pack: TaskContextPack, event: dict[str, Any]) -> bool:
+    event_kind = str(event.get("event_kind") or "")
+    if event_kind in _RUNNER_TELEMETRY_EVENT_KINDS and not _event_debug_log_requested(pack, event):
+        return False
+    return True
+
+
 def _is_plan_parent_pack(pack: TaskContextPack) -> bool:
     metadata = dict(pack.metadata or {})
     plan_execution = dict(metadata.get("plan_execution") or {})
     return str(plan_execution.get("mode") or "") == "module_parent_milestones"
+
+
+def _active_child_work_order_ids_from_plan_execution(plan_execution: dict[str, Any]) -> list[str]:
+    values = _string_list(plan_execution.get("active_child_work_order_ids"))
+    if not values:
+        running_modules = dict(dict(plan_execution.get("module_dag") or {}).get("running_modules") or {})
+        values = _string_list(running_modules.values())
+    active_child_work_order_id = str(plan_execution.get("active_child_work_order_id") or "").strip()
+    if active_child_work_order_id and active_child_work_order_id not in values:
+        values.insert(0, active_child_work_order_id)
+    return _dedupe_strings(values)
 
 
 def _pre_plan_gate_spec(pack: TaskContextPack) -> GateSpec | None:

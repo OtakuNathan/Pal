@@ -594,6 +594,7 @@ def compile_coder_work_order(
         {
             **dict(interface),
             "producer_module_id": str(dependency.get("module_id") or ""),
+            "producer_owned_area": list(dependency.get("owned_area") or []),
             "contract_visibility": "declared_public_interface",
         }
         for dependency in dependency_context
@@ -662,6 +663,9 @@ def prompt_view_for_coder(work_order: CoderWorkOrder | dict[str, Any]) -> Prompt
     dependency_context = _dict_list(order.metadata.get("module_dependency_context"))
     if dependency_context:
         module_view["dependency_context"] = dependency_context
+    dependency_outputs = _dict_list(order.metadata.get("module_dependency_outputs"))
+    if dependency_outputs:
+        module_view["dependency_outputs"] = dependency_outputs
     return PromptView(
         role=order.role,
         task_id=order.task_id,
@@ -944,6 +948,20 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
         errors.append("orchestration.topology.nodes must contain at least one module node")
     if len(join_nodes) != 1:
         errors.append("orchestration.topology.nodes must contain exactly one join node")
+    module_kind_by_id = {str(node.get("module_id") or ""): str(node.get("kind") or "") for node in nodes}
+    owned_area_owner: dict[str, str] = {}
+    for module_index, module in enumerate(artifact.modules):
+        if module_kind_by_id.get(module.module_id) == "join":
+            continue
+        for raw_owned_area in module.owned_area:
+            owned_area = _normalized_owned_area_key(raw_owned_area)
+            if not owned_area:
+                continue
+            owner = owned_area_owner.get(owned_area)
+            if owner and owner != module.module_id:
+                errors.append(f"modules[{module_index}].owned_area duplicates {owner}: {raw_owned_area}")
+            else:
+                owned_area_owner[owned_area] = module.module_id
     dependency_map = {str(node["node_id"]): list(node["depends_on"]) for node in nodes}
     for node_id, deps in dependency_map.items():
         for dep in deps:
@@ -1050,6 +1068,10 @@ def _plan_artifact_gate_check_ref_errors(artifact: PlanArtifact) -> list[str]:
             for item in _dict_list(milestone_metadata.get("acceptance_checklist")):
                 visit(f"acceptance {item.get('id') or '-'}", item.get("gate_check_refs"))
     return errors
+
+
+def _normalized_owned_area_key(value: Any) -> str:
+    return str(value or "").strip().replace("\\", "/").strip("/")
 
 
 def _plan_artifact_gate_check_refs(metadata: dict[str, Any]) -> set[str]:

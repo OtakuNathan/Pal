@@ -467,6 +467,10 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                             "compatibility": {"type": "string"},
                             "producer": {"type": "string"},
                             "consumer": {"type": "string"},
+                            "import_path": {"type": "string"},
+                            "source_path": {"type": "string"},
+                            "public_entrypoint": {"type": "string"},
+                            "copy_policy": {"type": "string", "enum": ["import_only", "copy_allowed"]},
                         },
                         "required": ["direction", "name", "shape", "lifecycle", "ownership", "error_behavior", "compatibility"],
                         "additionalProperties": False,
@@ -485,11 +489,19 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                             "compatibility": {"type": "string"},
                             "producer": {"type": "string"},
                             "consumer": {"type": "string"},
+                            "import_path": {"type": "string"},
+                            "source_path": {"type": "string"},
+                            "public_entrypoint": {"type": "string"},
+                            "copy_policy": {"type": "string", "enum": ["import_only", "copy_allowed"]},
                         },
                         "required": ["name", "shape", "lifecycle", "ownership", "error_behavior", "compatibility"],
                         "additionalProperties": False,
                     },
-                    "description": "Provided module interfaces. Prefer this over adding interfaces after the outline is closed.",
+                    "description": (
+                        "Provided module interfaces. Prefer this over adding interfaces after the outline is closed. "
+                        "For shared contracts/stubs/facades consumed by other modules, include import_path, source_path, "
+                        "and copy_policy=import_only so downstream coders import the shared contract instead of copying it."
+                    ),
                 },
                 "consumed_interfaces": {
                     "type": "array",
@@ -504,11 +516,19 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                             "compatibility": {"type": "string"},
                             "producer": {"type": "string"},
                             "consumer": {"type": "string"},
+                            "import_path": {"type": "string"},
+                            "source_path": {"type": "string"},
+                            "public_entrypoint": {"type": "string"},
+                            "copy_policy": {"type": "string", "enum": ["import_only", "copy_allowed"]},
                         },
                         "required": ["name", "shape", "lifecycle", "ownership", "error_behavior", "compatibility"],
                         "additionalProperties": False,
                     },
-                    "description": "Consumed module interfaces. Prefer this over adding interfaces after the outline is closed.",
+                    "description": (
+                        "Consumed module interfaces. Prefer this over adding interfaces after the outline is closed. "
+                        "When consuming a shared contract/stub/facade, cite the producer's import_path/source_path and "
+                        "copy_policy=import_only."
+                    ),
                 },
                 "milestones": {"type": "array", "items": {"type": "object"}},
             },
@@ -581,6 +601,10 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "compatibility": {"type": "string"},
                 "producer": {"type": "string"},
                 "consumer": {"type": "string"},
+                "import_path": {"type": "string"},
+                "source_path": {"type": "string"},
+                "public_entrypoint": {"type": "string"},
+                "copy_policy": {"type": "string", "enum": ["import_only", "copy_allowed"]},
             },
             "required": ["direction", "name", "shape", "lifecycle", "ownership", "error_behavior", "compatibility"],
             "additionalProperties": False,
@@ -1583,6 +1607,10 @@ class PlanBuilderRuntime:
                 "compatibility",
                 "producer",
                 "consumer",
+                "import_path",
+                "source_path",
+                "public_entrypoint",
+                "copy_policy",
             },
         )
         state, module = self._load_module_from_args(args)
@@ -1600,6 +1628,15 @@ class PlanBuilderRuntime:
             "producer": _text(args.get("producer") or module.get("module_id")),
             "consumer": _text(args.get("consumer")),
         }
+        for key in ("import_path", "source_path", "public_entrypoint"):
+            value = _text(args.get(key))
+            if value:
+                item[key] = value
+        copy_policy = _text(args.get("copy_policy"))
+        if copy_policy:
+            if copy_policy not in {"import_only", "copy_allowed"}:
+                raise ValueError("copy_policy must be import_only or copy_allowed")
+            item["copy_policy"] = copy_policy
         target = "provided_interfaces" if direction == "provided" else "consumed_interfaces"
         module[target].append(item)
         self._save_state(state)

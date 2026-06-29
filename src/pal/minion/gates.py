@@ -769,8 +769,16 @@ def _builtin_gate_checklist_entries() -> tuple[GateChecklistEntry, ...]:
             "Verify downstream modules can safely depend on only declared public interfaces/facades/contracts, with no sibling-internal imports or undeclared flywire coupling.",
         ),
         GateChecklistEntry(
+            "module.no_cross_module_source_copy",
+            "Verify changed files do not duplicate dependency module source/contracts/DTOs/protocols/schemas/headers/facades under a new path; consumers must import/include declared public contracts instead.",
+        ),
+        GateChecklistEntry(
             "plan.dispatchable",
             "Verify the plan is dispatchable and topology/module ordering is valid.",
+        ),
+        GateChecklistEntry(
+            "plan.boundary_import_contracts",
+            "Verify every shared contract/stub/facade has one producer-owned source_path plus import_path/include/public_entrypoint, downstream modules consume that interface, and no module owns a private copy of another module's contract file.",
         ),
         GateChecklistEntry(
             "plan.source_evidence",
@@ -850,6 +858,7 @@ def _builtin_gate_definitions() -> tuple[GateDefinition, ...]:
                 "module.delivery_dogfood",
                 "checkpoint.api_evidence",
                 "module.downstream_ready",
+                "module.no_cross_module_source_copy",
                 "checkpoint.submit_gate",
             ),
             blocking=(
@@ -860,6 +869,7 @@ def _builtin_gate_definitions() -> tuple[GateDefinition, ...]:
                 "scope_violation",
                 "unsafe_or_unclear_module_boundary",
                 "undeclared_cross_module_import",
+                "copied_cross_module_contract",
             ),
             policy={
                 "require_test_or_blocker": True,
@@ -907,6 +917,7 @@ def _builtin_gate_definitions() -> tuple[GateDefinition, ...]:
             max_revision_attempts=2,
             required_check_refs=(
                 "plan.dispatchable",
+                "plan.boundary_import_contracts",
                 "plan.source_evidence",
                 "plan.test_strategy",
                 "plan.delivery_strategy",
@@ -918,6 +929,8 @@ def _builtin_gate_definitions() -> tuple[GateDefinition, ...]:
                 "missing_acceptance_criteria",
                 "missing_user_entrypoint_dogfood",
                 "unsafe_or_unclear_module_boundary",
+                "missing_shared_import_contract",
+                "copied_cross_module_contract",
             ),
         ),
     )

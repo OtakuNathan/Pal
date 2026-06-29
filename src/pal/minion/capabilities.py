@@ -32,7 +32,7 @@ from pal.minion.capability_args import (
     validate_draft_work_order_args,
     validate_promote_work_order_args,
 )
-from pal.minion.ipc import MinionManagerClient, minion_log_path, open_manager_connection, python_subprocess_env
+from pal.minion.ipc import MinionManagerClient, minion_log_path, minion_port_path, open_manager_connection, python_subprocess_env
 from pal.minion.profiles import MinionProfileRegistry
 from pal.minion.prompt import TaskingPromptFragmentProvider
 from pal.minion.repository import MinionTaskingRepository
@@ -502,7 +502,7 @@ class MinionManagerProvider:
     @capability_action(namespace=OPERATION_NAMESPACE, scope="minion", family="minion", action_name="detach", description="Detach minion manager")
     def detach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
         _ = call
-        self._stop_manager()
+        self._stop_manager(force=True)
         self.mounted = False
         self.degraded = False
         payload = self._status_payload()
@@ -1421,6 +1421,14 @@ class MinionManagerProvider:
                 return
             except Exception:
                 self._stop_process_only()
+        try:
+            self.last_health = self.client.health_sync()
+            self.last_error = ""
+            self._start_event_subscription()
+            return
+        except Exception:
+            pass
+        self._cleanup_stale_endpoint()
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         minion_log_path(self.runtime_root).parent.mkdir(parents=True, exist_ok=True)
         self.process = subprocess.Popen(
@@ -1428,6 +1436,7 @@ class MinionManagerProvider:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=python_subprocess_env(),
+            start_new_session=True,
         )
         for _ in range(150):
             if self.process.poll() is not None:
@@ -1442,10 +1451,17 @@ class MinionManagerProvider:
                 time.sleep(0.2)
         raise RuntimeError("minion manager failed to start")
 
-    def _stop_manager(self) -> None:
+    def _stop_manager(self, *, force: bool = False) -> None:
         self._stop_event_subscription()
         process = self.process
         if process is not None and process.poll() is None:
+            if not force and self._has_active_runs_sync():
+                self.process = None
+                self._join_event_subscription()
+                self.last_health = {}
+                with self._buffer_lock:
+                    self._buffered_events.clear()
+                return
             self._stop_active_runs_sync()
             with contextlib.suppress(Exception):
                 self.client.shutdown_sync()
@@ -1456,6 +1472,25 @@ class MinionManagerProvider:
         self.last_health = {}
         with self._buffer_lock:
             self._buffered_events.clear()
+
+    def _cleanup_stale_endpoint(self) -> None:
+        with contextlib.suppress(Exception):
+            self.client.health_sync()
+            return
+        for path in (self.client.socket_path, minion_port_path(self.runtime_root)):
+            if path.exists():
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+
+    def _has_active_runs_sync(self) -> bool:
+        with contextlib.suppress(Exception):
+            result = self.client.list_runs_sync()
+            for item in list(result.get("items") or []):
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("status") or "") in {"starting", "running", "approval_pending"}:
+                    return True
+        return False
 
     def _stop_process_only(self) -> None:
         process = self.process
@@ -1564,6 +1599,8 @@ class MinionManagerProvider:
                 await writer.wait_closed()
 
     def _buffer_event(self, event: dict[str, Any]) -> None:
+        if _is_high_cardinality_minion_event(event):
+            return
         key = _event_dedupe_key(event)
         with self._buffer_lock:
             if key in self._seen_event_keys:
@@ -1945,6 +1982,10 @@ def _event_dedupe_key(event: dict[str, Any]) -> str:
         return json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)
     except Exception:
         return repr(sorted(dict(event or {}).items()))
+
+
+def _is_high_cardinality_minion_event(event: dict[str, Any]) -> bool:
+    return str((event or {}).get("event_kind") or "").strip() in {"phase_started", "progress"}
 
 
 @dataclass

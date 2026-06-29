@@ -13,6 +13,17 @@ from pal.minion.plan_builder import PLAN_BUILDER_CAPABILITIES, PLAN_BUILDER_INIT
 from pal.shared import TaskContextPack
 
 
+_PROFILE_RUNTIME_METADATA_KEYS = frozenset(
+    {
+        "heartbeat_interval_seconds",
+        "llm_round_timeout_seconds",
+        "manager_turn_timeout_seconds",
+        "max_output_tokens",
+        "timeout_seconds",
+    }
+)
+
+
 @dataclass(frozen=True)
 class MinionProfile:
     profile_id: str
@@ -252,6 +263,9 @@ class MinionProfileRegistry:
         if output_policy:
             workspace["output_policy"] = dict(output_policy)
         metadata = dict(pack.metadata)
+        for key in _PROFILE_RUNTIME_METADATA_KEYS:
+            if key not in metadata and key in profile.metadata:
+                metadata[key] = profile.metadata[key]
         preferred_endpoint_id = str(metadata.get("preferred_endpoint_id") or "").strip()
         if preferred_endpoint_id:
             metadata.setdefault("preferred_endpoint_source", "explicit")

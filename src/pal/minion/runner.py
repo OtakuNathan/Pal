@@ -605,6 +605,17 @@ class MinionRunner:
         workspace.setdefault("goal", self.pack.instruction or self.pack.goal)
         if isinstance(self.pack.metadata, dict):
             workspace.setdefault("task_id", str(self.pack.metadata.get("task_id") or ""))
+            if isinstance(self.pack.metadata.get("prompt_view"), dict):
+                workspace.setdefault("prompt_view", dict(self.pack.metadata.get("prompt_view") or {}))
+            if isinstance(self.pack.metadata.get("coder_work_order"), dict):
+                coder_work_order = dict(self.pack.metadata.get("coder_work_order") or {})
+                workspace.setdefault("coder_work_order", coder_work_order)
+                order_metadata = coder_work_order.get("metadata")
+                if isinstance(order_metadata, dict) and isinstance(order_metadata.get("module_dependency_context"), list):
+                    workspace.setdefault(
+                        "module_dependency_context",
+                        [dict(item) for item in list(order_metadata.get("module_dependency_context") or []) if isinstance(item, dict)],
+                    )
             if isinstance(self.pack.metadata.get("source_plan_ref"), dict):
                 workspace.setdefault("source_plan_ref", dict(self.pack.metadata.get("source_plan_ref") or {}))
             if isinstance(self.pack.metadata.get("review_gate_ref"), dict):
@@ -2604,6 +2615,14 @@ def _optional_positive_int(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _optional_positive_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def _resolve_minion_max_output_tokens(llm_runtime: Any, pack: TaskContextPack) -> int:
     metadata = pack.metadata if isinstance(pack.metadata, dict) else {}
     explicit = _optional_positive_int(metadata.get("max_output_tokens"))
@@ -2645,7 +2664,18 @@ def _minion_llm_request_metadata(pack: TaskContextPack, run_id: str) -> dict[str
         preferred_endpoint_source = _preferred_endpoint_source_from_pack(pack)
         if preferred_endpoint_source:
             metadata["preferred_endpoint_source"] = preferred_endpoint_source
+    timeout_seconds = _minion_llm_request_timeout_seconds(pack)
+    if timeout_seconds is not None:
+        metadata["timeout_seconds"] = timeout_seconds
     return metadata
+
+
+def _minion_llm_request_timeout_seconds(pack: TaskContextPack) -> float | None:
+    pack_metadata = pack.metadata if isinstance(pack.metadata, dict) else {}
+    explicit = _optional_positive_float(pack_metadata.get("timeout_seconds"))
+    if explicit is not None:
+        return explicit
+    return _optional_positive_float(pack_metadata.get("llm_round_timeout_seconds"))
 
 
 def _preferred_endpoint_id_from_pack(pack: TaskContextPack) -> str | None:

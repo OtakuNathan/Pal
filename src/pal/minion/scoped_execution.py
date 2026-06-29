@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import re
+import subprocess
 from typing import Any
 from uuid import uuid4
 
@@ -3046,6 +3047,25 @@ def _minion_checkpoint_commit_result(call: CanonicalToolCall, workspace: dict[st
         if not repo_path:
             raise ValueError("current project repo is not available")
         repo = Path(repo_path)
+        copy_violations = _cross_module_source_copy_violations(repo, workspace)
+        if copy_violations:
+            text = (
+                "Checkpoint blocked: changed files duplicate a dependency module contract/source file. "
+                "Import/include the declared shared contract instead of copying it into this module."
+            )
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text=text,
+                structured={
+                    "status": "blocked",
+                    "reason": "cross_module_source_copy_violation",
+                    "violations": copy_violations,
+                },
+                call_id=call.call_id,
+                llm_text=text,
+                status=RuntimeStatus.ERROR,
+            )
         title = str(call.args.get("title") or workspace.get("current_milestone_title") or "").strip()
         result = commit_milestone(
             repo,
@@ -3123,6 +3143,199 @@ def _minion_checkpoint_commit_result(call: CanonicalToolCall, workspace: dict[st
             llm_text=message,
             status=RuntimeStatus.ERROR,
         )
+
+
+def _cross_module_source_copy_violations(repo: Path, workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    changed_files = _git_changed_files(repo)
+    if not changed_files:
+        return []
+    source_refs = _dependency_source_refs(workspace)
+    if not source_refs:
+        return []
+    current_owned_area = _current_module_owned_area(workspace)
+    violations: list[dict[str, Any]] = []
+    for changed_path in changed_files:
+        normalized_changed = _normalize_repo_path(changed_path)
+        if not normalized_changed:
+            continue
+        if current_owned_area and not _path_matches_owned_area(normalized_changed, current_owned_area):
+            continue
+        changed_file = repo / normalized_changed
+        if not changed_file.is_file():
+            continue
+        try:
+            changed_bytes = changed_file.read_bytes()
+        except OSError:
+            continue
+        if not changed_bytes:
+            continue
+        for ref in source_refs:
+            if str(ref.get("copy_policy") or "import_only").strip() == "copy_allowed":
+                continue
+            source_path = _normalize_repo_path(ref.get("source_path"))
+            if not source_path or source_path == normalized_changed:
+                continue
+            source_file = repo / source_path
+            if not source_file.is_file():
+                continue
+            try:
+                source_bytes = source_file.read_bytes()
+            except OSError:
+                continue
+            if changed_bytes != source_bytes:
+                continue
+            violations.append(
+                {
+                    "changed_path": normalized_changed,
+                    "source_path": source_path,
+                    "producer_module_id": str(ref.get("producer_module_id") or ref.get("module_id") or ""),
+                    "interface": str(ref.get("name") or ref.get("interface") or ""),
+                    "import_path": str(ref.get("import_path") or ref.get("public_entrypoint") or ""),
+                    "copy_policy": str(ref.get("copy_policy") or "import_only"),
+                    "summary": "changed file is a byte-for-byte copy of a dependency-owned contract/source file",
+                }
+            )
+            break
+    return violations
+
+
+def _git_changed_files(repo: Path) -> list[str]:
+    try:
+        completed = subprocess.run(
+            ["git", "status", "--porcelain", "-uall", "--", "."],
+            cwd=str(repo),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError:
+        return []
+    if completed.returncode != 0:
+        return []
+    result: list[str] = []
+    for line in completed.stdout.splitlines():
+        if not line:
+            continue
+        path = line[3:].strip() if len(line) > 3 else ""
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1].strip()
+        normalized = _normalize_repo_path(path)
+        if normalized:
+            result.append(normalized)
+    return result
+
+
+def _dependency_source_refs(workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
+
+    def add_contract(contract: Any, *, producer_module_id: str = "", producer_owned_area: list[str] | None = None) -> None:
+        if not isinstance(contract, dict):
+            return
+        item = dict(contract)
+        if producer_module_id and not str(item.get("producer_module_id") or item.get("module_id") or "").strip():
+            item["producer_module_id"] = producer_module_id
+        if producer_owned_area and not list(item.get("producer_owned_area") or []):
+            item["producer_owned_area"] = list(producer_owned_area)
+        source_path = _normalize_repo_path(item.get("source_path"))
+        if source_path:
+            item["source_path"] = source_path
+            refs.append(item)
+            return
+        for owned_path in list(item.get("producer_owned_area") or []):
+            normalized = _normalize_repo_path(owned_path)
+            if _looks_like_contract_source_path(normalized):
+                refs.append({**item, "source_path": normalized, "copy_policy": str(item.get("copy_policy") or "import_only")})
+
+    def add_dependency(dep: Any) -> None:
+        if not isinstance(dep, dict):
+            return
+        producer = str(dep.get("module_id") or dep.get("producer_module_id") or "").strip()
+        owned_area = [_normalize_repo_path(item) for item in list(dep.get("owned_area") or []) if _normalize_repo_path(item)]
+        for interface in list(dep.get("provided_interfaces") or []):
+            add_contract(interface, producer_module_id=producer, producer_owned_area=owned_area)
+        for owned_path in owned_area:
+            if _looks_like_contract_source_path(owned_path):
+                add_contract({"source_path": owned_path, "producer_module_id": producer, "copy_policy": "import_only"})
+
+    prompt_view = workspace.get("prompt_view")
+    if isinstance(prompt_view, dict):
+        for contract in list(prompt_view.get("relevant_contracts") or []):
+            add_contract(contract)
+        module = prompt_view.get("module")
+        if isinstance(module, dict):
+            for dep in list(module.get("dependency_context") or []):
+                add_dependency(dep)
+    coder_work_order = workspace.get("coder_work_order")
+    if isinstance(coder_work_order, dict):
+        for contract in list(coder_work_order.get("relevant_contracts") or []):
+            add_contract(contract)
+        metadata = coder_work_order.get("metadata")
+        if isinstance(metadata, dict):
+            for dep in list(metadata.get("module_dependency_context") or []):
+                add_dependency(dep)
+    for dep in list(workspace.get("module_dependency_context") or []):
+        add_dependency(dep)
+    return _dedupe_source_refs(refs)
+
+
+def _current_module_owned_area(workspace: dict[str, Any]) -> list[str]:
+    prompt_view = workspace.get("prompt_view")
+    if isinstance(prompt_view, dict):
+        module = prompt_view.get("module")
+        if isinstance(module, dict):
+            owned = [_normalize_repo_path(item) for item in list(module.get("owned_area") or []) if _normalize_repo_path(item)]
+            if owned:
+                return owned
+    coder_work_order = workspace.get("coder_work_order")
+    if isinstance(coder_work_order, dict):
+        owned = [_normalize_repo_path(item) for item in list(coder_work_order.get("owned_area") or []) if _normalize_repo_path(item)]
+        if owned:
+            return owned
+    return [_normalize_repo_path(item) for item in list(workspace.get("owned_area") or []) if _normalize_repo_path(item)]
+
+
+def _path_matches_owned_area(path: str, owned_area: list[str]) -> bool:
+    normalized = _normalize_repo_path(path)
+    for raw_area in owned_area:
+        area = _normalize_repo_path(raw_area)
+        if not area:
+            continue
+        if normalized == area or normalized.startswith(area.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _looks_like_contract_source_path(path: str) -> bool:
+    normalized = _normalize_repo_path(path)
+    if not normalized or normalized.endswith("/__init__.py"):
+        return False
+    name = normalized.rsplit("/", 1)[-1].lower()
+    stem = name.rsplit(".", 1)[0]
+    if stem in {"contract", "contracts", "schema", "schemas", "types", "dto", "dtos", "protocol", "protocols", "interface", "interfaces", "api"}:
+        return True
+    return name.endswith((".h", ".hh", ".hpp", ".hxx", ".pyi", ".d.ts"))
+
+
+def _normalize_repo_path(value: Any) -> str:
+    return str(value or "").strip().replace("\\", "/").strip("/")
+
+
+def _dedupe_source_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for ref in refs:
+        source_path = _normalize_repo_path(ref.get("source_path"))
+        if not source_path:
+            continue
+        key = (source_path, str(ref.get("producer_module_id") or ref.get("module_id") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        item = dict(ref)
+        item["source_path"] = source_path
+        result.append(item)
+    return result
 
 
 def _effective_capability_name(tool_call: CanonicalToolCall) -> str:
