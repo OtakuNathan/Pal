@@ -9643,6 +9643,40 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(fake.calls[0][0], "request_logical_slot")
         self.assertEqual(fake.calls[1][0], "release_logical_slot")
 
+    def test_rpc_logical_slot_broker_tracks_owned_slots(self) -> None:
+        from pal.minion.step_runner import LogicalSlotOwner, RpcLogicalSlotBroker
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.released: list[dict[str, str]] = []
+
+            def request_logical_slot_sync(self, **kwargs: str) -> dict[str, Any]:
+                return {
+                    "status": "granted",
+                    "slot_id": "slot_broker",
+                    **kwargs,
+                }
+
+            def release_logical_slot_sync(self, **kwargs: str) -> dict[str, Any]:
+                self.released.append(dict(kwargs))
+                return {"status": "released", **kwargs}
+
+        fake = FakeClient()
+        broker = RpcLogicalSlotBroker(fake)
+        owner = LogicalSlotOwner(run_id="run_broker", work_order_id="wo_broker")
+
+        grant = broker.request(owner, resource="logical_minion_slot", module_id="module_broker", reason="test")
+        releases = broker.release_for_run("run_broker", reason="cleanup")
+
+        self.assertEqual(grant["status"], "granted")
+        self.assertEqual(grant["run_id"], "run_broker")
+        self.assertEqual(grant["work_order_id"], "wo_broker")
+        self.assertEqual(grant["module_id"], "module_broker")
+        self.assertEqual(releases[0]["status"], "released")
+        self.assertEqual(fake.released[0]["slot_id"], "slot_broker")
+        self.assertEqual(fake.released[0]["run_id"], "run_broker")
+        self.assertEqual(broker.release_for_run("run_broker"), [])
+
     def test_step_runner_logical_coder_context_isolates_pack_state(self) -> None:
         manager = MinionManager(runtime_root=self.root, max_parallel_modules=2)
         parent_state = MinionRunState(

@@ -4,7 +4,7 @@ import asyncio
 import copy
 import inspect
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
@@ -28,9 +28,127 @@ class LogicalCoderContext:
     pack: TaskContextPack
 
 
+@dataclass(frozen=True)
+class LogicalSlotOwner:
+    run_id: str
+    work_order_id: str
+
+
+@dataclass
+class LocalLogicalSlotBroker:
+    manager: Any
+
+    def request(self, owner: LogicalSlotOwner, *, resource: str, module_id: str = "", reason: str = "") -> dict[str, Any]:
+        # DAG resource isolation: a slot is only a global capacity token. It must
+        # not carry mutable coder state, workspace handles, or git checkout state.
+        # Each logical coder still gets a separate pack/context and its own
+        # prepared git environment before execution.
+        normalized_resource = str(resource or "logical_minion_slot").strip()
+        if normalized_resource != "logical_minion_slot":
+            return {
+                "status": "denied",
+                "reason": "unsupported_resource",
+                "resource": normalized_resource,
+                "run_id": owner.run_id,
+                "work_order_id": owner.work_order_id,
+            }
+        available = self.manager._available_module_slots()
+        if available <= 0:
+            return {
+                "status": "denied",
+                "reason": "global_parallel_limit",
+                "resource": normalized_resource,
+                "run_id": owner.run_id,
+                "work_order_id": owner.work_order_id,
+                "max_parallel_modules": int(self.manager.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
+                "active_module_count": self.manager._active_module_child_count(),
+                "allocated_logical_slots": self.manager._allocated_logical_slot_count(),
+            }
+        slot_id = f"slot_{uuid4().hex[:12]}"
+        self.manager._logical_slots[slot_id] = {
+            "slot_id": slot_id,
+            "resource": normalized_resource,
+            "run_id": owner.run_id,
+            "work_order_id": owner.work_order_id,
+            "module_id": str(module_id or "").strip(),
+            "reason": str(reason or "").strip(),
+            "granted_at": utc_now(),
+        }
+        return {
+            "status": "granted",
+            "slot_id": slot_id,
+            "resource": normalized_resource,
+            "run_id": owner.run_id,
+            "work_order_id": owner.work_order_id,
+            "module_id": str(module_id or "").strip(),
+            "available_module_slots": self.manager._available_module_slots(),
+        }
+
+    def release(self, slot_id: str, *, run_id: str = "", reason: str = "") -> dict[str, Any]:
+        normalized = str(slot_id or "").strip()
+        if not normalized:
+            return {"status": "skipped", "reason": "slot_id_required"}
+        slot = self.manager._logical_slots.get(normalized)
+        if slot is None:
+            return {"status": "not_found", "slot_id": normalized}
+        if run_id and str(slot.get("run_id") or "") != str(run_id):
+            return {"status": "denied", "reason": "slot_owned_by_different_run", "slot_id": normalized}
+        removed = self.manager._logical_slots.pop(normalized)
+        return {
+            "status": "released",
+            "slot_id": normalized,
+            "run_id": str(removed.get("run_id") or ""),
+            "work_order_id": str(removed.get("work_order_id") or ""),
+            "module_id": str(removed.get("module_id") or ""),
+            "reason": str(reason or "").strip(),
+            "available_module_slots": self.manager._available_module_slots(),
+        }
+
+    def release_for_run(self, run_id: str, *, reason: str = "") -> list[dict[str, Any]]:
+        normalized = str(run_id or "").strip()
+        if not normalized:
+            return []
+        slot_ids = [slot_id for slot_id, slot in self.manager._logical_slots.items() if str(slot.get("run_id") or "") == normalized]
+        return [self.release(slot_id, run_id=normalized, reason=reason) for slot_id in slot_ids]
+
+
+@dataclass
+class RpcLogicalSlotBroker:
+    client: Any
+    _owned_slots: dict[str, str] = field(default_factory=dict)
+
+    def request(self, owner: LogicalSlotOwner, *, resource: str, module_id: str = "", reason: str = "") -> dict[str, Any]:
+        result = self.client.request_logical_slot_sync(
+            run_id=owner.run_id,
+            work_order_id=owner.work_order_id,
+            resource=resource,
+            module_id=module_id,
+            reason=reason,
+        )
+        if str(result.get("status") or "") == "granted":
+            self._owned_slots[str(result.get("slot_id") or "")] = owner.run_id
+        return result
+
+    def release(self, slot_id: str, *, run_id: str = "", reason: str = "") -> dict[str, Any]:
+        result = self.client.release_logical_slot_sync(slot_id=slot_id, run_id=run_id, reason=reason)
+        if str(result.get("status") or "") == "released":
+            self._owned_slots.pop(str(slot_id or ""), None)
+        return result
+
+    def release_for_run(self, run_id: str, *, reason: str = "") -> list[dict[str, Any]]:
+        normalized = str(run_id or "").strip()
+        slot_ids = [slot_id for slot_id, owner_run_id in self._owned_slots.items() if owner_run_id == normalized]
+        return [self.release(slot_id, run_id=normalized, reason=reason) for slot_id in slot_ids]
+
+
 @dataclass
 class ModuleStepRunner:
     manager: Any
+    slot_broker: Any | None = None
+
+    def __post_init__(self) -> None:
+        if self.slot_broker is None:
+            self.slot_broker = LocalLogicalSlotBroker(self.manager)
 
     async def continue_work_order(self, work_order_id: str) -> dict[str, Any]:
         normalized = str(work_order_id or "").strip()
@@ -142,77 +260,17 @@ class ModuleStepRunner:
         }
 
     def request_logical_slot(self, state: Any, *, resource: str, module_id: str = "", reason: str = "") -> dict[str, Any]:
-        # DAG resource isolation: a slot is only a global capacity token. It must
-        # not carry mutable coder state, workspace handles, or git checkout state.
-        # Each logical coder still gets a separate pack/context and its own
-        # prepared git environment before execution.
-        normalized_resource = str(resource or "logical_minion_slot").strip()
-        if normalized_resource != "logical_minion_slot":
-            return {
-                "status": "denied",
-                "reason": "unsupported_resource",
-                "resource": normalized_resource,
-                "run_id": state.run_id,
-                "work_order_id": state.pack.work_order_id,
-            }
-        available = self.manager._available_module_slots()
-        if available <= 0:
-            return {
-                "status": "denied",
-                "reason": "global_parallel_limit",
-                "resource": normalized_resource,
-                "run_id": state.run_id,
-                "work_order_id": state.pack.work_order_id,
-                "max_parallel_modules": self._max_parallel_modules(),
-                "active_module_count": self.manager._active_module_child_count(),
-                "allocated_logical_slots": self.manager._allocated_logical_slot_count(),
-            }
-        slot_id = f"slot_{uuid4().hex[:12]}"
-        self.manager._logical_slots[slot_id] = {
-            "slot_id": slot_id,
-            "resource": normalized_resource,
-            "run_id": state.run_id,
-            "work_order_id": state.pack.work_order_id,
-            "module_id": str(module_id or "").strip(),
-            "reason": str(reason or "").strip(),
-            "granted_at": utc_now(),
-        }
-        return {
-            "status": "granted",
-            "slot_id": slot_id,
-            "resource": normalized_resource,
-            "run_id": state.run_id,
-            "work_order_id": state.pack.work_order_id,
-            "module_id": str(module_id or "").strip(),
-            "available_module_slots": self.manager._available_module_slots(),
-        }
+        assert self.slot_broker is not None
+        owner = LogicalSlotOwner(run_id=str(state.run_id or ""), work_order_id=str(state.pack.work_order_id or ""))
+        return self.slot_broker.request(owner, resource=resource, module_id=module_id, reason=reason)
 
     def release_logical_slot(self, slot_id: str, *, run_id: str = "", reason: str = "") -> dict[str, Any]:
-        normalized = str(slot_id or "").strip()
-        if not normalized:
-            return {"status": "skipped", "reason": "slot_id_required"}
-        slot = self.manager._logical_slots.get(normalized)
-        if slot is None:
-            return {"status": "not_found", "slot_id": normalized}
-        if run_id and str(slot.get("run_id") or "") != str(run_id):
-            return {"status": "denied", "reason": "slot_owned_by_different_run", "slot_id": normalized}
-        removed = self.manager._logical_slots.pop(normalized)
-        return {
-            "status": "released",
-            "slot_id": normalized,
-            "run_id": str(removed.get("run_id") or ""),
-            "work_order_id": str(removed.get("work_order_id") or ""),
-            "module_id": str(removed.get("module_id") or ""),
-            "reason": str(reason or "").strip(),
-            "available_module_slots": self.manager._available_module_slots(),
-        }
+        assert self.slot_broker is not None
+        return self.slot_broker.release(slot_id, run_id=run_id, reason=reason)
 
     def release_logical_slots_for_run(self, run_id: str, *, reason: str = "") -> list[dict[str, Any]]:
-        normalized = str(run_id or "").strip()
-        if not normalized:
-            return []
-        slot_ids = [slot_id for slot_id, slot in self.manager._logical_slots.items() if str(slot.get("run_id") or "") == normalized]
-        return [self.release_logical_slot(slot_id, run_id=normalized, reason=reason) for slot_id in slot_ids]
+        assert self.slot_broker is not None
+        return self.slot_broker.release_for_run(run_id, reason=reason)
 
     async def run_logical_coder_task(
         self,
