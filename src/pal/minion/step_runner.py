@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import inspect
 from collections.abc import Awaitable, Callable
@@ -256,6 +257,101 @@ class ModuleStepRunner:
             }
         finally:
             self.release_logical_slot(context.slot_id, run_id=parent_state.run_id, reason="logical_coder_task_done")
+
+    async def run_logical_coder_dag(
+        self,
+        parent_state: Any,
+        module_packs: dict[str, TaskContextPack],
+        depends_on: dict[str, list[str]],
+        *,
+        task: Callable[[str, LogicalCoderContext], Awaitable[dict[str, Any]] | dict[str, Any]],
+        reason: str = "",
+        fail_fast: bool = True,
+    ) -> dict[str, Any]:
+        module_ids = [str(item).strip() for item in module_packs if str(item).strip()]
+        unknown = {
+            module_id: [dep for dep in _string_list(depends_on.get(module_id)) if dep not in module_packs]
+            for module_id in module_ids
+        }
+        unknown = {module_id: deps for module_id, deps in unknown.items() if deps}
+        if unknown:
+            return {"status": "failed", "reason": "unknown_dependencies", "unknown_dependencies": unknown}
+        pending = list(module_ids)
+        running: dict[str, asyncio.Task[dict[str, Any]]] = {}
+        completed: dict[str, dict[str, Any]] = {}
+        failed: dict[str, dict[str, Any]] = {}
+
+        while pending or running:
+            ready = [
+                module_id
+                for module_id in list(pending)
+                if all(dep in completed for dep in _string_list(depends_on.get(module_id)))
+            ]
+            for module_id in ready:
+                if self.manager._available_module_slots() <= 0:
+                    break
+                pending.remove(module_id)
+                running[module_id] = asyncio.create_task(
+                    self.run_logical_coder_task(
+                        parent_state,
+                        module_packs[module_id],
+                        module_id=module_id,
+                        task=lambda context, module_id=module_id: task(module_id, context),
+                        reason=reason or "logical_coder_dag",
+                    ),
+                    name=f"minion-logical-coder-{module_id}",
+                )
+            if not running:
+                if ready:
+                    return {
+                        "status": "waiting_for_slot",
+                        "pending_modules": list(pending),
+                        "ready_modules": ready,
+                        "completed_modules": list(completed),
+                        "failed_modules": list(failed),
+                    }
+                blocked = {
+                    module_id: [dep for dep in _string_list(depends_on.get(module_id)) if dep in failed]
+                    for module_id in pending
+                }
+                blocked = {module_id: deps for module_id, deps in blocked.items() if deps}
+                return {
+                    "status": "failed",
+                    "reason": "dependency_failed" if blocked else "dependency_cycle_or_unreachable",
+                    "pending_modules": list(pending),
+                    "completed": completed,
+                    "failed": failed,
+                    "blocked": blocked,
+                }
+            done, _pending_tasks = await asyncio.wait(running.values(), return_when=asyncio.FIRST_COMPLETED)
+            for finished in done:
+                module_id = next(key for key, value in running.items() if value is finished)
+                del running[module_id]
+                result = finished.result()
+                if str(result.get("status") or "") == "completed":
+                    completed[module_id] = result
+                else:
+                    failed[module_id] = result
+            if failed and fail_fast:
+                for task_item in running.values():
+                    task_item.cancel()
+                if running:
+                    await asyncio.gather(*running.values(), return_exceptions=True)
+                return {
+                    "status": "failed",
+                    "reason": "module_failed",
+                    "completed": completed,
+                    "failed": failed,
+                    "pending_modules": list(pending),
+                }
+
+        return {
+            "status": "completed" if not failed else "failed",
+            "completed": completed,
+            "failed": failed,
+            "completed_modules": list(completed),
+            "failed_modules": list(failed),
+        }
 
     def build_logical_coder_context(
         self,

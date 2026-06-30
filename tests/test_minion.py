@@ -9670,6 +9670,78 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_step_runner_logical_coder_dag_runs_ready_modules_with_slots(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, max_parallel_modules=2)
+            parent_state = MinionRunState(
+                minion_id="minion_parent_dag",
+                run_id="run_parent_dag",
+                pack=TaskContextPack(work_order_id="wo_parent_dag", goal="parent"),
+            )
+            packs = {
+                "module_a": TaskContextPack(work_order_id="wo_dag_a", goal="a"),
+                "module_b": TaskContextPack(work_order_id="wo_dag_b", goal="b"),
+                "module_c": TaskContextPack(work_order_id="wo_dag_c", goal="c"),
+            }
+            depends_on = {"module_a": [], "module_b": [], "module_c": ["module_a", "module_b"]}
+            active = 0
+            max_active = 0
+            completed_order: list[str] = []
+
+            async def task(module_id: str, context) -> dict[str, Any]:
+                nonlocal active, max_active
+                self.assertEqual(context.pack.metadata["logical_module_id"], module_id)
+                active += 1
+                max_active = max(max_active, active)
+                await asyncio.sleep(0.01)
+                active -= 1
+                completed_order.append(module_id)
+                return {"module_id": module_id}
+
+            result = await manager.step_runner.run_logical_coder_dag(
+                parent_state,
+                packs,
+                depends_on,
+                task=task,
+            )
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(set(result["completed_modules"]), {"module_a", "module_b", "module_c"})
+            self.assertEqual(max_active, 2)
+            self.assertEqual(completed_order[-1], "module_c")
+            self.assertEqual(manager._allocated_logical_slot_count(), 0)
+
+        asyncio.run(scenario())
+
+    def test_step_runner_logical_coder_dag_waits_for_global_slot(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, max_parallel_modules=1)
+            parent_state = MinionRunState(
+                minion_id="minion_parent_wait",
+                run_id="run_parent_wait",
+                pack=TaskContextPack(work_order_id="wo_parent_wait", goal="parent"),
+            )
+            held = manager.step_runner.request_logical_slot(
+                parent_state,
+                resource="logical_minion_slot",
+                module_id="held",
+            )
+            self.assertEqual(held["status"], "granted")
+
+            result = await manager.step_runner.run_logical_coder_dag(
+                parent_state,
+                {"module_a": TaskContextPack(work_order_id="wo_wait_a", goal="a")},
+                {"module_a": []},
+                task=lambda _module_id, _context: {"ok": True},
+            )
+            released = manager.step_runner.release_logical_slot(held["slot_id"], run_id=parent_state.run_id)
+
+            self.assertEqual(result["status"], "waiting_for_slot")
+            self.assertEqual(result["ready_modules"], ["module_a"])
+            self.assertEqual(released["status"], "released")
+
+        asyncio.run(scenario())
+
     def test_continue_work_order_releases_running_module_when_spawn_fails(self) -> None:
         class FailingSpawnManager(MinionManager):
             async def spawn(self, pack_payload: dict[str, Any]) -> dict[str, Any]:
