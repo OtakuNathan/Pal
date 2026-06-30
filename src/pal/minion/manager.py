@@ -18,6 +18,7 @@ from pal.foundation.sidecar import (
     pack_sidecar_message,
     read_sidecar_message,
 )
+from pal.minion.coroutine_runner import CoroutineRunnerSupervisor
 from pal.minion.event_delivery import MinionEventDelivery
 from pal.minion.debug_log import minion_debug_log_enabled
 from pal.minion.gates import (
@@ -81,12 +82,20 @@ def _default_auto_resume_ready_modules() -> bool:
     return _coerce_bool(raw)
 
 
+def _default_runner_mode() -> str:
+    raw = str(os.environ.get("PAL_MINION_RUNNER_MODE") or "process").strip().lower()
+    return "coroutine" if raw in {"coroutine", "async", "in_process", "in-process"} else "process"
+
+
 @dataclass
 class MinionRunState:
     minion_id: str
     run_id: str
     pack: TaskContextPack
     process: asyncio.subprocess.Process | None = None
+    runner_kind: str = "process"
+    returncode: int | None = None
+    control_queue: asyncio.Queue[dict[str, Any]] | None = None
     status: str = "starting"
     started_at: str = field(default_factory=utc_now)
     ended_at: str = ""
@@ -115,8 +124,9 @@ class MinionRunState:
             "minion_profile": self.pack.minion_profile,
             "profile_display_name": str((self.pack.resolved_profile or {}).get("display_name") or self.pack.minion_profile),
             "status": self.status,
+            "runner_kind": self.runner_kind,
             "pid": self.process.pid if self.process is not None else None,
-            "returncode": self.process.returncode if self.process is not None else None,
+            "returncode": self.process.returncode if self.process is not None else self.returncode,
             "instruction": self.pack.instruction,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
@@ -147,6 +157,7 @@ class MinionManager:
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("pal.minion.manager"))
     max_parallel_modules: int | None = None
     auto_resume_ready_modules: bool | None = None
+    runner_mode: str | None = None
     tasking_repository: MinionTaskingRepository = field(init=False)
     server: asyncio.base_events.Server | None = None
     endpoint_info: dict[str, Any] = field(default_factory=dict)
@@ -171,11 +182,12 @@ class MinionManager:
             self.auto_resume_ready_modules = _default_auto_resume_ready_modules()
         else:
             self.auto_resume_ready_modules = _coerce_bool(self.auto_resume_ready_modules)
+        self.runner_mode = str(self.runner_mode or _default_runner_mode()).strip().lower()
         self.tasking_repository = MinionTaskingRepository(runtime_root=self.runtime_root)
         self.tasking_repository.ensure_schema()
         self.events = MinionEventDelivery()
         self.reviews = ReviewOrchestrator(self)
-        self.runner_process = RunnerProcessSupervisor(self)
+        self.runner_process = CoroutineRunnerSupervisor(self) if self.runner_mode == "coroutine" else RunnerProcessSupervisor(self)
         self.serial_scheduler = SerialMilestoneScheduler(self)
 
     @property
@@ -321,6 +333,7 @@ class MinionManager:
             "started_at": self.started_at,
             "run_count": len(self.runs),
             "active_count": len(active),
+            "runner_mode": self.runner_mode,
             "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
             "auto_resume_ready_modules": bool(self.auto_resume_ready_modules),
             "active_module_count": active_module_count,
@@ -506,17 +519,7 @@ class MinionManager:
     async def kill(self, run_id: str, reason: str = "") -> dict[str, Any]:
         state = self._require_run(run_id)
         already_terminal = state.status not in _ACTIVE_RUN_STATUSES
-        self._close_liveness_pipe(state)
-        process = state.process
-        if process is not None and process.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    process.kill()
-                await process.wait()
+        await self.runner_process.stop_runner(state)
         if state.status not in _ACTIVE_RUN_STATUSES:
             return state.summary()
         if already_terminal:
@@ -581,10 +584,7 @@ class MinionManager:
         state = self._find_run_for_decision(decision)
         if state is None:
             raise KeyError(f"unknown approval target: {decision.approval_id}")
-        if state.process is None or state.process.stdin is None or state.process.returncode is not None:
-            raise RuntimeError(f"minion is not accepting decisions: {state.run_id}")
-        state.process.stdin.write(pack_sidecar_message({"type": "decision", "decision": decision.to_dict()}))
-        await state.process.stdin.drain()
+        await self._send_runner_control(state, {"type": "decision", "decision": decision.to_dict()})
         state.pending_approval = {}
         self._transition_run_status(state, "running")
         self._record_event(
@@ -602,14 +602,11 @@ class MinionManager:
         state = self._find_run_for_clarification(payload)
         if state is None:
             raise KeyError(f"unknown clarification target: {clarification_id or payload.get('run_id') or ''}")
-        if state.process is None or state.process.stdin is None or state.process.returncode is not None:
-            raise RuntimeError(f"minion is not accepting clarifications: {state.run_id}")
         response = dict(payload)
         response.setdefault("run_id", state.run_id)
         response.setdefault("minion_id", state.minion_id)
         response.setdefault("work_order_id", state.pack.work_order_id)
-        state.process.stdin.write(pack_sidecar_message({"type": "clarification", "clarification": response}))
-        await state.process.stdin.drain()
+        await self._send_runner_control(state, {"type": "clarification", "clarification": response})
         state.pending_clarification = {}
         self._transition_run_status(state, "running")
         self._record_event(
@@ -627,11 +624,7 @@ class MinionManager:
         return {"ok": True, "run": state.summary(), "clarification": response}
 
     async def _send_runner_control(self, state: MinionRunState, message: dict[str, Any]) -> dict[str, Any]:
-        if state.process is None or state.process.stdin is None or state.process.returncode is not None:
-            raise RuntimeError(f"minion is not accepting manager control messages: {state.run_id}")
-        state.process.stdin.write(pack_sidecar_message(dict(message)))
-        await state.process.stdin.drain()
-        return {"ok": True, "run_id": state.run_id, "message_type": str(message.get("type") or "")}
+        return await self.runner_process.send_runner_control(state, message)
 
     def finalize_work_order(self, params: dict[str, Any]) -> dict[str, Any]:
         work_order_id = str(params.get("work_order_id") or "").strip()
@@ -1778,15 +1771,7 @@ class MinionManager:
             raise
 
     def runner_control_unavailable_reason(self, state: MinionRunState) -> str:
-        if state.status in _TERMINAL_RUN_STATUSES:
-            return f"run status is terminal: {state.status}"
-        if state.process is None:
-            return ""
-        if state.process.stdin is None:
-            return "runner stdin is not available"
-        if state.process.returncode is not None:
-            return f"runner process exited with returncode {state.process.returncode}"
-        return ""
+        return self.runner_process.runner_control_unavailable_reason(state)
 
     def record_runner_control_skipped(self, state: MinionRunState, message: dict[str, Any], *, reason: str) -> dict[str, Any]:
         payload = {

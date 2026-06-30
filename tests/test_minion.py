@@ -9590,6 +9590,105 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_coroutine_runner_mode_runs_minion_in_process(self) -> None:
+        class FakeRunner:
+            def __init__(self, **kwargs: Any) -> None:
+                self.write_event = kwargs["write_event"]
+
+            async def run(self) -> int:
+                await self.write_event(
+                    {
+                        "event_kind": "progress",
+                        "payload": {"phase": "fake_running", "summary": "fake coroutine runner progressed"},
+                        "created_at": utc_now(),
+                    }
+                )
+                return 0
+
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, runner_mode="coroutine")
+            with patch("pal.minion.runner.MinionRunner", FakeRunner):
+                result = await manager.spawn(
+                    TaskContextPack(
+                        work_order_id="wo_coroutine_runner",
+                        goal="Run fake coroutine minion.",
+                        minion_profile="generic",
+                    ).to_dict()
+                )
+                state = manager.runs[result["run_id"]]
+                self.assertEqual(state.runner_kind, "coroutine")
+                self.assertIsNone(state.process)
+                self.assertIsNotNone(state.wait_task)
+                assert state.wait_task is not None
+                await state.wait_task
+
+            self.assertEqual(state.status, "completed")
+            self.assertEqual(state.returncode, 0)
+            detail = manager.read_run(state.run_id)
+            self.assertEqual(detail["runner_kind"], "coroutine")
+            self.assertIsNone(detail["pid"])
+            self.assertEqual(detail["returncode"], 0)
+            self.assertTrue(any(event["event_kind"] == "progress" for event in detail["ledger"]))
+
+        asyncio.run(scenario())
+
+    def test_coroutine_runner_mode_accepts_manager_control(self) -> None:
+        class FakeRunner:
+            def __init__(self, **kwargs: Any) -> None:
+                self.write_event = kwargs["write_event"]
+                self.read_decision = kwargs["read_decision"]
+
+            async def run(self) -> int:
+                await self.write_event(
+                    {
+                        "event_kind": "approval_requested",
+                        "payload": {"approval_id": "approval_coroutine", "summary": "needs approval"},
+                        "created_at": utc_now(),
+                    }
+                )
+                message = await self.read_decision(1.0)
+                if str((message or {}).get("type") or "") != "decision":
+                    return 1
+                await self.write_event(
+                    {
+                        "event_kind": "terminal",
+                        "payload": {"status": "completed", "summary": "decision received"},
+                        "created_at": utc_now(),
+                    }
+                )
+                return 0
+
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, runner_mode="coroutine")
+            with patch("pal.minion.runner.MinionRunner", FakeRunner):
+                result = await manager.spawn(
+                    TaskContextPack(
+                        work_order_id="wo_coroutine_control",
+                        goal="Run fake coroutine minion with approval.",
+                        minion_profile="generic",
+                    ).to_dict()
+                )
+                state = manager.runs[result["run_id"]]
+                for _ in range(50):
+                    if state.status == "approval_pending":
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(state.status, "approval_pending")
+
+                decision = await manager.send_decision(
+                    {"approval_id": "approval_coroutine", "decision": "accept", "run_id": state.run_id}
+                )
+                self.assertTrue(decision["ok"])
+                assert state.wait_task is not None
+                await state.wait_task
+
+            self.assertEqual(state.status, "completed")
+            event_kinds = [event["event_kind"] for event in state.ledger]
+            self.assertIn("decision_received", event_kinds)
+            self.assertIn("terminal", event_kinds)
+
+        asyncio.run(scenario())
+
     def test_workspace_file_tools_use_relative_paths_and_cache_safety(self) -> None:
         async def scenario() -> None:
             from pal.execution.file_edit import FileEditTool

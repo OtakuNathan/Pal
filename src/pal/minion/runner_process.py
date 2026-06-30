@@ -123,11 +123,28 @@ class RunnerProcessSupervisor:
         state.wait_task = asyncio.create_task(self.wait_runner(state), name=f"minion-wait-{state.run_id}")
 
     async def send_runner_control(self, state: Any, message: dict[str, Any]) -> dict[str, Any]:
-        if state.process is None or state.process.stdin is None or state.process.returncode is not None:
+        reason = self.runner_control_unavailable_reason(state)
+        if reason:
+            raise RuntimeError(reason)
+        if state.process is None or state.process.stdin is None:
             raise RuntimeError(f"minion is not accepting manager control messages: {state.run_id}")
         state.process.stdin.write(pack_sidecar_message(dict(message)))
         await state.process.stdin.drain()
         return {"ok": True, "run_id": state.run_id, "message_type": str(message.get("type") or "")}
+
+    async def stop_runner(self, state: Any) -> None:
+        self.close_liveness_pipe(state)
+        process = state.process
+        if process is None or process.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
 
     async def read_runner_stdout(self, state: Any) -> None:
         process = state.process
@@ -240,6 +257,17 @@ class RunnerProcessSupervisor:
             if state.status in ACTIVE_RUN_STATUSES and state.process is not None and state.process.returncode is None:
                 return state
         return None
+
+    def runner_control_unavailable_reason(self, state: Any) -> str:
+        if state.status in TERMINAL_RUN_STATUSES:
+            return f"run status is terminal: {state.status}"
+        if state.process is None:
+            return ""
+        if state.process.stdin is None:
+            return "runner stdin is not available"
+        if state.process.returncode is not None:
+            return f"runner process exited with returncode {state.process.returncode}"
+        return ""
 
     def consume_task_result(self, state: Any, task: asyncio.Task[None] | None, task_name: str) -> None:
         if task is None or not task.done():
