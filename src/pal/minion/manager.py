@@ -49,6 +49,7 @@ from pal.minion.review_orchestrator import ReviewOrchestrator
 from pal.minion.runner_process import RunnerProcessSupervisor
 from pal.minion.sandbox import with_minion_sandbox_metadata
 from pal.minion.serial_scheduler import SerialMilestoneScheduler
+from pal.minion.step_process_supervisor import StepProcessSupervisor
 from pal.minion.step_runner import ModuleStepRunner
 from pal.minion.turns import sanitize_runner_session_pack
 from pal.minion.utils import coerce_int as _coerce_int
@@ -170,6 +171,7 @@ class MinionManager:
     runner_process: RunnerProcessSupervisor = field(init=False)
     serial_scheduler: SerialMilestoneScheduler = field(init=False)
     step_runner: ModuleStepRunner = field(init=False)
+    step_processes: StepProcessSupervisor = field(init=False)
     _llm_broker_bundle: Any | None = field(default=None, init=False, repr=False)
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -193,6 +195,7 @@ class MinionManager:
         self.runner_process = CoroutineRunnerSupervisor(self) if self.runner_mode == "coroutine" else RunnerProcessSupervisor(self)
         self.serial_scheduler = SerialMilestoneScheduler(self)
         self.step_runner = ModuleStepRunner(self)
+        self.step_processes = StepProcessSupervisor(self)
 
     @property
     def event_queue(self) -> list[dict[str, Any]]:
@@ -1164,6 +1167,7 @@ class MinionManager:
         return result, unresolved
 
     async def close_all(self) -> None:
+        await self.step_processes.close_all()
         await self.runner_process.close_all()
         if self._llm_broker_bundle is not None:
             close = getattr(self._llm_broker_bundle, "close", None)

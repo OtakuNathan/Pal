@@ -43,18 +43,26 @@ class StepProcessRuntime:
 class StepProcessRunner:
     runtime_root: Path
     payload: dict[str, Any]
+    _broker: RpcLogicalSlotBroker | None = field(default=None, init=False, repr=False)
+    _parent_run_id: str = field(default="", init=False, repr=False)
 
     async def run(self) -> dict[str, Any]:
-        mode = str(self.payload.get("mode") or "noop").strip() or "noop"
-        if mode != "noop":
-            return {"status": "failed", "reason": "unsupported_step_process_mode", "mode": mode}
-        return await self._run_noop_dag()
-
-    async def _run_noop_dag(self) -> dict[str, Any]:
+        self._parent_run_id = str(self.payload.get("parent_run_id") or "step_process_parent").strip()
         runtime = StepProcessRuntime(runtime_root=Path(self.runtime_root))
-        step_runner = ModuleStepRunner(runtime, slot_broker=RpcLogicalSlotBroker(runtime.client))
+        self._broker = RpcLogicalSlotBroker(runtime.client)
+        try:
+            mode = str(self.payload.get("mode") or "noop").strip() or "noop"
+            if mode != "noop":
+                return {"status": "failed", "reason": "unsupported_step_process_mode", "mode": mode}
+            return await self._run_noop_dag(runtime, self._broker)
+        finally:
+            if self._broker is not None and self._parent_run_id:
+                self._broker.release_for_run(self._parent_run_id, reason="step_process_exit")
+
+    async def _run_noop_dag(self, runtime: StepProcessRuntime, broker: RpcLogicalSlotBroker) -> dict[str, Any]:
+        step_runner = ModuleStepRunner(runtime, slot_broker=broker)
         parent_state = SimpleNamespace(
-            run_id=str(self.payload.get("parent_run_id") or "step_process_parent"),
+            run_id=self._parent_run_id or "step_process_parent",
             pack=TaskContextPack(
                 work_order_id=str(self.payload.get("parent_work_order_id") or "wo_step_process_parent"),
                 goal=str(self.payload.get("goal") or "step process parent"),

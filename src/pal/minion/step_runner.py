@@ -66,6 +66,7 @@ class LocalLogicalSlotBroker:
                 "max_parallel_modules": int(self.manager.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
                 "active_module_count": self.manager._active_module_child_count(),
                 "allocated_logical_slots": self.manager._allocated_logical_slot_count(),
+                "available_module_slots": 0,
             }
         slot_id = f"slot_{uuid4().hex[:12]}"
         self.manager._logical_slots[slot_id] = {
@@ -119,9 +120,10 @@ class LocalLogicalSlotBroker:
 class RpcLogicalSlotBroker:
     client: Any
     _owned_slots: dict[str, str] = field(default_factory=dict)
+    _known_available_slots: int | None = None
 
     def available_slots(self) -> int | None:
-        return None
+        return self._known_available_slots
 
     def request(self, owner: LogicalSlotOwner, *, resource: str, module_id: str = "", reason: str = "") -> dict[str, Any]:
         result = self.client.request_logical_slot_sync(
@@ -131,12 +133,14 @@ class RpcLogicalSlotBroker:
             module_id=module_id,
             reason=reason,
         )
+        self._remember_available_slots(result)
         if str(result.get("status") or "") == "granted":
             self._owned_slots[str(result.get("slot_id") or "")] = owner.run_id
         return result
 
     def release(self, slot_id: str, *, run_id: str = "", reason: str = "") -> dict[str, Any]:
         result = self.client.release_logical_slot_sync(slot_id=slot_id, run_id=run_id, reason=reason)
+        self._remember_available_slots(result)
         if str(result.get("status") or "") == "released":
             self._owned_slots.pop(str(slot_id or ""), None)
         return result
@@ -145,6 +149,14 @@ class RpcLogicalSlotBroker:
         normalized = str(run_id or "").strip()
         slot_ids = [slot_id for slot_id, owner_run_id in self._owned_slots.items() if owner_run_id == normalized]
         return [self.release(slot_id, run_id=normalized, reason=reason) for slot_id in slot_ids]
+
+    def _remember_available_slots(self, payload: dict[str, Any]) -> None:
+        if "available_module_slots" not in payload:
+            return
+        try:
+            self._known_available_slots = max(0, int(payload.get("available_module_slots") or 0))
+        except (TypeError, ValueError):
+            self._known_available_slots = None
 
 
 @dataclass
@@ -305,6 +317,23 @@ class ModuleStepRunner:
         )
         if str(grant.get("status") or "") != "granted":
             return {"status": "waiting_for_slot", "module_id": str(module_id or ""), "grant": grant}
+        return await self._run_logical_coder_task_with_grant(
+            parent_state,
+            pack,
+            module_id=module_id,
+            task=task,
+            grant=grant,
+        )
+
+    async def _run_logical_coder_task_with_grant(
+        self,
+        parent_state: Any,
+        pack: TaskContextPack,
+        *,
+        module_id: str,
+        task: Callable[[LogicalCoderContext], Awaitable[dict[str, Any]] | dict[str, Any]],
+        grant: dict[str, Any],
+    ) -> dict[str, Any]:
         context = self.build_logical_coder_context(
             parent_state,
             pack,
@@ -422,6 +451,7 @@ class ModuleStepRunner:
         waiting_for_slot: dict[str, dict[str, Any]] = {}
 
         while pending or running:
+            waiting_for_slot = {}
             ready = [
                 module_id
                 for module_id in list(pending)
@@ -431,27 +461,36 @@ class ModuleStepRunner:
             for module_id in ready:
                 if available_attempts is not None and available_attempts <= 0:
                     break
+                grant = self.request_logical_slot(
+                    parent_state,
+                    resource="logical_minion_slot",
+                    module_id=module_id,
+                    reason=reason or "logical_coder_dag",
+                )
+                if str(grant.get("status") or "") != "granted":
+                    waiting_for_slot[module_id] = {"status": "waiting_for_slot", "module_id": module_id, "grant": grant}
+                    break
                 pending.remove(module_id)
                 running[module_id] = asyncio.create_task(
-                    self.run_logical_coder_task(
+                    self._run_logical_coder_task_with_grant(
                         parent_state,
                         module_packs[module_id],
                         module_id=module_id,
                         task=lambda context, module_id=module_id: task(module_id, context),
-                        reason=reason or "logical_coder_dag",
+                        grant=grant,
                     ),
                     name=f"minion-logical-coder-{module_id}",
                 )
-                if available_attempts is not None:
-                    available_attempts -= 1
+                available_attempts = self._available_logical_slot_attempts()
             if not running:
                 if ready:
                     return {
                         "status": "waiting_for_slot",
                         "pending_modules": list(pending),
-                        "ready_modules": ready,
+                        "ready_modules": list(waiting_for_slot) or ready,
                         "completed_modules": list(completed),
                         "failed_modules": list(failed),
+                        "waiting_for_slot": waiting_for_slot,
                     }
                 blocked = {
                     module_id: [dep for dep in _string_list(depends_on.get(module_id)) if dep in failed]
@@ -477,15 +516,6 @@ class ModuleStepRunner:
                     waiting_for_slot[module_id] = result
                 else:
                     failed[module_id] = result
-            if waiting_for_slot and not running:
-                return {
-                    "status": "waiting_for_slot",
-                    "pending_modules": [*list(waiting_for_slot), *list(pending)],
-                    "ready_modules": list(waiting_for_slot),
-                    "completed_modules": list(completed),
-                    "failed_modules": list(failed),
-                    "waiting_for_slot": waiting_for_slot,
-                }
             if failed and fail_fast:
                 for task_item in running.values():
                     task_item.cancel()
