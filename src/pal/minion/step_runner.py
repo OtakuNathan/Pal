@@ -67,6 +67,7 @@ class LocalLogicalSlotBroker:
                 "active_module_count": self.manager._active_module_child_count(),
                 "allocated_logical_slots": self.manager._allocated_logical_slot_count(),
                 "available_module_slots": 0,
+                "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
             }
         slot_id = f"slot_{uuid4().hex[:12]}"
         self.manager._logical_slots[slot_id] = {
@@ -86,6 +87,100 @@ class LocalLogicalSlotBroker:
             "work_order_id": owner.work_order_id,
             "module_id": str(module_id or "").strip(),
             "available_module_slots": self.manager._available_module_slots(),
+            "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
+        }
+
+    async def wait_available(
+        self,
+        owner: LogicalSlotOwner,
+        *,
+        resource: str,
+        module_id: str = "",
+        reason: str = "",
+        timeout_seconds: Any = None,
+    ) -> dict[str, Any]:
+        normalized_resource = str(resource or "logical_minion_slot").strip()
+        if normalized_resource != "logical_minion_slot":
+            return {
+                "status": "unsupported",
+                "reason": "unsupported_resource",
+                "resource": normalized_resource,
+                "run_id": owner.run_id,
+                "work_order_id": owner.work_order_id,
+                "module_id": str(module_id or "").strip(),
+            }
+        shutdown_event = getattr(self.manager, "_shutdown_event", None)
+        if getattr(shutdown_event, "is_set", lambda: False)():
+            return {
+                "status": "shutdown",
+                "resource": normalized_resource,
+                "run_id": owner.run_id,
+                "work_order_id": owner.work_order_id,
+                "module_id": str(module_id or "").strip(),
+                "available_module_slots": self.manager._available_module_slots(),
+                "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
+            }
+        if self.manager._available_module_slots() > 0:
+            return {
+                "status": "available",
+                "resource": normalized_resource,
+                "run_id": owner.run_id,
+                "work_order_id": owner.work_order_id,
+                "module_id": str(module_id or "").strip(),
+                "available_module_slots": self.manager._available_module_slots(),
+                "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
+            }
+        generation = int(getattr(self.manager, "_logical_slot_generation", 0))
+        event = getattr(self.manager, "_logical_slot_event", None)
+        if event is None:
+            return {
+                "status": "unsupported",
+                "reason": "slot_wait_event_unavailable",
+                "resource": normalized_resource,
+                "run_id": owner.run_id,
+                "work_order_id": owner.work_order_id,
+                "module_id": str(module_id or "").strip(),
+            }
+        timeout = _optional_timeout_seconds(timeout_seconds)
+        try:
+            if timeout is None:
+                await event.wait()
+            else:
+                await asyncio.wait_for(event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return {
+                "status": "timeout",
+                "reason": "logical_slot_wait_timeout",
+                "resource": normalized_resource,
+                "run_id": owner.run_id,
+                "work_order_id": owner.work_order_id,
+                "module_id": str(module_id or "").strip(),
+                "timeout_seconds": timeout,
+                "available_module_slots": self.manager._available_module_slots(),
+                "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
+                "previous_logical_slot_generation": generation,
+            }
+        if getattr(shutdown_event, "is_set", lambda: False)():
+            return {
+                "status": "shutdown",
+                "resource": normalized_resource,
+                "run_id": owner.run_id,
+                "work_order_id": owner.work_order_id,
+                "module_id": str(module_id or "").strip(),
+                "available_module_slots": self.manager._available_module_slots(),
+                "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
+                "previous_logical_slot_generation": generation,
+            }
+        return {
+            "status": "notified",
+            "resource": normalized_resource,
+            "run_id": owner.run_id,
+            "work_order_id": owner.work_order_id,
+            "module_id": str(module_id or "").strip(),
+            "reason": str(reason or "").strip(),
+            "available_module_slots": self.manager._available_module_slots(),
+            "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
+            "previous_logical_slot_generation": generation,
         }
 
     def release(self, slot_id: str, *, run_id: str = "", reason: str = "") -> dict[str, Any]:
@@ -98,6 +193,9 @@ class LocalLogicalSlotBroker:
         if run_id and str(slot.get("run_id") or "") != str(run_id):
             return {"status": "denied", "reason": "slot_owned_by_different_run", "slot_id": normalized}
         removed = self.manager._logical_slots.pop(normalized)
+        notify = getattr(self.manager, "_notify_logical_slot_available", None)
+        if callable(notify):
+            notify(reason=reason or "logical_slot_release")
         return {
             "status": "released",
             "slot_id": normalized,
@@ -106,6 +204,7 @@ class LocalLogicalSlotBroker:
             "module_id": str(removed.get("module_id") or ""),
             "reason": str(reason or "").strip(),
             "available_module_slots": self.manager._available_module_slots(),
+            "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
         }
 
     def release_for_run(self, run_id: str, *, reason: str = "") -> list[dict[str, Any]]:
@@ -136,6 +235,29 @@ class RpcLogicalSlotBroker:
         self._remember_available_slots(result)
         if str(result.get("status") or "") == "granted":
             self._owned_slots[str(result.get("slot_id") or "")] = owner.run_id
+        return result
+
+    async def wait_available(
+        self,
+        owner: LogicalSlotOwner,
+        *,
+        resource: str,
+        module_id: str = "",
+        reason: str = "",
+        timeout_seconds: Any = None,
+    ) -> dict[str, Any]:
+        result = await self.client.request(
+            "wait_logical_slot",
+            {
+                "run_id": owner.run_id,
+                "work_order_id": owner.work_order_id,
+                "resource": resource,
+                "module_id": module_id,
+                "reason": reason,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+        self._remember_available_slots(result)
         return result
 
     def release(self, slot_id: str, *, run_id: str = "", reason: str = "") -> dict[str, Any]:
@@ -282,6 +404,35 @@ class ModuleStepRunner:
         owner = LogicalSlotOwner(run_id=str(state.run_id or ""), work_order_id=str(state.pack.work_order_id or ""))
         return self.slot_broker.request(owner, resource=resource, module_id=module_id, reason=reason)
 
+    async def wait_logical_slot(
+        self,
+        state: Any,
+        *,
+        resource: str,
+        module_id: str = "",
+        reason: str = "",
+        timeout_seconds: Any = None,
+    ) -> dict[str, Any]:
+        assert self.slot_broker is not None
+        wait_available = getattr(self.slot_broker, "wait_available", None)
+        if not callable(wait_available):
+            return {
+                "status": "unsupported",
+                "reason": "slot_wait_not_supported",
+                "resource": str(resource or "logical_minion_slot"),
+                "module_id": str(module_id or "").strip(),
+            }
+        owner = LogicalSlotOwner(run_id=str(state.run_id or ""), work_order_id=str(state.pack.work_order_id or ""))
+        value = wait_available(
+            owner,
+            resource=resource,
+            module_id=module_id,
+            reason=reason,
+            timeout_seconds=timeout_seconds,
+        )
+        result = await value if inspect.isawaitable(value) else value
+        return dict(result or {})
+
     def release_logical_slot(self, slot_id: str, *, run_id: str = "", reason: str = "") -> dict[str, Any]:
         assert self.slot_broker is not None
         return self.slot_broker.release(slot_id, run_id=run_id, reason=reason)
@@ -391,6 +542,7 @@ class ModuleStepRunner:
         *,
         reason: str = "",
         fail_fast: bool = True,
+        slot_wait_timeout_seconds: Any = None,
     ) -> dict[str, Any]:
         events_by_module: dict[str, list[dict[str, Any]]] = {}
 
@@ -406,6 +558,7 @@ class ModuleStepRunner:
             task=task,
             reason=reason or "logical_minion_runner_dag",
             fail_fast=fail_fast,
+            slot_wait_timeout_seconds=slot_wait_timeout_seconds,
         )
         payload = self._logical_minion_dag_result_from_returncodes(result)
         payload["events_by_module"] = {module_id: list(events) for module_id, events in events_by_module.items()}
@@ -500,6 +653,7 @@ class ModuleStepRunner:
         task: Callable[[str, LogicalCoderContext], Awaitable[dict[str, Any]] | dict[str, Any]],
         reason: str = "",
         fail_fast: bool = True,
+        slot_wait_timeout_seconds: Any = None,
     ) -> dict[str, Any]:
         module_ids = [str(item).strip() for item in module_packs if str(item).strip()]
         unknown = {
@@ -549,6 +703,15 @@ class ModuleStepRunner:
                 available_attempts = self._available_logical_slot_attempts()
             if not running:
                 if ready:
+                    slot_wait = await self.wait_logical_slot(
+                        parent_state,
+                        resource="logical_minion_slot",
+                        module_id=str((list(waiting_for_slot) or ready)[0] or ""),
+                        reason=reason or "logical_module_lane_dag",
+                        timeout_seconds=slot_wait_timeout_seconds,
+                    )
+                    if str(slot_wait.get("status") or "") in {"available", "notified"}:
+                        continue
                     return {
                         "status": "waiting_for_slot",
                         "pending_modules": list(pending),
@@ -556,6 +719,7 @@ class ModuleStepRunner:
                         "completed_modules": list(completed),
                         "failed_modules": list(failed),
                         "waiting_for_slot": waiting_for_slot,
+                        "slot_wait": slot_wait,
                     }
                 blocked = {
                     module_id: [dep for dep in _string_list(depends_on.get(module_id)) if dep in failed]
@@ -699,3 +863,13 @@ def _active_child_work_order_ids_from_plan_execution(plan_execution: dict[str, A
     if active_child_work_order_id and active_child_work_order_id not in values:
         values.insert(0, active_child_work_order_id)
     return _dedupe_strings(values)
+
+
+def _optional_timeout_seconds(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, timeout)

@@ -125,6 +125,28 @@ class MinionManagerClient:
             },
         )
 
+    def wait_logical_slot_sync(
+        self,
+        *,
+        run_id: str,
+        work_order_id: str,
+        resource: str = "logical_minion_slot",
+        module_id: str = "",
+        reason: str = "",
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        return self.request_sync(
+            "wait_logical_slot",
+            {
+                "run_id": run_id,
+                "work_order_id": work_order_id,
+                "resource": resource,
+                "module_id": module_id,
+                "reason": reason,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+
     def release_logical_slot_sync(self, *, slot_id: str, run_id: str = "", reason: str = "") -> dict[str, Any]:
         return self.request_sync(
             "release_logical_slot",

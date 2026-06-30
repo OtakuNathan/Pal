@@ -89,6 +89,7 @@ class StepProcessRunner:
             depends_on,
             task=task,
             reason=str(self.payload.get("reason") or "step_process_noop_dag"),
+            slot_wait_timeout_seconds=self.payload.get("slot_wait_timeout_seconds"),
         )
         return {"mode": "noop", **dict(result)}
 
@@ -102,6 +103,7 @@ class StepProcessRunner:
             modules,
             depends_on,
             reason=str(self.payload.get("reason") or "step_process_logical_minion_runner_dag"),
+            slot_wait_timeout_seconds=self.payload.get("slot_wait_timeout_seconds"),
         )
         return {"mode": "logical_minion_runner", **dict(result)}
 

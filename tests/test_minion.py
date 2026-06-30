@@ -9627,6 +9627,13 @@ class MinionManagerTests(unittest.TestCase):
             module_id="module_client",
             reason="test client",
         )
+        wait = client.wait_logical_slot_sync(
+            run_id="run_client_slot",
+            work_order_id="wo_client_slot",
+            module_id="module_client_wait",
+            reason="test client wait",
+            timeout_seconds=0.01,
+        )
         release = client.release_logical_slot_sync(
             slot_id="slot_client",
             run_id="run_client_slot",
@@ -9638,10 +9645,17 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(request["params"]["work_order_id"], "wo_client_slot")
         self.assertEqual(request["params"]["resource"], "logical_minion_slot")
         self.assertEqual(request["params"]["module_id"], "module_client")
+        self.assertEqual(wait["method"], "wait_logical_slot")
+        self.assertEqual(wait["params"]["run_id"], "run_client_slot")
+        self.assertEqual(wait["params"]["work_order_id"], "wo_client_slot")
+        self.assertEqual(wait["params"]["resource"], "logical_minion_slot")
+        self.assertEqual(wait["params"]["module_id"], "module_client_wait")
+        self.assertEqual(wait["params"]["timeout_seconds"], 0.01)
         self.assertEqual(release["method"], "release_logical_slot")
         self.assertEqual(release["params"]["slot_id"], "slot_client")
         self.assertEqual(fake.calls[0][0], "request_logical_slot")
-        self.assertEqual(fake.calls[1][0], "release_logical_slot")
+        self.assertEqual(fake.calls[1][0], "wait_logical_slot")
+        self.assertEqual(fake.calls[2][0], "release_logical_slot")
 
     def test_rpc_logical_slot_broker_tracks_owned_slots(self) -> None:
         from pal.minion.step_runner import LogicalSlotOwner, RpcLogicalSlotBroker
@@ -9889,17 +9903,26 @@ class MinionManagerTests(unittest.TestCase):
             )
             self.assertEqual(held["status"], "granted")
 
-            result = await manager.step_runner.run_logical_module_lane_dag(
-                parent_state,
-                {"module_a": TaskContextPack(work_order_id="wo_wait_a", goal="a")},
-                {"module_a": []},
-                task=lambda _module_id, _context: {"ok": True},
-            )
-            released = manager.step_runner.release_logical_slot(held["slot_id"], run_id=parent_state.run_id)
+            async def release_later() -> dict[str, Any]:
+                await asyncio.sleep(0.02)
+                return manager.step_runner.release_logical_slot(held["slot_id"], run_id=parent_state.run_id)
 
-            self.assertEqual(result["status"], "waiting_for_slot")
-            self.assertEqual(result["ready_modules"], ["module_a"])
+            release_task = asyncio.create_task(release_later())
+            result = await asyncio.wait_for(
+                manager.step_runner.run_logical_module_lane_dag(
+                    parent_state,
+                    {"module_a": TaskContextPack(work_order_id="wo_wait_a", goal="a")},
+                    {"module_a": []},
+                    task=lambda _module_id, _context: {"ok": True},
+                ),
+                timeout=1,
+            )
+            released = await release_task
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["completed_modules"], ["module_a"])
             self.assertEqual(released["status"], "released")
+            self.assertEqual(manager._allocated_logical_slot_count(), 0)
 
         asyncio.run(scenario())
 
@@ -19680,10 +19703,24 @@ class MinionManagerTests(unittest.TestCase):
                     "request_logical_slot",
                     {"run_id": "run_socket_slot", "work_order_id": "wo_socket_slot", "module_id": "module_b"},
                 )
+                wait_task = asyncio.create_task(
+                    client.request(
+                        "wait_logical_slot",
+                        {
+                            "run_id": "run_socket_slot",
+                            "work_order_id": "wo_socket_slot",
+                            "module_id": "module_b",
+                            "timeout_seconds": 1.0,
+                        },
+                    )
+                )
+                await asyncio.sleep(0.05)
+                self.assertFalse(wait_task.done())
                 released = await client.request(
                     "release_logical_slot",
                     {"slot_id": first["slot_id"], "run_id": "run_socket_slot", "reason": "done"},
                 )
+                waited = await asyncio.wait_for(wait_task, timeout=1)
             finally:
                 await self._shutdown_manager(client, manager_task)
 
@@ -19691,6 +19728,8 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(second["status"], "denied")
             self.assertEqual(second["reason"], "global_parallel_limit")
             self.assertEqual(released["status"], "released")
+            self.assertEqual(waited["status"], "notified")
+            self.assertGreaterEqual(waited["available_module_slots"], 1)
 
         asyncio.run(scenario())
 

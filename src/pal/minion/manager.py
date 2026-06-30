@@ -177,6 +177,8 @@ class MinionManager:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _serial_turns_inflight: InflightTracker = field(default_factory=InflightTracker)
     _logical_slots: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _logical_slot_generation: int = 0
+    _logical_slot_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     def __post_init__(self) -> None:
         if self.max_parallel_modules is None:
@@ -309,6 +311,8 @@ class MinionManager:
             return await self.continue_work_order(str(params.get("work_order_id") or ""))
         if method == "request_logical_slot":
             return self.request_logical_slot(dict(params))
+        if method == "wait_logical_slot":
+            return await self.wait_logical_slot(dict(params))
         if method == "release_logical_slot":
             return self.release_logical_slot(dict(params))
         if method == "dispatch_accepted_plan":
@@ -332,6 +336,7 @@ class MinionManager:
             return self.finish_work_order(str(params.get("work_order_id") or ""), str(params.get("reason") or ""))
         if method == "shutdown":
             self._shutdown_event.set()
+            self._notify_logical_slot_available(reason="shutdown")
             return {"ok": True}
         raise ValueError(f"unknown minion manager method: {method}")
 
@@ -350,6 +355,7 @@ class MinionManager:
             "active_module_count": active_module_count,
             "allocated_logical_slots": allocated_logical_slots,
             "available_module_slots": self._available_module_slots(),
+            "logical_slot_generation": self._logical_slot_generation,
             "pending_event_count": len(self.event_queue),
             "event_subscriber_count": len(self.event_subscribers),
             "log_path": str(minion_log_path(self.runtime_root)),
@@ -691,6 +697,24 @@ class MinionManager:
             resource=str(params.get("resource") or "logical_minion_slot"),
             module_id=str(params.get("module_id") or ""),
             reason=str(params.get("reason") or "manager_rpc"),
+        )
+
+    async def wait_logical_slot(self, params: dict[str, Any]) -> dict[str, Any]:
+        run_id = str(params.get("run_id") or "").strip()
+        work_order_id = str(params.get("work_order_id") or "").strip()
+        if not work_order_id and run_id in self.runs:
+            work_order_id = str(self.runs[run_id].pack.work_order_id or "").strip()
+        if not run_id:
+            raise ValueError("run_id is required")
+        if not work_order_id:
+            raise ValueError("work_order_id is required")
+        state = SimpleNamespace(run_id=run_id, pack=TaskContextPack(work_order_id=work_order_id, goal="logical slot waiter"))
+        return await self._wait_logical_slot(
+            state,
+            resource=str(params.get("resource") or "logical_minion_slot"),
+            module_id=str(params.get("module_id") or ""),
+            reason=str(params.get("reason") or "manager_rpc"),
+            timeout_seconds=params.get("timeout_seconds"),
         )
 
     def release_logical_slot(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1365,6 +1389,7 @@ class MinionManager:
             state.pending_approval = {}
             state.pending_clarification = {}
             self._release_logical_slots_for_run(state.run_id, reason="runner_terminal")
+            self._notify_logical_slot_available(reason="runner_terminal")
         if event_kind == "resource_request":
             self._schedule_resource_request(state, event)
         if event_kind == "resource_release":
@@ -1436,11 +1461,35 @@ class MinionManager:
     def _request_logical_slot(self, state: MinionRunState, *, resource: str, module_id: str = "", reason: str = "") -> dict[str, Any]:
         return self.step_runner.request_logical_slot(state, resource=resource, module_id=module_id, reason=reason)
 
+    async def _wait_logical_slot(
+        self,
+        state: MinionRunState,
+        *,
+        resource: str,
+        module_id: str = "",
+        reason: str = "",
+        timeout_seconds: Any = None,
+    ) -> dict[str, Any]:
+        return await self.step_runner.wait_logical_slot(
+            state,
+            resource=resource,
+            module_id=module_id,
+            reason=reason,
+            timeout_seconds=timeout_seconds,
+        )
+
     def _release_logical_slot(self, slot_id: str, *, run_id: str = "", reason: str = "") -> dict[str, Any]:
         return self.step_runner.release_logical_slot(slot_id, run_id=run_id, reason=reason)
 
     def _release_logical_slots_for_run(self, run_id: str, *, reason: str = "") -> list[dict[str, Any]]:
         return self.step_runner.release_logical_slots_for_run(run_id, reason=reason)
+
+    def _notify_logical_slot_available(self, *, reason: str = "") -> None:
+        _ = reason
+        self._logical_slot_generation += 1
+        event = self._logical_slot_event
+        self._logical_slot_event = asyncio.Event()
+        event.set()
 
     def _schedule_workflow_terminal_post(self, state: MinionRunState, event: dict[str, Any]) -> None:
         metadata = self._work_order_metadata_for_state(state)
