@@ -1007,11 +1007,11 @@ class RealLLMIntegrationTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_real_llm_minion_planner_reviewer_coder_handoff(self) -> None:
+    def test_real_llm_minion_architect_reviewer_coder_handoff(self) -> None:
         async def scenario() -> None:
             runtime = _real_runtime(max_output_tokens=4096)
             runtime_root = Path(tempfile.mkdtemp(prefix="pal_real_minion_team_"))
-            planner_events: list[dict[str, Any]] = []
+            architect_events: list[dict[str, Any]] = []
             reviewer_events: list[dict[str, Any]] = []
             coder_events: list[dict[str, Any]] = []
             slim_bundle: MinionRuntimeBundle | None = None
@@ -1020,10 +1020,10 @@ class RealLLMIntegrationTests(unittest.TestCase):
                     _ = timeout
                     return None
 
-                planner_pack = prepare_git_task_environment(
+                architect_pack = prepare_git_task_environment(
                     runtime_root,
                     TaskContextPack(
-                        work_order_id="wo_team_planner",
+                        work_order_id="wo_team_architect",
                         goal="Draft one tiny coder work order for a minion handoff test.",
                         instruction=(
                             "Return ONLY one JSON object. No markdown. Schema: "
@@ -1032,31 +1032,31 @@ class RealLLMIntegrationTests(unittest.TestCase):
                             "The work order must tell a coder minion to call shell with cwd equal to workspace.repo_path "
                             "and create status.txt containing exactly MINION_TEAM_OK."
                         ),
-                        acceptance_criteria=["planner returns one valid JSON work order"],
+                        acceptance_criteria=["architect returns one valid JSON work order"],
                         allowed_capabilities=[],
                         continuity={"current_milestone": {"milestone_index": 0, "milestone_id": "plan", "title": "Draft work order"}},
                         metadata={"allow_text_only_completion": True, "max_tool_rounds": 2, "max_output_tokens": 1000},
                         resolved_profile={
-                            "profile_id": "planner",
-                            "canonical_profile_id": "software_engineering.planner",
-                            "display_name": "Planner Minion",
-                            "identity_fragment": "You are a strict planner minion.",
+                            "profile_id": "architect",
+                            "canonical_profile_id": "software_engineering.architect",
+                            "display_name": "Architect Minion",
+                            "identity_fragment": "You are a strict architect minion.",
                             "behavior_fragment": "Produce bounded work orders. Do not do implementation.",
                             "output_contract_fragment": "Return only the requested JSON object.",
                         },
                     ),
                 )
-                planner_code = await MinionRunner(
+                architect_code = await MinionRunner(
                     runtime_root=runtime_root,
-                    pack=planner_pack,
-                    minion_id="m_planner",
-                    run_id="r_planner",
-                    write_event=lambda event: _append_event(planner_events, event),
+                    pack=architect_pack,
+                    minion_id="m_architect",
+                    run_id="r_architect",
+                    write_event=lambda event: _append_event(architect_events, event),
                     read_decision=no_decision,
                     runtime_bundle=MinionRuntimeBundle(llm_runtime=runtime, execution_runtime=_NoToolExecution()),
                 ).run()
-                self.assertEqual(planner_code, 0)
-                plan = _extract_json_object(_terminal_summary(planner_events))
+                self.assertEqual(architect_code, 0)
+                plan = _extract_json_object(_terminal_summary(architect_events))
                 self.assertIn("MINION_TEAM_OK", json.dumps(plan, ensure_ascii=False))
                 self.assertEqual(len(plan.get("milestones") or []), 1)
 
@@ -1064,12 +1064,12 @@ class RealLLMIntegrationTests(unittest.TestCase):
                     runtime_root,
                     TaskContextPack(
                         work_order_id="wo_team_reviewer",
-                        goal="Review the planner work order for bounded coder handoff.",
+                        goal="Review the architect work order for bounded coder handoff.",
                         instruction=(
-                            "Review this planner JSON for a coder handoff. Return ONLY JSON with schema: "
+                            "Review this architect JSON for a coder handoff. Return ONLY JSON with schema: "
                             "{\"approved\": boolean, \"issues\": [string], \"revised_instruction\": string}. "
                             "Approve only if it is one milestone, tells coder to use shell, and requires status.txt "
-                            "to contain MINION_TEAM_OK. Planner JSON: "
+                            "to contain MINION_TEAM_OK. Architect JSON: "
                             f"{json.dumps(plan, ensure_ascii=False, sort_keys=True)}"
                         ),
                         acceptance_criteria=["reviewer approves or gives a revised bounded instruction"],
@@ -1157,9 +1157,9 @@ class RealLLMIntegrationTests(unittest.TestCase):
                 self.assertEqual(checkpoint["payload"]["status"], "completed")
                 self.assertTrue(checkpoint["payload"]["commit_sha"])
                 self.assertTrue(_primary_artifact(coder_terminal["payload"]))
-                planner_progress = [event["payload"].get("phase") for event in planner_events if event.get("event_kind") == "progress"]
+                architect_progress = [event["payload"].get("phase") for event in architect_events if event.get("event_kind") == "progress"]
                 coder_progress = [event["payload"].get("phase") for event in coder_events if event.get("event_kind") == "progress"]
-                self.assertIn("milestone_finalizing", planner_progress)
+                self.assertIn("milestone_finalizing", architect_progress)
                 self.assertIn("tool_call_started", coder_progress)
                 self.assertIn("tool_call_completed", coder_progress)
             finally:

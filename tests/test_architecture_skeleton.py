@@ -453,15 +453,34 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertFalse(hasattr(core, "CoreDependencies"))
         self.assertTrue(hasattr(core, "PromptFragmentRegistry"))
 
-    def test_control_interaction_specs_are_compiled_in_control(self) -> None:
+    def test_domain_interaction_specs_stay_out_of_core_and_control_sources(self) -> None:
         core_runtime = (ROOT / "src/pal/core/runtime.py").read_text(encoding="utf-8")
+        core_prompt = (ROOT / "src/pal/core/prompt.py").read_text(encoding="utf-8")
+        llm_request_hooks = (ROOT / "src/pal/llm/request_hooks.py").read_text(encoding="utf-8")
         minion_source = (ROOT / "src/pal/minion/source.py").read_text(encoding="utf-8")
+        control_interactions = (ROOT / "src/pal/control/interactions.py").read_text(encoding="utf-8")
+        minion_interactions = (ROOT / "src/pal/minion/interactions.py").read_text(encoding="utf-8")
+        memory_interactions = (ROOT / "src/pal/memory/interactions.py").read_text(encoding="utf-8")
 
         self.assertNotIn("InteractionMessageSpec(", core_runtime)
         self.assertNotIn("InteractionButtonSpec(", core_runtime)
+        self.assertNotIn('"minion:minion"', core_runtime)
+        self.assertNotIn("event_notify", core_runtime)
+        self.assertNotIn("memory_candidate_decision", core_runtime)
+        self.assertNotIn("l3_commit_args_from_memory_candidate", core_runtime)
+        self.assertNotIn("op_minion", core_prompt)
+        self.assertNotIn("MINION_LLM_REQUEST_HOOKS", llm_request_hooks)
+        self.assertNotIn("MINION_BEHAVIOR_ROUTING_HOOK", llm_request_hooks)
+        self.assertNotIn("minion_behavior_routing", llm_request_hooks)
         self.assertNotIn("InteractionMessageSpec(", minion_source)
         self.assertNotIn("InteractionButtonSpec(", minion_source)
-        self.assertIn("InteractionMessageSpec(", (ROOT / "src/pal/control/interactions.py").read_text(encoding="utf-8"))
+        self.assertIn("InteractionMessageSpec(", control_interactions)
+        self.assertNotIn("memory_candidate_approval", control_interactions)
+        self.assertNotIn("minion_", control_interactions)
+        self.assertIn("InteractionMessageSpec(", minion_interactions)
+        self.assertIn("InteractionButtonSpec(", minion_interactions)
+        self.assertIn("InteractionMessageSpec(", memory_interactions)
+        self.assertIn("InteractionButtonSpec(", memory_interactions)
 
     def test_retired_legacy_files_and_aliases_are_not_referenced(self) -> None:
         old_bridge_alias = "codex_" + "proxy"

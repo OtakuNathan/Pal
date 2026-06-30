@@ -73,15 +73,15 @@ Drafts are not progress facts and are not PalCore state. They are searchable so 
 The intended route is:
 
 1. Pal captures user brainstorming with `minion_draft_work_order`.
-2. Planner reviews the draft as a bounded input and builds a structured plan with planner tools, not hand-written JSON.
+2. Architect reviews the draft as a bounded input and builds a structured plan with plan builder tools, not hand-written JSON.
 3. `plan_validate_and_submit_for_review` freezes a primary draft snapshot for the `plan_acceptance` gate.
 4. Reviewer reads the plan through `plan_read`/`plan_find`/`plan_get` handles, submits a gate verdict, and cites target handles for required fixes.
 5. Pal/user accepts the reviewed `plan_ref`, or requests/rejects a revision through the plan control interaction.
-6. `minion_spawn` starts the selected profile from the accepted plan or from a work order already bound to an accepted plan.
+6. The manager continues the workflow from the accepted plan and dispatches downstream coder/join modules according to the plan DAG and profile policy.
 
-Planner must not invent task boundaries from raw chat history when a draft exists. The draft is the bounded source for review.
+Architect must not invent task boundaries from raw chat history when a draft exists. The draft is the bounded source for review.
 
-Planner plan construction is structured and mutable during drafting:
+Architect plan construction is structured and mutable during drafting:
 
 - `plan_begin` creates a draft handle.
 - Module and milestone tools add bounded structure. `module_key` is caller-chosen, stable, and human-readable; generated handles are internal mutation references.
@@ -109,7 +109,7 @@ Minion work happens inside a task environment. There are two workspace kinds:
 
 - `git_repo`: used by coder-style profiles that produce code changes.
 - `git_worktree`: used by coder-style profiles when the source repository is a local Git repository and the task can share the same object store through `git worktree`.
-- `folder`: used by planner, reviewer, generic, and other one-shot profiles that only need a private output folder.
+- `folder`: used by architect, reviewer, generic, and other one-shot profiles that only need a private output folder.
 
 All prepared workspaces expose:
 
@@ -179,7 +179,7 @@ Non-coder profiles get an isolated folder workspace:
 - `data/minion/workspaces/{run_id}_{profile}/logs/`
 - `data/minion/workspaces/{run_id}_{profile}/deliverables/`
 
-The runner exposes scoped deliverable tools so minions can write structured files under `artifact_dir`. General report-style profiles use `artifact_write`; software planner profiles use plan builder tools that compile and register the primary `plan.json` artifact. The terminal and checkpoint payloads include `artifacts[]` and `primary_artifact`.
+The runner exposes scoped deliverable tools so minions can write structured files under `artifact_dir`. General report-style profiles use `artifact_write`; software architect profiles use plan builder tools that compile and register the primary `plan.json` artifact. The terminal and checkpoint payloads include `artifacts[]` and `primary_artifact`.
 
 When a Git-backed runner finishes a milestone:
 
@@ -209,40 +209,38 @@ The minion module exposes:
 - `minion_profile_read`
 - `minion_plan_search`
 - `minion_plan_read`
-- `minion_submit_plan`
-- `minion_accept_plan`
-- `minion_revise_plan`
+- `minion_attach`
+- `minion_detach`
+- `minion_configure`
+- `minion_dispatch_workflow`
+- `minion_review_gate_submit`
 - `minion_draft_work_order`
 - `minion_promote_work_order_draft`
-- `minion_spawn`
 - `minion_kill`
+- `minion_finalize`
 - `minion_continue_work_order`
+- `minion_submit_repair_bill`
 - `minion_pause_work_order`
 - `minion_recover_work_order`
 - `minion_destroy_work_order_run`
-- `minion_finalize`
 
 `work_order_read` returns work order status, milestones, derived current milestone, latest checkpoint, latest completed checkpoint, recent ledger, current worker, task lessons, and pending system lesson candidates.
 
 `current_worker` comes from manager active runs bound to the work order. It is not inferred from conversation context.
 
-`minion_spawn` may accept `task_query` instead of `work_order_id`. The minion repository resolves it through work order search only when there is exactly one candidate. Multiple candidates or no candidates return facts for Pal to show or ask about; Pal must not guess.
+`minion_dispatch_workflow` is the normal public delegation entrypoint. Pal passes the prepared goal, optional `requirements_brief`, workspace facts, optional initial profile selection, `architecture_mode`, `interaction_mode`, and optional `preferred_endpoint_id`. The manager creates or binds the work order, starts the initial profile step, applies that profile's gate/output policy, and follows profile-declared `workflow_next` instead of exposing low-level runner mechanics.
 
-`minion_spawn` may also accept `draft_id` for the existing draft promotion path. Draft milestones are review input and should be converted into an accepted plan before new execution work. This path is not a replacement for plan-first dispatch.
+`minion_draft_work_order` and `minion_promote_work_order_draft` remain auxiliary paths for user brainstorming and draft reuse. Draft milestones are review input only; they should be promoted or folded into a normal workflow before execution work starts.
 
-For new planned work, Pal must not hand-write spawn milestones. If no planner minion has produced a plan, Pal acts as a fallback planner by writing a small `FinalPlanArtifact` through `minion_submit_plan`. That operation writes an immutable plan file and returns a `plan_ref`. The plan file is the only milestone truth source, including for generic, reviewer, lifestyle, and other non-coder profiles. `minion_spawn` consumes an accepted top-level `plan_ref`; auxiliary files, review reports, checkpoints, and research outputs go in `supporting_artifacts` and never drive execution.
+Plan refs are not dispatchable just because they are valid JSON. A plan must pass review and then be accepted through explicit control before implementation dispatch can consume it. Review pass opens a plan acceptance interaction with Accept, Reject, and Edit actions. Accept writes a separate acceptance marker. Reject and Edit record decision state and let the manager dispatch a revision architect, which writes a new immutable plan revision instead of mutating the old file.
 
-`minion_spawn` does not accept public `artifact_refs`, `minion_profile`, `allowed_capabilities`, `resolved_profile`, `milestones`, inline `plan_artifact`, `TaskContextPack`, `module_execution`, or `prompt_view`. Public profile selection uses `profile_group` plus `profile_name`; the manager resolves the runtime profile snapshot and allowed capabilities. Raw work-order milestones without a plan are ignored for execution and must not create serial milestone state. Missing dispatch source, unknown work order id, unaccepted plan ref, bad plan schema, or invalid topology is an invalid/blocking state, not a fallback opportunity.
-
-Plan refs are not dispatchable just because they are valid JSON. A plan must pass review and then be accepted through explicit control before implementation spawn can consume it. Review pass opens a plan acceptance interaction with Accept, Reject, and Edit actions. Accept writes a separate acceptance marker. Reject and Edit record decision state and require an explicit revision path. Revisions use `minion_revise_plan`, which writes a new immutable plan revision instead of mutating the old file.
-
-`minion_spawn` may accept optional `preferred_endpoint_id`. Pal should set it only when the user explicitly asks for a specific model or LLM endpoint for that minion, after resolving the request to an enabled endpoint id. If omitted, the runner follows the normal Pal active endpoint setting from the runtime database.
+`minion_dispatch_workflow` may accept optional `preferred_endpoint_id`. Pal should set it only when the user explicitly asks for a specific model or LLM endpoint for that minion, after resolving the request to an enabled endpoint id. If omitted, the runner follows the normal Pal active endpoint setting from the runtime database.
 
 Natural-language minion control should resolve facts first. For requests like "what is it doing?", "replace it", "continue this task", or "merge the completed work", Pal should inspect active runs and work order snapshots, then call the relevant operation. Pal must not infer current worker, progress, or milestone completion from conversation text.
 
-## Spawn Continuity
+## Runner Continuity
 
-`minion_spawn` resolves the requested profile, applies role defaults and capability exposure hooks, then asks the minion repository to prepare continuity.
+The manager resolves the requested profile, applies role defaults and capability exposure hooks, then asks the minion repository to prepare continuity.
 
 `TaskContextPack.continuity` includes:
 
@@ -277,21 +275,21 @@ Minion compact must not create durable memory candidates. Reusable lessons or ca
 
 Minion profiles are declarative. Builtin profiles are package TOML templates, and runtime profiles are loaded from `runtime_root/plugins/minion/profiles/*.toml`.
 
-Current builtin profiles are `generic`, `planner`, `coder`, `reviewer`, and `writer`. Public calls identify them as `profile_group` plus `profile_name`, such as `software_engineering` / `coder`; canonical internal ids such as `software_engineering.coder` remain runtime metadata. `planner` owns both planning and architecture review: work-order decomposition, module/interface boundaries, design tradeoffs, risks, migration notes, and verification steps. `writer` is for bounded technical writing and evidence-based documentation artifacts; it is not a code implementation profile.
+Current builtin profiles are `generic`, `architect`, `coder`, `reviewer`, and `writer`. Public calls identify them as `profile_group` plus `profile_name`, such as `software_engineering` / `coder`; canonical internal ids such as `software_engineering.coder` remain runtime metadata. Pal's main agent owns user-facing requirements shaping, while `architect` owns implementation architecture: work-order decomposition, module/interface boundaries, design tradeoffs, risks, migration notes, and verification steps. `writer` is for bounded technical writing and evidence-based documentation artifacts; it is not a code implementation profile.
 
 Profile resolution order is builtin templates, runtime profile files, then currently mounted provider declarations. Later declarations with the same `profile_id` override earlier ones.
 
 Profiles may declare capability groups. `core_minion_read` includes scoped discovery/read/call plus read-only `memory_recall`, so runners can recall relevant experience without memory-write access. `web_research` expands to `web_search` and `web_read`, so research-capable minions reuse Pal's existing web tools instead of owning a second web integration.
 
-Profiles may also use `capability_policy.mode = "inherit_filtered"`. In that mode, spawn starts from the manager-visible capability surface, adds profile defaults and provider hook results, then applies the minion deny policy. For `profile_only`, the profile is the upper bound; public spawn cannot expand it with ad hoc `allowed_capabilities`.
+Profiles may also use `capability_policy.mode = "inherit_filtered"`. In that mode, workflow dispatch starts from the manager-visible capability surface, adds profile defaults and provider hook results, then applies the minion deny policy. For `profile_only`, the profile is the upper bound; public calls cannot expand it with ad hoc `allowed_capabilities`.
 
-Profiles may declare `gate_policy` and `output_policy`. Gate policy names gate definitions instead of expanding every reviewer/checklist detail into each profile. For example, coder uses `gates = ["checkpoint_admission", "module_quality"]`, planner uses `gates = ["plan_acceptance"]`, and generic uses `gates = ["none"]`. Runtime gate definitions expand those names into target kind, gate kind, execution strategy, reviewer profile, repair/revision bounds, required checks, and blocking classes. Milestone result events are the v1 gate trigger; profile TOML should not spell out trigger mechanics.
+Profiles may declare `gate_policy` and `output_policy`. Gate policy names gate definitions instead of expanding every reviewer/checklist detail into each profile. For example, coder uses `gates = ["checkpoint_admission", "module_quality"]`, architect uses `gates = ["plan_acceptance"]`, and generic uses `gates = ["none"]`. Runtime gate definitions expand those names into target kind, gate kind, execution strategy, reviewer profile, repair/revision bounds, required checks, and blocking classes. Milestone result events are the v1 gate trigger; profile TOML should not spell out trigger mechanics.
 
-The pre-plan `source_contract` compiler is an opt-in contract-locking layer for unusually risky or strongly constrained planning tasks. It is not part of the default planner path. Callers must explicitly request it through work-order metadata, such as `enable_pre_plan_contract=true`; otherwise the planner writes the structured plan directly and the `plan_acceptance` gate reviews the resulting artifact.
+The pre-plan `source_contract` compiler is an opt-in contract-locking layer for unusually risky or strongly constrained planning tasks. It is not part of the default architecture path. Callers must explicitly request it through work-order metadata, such as `enable_pre_plan_contract=true`; otherwise the architect writes the structured plan directly and the `plan_acceptance` gate reviews the resulting artifact.
 
 Gate definitions and individual gate checklist entries are extension points. New minion plugins may declare additional gate definitions or checklist entries; profiles reference the gate name, while the definition owns the concrete checks and default strategy. The active gate result is projected into `active_gate_todo` so reviewer failures, repair checklist items, and milestone todo state use the same ledger shape. Reviewer requirements such as command/test evidence, API evidence, LSP evidence, and public declaration implementation checks belong in gate definitions/policy, not LLM prompt folklore. LSP stays a reviewer evidence tool rather than a separate manager gate.
 
-The runner consumes only the resolved profile snapshot in `TaskContextPack`. It does not query PalCore for profile policy after spawn.
+The runner consumes only the resolved profile snapshot in `TaskContextPack`. It does not query PalCore for profile policy after launch.
 
 ## Gate Loop
 
@@ -306,13 +304,13 @@ This is profile-driven orchestration, not a planner-vs-coder special case in the
 
 ### Plan Acceptance Gate
 
-`plan_acceptance` applies to planner-style milestones. A planner milestone must emit `status=completed`, a `plan_ref`, and valid plan validation data before the gate schedules. The manager spawns a reviewer work order with a read-only review workspace and a `review_target` containing the exact plan ref, validation result, source work order, and gate spec.
+`plan_acceptance` applies to architect-style milestones. An architect milestone must emit `status=completed`, a `plan_ref`, and valid plan validation data before the gate schedules. The manager spawns a reviewer work order with a read-only review workspace and a `review_target` containing the exact plan ref, validation result, source work order, and gate spec.
 
 The reviewer must submit the verdict with `op_minion_review_gate_submit` and `gate_kind=plan_acceptance`.
 
 Manager reconciliation handles verdicts as follows:
 
-- `pass`: update plan review state to acceptance pending and emit `plan_acceptance_pending`. Implementation spawn still requires `minion_accept_plan` or an explicit human override marker; a valid JSON plan plus reviewer pass is not enough by itself.
+- `pass`: update plan review state to acceptance pending and emit `plan_acceptance_pending`. Implementation dispatch still requires plan acceptance through the control interaction or an explicit human override marker; a valid JSON plan plus reviewer pass is not enough by itself.
 - `fail`: spawn an automatic revision architect when the gate policy allows it and revision attempts remain; otherwise record `plan_revision_required`.
 - `partial`: record `plan_review_human_decision_required`.
 
@@ -367,9 +365,9 @@ The runner is a thin execution entity, not a forked Pal. It starts a slim runtim
 
 If `TaskContextPack.metadata.preferred_endpoint_id` is present, the runner forwards it as `CanonicalLLMRequest.metadata.preferred_endpoint_id` and uses that endpoint's budget when resolving max output tokens. Without that metadata, no preferred endpoint is passed; the slim runtime reads the current active LLM endpoint from `pal.sqlite3`.
 
-`TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `tool_search`, `tool_read`, `tool_call`, `file_read`, `file_edit`, `file_write`, `delete_path`, `git`, `shell`, `tree`, `search`, `artifact_write`/`artifact_edit`, planner `plan_*` builder tools, `web_search`, `web_read`, `memory_recall`, and LSP/code-intelligence tools when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
+`TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `tool_search`, `tool_read`, `tool_call`, `file_read`, `file_edit`, `file_write`, `delete_path`, `git`, `shell`, `tree`, `search`, `artifact_write`/`artifact_edit`, architect `plan_*` builder tools, `web_search`, `web_read`, `memory_recall`, and LSP/code-intelligence tools when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
 
-When `artifact_write` is available, the runner prompt asks the minion to write the primary deliverable to `artifact_dir` and keep the final summary short. Software planner profiles instead use the plan builder tools, starting with `plan_begin`, adding module and milestone outlines plus acceptance criteria, then finishing with `plan_validate_and_submit_for_review`; that call validates the draft and submits the primary plan artifact for the existing `plan_acceptance` gate. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
+When `artifact_write` is available, the runner prompt asks the minion to write the primary deliverable to `artifact_dir` and keep the final summary short. Software architect profiles instead use the plan builder tools, starting with `plan_begin`, adding module and milestone outlines plus acceptance criteria, then finishing with `plan_validate_and_submit_for_review`; that call validates the draft and submits the primary plan artifact for the existing `plan_acceptance` gate. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
 
 Tool calls are executed through the existing `ExecutionRuntime` path and must be present in `TaskContextPack.allowed_capabilities`.
 

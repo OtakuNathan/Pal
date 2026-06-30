@@ -31,6 +31,11 @@ from pal.minion.plan_builder import (
     plan_builder_tool_result,
 )
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
+from pal.minion.repair_bill_builder import (
+    REPAIR_BILL_BUILDER_CAPABILITIES,
+    REPAIR_BILL_BUILDER_TOOL_SPECS,
+    repair_bill_builder_tool_result,
+)
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.review_gate_store import plan_target_key
 from pal.minion.utils import coerce_int as _coerce_int
@@ -85,6 +90,7 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_minion_artifact_write",
     "op_minion_artifact_edit",
     *PLAN_BUILDER_CAPABILITIES,
+    *REPAIR_BILL_BUILDER_CAPABILITIES,
     "op_minion_memory_candidate_write",
     "op_web_search",
     "op_web_read",
@@ -334,6 +340,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
 }
 WORKSPACE_TOOL_SPECS.update(WORKSPACE_FILE_TOOL_SPECS)
 WORKSPACE_TOOL_SPECS.update(PLAN_BUILDER_TOOL_SPECS)
+WORKSPACE_TOOL_SPECS.update(REPAIR_BILL_BUILDER_TOOL_SPECS)
 
 _REPAIR_EDIT_TOOL_NAMES = {
     "op_file_edit",
@@ -619,6 +626,8 @@ class MinionScopedExecutionRuntime:
         if call.name in WORKSPACE_TOOL_SPECS:
             if call.name in PLAN_BUILDER_CAPABILITIES:
                 return plan_builder_tool_result(call, self.workspace, self.produced_artifacts)
+            if call.name in REPAIR_BILL_BUILDER_CAPABILITIES:
+                return await repair_bill_builder_tool_result(call, self.workspace, self.produced_artifacts)
             if call.name == "op_minion_memory_candidate_write":
                 return _minion_memory_candidate_result(call, self.memory_l3)
             if call.name == "op_minion_gate_contract_submit":

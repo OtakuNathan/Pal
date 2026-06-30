@@ -659,6 +659,7 @@ class RuntimeCompactionTests(unittest.TestCase):
     def test_memory_candidate_accept_commits_to_l3(self) -> None:
         core = PalCore()
         register_core_with_core(core)
+        register_memory_with_core(core.context, MemoryService())
         calls = []
 
         def record_memory_write(call):
@@ -683,7 +684,7 @@ class RuntimeCompactionTests(unittest.TestCase):
         core._reply_to_route_async = capture_reply
 
         asyncio.run(
-            core._handle_memory_candidate_decision_async(
+            core.handle_control_action_async(
                 ControlAction(
                     action_kind="memory_candidate_decision",
                     target_scope="memory",

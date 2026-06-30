@@ -22,6 +22,8 @@ def test_required_runtime_package_data_is_available() -> None:
         ("pal.mcp", "templates/stdio_server.toml"),
         ("pal.minion", "profile_templates/generic.toml"),
         ("pal.minion", "profile_templates/software_engineering/architect.toml"),
+        ("pal.minion", "profile_templates/software_engineering/coder.toml"),
+        ("pal.minion", "profile_templates/software_engineering/reviewer.toml"),
         ("pal.minion", "profile_templates/software_engineering/writer.toml"),
         ("pal.minion", "workspace_environment_templates/clangd.toml"),
         ("pal.minion", "workspace_environment_templates/cpp-cmake-runtime.toml"),
@@ -34,3 +36,5 @@ def test_required_runtime_package_data_is_available() -> None:
 
     for package, relative_path in required_files:
         assert resources.files(package).joinpath(relative_path).is_file()
+
+    assert not resources.files("pal.minion").joinpath("profile_templates/software_engineering/planner.toml").is_file()

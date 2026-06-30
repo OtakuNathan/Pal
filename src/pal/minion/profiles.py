@@ -11,6 +11,7 @@ from pal.minion.utils import dedupe_strings as _dedupe
 from pal.minion.utils import dict_from as _dict
 from pal.minion.utils import string_list as _string_list
 from pal.minion.plan_builder import PLAN_BUILDER_CAPABILITIES, PLAN_BUILDER_INITIAL_CAPABILITIES, PLAN_BUILDER_READ_CAPABILITIES
+from pal.minion.repair_bill_builder import REPAIR_BILL_BUILDER_CAPABILITIES
 from pal.shared import TaskContextPack
 
 
@@ -349,6 +350,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "minion_plan_builder_revision": PLAN_BUILDER_CAPABILITIES,
     "minion_plan_builder_full": PLAN_BUILDER_CAPABILITIES,
     "minion_plan_reader": PLAN_BUILDER_READ_CAPABILITIES,
+    "minion_repair_bill_builder": REPAIR_BILL_BUILDER_CAPABILITIES,
     "minion_review_gate": ("op_minion_review_gate_submit", "op_minion_review_checkpoint", "op_minion_gate_contract_submit"),
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
@@ -459,6 +461,7 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
         "op_minion_review_checkpoint",
         "op_minion_memory_candidate_write",
         *PLAN_BUILDER_CAPABILITIES,
+        *REPAIR_BILL_BUILDER_CAPABILITIES,
     }
 )
 

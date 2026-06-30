@@ -10,6 +10,7 @@ Does not own:
 - open-ended reasoning
 - durable truth
 - business object implementations
+- domain-specific interaction rendering such as minion workflow buttons or memory candidate approvals
 
 Exposes:
 - `ControlEvent`

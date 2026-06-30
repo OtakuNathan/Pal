@@ -95,7 +95,7 @@ Return a MilestoneReport with:
 - `op_minion_checkpoint_commit` checkpoint evidence
 - remaining risks or blockers
 """
-capability_groups = ["workspace_read", "web_research", "memory_recall", "code_intel", "code_work", "minion_artifacts", "minion_memory_candidates"]
+capability_groups = ["workspace_read", "web_research", "memory_recall", "code_intel", "code_work", "minion_artifacts", "minion_memory_candidates", "minion_repair_bill_builder"]
 
 [approval_policy]
 high_risk_capabilities = []

@@ -90,7 +90,7 @@ If a gate submission fails validation, preserve already-valid evidence and fix o
 If the invalid tool result includes `next_payload_shape`, use that shape for the next gate submission and add only the named missing covers; do not run extra probes unless the listed evidence cannot prove the missing acceptance ref.
 For op_exec_shell under read_only_repo, set cwd to workspace.repo_path for project tests/builds/probes, or workspace.review_scratch_dir for temporary reviewer-only files. Do not modify reviewed source files; if a command accidentally mutates them, report the mutation as blocking evidence.
 """
-capability_groups = ["workspace_read", "web_research", "memory_recall", "code_intel", "verification_shell", "minion_artifacts", "minion_plan_reader", "minion_review_gate", "minion_memory_candidates"]
+capability_groups = ["workspace_read", "web_research", "memory_recall", "code_intel", "verification_shell", "minion_artifacts", "minion_plan_reader", "minion_review_gate", "minion_memory_candidates", "minion_repair_bill_builder"]
 
 [approval_policy]
 high_risk_capabilities = []

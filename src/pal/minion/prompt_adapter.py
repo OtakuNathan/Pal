@@ -161,6 +161,48 @@ def _compact_repair_context(value: Any) -> dict[str, Any]:
     checkpoint_repair = value.get("checkpoint_repair") if isinstance(value.get("checkpoint_repair"), dict) else {}
     current_attempt = value.get("current_repair_attempt") if isinstance(value.get("current_repair_attempt"), dict) else {}
     result: dict[str, Any] = {}
+    repair_bill = value.get("repair_bill") if isinstance(value.get("repair_bill"), dict) else {}
+    if repair_bill:
+        result["repair_bill"] = {
+            key: item
+            for key, item in {
+                "kind": repair_bill.get("kind"),
+                "module_id": repair_bill.get("module_id"),
+                "overlay_version": repair_bill.get("overlay_version"),
+                "defect_kind": repair_bill.get("defect_kind"),
+                "summary": _compact_text(repair_bill.get("summary"), limit=360),
+                "source_bill_ids": _string_list(repair_bill.get("source_bill_ids"))[:6],
+                "additional_acceptance_criteria": [
+                    _compact_text(item, limit=260)
+                    for item in _string_list(repair_bill.get("additional_acceptance_criteria"))[:8]
+                ],
+                "acceptance_criteria": [
+                    {
+                        key: item
+                        for key, item in {
+                            "id": criterion.get("id"),
+                            "criterion": _compact_text(criterion.get("criterion"), limit=260),
+                            "evidence_expectation": _compact_text(criterion.get("evidence_expectation"), limit=220),
+                            "negative_cases": [_compact_text(case, limit=180) for case in _string_list(criterion.get("negative_cases"))[:4]],
+                        }.items()
+                        if item not in (None, "", [], {})
+                    }
+                    for criterion in list(repair_bill.get("acceptance_criteria") or [])[:8]
+                    if isinstance(criterion, dict)
+                ],
+                "negative_cases": [
+                    _compact_dict(item, limit=220)
+                    for item in list(repair_bill.get("negative_cases") or [])[:6]
+                    if isinstance(item, dict)
+                ],
+                "evidence": [
+                    _compact_dict(item, limit=220)
+                    for item in list(repair_bill.get("evidence") or [])[:6]
+                    if isinstance(item, dict)
+                ],
+            }.items()
+            if item not in (None, "", [], {})
+        }
     active_gate_todo = value.get("active_gate_todo") if isinstance(value.get("active_gate_todo"), dict) else {}
     active_items = _compact_prompt_checklist(active_gate_todo.get("items"))
     if active_items:
@@ -184,6 +226,22 @@ def _compact_repair_context(value: Any) -> dict[str, Any]:
         item = checkpoint_repair.get(key) or current_attempt.get(key)
         if item not in (None, "", []):
             result[key] = _compact_text(item) if isinstance(item, str) else item
+    return result
+
+
+def _compact_dict(value: dict[str, Any], *, limit: int = 260) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, item in dict(value or {}).items():
+        if item in (None, "", [], {}):
+            continue
+        if isinstance(item, str):
+            result[str(key)] = _compact_text(item, limit=limit)
+        elif isinstance(item, (int, float, bool)):
+            result[str(key)] = item
+        elif isinstance(item, list):
+            result[str(key)] = [_compact_text(child, limit=limit) for child in _string_list(item)[:6]]
+        else:
+            result[str(key)] = _compact_text(item, limit=limit)
     return result
 
 

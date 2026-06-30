@@ -27,6 +27,7 @@ required_wheel_paths=(
   "pal/lsp/manager.py"
   "pal/lsp/manager_main.py"
   "pal/lsp/plugin.py"
+  "pal/lsp/skills.py"
   "pal/lsp/server_templates/clangd.toml"
   "pal/lsp/server_templates/csharp.toml"
   "pal/lsp/server_templates/css.toml"
@@ -41,7 +42,9 @@ required_wheel_paths=(
   "pal/lsp/server_templates/typescript.toml"
   "pal/lsp/server_templates/yaml.toml"
   "pal/mcp/templates/stdio_server.toml"
+  "pal/memory/interactions.py"
   "pal/minion/gates.py"
+  "pal/minion/interactions.py"
   "pal/minion/llm_broker.py"
   "pal/minion/manager.py"
   "pal/minion/plan_builder.py"
@@ -49,13 +52,13 @@ required_wheel_paths=(
   "pal/minion/profile_templates/generic.toml"
   "pal/minion/profile_templates/software_engineering/architect.toml"
   "pal/minion/profile_templates/software_engineering/coder.toml"
-  "pal/minion/profile_templates/software_engineering/planner.toml"
   "pal/minion/profile_templates/software_engineering/reviewer.toml"
   "pal/minion/profile_templates/software_engineering/writer.toml"
   "pal/minion/runner_process.py"
   "pal/minion/sandbox.py"
   "pal/minion/scoped_execution.py"
   "pal/minion/serial_scheduler.py"
+  "pal/minion/skills.py"
   "pal/minion/review_gate_store.py"
   "pal/minion/review_orchestrator.py"
   "pal/minion/workspace_environment.py"
@@ -130,24 +133,8 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if gates != expected_gates:
             fail(f"{path} gate_policy.gates={gates!r}, expected {expected_gates!r}")
 
-    planner_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/planner.toml"))
-    if planner_profile.get("profile_id") != "planner" or planner_profile.get("profile_group") != "software_engineering":
-        fail("planner.toml must declare software_engineering planner profile")
-    if "gate_policy" in planner_profile:
-        fail("planner.toml must not declare gate_policy; requirements review is user-facing workflow state")
-    planner_capabilities = planner_profile.get("capability_groups")
-    if not isinstance(planner_capabilities, list) or "minion_plan_builder" in planner_capabilities:
-        fail("planner.toml must not expose plan builder capabilities")
-    if "minion_artifacts" not in planner_capabilities:
-        fail("planner.toml must allow minion_artifacts for requirements.md output")
-    planner_output_policy = planner_profile.get("output_policy")
-    if not isinstance(planner_output_policy, dict):
-        fail("planner.toml missing [output_policy]")
-    if planner_output_policy.get("primary_artifact") != "requirements.md":
-        fail("planner.toml must emit requirements.md as the primary artifact")
-    planner_output_types = planner_output_policy.get("allowed_output_types")
-    if not isinstance(planner_output_types, list) or "MarkdownRequirements" not in planner_output_types:
-        fail("planner.toml must allow MarkdownRequirements output")
+    if "pal/minion/profile_templates/software_engineering/planner.toml" in names:
+        fail("planner.toml must not be packaged; Pal owns requirements shaping and architect is the first software step")
 
     architect_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/architect.toml"))
     if architect_profile.get("profile_id") != "architect" or architect_profile.get("profile_group") != "software_engineering":
@@ -281,16 +268,86 @@ with zipfile.ZipFile(wheel_path) as wheel:
             fail(f"pal/minion/serial_scheduler.py missing serial scheduler token {token!r}")
 
     skill_source = read_text("pal/skill/builtin_skills.py")
+    skill_capability_source = read_text("pal/skill/capabilities.py")
+    for path, source in (
+        ("pal/skill/builtin_skills.py", skill_source),
+        ("pal/skill/capabilities.py", skill_capability_source),
+    ):
+        for token in (
+            "PAL_MINION_DEVELOPMENT_SKILL_ID",
+            "PAL_MINION_PROFILE_DEVELOPMENT_SKILL_ID",
+            "pal.minion.development",
+            "pal.minion.profile.development",
+            "declared.skill.pal_minion_development",
+            "declared.skill.pal_minion_profile_development",
+            "plugins/minion/workspace_environment",
+            "src/pal/minion/workspace_environment.py",
+            "WorkspaceEnvironmentPreparer",
+            "PAL_LSP_TEMPLATE_DEVELOPMENT_SKILL_ID",
+            "pal.lsp.template.development",
+            "declared.skill.pal_lsp_template_development",
+            "plugins/lsp/servers",
+        ):
+            if token in source:
+                fail(f"{path} should not declare plugin-owned skill token {token!r}")
+
+    lsp_skill_source = read_text("pal/lsp/skills.py")
     for token in (
-        'PAL_MINION_GATE_DEVELOPMENT_SKILL_ID = "pal.minion.gate.development"',
-        "PAL_MINION_GATE_DEVELOPMENT_MANUAL",
-        "Pal Minion Gate Development",
+        'PAL_LSP_TEMPLATE_DEVELOPMENT_SKILL_ID = "pal.lsp.template.development"',
+        "PAL_LSP_TEMPLATE_DEVELOPMENT_MANUAL",
+        "Pal LSP Template Development",
+        "plugins/lsp/servers",
+        "op_lsp_mgmt_rescan",
+        "op_lsp_status",
+        "op_lsp_doctor",
+        "load_lsp_server_file",
+        '"runtime_root_layout": "plugins/lsp/servers/<server_id>.toml"',
+    ):
+        if token not in lsp_skill_source:
+            fail(f"pal/lsp/skills.py missing LSP template development skill token {token!r}")
+
+    lsp_capability_source = read_text("pal/lsp/plugin.py")
+    for token in (
+        "PAL_LSP_TEMPLATE_DEVELOPMENT_SKILL_ID",
+        'affordance_id="declared.skill.pal_lsp_template_development"',
+        "Pal LSP template development skill",
+        "inject skill `pal.lsp.template.development`",
+        "lsp_declared_skills",
+        "declared_skills",
+    ):
+        if token not in lsp_capability_source:
+            fail(f"pal/lsp/plugin.py missing LSP template skill registration token {token!r}")
+
+    minion_skill_source = read_text("pal/minion/skills.py")
+    for token in (
+        'PAL_MINION_DEVELOPMENT_SKILL_ID = "pal.minion.development"',
+        "PAL_MINION_DEVELOPMENT_MANUAL",
+        "Pal Minion Development",
+        "op_minion_dispatch_workflow",
+        "workflow_next",
+        "op_minion_submit_repair_bill",
+        "resource slots",
+        "Coroutine runner mode",
+        "workspace environment",
+        "plugins/minion/workspace_environment",
+        "src/pal/minion/workspace_environment.py",
+        "WorkspaceEnvironmentPreparer",
+        "repair bill replay",
+        "reverse-propagation mechanism",
+        "amended obligations for the existing DAG",
+        "module-key indexed",
+        "shape-compatible with the existing plan/module schema",
+        "Use existing `module_id`/`module_key` values",
+        "Keep patch shape isomorphic to plan shape",
+        "normal DAG, slot, workspace, and gate logic",
         "GateDefinition",
         "GateChecklistEntry",
         "GateSpec",
-        "Builtin Implementation Workflow",
+        "Implementation Workflow",
         "Test Targets",
         "src/pal/minion/gates.py",
+        "src/pal/minion/manager.py",
+        "src/pal/minion/step_runner.py",
         "scripts/build_package.sh",
         "GateStrategy",
         "repair/todo ledger projection",
@@ -299,29 +356,67 @@ with zipfile.ZipFile(wheel_path) as wheel:
         "MinionGateDefinitionProvider",
         "MinionGateStrategyProvider",
         "op_minion_review_gate_submit",
-        "op_minion_review_checkpoint",
         '"may_require_code_changes": True',
-        '"extension_boundary": "minion.gates"',
+        '"extension_boundary": "minion"',
     ):
-        if token not in skill_source:
-            fail(f"pal/skill/builtin_skills.py missing minion gate skill token {token!r}")
-
-    skill_capability_source = read_text("pal/skill/capabilities.py")
+        if token not in minion_skill_source:
+            fail(f"pal/minion/skills.py missing minion development skill token {token!r}")
     for token in (
-        "PAL_MINION_GATE_DEVELOPMENT_SKILL_ID",
-        'affordance_id="declared.skill.pal_minion_gate_development"',
-        "Pal minion gate development skill",
-        "inject skill `pal.minion.gate.development`",
+        'PAL_MINION_PROFILE_DEVELOPMENT_SKILL_ID = "pal.minion.profile.development"',
+        "PAL_MINION_PROFILE_DEVELOPMENT_MANUAL",
+        "Pal Minion Profile Development",
+        "Profile TOML Shape",
+        "runtime_root/plugins/minion/profiles",
+        "capability_groups",
+        "workspace_policy",
+        "capability_policy",
+        "gate_policy",
+        "output_policy",
+        "workflow_next",
+        "gates = [\"none\"]",
+        "intro_minion_profile_list",
+        "intro_minion_profile_read",
+        "op_minion_dispatch_workflow",
+        '"extension_boundary": "minion.profiles"',
+    ):
+        if token not in minion_skill_source:
+            fail(f"pal/minion/skills.py missing minion profile development skill token {token!r}")
+
+    minion_capability_source = read_text("pal/minion/capabilities.py")
+    for token in (
+        "PAL_MINION_DEVELOPMENT_SKILL_ID",
+        'affordance_id="declared.skill.pal_minion_development"',
+        "Pal minion development skill",
+        "inject skill `pal.minion.development`",
+        "workflow_next",
+        "resource slots",
+        "repair bill replay",
         "GateDefinition",
         "GateChecklistEntry",
         "checkpoint_quality",
         "plan_acceptance",
         "gate ledger",
     ):
-        if token not in skill_capability_source:
-            fail(f"pal/skill/capabilities.py missing gate skill affordance token {token!r}")
+        if token not in minion_capability_source:
+            fail(f"pal/minion/capabilities.py missing minion development skill affordance token {token!r}")
+    for token in (
+        "PAL_MINION_PROFILE_DEVELOPMENT_SKILL_ID",
+        'affordance_id="declared.skill.pal_minion_profile_development"',
+        "Pal minion profile development skill",
+        "inject skill `pal.minion.profile.development`",
+        "capability_groups",
+        "workspace_policy",
+        "capability_policy",
+        "gate_policy",
+        "output_policy",
+        "workflow_next",
+        "plugins/minion/profiles",
+        '"extension_boundary": "minion.profiles"',
+    ):
+        if token not in minion_capability_source:
+            fail(f"pal/minion/capabilities.py missing minion profile development skill affordance token {token!r}")
 
-print("Verified minion profiles, workspace environment templates, sandbox, plan builder, scheduler, and gate development skill semantics")
+print("Verified minion profiles, workspace environment templates, sandbox, plan builder, scheduler, and minion development skill semantics")
 PY
 
 echo "Built $wheel_path"

@@ -1228,6 +1228,39 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         self.assertNotIn("behavior-routing-reminder", str(kwargs["messages"]))
 
+    def test_openai_chat_invoker_accepts_legacy_main_behavior_routing_hook_name(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="glm-5-tools-legacy-hook",
+            provider="zhipu",
+            model_id="glm-5.1",
+            api_mode="openai_chat",
+            base_url="https://api.z.ai/api/coding/paas/v4",
+            auth_kind="api_key_ref",
+            credential_ref="glm-prod:api-key",
+            priority=0,
+            enabled=True,
+        )
+        secret_store = InMemorySecretStore()
+        secret_store.set_secret(SecretRef(service="glm-prod", account="api-key"), "glm-token")
+        invoker = OpenAIChatEndpointInvoker(
+            credentials=LLMCredentialResolver(secret_store=secret_store),
+            message_hooks=("main_behavior_routing",),
+        )
+
+        kwargs, _ = invoker._build_completion_kwargs(
+            endpoint,
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "Implement the task."}],
+                max_output_tokens=64,
+                tools=[
+                    {"type": "function", "function": {"name": "op_exec_shell", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "op_file_read", "parameters": {"type": "object"}}},
+                ],
+            ),
+        )
+
+        self.assertIn("<system-reminder id=\"behavior-routing-reminder\">", kwargs["messages"][-1]["content"])
+
     def test_openai_chat_invoker_does_not_append_zai_tool_routing_reminder_without_shell_tool(self) -> None:
         endpoint = LLMEndpointRepository().upsert(
             endpoint_id="glm-5-file-only",

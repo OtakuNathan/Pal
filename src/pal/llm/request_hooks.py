@@ -8,10 +8,11 @@ from pal.llm.models import LLMEndpointModel
 from pal.shared import llm_tool_name
 
 
-MAIN_BEHAVIOR_ROUTING_HOOK = "main_behavior_routing"
-MINION_BEHAVIOR_ROUTING_HOOK = "minion_behavior_routing"
-MAIN_LLM_REQUEST_HOOKS = (MAIN_BEHAVIOR_ROUTING_HOOK,)
-MINION_LLM_REQUEST_HOOKS = (MINION_BEHAVIOR_ROUTING_HOOK,)
+BEHAVIOR_ROUTING_HOOK = "behavior_routing"
+LEGACY_MAIN_BEHAVIOR_ROUTING_HOOK = "main_behavior_routing"
+MAIN_BEHAVIOR_ROUTING_HOOK = BEHAVIOR_ROUTING_HOOK
+DEFAULT_LLM_REQUEST_HOOKS = (BEHAVIOR_ROUTING_HOOK,)
+MAIN_LLM_REQUEST_HOOKS = DEFAULT_LLM_REQUEST_HOOKS
 
 MessageHook = Callable[[LLMEndpointModel, CanonicalLLMRequest, list[dict[str, Any]]], list[dict[str, Any]]]
 
@@ -31,19 +32,7 @@ def apply_llm_message_hooks(
     return rendered
 
 
-def _apply_main_behavior_routing_hook(
-    endpoint: LLMEndpointModel,
-    request: CanonicalLLMRequest,
-    messages: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    _ = endpoint
-    available_repo_tools = _available_dedicated_repo_tools(request.tools)
-    if not _needs_tool_routing_reminder(request, available_repo_tools):
-        return messages
-    return _append_behavior_routing_reminder(messages)
-
-
-def _apply_minion_behavior_routing_hook(
+def _apply_behavior_routing_hook(
     endpoint: LLMEndpointModel,
     request: CanonicalLLMRequest,
     messages: list[dict[str, Any]],
@@ -56,8 +45,8 @@ def _apply_minion_behavior_routing_hook(
 
 
 _MESSAGE_HOOKS: dict[str, MessageHook] = {
-    MAIN_BEHAVIOR_ROUTING_HOOK: _apply_main_behavior_routing_hook,
-    MINION_BEHAVIOR_ROUTING_HOOK: _apply_minion_behavior_routing_hook,
+    BEHAVIOR_ROUTING_HOOK: _apply_behavior_routing_hook,
+    LEGACY_MAIN_BEHAVIOR_ROUTING_HOOK: _apply_behavior_routing_hook,
 }
 _SHELL_TOOL_NAMES = {"op_exec_shell", llm_tool_name("op_exec_shell"), "shell_exec"}
 _DEDICATED_REPO_TOOL_ORDER = (

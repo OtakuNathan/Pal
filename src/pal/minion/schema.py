@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from pal.minion.config import ensure_minion_runtime_settings_schema
+
 
 def ensure_minion_schema(runtime_root: Path, connection: sqlite3.Connection) -> None:
     runtime_root.mkdir(parents=True, exist_ok=True)
@@ -152,6 +154,7 @@ def ensure_minion_schema(runtime_root: Path, connection: sqlite3.Connection) -> 
     )
     _ensure_column(connection, "minion_work_orders", "profile_group", "TEXT NOT NULL DEFAULT 'general'")
     _ensure_column(connection, "minion_work_orders", "profile_name", "TEXT NOT NULL DEFAULT 'generic'")
+    ensure_minion_runtime_settings_schema(connection)
 
 
 def _ensure_column(connection: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:

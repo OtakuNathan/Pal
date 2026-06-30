@@ -13,6 +13,7 @@ from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.foundation.sidecar import python_subprocess_env
 from pal.lsp.ipc import LspManagerClient, lsp_log_path
+from pal.lsp.skills import PAL_LSP_TEMPLATE_DEVELOPMENT_SKILL_ID, lsp_declared_skills
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
     OPERATION_NAMESPACE,
@@ -124,6 +125,36 @@ def _position_schema() -> dict[str, Any]:
     activation_threshold=0.15,
     metadata={"resident": True},
 )
+@affordance(
+    affordance_id="declared.skill.pal_lsp_template_development",
+    title="Pal LSP template development skill",
+    scenario_text=(
+        "The user wants to add, repair, test, or hot-load an LSP server template, language server config, "
+        "or new programming language LSP support."
+    ),
+    prompt_hint=(
+        "If this route is selected, inject skill `pal.lsp.template.development` before creating "
+        "plugins/lsp/servers templates or LSP language server config."
+    ),
+    activation_terms=(
+        "lsp template",
+        "language server template",
+        "new language lsp",
+        "add lsp support",
+        "add language support",
+        "language server",
+        "plugins/lsp/servers",
+        "language_ids",
+        "op_lsp_mgmt_rescan",
+        "lsp 插件",
+        "语言服务器",
+        "新语言",
+    ),
+    skill_refs=(PAL_LSP_TEMPLATE_DEVELOPMENT_SKILL_ID,),
+    priority=35,
+    activation_threshold=0.2,
+    metadata={"skill_trigger": True, "resident": False, "runtime_root_layout": "plugins/lsp/servers"},
+)
 @dataclass
 class LspManagerPluginProvider:
     runtime_root: Path
@@ -134,6 +165,9 @@ class LspManagerPluginProvider:
 
     def __post_init__(self) -> None:
         self.client = LspManagerClient(runtime_root=self.runtime_root)
+
+    def declared_skills(self):
+        return lsp_declared_skills(module_id="lsp")
 
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show LSP provider status")
     def show(self, call: IntrospectionCall) -> IntrospectionResult:

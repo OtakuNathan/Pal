@@ -184,16 +184,29 @@ attempt to claim ownership of unrelated modules.
 
 ## Implementation Notes
 
-The first implementation can be deliberately small:
+Current implementation:
 
-- persist bills under minion-owned tasking state or
-  `data/minion/repair_bills/{parent_work_order_id}/`
-- add a repair overlay table or artifact keyed by
-  `(parent_work_order_id, module_id)`
-- extend scheduler state reconstruction to treat overlay-version mismatch as
-  `stale`
-- add a manager operation that accepts a validated bill and triggers scheduling
-- include active overlay entries in coder and reviewer context packs
+- minion-local builder tools: `op_minion_repair_bill_begin`,
+  `op_minion_repair_bill_add_module_patch`,
+  `op_minion_repair_bill_add_module` (alias for patching an existing module),
+  `op_minion_repair_bill_add_acceptance_criteria_batch`,
+  `op_minion_repair_bill_add_evidence`,
+  `op_minion_repair_bill_validate`, and `op_minion_repair_bill_submit`
+- Pal/public manager operation: `op_minion_submit_repair_bill`
+- manager RPC: `submit_repair_bill`
+- replay state is persisted in the parent work order `plan_execution` metadata
+  as `repair_overlay`, `module_replay_attempts`, and updated `module_dag`
+- submitted replay bills are recorded in parent metadata under `repair_bills`
+  and in the ledger as `repair_bill_submitted`
+- replay child work orders use a suffix such as `_r1`, `_r2` so old completed
+  child work orders remain auditable
+
+The first implementation is deliberately small:
+
+- persist active overlays in work-order metadata rather than a new table
+- merge bills into a repair overlay keyed by `module_id`
+- trigger existing ready-module scheduling after accepted replay bills
+- include active overlay entries in coder context packs and prompt summaries
 
 This keeps repair propagation as "DAG replay with amended constraints" instead
 of a second planning system.

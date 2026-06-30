@@ -41,7 +41,7 @@ from pal.llm.contracts import (
     LLMPreflightAdvice,
     LLMPreflightRequest,
 )
-from pal.llm.request_hooks import MINION_LLM_REQUEST_HOOKS
+from pal.llm.request_hooks import DEFAULT_LLM_REQUEST_HOOKS
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.lsp import build_lsp_plugin
 from pal.minion.contracts import SERIAL_MILESTONE_MODES
@@ -606,6 +606,18 @@ class MinionRunner:
         workspace.setdefault("goal", self.pack.instruction or self.pack.goal)
         if isinstance(self.pack.metadata, dict):
             workspace.setdefault("task_id", str(self.pack.metadata.get("task_id") or ""))
+            for key in (
+                "parent_work_order_id",
+                "parent_module_id",
+                "parent_module_name",
+                "module_id",
+                "module_name",
+            ):
+                value = str(self.pack.metadata.get(key) or "").strip()
+                if value:
+                    workspace.setdefault(key, value)
+            if isinstance(self.pack.metadata.get("repair_context"), dict):
+                workspace.setdefault("repair_context", dict(self.pack.metadata.get("repair_context") or {}))
             if isinstance(self.pack.metadata.get("prompt_view"), dict):
                 workspace.setdefault("prompt_view", dict(self.pack.metadata.get("prompt_view") or {}))
             if isinstance(self.pack.metadata.get("coder_work_order"), dict):
@@ -1987,6 +1999,9 @@ class MinionRunner:
         active_gate_todo = metadata.get("active_gate_todo")
         if isinstance(active_gate_todo, dict):
             result["active_gate_todo"] = dict(active_gate_todo)
+        repair_context = metadata.get("repair_context")
+        if isinstance(repair_context, dict):
+            result["repair_bill"] = dict(repair_context)
         return result
 
     def _workspace_policy(self) -> dict[str, Any]:
@@ -2364,7 +2379,7 @@ def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> Minion
                 credentials=LLMCredentialResolver(secret_store=EncryptedFileSecretStore(secrets_path=str(Path(runtime_root) / "secrets.json"))),
                 artifact_manager=artifact_service,
                 runtime_root=runtime_root,
-                message_hooks=MINION_LLM_REQUEST_HOOKS,
+                message_hooks=DEFAULT_LLM_REQUEST_HOOKS,
             ),
             config=config,
         )

@@ -105,6 +105,9 @@ class MinionManagerClient:
     def finalize_work_order_sync(self, work_order_id: str, **params: Any) -> dict[str, Any]:
         return self.request_sync("finalize_work_order", {"work_order_id": work_order_id, **dict(params)})
 
+    def submit_repair_bill_sync(self, repair_bill: dict[str, Any], **params: Any) -> dict[str, Any]:
+        return self.request_sync("submit_repair_bill", {"repair_bill": dict(repair_bill), **dict(params)})
+
     def request_logical_slot_sync(
         self,
         *,

@@ -15,7 +15,6 @@ class EventKind(StrEnum):
     MINION_WORK_ORDER_COMPLETED = "minion.work_order_completed"
     MINION_CLARIFICATION_REQUEST = "minion.clarification_request"
     MINION_PLAN_ACCEPTANCE_PENDING = "minion.plan_acceptance_pending"
-    MINION_REQUIREMENTS_REVIEW_PENDING = "minion.requirements_review_pending"
     CONTROL_ACTION = "control.action"
     SLASH_COMMAND = "slash_command"
     INTERACTION_RESULT = "interaction_result"
