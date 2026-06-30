@@ -403,6 +403,7 @@ class ModuleStepRunner:
         running: dict[str, asyncio.Task[dict[str, Any]]] = {}
         completed: dict[str, dict[str, Any]] = {}
         failed: dict[str, dict[str, Any]] = {}
+        waiting_for_slot: dict[str, dict[str, Any]] = {}
 
         while pending or running:
             ready = [
@@ -453,8 +454,19 @@ class ModuleStepRunner:
                 result = finished.result()
                 if str(result.get("status") or "") == "completed":
                     completed[module_id] = result
+                elif str(result.get("status") or "") == "waiting_for_slot":
+                    waiting_for_slot[module_id] = result
                 else:
                     failed[module_id] = result
+            if waiting_for_slot and not running:
+                return {
+                    "status": "waiting_for_slot",
+                    "pending_modules": [*list(waiting_for_slot), *list(pending)],
+                    "ready_modules": list(waiting_for_slot),
+                    "completed_modules": list(completed),
+                    "failed_modules": list(failed),
+                    "waiting_for_slot": waiting_for_slot,
+                }
             if failed and fail_fast:
                 for task_item in running.values():
                     task_item.cancel()

@@ -9860,6 +9860,43 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_step_runner_logical_coder_dag_waits_when_broker_denies_slot(self) -> None:
+        class DenyingBroker:
+            def request(self, owner, *, resource: str, module_id: str = "", reason: str = "") -> dict[str, Any]:
+                _ = owner, resource, reason
+                return {"status": "denied", "reason": "global_parallel_limit", "module_id": module_id}
+
+            def release(self, slot_id: str, *, run_id: str = "", reason: str = "") -> dict[str, Any]:
+                _ = slot_id, run_id, reason
+                return {"status": "not_found"}
+
+            def release_for_run(self, run_id: str, *, reason: str = "") -> list[dict[str, Any]]:
+                _ = run_id, reason
+                return []
+
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, max_parallel_modules=5)
+            manager.step_runner.slot_broker = DenyingBroker()
+            parent_state = MinionRunState(
+                minion_id="minion_parent_denied",
+                run_id="run_parent_denied",
+                pack=TaskContextPack(work_order_id="wo_parent_denied", goal="parent"),
+            )
+
+            result = await manager.step_runner.run_logical_coder_dag(
+                parent_state,
+                {"module_a": TaskContextPack(work_order_id="wo_denied_a", goal="a")},
+                {"module_a": []},
+                task=lambda _module_id, _context: {"ok": True},
+            )
+
+            self.assertEqual(result["status"], "waiting_for_slot")
+            self.assertEqual(result["pending_modules"], ["module_a"])
+            self.assertEqual(result["ready_modules"], ["module_a"])
+            self.assertEqual(result["waiting_for_slot"]["module_a"]["grant"]["reason"], "global_parallel_limit")
+
+        asyncio.run(scenario())
+
     def test_step_runner_runs_logical_minion_runner_without_mutating_parent_state(self) -> None:
         class FakeRunner:
             def __init__(self, **kwargs: Any) -> None:
