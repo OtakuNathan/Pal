@@ -19492,6 +19492,64 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_step_process_main_runs_noop_dag_with_rpc_slots(self) -> None:
+        async def scenario() -> None:
+            manager, manager_task, client = await self._start_manager(max_parallel_modules=1)
+            _ = manager
+            payload_path = Path(self.root) / "step_process_payload.json"
+            payload = {
+                "mode": "noop",
+                "parent_run_id": "run_step_process_parent",
+                "parent_work_order_id": "wo_step_process_parent",
+                "modules": {
+                    "module_a": TaskContextPack(work_order_id="wo_step_process_a", goal="step a").to_dict(),
+                    "module_b": TaskContextPack(work_order_id="wo_step_process_b", goal="step b").to_dict(),
+                },
+                "depends_on": {"module_a": [], "module_b": []},
+                "noop_delay_seconds": 0.05,
+            }
+            payload_path.write_text(json.dumps(payload), encoding="utf-8")
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    "-m",
+                    "pal.minion.step_process_main",
+                    "--runtime-root",
+                    str(self.root),
+                    "--step-json-file",
+                    str(payload_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=python_subprocess_env(),
+                )
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+                except asyncio.TimeoutError as exc:
+                    process.kill()
+                    stdout, stderr = await process.communicate()
+                    raise AssertionError(stderr.decode("utf-8", errors="replace") or stdout.decode("utf-8", errors="replace")) from exc
+                probe = await client.request(
+                    "request_logical_slot",
+                    {"run_id": "run_step_process_probe", "work_order_id": "wo_step_process_probe", "module_id": "probe"},
+                )
+                released = await client.request(
+                    "release_logical_slot",
+                    {"slot_id": probe.get("slot_id", ""), "run_id": "run_step_process_probe", "reason": "probe_done"},
+                )
+            finally:
+                await self._shutdown_manager(client, manager_task)
+
+            self.assertEqual(process.returncode, 0, stderr.decode("utf-8", errors="replace"))
+            result = json.loads(stdout.decode("utf-8"))
+            self.assertEqual(result["status"], "waiting_for_slot")
+            self.assertEqual(len(result["completed_modules"]), 1)
+            self.assertEqual(len(result["pending_modules"]), 1)
+            self.assertEqual(set(result["completed_modules"]) | set(result["pending_modules"]), {"module_a", "module_b"})
+            self.assertEqual(probe["status"], "granted")
+            self.assertEqual(released["status"], "released")
+
+        asyncio.run(scenario())
+
     async def _start_manager(self, **manager_kwargs):
         manager = MinionManager(runtime_root=self.root, **manager_kwargs)
         manager_task = asyncio.create_task(manager.run())

@@ -38,6 +38,9 @@ class LogicalSlotOwner:
 class LocalLogicalSlotBroker:
     manager: Any
 
+    def available_slots(self) -> int | None:
+        return self.manager._available_module_slots()
+
     def request(self, owner: LogicalSlotOwner, *, resource: str, module_id: str = "", reason: str = "") -> dict[str, Any]:
         # DAG resource isolation: a slot is only a global capacity token. It must
         # not carry mutable coder state, workspace handles, or git checkout state.
@@ -116,6 +119,9 @@ class LocalLogicalSlotBroker:
 class RpcLogicalSlotBroker:
     client: Any
     _owned_slots: dict[str, str] = field(default_factory=dict)
+
+    def available_slots(self) -> int | None:
+        return None
 
     def request(self, owner: LogicalSlotOwner, *, resource: str, module_id: str = "", reason: str = "") -> dict[str, Any]:
         result = self.client.request_logical_slot_sync(
@@ -272,6 +278,16 @@ class ModuleStepRunner:
         assert self.slot_broker is not None
         return self.slot_broker.release_for_run(run_id, reason=reason)
 
+    def _available_logical_slot_attempts(self) -> int | None:
+        assert self.slot_broker is not None
+        available = getattr(self.slot_broker, "available_slots", None)
+        if not callable(available):
+            return None
+        value = available()
+        if value is None:
+            return None
+        return max(0, int(value or 0))
+
     async def run_logical_coder_task(
         self,
         parent_state: Any,
@@ -411,8 +427,9 @@ class ModuleStepRunner:
                 for module_id in list(pending)
                 if all(dep in completed for dep in _string_list(depends_on.get(module_id)))
             ]
+            available_attempts = self._available_logical_slot_attempts()
             for module_id in ready:
-                if self.manager._available_module_slots() <= 0:
+                if available_attempts is not None and available_attempts <= 0:
                     break
                 pending.remove(module_id)
                 running[module_id] = asyncio.create_task(
@@ -425,6 +442,8 @@ class ModuleStepRunner:
                     ),
                     name=f"minion-logical-coder-{module_id}",
                 )
+                if available_attempts is not None:
+                    available_attempts -= 1
             if not running:
                 if ready:
                     return {
