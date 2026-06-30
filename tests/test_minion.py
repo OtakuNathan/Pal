@@ -109,6 +109,7 @@ from pal.minion.scoped_execution import (
     _review_tool_evidence_ref,
 )
 from pal.minion.review_orchestrator import (
+    ReviewOrchestrator,
     _checkpoint_gate_requires_repair,
     _checkpoint_git_context,
     _checkpoint_review_environment_workspace,
@@ -7953,6 +7954,99 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertFalse(renderer_repo.exists())
         self.assertFalse((self.root / "data" / "minion" / "repos" / "wo_parallel_join_baseline" / "parallel_join_source_repo" / "_integrations" / "final_verification").exists())
 
+    def test_parallel_dependency_integration_unions_compile_flags_conflicts(self) -> None:
+        source = self.root / "parallel_compile_flags_source_repo"
+        source.mkdir()
+        _git(source, "init", check=True)
+        _git(source, "config", "user.email", "test@example.com", check=True)
+        _git(source, "config", "user.name", "Test User", check=True)
+        (source / "README.md").write_text("# parallel compile flags\n", encoding="utf-8")
+        _git(source, "add", "README.md", check=True)
+        _git(source, "commit", "-m", "initial", check=True)
+
+        engine = _plan_module("engine", title="Engine", task="Implement engine.")
+        renderer = _plan_module("renderer", title="Renderer", task="Implement renderer.")
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_parallel_compile_flags",
+            task_id="task_parallel_compile_flags",
+            modules=[engine, renderer],
+            prelude_module_id="contracts",
+            join_module_id="final_verification",
+        )
+        parent = self.repository.build_plan_parent_pack_from_plan(
+            plan,
+            work_order_id="wo_parallel_compile_flags",
+            workspace={"source_repo": str(source)},
+        )
+        self.repository.prepare_pack_for_spawn(parent)
+
+        def complete_child(child: TaskContextPack, files: dict[str, str]) -> None:
+            resolved = MinionProfileRegistry(runtime_root=self.root).resolve_pack(child)
+            stored = self.repository.prepare_pack_for_spawn(resolved)
+            prepared = prepare_task_workspace(self.root, stored)
+            repo = Path(prepared.workspace["repo_path"])
+            for relative_path, content in files.items():
+                target = repo / relative_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            committed = commit_milestone(
+                repo,
+                work_order_id=child.work_order_id,
+                milestone_index=0,
+                title=str(child.metadata.get("parent_module_id") or child.work_order_id),
+            )
+            self.assertEqual(committed["status"], "committed")
+            self.repository.update_work_order_workspace(child.work_order_id, dict(prepared.workspace))
+            self.repository.record_minion_event(
+                {
+                    "event_kind": "checkpoint",
+                    "work_order_id": child.work_order_id,
+                    "payload": {"status": "completed", "milestone_index": 0, "summary": "child done"},
+                }
+            )
+            self.repository.record_minion_event(
+                {
+                    "event_kind": "terminal",
+                    "work_order_id": child.work_order_id,
+                    "payload": {"status": "completed", "summary": "child terminal"},
+                }
+            )
+            completion = self.repository.mark_serial_module_completed(child.work_order_id)
+            self.repository.record_plan_module_completion(child.work_order_id, completion)
+
+        contracts_child = self.repository.next_plan_module_pack("wo_parallel_compile_flags", allow_paused=True)
+        assert contracts_child is not None
+        complete_child(contracts_child, {"include/contracts.hpp": "#pragma once\n"})
+
+        sibling_children = self.repository.next_ready_plan_module_packs("wo_parallel_compile_flags", allow_paused=True, limit=5)
+        children_by_module = {str(child.metadata.get("parent_module_id") or ""): child for child in sibling_children}
+        self.assertEqual(set(children_by_module), {"engine", "renderer"})
+        complete_child(
+            children_by_module["engine"],
+            {
+                "compile_flags.txt": "-std=c++20\n-Iinclude\n-Isrc\n",
+                "src/engine.cpp": "int engine() { return 1; }\n",
+            },
+        )
+        complete_child(
+            children_by_module["renderer"],
+            {
+                "compile_flags.txt": "-std=c++20\n-Iinclude\n-Isrc\n-Wall\n-Wextra\n-Wpedantic\n",
+                "src/renderer.cpp": "int renderer() { return 2; }\n",
+            },
+        )
+
+        final_child = self.repository.next_plan_module_pack("wo_parallel_compile_flags", allow_paused=True)
+        assert final_child is not None
+        integration_repo = Path(final_child.workspace["source_repo"])
+
+        self.assertEqual(final_child.metadata["parent_module_id"], "final_verification")
+        self.assertIn("_integrations/final_verification", str(integration_repo).replace("\\", "/"))
+        self.assertEqual(
+            (integration_repo / "compile_flags.txt").read_text(encoding="utf-8"),
+            "-std=c++20\n-Iinclude\n-Isrc\n-Wall\n-Wextra\n-Wpedantic\n",
+        )
+
     def test_record_clarification_answer_appends_to_work_order_metadata(self) -> None:
         self.repository.prepare_pack_for_spawn(
             TaskContextPack(work_order_id="wo_clarify", goal="clarify", metadata={"task_id": "task_clarify", "milestones": ["clarify"]})
@@ -13256,6 +13350,78 @@ class MinionManagerTests(unittest.TestCase):
             child_c = next(state for state in manager.runs.values() if state.pack.work_order_id == "wo_wo_parent_manager_module_c")
             self.assertNotIn(child_c.run_id, {child_a.run_id, child_b.run_id})
             self.assertEqual(manager.started_modules, ["module_a", "module_b", "module_c"])
+
+        asyncio.run(scenario())
+
+    def test_persisted_checkpoint_pass_auto_advances_parent_module(self) -> None:
+        class FakeRepository:
+            def __init__(self) -> None:
+                self.events: list[dict[str, Any]] = []
+
+            def close_checkpoint_from_review_gate(self, gate: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "work_order_id": "wo_child",
+                    "payload": {
+                        "work_order_id": "wo_child",
+                        "status": "completed",
+                        "summary": "checkpoint closed",
+                    },
+                }
+
+            def next_serial_module_pack(self, work_order_id: str) -> None:
+                assert work_order_id == "wo_child"
+                return None
+
+            def mark_serial_module_completed(self, work_order_id: str) -> dict[str, Any]:
+                return {
+                    "status": "completed",
+                    "work_order_id": work_order_id,
+                    "module_id": "module_a",
+                    "summary": "module done",
+                }
+
+            def record_plan_module_completion(self, work_order_id: str, completion: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "status": "awaiting_continue",
+                    "parent_work_order_id": "wo_parent",
+                    "work_order_id": "wo_parent",
+                    "child_work_order_id": work_order_id,
+                    "module_id": completion["module_id"],
+                    "has_next_module": True,
+                    "next_module_id": "module_b",
+                    "auto_advance_modules": True,
+                }
+
+            def record_minion_event(self, event: dict[str, Any]) -> None:
+                self.events.append(dict(event))
+
+        class FakeManager:
+            def __init__(self, root: Path) -> None:
+                self.runtime_root = root
+                self.tasking_repository = FakeRepository()
+                self.queued_events: list[dict[str, Any]] = []
+                self.auto_continues: list[tuple[str, str]] = []
+
+            def _queue_event_delivery(self, event: dict[str, Any]) -> None:
+                self.queued_events.append(dict(event))
+
+            async def auto_continue_work_order(self, work_order_id: str, *, reason: str = "") -> dict[str, Any]:
+                self.auto_continues.append((work_order_id, reason))
+                return {"status": "running_module", "work_order_id": work_order_id}
+
+        async def scenario() -> None:
+            manager = FakeManager(self.root)
+            orchestrator = ReviewOrchestrator(manager)  # type: ignore[arg-type]
+            result = await orchestrator._continue_persisted_checkpoint_pass(
+                "chk_persisted",
+                {"review_gate_ref": {"checkpoint_id": "chk_persisted"}},
+                {"summary": "review pass"},
+            )
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(manager.auto_continues, [("wo_parent", "module_completed")])
+            self.assertEqual(manager.queued_events[-1]["event_kind"], "module_completed")
+            self.assertEqual(manager.queued_events[-1]["work_order_id"], "wo_parent")
 
         asyncio.run(scenario())
 

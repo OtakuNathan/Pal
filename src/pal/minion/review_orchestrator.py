@@ -1172,6 +1172,12 @@ class ReviewOrchestrator:
                 event_kind="module_completed",
                 payload=event_payload,
             )
+            if (
+                str(parent_completion.get("status") or "") in {"awaiting_continue", "running_module"}
+                and bool(parent_completion.get("has_next_module"))
+                and bool(parent_completion.get("auto_advance_modules", True))
+            ):
+                await self.manager.auto_continue_work_order(event_work_order_id, reason="module_completed")
         return {
             "status": str(completion.get("status") or "closed"),
             "checkpoint_id": checkpoint_id,

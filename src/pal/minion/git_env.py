@@ -67,6 +67,12 @@ LOCAL_GIT_EXCLUDES = (
     "*.class",
 )
 
+GENERATED_ENVIRONMENT_UNION_MERGE_FILES = frozenset(
+    {
+        "compile_flags.txt",
+    }
+)
+
 
 CHECKPOINT_COMMIT_CAPABILITY = "op_minion_checkpoint_commit"
 
@@ -373,6 +379,10 @@ def prepare_dependency_integration_baseline(
             raise RuntimeError(f"unknown dependency ref for {module_id}: {ref}")
         merged = _git(integration_dir, "merge", "--no-ff", "--no-edit", ref)
         if not merged.ok:
+            resolved = _resolve_generated_environment_conflicts(integration_dir)
+            if resolved.get("status") == "resolved":
+                merged_outputs.append(dict(output))
+                continue
             _git(integration_dir, "merge", "--abort")
             module = str(output.get("module_id") or "")
             detail = merged.stderr or merged.stdout or f"git merge {ref} failed"
@@ -392,6 +402,63 @@ def prepare_dependency_integration_baseline(
             "dependencies": merged_outputs,
         },
     }
+
+
+def _resolve_generated_environment_conflicts(repo_path: Path) -> dict[str, Any]:
+    repo = Path(repo_path)
+    unresolved = _git(repo, "diff", "--name-only", "--diff-filter=U")
+    if not unresolved.ok:
+        return {"status": "failed", "reason": "list_unmerged_failed", "stderr": unresolved.stderr}
+    paths = [line.strip() for line in unresolved.stdout.splitlines() if line.strip()]
+    if not paths:
+        return {"status": "none"}
+    unsupported = [path for path in paths if path not in GENERATED_ENVIRONMENT_UNION_MERGE_FILES]
+    if unsupported:
+        return {"status": "unsupported", "unsupported_paths": unsupported, "paths": paths}
+    resolved_paths: list[str] = []
+    for path in paths:
+        merged = _merged_compile_flags_content(
+            [
+                _git_stage_text(repo, 2, path),
+                _git_stage_text(repo, 3, path),
+            ]
+        )
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(merged, encoding="utf-8")
+        added = _git(repo, "add", "--", path)
+        if not added.ok:
+            return {"status": "failed", "reason": "git_add_failed", "path": path, "stderr": added.stderr}
+        resolved_paths.append(path)
+    remaining = _git(repo, "diff", "--name-only", "--diff-filter=U")
+    if not remaining.ok:
+        return {"status": "failed", "reason": "list_remaining_failed", "stderr": remaining.stderr}
+    remaining_paths = [line.strip() for line in remaining.stdout.splitlines() if line.strip()]
+    if remaining_paths:
+        return {"status": "failed", "reason": "unresolved_paths_remaining", "paths": remaining_paths}
+    committed = _git(repo, "commit", "--no-edit")
+    if not committed.ok:
+        return {"status": "failed", "reason": "commit_failed", "stdout": committed.stdout, "stderr": committed.stderr}
+    return {"status": "resolved", "paths": resolved_paths, "commit_sha": _current_head(repo)}
+
+
+def _git_stage_text(repo_path: Path, stage: int, path: str) -> str:
+    result = _git(Path(repo_path), "show", f":{int(stage)}:{path}")
+    return result.stdout if result.ok else ""
+
+
+def _merged_compile_flags_content(contents: list[str]) -> str:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for content in contents:
+        for raw_line in str(content or "").splitlines():
+            line = raw_line.rstrip()
+            key = line.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            lines.append(line)
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
 def cleanup_completed_plan_worktrees(
