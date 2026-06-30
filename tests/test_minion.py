@@ -9598,6 +9598,78 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(child_pack.metadata["nested"]["items"], [])
         self.assertEqual(child_pack.workspace["nested"]["paths"], [])
 
+    def test_step_runner_logical_coder_task_releases_slot(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, max_parallel_modules=1)
+            parent_state = MinionRunState(
+                minion_id="minion_parent_task",
+                run_id="run_parent_task",
+                pack=TaskContextPack(work_order_id="wo_parent_task", goal="parent"),
+            )
+            child_pack = TaskContextPack(work_order_id="wo_child_task", goal="child")
+            seen: list[str] = []
+
+            async def task(context) -> dict[str, Any]:
+                seen.append(context.module_id)
+                blocked = manager.step_runner.request_logical_slot(
+                    parent_state,
+                    resource="logical_minion_slot",
+                    module_id="module_blocked",
+                )
+                self.assertEqual(blocked["status"], "denied")
+                self.assertEqual(blocked["reason"], "global_parallel_limit")
+                return {"ok": True}
+
+            result = await manager.step_runner.run_logical_coder_task(
+                parent_state,
+                child_pack,
+                module_id="module_a",
+                task=task,
+            )
+            after = manager.step_runner.request_logical_slot(
+                parent_state,
+                resource="logical_minion_slot",
+                module_id="module_after",
+            )
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["result"], {"ok": True})
+            self.assertEqual(seen, ["module_a"])
+            self.assertEqual(after["status"], "granted")
+
+        asyncio.run(scenario())
+
+    def test_step_runner_logical_coder_task_releases_slot_on_failure(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, max_parallel_modules=1)
+            parent_state = MinionRunState(
+                minion_id="minion_parent_fail",
+                run_id="run_parent_fail",
+                pack=TaskContextPack(work_order_id="wo_parent_fail", goal="parent"),
+            )
+            child_pack = TaskContextPack(work_order_id="wo_child_fail", goal="child")
+
+            async def task(_context) -> dict[str, Any]:
+                raise RuntimeError("task boom")
+
+            result = await manager.step_runner.run_logical_coder_task(
+                parent_state,
+                child_pack,
+                module_id="module_fail",
+                task=task,
+            )
+            after = manager.step_runner.request_logical_slot(
+                parent_state,
+                resource="logical_minion_slot",
+                module_id="module_after_fail",
+            )
+
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("RuntimeError: task boom", result["error"])
+            self.assertEqual(after["status"], "granted")
+
+        asyncio.run(scenario())
+
     def test_continue_work_order_releases_running_module_when_spawn_fails(self) -> None:
         class FailingSpawnManager(MinionManager):
             async def spawn(self, pack_payload: dict[str, Any]) -> dict[str, Any]:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -210,6 +212,50 @@ class ModuleStepRunner:
             return []
         slot_ids = [slot_id for slot_id, slot in self.manager._logical_slots.items() if str(slot.get("run_id") or "") == normalized]
         return [self.release_logical_slot(slot_id, run_id=normalized, reason=reason) for slot_id in slot_ids]
+
+    async def run_logical_coder_task(
+        self,
+        parent_state: Any,
+        pack: TaskContextPack,
+        *,
+        module_id: str,
+        task: Callable[[LogicalCoderContext], Awaitable[dict[str, Any]] | dict[str, Any]],
+        reason: str = "",
+    ) -> dict[str, Any]:
+        grant = self.request_logical_slot(
+            parent_state,
+            resource="logical_minion_slot",
+            module_id=module_id,
+            reason=reason or "logical_coder_task",
+        )
+        if str(grant.get("status") or "") != "granted":
+            return {"status": "waiting_for_slot", "module_id": str(module_id or ""), "grant": grant}
+        context = self.build_logical_coder_context(
+            parent_state,
+            pack,
+            module_id=module_id,
+            slot_id=str(grant.get("slot_id") or ""),
+        )
+        try:
+            value = task(context)
+            result = await value if inspect.isawaitable(value) else value
+            return {
+                "status": "completed",
+                "module_id": context.module_id,
+                "logical_run_id": context.run_id,
+                "slot_id": context.slot_id,
+                "result": dict(result or {}),
+            }
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "module_id": context.module_id,
+                "logical_run_id": context.run_id,
+                "slot_id": context.slot_id,
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+        finally:
+            self.release_logical_slot(context.slot_id, run_id=parent_state.run_id, reason="logical_coder_task_done")
 
     def build_logical_coder_context(
         self,
