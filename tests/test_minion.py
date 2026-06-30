@@ -9716,7 +9716,7 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(child_pack.metadata["nested"]["items"], [])
         self.assertEqual(child_pack.workspace["nested"]["paths"], [])
 
-    def test_step_runner_logical_coder_task_releases_slot(self) -> None:
+    def test_step_runner_logical_module_lane_releases_slot(self) -> None:
         async def scenario() -> None:
             manager = MinionManager(runtime_root=self.root, max_parallel_modules=1)
             parent_state = MinionRunState(
@@ -9738,7 +9738,7 @@ class MinionManagerTests(unittest.TestCase):
                 self.assertEqual(blocked["reason"], "global_parallel_limit")
                 return {"ok": True}
 
-            result = await manager.step_runner.run_logical_coder_task(
+            result = await manager.step_runner.run_logical_module_lane(
                 parent_state,
                 child_pack,
                 module_id="module_a",
@@ -9757,7 +9757,7 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_step_runner_logical_coder_task_releases_slot_on_failure(self) -> None:
+    def test_step_runner_logical_module_lane_releases_slot_on_failure(self) -> None:
         async def scenario() -> None:
             manager = MinionManager(runtime_root=self.root, max_parallel_modules=1)
             parent_state = MinionRunState(
@@ -9770,7 +9770,7 @@ class MinionManagerTests(unittest.TestCase):
             async def task(_context) -> dict[str, Any]:
                 raise RuntimeError("task boom")
 
-            result = await manager.step_runner.run_logical_coder_task(
+            result = await manager.step_runner.run_logical_module_lane(
                 parent_state,
                 child_pack,
                 module_id="module_fail",
@@ -9785,6 +9785,49 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertIn("RuntimeError: task boom", result["error"])
             self.assertEqual(after["status"], "granted")
+
+        asyncio.run(scenario())
+
+    def test_step_runner_logical_module_lane_holds_slot_across_phases(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, max_parallel_modules=1)
+            parent_state = MinionRunState(
+                minion_id="minion_parent_lane",
+                run_id="run_parent_lane",
+                pack=TaskContextPack(work_order_id="wo_parent_lane", goal="parent"),
+            )
+            child_pack = TaskContextPack(work_order_id="wo_child_lane", goal="child")
+            phases: list[str] = []
+
+            async def task(_context) -> dict[str, Any]:
+                phases.append("coder")
+                self.assertEqual(manager._allocated_logical_slot_count(), 1)
+                blocked_during_coder = manager.step_runner.request_logical_slot(
+                    parent_state,
+                    resource="logical_minion_slot",
+                    module_id="other_module_during_coder",
+                )
+                self.assertEqual(blocked_during_coder["status"], "denied")
+                phases.append("reviewer")
+                self.assertEqual(manager._allocated_logical_slot_count(), 1)
+                blocked_during_reviewer = manager.step_runner.request_logical_slot(
+                    parent_state,
+                    resource="logical_minion_slot",
+                    module_id="other_module_during_reviewer",
+                )
+                self.assertEqual(blocked_during_reviewer["status"], "denied")
+                return {"phases": list(phases)}
+
+            result = await manager.step_runner.run_logical_module_lane(
+                parent_state,
+                child_pack,
+                module_id="module_lane",
+                task=task,
+            )
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["result"]["phases"], ["coder", "reviewer"])
+            self.assertEqual(manager._allocated_logical_slot_count(), 0)
 
         asyncio.run(scenario())
 

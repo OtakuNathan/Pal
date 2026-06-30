@@ -300,7 +300,7 @@ class ModuleStepRunner:
             return None
         return max(0, int(value or 0))
 
-    async def run_logical_coder_task(
+    async def run_logical_module_lane(
         self,
         parent_state: Any,
         pack: TaskContextPack,
@@ -313,11 +313,11 @@ class ModuleStepRunner:
             parent_state,
             resource="logical_minion_slot",
             module_id=module_id,
-            reason=reason or "logical_coder_task",
+            reason=reason or "logical_module_lane",
         )
         if str(grant.get("status") or "") != "granted":
             return {"status": "waiting_for_slot", "module_id": str(module_id or ""), "grant": grant}
-        return await self._run_logical_coder_task_with_grant(
+        return await self._run_logical_module_lane_with_grant(
             parent_state,
             pack,
             module_id=module_id,
@@ -325,7 +325,7 @@ class ModuleStepRunner:
             grant=grant,
         )
 
-    async def _run_logical_coder_task_with_grant(
+    async def _run_logical_module_lane_with_grant(
         self,
         parent_state: Any,
         pack: TaskContextPack,
@@ -359,7 +359,7 @@ class ModuleStepRunner:
                 "error": f"{exc.__class__.__name__}: {exc}",
             }
         finally:
-            self.release_logical_slot(context.slot_id, run_id=parent_state.run_id, reason="logical_coder_task_done")
+            self.release_logical_slot(context.slot_id, run_id=parent_state.run_id, reason="logical_module_lane_done")
 
     async def run_logical_minion_runner(
         self,
@@ -413,7 +413,7 @@ class ModuleStepRunner:
                 )
             return {"returncode": int(returncode or 0), "event_count": len(events)}
 
-        result = await self.run_logical_coder_task(
+        result = await self.run_logical_module_lane(
             parent_state,
             pack,
             module_id=module_id,
@@ -472,7 +472,7 @@ class ModuleStepRunner:
                     break
                 pending.remove(module_id)
                 running[module_id] = asyncio.create_task(
-                    self._run_logical_coder_task_with_grant(
+                    self._run_logical_module_lane_with_grant(
                         parent_state,
                         module_packs[module_id],
                         module_id=module_id,
