@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
+from typing import Any
+from uuid import uuid4
+
+from pal.foundation import utc_now
+from pal.minion.profiles import MinionProfileRegistry
+from pal.minion.utils import dedupe_strings as _dedupe_strings
+from pal.minion.utils import string_list as _string_list
+from pal.shared import TaskContextPack
+
+
+_DEFAULT_MAX_PARALLEL_MODULES = 5
+
+
+@dataclass(frozen=True)
+class LogicalCoderContext:
+    run_id: str
+    parent_run_id: str
+    work_order_id: str
+    module_id: str
+    slot_id: str
+    pack: TaskContextPack
+
+
+@dataclass
+class ModuleStepRunner:
+    manager: Any
+
+    async def continue_work_order(self, work_order_id: str) -> dict[str, Any]:
+        normalized = str(work_order_id or "").strip()
+        if not normalized:
+            raise ValueError("work_order_id is required")
+        available_slots = self.manager._available_module_slots()
+        if available_slots <= 0:
+            snapshot = self.manager.tasking_repository.read_work_order(normalized)
+            metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {}
+            plan_execution = dict(metadata.get("plan_execution") or {})
+            status = str(plan_execution.get("status") or snapshot.get("status") or "not_available")
+            active_child_work_order_ids = _active_child_work_order_ids_from_plan_execution(plan_execution)
+            ready_module_ids = _string_list(dict(plan_execution.get("module_dag") or {}).get("ready_modules"))
+            waiting_for_slot = bool(ready_module_ids)
+            return {
+                "status": "waiting_for_slot" if waiting_for_slot else status,
+                "work_order_id": normalized,
+                "reason": "global_parallel_limit" if waiting_for_slot else ("active_child_running" if active_child_work_order_ids else "no_available_module_slot"),
+                "active_child_work_order_id": active_child_work_order_ids[0] if active_child_work_order_ids else "",
+                "active_child_work_order_ids": active_child_work_order_ids,
+                "ready_module_ids": ready_module_ids,
+                "max_parallel_modules": self._max_parallel_modules(),
+                "active_module_count": self.manager._active_module_child_count(),
+            }
+        packs = self.manager.tasking_repository.next_ready_plan_module_packs(normalized, allow_paused=True, limit=available_slots)
+        if not packs:
+            snapshot = self.manager.tasking_repository.read_work_order(normalized)
+            metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {}
+            plan_execution = dict(metadata.get("plan_execution") or {})
+            status = str(plan_execution.get("status") or snapshot.get("status") or "not_available")
+            active_child_work_order_ids = _active_child_work_order_ids_from_plan_execution(plan_execution)
+            return {
+                "status": status,
+                "work_order_id": normalized,
+                "reason": "active_child_running" if status == "running_module" and active_child_work_order_ids else "no_next_module",
+                "active_child_work_order_id": active_child_work_order_ids[0] if active_child_work_order_ids else "",
+                "active_child_work_order_ids": active_child_work_order_ids,
+            }
+        registry = MinionProfileRegistry(runtime_root=self.manager.runtime_root)
+        runs: list[dict[str, Any]] = []
+        module_ids: list[str] = []
+        child_work_order_ids: list[str] = []
+        spawn_failures: list[dict[str, Any]] = []
+        for pack in packs:
+            resolved_pack = registry.resolve_pack(pack)
+            module_id = str(resolved_pack.metadata.get("module_id") or resolved_pack.metadata.get("parent_module_id") or "")
+            try:
+                run = await self.manager.spawn(resolved_pack.to_dict())
+            except Exception as exc:
+                release = self.manager.tasking_repository.release_running_module_parent(
+                    resolved_pack.work_order_id,
+                    child_terminal_status="failed",
+                    reason=f"manager failed to spawn module {module_id or resolved_pack.work_order_id}: {exc.__class__.__name__}: {exc}",
+                )
+                spawn_failures.append(
+                    {
+                        "module_id": module_id,
+                        "child_work_order_id": resolved_pack.work_order_id,
+                        "error": f"{exc.__class__.__name__}: {exc}",
+                        "release": dict(release),
+                    }
+                )
+                continue
+            runs.append(dict(run))
+            module_ids.append(module_id)
+            child_work_order_ids.append(resolved_pack.work_order_id)
+        if not runs and spawn_failures:
+            return {
+                "status": "spawn_failed",
+                "work_order_id": normalized,
+                "failures": spawn_failures,
+                "failure_count": len(spawn_failures),
+                "max_parallel_modules": self._max_parallel_modules(),
+                "active_module_count": self.manager._active_module_child_count(),
+            }
+        return {
+            "status": "running_module",
+            "work_order_id": normalized,
+            "child_work_order_id": child_work_order_ids[0] if child_work_order_ids else "",
+            "child_work_order_ids": child_work_order_ids,
+            "module_id": module_ids[0] if module_ids else "",
+            "module_ids": module_ids,
+            "run": runs[0] if runs else {},
+            "runs": runs,
+            "spawn_failures": spawn_failures,
+            "max_parallel_modules": self._max_parallel_modules(),
+            "active_module_count": self.manager._active_module_child_count(),
+        }
+
+    async def schedule_ready_plan_modules(self, *, preferred_work_order_id: str = "", reason: str = "") -> dict[str, Any]:
+        preferred = str(preferred_work_order_id or "").strip()
+        parent_ids = self.manager.tasking_repository.ready_plan_parent_work_order_ids()
+        if preferred and preferred in parent_ids:
+            parent_ids = [preferred, *[item for item in parent_ids if item != preferred]]
+        scheduled: list[dict[str, Any]] = []
+        for parent_id in parent_ids:
+            if self.manager._available_module_slots() <= 0:
+                break
+            result = await self.continue_work_order(parent_id)
+            if str(result.get("status") or "") == "running_module":
+                scheduled.append(dict(result))
+        return {
+            "status": "scheduled" if scheduled else "idle",
+            "reason": reason,
+            "scheduled": scheduled,
+            "scheduled_count": len(scheduled),
+            "max_parallel_modules": self._max_parallel_modules(),
+            "active_module_count": self.manager._active_module_child_count(),
+        }
+
+    def request_logical_slot(self, state: Any, *, resource: str, module_id: str = "", reason: str = "") -> dict[str, Any]:
+        # DAG resource isolation: a slot is only a global capacity token. It must
+        # not carry mutable coder state, workspace handles, or git checkout state.
+        # Each logical coder still gets a separate pack/context and its own
+        # prepared git environment before execution.
+        normalized_resource = str(resource or "logical_minion_slot").strip()
+        if normalized_resource != "logical_minion_slot":
+            return {
+                "status": "denied",
+                "reason": "unsupported_resource",
+                "resource": normalized_resource,
+                "run_id": state.run_id,
+                "work_order_id": state.pack.work_order_id,
+            }
+        available = self.manager._available_module_slots()
+        if available <= 0:
+            return {
+                "status": "denied",
+                "reason": "global_parallel_limit",
+                "resource": normalized_resource,
+                "run_id": state.run_id,
+                "work_order_id": state.pack.work_order_id,
+                "max_parallel_modules": self._max_parallel_modules(),
+                "active_module_count": self.manager._active_module_child_count(),
+                "allocated_logical_slots": self.manager._allocated_logical_slot_count(),
+            }
+        slot_id = f"slot_{uuid4().hex[:12]}"
+        self.manager._logical_slots[slot_id] = {
+            "slot_id": slot_id,
+            "resource": normalized_resource,
+            "run_id": state.run_id,
+            "work_order_id": state.pack.work_order_id,
+            "module_id": str(module_id or "").strip(),
+            "reason": str(reason or "").strip(),
+            "granted_at": utc_now(),
+        }
+        return {
+            "status": "granted",
+            "slot_id": slot_id,
+            "resource": normalized_resource,
+            "run_id": state.run_id,
+            "work_order_id": state.pack.work_order_id,
+            "module_id": str(module_id or "").strip(),
+            "available_module_slots": self.manager._available_module_slots(),
+        }
+
+    def release_logical_slot(self, slot_id: str, *, run_id: str = "", reason: str = "") -> dict[str, Any]:
+        normalized = str(slot_id or "").strip()
+        if not normalized:
+            return {"status": "skipped", "reason": "slot_id_required"}
+        slot = self.manager._logical_slots.get(normalized)
+        if slot is None:
+            return {"status": "not_found", "slot_id": normalized}
+        if run_id and str(slot.get("run_id") or "") != str(run_id):
+            return {"status": "denied", "reason": "slot_owned_by_different_run", "slot_id": normalized}
+        removed = self.manager._logical_slots.pop(normalized)
+        return {
+            "status": "released",
+            "slot_id": normalized,
+            "run_id": str(removed.get("run_id") or ""),
+            "work_order_id": str(removed.get("work_order_id") or ""),
+            "module_id": str(removed.get("module_id") or ""),
+            "reason": str(reason or "").strip(),
+            "available_module_slots": self.manager._available_module_slots(),
+        }
+
+    def release_logical_slots_for_run(self, run_id: str, *, reason: str = "") -> list[dict[str, Any]]:
+        normalized = str(run_id or "").strip()
+        if not normalized:
+            return []
+        slot_ids = [slot_id for slot_id, slot in self.manager._logical_slots.items() if str(slot.get("run_id") or "") == normalized]
+        return [self.release_logical_slot(slot_id, run_id=normalized, reason=reason) for slot_id in slot_ids]
+
+    def build_logical_coder_context(
+        self,
+        parent_state: Any,
+        pack: TaskContextPack,
+        *,
+        module_id: str,
+        slot_id: str,
+    ) -> LogicalCoderContext:
+        # Coroutine coders may share a Python process, but they must not share
+        # TaskContextPack internals. Deep-copy the payload before attaching
+        # scheduler metadata so later milestone updates cannot bleed sideways.
+        logical_run_id = f"logical_run_{uuid4().hex[:12]}"
+        pack_payload = copy.deepcopy(pack.to_dict())
+        metadata = dict(pack_payload.get("metadata") or {})
+        metadata.update(
+            {
+                "logical_parent_run_id": parent_state.run_id,
+                "logical_run_id": logical_run_id,
+                "logical_module_id": str(module_id or "").strip(),
+                "logical_slot_id": str(slot_id or "").strip(),
+            }
+        )
+        pack_payload["metadata"] = metadata
+        return LogicalCoderContext(
+            run_id=logical_run_id,
+            parent_run_id=parent_state.run_id,
+            work_order_id=str(pack.work_order_id or ""),
+            module_id=str(module_id or "").strip(),
+            slot_id=str(slot_id or "").strip(),
+            pack=TaskContextPack.from_dict(pack_payload),
+        )
+
+    def _max_parallel_modules(self) -> int:
+        return int(self.manager.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES)
+
+
+def _active_child_work_order_ids_from_plan_execution(plan_execution: dict[str, Any]) -> list[str]:
+    values = _string_list(plan_execution.get("active_child_work_order_ids"))
+    if not values:
+        running_modules = dict(dict(plan_execution.get("module_dag") or {}).get("running_modules") or {})
+        values = _string_list(running_modules.values())
+    active_child_work_order_id = str(plan_execution.get("active_child_work_order_id") or "").strip()
+    if active_child_work_order_id and active_child_work_order_id not in values:
+        values.insert(0, active_child_work_order_id)
+    return _dedupe_strings(values)

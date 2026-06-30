@@ -7888,6 +7888,11 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         engine_repo = complete_child(children_by_module["engine"], "src/pal_contract_guard/engine.py", "ENGINE = 'ready'\n")
         renderer_repo = complete_child(children_by_module["renderer"], "src/pal_contract_guard/renderer.py", "RENDERER = 'ready'\n")
+        self.assertNotEqual(engine_repo, renderer_repo)
+        self.assertEqual(engine_repo.parent, renderer_repo.parent)
+        self.assertEqual(engine_repo.name, "engine")
+        self.assertEqual(renderer_repo.name, "renderer")
+        self.assertEqual(_git_common_dir(engine_repo), _git_common_dir(renderer_repo))
 
         final_child = self.repository.next_plan_module_pack("wo_parallel_join_baseline", allow_paused=True)
         assert final_child is not None
@@ -9553,6 +9558,45 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(second["reason"], "global_parallel_limit")
         self.assertEqual(released["status"], "released")
         self.assertEqual(third["status"], "granted")
+
+    def test_step_runner_logical_coder_context_isolates_pack_state(self) -> None:
+        manager = MinionManager(runtime_root=self.root, max_parallel_modules=2)
+        parent_state = MinionRunState(
+            minion_id="minion_parent",
+            run_id="run_parent",
+            pack=TaskContextPack(work_order_id="wo_parent_context", goal="parent"),
+        )
+        child_pack = TaskContextPack(
+            work_order_id="wo_child_context",
+            goal="child",
+            workspace={"nested": {"paths": []}},
+            metadata={"nested": {"items": []}},
+        )
+
+        first = manager.step_runner.build_logical_coder_context(
+            parent_state,
+            child_pack,
+            module_id="module_a",
+            slot_id="slot_a",
+        )
+        second = manager.step_runner.build_logical_coder_context(
+            parent_state,
+            child_pack,
+            module_id="module_b",
+            slot_id="slot_b",
+        )
+        first.pack.metadata["nested"]["items"].append("first")
+        first.pack.workspace["nested"]["paths"].append("src/a.py")
+
+        self.assertNotEqual(first.run_id, second.run_id)
+        self.assertEqual(first.parent_run_id, "run_parent")
+        self.assertEqual(first.pack.metadata["logical_parent_run_id"], "run_parent")
+        self.assertEqual(first.pack.metadata["logical_module_id"], "module_a")
+        self.assertEqual(second.pack.metadata["logical_module_id"], "module_b")
+        self.assertEqual(second.pack.metadata["nested"]["items"], [])
+        self.assertEqual(second.pack.workspace["nested"]["paths"], [])
+        self.assertEqual(child_pack.metadata["nested"]["items"], [])
+        self.assertEqual(child_pack.workspace["nested"]["paths"], [])
 
     def test_continue_work_order_releases_running_module_when_spawn_fails(self) -> None:
         class FailingSpawnManager(MinionManager):
