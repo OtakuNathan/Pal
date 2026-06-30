@@ -9742,6 +9742,103 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_step_runner_runs_logical_minion_runner_without_mutating_parent_state(self) -> None:
+        class FakeRunner:
+            def __init__(self, **kwargs: Any) -> None:
+                self.write_event = kwargs["write_event"]
+
+            async def run(self) -> int:
+                await self.write_event(
+                    {
+                        "event_kind": "progress",
+                        "payload": {"phase": "fake_logical_progress", "summary": "logical progress"},
+                        "created_at": utc_now(),
+                    }
+                )
+                await self.write_event(
+                    {
+                        "event_kind": "terminal",
+                        "payload": {"status": "completed", "summary": "logical done"},
+                        "created_at": utc_now(),
+                    }
+                )
+                return 0
+
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, max_parallel_modules=1)
+            parent_state = MinionRunState(
+                minion_id="minion_parent_runner",
+                run_id="run_parent_runner",
+                pack=TaskContextPack(work_order_id="wo_parent_runner", goal="parent"),
+                status="running",
+            )
+            child_pack = manager.tasking_repository.prepare_pack_for_spawn(
+                TaskContextPack(work_order_id="wo_child_runner", goal="child")
+            )
+
+            with patch("pal.minion.runner.MinionRunner", FakeRunner):
+                result = await manager.step_runner.run_logical_minion_runner(
+                    parent_state,
+                    child_pack,
+                    module_id="module_runner",
+                )
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(result["result"]["returncode"], 0)
+            self.assertEqual(result["event_count"], 2)
+            self.assertEqual(parent_state.status, "running")
+            self.assertEqual(manager._allocated_logical_slot_count(), 0)
+            terminal_event = next(event for event in result["events"] if event["event_kind"] == "terminal")
+            self.assertEqual(terminal_event["run_id"], result["logical_run_id"])
+            self.assertEqual(terminal_event["payload"]["metadata"]["logical_parent_run_id"], "run_parent_runner")
+            self.assertEqual(terminal_event["payload"]["metadata"]["logical_module_id"], "module_runner")
+            child_snapshot = manager.tasking_repository.read_work_order("wo_child_runner")
+            self.assertEqual(child_snapshot["work_order"]["status"], "completed")
+            self.assertTrue(any(event["event_kind"] == "terminal" for event in manager.event_queue))
+
+        asyncio.run(scenario())
+
+    def test_step_runner_logical_minion_runner_nonzero_releases_slot(self) -> None:
+        class FakeRunner:
+            def __init__(self, **kwargs: Any) -> None:
+                _ = kwargs
+
+            async def run(self) -> int:
+                return 1
+
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, max_parallel_modules=1)
+            parent_state = MinionRunState(
+                minion_id="minion_parent_nonzero",
+                run_id="run_parent_nonzero",
+                pack=TaskContextPack(work_order_id="wo_parent_nonzero", goal="parent"),
+            )
+            child_pack = manager.tasking_repository.prepare_pack_for_spawn(
+                TaskContextPack(work_order_id="wo_child_nonzero", goal="child")
+            )
+
+            with patch("pal.minion.runner.MinionRunner", FakeRunner):
+                result = await manager.step_runner.run_logical_minion_runner(
+                    parent_state,
+                    child_pack,
+                    module_id="module_nonzero",
+                )
+            after = manager.step_runner.request_logical_slot(
+                parent_state,
+                resource="logical_minion_slot",
+                module_id="module_after_nonzero",
+            )
+
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["reason"], "logical_minion_nonzero_returncode")
+            self.assertEqual(result["result"]["returncode"], 1)
+            self.assertTrue(any(event["event_kind"] == "terminal" for event in result["events"]))
+            self.assertEqual(after["status"], "granted")
+            child_snapshot = manager.tasking_repository.read_work_order("wo_child_nonzero")
+            self.assertEqual(child_snapshot["work_order"]["status"], "failed")
+
+        asyncio.run(scenario())
+
     def test_continue_work_order_releases_running_module_when_spawn_fails(self) -> None:
         class FailingSpawnManager(MinionManager):
             async def spawn(self, pack_payload: dict[str, Any]) -> dict[str, Any]:

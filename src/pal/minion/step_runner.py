@@ -258,6 +258,71 @@ class ModuleStepRunner:
         finally:
             self.release_logical_slot(context.slot_id, run_id=parent_state.run_id, reason="logical_coder_task_done")
 
+    async def run_logical_minion_runner(
+        self,
+        parent_state: Any,
+        pack: TaskContextPack,
+        *,
+        module_id: str,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        events: list[dict[str, Any]] = []
+
+        async def task(context: LogicalCoderContext) -> dict[str, Any]:
+            control_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+            async def write_event(event: dict[str, Any]) -> None:
+                normalized = self._logical_runner_event(context, event)
+                events.append(normalized)
+                self._record_logical_runner_event(normalized)
+
+            async def read_decision(timeout: float | None = None) -> dict[str, Any] | None:
+                if timeout is None:
+                    return await control_queue.get()
+                try:
+                    return await asyncio.wait_for(control_queue.get(), timeout=max(0.0, float(timeout or 0.0)))
+                except asyncio.TimeoutError:
+                    return None
+
+            from pal.minion.runner import MinionRunner
+
+            runner = MinionRunner(
+                runtime_root=self.manager.runtime_root,
+                pack=context.pack,
+                minion_id=f"logical_minion_{uuid4().hex[:10]}",
+                run_id=context.run_id,
+                write_event=write_event,
+                read_decision=read_decision,
+            )
+            returncode = await runner.run()
+            if not any(str(event.get("event_kind") or "") == "terminal" for event in events):
+                status = "completed" if int(returncode or 0) == 0 else "failed"
+                await write_event(
+                    {
+                        "event_kind": "terminal",
+                        "payload": {
+                            "status": status,
+                            "summary": f"logical minion exited with code {int(returncode or 0)}",
+                            "returncode": int(returncode or 0),
+                        },
+                        "created_at": utc_now(),
+                    }
+                )
+            return {"returncode": int(returncode or 0), "event_count": len(events)}
+
+        result = await self.run_logical_coder_task(
+            parent_state,
+            pack,
+            module_id=module_id,
+            task=task,
+            reason=reason or "logical_minion_runner",
+        )
+        payload = {**result, "events": list(events), "event_count": len(events)}
+        if str(result.get("status") or "") == "completed" and int(dict(result.get("result") or {}).get("returncode") or 0) != 0:
+            payload["status"] = "failed"
+            payload["reason"] = "logical_minion_nonzero_returncode"
+        return payload
+
     async def run_logical_coder_dag(
         self,
         parent_state: Any,
@@ -384,6 +449,33 @@ class ModuleStepRunner:
             slot_id=str(slot_id or "").strip(),
             pack=TaskContextPack.from_dict(pack_payload),
         )
+
+    def _logical_runner_event(self, context: LogicalCoderContext, event: dict[str, Any]) -> dict[str, Any]:
+        normalized = {
+            "event_kind": str(event.get("event_kind") or ""),
+            "minion_id": str(event.get("minion_id") or ""),
+            "run_id": str(event.get("run_id") or context.run_id),
+            "work_order_id": str(event.get("work_order_id") or context.work_order_id),
+            "minion_profile": str(event.get("minion_profile") or context.pack.minion_profile),
+            "payload": dict(event.get("payload") or {}),
+            "created_at": str(event.get("created_at") or utc_now()),
+        }
+        payload = dict(normalized["payload"])
+        metadata = dict(payload.get("metadata") or {})
+        metadata.setdefault("logical_parent_run_id", context.parent_run_id)
+        metadata.setdefault("logical_run_id", context.run_id)
+        metadata.setdefault("logical_module_id", context.module_id)
+        metadata.setdefault("logical_slot_id", context.slot_id)
+        payload["metadata"] = metadata
+        normalized["payload"] = payload
+        return normalized
+
+    def _record_logical_runner_event(self, event: dict[str, Any]) -> None:
+        if bool(getattr(self.manager, "_should_queue_event_delivery", lambda _event: True)(event)):
+            self.manager._queue_event_delivery(event)
+        if str(event.get("event_kind") or "") in {"progress", "phase_started"}:
+            return
+        self.manager.tasking_repository.record_minion_event(event)
 
     def _max_parallel_modules(self) -> int:
         return int(self.manager.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES)
