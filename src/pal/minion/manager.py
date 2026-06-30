@@ -9,6 +9,7 @@ import signal
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -303,6 +304,10 @@ class MinionManager:
             return self.finalize_work_order(dict(params))
         if method == "continue_work_order":
             return await self.continue_work_order(str(params.get("work_order_id") or ""))
+        if method == "request_logical_slot":
+            return self.request_logical_slot(dict(params))
+        if method == "release_logical_slot":
+            return self.release_logical_slot(dict(params))
         if method == "dispatch_accepted_plan":
             return await self.dispatch_accepted_plan(dict(params))
         if method == "dispatch_plan_revision":
@@ -662,6 +667,28 @@ class MinionManager:
 
     async def schedule_ready_plan_modules(self, *, preferred_work_order_id: str = "", reason: str = "") -> dict[str, Any]:
         return await self.step_runner.schedule_ready_plan_modules(preferred_work_order_id=preferred_work_order_id, reason=reason)
+
+    def request_logical_slot(self, params: dict[str, Any]) -> dict[str, Any]:
+        run_id = str(params.get("run_id") or "").strip()
+        work_order_id = str(params.get("work_order_id") or "").strip()
+        if not work_order_id and run_id in self.runs:
+            work_order_id = str(self.runs[run_id].pack.work_order_id or "").strip()
+        if not run_id:
+            raise ValueError("run_id is required")
+        if not work_order_id:
+            raise ValueError("work_order_id is required")
+        state = SimpleNamespace(run_id=run_id, pack=TaskContextPack(work_order_id=work_order_id, goal="logical slot owner"))
+        return self._request_logical_slot(
+            state,
+            resource=str(params.get("resource") or "logical_minion_slot"),
+            module_id=str(params.get("module_id") or ""),
+            reason=str(params.get("reason") or "manager_rpc"),
+        )
+
+    def release_logical_slot(self, params: dict[str, Any]) -> dict[str, Any]:
+        slot_id = str(params.get("slot_id") or "").strip()
+        run_id = str(params.get("run_id") or "").strip()
+        return self._release_logical_slot(slot_id, run_id=run_id, reason=str(params.get("reason") or "manager_rpc"))
 
     async def dispatch_accepted_plan(self, params: dict[str, Any]) -> dict[str, Any]:
         work_order_id = str(params.get("work_order_id") or "").strip()

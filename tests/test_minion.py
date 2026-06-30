@@ -9559,6 +9559,90 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(released["status"], "released")
         self.assertEqual(third["status"], "granted")
 
+    def test_manager_logical_slot_rpc_enforces_owner_and_global_limit(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, max_parallel_modules=1)
+            first = await manager._call_method(
+                "request_logical_slot",
+                {
+                    "run_id": "run_rpc_slots",
+                    "work_order_id": "wo_rpc_slots",
+                    "module_id": "module_a",
+                    "reason": "test",
+                },
+            )
+            second = await manager._call_method(
+                "request_logical_slot",
+                {
+                    "run_id": "run_rpc_slots",
+                    "work_order_id": "wo_rpc_slots",
+                    "module_id": "module_b",
+                    "reason": "test",
+                },
+            )
+            wrong_owner = await manager._call_method(
+                "release_logical_slot",
+                {"slot_id": first["slot_id"], "run_id": "other_run", "reason": "wrong owner"},
+            )
+            released = await manager._call_method(
+                "release_logical_slot",
+                {"slot_id": first["slot_id"], "run_id": "run_rpc_slots", "reason": "done"},
+            )
+            third = await manager._call_method(
+                "request_logical_slot",
+                {
+                    "run_id": "run_rpc_slots",
+                    "work_order_id": "wo_rpc_slots",
+                    "module_id": "module_c",
+                    "reason": "test",
+                },
+            )
+
+            self.assertEqual(first["status"], "granted")
+            self.assertEqual(second["status"], "denied")
+            self.assertEqual(second["reason"], "global_parallel_limit")
+            self.assertEqual(wrong_owner["status"], "denied")
+            self.assertEqual(wrong_owner["reason"], "slot_owned_by_different_run")
+            self.assertEqual(released["status"], "released")
+            self.assertEqual(third["status"], "granted")
+
+        asyncio.run(scenario())
+
+    def test_minion_manager_client_wraps_logical_slot_rpc(self) -> None:
+        class FakeRpcClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict[str, Any]]] = []
+
+            async def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+                self.calls.append((method, dict(params or {})))
+                return {"ok": True, "method": method, "params": dict(params or {})}
+
+        fake = FakeRpcClient()
+        client = MinionManagerClient(runtime_root=self.root)
+        client._client = fake
+
+        request = client.request_logical_slot_sync(
+            run_id="run_client_slot",
+            work_order_id="wo_client_slot",
+            module_id="module_client",
+            reason="test client",
+        )
+        release = client.release_logical_slot_sync(
+            slot_id="slot_client",
+            run_id="run_client_slot",
+            reason="done",
+        )
+
+        self.assertEqual(request["method"], "request_logical_slot")
+        self.assertEqual(request["params"]["run_id"], "run_client_slot")
+        self.assertEqual(request["params"]["work_order_id"], "wo_client_slot")
+        self.assertEqual(request["params"]["resource"], "logical_minion_slot")
+        self.assertEqual(request["params"]["module_id"], "module_client")
+        self.assertEqual(release["method"], "release_logical_slot")
+        self.assertEqual(release["params"]["slot_id"], "slot_client")
+        self.assertEqual(fake.calls[0][0], "request_logical_slot")
+        self.assertEqual(fake.calls[1][0], "release_logical_slot")
+
     def test_step_runner_logical_coder_context_isolates_pack_state(self) -> None:
         manager = MinionManager(runtime_root=self.root, max_parallel_modules=2)
         parent_state = MinionRunState(
@@ -19310,8 +19394,35 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("delete_path", prompt)
         self.assertNotIn("op_exec_shell", pack.allowed_capabilities)
 
-    async def _start_manager(self):
-        manager = MinionManager(runtime_root=self.root)
+    def test_manager_logical_slot_rpc_round_trip_over_socket(self) -> None:
+        async def scenario() -> None:
+            manager, manager_task, client = await self._start_manager(max_parallel_modules=1)
+            _ = manager
+            try:
+                first = await client.request(
+                    "request_logical_slot",
+                    {"run_id": "run_socket_slot", "work_order_id": "wo_socket_slot", "module_id": "module_a"},
+                )
+                second = await client.request(
+                    "request_logical_slot",
+                    {"run_id": "run_socket_slot", "work_order_id": "wo_socket_slot", "module_id": "module_b"},
+                )
+                released = await client.request(
+                    "release_logical_slot",
+                    {"slot_id": first["slot_id"], "run_id": "run_socket_slot", "reason": "done"},
+                )
+            finally:
+                await self._shutdown_manager(client, manager_task)
+
+            self.assertEqual(first["status"], "granted")
+            self.assertEqual(second["status"], "denied")
+            self.assertEqual(second["reason"], "global_parallel_limit")
+            self.assertEqual(released["status"], "released")
+
+        asyncio.run(scenario())
+
+    async def _start_manager(self, **manager_kwargs):
+        manager = MinionManager(runtime_root=self.root, **manager_kwargs)
         manager_task = asyncio.create_task(manager.run())
         client = MinionManagerClient(runtime_root=self.root, request_timeout_seconds=3.0)
         for _ in range(80):

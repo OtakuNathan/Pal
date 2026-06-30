@@ -105,6 +105,36 @@ class MinionManagerClient:
     def finalize_work_order_sync(self, work_order_id: str, **params: Any) -> dict[str, Any]:
         return self.request_sync("finalize_work_order", {"work_order_id": work_order_id, **dict(params)})
 
+    def request_logical_slot_sync(
+        self,
+        *,
+        run_id: str,
+        work_order_id: str,
+        resource: str = "logical_minion_slot",
+        module_id: str = "",
+        reason: str = "",
+    ) -> dict[str, Any]:
+        return self.request_sync(
+            "request_logical_slot",
+            {
+                "run_id": run_id,
+                "work_order_id": work_order_id,
+                "resource": resource,
+                "module_id": module_id,
+                "reason": reason,
+            },
+        )
+
+    def release_logical_slot_sync(self, *, slot_id: str, run_id: str = "", reason: str = "") -> dict[str, Any]:
+        return self.request_sync(
+            "release_logical_slot",
+            {
+                "slot_id": slot_id,
+                "run_id": run_id,
+                "reason": reason,
+            },
+        )
+
     def shutdown_sync(self) -> dict[str, Any]:
         return self.request_sync("shutdown")
 
