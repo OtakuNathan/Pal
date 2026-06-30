@@ -130,17 +130,23 @@ languages = ["c", "cpp", "objc", "objcpp", "python", "javascript", "typescript",
 not_applicable_reason_field = "warning_clean_not_applicable_reason"
 command_examples = ["-Werror", "PYTHONWARNINGS=error python -m pytest", "python -W error -m compileall", "tsc --noEmit", "cargo clippy -- -D warnings", "eslint --max-warnings=0"]
 
-[execution_strategy.prepare]
+[execution_strategy.pre]
 kind = "git_worktree"
 
-[execution_strategy.repair_loop]
+[execution_strategy.in]
 kind = "checkpoint_repair"
 
-[execution_strategy.gate]
+[execution_strategy.post]
 kind = "configured_gates"
 
 [output_policy]
 milestone_completion = "op_minion_checkpoint_commit"
+
+[output_policy.workflow_next]
+artifact_type = "repo_changes"
+adapter = "none"
+default_next_profile = "none"
+allowed_next_profiles = ["none"]
 
 [metadata]
 builtin = true

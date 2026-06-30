@@ -127,13 +127,13 @@ languages = ["c", "cpp", "objc", "objcpp", "python", "javascript", "typescript",
 not_applicable_reason_field = "warning_clean_not_applicable_reason"
 command_examples = ["-Werror", "PYTHONWARNINGS=error python -m pytest", "python -W error -m compileall", "tsc --noEmit", "cargo clippy -- -D warnings", "eslint --max-warnings=0"]
 
-[execution_strategy.prepare]
+[execution_strategy.pre]
 kind = "read_only_repo"
 
-[execution_strategy.repair_loop]
+[execution_strategy.in]
 kind = "none"
 
-[execution_strategy.gate]
+[execution_strategy.post]
 kind = "review_gate"
 
 [output_policy]

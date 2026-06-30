@@ -38,6 +38,12 @@ from pal.minion.prompt import TaskingPromptFragmentProvider
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.source import MinionControlEventHandler, MinionEventSource
 from pal.minion.validation import MinionWorkOrderValidationError
+from pal.minion.workflow import (
+    DEFAULT_ARCHITECT_PROFILE,
+    append_workflow_step,
+    canonical_profile_ref,
+    split_profile_ref,
+)
 from pal.minion.work_order import build_planner_work_order, new_work_id, prompt_view_from_metadata
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -519,16 +525,16 @@ class MinionManagerProvider:
         family="minion",
         action_name="dispatch_workflow",
         description=(
-            "Normal public entrypoint for Minion delegation. Pass user intent and workspace facts; the manager dispatches the "
-            "architect, runs architecture plan review, waits for or applies plan acceptance according to interaction_mode, and then "
-            "dispatches coder/reviewer module work. Do not call lower-level plan/spawn capabilities. "
-            "requirements_review=required first dispatches the requirements planner to produce requirements.md for user review; "
-            "requirements_review=skip sends a manager-generated requirements brief directly to the internal architect. "
-            "architecture_mode controls architect granularity, not whether a plan exists: coder is never dispatched without an "
-            "accepted canonical architecture plan. auto conservatively chooses micro/full from workspace kind, goal scope, repo "
-            "scan hints, and explicit user hints. micro asks the architect for a small canonical plan, normally one implementation "
-            "module plus a final verification join, with a prelude only when real shared setup/contracts are needed. full asks for a complete multi-module plan. If micro scope is unsafe, the "
-            "architect must escalate instead of weakening contracts. "
+            "Normal public entrypoint for Minion delegation. Pal's main agent owns requirements shaping; pass the prepared user "
+            "intent, requirements_brief, and workspace facts here. The manager dispatches the initial profile step, applies that "
+            "profile's post/gate policy, and follows profile-declared workflow_next instead of hard-coding profile transitions. "
+            "By default the initial profile is software_engineering.architect, whose reviewed implementation_plan next step is "
+            "software_engineering.coder. Non-software profiles can set workflow_next=none and finish as a single step. Do not call "
+            "lower-level plan/spawn capabilities. "
+            "architecture_mode only affects the default software architect step: auto conservatively chooses micro/full from workspace "
+            "kind, goal scope, repo scan hints, and explicit user hints. micro asks the architect for a small canonical plan, normally "
+            "one implementation module plus a final verification join, with a prelude only when real shared setup/contracts are needed. "
+            "full asks for a complete multi-module plan. If micro scope is unsafe, the architect must escalate instead of weakening contracts. "
             "interaction_mode controls user confirmation: interactive asks for plan acceptance and disables module auto-advance; "
             "auto_after_plan asks for plan acceptance, then auto-advances modules when gates pass; autonomous auto-accepts reviewed "
             "plans and asks only for failures, permissions, destructive/high-risk actions, or missing user-owned facts. "
@@ -550,6 +556,13 @@ class MinionManagerProvider:
             "type": "object",
             "properties": {
                 "goal": {"type": "string", "description": "User-visible outcome Minion should plan and execute."},
+                "requirements_brief": {
+                    "type": "object",
+                    "description": (
+                        "Optional requirements brief prepared by Pal's main agent. Use this for scope, acceptance criteria, constraints, "
+                        "open questions already resolved, and user preferences. Minion no longer runs a separate requirements planner."
+                    ),
+                },
                 "workspace": {
                     "type": "object",
                     "description": (
@@ -566,15 +579,6 @@ class MinionManagerProvider:
                         "languages": {"type": "array", "items": {"type": "string"}},
                     },
                 },
-                "requirements_review": {
-                    "type": "string",
-                    "enum": ["skip", "required"],
-                    "default": "skip",
-                    "description": (
-                        "skip directly dispatches the internal architect with a manager-generated requirements brief. required first "
-                        "runs the requirements planner and asks the user to accept/edit/reject requirements.md before architecture."
-                    ),
-                },
                 "architecture_mode": {
                     "type": "string",
                     "enum": ["auto", "micro", "full"],
@@ -582,6 +586,20 @@ class MinionManagerProvider:
                     "description": (
                         "auto lets manager choose micro/full conservatively. micro still uses architect and must produce a canonical "
                         "plan with acceptance criteria and test strategy. full uses architect for a complete multi-module plan."
+                    ),
+                },
+                "profile_group": {
+                    "type": "string",
+                    "description": (
+                        "Optional initial profile group. Omit for software_engineering. Use with profile_name for non-software steps, "
+                        "for example lifestyle + nutritionist."
+                    ),
+                },
+                "profile_name": {
+                    "type": "string",
+                    "description": (
+                        "Optional initial profile name. Defaults to architect. The profile's output_policy.workflow_next controls the "
+                        "next step; the minion itself does not spawn other minions."
                     ),
                 },
                 "interaction_mode": {
@@ -636,10 +654,10 @@ class MinionManagerProvider:
                 "minion_id": str(result.get("minion_id") or ""),
                 "run": dict(result),
                 "workspace_summary": workflow_payload["workspace_summary"],
-                "requirements_review": workflow_payload["requirements_review"],
                 "architecture_mode": workflow_payload["architecture_mode"],
                 "requested_architecture_mode": workflow_payload["requested_architecture_mode"],
                 "interaction_mode": workflow_payload["interaction_mode"],
+                "initial_profile": workflow_payload["initial_profile"],
                 "next_action": workflow_payload["next_action"],
             }
             return _capability_from_rpc("minion workflow dispatched", payload)
@@ -754,7 +772,7 @@ class MinionManagerProvider:
                 "proposed_work_order_id": {"type": "string"},
                 "minion_profile": {
                     "type": "string",
-                    "description": "Registered minion canonical_profile_id, such as software_engineering.architect or software_engineering.planner. Discover with intro_minion_profile_list/read before use.",
+                    "description": "Registered minion canonical_profile_id, such as software_engineering.architect, software_engineering.writer, or lifestyle.nutritionist. Discover with intro_minion_profile_list/read before use.",
                 },
                 "metadata": {"type": "object"},
             },
@@ -2093,12 +2111,19 @@ def _workflow_entry_pack_from_args(args: dict[str, Any]) -> tuple[TaskContextPac
     if not goal:
         raise MinionWorkOrderValidationError("goal is required", field="goal")
     workspace = _normalize_workflow_workspace(dict(args.get("workspace") or {}))
-    requirements_review = str(args.get("requirements_review") or "skip").strip().lower() or "skip"
-    if requirements_review not in {"skip", "required"}:
+    requirements_review = str(args.get("requirements_review") or "").strip().lower()
+    if requirements_review and requirements_review != "skip":
         raise MinionWorkOrderValidationError(
-            "requirements_review must be skip or required",
+            "requirements_review planner mode has been removed; Pal must prepare requirements_brief before dispatch_workflow",
             field="requirements_review",
         )
+    initial_profile = canonical_profile_ref(
+        profile_group=str(args.get("profile_group") or ""),
+        profile_name=str(args.get("profile_name") or ""),
+        profile=DEFAULT_ARCHITECT_PROFILE if not (args.get("profile_group") or args.get("profile_name")) else "",
+    )
+    initial_group, initial_name = split_profile_ref(initial_profile)
+    is_architect = initial_profile == DEFAULT_ARCHITECT_PROFILE
     requested_architecture_mode = str(args.get("architecture_mode") or "auto").strip().lower() or "auto"
     if requested_architecture_mode not in {"auto", "micro", "full"}:
         raise MinionWorkOrderValidationError(
@@ -2118,9 +2143,8 @@ def _workflow_entry_pack_from_args(args: dict[str, Any]) -> tuple[TaskContextPac
     title = str(args.get("title") or _first_summary_sentence(goal, limit=120) or goal).strip()
     workflow = {
         "workflow_id": workflow_id,
-        "status": "requirements_review" if requirements_review == "required" else "architecting",
+        "status": "running",
         "entrypoint": "op_minion_dispatch_workflow",
-        "requirements_review": requirements_review,
         "requested_architecture_mode": requested_architecture_mode,
         "architecture_mode": architecture_mode,
         "interaction_mode": interaction_mode,
@@ -2128,128 +2152,109 @@ def _workflow_entry_pack_from_args(args: dict[str, Any]) -> tuple[TaskContextPac
         "auto_accept_on_review_pass": interaction_mode == "autonomous",
         "created_at": utc_now(),
     }
-    approval_policy = dict(args.get("approval_policy") or {}) if isinstance(args.get("approval_policy"), dict) else {}
-    if requirements_review == "required":
-        metadata = {
-            "task_id": task_id,
-            "task_title": title,
-            "work_order_title": f"Requirements: {title}",
-            "workflow": workflow,
-            "requirements_review": {
-                "status": "drafting",
-                "interaction_mode": interaction_mode,
-                "architecture_mode": architecture_mode,
-                "requested_architecture_mode": requested_architecture_mode,
-            },
-            "architecture_mode": architecture_mode,
-            "requested_architecture_mode": requested_architecture_mode,
-            "interaction_mode": interaction_mode,
-            "milestones": [
-                {
-                    "milestone_id": "produce_requirements",
-                    "title": "Produce requirements brief",
-                    "summary": "Inspect the workspace as needed and write requirements.md for human review.",
-                    "acceptance": [
-                        "requirements.md is written as the primary artifact.",
-                        "The document states goal, scope, non-goals, acceptance criteria, constraints, open questions, and suggested implementation direction.",
-                        "The document avoids internal module DAGs and implementation work orders.",
-                    ],
-                }
-            ],
-        }
-        if approval_policy:
-            metadata["approval_policy"] = approval_policy
-        pack = TaskContextPack.from_dict(
-            {
-                "work_order_id": work_order_id,
-                "goal": goal,
-                "instruction": _requirements_workflow_instruction(),
-                "acceptance_criteria": [
-                    "Write requirements.md as a Markdown artifact for human review.",
-                    "Capture user-visible success criteria and unresolved user-owned questions.",
-                    "Do not produce a structured PlanArtifact or implementation module DAG.",
-                ],
-                "workspace": workspace,
-                "profile_group": "software_engineering",
-                "profile_name": "planner",
-                "metadata": metadata,
-            }
-        )
-        return pack, {
-            "workflow_id": workflow_id,
-            "requirements_review": requirements_review,
-            "requested_architecture_mode": requested_architecture_mode,
-            "architecture_mode": architecture_mode,
-            "interaction_mode": interaction_mode,
-            "workspace_summary": _workflow_workspace_summary(workspace),
-            "next_action": "requirements_planner_running",
-        }
-    planner_work_order = build_planner_work_order(goal=goal, task_id=task_id, work_order_id=work_order_id)
-    planner_work_order["role"] = "architect"
-    _apply_architecture_mode_requirements(
-        planner_work_order,
-        architecture_mode=architecture_mode,
-        requested_architecture_mode=requested_architecture_mode,
+    workflow = append_workflow_step(
+        workflow,
+        profile=initial_profile,
+        input_artifact=_manager_requirements_brief_from_args(goal=goal, workspace=workspace, args=args),
     )
-    requirements_brief = _manager_requirements_brief(goal=goal, workspace=workspace)
-    plan_review = {
-        "interaction_mode": interaction_mode,
-        "auto_accept_on_review_pass": interaction_mode == "autonomous",
-        "auto_advance_modules": interaction_mode != "interactive",
-    }
-    metadata = {
+    approval_policy = dict(args.get("approval_policy") or {}) if isinstance(args.get("approval_policy"), dict) else {}
+    requirements_brief = _manager_requirements_brief_from_args(goal=goal, workspace=workspace, args=args)
+    metadata: dict[str, Any] = {
         "task_id": task_id,
         "task_title": title,
-        "work_order_title": f"Plan: {title}",
+        "work_order_title": f"{'Plan' if is_architect else 'Run'}: {title}",
         "workflow": workflow,
-        "planner_work_order": planner_work_order,
         "requirements_brief": requirements_brief,
         "architecture_mode": architecture_mode,
         "requested_architecture_mode": requested_architecture_mode,
         "interaction_mode": interaction_mode,
-        "plan_review": plan_review,
-        "milestones": [
+    }
+    if is_architect:
+        planner_work_order = build_planner_work_order(goal=goal, task_id=task_id, work_order_id=work_order_id)
+        planner_work_order["role"] = "architect"
+        _apply_architecture_mode_requirements(
+            planner_work_order,
+            architecture_mode=architecture_mode,
+            requested_architecture_mode=requested_architecture_mode,
+        )
+        plan_review = {
+            "interaction_mode": interaction_mode,
+            "auto_accept_on_review_pass": interaction_mode == "autonomous",
+            "auto_advance_modules": interaction_mode != "interactive",
+        }
+        metadata.update(
             {
-                "milestone_id": "produce_architecture",
-                "title": "Produce reviewed architecture plan",
-                "summary": "Inspect the workspace as needed and submit a dispatchable plan draft for plan acceptance review.",
-                "acceptance": [
-                    "Architect submits a canonical dispatchable plan draft.",
-                    "Plan includes acceptance criteria, module contracts, and test strategy.",
-                    "Architecture mode constraints are either satisfied or escalated with a concrete reason.",
+                "planner_work_order": planner_work_order,
+                "architect_work_order": planner_work_order,
+                "plan_review": plan_review,
+                "milestones": [
+                    {
+                        "milestone_id": "produce_architecture",
+                        "title": "Produce reviewed architecture plan",
+                        "summary": "Inspect the workspace as needed and submit a dispatchable plan draft for plan acceptance review.",
+                        "acceptance": [
+                            "Architect submits a canonical dispatchable plan draft.",
+                            "Plan includes acceptance criteria, module contracts, and test strategy.",
+                            "Architecture mode constraints are either satisfied or escalated with a concrete reason.",
+                        ],
+                    }
                 ],
             }
-        ],
-    }
+        )
+    else:
+        metadata["milestones"] = [
+            {
+                "milestone_id": "main",
+                "title": f"Run {initial_profile}",
+                "summary": "Produce the profile's requested artifact from the supplied goal, requirements brief, and workspace facts.",
+                "acceptance": [
+                    "The profile output contract is satisfied.",
+                    "The result is written through artifact tools when the profile requests an artifact deliverable.",
+                    "No downstream minion is spawned by the executor; workflow continuation is manager-owned.",
+                ],
+            }
+        ]
     if approval_policy:
         metadata["approval_policy"] = approval_policy
     pack = TaskContextPack.from_dict(
         {
             "work_order_id": work_order_id,
             "goal": goal,
-            "instruction": _architect_workflow_instruction(
-                architecture_mode=architecture_mode,
-                requested_architecture_mode=requested_architecture_mode,
+            "instruction": (
+                _architect_workflow_instruction(
+                    architecture_mode=architecture_mode,
+                    requested_architecture_mode=requested_architecture_mode,
+                )
+                if is_architect
+                else _single_step_workflow_instruction(initial_profile=initial_profile)
             ),
-            "acceptance_criteria": [
-                "Submit a dispatchable plan draft through the plan builder tools.",
-                "Include module acceptance criteria and test strategy in the plan.",
-                "Do not implement code in the architect run.",
-            ],
+            "acceptance_criteria": (
+                [
+                    "Submit a dispatchable plan draft through the plan builder tools.",
+                    "Include module acceptance criteria and test strategy in the plan.",
+                    "Do not implement code in the architect run.",
+                ]
+                if is_architect
+                else [
+                    "Satisfy the selected profile output contract.",
+                    "Use the supplied requirements_brief as the task scope.",
+                    "Do not spawn or request downstream minions from inside the executor.",
+                ]
+            ),
             "workspace": workspace,
-            "profile_group": "software_engineering",
-            "profile_name": "architect",
+            "profile_group": initial_group or "general",
+            "profile_name": initial_name,
             "metadata": metadata,
         }
     )
     return pack, {
         "workflow_id": workflow_id,
-        "requirements_review": requirements_review,
         "requested_architecture_mode": requested_architecture_mode,
         "architecture_mode": architecture_mode,
         "interaction_mode": interaction_mode,
+        "initial_profile": initial_profile,
         "workspace_summary": _workflow_workspace_summary(workspace),
-        "next_action": "architect_running",
+        "next_action": "step_running",
     }
 
 
@@ -2382,6 +2387,15 @@ def _architect_workflow_instruction(*, architecture_mode: str, requested_archite
     )
 
 
+def _single_step_workflow_instruction(*, initial_profile: str) -> str:
+    return (
+        f"Run the {initial_profile} workflow step from the supplied goal, requirements_brief, and workspace facts. "
+        "You are a bounded executor, not a scheduler: do not spawn minions, do not dispatch follow-up work, and do not invent "
+        "workflow transitions. Produce the profile's contracted artifact or a concrete blocker; Pal's manager owns post-step "
+        "validation and next-step routing."
+    )
+
+
 def _requirements_workflow_instruction() -> str:
     return (
         "Produce requirements.md for human review. Capture what should be built, success criteria, constraints, "
@@ -2390,13 +2404,31 @@ def _requirements_workflow_instruction() -> str:
     )
 
 
+def _manager_requirements_brief_from_args(*, goal: str, workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+    supplied = args.get("requirements_brief")
+    if isinstance(supplied, dict):
+        brief = dict(supplied)
+        brief.setdefault("source", "pal_main_agent")
+        brief.setdefault("goal", str(goal or "").strip())
+        brief.setdefault("workspace", _workflow_workspace_summary(workspace))
+        return brief
+    if isinstance(supplied, str) and supplied.strip():
+        return {
+            "source": "pal_main_agent",
+            "goal": str(goal or "").strip(),
+            "summary": supplied.strip(),
+            "workspace": _workflow_workspace_summary(workspace),
+        }
+    return _manager_requirements_brief(goal=goal, workspace=workspace)
+
+
 def _manager_requirements_brief(*, goal: str, workspace: dict[str, Any]) -> dict[str, Any]:
     return {
         "source": "manager_generated",
         "goal": str(goal or "").strip(),
         "workspace": _workflow_workspace_summary(workspace),
         "notes": [
-            "Requirements review was skipped; architect should treat the user goal and workspace facts as the requirements brief.",
+            "Pal main agent did not supply a separate requirements_brief; treat the user goal and workspace facts as the brief.",
             "Ask only for user-owned blockers that cannot be resolved from repository inspection.",
         ],
     }

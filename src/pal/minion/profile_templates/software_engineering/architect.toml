@@ -140,19 +140,25 @@ requires_capability_evidence = true
 [gate_policy]
 gates = ["plan_acceptance"]
 
-[execution_strategy.prepare]
+[execution_strategy.pre]
 kind = "read_only_repo"
 
-[execution_strategy.repair_loop]
+[execution_strategy.in]
 kind = "plan_revision"
 
-[execution_strategy.gate]
+[execution_strategy.post]
 kind = "plan_acceptance"
 
 [output_policy]
 requires_plan_artifact = true
 primary_artifact = "plan.json"
 allowed_output_types = ["FinalPlanArtifact", "PlanDraft", "AskUserQuestion"]
+
+[output_policy.workflow_next]
+artifact_type = "implementation_plan"
+adapter = "accepted_plan"
+default_next_profile = "software_engineering.coder"
+allowed_next_profiles = ["software_engineering.coder", "none"]
 
 [metadata]
 builtin = true

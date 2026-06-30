@@ -61,14 +61,24 @@ write_baseline_config = false
 evidence = "text_deliverable"
 requires_capability_evidence = true
 
-[execution_strategy.prepare]
+[execution_strategy.pre]
 kind = "git_worktree"
 
-[execution_strategy.repair_loop]
+[execution_strategy.in]
 kind = "none"
 
-[execution_strategy.gate]
+[execution_strategy.post]
 kind = "none"
+
+[output_policy]
+primary_artifact = "document.md"
+allowed_output_types = ["MarkdownDocument", "TextDeliverable"]
+
+[output_policy.workflow_next]
+artifact_type = "written_artifact"
+adapter = "none"
+default_next_profile = "none"
+allowed_next_profiles = ["none"]
 
 [metadata]
 builtin = true

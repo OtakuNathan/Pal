@@ -38,6 +38,7 @@ from pal.minion.work_order import (
 )
 from pal.minion.turns import build_minion_turn_from_pack
 from pal.minion.validation import normalize_milestones
+from pal.minion.workflow import NONE_PROFILE, update_current_workflow_step
 from pal.shared import TaskContextPack
 from pal.shared.text_search import jieba_fts_text
 
@@ -1164,6 +1165,21 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 )
                 parent_metadata["workspace_cleanup"] = cleanup
                 plan_execution["workspace_cleanup"] = cleanup
+                workflow = dict(parent_metadata.get("workflow") or {})
+                if workflow:
+                    output_artifact = {
+                        "plan_ref": dict(parent_metadata.get("plan_ref") or {}),
+                        "module_outputs": [dict(value) for value in dict(dag.get("module_outputs") or {}).values() if isinstance(value, dict)],
+                        "workspace_cleanup": cleanup,
+                    }
+                    workflow = update_current_workflow_step(
+                        workflow,
+                        status="completed",
+                        output_artifact=output_artifact,
+                        next_profile=NONE_PROFILE,
+                    )
+                    workflow.update({"status": "completed", "updated_at": utc_now()})
+                    parent_metadata["workflow"] = workflow
             else:
                 parent_status = "active"
             parent_metadata["plan_execution"] = plan_execution
@@ -1645,7 +1661,13 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 (_json(metadata), utc_now(), str(work_order_id)),
             )
 
-    def merge_work_order_metadata(self, work_order_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    def merge_work_order_metadata(
+        self,
+        work_order_id: str,
+        updates: dict[str, Any],
+        *,
+        work_order_status: str | None = None,
+    ) -> dict[str, Any]:
         self.ensure_schema()
         normalized = str(work_order_id or "").strip()
         if not normalized:
@@ -1661,6 +1683,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "UPDATE minion_work_orders SET metadata_json = ?, updated_at = ? WHERE work_order_id = ?",
                 (_json(metadata), utc_now(), normalized),
             )
+            if work_order_status:
+                self._update_work_order_status(db, normalized, str(work_order_status))
         return {"status": "ok", "work_order_id": normalized, "metadata": metadata}
 
     def create_work_order_draft(self, payload: dict[str, Any]) -> dict[str, Any]:

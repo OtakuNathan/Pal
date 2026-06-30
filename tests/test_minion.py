@@ -4684,12 +4684,15 @@ class MinionContractTests(unittest.TestCase):
         registry = MinionProfileRegistry()
         profiles = {profile.canonical_profile_id: profile for profile in registry.list_profiles()}
 
-        self.assertEqual(profiles["generic"].execution_strategy["prepare"]["kind"], "artifact_workspace")
-        self.assertEqual(profiles["software_engineering.planner"].execution_strategy["prepare"]["kind"], "read_only_repo")
-        self.assertEqual(profiles["software_engineering.architect"].execution_strategy["gate"]["kind"], "plan_acceptance")
-        self.assertEqual(profiles["software_engineering.coder"].execution_strategy["prepare"]["kind"], "git_worktree")
-        self.assertEqual(profiles["software_engineering.coder"].execution_strategy["repair_loop"]["kind"], "checkpoint_repair")
-        self.assertEqual(profiles["software_engineering.reviewer"].execution_strategy["gate"]["kind"], "review_gate")
+        self.assertEqual(profiles["generic"].execution_strategy["pre"]["kind"], "artifact_workspace")
+        self.assertEqual(profiles["software_engineering.architect"].execution_strategy["post"]["kind"], "plan_acceptance")
+        self.assertEqual(
+            profiles["software_engineering.architect"].output_policy["workflow_next"]["default_next_profile"],
+            "software_engineering.coder",
+        )
+        self.assertEqual(profiles["software_engineering.coder"].execution_strategy["pre"]["kind"], "git_worktree")
+        self.assertEqual(profiles["software_engineering.coder"].execution_strategy["in"]["kind"], "checkpoint_repair")
+        self.assertEqual(profiles["software_engineering.reviewer"].execution_strategy["post"]["kind"], "review_gate")
 
         coder = registry.resolve_pack(TaskContextPack(work_order_id="wo_strategy_coder", goal="code"), requested_profile="software_engineering.coder")
         generic = registry.resolve_pack(TaskContextPack(work_order_id="wo_strategy_generic", goal="report"), requested_profile="generic")
@@ -4913,7 +4916,7 @@ class MinionContractTests(unittest.TestCase):
                 profile.workspace_environment_policy,
                 {"runtime": False, "lsp": True, "write_baseline_config": False},
             )
-            self.assertIsNone(registry.get("planner"))
+            self.assertEqual(registry.get("planner"), profile)
 
     def test_runtime_profile_file_overrides_builtin_profile(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_profile_registry_test_") as tmp:
@@ -9344,6 +9347,248 @@ class MinionManagerTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_dispatch_accepted_plan_uses_profile_declared_workflow_next(self) -> None:
+        class FakeManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started: list[MinionRunState] = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                self.started.append(state)
+
+        async def scenario() -> None:
+            source = self.root / "source_repo"
+            _init_git_source_repo(source, {"README.md": "source\n"})
+            manager = FakeManager(runtime_root=self.root, max_parallel_modules=2)
+            registry = MinionProfileRegistry(runtime_root=self.root)
+            architect_pack = registry.resolve_pack(
+                TaskContextPack(
+                    work_order_id="wo_workflow_next",
+                    goal="Implement profile-declared workflow next.",
+                    workspace={"source_repo": str(source), "lsp_prewarm_disabled": True},
+                    metadata={
+                        "task_id": "task_workflow_next",
+                        "workflow": {
+                            "workflow_id": "wf_next_test",
+                            "entrypoint": "op_minion_dispatch_workflow",
+                            "status": "running",
+                            "current_step_id": "step_0",
+                            "current_profile": "software_engineering.architect",
+                            "steps": [
+                                {
+                                    "step_id": "step_0",
+                                    "profile": "software_engineering.architect",
+                                    "status": "running",
+                                }
+                            ],
+                            "auto_advance_modules": True,
+                        },
+                        "plan_review": {"interaction_mode": "autonomous", "auto_accept_on_review_pass": True},
+                        "milestones": ["Produce architecture"],
+                        "lsp_prewarm_disabled": True,
+                    },
+                    minion_profile="software_engineering.architect",
+                ),
+                requested_profile="software_engineering.architect",
+            )
+            await manager.spawn(architect_pack.to_dict())
+            plan = _dispatchable_plan_payload(
+                plan_id="plan_workflow_next",
+                task_id="task_workflow_next",
+                modules=[_plan_module("implementation", title="Implementation")],
+            )
+            submitted = manager.tasking_repository.submit_plan_ref(plan)
+            accepted = manager.tasking_repository.accept_plan_ref(
+                submitted["plan_ref"],
+                reason="test accepts reviewed architect plan",
+                human_override={
+                    "reason": "test",
+                    "actor": "test",
+                    "source": "control_action",
+                    "action_kind": "minion_plan_accept_override",
+                },
+            )
+
+            dispatched = await manager.dispatch_accepted_plan(
+                {"work_order_id": "wo_workflow_next", "plan_ref": accepted["plan_ref"]}
+            )
+
+            self.assertEqual(dispatched["status"], "dispatched")
+            self.assertEqual(dispatched["next_profile"], "software_engineering.coder")
+            snapshot = manager.tasking_repository.read_work_order("wo_workflow_next")
+            metadata = snapshot["work_order"]["metadata"]
+            workflow = metadata["workflow"]
+            self.assertEqual(workflow["steps"][0]["next_profile"], "software_engineering.coder")
+            self.assertEqual(workflow["steps"][1]["profile"], "software_engineering.coder")
+            self.assertEqual(metadata["dispatch_profile_group"], "software_engineering")
+            self.assertEqual(metadata["dispatch_profile_name"], "coder")
+
+        asyncio.run(scenario())
+
+    def test_single_step_workflow_terminal_post_reads_repository_metadata(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root)
+            registry = MinionProfileRegistry(runtime_root=self.root)
+            workflow = {
+                "workflow_id": "wf_single_step",
+                "entrypoint": "op_minion_dispatch_workflow",
+                "status": "running",
+                "current_step_id": "step_0",
+                "current_profile": "general.generic",
+                "steps": [{"step_id": "step_0", "profile": "general.generic", "status": "running"}],
+            }
+            pack = registry.resolve_pack(
+                TaskContextPack(
+                    work_order_id="wo_single_step_workflow",
+                    goal="Finish one text deliverable.",
+                    instruction="Return the deliverable.",
+                    metadata={"workflow": workflow},
+                    profile_group="general",
+                    profile_name="generic",
+                    minion_profile="general.generic",
+                ),
+                requested_profile="general.generic",
+            )
+            prepared = manager.tasking_repository.prepare_pack_for_spawn(pack)
+            runner_pack = TaskContextPack.from_dict({**prepared.to_dict(), "metadata": {}})
+            state = MinionRunState(minion_id="minion_single", run_id="run_single", pack=runner_pack)
+            event = {
+                "event_kind": "terminal",
+                "minion_id": state.minion_id,
+                "run_id": state.run_id,
+                "work_order_id": state.pack.work_order_id,
+                "minion_profile": state.pack.minion_profile,
+                "payload": {
+                    "status": "completed",
+                    "summary": "single step done",
+                    "primary_artifact": {"kind": "file", "path": "/tmp/single.txt", "relative_path": "single.txt"},
+                },
+                "created_at": utc_now(),
+            }
+            manager.tasking_repository.record_minion_event(event)
+
+            await manager._handle_workflow_terminal_post_async(state, event)
+
+            snapshot = manager.tasking_repository.read_work_order("wo_single_step_workflow")
+            self.assertEqual(snapshot["work_order"]["status"], "completed")
+            stored = snapshot["work_order"]["metadata"]["workflow"]
+            self.assertEqual(stored["status"], "completed")
+            self.assertEqual(stored["steps"][0]["status"], "completed")
+            self.assertEqual(stored["steps"][0]["next_profile"], "none")
+            self.assertEqual(stored["steps"][0]["output_artifact"]["primary_artifact"]["relative_path"], "single.txt")
+
+        asyncio.run(scenario())
+
+    def test_architect_workflow_terminal_post_keeps_parent_active_for_plan_gate(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root)
+            registry = MinionProfileRegistry(runtime_root=self.root)
+            workflow = {
+                "workflow_id": "wf_architect_gate",
+                "entrypoint": "op_minion_dispatch_workflow",
+                "status": "running",
+                "current_step_id": "step_0",
+                "current_profile": "software_engineering.architect",
+                "steps": [{"step_id": "step_0", "profile": "software_engineering.architect", "status": "running"}],
+            }
+            pack = registry.resolve_pack(
+                TaskContextPack(
+                    work_order_id="wo_architect_gate",
+                    goal="Plan a tiny project.",
+                    instruction="Produce plan.json.",
+                    metadata={"workflow": workflow},
+                    profile_group="software_engineering",
+                    profile_name="architect",
+                    minion_profile="software_engineering.architect",
+                ),
+                requested_profile="software_engineering.architect",
+            )
+            prepared = manager.tasking_repository.prepare_pack_for_spawn(pack)
+            runner_pack = TaskContextPack.from_dict({**prepared.to_dict(), "metadata": {}})
+            state = MinionRunState(minion_id="minion_architect", run_id="run_architect", pack=runner_pack)
+            event = {
+                "event_kind": "terminal",
+                "minion_id": state.minion_id,
+                "run_id": state.run_id,
+                "work_order_id": state.pack.work_order_id,
+                "minion_profile": state.pack.minion_profile,
+                "payload": {
+                    "status": "completed",
+                    "summary": "plan submitted",
+                    "primary_artifact": {"kind": "file", "path": "/tmp/plan.json", "relative_path": "plan.json"},
+                },
+                "created_at": utc_now(),
+            }
+            manager.tasking_repository.record_minion_event(event)
+
+            await manager._handle_workflow_terminal_post_async(state, event)
+
+            snapshot = manager.tasking_repository.read_work_order("wo_architect_gate")
+            self.assertEqual(snapshot["work_order"]["status"], "active")
+            stored = snapshot["work_order"]["metadata"]["workflow"]
+            self.assertEqual(stored["status"], "post_gate_pending")
+            self.assertEqual(stored["post_gate"], "plan_acceptance")
+            self.assertEqual(stored["steps"][0]["status"], "post_gate_pending")
+            self.assertEqual(stored["steps"][0]["next_profile"], "software_engineering.coder")
+
+        asyncio.run(scenario())
+
+    def test_logical_slots_share_global_parallel_limit(self) -> None:
+        manager = MinionManager(runtime_root=self.root, max_parallel_modules=1)
+        state = MinionRunState(
+            minion_id="minion_slots",
+            run_id="run_slots",
+            pack=TaskContextPack(work_order_id="wo_slots", goal="slot test"),
+        )
+
+        first = manager._request_logical_slot(state, resource="logical_minion_slot", module_id="a")
+        second = manager._request_logical_slot(state, resource="logical_minion_slot", module_id="b")
+        released = manager._release_logical_slot(first["slot_id"], run_id=state.run_id, reason="done")
+        third = manager._request_logical_slot(state, resource="logical_minion_slot", module_id="c")
+
+        self.assertEqual(first["status"], "granted")
+        self.assertEqual(second["status"], "denied")
+        self.assertEqual(second["reason"], "global_parallel_limit")
+        self.assertEqual(released["status"], "released")
+        self.assertEqual(third["status"], "granted")
+
+    def test_continue_work_order_releases_running_module_when_spawn_fails(self) -> None:
+        class FailingSpawnManager(MinionManager):
+            async def spawn(self, pack_payload: dict[str, Any]) -> dict[str, Any]:
+                _ = pack_payload
+                raise RuntimeError("spawn boom")
+
+        async def scenario() -> None:
+            manager = FailingSpawnManager(runtime_root=self.root, max_parallel_modules=2)
+            module = _plan_module("implementation", title="Implementation")
+            plan = _dispatchable_plan_payload(plan_id="plan_spawn_failure", task_id="task_spawn_failure", modules=[module])
+            parent = manager.tasking_repository.build_plan_parent_pack_from_plan(
+                plan,
+                work_order_id="wo_spawn_failure",
+                workspace={"kind": "new_project", "project_name": "spawn_failure", "primary_language": "python"},
+                metadata={"task_id": "task_spawn_failure"},
+            )
+            manager.tasking_repository.prepare_pack_for_spawn(parent)
+
+            result = await manager.continue_work_order("wo_spawn_failure")
+
+            self.assertEqual(result["status"], "spawn_failed")
+            self.assertEqual(result["failure_count"], 1)
+            self.assertEqual(result["active_module_count"], 0)
+            self.assertEqual(manager.tasking_repository.running_plan_module_child_work_order_ids(), [])
+            snapshot = manager.tasking_repository.read_work_order("wo_spawn_failure")
+            plan_execution = snapshot["work_order"]["metadata"]["plan_execution"]
+            self.assertEqual(plan_execution["status"], "awaiting_continue")
+            self.assertEqual(plan_execution["active_child_work_order_ids"], [])
+            dag = plan_execution["module_dag"]
+            failed_module_id = result["failures"][0]["module_id"]
+            self.assertEqual(dag["module_status"][failed_module_id], "ready")
+            self.assertIn(failed_module_id, dag["ready_modules"])
+            self.assertEqual(dag["running_modules"], {})
+
+        asyncio.run(scenario())
 
     def test_workspace_file_tools_use_relative_paths_and_cache_safety(self) -> None:
         async def scenario() -> None:
@@ -18964,9 +19209,9 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(listed.status, "ok")
                 profile_refs = {(item["profile_group"], item["profile_name"]) for item in listed.structured["profiles"]}
                 self.assertIn(("general", "generic"), profile_refs)
-                self.assertIn(("software_engineering", "planner"), profile_refs)
                 self.assertIn(("software_engineering", "architect"), profile_refs)
                 self.assertIn(("software_engineering", "coder"), profile_refs)
+                self.assertNotIn(("software_engineering", "planner"), profile_refs)
                 self.assertNotIn(("general", "architect"), profile_refs)
                 for item in listed.structured["profiles"]:
                     self.assertEqual(set(item), {"profile_group", "profile_name", "description_summary"})
@@ -18980,11 +19225,6 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(architect.structured["workspace_policy"]["mode"], "read_only_repo")
                 self.assertIn("structured planartifact", architect.structured["identity_fragment"].lower())
 
-                planner = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_read", args={"profile_id": "software_engineering.planner"}))
-                self.assertEqual(planner.status, "ok")
-                self.assertIn("requirements markdown", planner.structured["identity_fragment"].lower())
-                self.assertFalse(planner.structured["output_policy"].get("requires_plan_artifact", False))
-
                 read = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_read", args={"profile_id": "software_engineering.reviewer"}))
                 self.assertEqual(read.status, "ok")
                 self.assertEqual(read.structured["profile_id"], "reviewer")
@@ -18993,18 +19233,18 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIsNotNone(workflow_spec)
                 assert workflow_spec is not None
                 self.assertIn("Normal public entrypoint", workflow_spec["description"])
-                self.assertIn("coder is never dispatched without an accepted", workflow_spec["description"])
+                self.assertIn("profile-declared workflow_next", workflow_spec["description"])
                 self.assertIn("interaction_mode controls user confirmation", workflow_spec["description"])
                 workflow_props = workflow_spec["parameters_schema"]["properties"]
                 self.assertIn("goal", workflow_props)
                 self.assertIn("workspace", workflow_props)
-                self.assertIn("requirements_review", workflow_props)
+                self.assertIn("requirements_brief", workflow_props)
                 self.assertIn("architecture_mode", workflow_props)
                 self.assertNotIn("plan_mode", workflow_props)
                 self.assertIn("interaction_mode", workflow_props)
                 self.assertNotIn("plan_ref", workflow_props)
-                self.assertNotIn("profile_group", workflow_props)
-                self.assertNotIn("profile_name", workflow_props)
+                self.assertIn("profile_group", workflow_props)
+                self.assertIn("profile_name", workflow_props)
                 self.assertNotIn("spawn_bonus_skill_refs", workflow_props)
                 self.assertIsNone(core.context.execution_runtime.get_capability_spec("op_minion_spawn"))
                 self.assertIsNone(core.context.execution_runtime.get_capability_spec("op_minion_submit_plan"))
@@ -19207,29 +19447,30 @@ class MinionIntegrationTests(unittest.TestCase):
             )
 
             self.assertEqual(result.status, RuntimeStatus.OK)
-            self.assertEqual(result.structured["requirements_review"], "skip")
             self.assertEqual(result.structured["architecture_mode"], "micro")
             self.assertEqual(result.structured["interaction_mode"], "auto_after_plan")
+            self.assertEqual(result.structured["initial_profile"], "software_engineering.architect")
             self.assertEqual(len(fake_client.spawned), 1)
             pack = fake_client.spawned[0]
             self.assertEqual(pack["minion_profile"], "software_engineering.architect")
             self.assertEqual(pack["metadata"]["preferred_endpoint_id"], "architect_fast")
             self.assertEqual(pack["metadata"]["workflow"]["entrypoint"], "op_minion_dispatch_workflow")
-            self.assertEqual(pack["metadata"]["workflow"]["requirements_review"], "skip")
+            self.assertEqual(pack["metadata"]["workflow"]["current_profile"], "software_engineering.architect")
+            self.assertEqual(pack["metadata"]["workflow"]["steps"][0]["profile"], "software_engineering.architect")
             self.assertEqual(pack["metadata"]["planner_work_order"]["role"], "architect")
             self.assertEqual(pack["metadata"]["planner_work_order"]["planning_requirements"]["architecture_mode"], "micro")
             self.assertEqual(pack["workspace"]["origin_repo_path"], str(repo))
 
-    def test_dispatch_workflow_requirements_review_runs_requirements_planner_first(self) -> None:
+    def test_dispatch_workflow_can_start_non_software_profile_step(self) -> None:
         class FakeClient:
             def __init__(self) -> None:
                 self.spawned: list[dict] = []
 
             def spawn_sync(self, payload):
                 self.spawned.append(dict(payload))
-                return {"status": "running", "run_id": "run_requirements", "minion_id": "minion_requirements"}
+                return {"status": "running", "run_id": "run_writer", "minion_id": "minion_writer"}
 
-        with tempfile.TemporaryDirectory(prefix="pal_minion_requirements_dispatch_test_") as tmp:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_single_step_dispatch_test_") as tmp:
             root = Path(tmp)
             repo = root / "repo"
             repo.mkdir()
@@ -19242,24 +19483,46 @@ class MinionIntegrationTests(unittest.TestCase):
                 CapabilityCall(
                     name="op_minion_dispatch_workflow",
                     args={
-                        "goal": "Design a new import workflow",
+                        "goal": "Write a concise handoff",
+                        "requirements_brief": {"scope": "document only"},
                         "workspace": {"kind": "existing_repo", "repo_path": str(repo)},
-                        "requirements_review": "required",
-                        "architecture_mode": "full",
+                        "profile_group": "software_engineering",
+                        "profile_name": "writer",
                     },
                 )
             )
 
             self.assertEqual(result.status, RuntimeStatus.OK)
-            self.assertEqual(result.structured["requirements_review"], "required")
-            self.assertEqual(result.structured["architecture_mode"], "full")
-            self.assertEqual(result.structured["next_action"], "requirements_planner_running")
+            self.assertEqual(result.structured["initial_profile"], "software_engineering.writer")
+            self.assertEqual(result.structured["next_action"], "step_running")
             self.assertEqual(len(fake_client.spawned), 1)
             pack = fake_client.spawned[0]
-            self.assertEqual(pack["minion_profile"], "software_engineering.planner")
-            self.assertEqual(pack["metadata"]["workflow"]["requirements_review"], "required")
-            self.assertEqual(pack["metadata"]["requirements_review"]["status"], "drafting")
+            self.assertEqual(pack["minion_profile"], "software_engineering.writer")
+            self.assertEqual(pack["metadata"]["workflow"]["current_profile"], "software_engineering.writer")
+            self.assertEqual(pack["metadata"]["requirements_brief"]["scope"], "document only")
             self.assertNotIn("planner_work_order", pack["metadata"])
+
+    def test_dispatch_workflow_rejects_removed_requirements_planner_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_requirements_removed_test_") as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            provider = MinionManagerProvider(runtime_root=root)
+            provider._ensure_manager_started = lambda: None  # type: ignore[method-assign]
+
+            result = provider.dispatch_workflow(
+                CapabilityCall(
+                    name="op_minion_dispatch_workflow",
+                    args={
+                        "goal": "Design a new import workflow",
+                        "workspace": {"kind": "existing_repo", "repo_path": str(repo)},
+                        "requirements_review": "required",
+                    },
+                )
+            )
+
+            self.assertEqual(result.status, RuntimeStatus.INVALID)
+            self.assertEqual(result.structured["field"], "requirements_review")
 
     def test_dispatch_workflow_requires_primary_language_for_new_project(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_workflow_validation_test_") as tmp:

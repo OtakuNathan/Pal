@@ -31,9 +31,9 @@ def normalize_execution_strategy(
     evidence = _lower(completion.get("evidence"))
     submits_review_gate = bool(gate.get("submits_review_gate") or output.get("requires_review_gate"))
 
-    prepare = _stage(explicit_strategy, "prepare")
-    repair_loop = _stage(explicit_strategy, "repair_loop") or _stage(explicit_strategy, "repair")
-    gate_stage = _stage(explicit_strategy, "gate")
+    prepare = _stage(explicit_strategy, "pre") or _stage(explicit_strategy, "prepare")
+    repair_loop = _stage(explicit_strategy, "in") or _stage(explicit_strategy, "repair_loop") or _stage(explicit_strategy, "repair")
+    gate_stage = _stage(explicit_strategy, "post") or _stage(explicit_strategy, "gate")
     gates = _string_list(gate.get("gates")) or _string_list(gate_stage.get("gates") or explicit_strategy.get("gates"))
     normalized_gates = [_lower(item) for item in gates]
 

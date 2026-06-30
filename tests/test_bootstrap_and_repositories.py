@@ -255,7 +255,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         profile_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles"
 
         self.assertTrue((profile_root / "generic.toml").is_file())
-        self.assertTrue((profile_root / "software_engineering" / "planner.toml").is_file())
+        self.assertFalse((profile_root / "software_engineering" / "planner.toml").is_file())
         self.assertTrue((profile_root / "software_engineering" / "coder.toml").is_file())
         self.assertTrue((profile_root / "software_engineering" / "reviewer.toml").is_file())
         self.assertTrue((profile_root / "software_engineering" / "writer.toml").is_file())

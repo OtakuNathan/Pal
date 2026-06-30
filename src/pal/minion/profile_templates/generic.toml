@@ -20,17 +20,23 @@ evidence = "text_deliverable"
 [gate_policy]
 gates = ["none"]
 
-[execution_strategy.prepare]
+[execution_strategy.pre]
 kind = "artifact_workspace"
 
-[execution_strategy.repair_loop]
+[execution_strategy.in]
 kind = "none"
 
-[execution_strategy.gate]
+[execution_strategy.post]
 kind = "none"
 
 [output_policy]
 milestone_completion = "text_deliverable"
+
+[output_policy.workflow_next]
+artifact_type = "text_deliverable"
+adapter = "none"
+default_next_profile = "none"
+allowed_next_profiles = ["none"]
 
 [metadata]
 builtin = true
