@@ -10037,6 +10037,109 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_logical_minion_runner_checkpoint_review_sends_control_to_same_lane(self) -> None:
+        class LogicalReviewManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started_reviewers: list[MinionRunState] = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                if state.pack.minion_profile == "software_engineering.reviewer":
+                    self.started_reviewers.append(state)
+
+        class FakeRunner:
+            received: list[dict[str, Any]] = []
+
+            def __init__(self, **kwargs: Any) -> None:
+                self.write_event = kwargs["write_event"]
+                self.read_decision = kwargs["read_decision"]
+
+            async def run(self) -> int:
+                await self.write_event(
+                    {
+                        "event_kind": "checkpoint",
+                        "payload": {
+                            "checkpoint_id": "chk_logical_review",
+                            "status": "claimed",
+                            "milestone_index": 0,
+                            "milestone_id": "m0",
+                            "summary": "logical checkpoint ready",
+                            "commit_sha": "abc123",
+                            "expected_review_gate_kind": "checkpoint_verification",
+                        },
+                        "created_at": utc_now(),
+                    }
+                )
+                message = await self.read_decision(timeout=10)
+                FakeRunner.received.append(dict(message or {}))
+                return 0
+
+        async def scenario() -> None:
+            FakeRunner.received = []
+            manager = LogicalReviewManager(runtime_root=self.root, max_parallel_modules=1)
+            parent_state = MinionRunState(
+                minion_id="minion_parent_logical_review",
+                run_id="run_parent_logical_review",
+                pack=TaskContextPack(work_order_id="wo_parent_logical_review", goal="parent"),
+            )
+            child_pack = manager.tasking_repository.prepare_pack_for_spawn(
+                TaskContextPack(
+                    work_order_id="wo_logical_review_child",
+                    goal="child",
+                    minion_profile="software_engineering.coder",
+                    workspace={"gate_policy": {"gates": [{"gate": "checkpoint_quality"}]}},
+                    continuity={"current_milestone": {"milestone_index": 0, "milestone_id": "m0", "title": "Implement"}},
+                )
+            )
+            child_pack, _updates = manager._with_profile_gate_policy(child_pack)
+
+            with patch("pal.minion.runner.MinionRunner", FakeRunner):
+                task = asyncio.create_task(
+                    manager.step_runner.run_logical_minion_runner(
+                        parent_state,
+                        child_pack,
+                        module_id="module_logical_review",
+                    )
+                )
+                for _ in range(500):
+                    if any(dict(state.pack.metadata.get("review_target") or {}).get("run_id") for state in manager.started_reviewers):
+                        break
+                    await asyncio.sleep(0.01)
+                reviewers = [state for state in manager.started_reviewers if dict(state.pack.metadata.get("review_target") or {}).get("run_id")]
+                self.assertEqual(len(reviewers), 1)
+                reviewer_state = reviewers[0]
+                coder_run_id = reviewer_state.pack.metadata["review_target"]["run_id"]
+                gate = manager.tasking_repository.submit_review_gate(
+                    {
+                        "gate_kind": "checkpoint_verification",
+                        "target": {"checkpoint_id": "chk_logical_review", "commit_sha": "abc123"},
+                        "verdict": "pass",
+                        "summary": "logical checkpoint passed",
+                        "evidence": [{"kind": "review", "summary": "accepted"}],
+                        "commands_run": [{"command": "not run in unit fixture", "status": "not_run", "reason": "unit fixture"}],
+                        "api_evidence": [{"kind": "not_applicable", "summary": "fixture has no API claims"}],
+                        "metadata": {
+                            "api_evidence_not_applicable": True,
+                            "api_evidence_not_applicable_reason": "fixture has no API claims",
+                            "lsp_evidence_not_applicable": True,
+                            "lsp_evidence_not_applicable_reason": "fixture has no symbol-level API claims",
+                        },
+                        "reviewer_profile": "software_engineering.reviewer",
+                    }
+                )
+                await manager.reviews._reconcile_checkpoint_review(reviewer_state, "chk_logical_review", coder_run_id)
+                result = await asyncio.wait_for(task, timeout=5)
+
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(FakeRunner.received[-1]["type"], "complete")
+            self.assertEqual(FakeRunner.received[-1]["completion"]["review_gate_ref"]["gate_id"], gate["review_gate_ref"]["gate_id"])
+            self.assertEqual(manager.runs[coder_run_id].runner_kind, "logical")
+            self.assertEqual(manager.runs[coder_run_id].status, "completed")
+            self.assertEqual(manager._allocated_logical_slot_count(), 0)
+
+        asyncio.run(scenario())
+
     def test_step_runner_logical_minion_runner_dag_runs_modules(self) -> None:
         class FakeRunner:
             active = 0

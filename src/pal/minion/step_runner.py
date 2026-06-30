@@ -414,11 +414,17 @@ class ModuleStepRunner:
 
     async def _run_minion_runner_in_context(self, context: LogicalCoderContext, events: list[dict[str, Any]]) -> dict[str, Any]:
         control_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        logical_state = self._register_logical_runner_state(context, control_queue)
 
         async def write_event(event: dict[str, Any]) -> None:
             normalized = self._logical_runner_event(context, event)
+            if logical_state is not None:
+                normalized["minion_id"] = logical_state.minion_id
             events.append(normalized)
-            self._record_logical_runner_event(normalized)
+            if logical_state is not None:
+                self.manager._record_event(logical_state, normalized)
+            else:
+                self._record_logical_runner_event(normalized)
 
         async def read_decision(timeout: float | None = None) -> dict[str, Any] | None:
             if timeout is None:
@@ -433,7 +439,7 @@ class ModuleStepRunner:
         runner = MinionRunner(
             runtime_root=self.manager.runtime_root,
             pack=context.pack,
-            minion_id=f"logical_minion_{uuid4().hex[:10]}",
+            minion_id=logical_state.minion_id if logical_state is not None else f"logical_minion_{uuid4().hex[:10]}",
             run_id=context.run_id,
             write_event=write_event,
             read_decision=read_decision,
@@ -453,6 +459,37 @@ class ModuleStepRunner:
                 }
             )
         return {"returncode": int(returncode or 0), "event_count": len(events)}
+
+    def _register_logical_runner_state(
+        self,
+        context: LogicalCoderContext,
+        control_queue: asyncio.Queue[dict[str, Any]],
+    ) -> Any | None:
+        if not hasattr(self.manager, "runs") or not hasattr(self.manager, "_record_event"):
+            return None
+        try:
+            from pal.minion.manager import MinionRunState
+        except Exception:
+            return None
+        state = self.manager.runs.get(context.run_id)
+        if state is None:
+            state = MinionRunState(
+                minion_id=f"logical_minion_{uuid4().hex[:10]}",
+                run_id=context.run_id,
+                pack=context.pack,
+                runner_kind="logical",
+                status="running",
+                control_queue=control_queue,
+                wait_task=asyncio.current_task(),
+            )
+            self.manager.runs[context.run_id] = state
+        else:
+            state.runner_kind = "logical"
+            state.status = "running"
+            state.control_queue = control_queue
+            state.wait_task = asyncio.current_task()
+            state.pack = context.pack
+        return state
 
     async def run_logical_module_lane_dag(
         self,

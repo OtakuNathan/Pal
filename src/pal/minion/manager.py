@@ -635,6 +635,11 @@ class MinionManager:
         return {"ok": True, "run": state.summary(), "clarification": response}
 
     async def _send_runner_control(self, state: MinionRunState, message: dict[str, Any]) -> dict[str, Any]:
+        if state.runner_kind == "logical":
+            if state.control_queue is None:
+                raise RuntimeError(f"logical runner control queue is not available: {state.run_id}")
+            await state.control_queue.put(dict(message))
+            return {"ok": True, "run_id": state.run_id, "message_type": str(message.get("type") or "")}
         return await self.runner_process.send_runner_control(state, message)
 
     def finalize_work_order(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1642,6 +1647,12 @@ class MinionManager:
             raise
 
     def runner_control_unavailable_reason(self, state: MinionRunState) -> str:
+        if state.status in _TERMINAL_RUN_STATUSES:
+            return f"run status is terminal: {state.status}"
+        if state.runner_kind == "logical":
+            if state.control_queue is None:
+                return "logical runner control queue is not available"
+            return ""
         return self.runner_process.runner_control_unavailable_reason(state)
 
     def record_runner_control_skipped(self, state: MinionRunState, message: dict[str, Any], *, reason: str) -> dict[str, Any]:
