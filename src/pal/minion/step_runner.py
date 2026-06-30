@@ -370,54 +370,11 @@ class ModuleStepRunner:
         reason: str = "",
     ) -> dict[str, Any]:
         events: list[dict[str, Any]] = []
-
-        async def task(context: LogicalCoderContext) -> dict[str, Any]:
-            control_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-
-            async def write_event(event: dict[str, Any]) -> None:
-                normalized = self._logical_runner_event(context, event)
-                events.append(normalized)
-                self._record_logical_runner_event(normalized)
-
-            async def read_decision(timeout: float | None = None) -> dict[str, Any] | None:
-                if timeout is None:
-                    return await control_queue.get()
-                try:
-                    return await asyncio.wait_for(control_queue.get(), timeout=max(0.0, float(timeout or 0.0)))
-                except asyncio.TimeoutError:
-                    return None
-
-            from pal.minion.runner import MinionRunner
-
-            runner = MinionRunner(
-                runtime_root=self.manager.runtime_root,
-                pack=context.pack,
-                minion_id=f"logical_minion_{uuid4().hex[:10]}",
-                run_id=context.run_id,
-                write_event=write_event,
-                read_decision=read_decision,
-            )
-            returncode = await runner.run()
-            if not any(str(event.get("event_kind") or "") == "terminal" for event in events):
-                status = "completed" if int(returncode or 0) == 0 else "failed"
-                await write_event(
-                    {
-                        "event_kind": "terminal",
-                        "payload": {
-                            "status": status,
-                            "summary": f"logical minion exited with code {int(returncode or 0)}",
-                            "returncode": int(returncode or 0),
-                        },
-                        "created_at": utc_now(),
-                    }
-                )
-            return {"returncode": int(returncode or 0), "event_count": len(events)}
-
         result = await self.run_logical_module_lane(
             parent_state,
             pack,
             module_id=module_id,
-            task=task,
+            task=lambda context: self._run_minion_runner_in_context(context, events),
             reason=reason or "logical_minion_runner",
         )
         payload = {**result, "events": list(events), "event_count": len(events)}
@@ -426,7 +383,78 @@ class ModuleStepRunner:
             payload["reason"] = "logical_minion_nonzero_returncode"
         return payload
 
-    async def run_logical_coder_dag(
+    async def run_logical_minion_runner_dag(
+        self,
+        parent_state: Any,
+        module_packs: dict[str, TaskContextPack],
+        depends_on: dict[str, list[str]],
+        *,
+        reason: str = "",
+        fail_fast: bool = True,
+    ) -> dict[str, Any]:
+        events_by_module: dict[str, list[dict[str, Any]]] = {}
+
+        async def task(module_id: str, context: LogicalCoderContext) -> dict[str, Any]:
+            events: list[dict[str, Any]] = []
+            events_by_module[module_id] = events
+            return await self._run_minion_runner_in_context(context, events)
+
+        result = await self.run_logical_module_lane_dag(
+            parent_state,
+            module_packs,
+            depends_on,
+            task=task,
+            reason=reason or "logical_minion_runner_dag",
+            fail_fast=fail_fast,
+        )
+        payload = self._logical_minion_dag_result_from_returncodes(result)
+        payload["events_by_module"] = {module_id: list(events) for module_id, events in events_by_module.items()}
+        payload["event_count"] = sum(len(events) for events in events_by_module.values())
+        return payload
+
+    async def _run_minion_runner_in_context(self, context: LogicalCoderContext, events: list[dict[str, Any]]) -> dict[str, Any]:
+        control_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def write_event(event: dict[str, Any]) -> None:
+            normalized = self._logical_runner_event(context, event)
+            events.append(normalized)
+            self._record_logical_runner_event(normalized)
+
+        async def read_decision(timeout: float | None = None) -> dict[str, Any] | None:
+            if timeout is None:
+                return await control_queue.get()
+            try:
+                return await asyncio.wait_for(control_queue.get(), timeout=max(0.0, float(timeout or 0.0)))
+            except asyncio.TimeoutError:
+                return None
+
+        from pal.minion.runner import MinionRunner
+
+        runner = MinionRunner(
+            runtime_root=self.manager.runtime_root,
+            pack=context.pack,
+            minion_id=f"logical_minion_{uuid4().hex[:10]}",
+            run_id=context.run_id,
+            write_event=write_event,
+            read_decision=read_decision,
+        )
+        returncode = await runner.run()
+        if not any(str(event.get("event_kind") or "") == "terminal" for event in events):
+            status = "completed" if int(returncode or 0) == 0 else "failed"
+            await write_event(
+                {
+                    "event_kind": "terminal",
+                    "payload": {
+                        "status": status,
+                        "summary": f"logical minion exited with code {int(returncode or 0)}",
+                        "returncode": int(returncode or 0),
+                    },
+                    "created_at": utc_now(),
+                }
+            )
+        return {"returncode": int(returncode or 0), "event_count": len(events)}
+
+    async def run_logical_module_lane_dag(
         self,
         parent_state: Any,
         module_packs: dict[str, TaskContextPack],
@@ -465,7 +493,7 @@ class ModuleStepRunner:
                     parent_state,
                     resource="logical_minion_slot",
                     module_id=module_id,
-                    reason=reason or "logical_coder_dag",
+                    reason=reason or "logical_module_lane_dag",
                 )
                 if str(grant.get("status") or "") != "granted":
                     waiting_for_slot[module_id] = {"status": "waiting_for_slot", "module_id": module_id, "grant": grant}
@@ -536,6 +564,31 @@ class ModuleStepRunner:
             "completed_modules": list(completed),
             "failed_modules": list(failed),
         }
+
+    def _logical_minion_dag_result_from_returncodes(self, result: dict[str, Any]) -> dict[str, Any]:
+        payload = copy.deepcopy(dict(result))
+        completed = dict(payload.get("completed") or {})
+        failed = dict(payload.get("failed") or {})
+        for module_id, module_result in list(completed.items()):
+            returncode = int(dict(module_result.get("result") or {}).get("returncode") or 0)
+            if returncode == 0:
+                continue
+            failed_result = dict(module_result)
+            failed_result["status"] = "failed"
+            failed_result["reason"] = "logical_minion_nonzero_returncode"
+            failed[module_id] = failed_result
+            completed.pop(module_id, None)
+        payload["completed"] = completed
+        payload["failed"] = failed
+        payload["completed_modules"] = list(completed)
+        payload["failed_modules"] = list(failed)
+        if failed:
+            payload["status"] = "failed"
+        elif str(payload.get("status") or "") == "completed":
+            payload["status"] = "completed"
+        if failed and "reason" not in payload:
+            payload["reason"] = "logical_minion_nonzero_returncode"
+        return payload
 
     def build_logical_coder_context(
         self,

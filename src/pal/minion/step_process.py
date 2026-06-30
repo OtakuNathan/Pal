@@ -52,9 +52,11 @@ class StepProcessRunner:
         self._broker = RpcLogicalSlotBroker(runtime.client)
         try:
             mode = str(self.payload.get("mode") or "noop").strip() or "noop"
-            if mode != "noop":
-                return {"status": "failed", "reason": "unsupported_step_process_mode", "mode": mode}
-            return await self._run_noop_dag(runtime, self._broker)
+            if mode == "noop":
+                return await self._run_noop_dag(runtime, self._broker)
+            if mode == "logical_minion_runner":
+                return await self._run_logical_minion_runner_dag(runtime, self._broker)
+            return {"status": "failed", "reason": "unsupported_step_process_mode", "mode": mode}
         finally:
             if self._broker is not None and self._parent_run_id:
                 self._broker.release_for_run(self._parent_run_id, reason="step_process_exit")
@@ -81,7 +83,7 @@ class StepProcessRunner:
                 "work_order_id": context.work_order_id,
             }
 
-        result = await step_runner.run_logical_coder_dag(
+        result = await step_runner.run_logical_module_lane_dag(
             parent_state,
             modules,
             depends_on,
@@ -89,6 +91,28 @@ class StepProcessRunner:
             reason=str(self.payload.get("reason") or "step_process_noop_dag"),
         )
         return {"mode": "noop", **dict(result)}
+
+    async def _run_logical_minion_runner_dag(self, runtime: StepProcessRuntime, broker: RpcLogicalSlotBroker) -> dict[str, Any]:
+        step_runner = ModuleStepRunner(runtime, slot_broker=broker)
+        parent_state = self._parent_state()
+        modules = _module_packs_from_payload(self.payload.get("modules"))
+        depends_on = _depends_on_from_payload(self.payload.get("depends_on"), module_ids=set(modules))
+        result = await step_runner.run_logical_minion_runner_dag(
+            parent_state,
+            modules,
+            depends_on,
+            reason=str(self.payload.get("reason") or "step_process_logical_minion_runner_dag"),
+        )
+        return {"mode": "logical_minion_runner", **dict(result)}
+
+    def _parent_state(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            run_id=self._parent_run_id or "step_process_parent",
+            pack=TaskContextPack(
+                work_order_id=str(self.payload.get("parent_work_order_id") or "wo_step_process_parent"),
+                goal=str(self.payload.get("goal") or "step process parent"),
+            ),
+        )
 
 
 def _module_packs_from_payload(raw: Any) -> dict[str, TaskContextPack]:
