@@ -1126,7 +1126,7 @@ class MinionContractTests(unittest.TestCase):
                 )
                 for call in calls:
                     if call.name == "plan_begin_module" and call.args.get("module_key") == "module_builder_executor":
-                        call.args["executor_profile"] = "software_engineering.review_worker"
+                        call.args["executor_profile"] = "review_worker"
                     result = await scoped.execute_tool_async(call)
                     self.assertTrue(result.ok, result.text)
 
@@ -1137,8 +1137,8 @@ class MinionContractTests(unittest.TestCase):
                     for item in payload["orchestration"]["topology"]["nodes"]
                     if item["module_id"] == "module_builder_executor"
                 )
-                self.assertEqual(module["metadata"]["executor_profile"], "software_engineering.review_worker")
-                self.assertEqual(node["executor_profile"], "software_engineering.review_worker")
+                self.assertEqual(module["metadata"]["executor_profile"], "review_worker")
+                self.assertEqual(node["executor_profile"], "review_worker")
             finally:
                 shutil.rmtree(root, ignore_errors=True)
 
@@ -8019,7 +8019,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             "implementation",
             title="Implementation review",
             task="Review implementation boundaries.",
-            metadata={"executor_profile": "software_engineering.review_worker"},
+            metadata={"executor_profile": "review_worker"},
         )
         final_verification = _plan_module("final_verification", title="Final verification")
         plan = {
@@ -20389,6 +20389,7 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("The plan artifact owns workflow routing after plan acceptance", prompt)
         self.assertIn("Declare workflow_next through plan_begin or plan_update_plan", prompt)
         self.assertIn("executor_profile", prompt)
+        self.assertIn("group-scoped", prompt)
         self.assertIn("per-DAG-node override", prompt)
         self.assertIn("metadata.languages", prompt)
         self.assertIn("canonical implementation language ids", prompt)

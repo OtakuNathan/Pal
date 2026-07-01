@@ -442,8 +442,9 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "executor_profile": {
                     "type": "string",
                     "description": (
-                        "Optional canonical profile id for this DAG node when it differs from the artifact default "
-                        "workflow_next profile, such as software_engineering.review_worker."
+                        "Optional executor profile for this DAG node when it differs from the artifact default "
+                        "workflow_next profile. Bare names such as review_worker resolve inside the default "
+                        "executor profile group; canonical ids such as software_engineering.review_worker are also accepted."
                     ),
                 },
                 "module_quality_criteria": {
@@ -593,7 +594,10 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "languages": {"type": "array", "items": {"type": "string"}},
                 "executor_profile": {
                     "type": "string",
-                    "description": "Optional canonical profile id for this DAG node when it differs from the artifact default workflow_next profile.",
+                    "description": (
+                        "Optional executor profile for this DAG node when it differs from the artifact default workflow_next profile. "
+                        "Bare names resolve inside the default executor profile group; canonical ids are also accepted."
+                    ),
                 },
                 "module_quality_criteria": {
                     "type": "array",
