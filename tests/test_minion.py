@@ -1047,6 +1047,117 @@ class MinionContractTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_plan_builder_compiles_artifact_workflow_next_metadata(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_next_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_constraint",
+                        "op_minion_plan_begin_module",
+                        "op_minion_plan_add_module_interface",
+                        "op_minion_plan_begin_milestone",
+                        "op_minion_plan_add_acceptance_criterion",
+                        "op_minion_plan_end_milestone",
+                        "op_minion_plan_end_module",
+                        "op_minion_plan_validate_and_submit_for_review",
+                    ],
+                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_builder_next"},
+                )
+
+                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_next", module_key="module_builder_next")
+                calls[0].args["workflow_next"] = {
+                    "profile": "none",
+                    "artifact_type": "review_report_plan",
+                    "adapter": "accepted_plan",
+                    "reason": "The reviewed plan artifact is terminal.",
+                }
+                for call in calls:
+                    result = await scoped.execute_tool_async(call)
+                    self.assertTrue(result.ok, result.text)
+
+                payload = json.loads((root / "artifacts" / "plan.draft.json").read_text(encoding="utf-8"))
+                self.assertEqual(
+                    payload["metadata"]["workflow_next"],
+                    {
+                        "profile": "none",
+                        "adapter": "accepted_plan",
+                        "artifact_type": "review_report_plan",
+                        "reason": "The reviewed plan artifact is terminal.",
+                    },
+                )
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_accepts_string_acceptance_criteria_in_module_outline(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_string_ac_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_module_outline",
+                    ],
+                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_string_ac"},
+                )
+
+                begin = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_begin",
+                        args={
+                            "goal": "Plan one small module.",
+                            "plan_id": "plan_string_ac",
+                            "summary": "String acceptance criterion shorthand.",
+                            "languages": ["python"],
+                        },
+                    )
+                )
+                self.assertTrue(begin.ok, begin.text)
+                module = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_module_outline",
+                        args={
+                            "plan_handle": "plan_string_ac",
+                            "module_key": "implementation",
+                            "kind": "module",
+                            "responsibility": "Implement and test a small Python API.",
+                            "owned_area": ["src/example/__init__.py", "tests/test_example.py"],
+                            "module_quality_criteria": ["The public API behavior is covered by focused tests."],
+                            "milestones": [
+                                {
+                                    "title": "Implement API",
+                                    "task": "Implement the public API and focused test.",
+                                    "checkpoint_admission_evidence": ["python -m pytest -q passes."],
+                                    "acceptance_criteria": [
+                                        "The public API returns the expected normalized value.",
+                                    ],
+                                }
+                            ],
+                        },
+                    )
+                )
+                self.assertTrue(module.ok, module.text)
+
+                payload = json.loads(
+                    (root / "artifacts" / ".plan_builder" / "plan_string_ac.json").read_text(encoding="utf-8")
+                )
+                acceptance = payload["modules"][0]["internal_milestones"][0]["acceptance"][0]
+                self.assertEqual(acceptance["criterion"], "The public API returns the expected normalized value.")
+                self.assertEqual(
+                    acceptance["evidence_expectation"],
+                    "Focused tests, inspection, or review evidence demonstrates this criterion.",
+                )
+                self.assertEqual(acceptance["negative_cases"], [])
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
     def test_plan_builder_allows_micro_plan_without_prelude(self) -> None:
         async def scenario() -> None:
             root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_micro_"))
@@ -3459,6 +3570,7 @@ class MinionContractTests(unittest.TestCase):
         self.assertNotIn("preferred_endpoint_id", metadata)
         self.assertNotIn("llm_request_hooks", metadata)
         self.assertEqual(metadata["minion_run_id"], "run_tokens")
+        self.assertEqual(metadata["endpoint_fallback_policy"], "none")
 
     def test_minion_llm_request_metadata_includes_explicit_preferred_endpoint(self) -> None:
         pack = TaskContextPack(
@@ -3471,6 +3583,7 @@ class MinionContractTests(unittest.TestCase):
 
         self.assertEqual(metadata["preferred_endpoint_id"], "planner_long")
         self.assertEqual(metadata["preferred_endpoint_source"], "user")
+        self.assertEqual(metadata["endpoint_fallback_policy"], "none")
         self.assertNotIn("llm_request_hooks", metadata)
 
     def test_minion_llm_request_metadata_includes_profile_round_timeout(self) -> None:
@@ -4658,6 +4771,7 @@ class MinionContractTests(unittest.TestCase):
 
         self.assertEqual(profiles["software_engineering.coder"].preferred_endpoint_id, "glm-5.2-bigmodel-anthropic")
         self.assertEqual(profiles["software_engineering.reviewer"].preferred_endpoint_id, "glm-5.2-bigmodel-anthropic")
+        self.assertEqual(profiles["software_engineering.review_worker"].preferred_endpoint_id, "glm-5.2-bigmodel-anthropic")
         self.assertEqual(profiles["software_engineering.architect"].preferred_endpoint_id, "")
         self.assertEqual(profiles["software_engineering.writer"].preferred_endpoint_id, "")
         self.assertEqual(profiles["generic"].preferred_endpoint_id, "")
@@ -4673,6 +4787,10 @@ class MinionContractTests(unittest.TestCase):
         )
         self.assertEqual(
             profiles["software_engineering.reviewer"].workspace_environment_policy,
+            {"runtime": True, "lsp": True, "write_baseline_config": False},
+        )
+        self.assertEqual(
+            profiles["software_engineering.review_worker"].workspace_environment_policy,
             {"runtime": True, "lsp": True, "write_baseline_config": False},
         )
         self.assertEqual(
@@ -4695,9 +4813,14 @@ class MinionContractTests(unittest.TestCase):
             profiles["software_engineering.architect"].output_policy["workflow_next"]["default_next_profile"],
             "software_engineering.coder",
         )
+        self.assertIn(
+            "software_engineering.review_worker",
+            profiles["software_engineering.architect"].output_policy["workflow_next"]["allowed_next_profiles"],
+        )
         self.assertEqual(profiles["software_engineering.coder"].execution_strategy["pre"]["kind"], "git_worktree")
         self.assertEqual(profiles["software_engineering.coder"].execution_strategy["in"]["kind"], "checkpoint_repair")
         self.assertEqual(profiles["software_engineering.reviewer"].execution_strategy["post"]["kind"], "review_gate")
+        self.assertEqual(profiles["software_engineering.review_worker"].execution_strategy["post"]["kind"], "none")
 
         coder = registry.resolve_pack(TaskContextPack(work_order_id="wo_strategy_coder", goal="code"), requested_profile="software_engineering.coder")
         generic = registry.resolve_pack(TaskContextPack(work_order_id="wo_strategy_generic", goal="report"), requested_profile="generic")
@@ -5954,6 +6077,8 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                         "task_id": "task_auto_review",
                         "milestones": ["Produce plan artifact"],
                         "plan_review": {"auto_accept": True, "acceptance_reason": "ignored stale auto-accept policy"},
+                        "preferred_endpoint_id": "glm-5.2",
+                        "preferred_endpoint_source": "user",
                     },
                 ),
                 requested_profile="software_engineering.architect",
@@ -5980,6 +6105,8 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             self.assertEqual(len(manager.started_reviewers), 1)
             reviewer_state = manager.started_reviewers[0]
             self.assertEqual(reviewer_state.pack.minion_profile, "software_engineering.reviewer")
+            self.assertEqual(reviewer_state.pack.metadata["preferred_endpoint_id"], "glm-5.2")
+            self.assertEqual(reviewer_state.pack.metadata["preferred_endpoint_source"], "user")
             self.assertNotIn("op_exec_shell", reviewer_state.pack.allowed_capabilities)
             self.assertIn("op_minion_plan_read", reviewer_state.pack.allowed_capabilities)
             self.assertIn("op_minion_review_gate_submit", reviewer_state.pack.allowed_capabilities)
@@ -7808,6 +7935,34 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(prepared_child.metadata["prompt_view"]["module"]["module_id"], "module_prelude")
         self.assertEqual(prepared_child.metadata["prompt_view"]["milestone"]["milestone_id"], "module_prelude_m1")
 
+    def test_plan_parent_child_copy_uses_profile_action_labels(self) -> None:
+        review_module = _plan_module("api_review", title="API review", task="Review the public API.")
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_review_worker_child",
+            task_id="task_review_worker_child",
+            modules=[review_module],
+        )
+        parent = self.repository.build_plan_parent_pack_from_plan(
+            plan,
+            work_order_id="wo_review_worker_parent",
+            workspace={"repo_path": str(self.root)},
+            profile_group="software_engineering",
+            profile_name="review_worker",
+        )
+        self.repository.prepare_pack_for_spawn(parent)
+
+        child = self.repository.next_plan_module_pack("wo_review_worker_parent", allow_paused=True)
+
+        self.assertIsNotNone(child)
+        assert child is not None
+        self.assertEqual(child.minion_profile, "software_engineering.review_worker")
+        self.assertEqual(child.goal, "Review module module_prelude")
+        self.assertEqual(child.instruction, "Review module module_prelude; this is parent work-order milestone 0.")
+        self.assertEqual(child.metadata["work_order_title"], "module_prelude review")
+        prepared_child = self.repository.prepare_pack_for_spawn(child)
+        self.assertIn("prompt_view", prepared_child.metadata)
+        self.assertNotIn("coder_work_order", prepared_child.metadata)
+
     def test_plan_parent_reinitializes_cursor_when_reusing_architect_work_order_id(self) -> None:
         self.repository.prepare_pack_for_spawn(
             TaskContextPack(
@@ -8798,6 +8953,37 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(snapshot["work_order"]["status"], "active")
         self.assertEqual(snapshot["recent_ledger"], [])
 
+    def test_key_llm_endpoint_progress_enters_ledger_without_debug_log(self) -> None:
+        self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_endpoint_event_ledger",
+                goal="endpoint event ledger",
+                metadata={"task_id": "task_endpoint_event_ledger", "milestones": ["first"]},
+            )
+        )
+
+        self.repository.record_minion_event(
+            {
+                "event_kind": "progress",
+                "work_order_id": "wo_endpoint_event_ledger",
+                "minion_id": "m1",
+                "run_id": "r1",
+                "payload": {
+                    "phase": "llm_endpoint_attempt_failed",
+                    "endpoint_id": "glm-5.2",
+                    "error_kind": "timeout",
+                    "summary": "LLM endpoint glm-5.2 attempt 1/1 failed: timeout",
+                    "force_ledger": True,
+                },
+            }
+        )
+
+        snapshot = self.repository.read_work_order("wo_endpoint_event_ledger")
+
+        self.assertEqual(len(snapshot["recent_ledger"]), 1)
+        self.assertEqual(snapshot["recent_ledger"][0]["event_kind"], "progress")
+        self.assertEqual(snapshot["recent_ledger"][0]["payload"]["phase"], "llm_endpoint_attempt_failed")
+
     def test_work_order_workspace_drops_run_specific_paths(self) -> None:
         repo_path = self.root / "repo"
         repo_path.mkdir()
@@ -9143,6 +9329,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             prepared.workspace["execution_env"]["path_prepend"]["PYTHONPATH"],
             [str(repo / "src")],
         )
+        self.assertEqual(prepared.workspace["execution_env"]["vars"]["PYTHONDONTWRITEBYTECODE"], "1")
         self.assertNotIn("PYTHONPATH", "\n".join(prepared.workspace["lsp_setup"]["skipped"]))
 
     def test_git_task_environment_detects_existing_python_project_runtime_env(self) -> None:
@@ -9172,6 +9359,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             prepared.workspace["execution_env"]["path_prepend"]["PYTHONPATH"],
             [str(repo / "src")],
         )
+        self.assertEqual(prepared.workspace["execution_env"]["vars"]["PYTHONDONTWRITEBYTECODE"], "1")
 
     def test_python_runtime_env_does_not_depend_on_lsp_template(self) -> None:
         repo = self.root / "python_runtime_without_pyright"
@@ -9189,6 +9377,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         self.assertEqual(environment["languages"][0], "python")
         self.assertEqual(environment["execution_env"]["path_prepend"]["PYTHONPATH"], [str(repo / "src")])
+        self.assertEqual(environment["execution_env"]["vars"]["PYTHONDONTWRITEBYTECODE"], "1")
         self.assertEqual(environment["lsp_setup"]["servers"], [])
         self.assertIn("missing LSP server template", "\n".join(environment["lsp_setup"]["skipped"]))
 
@@ -9762,7 +9951,7 @@ class MinionManagerTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)
 
-    def test_dispatch_accepted_plan_uses_profile_declared_workflow_next(self) -> None:
+    def test_dispatch_accepted_plan_uses_profile_workflow_next_default(self) -> None:
         class FakeManager(MinionManager):
             def __post_init__(self) -> None:
                 super().__post_init__()
@@ -9838,6 +10027,93 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(workflow["steps"][1]["profile"], "software_engineering.coder")
             self.assertEqual(metadata["dispatch_profile_group"], "software_engineering")
             self.assertEqual(metadata["dispatch_profile_name"], "coder")
+
+        asyncio.run(scenario())
+
+    def test_dispatch_accepted_plan_uses_artifact_workflow_next_override(self) -> None:
+        class FakeManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started: list[MinionRunState] = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                self.started.append(state)
+
+        async def scenario() -> None:
+            source = self.root / "source_repo"
+            _init_git_source_repo(source, {"README.md": "source\n"})
+            manager = FakeManager(runtime_root=self.root, max_parallel_modules=2)
+            registry = MinionProfileRegistry(runtime_root=self.root)
+            architect_pack = registry.resolve_pack(
+                TaskContextPack(
+                    work_order_id="wo_workflow_next_none",
+                    goal="Produce a terminal engineering review plan.",
+                    workspace={"source_repo": str(source), "lsp_prewarm_disabled": True},
+                    metadata={
+                        "task_id": "task_workflow_next_none",
+                        "workflow": {
+                            "workflow_id": "wf_next_none_test",
+                            "entrypoint": "op_minion_dispatch_workflow",
+                            "status": "running",
+                            "current_step_id": "step_0",
+                            "current_profile": "software_engineering.architect",
+                            "steps": [
+                                {
+                                    "step_id": "step_0",
+                                    "profile": "software_engineering.architect",
+                                    "status": "running",
+                                }
+                            ],
+                            "auto_advance_modules": True,
+                        },
+                        "plan_review": {"interaction_mode": "autonomous", "auto_accept_on_review_pass": True},
+                        "milestones": ["Produce architecture"],
+                        "lsp_prewarm_disabled": True,
+                    },
+                    minion_profile="software_engineering.architect",
+                ),
+                requested_profile="software_engineering.architect",
+            )
+            await manager.spawn(architect_pack.to_dict())
+            plan = _dispatchable_plan_payload(
+                plan_id="plan_workflow_next_none",
+                task_id="task_workflow_next_none",
+                modules=[_plan_module("implementation", title="Implementation")],
+            )
+            plan["metadata"] = {
+                "workflow_next": {
+                    "profile": "none",
+                    "artifact_type": "review_report_plan",
+                    "adapter": "accepted_plan",
+                    "reason": "Terminal review plan.",
+                }
+            }
+            submitted = manager.tasking_repository.submit_plan_ref(plan)
+            accepted = manager.tasking_repository.accept_plan_ref(
+                submitted["plan_ref"],
+                reason="test accepts reviewed terminal architect plan",
+                human_override={
+                    "reason": "test",
+                    "actor": "test",
+                    "source": "control_action",
+                    "action_kind": "minion_plan_accept_override",
+                },
+            )
+
+            dispatched = await manager.dispatch_accepted_plan(
+                {"work_order_id": "wo_workflow_next_none", "plan_ref": accepted["plan_ref"]}
+            )
+
+            self.assertEqual(dispatched["status"], "completed")
+            self.assertEqual(dispatched["next_profile"], "none")
+            snapshot = manager.tasking_repository.read_work_order("wo_workflow_next_none")
+            self.assertEqual(snapshot["work_order"]["status"], "completed")
+            workflow = snapshot["work_order"]["metadata"]["workflow"]
+            self.assertEqual(workflow["status"], "completed")
+            self.assertEqual(workflow["steps"][0]["next_profile"], "none")
+            self.assertEqual(len(workflow["steps"]), 1)
+            self.assertEqual(len(manager.started), 1)
 
         asyncio.run(scenario())
 
@@ -11710,6 +11986,8 @@ class MinionManagerTests(unittest.TestCase):
             )
             pack = MinionProfileRegistry(runtime_root=self.root).resolve_pack(pack)
             payload = pack.to_dict()
+            payload["metadata"]["preferred_endpoint_id"] = "glm-5.2"
+            payload["metadata"]["preferred_endpoint_source"] = "user"
             payload["continuity"] = {
                 "current_milestone": {
                     "milestone_id": "m1",
@@ -11742,6 +12020,8 @@ class MinionManagerTests(unittest.TestCase):
             )
 
             self.assertEqual(len(manager.spawned_packs), 1)
+            self.assertEqual(manager.spawned_packs[0].metadata["preferred_endpoint_id"], "glm-5.2")
+            self.assertEqual(manager.spawned_packs[0].metadata["preferred_endpoint_source"], "user")
             review_target = manager.spawned_packs[0].metadata["review_target"]
             self.assertEqual(review_target["acceptance_criteria"], ["First behavior is verified."])
             self.assertEqual(review_target["acceptance_checklist"], [{"id": "AC-1", "kind": "acceptance", "status": "pending", "text": "First behavior is verified."}])
@@ -13949,6 +14229,66 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_manager_startup_recovery_does_not_reschedule_failed_child_module(self) -> None:
+        class FakePlanManager(MinionManager):
+            def __post_init__(self) -> None:
+                super().__post_init__()
+                self.started_modules = []
+
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.status = "running"
+                prompt_view = dict(state.pack.metadata.get("prompt_view") or {})
+                self.started_modules.append(str((prompt_view.get("module") or {}).get("module_id") or ""))
+
+            async def _with_lsp_prewarm(self, pack: TaskContextPack) -> TaskContextPack:
+                return pack
+
+        async def scenario() -> None:
+            first_manager = FakePlanManager(runtime_root=self.root, max_parallel_modules=1)
+            plan = _dispatchable_plan_payload(
+                plan_id="plan_startup_blocked_child",
+                task_id="task_startup_blocked_child",
+                modules=[_plan_module("module_startup_blocked_child")],
+            )
+            parent = first_manager.tasking_repository.build_plan_parent_pack_from_plan(plan, work_order_id="wo_startup_blocked_child")
+            await first_manager.spawn(parent.to_dict())
+            child_work_order_id = next(iter(first_manager.tasking_repository.running_plan_module_child_work_order_ids()))
+            first_manager.tasking_repository.record_minion_event(
+                {
+                    "event_kind": "checkpoint",
+                    "work_order_id": child_work_order_id,
+                    "minion_id": "m_blocked_child",
+                    "run_id": "r_blocked_child",
+                    "payload": {
+                        "status": "blocked",
+                        "milestone_index": 0,
+                        "summary": "child already exhausted endpoint before manager restart",
+                    },
+                    "created_at": utc_now(),
+                }
+            )
+
+            restarted_manager = FakePlanManager(runtime_root=self.root, max_parallel_modules=1)
+            recovery = restarted_manager._recover_stale_modules_on_startup()
+            schedule = await restarted_manager._schedule_ready_modules_on_startup()
+
+            self.assertEqual(recovery["status"], "recovered")
+            self.assertEqual(recovery["recovered_count"], 1)
+            self.assertEqual(recovery["recovered"][0]["status"], "blocked")
+            self.assertEqual(recovery["recovered"][0]["child_terminal_status"], "blocked")
+            self.assertEqual(schedule["scheduled_count"], 0)
+            self.assertEqual(restarted_manager.started_modules, [])
+            parent_snapshot = restarted_manager.tasking_repository.read_work_order("wo_startup_blocked_child")
+            plan_execution = parent_snapshot["work_order"]["metadata"]["plan_execution"]
+            self.assertEqual(parent_snapshot["work_order"]["status"], "blocked")
+            self.assertEqual(plan_execution["status"], "blocked")
+            self.assertEqual(plan_execution["module_dag"]["ready_modules"], [])
+            self.assertEqual(plan_execution["module_dag"]["module_status"]["module_prelude"], "blocked")
+            child_snapshot = restarted_manager.tasking_repository.read_work_order(child_work_order_id)
+            self.assertEqual(child_snapshot["work_order"]["status"], "blocked")
+
+        asyncio.run(scenario())
+
     def test_manager_startup_auto_schedule_can_be_disabled(self) -> None:
         class FakePlanManager(MinionManager):
             def __post_init__(self) -> None:
@@ -15187,6 +15527,57 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(len(state.ledger), 500)
         self.assertEqual(len(detail["ledger"]), 100)
         self.assertEqual(manager.event_queue, [])
+
+    def test_manager_records_key_llm_endpoint_progress_without_debug_log(self) -> None:
+        class CapturingLogger:
+            def __init__(self) -> None:
+                self.info_calls: list[tuple[Any, ...]] = []
+                self.exception_calls: list[tuple[Any, ...]] = []
+
+            def info(self, *args: Any) -> None:
+                self.info_calls.append(args)
+
+            def exception(self, *args: Any) -> None:
+                self.exception_calls.append(args)
+
+        manager = MinionManager(self.root)
+        logger = CapturingLogger()
+        manager.logger = logger  # type: ignore[assignment]
+        recorded: list[dict[str, Any]] = []
+
+        def record_event(event: dict[str, Any]) -> None:
+            recorded.append(dict(event))
+
+        manager.tasking_repository.record_minion_event = record_event  # type: ignore[method-assign]
+        state = MinionRunState(
+            minion_id="m_endpoint_progress",
+            run_id="r_endpoint_progress",
+            pack=TaskContextPack(work_order_id="wo_endpoint_progress", goal="endpoint progress"),
+            status="running",
+        )
+        manager.runs[state.run_id] = state
+
+        manager._record_event(
+            state,
+            {
+                "event_kind": "progress",
+                "payload": {
+                    "phase": "llm_endpoint_attempt_failed",
+                    "endpoint_id": "glm-5.2",
+                    "attempt": 1,
+                    "max_attempts": 1,
+                    "error_kind": "timeout",
+                    "summary": "LLM endpoint glm-5.2 attempt 1/1 failed: timeout",
+                    "force_ledger": True,
+                },
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+        )
+
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]["event_kind"], "progress")
+        self.assertEqual(recorded[0]["payload"]["phase"], "llm_endpoint_attempt_failed")
+        self.assertEqual(len(logger.info_calls), 1)
 
     def test_manager_records_runner_telemetry_when_debug_log_enabled(self) -> None:
         class CapturingLogger:
@@ -19875,11 +20266,15 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("user/downstream-facing delivery surface", prompt)
         self.assertIn("smallest faithful verification path", prompt)
         self.assertIn("parse-layer", prompt)
+        self.assertIn("The plan artifact owns workflow routing after plan acceptance", prompt)
+        self.assertIn("Declare workflow_next through plan_begin or plan_update_plan", prompt)
         self.assertIn("metadata.languages", prompt)
         self.assertIn("canonical implementation language ids", prompt)
         self.assertIn("python, cpp, c", prompt)
+        self.assertIn("metadata.workflow_next", prompt)
         self.assertIn("Build the plan with the plan builder tools", prompt)
         self.assertIn("plan_begin", prompt)
+        self.assertIn("ordinary software implementation plans", prompt)
         self.assertIn("plan_add_constraints_batch", prompt)
         self.assertIn("plan_add_constraint", prompt)
         self.assertIn("Only include them when the active workspace/draft actually contains a source gate_contract", prompt)
@@ -19914,6 +20309,7 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("<workspace_policy>", prompt)
         self.assertNotIn("shell", pack.allowed_capabilities)
         self.assertIn("op_minion_plan_begin", pack.allowed_capabilities)
+        self.assertIn("op_minion_plan_update_plan", pack.allowed_capabilities)
         self.assertIn("op_minion_plan_add_module_outline", pack.allowed_capabilities)
         self.assertIn("op_minion_plan_validate_and_submit_for_review", pack.allowed_capabilities)
         self.assertNotIn("op_minion_plan_submit_for_review", pack.allowed_capabilities)
@@ -20057,6 +20453,7 @@ class MinionManagerTests(unittest.TestCase):
             "software_engineering.architect",
             "software_engineering.coder",
             "software_engineering.reviewer",
+            "software_engineering.review_worker",
         ):
             pack = registry.resolve_pack(
                 TaskContextPack(work_order_id=f"wo_lsp_{profile_id.replace('.', '_')}", goal="use code intelligence"),
@@ -20088,6 +20485,7 @@ class MinionManagerTests(unittest.TestCase):
 
         self.assertIn("Trace happens-before chains", prompt)
         self.assertIn("Review like a software engineer", prompt)
+        self.assertIn("Treat review as engineering acceptance", prompt)
         self.assertIn("breadth-first pass over the checkpoint/diff file list", prompt)
         self.assertIn("read depth-first only through modules", prompt)
         self.assertIn("Batch independent inspection tool calls", prompt)
@@ -20128,12 +20526,41 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("preconditions and postconditions", prompt)
         self.assertIn("exception escape", prompt)
         self.assertIn("lifecycle management", prompt)
+        self.assertIn("false negatives and false positives", prompt)
+        self.assertIn("multi-module review", prompt)
+        self.assertIn("reproducible acceptance evidence", prompt)
         self.assertIn("write the primary review deliverable as an artifact. This is mandatory", prompt)
         self.assertIn("review_report.json", prompt)
         self.assertIn("review_report.md", prompt)
         self.assertIn("terminal summaries may be truncated", prompt)
         self.assertIn("blocker: correctness/security/data loss/API breakage", prompt)
         self.assertIn("note: residual risk or observation", prompt)
+
+    def test_review_worker_profile_is_terminal_artifact_executor(self) -> None:
+        registry = MinionProfileRegistry(runtime_root=self.root)
+        pack = registry.resolve_pack(
+            TaskContextPack(work_order_id="wo_review_worker_prompt", goal="review a repo as final deliverable"),
+            requested_profile="software_engineering.review_worker",
+        )
+        prompt = _render_system_prompt(
+            {
+                "identity": pack.resolved_profile["identity_fragment"],
+                "behavior": pack.resolved_profile["behavior_fragment"],
+                "output_contract": pack.resolved_profile["output_contract_fragment"],
+                "allowed_capabilities": pack.allowed_capabilities,
+                "workspace_policy": pack.workspace["workspace_policy"],
+                "completion_policy": pack.workspace["completion_policy"],
+            }
+        )
+
+        self.assertEqual(pack.minion_profile, "software_engineering.review_worker")
+        self.assertEqual(pack.resolved_profile["effective_execution_strategy"]["gate"]["kind"], "none")
+        self.assertEqual(pack.resolved_profile["output_policy"]["workflow_next"]["default_next_profile"], "none")
+        self.assertIn("review artifact", prompt)
+        self.assertIn("Do not submit review_gate_submit", prompt)
+        self.assertIn("review_report", prompt)
+        self.assertIn("op_minion_artifact_write", pack.allowed_capabilities)
+        self.assertNotIn("op_minion_review_gate_submit", pack.allowed_capabilities)
 
     def test_writer_profile_can_write_files_without_shell(self) -> None:
         registry = MinionProfileRegistry(runtime_root=self.root)
@@ -20593,7 +21020,8 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIsNotNone(workflow_spec)
                 assert workflow_spec is not None
                 self.assertIn("Normal public entrypoint", workflow_spec["description"])
-                self.assertIn("profile-declared workflow_next", workflow_spec["description"])
+                self.assertIn("artifact-declared workflow_next", workflow_spec["description"])
+                self.assertIn("profile workflow_next as the fallback", workflow_spec["description"])
                 self.assertIn("interaction_mode controls user confirmation", workflow_spec["description"])
                 workflow_props = workflow_spec["parameters_schema"]["properties"]
                 self.assertIn("goal", workflow_props)

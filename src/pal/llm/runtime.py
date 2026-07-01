@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import queue
 import random
@@ -55,6 +57,32 @@ _DEFAULT_MAX_RETRY_DELAY_MS = 32_000
 _DEFAULT_STALE_CONNECTION_SETTLE_MS = 300
 _DEFAULT_LLM_REQUEST_TIMEOUT_SECONDS = 180.0
 _DEFAULT_LLM_COMPACTION_TIMEOUT_SECONDS = 180.0
+_ENDPOINT_FALLBACK_DISABLED_POLICIES = {
+    "disabled",
+    "none",
+    "off",
+    "strict",
+    "strict_preferred",
+    "no_fallback",
+}
+_STRICT_ENDPOINT_PREFERRED_SOURCES = {"profile"}
+_SCOPED_LLM_EVENT_SINK: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar(
+    "pal_llm_event_sink",
+    default=None,
+)
+
+
+@contextmanager
+def scoped_llm_event_sink(sink: Callable[[dict[str, Any]], None] | None):
+    token = _SCOPED_LLM_EVENT_SINK.set(sink if callable(sink) else None)
+    try:
+        yield
+    finally:
+        _SCOPED_LLM_EVENT_SINK.reset(token)
+
+
+def _endpoint_fallback_disabled(policy: Any) -> bool:
+    return str(policy or "").strip().lower() in _ENDPOINT_FALLBACK_DISABLED_POLICIES
 
 
 def _is_stale_connection(message: str) -> bool:
@@ -232,12 +260,13 @@ class EndpointResolver:
         *,
         preferred_endpoint_id: str | None = None,
         fallback_endpoint_id: str | None = None,
+        include_remaining: bool = True,
     ) -> list[LLMEndpointModel]:
         items = list(self.endpoints)
         preferred = str(preferred_endpoint_id or "").strip()
         fallback = str(fallback_endpoint_id or "").strip()
         if not preferred and not fallback:
-            return items
+            return items if include_remaining else items[:1]
         ordered: list[LLMEndpointModel] = []
         seen: set[str] = set()
         for endpoint_id in (preferred, fallback):
@@ -248,7 +277,8 @@ class EndpointResolver:
                 continue
             ordered.append(match)
             seen.add(endpoint_id)
-        ordered.extend(item for item in items if item.endpoint_id not in seen)
+        if include_remaining:
+            ordered.extend(item for item in items if item.endpoint_id not in seen)
         return ordered
 
 
@@ -1342,9 +1372,19 @@ class LLMRuntime(LLMRuntimePort):
         *,
         preferred_endpoint_id: str | None = None,
         preferred_endpoint_source: str | None = None,
+        endpoint_fallback_policy: str | None = None,
     ) -> list[LLMEndpointModel]:
-        _ = preferred_endpoint_source
         preferred = str(preferred_endpoint_id or "").strip() or None
+        preferred_source = str(preferred_endpoint_source or "").strip().lower()
+        fallback_disabled = _endpoint_fallback_disabled(endpoint_fallback_policy) or (
+            bool(preferred) and preferred_source in _STRICT_ENDPOINT_PREFERRED_SOURCES
+        )
+        if fallback_disabled:
+            if preferred:
+                return self.endpoint_resolver.enabled(preferred_endpoint_id=preferred, include_remaining=False)
+            if self.active_endpoint_id:
+                return self.endpoint_resolver.enabled(preferred_endpoint_id=self.active_endpoint_id, include_remaining=False)
+            return self.endpoint_resolver.enabled(include_remaining=False)
         if preferred:
             return self.endpoint_resolver.enabled(
                 preferred_endpoint_id=preferred,
@@ -1356,6 +1396,7 @@ class LLMRuntime(LLMRuntimePort):
         return self._enabled_endpoints_for_preference(
             preferred_endpoint_id=str(metadata.get("preferred_endpoint_id") or "").strip() or None,
             preferred_endpoint_source=str(metadata.get("preferred_endpoint_source") or "").strip() or None,
+            endpoint_fallback_policy=str(metadata.get("endpoint_fallback_policy") or "").strip() or None,
         )
 
     def refresh_llm_endpoints(self) -> dict[str, Any]:
@@ -1673,7 +1714,7 @@ class LLMRuntime(LLMRuntimePort):
         return _EndpointInvocationResult(kind="error", error_message=reason)
 
     def _emit_llm_progress(self, phase: str, *, endpoint: LLMEndpointModel, **payload: Any) -> None:
-        sink = self.event_sink
+        sink = _SCOPED_LLM_EVENT_SINK.get() or self.event_sink
         if not callable(sink):
             return
         event = {

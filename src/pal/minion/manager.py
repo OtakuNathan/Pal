@@ -18,6 +18,7 @@ from pal.foundation.sidecar import (
     pack_sidecar_message,
     read_sidecar_message,
 )
+from pal.llm.runtime import scoped_llm_event_sink
 from pal.minion.config import DEFAULT_MINION_RUNNER_MODE, effective_minion_runtime_config, normalize_minion_runner_mode
 from pal.minion.coroutine_runner import CoroutineRunnerSupervisor
 from pal.minion.event_delivery import MinionEventDelivery
@@ -72,6 +73,13 @@ _DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS = 3600
 _DEFAULT_MAX_PARALLEL_MODULES = 5
 _RUN_MEMORY_LEDGER_LIMIT = 500
 _RUNNER_TELEMETRY_EVENT_KINDS = {"phase_started", "progress"}
+_KEY_LLM_ENDPOINT_PROGRESS_PHASES = {
+    "llm_endpoint_attempt_failed",
+    "llm_endpoint_exhausted",
+    "llm_endpoint_fallback_started",
+    "llm_endpoint_fallback_succeeded",
+    "llm_endpoint_skipped",
+}
 
 
 @dataclass
@@ -731,7 +739,11 @@ class MinionManager:
         plan_review = dict(source_metadata.get("plan_review") or {})
         source_pack = self.tasking_repository.pack_for_work_order(work_order_id)
         source_pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(source_pack)
-        next_step = resolve_workflow_next(source_pack, {"plan_ref": dict(loaded.get("plan_ref") or {})})
+        plan_artifact = dict(loaded.get("plan_artifact") or {}) if isinstance(loaded.get("plan_artifact"), dict) else {}
+        next_step = resolve_workflow_next(
+            source_pack,
+            {"plan_ref": dict(loaded.get("plan_ref") or {}), "plan_artifact": plan_artifact},
+        )
         if next_step.get("status") != "ok":
             raise ValueError(str(next_step.get("reason") or "workflow next profile is invalid"))
         next_profile = str(next_step.get("next_profile") or NONE_PROFILE)
@@ -744,7 +756,7 @@ class MinionManager:
                 next_profile=NONE_PROFILE,
             )
             workflow.update({"status": "completed", "accepted_plan_ref": dict(loaded.get("plan_ref") or {}), "updated_at": utc_now()})
-            self.tasking_repository.merge_work_order_metadata(work_order_id, {"workflow": workflow})
+            self.tasking_repository.merge_work_order_metadata(work_order_id, {"workflow": workflow}, work_order_status="completed")
             return {
                 "status": "completed",
                 "work_order_id": work_order_id,
@@ -1089,10 +1101,32 @@ class MinionManager:
         return {"ok": True, "advice": preflight_advice_to_payload(advice)}
 
     async def llm_broker_generate(self, params: dict[str, Any]) -> dict[str, Any]:
-        self._require_broker_run(params)
+        state = self._require_broker_run(params)
         request = llm_request_from_payload(dict(params.get("request") or {}))
         runtime = await self._llm_broker_runtime()
-        outcome = await runtime.agenerate(request)
+        loop = asyncio.get_running_loop()
+
+        def sink(event: dict[str, Any]) -> None:
+            payload = _llm_endpoint_progress_payload(event)
+
+            def record() -> None:
+                current = self.runs.get(state.run_id)
+                if current is None or current.status in _TERMINAL_RUN_STATUSES:
+                    return
+                self._record_event(
+                    current,
+                    {
+                        "event_kind": "progress",
+                        "payload": payload,
+                        "created_at": utc_now(),
+                    },
+                )
+
+            loop.call_soon_threadsafe(record)
+
+        with scoped_llm_event_sink(sink):
+            outcome = await runtime.agenerate(request)
+        await asyncio.sleep(0)
         return {"ok": True, "outcome": llm_outcome_to_payload(outcome)}
 
     async def llm_broker_resolve_max_output_tokens(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1581,6 +1615,8 @@ class MinionManager:
                 "ok": payload.get("ok"),
                 "status": payload.get("status"),
                 "error_type": payload.get("error_type"),
+                "error": payload.get("error"),
+                "text_preview": payload.get("text_preview"),
             }
             if phase == "tool_call_completed":
                 state.tool_call_count += 1
@@ -1628,6 +1664,8 @@ def _event_debug_log_requested(pack: TaskContextPack, event: dict[str, Any]) -> 
 
 def _should_record_runner_event(pack: TaskContextPack, event: dict[str, Any]) -> bool:
     event_kind = str(event.get("event_kind") or "")
+    if _is_key_llm_endpoint_progress_event(event):
+        return True
     if event_kind in _RUNNER_TELEMETRY_EVENT_KINDS and not _event_debug_log_requested(pack, event):
         return False
     return True
@@ -1635,9 +1673,44 @@ def _should_record_runner_event(pack: TaskContextPack, event: dict[str, Any]) ->
 
 def _should_log_runner_event(pack: TaskContextPack, event: dict[str, Any]) -> bool:
     event_kind = str(event.get("event_kind") or "")
+    if _is_key_llm_endpoint_progress_event(event):
+        return True
     if event_kind in _RUNNER_TELEMETRY_EVENT_KINDS and not _event_debug_log_requested(pack, event):
         return False
     return True
+
+
+def _is_key_llm_endpoint_progress_event(event: dict[str, Any]) -> bool:
+    if str((event or {}).get("event_kind") or "") != "progress":
+        return False
+    payload = dict((event or {}).get("payload") or {})
+    return str(payload.get("phase") or "").strip() in _KEY_LLM_ENDPOINT_PROGRESS_PHASES
+
+
+def _llm_endpoint_progress_payload(event: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(event or {})
+    phase = str(payload.get("phase") or "llm_endpoint_event").strip() or "llm_endpoint_event"
+    payload["phase"] = phase
+    payload["force_ledger"] = True
+    payload.setdefault("summary", _llm_endpoint_progress_summary(phase, payload))
+    return payload
+
+
+def _llm_endpoint_progress_summary(phase: str, payload: dict[str, Any]) -> str:
+    endpoint = payload.get("endpoint_id") or payload.get("model_id") or "endpoint"
+    if phase == "llm_endpoint_attempt_failed":
+        return f"LLM endpoint {endpoint} attempt {payload.get('attempt')}/{payload.get('max_attempts')} failed: {payload.get('error_kind') or 'error'}"
+    if phase == "llm_endpoint_exhausted":
+        next_endpoint = str(payload.get("next_endpoint_id") or "").strip()
+        suffix = f"; falling back to {next_endpoint}" if next_endpoint else ""
+        return f"LLM endpoint {endpoint} exhausted after {payload.get('attempt')}/{payload.get('max_attempts')}{suffix}"
+    if phase == "llm_endpoint_fallback_started":
+        return f"LLM fallback started: {endpoint}"
+    if phase == "llm_endpoint_fallback_succeeded":
+        return f"LLM fallback succeeded: {endpoint}"
+    if phase == "llm_endpoint_skipped":
+        return f"LLM endpoint skipped: {endpoint} ({payload.get('reason') or 'skipped'})"
+    return f"LLM endpoint event: {endpoint}"
 
 
 def _is_plan_parent_pack(pack: TaskContextPack) -> bool:
@@ -1773,6 +1846,9 @@ def _build_pre_plan_contract_compiler_pack(pack: TaskContextPack, spec: GateSpec
     }
     if isinstance(pack.metadata.get("control_route"), dict):
         metadata["control_route"] = dict(pack.metadata.get("control_route") or {})
+    for key in ("preferred_endpoint_id", "preferred_endpoint_source"):
+        if key in (pack.metadata or {}):
+            metadata[key] = (pack.metadata or {})[key]
     return TaskContextPack.from_dict(
         {
             "work_order_id": compiler_work_order_id,
@@ -1826,16 +1902,25 @@ def _source_contract_from_pack(pack: TaskContextPack) -> dict[str, Any]:
 def _workflow_output_artifact_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     primary = payload.get("primary_artifact")
     artifacts = [dict(item) for item in list(payload.get("artifacts") or []) if isinstance(item, dict)]
+    declared_next = payload.get("workflow_next")
     if isinstance(primary, dict):
-        return {"primary_artifact": dict(primary), "artifacts": artifacts}
+        result = {"primary_artifact": dict(primary), "artifacts": artifacts}
+        if isinstance(declared_next, dict):
+            result["workflow_next"] = dict(declared_next)
+        return result
     plan_ref = payload.get("plan_ref")
     if isinstance(plan_ref, dict):
         result: dict[str, Any] = {"plan_ref": dict(plan_ref)}
         if isinstance(payload.get("plan_validation"), dict):
             result["plan_validation"] = dict(payload.get("plan_validation") or {})
+        if isinstance(declared_next, dict):
+            result["workflow_next"] = dict(declared_next)
         return result
     if artifacts:
-        return {"artifacts": artifacts}
+        result = {"artifacts": artifacts}
+        if isinstance(declared_next, dict):
+            result["workflow_next"] = dict(declared_next)
+        return result
     return {"summary": str(payload.get("summary") or ""), "status": str(payload.get("status") or "")}
 
 

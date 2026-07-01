@@ -53,15 +53,49 @@ def workflow_next_policy(pack: TaskContextPack) -> dict[str, Any]:
     return policy
 
 
+def _mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _artifact_declared_next(payload: dict[str, Any]) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    for key in ("workflow_next", "next"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            candidates.append(dict(value))
+    for key in ("plan_artifact", "artifact", "output_artifact", "primary_artifact"):
+        artifact = _mapping(payload.get(key))
+        if not artifact:
+            continue
+        for nested_key in ("workflow_next", "next"):
+            value = artifact.get(nested_key)
+            if isinstance(value, dict):
+                candidates.append(dict(value))
+        metadata = _mapping(artifact.get("metadata"))
+        for nested_key in ("workflow_next", "next"):
+            value = metadata.get(nested_key)
+            if isinstance(value, dict):
+                candidates.append(dict(value))
+        if str(artifact.get("next_profile") or "").strip():
+            candidates.append({"profile": artifact.get("next_profile")})
+    if str(payload.get("next_profile") or "").strip():
+        candidates.append({"profile": payload.get("next_profile")})
+    return candidates[0] if candidates else {}
+
+
+def _next_profile_from_declaration(declaration: dict[str, Any]) -> str:
+    requested = declaration.get("profile") or declaration.get("next_profile")
+    if not requested and isinstance(declaration.get("next"), dict):
+        requested = dict(declaration.get("next") or {}).get("profile")
+    return str(requested or "").strip()
+
+
 def resolve_workflow_next(pack: TaskContextPack, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     policy = workflow_next_policy(pack)
     payload = dict(payload or {})
     default_next = canonical_profile_ref(profile=str(policy.get("default_next_profile") or policy.get("next_profile") or NONE_PROFILE))
-    requested = payload.get("next_profile")
-    if not requested and isinstance(payload.get("next"), dict):
-        requested = dict(payload.get("next") or {}).get("profile")
-    if not requested:
-        requested = default_next
+    declaration = _artifact_declared_next(payload)
+    requested = _next_profile_from_declaration(declaration) or default_next
     next_profile = canonical_profile_ref(profile=str(requested or NONE_PROFILE))
     allowed = _string_list(policy.get("allowed_next_profiles"))
     if not allowed:
@@ -76,14 +110,19 @@ def resolve_workflow_next(pack: TaskContextPack, payload: dict[str, Any] | None 
             "next_profile": next_profile,
             "allowed_next_profiles": allowed,
             "policy": policy,
+            "declaration": declaration,
         }
+    adapter = str(declaration.get("adapter") or policy.get("adapter") or "").strip()
+    artifact_type = str(declaration.get("artifact_type") or policy.get("artifact_type") or "").strip()
     return {
         "status": "ok",
         "next_profile": next_profile,
-        "adapter": str(policy.get("adapter") or "").strip(),
-        "artifact_type": str(policy.get("artifact_type") or "").strip(),
+        "adapter": adapter,
+        "artifact_type": artifact_type,
         "allowed_next_profiles": allowed,
         "policy": policy,
+        "declaration": declaration,
+        "source": "artifact" if declaration else "profile_default",
     }
 
 

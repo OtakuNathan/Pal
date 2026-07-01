@@ -791,12 +791,8 @@ class PalCore:
         channel_envelope: ChannelEnvelope,
         control_scope_key: str,
         scope_state,
-        *,
-        emit_typing_start: bool = False,
     ) -> asyncio.Task[Any]:
         turn_id = channel_envelope.event.event_id
-        if emit_typing_start:
-            self._queue_channel_status(channel_envelope, "typing_start")
         self.context.turn_event_bus.emit("turn.start", {
             "turn_id": turn_id,
             "scope_key": control_scope_key,
@@ -828,7 +824,6 @@ class PalCore:
                     next_envelope,
                     control_scope_key,
                     scope_state,
-                    emit_typing_start=True,
                 )
                 return
 
@@ -953,6 +948,8 @@ class PalCore:
     async def handle_control_action_async(self, action: ControlAction) -> None:
         await self.expire_pending_control_requests_async()
         status_route = action.route or (action.delivery.route if action.delivery is not None else None)
+        with contextlib.suppress(Exception):
+            await self._status_to_route_async(status_route, "typing_start", {})
         try:
             if action.delivery is not None:
                 await self._deliver_control_delivery_async(action.delivery, fallback_route=action.route)

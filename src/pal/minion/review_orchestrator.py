@@ -277,6 +277,9 @@ class ReviewOrchestrator:
             }
             if isinstance((planner_state.pack.metadata or {}).get("control_route"), dict):
                 metadata["control_route"] = dict((planner_state.pack.metadata or {}).get("control_route") or {})
+            for key in ("preferred_endpoint_id", "preferred_endpoint_source"):
+                if key in (planner_state.pack.metadata or {}):
+                    metadata[key] = (planner_state.pack.metadata or {})[key]
             if isinstance((planner_state.pack.metadata or {}).get("plan_review"), dict):
                 metadata["plan_review"] = {
                     **plan_review_policy,
@@ -475,6 +478,9 @@ class ReviewOrchestrator:
                 metadata["checklist_projection"] = compact_checklist(acceptance_checklist)
             if isinstance((coder_state.pack.metadata or {}).get("control_route"), dict):
                 metadata["control_route"] = dict((coder_state.pack.metadata or {}).get("control_route") or {})
+            for key in ("preferred_endpoint_id", "preferred_endpoint_source"):
+                if key in (coder_state.pack.metadata or {}):
+                    metadata[key] = (coder_state.pack.metadata or {})[key]
             pack = TaskContextPack.from_dict(
                 {
                     "work_order_id": review_work_order_id,
@@ -1005,6 +1011,9 @@ class ReviewOrchestrator:
             }
             if isinstance((reviewer_state.pack.metadata or {}).get("control_route"), dict):
                 metadata["control_route"] = dict((reviewer_state.pack.metadata or {}).get("control_route") or {})
+            for key in ("preferred_endpoint_id", "preferred_endpoint_source"):
+                if key in (reviewer_state.pack.metadata or {}):
+                    metadata[key] = (reviewer_state.pack.metadata or {})[key]
             pack = self.repository.build_planner_revision_pack_from_review_gate(
                 review_gate_ref,
                 metadata=metadata,

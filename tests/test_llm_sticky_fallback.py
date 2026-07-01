@@ -13,6 +13,7 @@ from pal.llm import EndpointResolver, LLMRuntime, RuntimeSettingRepository
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
 from pal.llm.capabilities import LLMIntrospectionProvider, register_with_core as register_llm_with_core
 from pal.runtime_app import open_runtime
+from pal.shared import LLMFinishReason
 
 
 class _FailoverInvoker:
@@ -88,7 +89,7 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
             finally:
                 asyncio.run(handle.stop_async())
 
-    def test_profile_preferred_missing_falls_back_to_active_endpoint_first(self) -> None:
+    def test_profile_preferred_missing_does_not_fall_back_to_active_endpoint(self) -> None:
         settings = _MemorySettingsRepository()
         settings.active_endpoint_id = "active"
         active = _fake_endpoint("active", "active-model")
@@ -108,11 +109,12 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(outcome.text, "ok:active")
-        self.assertEqual(invoker.calls, ["active"])
+        self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
+        self.assertIn("no enabled endpoints", outcome.text)
+        self.assertEqual(invoker.calls, [])
         self.assertEqual(runtime.active_endpoint_id, "active")
 
-    def test_profile_preferred_failure_falls_back_to_active_endpoint_next(self) -> None:
+    def test_profile_preferred_failure_does_not_fall_back_to_active_endpoint(self) -> None:
         settings = _MemorySettingsRepository()
         settings.active_endpoint_id = "active"
         active = _fake_endpoint("active", "active-model")
@@ -134,11 +136,12 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(outcome.text, "ok:active")
-        self.assertEqual(invoker.calls, ["broken", "active"])
+        self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
+        self.assertIn("broken endpoint", outcome.text)
+        self.assertEqual(invoker.calls, ["broken"])
         self.assertEqual(runtime.active_endpoint_id, "active")
 
-    def test_profile_preferred_missing_resolves_budget_from_active_endpoint(self) -> None:
+    def test_profile_preferred_missing_does_not_resolve_budget_from_active_endpoint(self) -> None:
         settings = _MemorySettingsRepository()
         settings.active_endpoint_id = "active"
         active = _fake_endpoint("active", "active-model")
@@ -153,11 +156,36 @@ class PalV2LLMStickyFallbackTests(unittest.TestCase):
 
         self.assertEqual(
             runtime.resolve_max_output_tokens(preferred_endpoint_id="missing", preferred_endpoint_source="profile"),
-            777,
+            None,
         )
         facts = runtime.resolve_endpoint_facts(preferred_endpoint_id="missing", preferred_endpoint_source="profile")
-        self.assertEqual(facts["endpoint_id"], "active")
-        self.assertEqual(facts["max_output_tokens"], 777)
+        self.assertEqual(facts["endpoint_id"], "missing")
+        self.assertIsNone(facts["max_output_tokens"])
+
+    def test_endpoint_fallback_policy_none_uses_only_selected_endpoint(self) -> None:
+        settings = _MemorySettingsRepository()
+        settings.active_endpoint_id = "broken"
+        broken = _fake_endpoint("broken", "broken-model")
+        working = _fake_endpoint("working", "working-model")
+        invoker = _FailoverInvoker()
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(endpoints=(broken, working)),
+            settings_repository=settings,
+            endpoint_invoker=invoker,
+            endpoint_retry_attempts=1,
+        )
+
+        outcome = runtime.generate(
+            CanonicalLLMRequest(
+                messages=[{"role": "user", "content": "hi"}],
+                max_output_tokens=64,
+                metadata={"endpoint_fallback_policy": "none"},
+            )
+        )
+
+        self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
+        self.assertIn("broken endpoint", outcome.text)
+        self.assertEqual(invoker.calls, ["broken"])
 
     def test_codex_cli_connection_failure_skips_same_failure_domain(self) -> None:
         class _Invoker:

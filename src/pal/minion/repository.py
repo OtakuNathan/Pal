@@ -407,12 +407,13 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         repair_acceptance = _repair_context_acceptance_texts(repair_context)
         if repair_context:
             resolved_workspace.setdefault("repair_context", repair_context)
+        module_action = _module_dispatch_action(resolved_profile)
         pack_metadata.update(
             {
                 "task_id": task_id,
                 "project_name": project_name,
                 "task_title": str(pack_metadata.get("task_title") or artifact.summary or artifact.task_id),
-                "work_order_title": str(pack_metadata.get("work_order_title") or f"{module_name} implementation"),
+                "work_order_title": str(pack_metadata.get("work_order_title") or f"{module_name} {module_action['noun']}"),
                 "plan_artifact": _plan_artifact_payload(artifact, plan_revision=plan_revision),
                 "plan_validation": validation,
                 "module_id": resolved_module_id,
@@ -489,13 +490,13 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         return TaskContextPack.from_dict(
             {
                 "work_order_id": resolved_work_order_id,
-                "goal": str(goal or artifact.summary or f"Implement module {resolved_module_id}"),
+                "goal": str(goal or artifact.summary or f"{module_action['verb']} module {resolved_module_id}"),
                 "instruction": str(
                     instruction
                     or (
                         f"Implement module {resolved_module_id} according to the structured coder work order."
                         if _profile_uses_coder_contract(resolved_profile)
-                        else f"Complete module {resolved_module_id} one plan milestone at a time."
+                        else f"{module_action['verb']} module {resolved_module_id} one plan milestone at a time."
                     )
                 ),
                 "acceptance_criteria": acceptance_criteria,
@@ -1018,11 +1019,13 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             )
             if integration_workspace:
                 module_workspace.update(integration_workspace)
+            child_profile = _canonical_profile_id(dispatch_profile_group, dispatch_profile_name)
+            child_action = _module_dispatch_action(child_profile)
             child_metadata = {
                 "task_id": _safe_id(task_id),
                 "project_name": project_name,
                 "task_title": str(metadata.get("task_title") or artifact.summary or task_id),
-                "work_order_title": f"{module_name} implementation",
+                "work_order_title": f"{module_name} {child_action['noun']}",
                 "parent_work_order_id": str(work_order_id),
                 "parent_milestone_index": int(milestone_index),
                 "parent_module_id": module_id,
@@ -1051,9 +1054,9 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                     work_order_id=child_work_order_id,
                     workspace=module_workspace,
                     metadata=child_metadata,
-                    goal=f"Implement module {module_id}",
-                    instruction=f"Implement module {module_id}; this is parent work-order milestone {milestone_index}.",
-                    minion_profile=_canonical_profile_id(dispatch_profile_group, dispatch_profile_name),
+                    goal=f"{child_action['verb']} module {module_id}",
+                    instruction=f"{child_action['verb']} module {module_id}; this is parent work-order milestone {milestone_index}.",
+                    minion_profile=child_profile,
                 )
             )
             module_status[module_id] = "running"
@@ -2530,24 +2533,31 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         parent_id = str(parent_work_order.get("work_order_id") or "")
         child_id = str(child_work_order_id or "").strip()
         normalized_child_status = str(child_terminal_status or "failed").strip().lower()
-        if normalized_child_status not in {"failed", "killed"}:
+        if normalized_child_status not in {"failed", "blocked", "killed"}:
             normalized_child_status = "failed"
         now = utc_now()
         child_terminal_recorded = False
+        child_existing_terminal_status = _latest_child_terminal_failure_status(db, child_id)
+        child_has_terminal_failure = child_existing_terminal_status in {"failed", "blocked", "killed"}
+        if child_has_terminal_failure:
+            normalized_child_status = child_existing_terminal_status
         if child_id:
             child = self._fetch_one(db, "SELECT status FROM minion_work_orders WHERE work_order_id = ?", (child_id,))
             child_status = str(dict(child)["status"] if child is not None else "").strip().lower()
             if child is not None and child_status not in {"completed", "failed", "blocked", "killed"}:
-                child_payload = {
-                    "status": normalized_child_status,
-                    "summary": reason or f"child module runner {child_id} was released",
-                    "reason": "manager_recovery",
-                    "parent_work_order_id": parent_id,
-                    "child_work_order_id": child_id,
-                }
-                self.ledger.insert_ledger(db, child_id, "terminal", str(child_payload["summary"]), child_payload, "", "", now)
-                self.ledger.record_terminal(db, child_id, child_payload, "", "", now)
-                child_terminal_recorded = True
+                if child_has_terminal_failure:
+                    self._update_work_order_status(db, child_id, normalized_child_status)
+                else:
+                    child_payload = {
+                        "status": normalized_child_status,
+                        "summary": reason or f"child module runner {child_id} was released",
+                        "reason": "manager_recovery",
+                        "parent_work_order_id": parent_id,
+                        "child_work_order_id": child_id,
+                    }
+                    self.ledger.insert_ledger(db, child_id, "terminal", str(child_payload["summary"]), child_payload, "", "", now)
+                    self.ledger.record_terminal(db, child_id, child_payload, "", "", now)
+                    child_terminal_recorded = True
         running_children = _plan_execution_running_children(plan_execution)
         released_module_id = next((module_id for module_id, value in running_children.items() if value == child_id), "")
         dag = dict(plan_execution.get("module_dag") or {})
@@ -2556,12 +2566,14 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             running_modules = dict(dag.get("running_modules") or {})
             running_modules.pop(released_module_id, None)
             if str(module_status.get(released_module_id) or "").strip().lower() == "running":
-                module_status[released_module_id] = "ready"
+                module_status[released_module_id] = "blocked" if child_has_terminal_failure else "ready"
             dag["module_status"] = module_status
             dag["running_modules"] = running_modules
             ready_modules = _coerce_text_list(dag.get("ready_modules"))
-            if released_module_id and released_module_id not in ready_modules:
+            if released_module_id and not child_has_terminal_failure and released_module_id not in ready_modules:
                 ready_modules.append(released_module_id)
+            if child_has_terminal_failure:
+                ready_modules = [module_id for module_id in ready_modules if module_id != released_module_id]
             module_order = _coerce_text_list(dag.get("module_order"))
             dag["ready_modules"] = [module_id for module_id in module_order if module_id in set(ready_modules)] or ready_modules
             plan_execution["module_dag"] = dag
@@ -2585,7 +2597,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             "UPDATE minion_work_orders SET metadata_json = ?, updated_at = ? WHERE work_order_id = ?",
             (_json(parent_metadata), now, parent_id),
         )
-        self._update_work_order_status(db, parent_id, "active")
+        self._update_work_order_status(db, parent_id, "blocked" if resolved_status == "blocked" else "active")
         parent_payload = {
             "status": resolved_status,
             "summary": reason or f"released stale running module for {parent_id}",
@@ -3037,6 +3049,50 @@ def _plan_milestone_prompt_view(
 def _profile_uses_coder_contract(profile: str) -> bool:
     normalized = str(profile or "").replace("/", ".").strip().lower()
     return normalized == "software_engineering.coder" or normalized.endswith(".coder")
+
+
+def _latest_child_terminal_failure_status(db: sqlite3.Connection, child_work_order_id: str) -> str:
+    child_id = str(child_work_order_id or "").strip()
+    if not child_id:
+        return ""
+    row = db.execute(
+        """
+        SELECT status FROM minion_worker_checkpoints
+        WHERE work_order_id = ?
+          AND status IN ('failed', 'blocked', 'killed')
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (child_id,),
+    ).fetchone()
+    if row is not None:
+        return str(dict(row).get("status") or "").strip().lower()
+    rows = db.execute(
+        """
+        SELECT payload_json FROM minion_worker_ledger
+        WHERE work_order_id = ?
+          AND event_kind = 'terminal'
+        ORDER BY created_at DESC
+        LIMIT 5
+        """,
+        (child_id,),
+    ).fetchall()
+    for item in rows:
+        status = str(_loads_or_dict(dict(item).get("payload_json")).get("status") or "").strip().lower()
+        if status in {"failed", "blocked", "killed"}:
+            return status
+    return ""
+
+
+def _module_dispatch_action(profile: str) -> dict[str, str]:
+    role = _role_from_profile(profile).lower()
+    if role == "coder":
+        return {"verb": "Implement", "noun": "implementation"}
+    if role in {"reviewer", "review_worker", "reviewer_worker"}:
+        return {"verb": "Review", "noun": "review"}
+    if role == "writer":
+        return {"verb": "Write", "noun": "writing"}
+    return {"verb": "Execute", "noun": "execution"}
 
 
 def _role_from_profile(profile: str) -> str:
@@ -3888,6 +3944,8 @@ def _loads_or_dict(value: Any) -> dict[str, Any]:
 
 
 def _work_order_event_log_enabled(repo: Any, db: sqlite3.Connection, work_order_id: str, payload: dict[str, Any]) -> bool:
+    if bool((payload or {}).get("force_ledger")):
+        return True
     metadata = _loads_or_dict((payload or {}).get("metadata"))
     row = repo._fetch_one(db, "SELECT metadata_json FROM minion_work_orders WHERE work_order_id = ?", (str(work_order_id),))
     if row is not None:

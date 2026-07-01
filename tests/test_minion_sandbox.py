@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from pal.llm import EndpointResolver, LLMRuntime
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice, LLMPreflightRequest
 from pal.minion.manager import MinionManager, MinionRunState
 from pal.minion.llm_broker import (
@@ -419,6 +420,89 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
                 self.assertEqual(generated["outcome"]["text"], "pong")
                 self.assertEqual(max_tokens["max_output_tokens"], 123)
                 self.assertEqual(facts["endpoint_id"], "endpoint_a")
+
+        asyncio.run(scenario())
+
+    def test_manager_llm_broker_records_endpoint_progress_from_host_runtime(self) -> None:
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory(prefix="pal_minion_broker_events_") as tmp:
+                manager = MinionManager(runtime_root=Path(tmp))
+                pack = TaskContextPack(work_order_id="wo_broker_events", goal="g")
+                state = MinionRunState(minion_id="m", run_id="run_broker_events", pack=pack, status="running")
+                manager.runs[state.run_id] = state
+                recorded: list[dict[str, object]] = []
+                manager.tasking_repository.record_minion_event = lambda event: recorded.append(dict(event))  # type: ignore[method-assign]
+
+                class Settings:
+                    def get_think_level(self):
+                        return "balanced"
+
+                    def get_active_llm_endpoint_id(self):
+                        return None
+
+                    def set_active_llm_endpoint_id(self, endpoint_id):
+                        self.active_endpoint_id = endpoint_id
+
+                class Invoker:
+                    def invoke(self, endpoint, request):
+                        _ = request
+                        if endpoint.endpoint_id == "broken":
+                            raise RuntimeError("broken endpoint")
+                        return CanonicalLLMOutcome(text=f"ok:{endpoint.endpoint_id}")
+
+                    def invoke_stream(self, endpoint, request):
+                        raise NotImplementedError
+
+                broken = SimpleNamespace(
+                    endpoint_id="broken",
+                    model_id="broken-model",
+                    provider="stub",
+                    base_url="",
+                    capabilities_blob={},
+                    supports_streaming=False,
+                    supports_vision=False,
+                    max_output_tokens=1024,
+                    context_window=8192,
+                    input_modalities_blob=[],
+                )
+                working = SimpleNamespace(
+                    endpoint_id="working",
+                    model_id="working-model",
+                    provider="stub",
+                    base_url="",
+                    capabilities_blob={},
+                    supports_streaming=False,
+                    supports_vision=False,
+                    max_output_tokens=1024,
+                    context_window=8192,
+                    input_modalities_blob=[],
+                )
+                runtime = LLMRuntime(
+                    endpoint_resolver=EndpointResolver(endpoints=(broken, working)),
+                    settings_repository=Settings(),
+                    endpoint_invoker=Invoker(),
+                    endpoint_retry_attempts=1,
+                )
+
+                async def fake_runtime():
+                    return runtime
+
+                manager._llm_broker_runtime = fake_runtime  # type: ignore[method-assign]
+                generated = await manager.llm_broker_generate(
+                    {
+                        "run_id": state.run_id,
+                        "request": llm_request_to_payload(
+                            CanonicalLLMRequest(messages=[{"role": "user", "content": "ping"}], max_output_tokens=10)
+                        ),
+                    }
+                )
+
+                self.assertEqual(generated["outcome"]["text"], "ok:working")
+                phases = [event["payload"]["phase"] for event in recorded if event.get("event_kind") == "progress"]
+                self.assertIn("llm_endpoint_attempt_failed", phases)
+                self.assertIn("llm_endpoint_exhausted", phases)
+                self.assertIn("llm_endpoint_fallback_succeeded", phases)
+                self.assertTrue(all(event["payload"].get("force_ledger") for event in recorded))
 
         asyncio.run(scenario())
 

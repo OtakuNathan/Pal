@@ -948,7 +948,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.endpoint.has_queued_status())
         self.assertEqual(self.endpoint.status_outbox[-1].kind, "working_stop")
 
-    async def test_control_action_emits_working_stop(self) -> None:
+    async def test_control_action_emits_typing_start_and_working_stop(self) -> None:
         await self.core.handle_control_action_async(
             ControlAction(
                 action_kind="show_think",
@@ -958,6 +958,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(self.endpoint.has_queued_status())
+        self.assertEqual(self.endpoint.status_outbox[0].kind, "typing_start")
         self.assertEqual(self.endpoint.status_outbox[-1].kind, "working_stop")
 
     async def test_non_interactive_capability_reply_preserves_full_text(self) -> None:
@@ -999,6 +1000,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.core.schedule_channel_turn_async(envelope)
         await self.core.run_until_idle_async(max_iterations=32)
 
+        self.assertTrue(any(kind == "typing_start" for kind, _, _ in self.endpoint.sent_statuses))
         self.assertTrue(any(kind == "working_stop" for kind, _, _ in self.endpoint.sent_statuses))
 
     async def test_button_backed_set_think_resolves_interaction(self) -> None:

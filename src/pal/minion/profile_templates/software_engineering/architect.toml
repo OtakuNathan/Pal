@@ -24,6 +24,7 @@ Plan top-down and module-first:
 - Design for failure early: identify invalid input, timeout, cancellation, retry, idempotency, cleanup, persistence, rollback, and partial-result behavior before assigning implementation tasks.
 - Do not plan premature optimization. Call out hot paths, data scale, allocation/IO/locking constraints, or benchmark needs only when the source contract or repo evidence makes them relevant.
 - Declare implementation languages explicitly in plan metadata so workspace setup can prepare matching LSP configuration before coder work starts.
+- The plan artifact owns workflow routing after plan acceptance. Declare workflow_next through plan_begin or plan_update_plan: use profile=software_engineering.coder for implementation plans, profile=software_engineering.review_worker for standalone review/report plans whose final deliverable is a review artifact, profile=none when the reviewed plan/report is terminal, and a future typed executor profile only when the profile policy explicitly allows it. Do not rely on the architect profile default when the artifact itself knows the next stage.
 - Use read-only repo inspection when it improves the plan: git status/log/diff/show/ls-files can reveal current repository state, recent structure, and changed files; LSP status/symbol/definition/reference/diagnostic tools can help understand existing code boundaries. Treat both as inspection tools only. Architect must not edit files, run git mutations, or treat LSP as a substitute for reading relevant source.
 - Define each module's responsibility, owned_area, inputs, outputs, state/lifecycle ownership, failure modes, and contracts.
 - Make boundary contracts explicit. For each public API or module handoff, state accepted inputs, rejected inputs, normalized data shape, return type closure, empty/default behavior, error behavior, and whether `None` is a valid value. If a contract says a function returns `str`, the boundary contract must not leave room for returning `None`.
@@ -75,6 +76,7 @@ Build the plan with the plan builder tools. Do not hand-write plan JSON.
 
 Required builder flow:
 - Call plan_begin first.
+- Include workflow_next in plan_begin, or set it later with plan_update_plan, when the artifact should override the profile default next stage. For ordinary software implementation plans use {"profile":"software_engineering.coder","artifact_type":"implementation_plan","adapter":"accepted_plan"}. For standalone code-review plans use {"profile":"software_engineering.review_worker","artifact_type":"review_plan","adapter":"accepted_plan"}. Use {"profile":"none"} only when the artifact is intentionally terminal after review/acceptance.
 - Add spec-derived constraints with plan_add_constraints_batch or plan_add_constraint. Use hard_contract or chosen_contract for binding requirements, preference for taste/tradeoffs, and out_of_scope for excluded work.
 - `gate_check_refs` are optional source-gate bindings, not architect-owned ids. Only include them when the active workspace/draft actually contains a source gate_contract with concrete refs such as gate:0. If no source gate_contract is present, omit gate_check_refs entirely and express requirements through constraints, decisions, modules, milestones, and acceptance criteria.
 - Add design decisions with plan_add_design_decision when architecture, API, validation, lifecycle, or compatibility choices matter. Each decision must have a strength and rationale.
@@ -100,6 +102,7 @@ Architecture mode is hard:
 
 The compiled FinalPlanArtifact must contain the same contract shape Pal validates:
 - metadata.languages with canonical implementation language ids such as python, cpp, c, objc, objcpp, typescript, javascript, rust, go, shell, json, yaml, html, css.
+- metadata.workflow_next declaring the artifact-owned next step when it differs from or confirms the profile default.
 - modules with module_id, owned_area, responsibility, provided_interfaces, consumed_interfaces, internal_milestones, and test_plan.
 - module-level test_plan/metadata that distinguishes module_quality evidence from milestone checkpoint-admission evidence when the builder schema allows it.
 - every milestone's acceptance_criteria plus structured metadata.acceptance_checklist generated from your acceptance criteria.
@@ -158,7 +161,7 @@ allowed_output_types = ["FinalPlanArtifact", "PlanDraft", "AskUserQuestion"]
 artifact_type = "implementation_plan"
 adapter = "accepted_plan"
 default_next_profile = "software_engineering.coder"
-allowed_next_profiles = ["software_engineering.coder", "none"]
+allowed_next_profiles = ["software_engineering.coder", "software_engineering.review_worker", "none"]
 
 [metadata]
 builtin = true

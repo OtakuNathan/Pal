@@ -53,6 +53,7 @@ required_wheel_paths=(
   "pal/minion/profile_templates/software_engineering/architect.toml"
   "pal/minion/profile_templates/software_engineering/coder.toml"
   "pal/minion/profile_templates/software_engineering/reviewer.toml"
+  "pal/minion/profile_templates/software_engineering/review_worker.toml"
   "pal/minion/profile_templates/software_engineering/writer.toml"
   "pal/minion/runner_process.py"
   "pal/minion/sandbox.py"
@@ -149,11 +150,27 @@ with zipfile.ZipFile(wheel_path) as wheel:
         fail("architect.toml must require a plan artifact")
     if architect_output_policy.get("primary_artifact") != "plan.json":
         fail("architect.toml must emit plan.json as the primary artifact")
+    architect_next = architect_output_policy.get("workflow_next")
+    if not isinstance(architect_next, dict):
+        fail("architect.toml missing [output_policy.workflow_next]")
+    architect_allowed_next = architect_next.get("allowed_next_profiles")
+    if not isinstance(architect_allowed_next, list) or "software_engineering.review_worker" not in architect_allowed_next:
+        fail("architect.toml must allow software_engineering.review_worker for standalone review workflows")
 
     reviewer_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/reviewer.toml"))
     reviewer_gate_policy = reviewer_profile.get("gate_policy")
     if not isinstance(reviewer_gate_policy, dict) or reviewer_gate_policy.get("submits_review_gate") is not True:
         fail("reviewer.toml must declare gate_policy.submits_review_gate = true")
+
+    review_worker_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/review_worker.toml"))
+    if (
+        review_worker_profile.get("profile_id") != "review_worker"
+        or review_worker_profile.get("profile_group") != "software_engineering"
+    ):
+        fail("review_worker.toml must declare software_engineering review_worker profile")
+    review_worker_strategy = review_worker_profile.get("execution_strategy")
+    if not isinstance(review_worker_strategy, dict) or review_worker_strategy.get("post", {}).get("kind") != "none":
+        fail("review_worker.toml must be a terminal artifact executor with execution_strategy.post.kind=none")
 
     writer_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/writer.toml"))
     if writer_profile.get("profile_id") != "writer" or writer_profile.get("profile_group") != "software_engineering":
@@ -185,6 +202,10 @@ with zipfile.ZipFile(wheel_path) as wheel:
         found_language_ids = set(payload.get("language_ids") or [])
         if found_language_ids != language_ids:
             fail(f"{path} language_ids={sorted(found_language_ids)!r}, expected {sorted(language_ids)!r}")
+        if path.endswith("python-runtime.toml"):
+            env = payload.get("env")
+            if not isinstance(env, dict) or dict(env.get("vars") or {}).get("PYTHONDONTWRITEBYTECODE") != "1":
+                fail("python-runtime.toml must set PYTHONDONTWRITEBYTECODE=1 to keep review/probe repos clean")
 
     gates_source = read_text("pal/minion/gates.py")
     for token in (

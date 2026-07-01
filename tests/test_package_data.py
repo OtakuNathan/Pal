@@ -24,6 +24,7 @@ def test_required_runtime_package_data_is_available() -> None:
         ("pal.minion", "profile_templates/software_engineering/architect.toml"),
         ("pal.minion", "profile_templates/software_engineering/coder.toml"),
         ("pal.minion", "profile_templates/software_engineering/reviewer.toml"),
+        ("pal.minion", "profile_templates/software_engineering/review_worker.toml"),
         ("pal.minion", "profile_templates/software_engineering/writer.toml"),
         ("pal.minion", "workspace_environment_templates/clangd.toml"),
         ("pal.minion", "workspace_environment_templates/cpp-cmake-runtime.toml"),

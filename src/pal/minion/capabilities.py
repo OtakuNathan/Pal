@@ -698,10 +698,12 @@ class MinionManagerProvider:
         description=(
             "Normal public entrypoint for Minion delegation. Pal's main agent owns requirements shaping; pass the prepared user "
             "intent, requirements_brief, and workspace facts here. The manager dispatches the initial profile step, applies that "
-            "profile's post/gate policy, and follows profile-declared workflow_next instead of hard-coding profile transitions. "
+            "profile's post/gate policy, and follows artifact-declared workflow_next first, with profile workflow_next as the fallback, "
+            "instead of hard-coding profile transitions. "
             "By default the initial profile is software_engineering.architect, whose reviewed implementation_plan next step is "
-            "software_engineering.coder. Non-software profiles can set workflow_next=none and finish as a single step. Do not call "
-            "lower-level plan/spawn capabilities. "
+            "software_engineering.coder. Non-software artifacts/profiles can set workflow_next=none and finish as a single step. Do not call "
+            "lower-level plan/spawn capabilities. Review-only software plans may route to software_engineering.review_worker when the "
+            "review artifact is the final deliverable. "
             "architecture_mode only affects the default software architect step: auto conservatively chooses micro/full from workspace "
             "kind, goal scope, repo scan hints, and explicit user hints. micro asks the architect for a small canonical plan, normally "
             "one implementation module plus a final verification join, with a prelude only when real shared setup/contracts are needed. "
@@ -769,8 +771,8 @@ class MinionManagerProvider:
                 "profile_name": {
                     "type": "string",
                     "description": (
-                        "Optional initial profile name. Defaults to architect. The profile's output_policy.workflow_next controls the "
-                        "next step; the minion itself does not spawn other minions."
+                        "Optional initial profile name. Defaults to architect. The produced artifact may declare workflow_next; "
+                        "otherwise the profile's output_policy.workflow_next controls the next step. The minion itself does not spawn other minions."
                     ),
                 },
                 "interaction_mode": {

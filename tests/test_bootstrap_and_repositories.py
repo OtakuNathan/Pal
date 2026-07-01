@@ -258,6 +258,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertFalse((profile_root / "software_engineering" / "planner.toml").is_file())
         self.assertTrue((profile_root / "software_engineering" / "coder.toml").is_file())
         self.assertTrue((profile_root / "software_engineering" / "reviewer.toml").is_file())
+        self.assertTrue((profile_root / "software_engineering" / "review_worker.toml").is_file())
         self.assertTrue((profile_root / "software_engineering" / "writer.toml").is_file())
         self.assertIn(
             'profile_id = "writer"',
@@ -274,6 +275,31 @@ class PalV2BootstrapTests(unittest.TestCase):
             profile_path.read_text(encoding="utf-8"),
             'profile_id = "writer"\ndisplay_name = "Custom Runtime Writer"\n',
         )
+
+    def test_wizard_minion_profile_template_seed_refreshes_builtin_copies(self) -> None:
+        profile_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles"
+        profile_path = profile_root / "software_engineering" / "architect.toml"
+        profile_path.write_text(
+            "\n".join(
+                [
+                    'profile_id = "architect"',
+                    'display_name = "Old Runtime Architect Seed"',
+                    'profile_group = "software_engineering"',
+                    "[metadata]",
+                    "builtin = true",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        self.wizard.provision_minion_profile_templates(self.registration)
+
+        updated = profile_path.read_text(encoding="utf-8")
+        self.assertIn("software_engineering.review_worker", updated)
+        backups = list((profile_root.parent / "profile_backups").glob("*/software_engineering/architect.toml"))
+        self.assertEqual(len(backups), 1)
+        self.assertIn("Old Runtime Architect Seed", backups[0].read_text(encoding="utf-8"))
 
     def test_identity_repository_bootstraps_singletons(self) -> None:
         repository = IdentityRepository()
@@ -4906,7 +4932,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(get_updates_request._client_kwargs["timeout"].pool, 30)
         self.assertEqual(bot_request._client_kwargs["limits"].max_connections, 32)
 
-    async def test_telegram_endpoint_accepts_matching_binding_and_queues_statuses(self) -> None:
+    async def test_telegram_endpoint_accepts_matching_binding_and_queues_receipt_only(self) -> None:
         update = _FakeTelegramUpdate(
             update_id=2,
             message=_FakeTelegramMessage(chat_id=100, user_id=42, message_id=10, text="hello"),
@@ -4917,7 +4943,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertFalse(any(kind == "reaction" for kind, _ in self.fake_bot.actions))
         self.assertFalse(any(kind == "typing" for kind, _ in self.fake_bot.actions))
-        self.assertEqual([item.kind for item in self.endpoint.status_outbox], ["receipt_marker", "typing_start"])
+        self.assertEqual([item.kind for item in self.endpoint.status_outbox], ["receipt_marker"])
 
         envelopes = self.endpoint.poll()
         self.assertEqual(len(envelopes), 1)
@@ -4925,7 +4951,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.endpoint.flush_status_outbox()
         await asyncio.sleep(0.05)
         self.assertTrue(any(kind == "reaction" for kind, _ in self.fake_bot.actions))
-        self.assertTrue(any(kind == "typing" for kind, _ in self.fake_bot.actions))
+        self.assertFalse(any(kind == "typing" for kind, _ in self.fake_bot.actions))
 
     async def test_telegram_endpoint_serializes_replies_for_same_thread(self) -> None:
         self.fake_bot.message_delays["first"] = 0.05

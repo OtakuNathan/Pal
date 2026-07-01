@@ -2,6 +2,9 @@ preparer_id = "python-runtime"
 kind = "runtime"
 language_ids = ["python"]
 
+[env.vars]
+PYTHONDONTWRITEBYTECODE = "1"
+
 [[env.path_prepend]]
 name = "PYTHONPATH"
 path = "src"

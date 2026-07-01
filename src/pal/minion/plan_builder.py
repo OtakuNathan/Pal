@@ -42,6 +42,7 @@ PLAN_BUILDER_INITIAL_CAPABILITIES: tuple[str, ...] = (
     "op_minion_plan_add_acceptance_criterion",
     "op_minion_plan_end_milestone",
     "op_minion_plan_end_module",
+    "op_minion_plan_update_plan",
     "op_minion_plan_validate_and_submit_for_review",
 )
 
@@ -220,6 +221,13 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "summary": {"type": "string", "description": "Optional initial plan summary."},
                 "languages": {"type": "array", "items": {"type": "string"}, "description": "Canonical implementation language ids."},
                 "source_refs": {"type": "array", "items": {"type": "string"}},
+                "workflow_next": {
+                    "type": "object",
+                    "description": (
+                        "Optional manager routing hint compiled into metadata.workflow_next. Use profile/next_profile to "
+                        "declare the next workflow profile for this artifact, such as software_engineering.coder or none."
+                    ),
+                },
             },
         },
     },
@@ -530,7 +538,15 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                         "copy_policy=import_only."
                     ),
                 },
-                "milestones": {"type": "array", "items": {"type": "object"}},
+                "milestones": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Closed milestone outlines. Each item should include title, task, and acceptance_criteria. "
+                        "Acceptance criteria objects are preferred; string shorthand is accepted and Pal fills "
+                        "conservative evidence/negative-case defaults."
+                    ),
+                },
             },
             "required": ["plan_handle", "module_key", "responsibility", "owned_area", "milestones"],
             "additionalProperties": False,
@@ -640,7 +656,14 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                         "focused tests/commands, LSP/type/build diagnostics or not-applicable reason, and changed-area evidence."
                     ),
                 },
-                "acceptance_criteria": {"type": "array", "items": {"type": "object"}},
+                "acceptance_criteria": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": (
+                        "Acceptance criterion objects are preferred; string shorthand is accepted and Pal fills "
+                        "conservative evidence/negative-case defaults."
+                    ),
+                },
             },
             "required": ["title", "task", "acceptance_criteria"],
             "additionalProperties": False,
@@ -683,6 +706,10 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "milestone_handle": {"type": "string"},
                 "criteria": {
                     "type": "array",
+                    "description": (
+                        "Acceptance criterion objects are preferred; string shorthand is accepted and Pal fills "
+                        "conservative evidence/negative-case defaults."
+                    ),
                     "items": {
                         "type": "object",
                         "properties": {
@@ -764,6 +791,10 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "summary": {"type": "string"},
                 "languages": {"type": "array", "items": {"type": "string"}},
                 "source_refs": {"type": "array", "items": {"type": "string"}},
+                "workflow_next": {
+                    "type": "object",
+                    "description": "Optional replacement for metadata.workflow_next; set profile/next_profile to control the next workflow step.",
+                },
             },
             "required": ["plan_handle"],
             "additionalProperties": False,
@@ -1173,7 +1204,7 @@ class PlanBuilderRuntime:
         return validation_result
 
     def _plan_begin(self, args: dict[str, Any]) -> dict[str, Any]:
-        _reject_unknown_args(args, {"goal", "plan_id", "summary", "languages", "source_refs"})
+        _reject_unknown_args(args, {"goal", "plan_id", "summary", "languages", "source_refs", "workflow_next"})
         goal = _text(args.get("goal") or self.workspace.get("goal") or "")
         plan_id = _safe_id(args.get("plan_id"), default_prefix="plan")
         plan_handle = plan_id if plan_id.startswith("plan_") else f"plan_{plan_id}"
@@ -1186,6 +1217,7 @@ class PlanBuilderRuntime:
             "summary": _text(args.get("summary") or goal),
             "languages": _normalize_language_ids(args.get("languages")),
             "source_refs": _string_list(args.get("source_refs")),
+            "workflow_next": _workflow_next_payload(args.get("workflow_next")),
             "gate_contract": gate_contract,
             "locked_gate_check_refs": [f"gate:{int(check.get('index') or 0)}" for check in _gate_checks({"gate_contract": gate_contract})],
             "constraints": [],
@@ -1668,9 +1700,9 @@ class PlanBuilderRuntime:
         )
         state, module = self._load_module_from_args(args)
         module_handle = _text(module.get("handle"))
-        criteria = _dict_list(args.get("acceptance_criteria"))
+        criteria = _acceptance_criteria_list(args.get("acceptance_criteria"))
         if not criteria:
-            raise ValueError("acceptance_criteria must contain at least one criterion object")
+            raise ValueError("acceptance_criteria must contain at least one criterion object or string")
         before = state
         milestone_handle = ""
         try:
@@ -1767,9 +1799,9 @@ class PlanBuilderRuntime:
     def _add_acceptance_criteria_batch(self, args: dict[str, Any]) -> dict[str, Any]:
         _reject_unknown_args(args, {"milestone_handle", "criteria"})
         milestone_handle = _required(args, "milestone_handle")
-        criteria = _dict_list(args.get("criteria"))
+        criteria = _acceptance_criteria_list(args.get("criteria"))
         if not criteria:
-            raise ValueError("criteria must contain at least one acceptance criterion object")
+            raise ValueError("criteria must contain at least one acceptance criterion object or string")
         before, _module, _milestone = self._load_milestone(milestone_handle)
         handles: list[str] = []
         try:
@@ -1886,7 +1918,7 @@ class PlanBuilderRuntime:
         }
 
     def _update_plan(self, args: dict[str, Any]) -> dict[str, Any]:
-        _reject_unknown_args(args, {"plan_handle", "summary", "languages", "source_refs"})
+        _reject_unknown_args(args, {"plan_handle", "summary", "languages", "source_refs", "workflow_next"})
         state = self._load_state(_required(args, "plan_handle"))
         _assert_editable_plan(state)
         if "summary" in args:
@@ -1895,6 +1927,8 @@ class PlanBuilderRuntime:
             state["languages"] = _normalize_language_ids(args.get("languages"))
         if "source_refs" in args:
             state["source_refs"] = _string_list(args.get("source_refs"))
+        if "workflow_next" in args:
+            state["workflow_next"] = _workflow_next_payload(args.get("workflow_next"))
         self._save_state(state)
         return {"text": f"Plan updated: {state['plan_handle']}", "structured": {"plan_handle": state["plan_handle"]}}
 
@@ -2196,9 +2230,9 @@ class PlanBuilderRuntime:
         _reject_unknown_args(args, {"milestone_handle", "criteria"})
         state, module, milestone = self._load_milestone(_required(args, "milestone_handle"))
         _assert_editable_plan(state)
-        criteria = _dict_list(args.get("criteria"))
+        criteria = _acceptance_criteria_list(args.get("criteria"))
         if not criteria:
-            raise ValueError("criteria must contain at least one acceptance criterion object")
+            raise ValueError("criteria must contain at least one acceptance criterion object or string")
         items: list[dict[str, Any]] = []
         for index, raw in enumerate(criteria, start=1):
             criterion = _required(raw, "criterion")
@@ -2369,6 +2403,9 @@ class PlanBuilderRuntime:
             },
             "plan_revision": _coerce_int(state.get("plan_revision"), default=0),
         }
+        workflow_next = _workflow_next_payload(state.get("workflow_next"))
+        if workflow_next:
+            metadata["workflow_next"] = workflow_next
         gate_contract = _compiled_gate_contract(state)
         if gate_contract:
             metadata["gate_contract"] = gate_contract
@@ -3061,6 +3098,7 @@ def _state_from_plan_payload(
         "summary": artifact.summary,
         "languages": _normalize_language_ids(metadata.get("languages")),
         "source_refs": _string_list(metadata.get("source_refs")),
+        "workflow_next": _workflow_next_payload(metadata.get("workflow_next")),
         "gate_contract": gate_contract,
         "constraints": constraints,
         "design_decisions": decisions,
@@ -4096,6 +4134,25 @@ def _text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _workflow_next_payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        profile = _text(value)
+        return {"profile": profile} if profile else {}
+    if not isinstance(value, dict):
+        return {}
+    profile = _text(value.get("profile") or value.get("next_profile"))
+    if not profile and isinstance(value.get("next"), dict):
+        profile = _text(dict(value.get("next") or {}).get("profile"))
+    if not profile:
+        return {}
+    result: dict[str, Any] = {"profile": profile}
+    for key in ("adapter", "artifact_type", "reason"):
+        text = _text(value.get(key))
+        if text:
+            result[key] = text
+    return result
+
+
 def _string_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -4202,6 +4259,51 @@ def _dict_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list | tuple):
         return []
     return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _acceptance_criteria_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list | tuple):
+        return []
+    result: list[dict[str, Any]] = []
+    for raw in value:
+        if isinstance(raw, str):
+            criterion = _text(raw)
+            if criterion:
+                result.append(_acceptance_criterion_defaults({"criterion": criterion}))
+            continue
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        criterion = _text(
+            item.get("criterion")
+            or item.get("description")
+            or item.get("summary")
+            or item.get("text")
+            or item.get("acceptance")
+        )
+        if criterion:
+            item["criterion"] = criterion
+        result.append(_acceptance_criterion_defaults(item))
+    return result
+
+
+def _acceptance_criterion_defaults(item: dict[str, Any]) -> dict[str, Any]:
+    result = dict(item)
+    criterion = _text(result.get("criterion"))
+    evidence = _text(result.get("evidence_expectation") or result.get("evidence") or result.get("done_when"))
+    if criterion and not evidence:
+        evidence = "Focused tests, inspection, or review evidence demonstrates this criterion."
+    result["criterion"] = criterion
+    result["evidence_expectation"] = evidence
+    if "negative_cases" not in result:
+        result["negative_cases"] = _default_negative_cases_for_acceptance(criterion, evidence)
+    return result
+
+
+def _default_negative_cases_for_acceptance(criterion: str, evidence: str) -> list[str]:
+    if _acceptance_requires_negative_cases(criterion, evidence):
+        return ["Concrete invalid, empty, error, or boundary input is covered by focused tests or review evidence."]
+    return []
 
 
 def _module_outline_interfaces(args: dict[str, Any]) -> list[dict[str, Any]]:

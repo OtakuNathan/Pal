@@ -12,6 +12,7 @@ Lead with findings grounded in evidence. Do not guess from a skim when the risk 
 
 Review method:
 - Review like a software engineer: start with a breadth-first pass over the checkpoint/diff file list, source contract, public surfaces, tests, configuration, and reported evidence; then read depth-first only through modules, call paths, lifecycle edges, and edge cases that can affect the verdict.
+- Treat review as engineering acceptance. A pass means the next engineer, module, user, or runtime can safely depend on the contract you reviewed; a fail means you can point to a bounded repair that would make acceptance possible.
 - Batch independent inspection tool calls in one assistant turn when their results do not depend on each other: read changed source and matching tests together, inspect contract and evidence together, and avoid one-tool-per-turn probing when a small batch gives the same context.
 - Trace happens-before chains before claiming or dismissing concurrency bugs.
 - For source_contract pre-plan review, do not design the implementation plan. Compile the original work order into indexed gate_contract checks: hard semantic requirements, preferences, and only the mechanical dispatch/topology predicates Pal can truly verify. Use semantic checks by default. Do not convert API symbols, label sets, type contracts, test-count quality, or implementation behavior into mechanical count checks merely because they contain numbers; preserve them as semantic contracts with concrete evidence expectations. Submit the result with op_minion_gate_contract_submit.
@@ -55,6 +56,9 @@ Review method:
 - Check lifecycle management: resource acquisition/release, spawned process ownership, async task completion, persistence, commits, and cleanup.
 - Check tests against risk: unit, module, integration, concurrency, and system dogfood evidence where relevant.
 - Prefer complete tracing over local pattern matching when behavior crosses module boundaries.
+- For final verification or review synthesis, actively look for both false negatives and false positives. Re-check the strongest blocker claims against source/test/build evidence, deduplicate overlapping findings, downgrade issues with no contract impact to notes, and call out any unreviewed surface that could hide a missed blocker.
+- For multi-module review, verify the DAG handoff rather than only local diffs: producer guarantees, consumer assumptions, join/final verification coverage, and whether integration failures belong to the local module, an upstream contract, or the architecture artifact.
+- Prefer reproducible acceptance evidence over impressionistic confidence. A finding should identify the smallest source path, command, LSP result, or runtime probe that proves the risk; a pass should identify the smallest faithful proof that the reviewed contract works.
 
 Severity:
 - blocker: correctness/security/data loss/API breakage; must fix before accept

@@ -625,13 +625,11 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
                 message_id=getattr(message, "message_id", "") or "",
                 thread_id=getattr(message, "message_thread_id", "") or "",
             )
-            envelope = self.emit_interaction_result(
+            self.emit_interaction_result(
                 interaction_result,
                 correlation_id=str(getattr(getattr(update, "callback_query", None), "id", "") or ""),
                 reply_target=reply_target,
             )
-            if envelope is not None:
-                self.queue_status("typing_start", response_handle=envelope.response_handle)
             return
         payload = await self._payload_from_update(update)
         if payload is None:
@@ -649,7 +647,6 @@ class TelegramChannelEndpoint(ChannelEndpointQueueBase):
         if envelope is None:
             return
         self.queue_status("receipt_marker", response_handle=envelope.response_handle)
-        self.queue_status("typing_start", response_handle=envelope.response_handle)
 
     async def _interaction_result_from_update(self, update: Any) -> InteractionResult | None:
         callback_query = getattr(update, "callback_query", None)

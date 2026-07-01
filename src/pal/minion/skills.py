@@ -17,9 +17,9 @@ Minion is a detachable first-party subsystem. Keep the roles crisp:
 
 - Pal's main agent owns user conversation, requirements shaping, workspace fact collection, progress reporting, and user confirmation.
 - `op_minion_dispatch_workflow` is the normal public delegation entrypoint. Do not reintroduce public `op_minion_spawn`, `op_minion_submit_plan`, `op_minion_accept_plan`, or `op_minion_revise_plan`.
-- The manager is mechanical orchestration: it creates work orders, starts the initial profile step, follows profile-declared `workflow_next`, applies gates, updates DAG state, and manages resource slots.
+- The manager is mechanical orchestration: it creates work orders, starts the initial profile step, follows artifact-declared `workflow_next` first and profile defaults second, applies gates, updates DAG state, and manages resource slots.
 - Minions do bounded execution. They do not spawn minions. A profile may declare what output unlocks the next workflow step; the manager consumes that declaration.
-- Reviewer is special inside the in-process repair loop. Treat reviewer work as a gate strategy or repair loop participant, not as an independent user-facing workflow step unless a profile explicitly produces a standalone review artifact.
+- Reviewer is special inside the in-process repair loop. Treat `software_engineering.reviewer` as a gate strategy or repair loop participant. Use `software_engineering.review_worker` when a workflow step should produce a standalone review artifact as the final deliverable.
 - Domain interactions live with their domain. Minion approval/question/plan interactions belong under `pal.minion`; memory candidate approval belongs under `pal.memory`; `pal.control` transports and renders generic interaction deliveries.
 
 ## Main Workflow
@@ -34,7 +34,7 @@ For software work, the default flow is:
 6. Coder milestones run in isolated contexts and Git worktrees/checkouts. Reviewer gates run as module-local repair loops and share the module slot.
 7. Join/final verification is the only final product worktree that users normally need to inspect.
 
-Non-software profiles can be one-step workflows by declaring `workflow_next = "none"` or equivalent output policy. They still use the same pre/in/post shape: prepare environment, execute bounded work, then postprocess/gate/finalize.
+Non-software profiles can be one-step workflows by declaring `workflow_next = "none"` in the artifact or equivalent output policy. They still use the same pre/in/post shape: prepare environment, execute bounded work, then postprocess/gate/finalize.
 
 ## Profile And Workflow Rules
 
@@ -42,7 +42,7 @@ Profiles are extension points, not manager branches.
 
 - Builtin profiles live under `src/pal/minion/profile_templates/`; runtime overrides live under `runtime_root/plugins/minion/profiles/*.toml`.
 - Public profile selection is `profile_group` plus `profile_name`. Keep canonical ids such as `software_engineering.architect` as runtime metadata.
-- `output_policy.workflow_next` declares the next stage. Use it instead of hard-coding architect -> coder or profile-specific if/else logic.
+- The produced artifact may declare `workflow_next`; `output_policy.workflow_next` is the profile default and allowed-next policy. Use these contracts instead of hard-coding architect -> coder or profile-specific if/else logic.
 - `gate_policy.gates = [...]` declares review requirements by stable gate names.
 - Use `gates = ["none"]` for profiles that intentionally complete without review.
 - Do not let prompt text be the only contract. If routing, capability exposure, workflow progression, or gate behavior matters, represent it in profile policy, gate definitions, repository metadata, or manager state.
@@ -233,7 +233,7 @@ Before calling a Minion subsystem change done:
 
 PAL_MINION_PROFILE_DEVELOPMENT_MANUAL = """# Pal Minion Profile Development
 
-Use this skill when Pal needs to create, review, repair, or explain a Minion profile TOML file, profile capability policy, workspace policy, gate policy, or profile-declared workflow transition.
+Use this skill when Pal needs to create, review, repair, or explain a Minion profile TOML file, profile capability policy, workspace policy, gate policy, or artifact/profile workflow transition.
 
 ## Boundary
 
@@ -241,7 +241,7 @@ A Minion profile describes one bounded executor role. It should not be a hidden 
 
 - The manager starts profiles and consumes profile policy. It owns scheduling, gates, resource slots, and workflow continuation.
 - The profile owns identity, behavior prompt, capability exposure, workspace expectations, output contract, and declared next workflow step.
-- A minion running a profile does not spawn other minions. Use `output_policy.workflow_next` so the manager can mechanically dispatch the next step.
+- A minion running a profile does not spawn other minions. Use artifact `workflow_next` plus profile `output_policy.workflow_next` policy so the manager can mechanically dispatch the next step.
 - Pal's main agent owns requirements shaping. Do not recreate the removed planner/requirements-review profile.
 - Prefer runtime profile files under `runtime_root/plugins/minion/profiles/<group>/<profile>.toml` for local experiments; edit `src/pal/minion/profile_templates/` only for builtin product profiles.
 
@@ -290,7 +290,7 @@ Choose policies deliberately:
 - `capability_policy.mode = "inherit_filtered"` starts from manager-visible capabilities, adds profile defaults/provider hooks, then applies the minion deny policy. Use it only when the profile genuinely needs Pal's current tool surface.
 - `gate_policy.gates = ["none"]` is correct for bounded one-shot profiles that finish with an artifact and no reviewer loop.
 - Software architecture profiles use `gates = ["plan_acceptance"]`; coder profiles use checkpoint/module-quality gates.
-- `output_policy.workflow_next = "none"` ends the workflow. Use `software_engineering.coder` or another canonical profile id only when the profile output is meant to mechanically unlock a next step.
+- Artifact `workflow_next = "none"` or `output_policy.workflow_next = "none"` ends the workflow. Use `software_engineering.coder` or another canonical profile id only when the artifact output is meant to mechanically unlock a next step.
 
 ## Capability Groups
 
@@ -315,13 +315,13 @@ Profile prompt fragments should say what the role does and what it must produce,
 - `output_contract_fragment`: required artifact, final message shape, and any machine-readable fields.
 - Avoid asking the profile to request plan approval, spawn coders, mutate Pal config, write memory directly, or infer hidden workflow state.
 - For non-code professional profiles, require file-first deliverables with `artifact_write` and a short final summary pointing to the artifact.
-- For software profiles, preserve the architect/coder/reviewer split. Architect plans; coder implements assigned modules; reviewer submits gate verdicts.
+- For software profiles, preserve the architect/coder/reviewer split. Architect plans; coder implements assigned modules; reviewer submits gate verdicts. Standalone review workflows should use `review_worker`, not the gate-only `reviewer`.
 
 ## Workflow Next
 
-`workflow_next` is the profile-composition hook.
+`workflow_next` is the artifact/profile-composition hook.
 
-- Use `none` for terminal profiles.
+- Use `none` for terminal artifacts or terminal profiles.
 - Use a canonical profile id, such as `software_engineering.coder`, only when the output has a typed artifact/gate that the manager can consume.
 - Do not encode continuation rules only in prose. If the manager must act on the result, the policy must be in TOML/output metadata and backed by tests.
 - Reviewer repair loops should remain gate strategy behavior, not profile-to-profile workflow chains.
@@ -332,7 +332,7 @@ For local or user-specific profiles:
 
 1. Create `runtime_root/plugins/minion/profiles/<group>/<profile>.toml`.
 2. Pick a stable `profile_group` and `profile_id`; avoid colliding with builtin profiles unless intentionally overriding.
-3. Start with `profile_only`, `folder`, `gates = ["none"]`, and `workflow_next = "none"` unless the profile proves it needs more.
+3. Start with `profile_only`, `folder`, `gates = ["none"]`, and profile `workflow_next = "none"` unless the profile proves it needs more.
 4. Add only the minimum capability groups needed for the role.
 5. Use `intro_minion_profile_list` and `intro_minion_profile_read` to confirm discovery and rendered policy.
 6. Dogfood with `op_minion_dispatch_workflow` using `profile_group` and `profile_name`.
@@ -353,7 +353,7 @@ Before calling a new profile done:
 3. The profile does not expose recursive minion dispatch or Pal mutation capabilities.
 4. Workspace mode matches the role and does not require source mutation unless the role is explicitly an implementation profile.
 5. Gate policy is explicit, including `["none"]` for no-gate profiles.
-6. `workflow_next` is explicit and covered by a focused test when it is not `none`.
+6. Artifact/profile `workflow_next` behavior is explicit and covered by a focused test when it is not `none`.
 7. The profile can be dispatched through `op_minion_dispatch_workflow` without lower-level spawn/submit/accept capabilities.
 8. Package checks include the profile when it is builtin.
 """

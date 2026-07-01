@@ -2698,6 +2698,7 @@ def _resolve_minion_max_output_tokens(llm_runtime: Any, pack: TaskContextPack) -
 
 def _minion_llm_request_metadata(pack: TaskContextPack, run_id: str) -> dict[str, Any]:
     metadata: dict[str, Any] = {
+        "endpoint_fallback_policy": "none",
         "response_mode_hint": "operational",
         "minion_run_id": str(run_id or ""),
         "max_output_tokens_source": "minion",
