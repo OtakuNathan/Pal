@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -782,6 +783,12 @@ class ReviewOrchestrator:
                     submission_notes=f"published from reviewed draft {reviewed_plan_ref.get('sha256') or ''}",
                 )
                 plan_ref = dict(published_plan.get("plan_ref") or plan_ref)
+            review_artifact_ref = _review_artifact_ref_from_plan_refs(
+                reviewed_plan_ref,
+                plan_ref,
+                review_target.get("plan_draft_ref"),
+                review_target.get("plan_ref"),
+            )
             event_kind = {
                 "pass": "plan_review_passed",
                 "fail": "plan_review_failed",
@@ -794,6 +801,7 @@ class ReviewOrchestrator:
                 **({"plan_draft_ref": reviewed_plan_ref} if reviewed_plan_ref != plan_ref else {}),
                 "review_gate": gate,
                 "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                **({"review_artifact_ref": dict(review_artifact_ref)} if review_artifact_ref else {}),
             }
             review_state = {
                 "status": {
@@ -805,6 +813,7 @@ class ReviewOrchestrator:
                 **({"plan_draft_ref": reviewed_plan_ref} if reviewed_plan_ref != plan_ref else {}),
                 "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
                 "review_gate": gate,
+                **({"review_artifact_ref": dict(review_artifact_ref)} if review_artifact_ref else {}),
                 "updated_at": utc_now(),
                 "next_action": {
                     "pass": "accept_plan",
@@ -859,6 +868,7 @@ class ReviewOrchestrator:
                             "summary": "plan review passed; manager accepted and dispatched the plan",
                             "plan_ref": dict(acceptance.get("plan_ref") or plan_ref),
                             "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                            **({"review_artifact_ref": dict(review_artifact_ref)} if review_artifact_ref else {}),
                             "dispatch": dict(dispatch),
                         },
                     )
@@ -875,6 +885,7 @@ class ReviewOrchestrator:
                             "plan_ref": dict(plan_ref),
                             **({"plan_draft_ref": reviewed_plan_ref} if reviewed_plan_ref != plan_ref else {}),
                             "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                            **({"review_artifact_ref": dict(review_artifact_ref)} if review_artifact_ref else {}),
                             **({"published_plan": dict(published_plan)} if published_plan else {}),
                         },
                     )
@@ -891,6 +902,7 @@ class ReviewOrchestrator:
                                 "plan_ref": dict(plan_ref),
                                 **({"plan_draft_ref": reviewed_plan_ref} if reviewed_plan_ref != plan_ref else {}),
                                 "review_gate_ref": dict(latest.get("review_gate_ref") or {}),
+                                **({"review_artifact_ref": dict(review_artifact_ref)} if review_artifact_ref else {}),
                                 "revision_work_order_id": source_work_order_id,
                                 **({"published_plan": dict(published_plan)} if published_plan else {}),
                             },
@@ -1880,6 +1892,43 @@ def review_artifact_dir(runtime_root: Path, work_order_id: str) -> Path:
     path = _review_ephemeral_root(runtime_root) / safe_token(work_order_id) / "artifacts"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _review_artifact_ref_from_plan_refs(*refs: Any) -> dict[str, Any]:
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        embedded = ref.get("review_artifact_ref") or ref.get("review_artifact")
+        if isinstance(embedded, dict):
+            path = str(embedded.get("path") or "").strip()
+            if path:
+                return dict(embedded)
+        artifact_dir = str(ref.get("artifact_dir") or "").strip()
+        if not artifact_dir:
+            continue
+        path = Path(artifact_dir) / "plan_review.md"
+        if path.exists() and path.is_file():
+            return _review_artifact_file_ref(path, artifact_dir=Path(artifact_dir))
+    return {}
+
+
+def _review_artifact_file_ref(path: Path, *, artifact_dir: Path) -> dict[str, Any]:
+    content = path.read_text(encoding="utf-8", errors="ignore")
+    try:
+        relative = str(path.resolve().relative_to(artifact_dir.resolve())).replace("\\", "/")
+    except ValueError:
+        relative = path.name
+    return {
+        "kind": "file",
+        "path": str(path),
+        "artifact_dir": str(artifact_dir),
+        "relative_path": relative,
+        "title": "Plan review",
+        "role": "review",
+        "mime_type": "text/markdown",
+        "size_bytes": path.stat().st_size,
+        "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    }
 
 
 def _review_ephemeral_root(runtime_root: Path) -> Path:

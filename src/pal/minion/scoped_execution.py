@@ -27,7 +27,9 @@ from pal.minion.plan_builder import (
     PLAN_BUILDER_CAPABILITIES,
     PLAN_BUILDER_TOOL_SPECS,
     enrich_plan_review_gate_node_refs,
+    is_plan_builder_capability,
     normalize_gate_contract_payload,
+    plan_builder_tool_specs,
     plan_builder_tool_result,
 )
 from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
@@ -354,6 +356,12 @@ _WORKSPACE_MUTATION_TOOL_NAMES = {
     "op_path_delete",
 }
 
+
+def _workspace_tool_specs() -> dict[str, dict[str, Any]]:
+    specs = dict(WORKSPACE_TOOL_SPECS)
+    specs.update(plan_builder_tool_specs())
+    return specs
+
 _PRE_EDIT_VERIFICATION_COMMAND_MARKERS = (
     "--collect-only",
     "pytest",
@@ -501,7 +509,7 @@ def _canonical_minion_capability_name(name: object) -> str:
         return "op_web_search"
     if raw in {"web_read", "read_web"}:
         return "op_web_read"
-    if raw in WORKSPACE_TOOL_SPECS:
+    if raw in _workspace_tool_specs():
         return raw
     candidates = tuple(dict.fromkeys((*MINION_DIRECT_WORK_TOOL_SURFACE, *MINION_DISCOVERY_TOOL_SURFACE)))
     for candidate in candidates:
@@ -525,7 +533,8 @@ class MinionScopedExecutionRuntime:
     def list_capability_specs(self) -> list[dict[str, Any]]:
         allowed = set(self.allowed_capabilities)
         specs = []
-        for name, spec in WORKSPACE_TOOL_SPECS.items():
+        workspace_specs = _workspace_tool_specs()
+        for name, spec in workspace_specs.items():
             if not self._tool_visible_for_workspace(name):
                 continue
             if name in allowed and not is_minion_capability_denied(name):
@@ -537,7 +546,7 @@ class MinionScopedExecutionRuntime:
                 canonical = str(spec.get("canonical_path") or name).strip()
                 if not self._tool_visible_for_workspace(canonical):
                     continue
-                if canonical in WORKSPACE_TOOL_SPECS:
+                if canonical in workspace_specs:
                     continue
                 if canonical in allowed and not is_minion_capability_denied(canonical):
                     specs.append(_augment_minion_capability_spec(spec, allowed))
@@ -547,10 +556,11 @@ class MinionScopedExecutionRuntime:
         name = self._resolve_minion_capability_alias(name)
         if not self._tool_visible_for_workspace(name):
             return None
-        if name in WORKSPACE_TOOL_SPECS:
+        workspace_specs = _workspace_tool_specs()
+        if name in workspace_specs:
             if name not in set(self.allowed_capabilities) or is_minion_capability_denied(name):
                 return None
-            return _scrub_minion_capability_spec(WORKSPACE_TOOL_SPECS[name])
+            return _scrub_minion_capability_spec(workspace_specs[name])
         get_spec = getattr(self.base_runtime, "get_capability_spec", None)
         if not callable(get_spec):
             return None
@@ -623,8 +633,9 @@ class MinionScopedExecutionRuntime:
             )
         if call.name == "op_tool_call":
             return await self._execute_scoped_tool_call(call, allow_tools=allow_tools, turn_id=turn_id)
-        if call.name in WORKSPACE_TOOL_SPECS:
-            if call.name in PLAN_BUILDER_CAPABILITIES:
+        workspace_specs = _workspace_tool_specs()
+        if call.name in workspace_specs:
+            if is_plan_builder_capability(call.name):
                 return plan_builder_tool_result(call, self.workspace, self.produced_artifacts)
             if call.name in REPAIR_BILL_BUILDER_CAPABILITIES:
                 return await repair_bill_builder_tool_result(call, self.workspace, self.produced_artifacts)
@@ -714,7 +725,7 @@ class MinionScopedExecutionRuntime:
         canonical_raw = _canonical_minion_capability_name(raw)
         if canonical_raw != raw and canonical_raw in set(self.allowed_capabilities) and not is_minion_capability_denied(canonical_raw):
             return canonical_raw
-        if raw in set(self.allowed_capabilities) or raw in WORKSPACE_TOOL_SPECS:
+        if raw in set(self.allowed_capabilities) or raw in _workspace_tool_specs():
             return raw
         matches = [
             canonical

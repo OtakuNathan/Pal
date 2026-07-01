@@ -74,7 +74,7 @@ The intended route is:
 
 1. Pal captures user brainstorming with `minion_draft_work_order`.
 2. Architect reviews the draft as a bounded input and builds a structured plan with plan builder tools, not hand-written JSON.
-3. `plan_validate_and_submit_for_review` freezes a primary draft snapshot for the `plan_acceptance` gate.
+3. `plan_validate_and_submit_for_review` freezes a primary draft snapshot for the `plan_acceptance` gate and writes a mechanical `plan_review.md` summary artifact next to the machine `plan.draft.json`.
 4. Reviewer reads the plan through `plan_read`/`plan_find`/`plan_get` handles, submits a gate verdict, and cites target handles for required fixes.
 5. Pal/user accepts the reviewed `plan_ref`, or requests/rejects a revision through the plan control interaction.
 6. The manager continues the workflow from the accepted plan and dispatches downstream coder/join modules according to the plan DAG and profile policy.
@@ -88,6 +88,7 @@ Architect plan construction is structured and mutable during drafting:
 - `plan_add_module_outline` and `plan_add_milestone_outline` close their nodes in one call. `begin_*`/`end_*` tools are for incremental construction and return parent handles so the planner can continue at the correct layer.
 - Revision planners use `plan_checkout`, `plan_find`, `plan_get`, and `plan_update_*`/`plan_delete_*` tools to repair specific handles instead of rebuilding the whole plan from scratch.
 - The runtime validates topology, closed nodes, acceptance criteria, module dependencies, and gate evidence fields before a draft can be submitted for review.
+- Domain plugins may expose plan builder aliases for their own vocabulary, but aliases must deterministically map back to the core plan builder operations. The compiled artifact remains the canonical DAG; alias output is not a second plan format.
 
 ## Checkpoint Cursor
 
@@ -139,7 +140,7 @@ While a work order is running, each module worktree contains a full checkout of 
 
 Module boundaries are contract boundaries. Planner output must describe cross-module handoffs through `provided_interfaces`, `consumed_interfaces`, `cross_module_contracts`, and prelude/contracts stubs or public facades when downstream modules need importable types or APIs. Coder and reviewer profiles treat undeclared cross-module imports as contract violations, including in the join module. Join may compose modules only through declared public interfaces, exported facades, or prelude contracts.
 
-Plan-parent module scheduling is DAG-first. The accepted plan artifact remains the truth source, while the manager may compile a rebuildable `PlanDagProjection` file under `data/minion/plan_dags/{parent_work_order_id}.json` for scheduler reads. That projection contains module nodes, dependency edges, children, topology hash, and scheduler defaults such as `max_parallel_modules`; it must not become a second runtime-state database. If the file is missing or stale, it can be regenerated from the accepted plan artifact and validation output.
+Plan-parent module scheduling is DAG-first. The accepted plan artifact remains the truth source, while the manager may compile a rebuildable `PlanDagProjection` file under `data/minion/plan_dags/{parent_work_order_id}.json` for scheduler reads. That projection contains module nodes, dependency edges, children, topology hash, and scheduler defaults such as `max_parallel_modules`; it must not become a second runtime-state database. If the file is missing or stale, it can be regenerated from the accepted plan artifact and validation output. DAG advancement is mechanism while manager policy is strategy: graph construction, indegree transitions, ready/running/completed/stale state, replay merge, and slot release should remain typed mechanical helpers; auto-advance policy, concurrency limit selection, profile selection, and user notification remain manager/control policy.
 
 The scheduler derives runtime state from minion-owned facts, not from the projection file: completed modules come from parent/module checkpoints, running modules come from active child work orders, and blocked/failed modules come from terminal ledger state. On each scheduling signal, the manager recomputes the ready set from the DAG:
 
@@ -150,7 +151,7 @@ The scheduler derives runtime state from minion-owned facts, not from the projec
 - `max_parallel_modules=1` gives serial behavior without a manual module-boundary continue step
 - larger values allow independent ready modules to run concurrently in isolated worktrees
 
-Module completion, parent spawn, manager startup recovery, retry, and explicit continue are scheduling signals. `continue_work_order` is a manual recovery/control path, not the normal module-boundary driver. The normal path is: gate passes a child module checkpoint, parent records the module completion, the scheduler recomputes ready modules, and the manager starts the next available child module when a global concurrency slot is free. On manager startup, stale `running_module` children without active runner processes are released back to the DAG as ready work, then ready parents are automatically scheduled after the manager socket is listening. Set `PAL_MINION_AUTO_RESUME_READY_MODULES=0` to keep startup recovery ledger-only and require an explicit continue.
+Module completion, parent spawn, manager startup recovery, retry, and explicit continue are scheduling signals. `continue_work_order` is a manual recovery/control path, not the normal module-boundary driver. The normal path is: gate passes a child module checkpoint, parent records the module completion, the scheduler recomputes ready modules, and the manager starts the next available child module when a global concurrency slot is free. On manager startup, stale `running_module` children without active runner processes are released back to the DAG as ready work, then ready parents are automatically scheduled after the manager socket is listening. Set `PAL_MINION_AUTO_RESUME_READY_MODULES=0` to keep startup recovery ledger-only and require an explicit continue. When the DAG completes, the parent writes a mechanical `completion_report.md` artifact under the work-order artifact directory; user-facing notifications should point to that artifact rather than paste the full report.
 
 Concurrency is intentionally global at the minion scheduler layer. Per-endpoint request limits belong to the LLM broker or endpoint invoker because endpoint fallback can change the actual provider/model used by a child run. The parent module scheduler should not pre-resolve endpoint identity or duplicate broker fallback policy.
 
@@ -224,7 +225,7 @@ The minion module exposes:
 - `minion_recover_work_order`
 - `minion_destroy_work_order_run`
 
-`work_order_read` returns work order status, milestones, derived current milestone, latest checkpoint, latest completed checkpoint, recent ledger, current worker, task lessons, and pending system lesson candidates.
+`work_order_read` returns work order status, milestones, derived current milestone, latest checkpoint, latest completed checkpoint, recent ledger, current worker, module status projections (`module_status_list` and `module_status_text`) for plan-parent DAGs, task lessons, and pending system lesson candidates.
 
 `current_worker` comes from manager active runs bound to the work order. It is not inferred from conversation context.
 

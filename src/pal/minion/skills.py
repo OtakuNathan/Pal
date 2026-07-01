@@ -18,6 +18,7 @@ Minion is a detachable first-party subsystem. Keep the roles crisp:
 - Pal's main agent owns user conversation, requirements shaping, workspace fact collection, progress reporting, and user confirmation.
 - `op_minion_dispatch_workflow` is the normal public delegation entrypoint. Do not reintroduce public `op_minion_spawn`, `op_minion_submit_plan`, `op_minion_accept_plan`, or `op_minion_revise_plan`.
 - The manager is mechanical orchestration: it creates work orders, starts the initial profile step, follows artifact-declared `workflow_next` first and profile defaults second, applies gates, updates DAG state, and manages resource slots.
+- DAG advancement is mechanism; manager policy is strategy. Keep graph construction, indegree/ready/running/completed/stale transitions, replay merge, and slot release in typed mechanical helpers. Keep policy choices such as auto-advance, concurrency limits, profile selection, and user notification in the manager/control layer.
 - Accepted artifacts are DAGs consumed by role profiles. `workflow_next` is the default executor profile for the DAG; module/topology metadata such as `executor_profile` is a per-node override for mixed DAGs. Bare executor names are scoped to the default profile group, so `review_worker` under `software_engineering.coder` resolves to `software_engineering.review_worker`. The manager reads this metadata mechanically instead of branching on workflow kind.
 - Minions do bounded execution. They do not spawn minions. A profile may declare what output unlocks the next workflow step; the manager consumes that declaration.
 - Reviewer is special inside the in-process repair loop. Treat `software_engineering.reviewer` as a gate strategy or repair loop participant. Use `software_engineering.review_worker` when a workflow step should produce a standalone review artifact as the final deliverable.
@@ -29,7 +30,7 @@ For software work, the default flow is:
 
 1. Pal prepares `goal`, optional `requirements_brief`, and `workspace` facts.
 2. Manager dispatches the initial profile, normally `software_engineering.architect`.
-3. Architect uses plan builder tools and submits a canonical plan artifact. Pal's main agent does not hand-write plan JSON.
+3. Architect uses plan builder tools and submits a canonical plan artifact. Pal's main agent does not hand-write plan JSON. Submission writes the machine plan and a mechanical `plan_review.md` artifact for user review.
 4. `plan_acceptance` gate reviews the plan. Passing review opens plan acceptance unless `interaction_mode` allows autonomous acceptance.
 5. Accepted plans compile into a module DAG. The manager schedules ready modules under the global concurrency limit.
 6. Each DAG node is consumed by its executor profile. Coder milestones run in isolated contexts and Git worktrees/checkouts. Reviewer gates run as module-local repair loops and share the module slot.
@@ -176,7 +177,7 @@ Prefer these extension surfaces before adding manager special cases:
 - profiles: `src/pal/minion/profile_templates/` or runtime profile TOML
 - workspace environment: `src/pal/minion/workspace_environment.py` and runtime preparer templates
 - gates: `GateDefinition`, `GateChecklistEntry`, and `GateStrategy` provider protocols
-- plan builder: typed plan operations in `src/pal/minion/plan_builder.py`
+- plan builder: typed plan operations in `src/pal/minion/plan_builder.py`; domain plugins may register deterministic alias tools with `@plan_builder_alias`/`register_plan_builder_alias` that map domain terminology back to the core plan DAG operations
 - scoped tools: `src/pal/minion/scoped_execution.py`
 - interactions: `src/pal/minion/interactions.py`
 - scheduler/resource behavior: manager plus scheduler/step runner state, with persistent recovery
@@ -212,6 +213,7 @@ Add focused tests near the changed layer. Do not run the full suite in one shot 
 - Profile tests: builtin/runtime profiles list, read, expand capability groups, gate policy, and `workflow_next` correctly.
 - Dispatch tests: `op_minion_dispatch_workflow` validates workspace facts, rejects removed `requirements_review`, and does not expose removed spawn/submit/accept/revise capabilities.
 - Scheduler tests: indegree rebuild, ready queue scheduling, global slot acquisition/release, kill/failure recovery, and module completion events.
+- Plan builder tests: alias tools map to core DAG operations, submitted plans write `plan_review.md`, and completion writes a work-order `completion_report.md`.
 - Runner/coroutine tests: independent context per logical coder, isolated scoped tools, isolated Git/workspace metadata, and clean LLM request hooks.
 - Workspace tests: language environment preparation happens before runner LLM calls and does not overwrite existing repo files unexpectedly.
 - Gate tests: `normalize_gate_policy(...)`, checklist refs, reviewer submission validation, pass/fail/repair max attempts, and active todo/repair ledger projection.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import contextlib
@@ -302,6 +303,118 @@ def _module_dag_status(dag: dict[str, Any]) -> str:
     if any(str(status or "").strip().lower() in {"needs_repair", "stale"} for status in statuses.values()):
         return "awaiting_continue"
     return "blocked"
+
+
+def _module_status_items_from_metadata(
+    metadata: dict[str, Any],
+    milestones: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    plan_execution = dict(metadata.get("plan_execution") or {})
+    if str(plan_execution.get("mode") or "").strip() != "module_parent_milestones":
+        return []
+    dag = dict(plan_execution.get("module_dag") or {})
+    if not dag:
+        return []
+    module_order = _coerce_text_list(plan_execution.get("module_order") or dag.get("module_order"))
+    if not module_order:
+        return []
+    module_kind = dict(dag.get("module_kind") or {})
+    module_status = dict(dag.get("module_status") or {})
+    depends_on = dict(dag.get("depends_on") or {})
+    remaining_indegree = dict(dag.get("remaining_indegree") or {})
+    running_modules = dict(dag.get("running_modules") or {})
+    child_ids = dict(plan_execution.get("child_work_order_ids") or {})
+    module_outputs = dict(dag.get("module_outputs") or {})
+    dag_execution = dict(plan_execution.get("dag_execution") or {})
+    node_executors = dict(dag.get("node_executors") or dag_execution.get("node_executors") or {})
+    default_executor = str(dag.get("default_executor_profile") or dag_execution.get("default_executor_profile") or "").strip()
+    modules_by_id = _plan_artifact_modules_by_id(metadata.get("plan_artifact"))
+    milestone_by_module: dict[str, dict[str, Any]] = {}
+    for index, milestone in enumerate(list(milestones or [])):
+        if not isinstance(milestone, dict):
+            continue
+        if index < len(module_order):
+            milestone_by_module[module_order[index]] = dict(milestone)
+        explicit_module = str(milestone.get("module_id") or milestone.get("title") or "").strip()
+        if explicit_module in module_order:
+            milestone_by_module[explicit_module] = dict(milestone)
+    items: list[dict[str, Any]] = []
+    for module_id in module_order:
+        module = modules_by_id.get(module_id)
+        milestone = milestone_by_module.get(module_id, {})
+        output = dict(module_outputs.get(module_id) or {}) if isinstance(module_outputs.get(module_id), dict) else {}
+        running_child = str(running_modules.get(module_id) or "").strip()
+        child_id = str(child_ids.get(module_id) or running_child or output.get("child_work_order_id") or "").strip()
+        remaining = _coerce_int(remaining_indegree.get(module_id))
+        if remaining is None:
+            remaining = len(_coerce_text_list(depends_on.get(module_id)))
+        status = str(module_status.get(module_id) or "").strip().lower()
+        if running_child:
+            status = "running"
+        if not status:
+            status = "ready" if int(remaining or 0) == 0 else "blocked"
+        summary = str(milestone.get("summary") or "").strip()
+        if not summary and module is not None:
+            summary = str(getattr(module, "responsibility", "") or "").strip()
+        if not summary:
+            summary = str(output.get("summary") or output.get("module_name") or "").strip()
+        items.append(
+            {
+                "module_id": module_id,
+                "kind": str(module_kind.get(module_id) or "module").strip() or "module",
+                "status": status,
+                "executor_profile": str(node_executors.get(module_id) or default_executor or "").strip(),
+                "depends_on": _coerce_text_list(depends_on.get(module_id)),
+                "remaining_indegree": int(remaining or 0),
+                "child_work_order_id": child_id,
+                "running_child_work_order_id": running_child,
+                "completed": status == "completed",
+                "ready": status in {"ready", "needs_repair", "stale"} and int(remaining or 0) == 0,
+                "summary": summary,
+                "output": output,
+            }
+        )
+    return items
+
+
+def _module_status_text(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return ""
+    lines = ["Modules:"]
+    for item in items:
+        module_id = str(item.get("module_id") or "").strip()
+        status = str(item.get("status") or "").strip() or "unknown"
+        kind = str(item.get("kind") or "module").strip() or "module"
+        executor = str(item.get("executor_profile") or "").strip()
+        deps = _coerce_text_list(item.get("depends_on"))
+        child = str(item.get("running_child_work_order_id") or item.get("child_work_order_id") or "").strip()
+        suffix: list[str] = []
+        if kind != "module":
+            suffix.append(kind)
+        if executor:
+            suffix.append(f"executor={executor}")
+        if deps:
+            suffix.append("depends_on=" + ",".join(deps))
+        if child:
+            suffix.append(f"child={child}")
+        line = f"- {module_id} [{status}]"
+        if suffix:
+            line += " (" + "; ".join(suffix) + ")"
+        lines.append(line)
+        summary = str(item.get("summary") or "").strip()
+        if summary:
+            lines.append(f"  {summary}")
+    return "\n".join(lines)
+
+
+def _plan_artifact_modules_by_id(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    try:
+        artifact = PlanArtifact.from_dict(value)
+    except Exception:
+        return {}
+    return {module.module_id: module for module in artifact.modules if module.module_id}
 
 
 def _module_dependency_outputs_for(dag: dict[str, Any], module_id: str) -> list[dict[str, Any]]:
@@ -1245,6 +1358,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         dag = _module_dag_from_validation(validation, dict(plan_execution.get("module_dag") or {}))
         summary = str(completion.get("summary") or f"Module {module_id} completed.").strip()
         created_at = utc_now()
+        completion_report_ref: dict[str, Any] = {}
         with self._connect() as db:
             already_completed = self._fetch_one(
                 db,
@@ -1363,6 +1477,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 )
                 parent_metadata["workspace_cleanup"] = cleanup
                 plan_execution["workspace_cleanup"] = cleanup
+                parent_metadata["plan_execution"] = plan_execution
                 workflow = dict(parent_metadata.get("workflow") or {})
                 if workflow:
                     output_artifact = {
@@ -1378,6 +1493,16 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                     )
                     workflow.update({"status": "completed", "updated_at": utc_now()})
                     parent_metadata["workflow"] = workflow
+                completion_report_ref = _write_work_order_markdown_artifact(
+                    self.runtime_root,
+                    parent_work_order_id,
+                    "completion_report.md",
+                    title="Completion report",
+                    role="completion",
+                    content=_plan_completion_markdown(parent_work_order_id, parent_metadata, plan_execution),
+                )
+                parent_metadata["completion_report_ref"] = completion_report_ref
+                plan_execution["completion_report_ref"] = completion_report_ref
             else:
                 parent_status = "active"
             parent_metadata["plan_execution"] = plan_execution
@@ -1399,6 +1524,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             "ready_module_ids": list((plan_execution.get("module_dag") or {}).get("ready_modules") or []),
             "auto_advance_modules": bool(plan_execution.get("auto_advance_modules", True)),
             "summary": summary,
+            **({"completion_report_ref": dict(completion_report_ref)} if completion_report_ref else {}),
             "metadata": (
                 {"control_route": dict(parent_metadata.get("control_route") or {})}
                 if isinstance(parent_metadata.get("control_route"), dict)
@@ -2497,10 +2623,15 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 """,
                 (str(work_order_id),),
             ).fetchall()]
+            decoded_work_order = _decode_json_fields(dict(work_order), keep_json=False)
+            module_status_list = _module_status_items_from_metadata(
+                _loads_or_dict(decoded_work_order.get("metadata")),
+                enriched_milestones,
+            )
             return {
                 "status": "ok",
                 "task": _decode_json_fields(dict(task), keep_json=False) if task else {},
-                "work_order": _decode_json_fields(dict(work_order), keep_json=False),
+                "work_order": decoded_work_order,
                 "milestones": enriched_milestones,
                 "current_milestone": current or {},
                 "latest_checkpoint": latest_checkpoint,
@@ -2514,6 +2645,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                     for item in recent_ledger
                 ],
                 "current_worker": _current_worker_for_work_order(str(work_order_id), active_runs or []),
+                "module_status_list": module_status_list,
+                "module_status_text": _module_status_text(module_status_list),
                 "task_lessons": task_lessons,
                 "pending_system_lesson_candidates": system_candidates,
             }
@@ -4087,6 +4220,107 @@ def _deep_merge_dict(base: dict[str, Any], updates: dict[str, Any]) -> dict[str,
         else:
             result[key] = value
     return result
+
+
+def _work_order_artifact_dir(runtime_root: Path, work_order_id: str) -> Path:
+    path = Path(runtime_root).expanduser() / "data" / "minion" / "work_orders" / _safe_id(work_order_id) / "artifacts"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _write_work_order_markdown_artifact(
+    runtime_root: Path,
+    work_order_id: str,
+    relative_path: str,
+    *,
+    title: str,
+    role: str,
+    content: str,
+) -> dict[str, Any]:
+    root = _work_order_artifact_dir(runtime_root, work_order_id)
+    relative = Path(str(relative_path or "").strip())
+    if not str(relative) or relative.is_absolute():
+        raise ValueError("work order artifact relative_path must be relative")
+    path = (root / relative).resolve()
+    if path != root and root not in path.parents:
+        raise ValueError("work order artifact path escapes artifact directory")
+    if path == root:
+        raise ValueError("work order artifact path must name a file")
+    text = str(content or "").strip()
+    if not text:
+        text = "# Work Order Completion\n\nNo completion details were recorded.\n"
+    if not text.endswith("\n"):
+        text += "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return {
+        "kind": "file",
+        "path": str(path),
+        "artifact_dir": str(root),
+        "relative_path": str(path.relative_to(root)).replace("\\", "/"),
+        "title": str(title or path.stem).strip() or path.name,
+        "role": str(role or "summary").strip() or "summary",
+        "mime_type": "text/markdown",
+        "size_bytes": path.stat().st_size,
+        "sha256": digest,
+    }
+
+
+def _plan_completion_markdown(
+    parent_work_order_id: str,
+    parent_metadata: dict[str, Any],
+    plan_execution: dict[str, Any],
+) -> str:
+    metadata = dict(parent_metadata or {})
+    metadata["plan_execution"] = dict(plan_execution or {})
+    plan_payload = dict(metadata.get("plan_artifact") or {})
+    dag = dict((plan_execution or {}).get("module_dag") or {})
+    cleanup = dict((plan_execution or {}).get("workspace_cleanup") or metadata.get("workspace_cleanup") or {})
+    module_items = _module_status_items_from_metadata(metadata)
+    plan_id = str(plan_payload.get("plan_id") or metadata.get("plan_id") or "").strip()
+    task_id = str(plan_payload.get("task_id") or metadata.get("task_id") or "").strip()
+    summary = str(plan_payload.get("summary") or metadata.get("work_order_title") or metadata.get("task_title") or "").strip()
+    lines = [
+        "# Work Order Completion",
+        "",
+        "## Summary",
+        f"- Work order: `{parent_work_order_id}`",
+        f"- Status: `{str((plan_execution or {}).get('status') or _module_dag_status(dag) or 'completed')}`",
+    ]
+    if plan_id:
+        lines.append(f"- Plan: `{plan_id}`")
+    if task_id:
+        lines.append(f"- Task: `{task_id}`")
+    if summary:
+        lines.append(f"- Summary: {summary}")
+    if module_items:
+        lines.extend(["", "## Modules"])
+        for line in _module_status_text(module_items).splitlines()[1:]:
+            lines.append(line)
+    module_outputs = [dict(value) for value in dict(dag.get("module_outputs") or {}).values() if isinstance(value, dict)]
+    if module_outputs:
+        lines.extend(["", "## Module Outputs"])
+        for output in module_outputs:
+            module_id = str(output.get("module_id") or "").strip()
+            repo_path = str(output.get("repo_path") or "").strip()
+            commit_sha = str(output.get("commit_sha") or "").strip()
+            parts = [f"- `{module_id or 'module'}`"]
+            if commit_sha:
+                parts.append(f"commit `{commit_sha}`")
+            if repo_path:
+                parts.append(f"repo `{repo_path}`")
+            lines.append(": ".join([parts[0], "; ".join(parts[1:])]) if len(parts) > 1 else parts[0])
+    if cleanup:
+        lines.extend(["", "## Workspace Cleanup"])
+        lines.append(f"- Status: `{str(cleanup.get('status') or 'unknown')}`")
+        removed = _coerce_text_list(cleanup.get("removed_paths"))
+        kept = _coerce_text_list(cleanup.get("kept_paths") or cleanup.get("kept_repo_paths"))
+        if removed:
+            lines.append("- Removed: " + ", ".join(f"`{item}`" for item in removed[:12]))
+        if kept:
+            lines.append("- Kept: " + ", ".join(f"`{item}`" for item in kept[:12]))
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _safe_id(value: str) -> str:

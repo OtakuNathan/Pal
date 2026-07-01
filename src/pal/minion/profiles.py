@@ -10,7 +10,12 @@ from pal.minion.execution_strategy import merge_execution_strategy, normalize_ex
 from pal.minion.utils import dedupe_strings as _dedupe
 from pal.minion.utils import dict_from as _dict
 from pal.minion.utils import string_list as _string_list
-from pal.minion.plan_builder import PLAN_BUILDER_CAPABILITIES, PLAN_BUILDER_INITIAL_CAPABILITIES, PLAN_BUILDER_READ_CAPABILITIES
+from pal.minion.plan_builder import (
+    PLAN_BUILDER_CAPABILITIES,
+    PLAN_BUILDER_INITIAL_CAPABILITIES,
+    PLAN_BUILDER_READ_CAPABILITIES,
+    is_plan_builder_capability,
+)
 from pal.minion.repair_bill_builder import REPAIR_BILL_BUILDER_CAPABILITIES
 from pal.shared import TaskContextPack
 
@@ -487,7 +492,7 @@ def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] 
     denied = DEFAULT_MINION_DENIED_CAPABILITIES | frozenset(extra_denied)
     if capability in denied:
         return True
-    if capability in MINION_INTERNAL_ALLOWED_CAPABILITIES:
+    if capability in MINION_INTERNAL_ALLOWED_CAPABILITIES or is_plan_builder_capability(capability):
         return False
     if str(policy.get("risk") or "").strip().lower() == "read_only" and capability == "op_exec_shell":
         return True

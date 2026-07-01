@@ -91,7 +91,14 @@ from pal.minion.interactions import build_minion_question_interaction
 from pal.minion.ipc import minion_runner_log_path, open_manager_connection, python_subprocess_env
 from pal.minion.lifecycle import RunStatusTransitionError, transition_run_status
 from pal.minion.manager import MinionRunState
-from pal.minion.plan_builder import PLAN_BUILDER_CAPABILITIES, PLAN_BUILDER_INITIAL_CAPABILITIES, enrich_plan_review_gate_node_refs
+from pal.minion.plan_builder import (
+    PLAN_BUILDER_CAPABILITIES,
+    PLAN_BUILDER_INITIAL_CAPABILITIES,
+    PlanBuilderAliasSpec,
+    enrich_plan_review_gate_node_refs,
+    register_plan_builder_alias,
+    unregister_plan_builder_alias,
+)
 from pal.minion.repair_bill_builder import RepairBillBuilderRuntime
 from pal.minion.runner import (
     MinionAgentLoopState,
@@ -1007,6 +1014,82 @@ class SidecarFoundationTests(unittest.TestCase):
 
 
 class MinionContractTests(unittest.TestCase):
+    def test_plan_builder_alias_maps_domain_tool_to_core_dag_tool(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_alias_"))
+            alias_name = "op_minion_domain_add_module"
+            unregister_plan_builder_alias(alias_name)
+            try:
+                register_plan_builder_alias(
+                    PlanBuilderAliasSpec(
+                        name=alias_name,
+                        core_tool="op_minion_plan_add_module_outline",
+                        domain="unit_test_domain",
+                        description="Add a domain section as a plan module.",
+                        parameters_schema={
+                            "type": "object",
+                            "properties": {
+                                "plan_handle": {"type": "string"},
+                                "section_key": {"type": "string"},
+                                "title": {"type": "string"},
+                                "summary": {"type": "string"},
+                            },
+                            "required": ["plan_handle", "section_key", "title", "summary"],
+                        },
+                        map_args=lambda args: {
+                            "plan_handle": args["plan_handle"],
+                            "module_key": args["section_key"],
+                            "kind": "module",
+                            "responsibility": args["summary"],
+                            "owned_area": [f"domain:{args['section_key']}"],
+                            "milestones": [
+                                {
+                                    "title": args["title"],
+                                    "task": args["summary"],
+                                    "acceptance_criteria": [f"{args['section_key']} satisfies its domain contract."],
+                                }
+                            ],
+                        },
+                    )
+                )
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    ["op_minion_plan_begin", alias_name, "op_minion_plan_read"],
+                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_alias"},
+                )
+                specs = scoped.list_capability_specs()
+                alias_spec = next(item for item in specs if item.get("canonical_path") == alias_name)
+                self.assertEqual(alias_spec["name"], llm_tool_name(alias_name))
+
+                begin = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_begin",
+                        args={"goal": "Alias plan", "plan_id": "plan_alias", "summary": "Alias plan.", "languages": ["python"]},
+                        call_id="call_alias_begin",
+                    )
+                )
+                self.assertTrue(begin.ok, begin.text)
+                added = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name=llm_tool_name(alias_name),
+                        args={
+                            "plan_handle": "plan_alias",
+                            "section_key": "domain_section",
+                            "title": "Domain section",
+                            "summary": "Build the domain section.",
+                        },
+                        call_id="call_alias_add",
+                    )
+                )
+                self.assertTrue(added.ok, added.text)
+                self.assertEqual(added.structured["plan_builder_alias"]["alias"], alias_name)
+                self.assertEqual(added.structured["module_key"], "domain_section")
+            finally:
+                unregister_plan_builder_alias(alias_name)
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
     def test_plan_builder_finalizes_dispatchable_plan_artifact(self) -> None:
         async def scenario() -> None:
             root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_"))
@@ -1081,9 +1164,11 @@ class MinionContractTests(unittest.TestCase):
                     "adapter": "accepted_plan",
                     "reason": "The reviewed plan artifact is terminal.",
                 }
+                last_result = None
                 for call in calls:
                     result = await scoped.execute_tool_async(call)
                     self.assertTrue(result.ok, result.text)
+                    last_result = result
 
                 payload = json.loads((root / "artifacts" / "plan.draft.json").read_text(encoding="utf-8"))
                 self.assertEqual(
@@ -1095,6 +1180,14 @@ class MinionContractTests(unittest.TestCase):
                         "reason": "The reviewed plan artifact is terminal.",
                     },
                 )
+                review_path = root / "artifacts" / "plan_review.md"
+                self.assertTrue(review_path.exists())
+                review_text = review_path.read_text(encoding="utf-8")
+                self.assertIn("## Modules", review_text)
+                self.assertIn("module_builder_next", review_text)
+                self.assertIn("## Validation", review_text)
+                assert last_result is not None
+                self.assertEqual(last_result.structured["plan_ref"]["review_artifact_ref"]["relative_path"], "plan_review.md")
             finally:
                 shutil.rmtree(root, ignore_errors=True)
 
@@ -6098,12 +6191,16 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             plan_path = self.root / "plans" / "plan.json"
             plan_path.parent.mkdir(parents=True)
             plan_path.write_text(json.dumps(artifact), encoding="utf-8")
+            review_path = self.root / "planner_artifacts" / "plan_review.md"
+            review_path.parent.mkdir(parents=True)
+            review_path.write_text("# Plan Review\n\n## Modules\n- module_auto_review\n", encoding="utf-8")
             plan_ref = {
                 "path": str(plan_path),
                 "sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
                 "plan_id": "plan_auto_review",
                 "task_id": "task_auto_review",
                 "plan_revision": 0,
+                "artifact_dir": str(review_path.parent),
             }
             planner_pack = MinionProfileRegistry(runtime_root=self.root).resolve_pack(
                 TaskContextPack(
@@ -6213,14 +6310,17 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             events = [event for event in manager.event_queue if event.get("event_kind") == "plan_review_passed"]
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["payload"]["review_gate_ref"]["verdict"], "pass")
+            self.assertEqual(events[0]["payload"]["review_artifact_ref"]["path"], str(review_path))
             accepted_events = [event for event in manager.event_queue if event.get("event_kind") == "plan_accepted"]
             self.assertEqual(len(accepted_events), 0)
             pending_events = [event for event in manager.event_queue if event.get("event_kind") == "plan_acceptance_pending"]
             self.assertEqual(len(pending_events), 1)
+            self.assertEqual(pending_events[0]["payload"]["review_artifact_ref"]["path"], str(review_path))
             with self.assertRaisesRegex(ValueError, "not accepted"):
                 manager.tasking_repository.load_accepted_plan_ref(plan_ref)
             snapshot = manager.tasking_repository.read_work_order("wo_auto_plan")
             self.assertEqual(snapshot["work_order"]["metadata"]["plan_review"]["status"], "acceptance_pending")
+            self.assertEqual(snapshot["work_order"]["metadata"]["plan_review"]["review_artifact_ref"]["path"], str(review_path))
 
         asyncio.run(scenario())
 
@@ -7975,6 +8075,11 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertNotIn("prompt_view", prepared_parent.metadata)
         self.assertEqual(prepared_parent.continuity["current_milestone"]["milestone_index"], 0)
         self.assertEqual(prepared_parent.continuity["current_milestone"]["title"], "module_prelude")
+        parent_snapshot = self.repository.read_work_order("wo_parent")
+        self.assertEqual(parent_snapshot["module_status_list"][0]["module_id"], "module_prelude")
+        self.assertEqual(parent_snapshot["module_status_list"][0]["status"], "ready")
+        self.assertIn("- module_prelude [ready]", parent_snapshot["module_status_text"])
+        self.assertIn("- module_a [blocked]", parent_snapshot["module_status_text"])
 
         child = self.repository.next_plan_module_pack("wo_parent", allow_paused=True)
         self.assertIsNotNone(child)
@@ -8536,6 +8641,13 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         cleanup = parent_snapshot["work_order"]["metadata"]["workspace_cleanup"]
 
         self.assertEqual(parent_completion["status"], "completed")
+        report_ref = parent_completion["completion_report_ref"]
+        report_path = Path(report_ref["path"])
+        self.assertTrue(report_path.exists())
+        report_text = report_path.read_text(encoding="utf-8")
+        self.assertIn("# Work Order Completion", report_text)
+        self.assertIn("final_verification", report_text)
+        self.assertEqual(parent_snapshot["work_order"]["metadata"]["completion_report_ref"]["path"], str(report_path))
         self.assertEqual(parent_snapshot["work_order"]["status"], "completed")
         self.assertEqual(cleanup["status"], "ok")
         self.assertTrue(final_repo.exists())

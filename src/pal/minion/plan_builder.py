@@ -5,7 +5,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.plan_store import coerce_plan_ref, plan_revision_from_payload, resolve_plan_ref_path
@@ -82,6 +82,92 @@ PLAN_BUILDER_WRITE_CAPABILITIES: tuple[str, ...] = (
 
 
 PLAN_BUILDER_CAPABILITIES: tuple[str, ...] = (*PLAN_BUILDER_READ_CAPABILITIES, *PLAN_BUILDER_WRITE_CAPABILITIES)
+
+
+PlanBuilderAliasMapper = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class PlanBuilderAliasSpec:
+    name: str
+    core_tool: str
+    description: str
+    parameters_schema: dict[str, Any]
+    map_args: PlanBuilderAliasMapper
+    domain: str = ""
+
+    def tool_spec(self) -> dict[str, Any]:
+        payload = {
+            "name": self.name,
+            "description": self.description,
+            "parameters_schema": dict(self.parameters_schema),
+        }
+        if self.domain:
+            payload["domain"] = self.domain
+        payload["alias_for"] = self.core_tool
+        return payload
+
+
+PLAN_BUILDER_ALIASES: dict[str, PlanBuilderAliasSpec] = {}
+
+
+def register_plan_builder_alias(spec: PlanBuilderAliasSpec) -> PlanBuilderAliasSpec:
+    name = str(spec.name or "").strip()
+    core_tool = str(spec.core_tool or "").strip()
+    if not name.startswith("op_"):
+        raise ValueError("plan builder alias name must be a capability name starting with op_")
+    if name in PLAN_BUILDER_TOOL_SPECS:
+        raise ValueError(f"plan builder alias conflicts with core tool: {name}")
+    if core_tool not in PLAN_BUILDER_TOOL_SPECS:
+        raise ValueError(f"plan builder alias core_tool is unknown: {core_tool}")
+    if name == core_tool:
+        raise ValueError("plan builder alias cannot target itself")
+    PLAN_BUILDER_ALIASES[name] = spec
+    return spec
+
+
+def unregister_plan_builder_alias(name: str) -> None:
+    PLAN_BUILDER_ALIASES.pop(str(name or "").strip(), None)
+
+
+def plan_builder_alias(
+    *,
+    name: str,
+    core_tool: str,
+    description: str,
+    parameters_schema: dict[str, Any],
+    domain: str = "",
+) -> Callable[[PlanBuilderAliasMapper], PlanBuilderAliasMapper]:
+    def decorator(func: PlanBuilderAliasMapper) -> PlanBuilderAliasMapper:
+        register_plan_builder_alias(
+            PlanBuilderAliasSpec(
+                name=name,
+                core_tool=core_tool,
+                description=description,
+                parameters_schema=dict(parameters_schema),
+                map_args=func,
+                domain=domain,
+            )
+        )
+        return func
+
+    return decorator
+
+
+def plan_builder_tool_specs() -> dict[str, dict[str, Any]]:
+    return {
+        **PLAN_BUILDER_TOOL_SPECS,
+        **{name: spec.tool_spec() for name, spec in PLAN_BUILDER_ALIASES.items()},
+    }
+
+
+def plan_builder_capabilities() -> tuple[str, ...]:
+    return (*PLAN_BUILDER_CAPABILITIES, *tuple(PLAN_BUILDER_ALIASES))
+
+
+def is_plan_builder_capability(name: str) -> bool:
+    normalized = str(name or "").strip()
+    return normalized in PLAN_BUILDER_TOOL_SPECS or normalized in PLAN_BUILDER_ALIASES
 
 _SUPPORTED_MECHANICAL_CHECK_TYPES: frozenset[str] = frozenset(
     {
@@ -1057,6 +1143,20 @@ class PlanBuilderRuntime:
             )
 
     def _execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        alias = PLAN_BUILDER_ALIASES.get(str(name or "").strip())
+        if alias is not None:
+            mapped_args = alias.map_args(dict(args or {}))
+            if not isinstance(mapped_args, dict):
+                raise ValueError(f"plan builder alias {alias.name} must return an argument object")
+            result = self._execute(alias.core_tool, mapped_args)
+            structured = dict(result.get("structured") or {})
+            structured["plan_builder_alias"] = {
+                "alias": alias.name,
+                "domain": alias.domain,
+                "core_tool": alias.core_tool,
+            }
+            result["structured"] = structured
+            return result
         if name == "op_minion_plan_read":
             return self._plan_read(args)
         if name == "op_minion_plan_find":
@@ -2310,9 +2410,23 @@ class PlanBuilderRuntime:
             },
         )
         _append_unique_artifact(self.produced_artifacts, artifact_meta)
+        review_content = _plan_review_markdown(artifact, validation, plan_revision=plan_revision)
+        review_artifact_meta = _write_minion_artifact(
+            self.workspace,
+            {
+                "relative_path": "plan_review.md",
+                "title": "Plan review",
+                "role": "review",
+                "mime_type": "text/markdown",
+                "overwrite": True,
+                "content": review_content,
+            },
+        )
+        _append_unique_artifact(self.produced_artifacts, review_artifact_meta)
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         state["lifecycle"] = "submitted"
         state["submitted_artifact"] = dict(artifact_meta)
+        state["submitted_review_artifact"] = dict(review_artifact_meta)
         state["submitted_artifact_sha256"] = digest
         state["submitted_at_revision"] = plan_revision
         self._save_state(state)
@@ -2326,6 +2440,7 @@ class PlanBuilderRuntime:
             "plan_handle": state["plan_handle"],
             "artifact_dir": str(self.workspace.get("artifact_dir") or ""),
             "relative_path": "plan.draft.json",
+            "review_artifact_ref": dict(review_artifact_meta),
         }
         return {
             "text": "Plan draft submitted for review. The plan_acceptance gate can review this draft snapshot.",
@@ -2334,6 +2449,7 @@ class PlanBuilderRuntime:
                 "plan_draft_ref": plan_draft_ref,
                 "plan_ref": plan_draft_ref,
                 "artifact": artifact_meta,
+                "review_artifact": review_artifact_meta,
                 "plan_id": artifact["plan_id"],
                 "task_id": artifact["task_id"],
                 "plan_revision": plan_revision,
@@ -2955,6 +3071,93 @@ def plan_builder_tool_result(
     produced_artifacts: list[dict[str, Any]],
 ) -> CanonicalToolResult:
     return PlanBuilderRuntime(workspace=workspace, produced_artifacts=produced_artifacts).execute(call)
+
+
+def _plan_review_markdown(artifact: dict[str, Any], validation: dict[str, Any], *, plan_revision: int) -> str:
+    modules = [dict(item) for item in list(artifact.get("modules") or []) if isinstance(item, dict)]
+    nodes = [dict(item) for item in list(dict(validation or {}).get("nodes") or []) if isinstance(item, dict)]
+    node_by_module = {str(node.get("module_id") or ""): node for node in nodes}
+    metadata = dict(artifact.get("metadata") or {})
+    workflow_next = dict(metadata.get("workflow_next") or {})
+    next_profile = _text(workflow_next.get("profile") or workflow_next.get("next_profile"))
+    lines: list[str] = [
+        f"# Plan Review: {_text(artifact.get('summary') or artifact.get('plan_id') or 'Plan')}",
+        "",
+        "## Summary",
+        f"- Plan id: `{_text(artifact.get('plan_id'))}`",
+        f"- Task id: `{_text(artifact.get('task_id'))}`",
+        f"- Revision: `{int(plan_revision or 0)}`",
+        f"- Validation: `{_text(validation.get('status') or 'valid')}`",
+    ]
+    if next_profile:
+        lines.append(f"- Default executor: `{next_profile}`")
+    languages = _string_list(metadata.get("languages"))
+    if languages:
+        lines.append("- Languages: " + ", ".join(f"`{item}`" for item in languages))
+    lines.extend(["", "## Modules"])
+    for module in modules:
+        module_id = _text(module.get("module_id"))
+        node = node_by_module.get(module_id, {})
+        module_metadata = dict(module.get("metadata") or {})
+        kind = _text(node.get("kind") or module_metadata.get("module_kind") or "module")
+        executor = _text(module_metadata.get("executor_profile") or node.get("executor_profile") or next_profile or "default")
+        deps = _string_list(node.get("depends_on"))
+        lines.extend(
+            [
+                "",
+                f"### {module_id}",
+                f"- Kind: `{kind}`",
+                f"- Executor: `{executor}`",
+                "- Depends on: " + (", ".join(f"`{item}`" for item in deps) if deps else "-"),
+                "- Owned area: " + (", ".join(f"`{item}`" for item in _string_list(module.get("owned_area"))) or "-"),
+                f"- Responsibility: {_text(module.get('responsibility')) or '-'}",
+            ]
+        )
+        provided = _dict_list(module.get("provided_interfaces"))
+        consumed = _dict_list(module.get("consumed_interfaces"))
+        if provided or consumed:
+            lines.append("- Interfaces:")
+            for item in provided:
+                lines.append(f"  - provides `{_text(item.get('name') or '-')}`: {_text(item.get('shape') or item.get('contract')) or '-'}")
+            for item in consumed:
+                lines.append(f"  - consumes `{_text(item.get('name') or '-')}`: {_text(item.get('shape') or item.get('contract')) or '-'}")
+        milestones = _dict_list(module.get("internal_milestones"))
+        if milestones:
+            lines.append("- Milestones:")
+            for milestone in milestones:
+                title = _text(milestone.get("title") or milestone.get("milestone_id"))
+                task = _text(milestone.get("task"))
+                lines.append(f"  - {title}: {task or '-'}")
+                for criterion in _string_list(milestone.get("acceptance_criteria")):
+                    lines.append(f"    - AC: {criterion}")
+                checklist = _dict_list(dict(milestone.get("metadata") or {}).get("acceptance_checklist"))
+                for item in checklist:
+                    criterion = _text(item.get("criterion"))
+                    if criterion:
+                        lines.append(f"    - AC: {criterion}")
+    system_tests = _dict_list(artifact.get("system_test_plan"))
+    if system_tests:
+        lines.extend(["", "## System Verification"])
+        for item in system_tests:
+            lines.append(f"- {_text(item.get('level') or 'system')}: {_text(item.get('evidence') or item.get('summary')) or '-'}")
+    risks = _dict_list(artifact.get("risks"))
+    if risks:
+        lines.extend(["", "## Risks And Assumptions"])
+        for item in risks:
+            summary = _text(item.get("summary") or item.get("statement") or item.get("risk") or item)
+            if summary:
+                lines.append(f"- {summary}")
+    lines.extend(
+        [
+            "",
+            "## Validation",
+            f"- Execution shape: `{_text(validation.get('execution_shape') or 'fork_join_linear')}`",
+            "- Module order: " + ", ".join(f"`{item}`" for item in _string_list(validation.get("module_order"))),
+            f"- Topology hash: `{_text(validation.get('topology_hash'))}`",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def enrich_plan_review_gate_node_refs(args: dict[str, Any], workspace: dict[str, Any]) -> dict[str, Any]:
