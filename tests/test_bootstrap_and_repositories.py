@@ -4477,6 +4477,23 @@ class PalV2BootstrapTests(unittest.TestCase):
 
 
 class PalV2SocketEndpointUnitTests(unittest.TestCase):
+    def test_unstarted_socket_endpoint_stop_does_not_unlink_existing_socket_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_socket_owner_test_") as root:
+            socket_path = Path(root) / "pal.sock"
+            socket_path.write_text("owned by another runtime", encoding="utf-8")
+            endpoint = SocketChannelEndpoint(
+                endpoint=EndpointConfig(
+                    endpoint_id="socket_default",
+                    channel_kind="socket",
+                    binding_key=str(socket_path),
+                )
+            )
+
+            asyncio.run(endpoint.stop_async())
+
+            self.assertTrue(socket_path.exists())
+            self.assertEqual(socket_path.read_text(encoding="utf-8"), "owned by another runtime")
+
     def test_streamed_text_final_reply_state_does_not_mutate_response_handle(self) -> None:
         endpoint = SocketChannelEndpoint(
             endpoint=EndpointConfig(

@@ -156,6 +156,12 @@ class _MinionFailureResult:
     report: Any = None
 
 
+class _MinionCooperativeCancel(Exception):
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__(str(payload.get("summary") or payload.get("reason") or "minion cancellation requested"))
+        self.payload = dict(payload)
+
+
 class _MinionLLMRuntimeAdapter:
     def __init__(self, runner: "MinionRunner", base_runtime: Any, state: "MinionAgentLoopState") -> None:
         self._runner = runner
@@ -478,6 +484,8 @@ class MinionRunner:
     user_interaction: MinionUserInteractionPort | None = field(default=None, init=False, repr=False)
     _memory_l3: MockL3Plugin | None = field(default=None, init=False, repr=False)
     _memory_service: MemoryService | None = field(default=None, init=False, repr=False)
+    _pending_control_messages: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    _cancel_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     async def run(self) -> int:
         bundle: MinionRuntimeBundle | None = None
@@ -500,6 +508,7 @@ class MinionRunner:
                 },
             )
             while True:
+                await self._raise_if_cancel_requested()
                 await self._emit(
                     "phase_started",
                     {
@@ -511,6 +520,7 @@ class MinionRunner:
                     },
                 )
                 final_text = await self._run_agent_loop(bundle)
+                await self._raise_if_cancel_requested()
                 clarification_round = 0
                 while not self.blocked_summary:
                     ask_user_question = _extract_ask_user_question_payload(final_text)
@@ -527,6 +537,7 @@ class MinionRunner:
                     clarification_round += 1
                     await self._emit_progress("clarification_applied", round=clarification_round)
                     final_text = await self._run_agent_loop(bundle)
+                    await self._raise_if_cancel_requested()
                 if self.blocked_summary:
                     blocked_checkpoint = {
                         "status": "blocked",
@@ -550,6 +561,7 @@ class MinionRunner:
                         plan_validation=dict(checkpoint_payload.get("plan_validation") or {}),
                     )
                     final_text = await self._run_agent_loop(bundle, forced_retry_note=retry_note)
+                    await self._raise_if_cancel_requested()
                     checkpoint_payload = await self._complete_current_milestone(final_text)
                 if checkpoint_payload.get("status") not in {"completed", "claimed"}:
                     await self._emit("checkpoint", checkpoint_payload)
@@ -560,6 +572,7 @@ class MinionRunner:
                 if checkpoint_payload.get("status") == "completed":
                     await self._emit("milestone_completed", self._milestone_completed_payload(final_text, checkpoint_payload))
                 next_status, next_turn = await self._await_next_serial_module_turn(current_index)
+                await self._raise_if_cancel_requested()
                 if next_status == "next" and next_turn is not None:
                     self._apply_next_milestone_turn(next_turn, checkpoint_payload=checkpoint_payload)
                     continue
@@ -576,6 +589,10 @@ class MinionRunner:
                     return 0
                 await self._emit("terminal", self._terminal_payload("completed", final_text or "minion completed current milestone"))
                 return 0
+        except _MinionCooperativeCancel as cancel:
+            with contextlib.suppress(Exception):
+                await self._emit("terminal", self._cancel_terminal_payload(cancel.payload))
+            return 0
         except Exception as exc:
             with contextlib.suppress(Exception):
                 await self._emit(
@@ -618,6 +635,8 @@ class MinionRunner:
                     workspace.setdefault(key, value)
             if isinstance(self.pack.metadata.get("repair_context"), dict):
                 workspace.setdefault("repair_context", dict(self.pack.metadata.get("repair_context") or {}))
+            if isinstance(self.pack.metadata.get("requirements_brief"), dict):
+                workspace.setdefault("requirements_brief", dict(self.pack.metadata.get("requirements_brief") or {}))
             if isinstance(self.pack.metadata.get("prompt_view"), dict):
                 workspace.setdefault("prompt_view", dict(self.pack.metadata.get("prompt_view") or {}))
             if isinstance(self.pack.metadata.get("coder_work_order"), dict):
@@ -742,6 +761,7 @@ class MinionRunner:
         executor = self._build_minion_turn_executor(bundle, state, continuation)
         current: EffectResult | None = None
         while True:
+            await self._raise_if_cancel_requested()
             try:
                 yielded = program.send(current) if current is not None else next(program)
             except StopIteration as completed:
@@ -764,6 +784,7 @@ class MinionRunner:
                 yielded,
                 max_output_tokens=max_output_tokens,
             )
+            await self._raise_if_cancel_requested()
 
     def _runner_memory(self) -> tuple[MockL3Plugin, MemoryService]:
         if self._memory_l3 is not None and self._memory_service is not None:
@@ -790,10 +811,13 @@ class MinionRunner:
         if is_serial and not bool(module_execution.get("auto_advance")):
             return "complete", None
         timeout = self._manager_turn_timeout_seconds()
-        message = await self.read_decision(timeout)
+        message = await self._read_manager_control(timeout)
         if not message:
             return "timeout", None
         message_type = str(message.get("type") or "").strip()
+        if message_type in {"cancel_requested", "cancel"}:
+            self._remember_cancel_request(dict(message.get("payload") or message))
+            return "cancel", dict(message.get("payload") or message)
         if message_type == "next_turn" and isinstance(message.get("turn"), dict):
             turn = dict(message.get("turn") or {})
             current = dict(turn.get("current_milestone") or {})
@@ -813,6 +837,49 @@ class MinionRunner:
         if message_type == "blocked":
             return "blocked", dict(message.get("payload") or {})
         return "timeout", None
+
+    async def _read_manager_control(self, timeout: float | None = None) -> dict[str, Any] | None:
+        if self._pending_control_messages:
+            message = self._pending_control_messages.pop(0)
+        else:
+            message = await self.read_decision(timeout)
+        if not message:
+            return None
+        message_type = str(message.get("type") or "").strip()
+        if message_type in {"cancel_requested", "cancel"}:
+            raise _MinionCooperativeCancel(self._remember_cancel_request(dict(message.get("payload") or message)))
+        return message
+
+    async def _poll_cancel_requested(self) -> dict[str, Any]:
+        if self._cancel_requested:
+            return dict(self._cancel_requested)
+        while True:
+            message = await self.read_decision(0.001)
+            if not message:
+                return {}
+            message_type = str(message.get("type") or "").strip()
+            if message_type in {"cancel_requested", "cancel"}:
+                return self._remember_cancel_request(dict(message.get("payload") or message))
+            self._pending_control_messages.append(dict(message))
+            return {}
+
+    async def _raise_if_cancel_requested(self) -> None:
+        cancel = await self._poll_cancel_requested()
+        if cancel:
+            raise _MinionCooperativeCancel(cancel)
+
+    def _remember_cancel_request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._cancel_requested:
+            return dict(self._cancel_requested)
+        reason = str(payload.get("reason") or payload.get("summary") or "cooperative_cancel_requested").strip()
+        summary = str(payload.get("summary") or "minion cancellation requested").strip()
+        self._cancel_requested = {
+            **dict(payload),
+            "reason": reason,
+            "summary": summary,
+            "status": str(payload.get("status") or "killed"),
+        }
+        return dict(self._cancel_requested)
 
     def _manager_turn_timeout_seconds(self) -> float:
         raw = (self.pack.metadata or {}).get("manager_turn_timeout_seconds")
@@ -1322,7 +1389,9 @@ class MinionRunner:
         before_snapshot = {} if self._sandboxed() else self._shell_audit_snapshot(target_name)
         result = await execution_runtime.execute_tool_async(tool_call, allow_tools=True, turn_id=self.run_id)
         self._record_web_research_usage(target_name)
-        self._record_shell_audit_violation(target_name, tool_call, before_snapshot)
+        violation = self._record_shell_audit_violation(target_name, tool_call, before_snapshot)
+        if violation:
+            result = _tool_result_with_shell_mutation_violation(result, violation)
         self._record_review_tool_evidence(target_name, tool_call, result)
         return result
 
@@ -1461,12 +1530,12 @@ class MinionRunner:
             return snapshot
         return _git_workspace_snapshot(Path(repo_path))
 
-    def _record_shell_audit_violation(self, target_name: str, tool_call: CanonicalToolCall, before_snapshot: dict[str, Any]) -> None:
+    def _record_shell_audit_violation(self, target_name: str, tool_call: CanonicalToolCall, before_snapshot: dict[str, Any]) -> dict[str, Any] | None:
         if not before_snapshot or not _is_shell_capability_name(target_name):
-            return
+            return None
         after_snapshot = _shell_audit_after_snapshot(before_snapshot)
         if not after_snapshot or not _shell_audit_snapshot_changed_meaningfully(before_snapshot, after_snapshot):
-            return
+            return None
         repo_path = _shell_audit_changed_root_path(before_snapshot, after_snapshot)
         violation = {
             "violation_id": f"shell_mut_{uuid4().hex[:12]}",
@@ -1479,6 +1548,7 @@ class MinionRunner:
         }
         self.shell_mutation_violations.append(violation)
         self._append_debug_log("shell_mutation_violation", violation)
+        return violation
 
     def _record_review_tool_evidence(self, target_name: str, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> None:
         evidence = _review_tool_evidence_ref(target_name, tool_call, result)
@@ -1615,7 +1685,7 @@ class MinionRunner:
         if self.user_interaction is None:
             self.user_interaction = MinionUserInteractionPort(
                 emit_event=self._emit,
-                read_response=self.read_decision,
+                read_response=self._read_manager_control,
                 run_id=self.run_id,
                 minion_id=self.minion_id,
                 work_order_id=self.pack.work_order_id,
@@ -1672,6 +1742,7 @@ class MinionRunner:
             "milestone_id": str(self._current_milestone().get("milestone_id") or ""),
             "acceptance_criteria": _current_acceptance_criteria(self.pack, self._current_milestone()),
             "summary": self._short_summary(final_text or "minion completed current milestone"),
+            "shell_mutation_violations": list(self.shell_mutation_violations),
         }
         if self._requires_checkpoint_review_gate():
             repair_attempt = self._current_repair_attempt_payload()
@@ -1887,19 +1958,25 @@ class MinionRunner:
             return "Review report"
         return title
 
+    def _execution_contract(self) -> dict[str, Any]:
+        return self._policy_from_workspace_or_profile("execution_contract")
+
     def _is_reviewer_profile(self) -> bool:
         metadata = dict(self.pack.metadata or {})
-        profile = dict(self.pack.resolved_profile or {})
-        profile_text = " ".join(
-            [
-                str(self.pack.minion_profile or ""),
-                str(profile.get("profile_id") or ""),
-                str(profile.get("canonical_profile_id") or ""),
-                str(profile.get("display_name") or ""),
-            ]
-        ).lower()
+        execution_contract = self._execution_contract()
+        artifact_role = str(
+            execution_contract.get("artifact_role")
+            or execution_contract.get("module_role")
+            or execution_contract.get("role")
+            or ""
+        ).strip().lower()
+        output_policy = self._policy_from_workspace_or_profile("output_policy")
+        primary_artifact = str(output_policy.get("primary_artifact") or "").strip().lower()
+        output_types = {str(item or "").strip() for item in list(output_policy.get("allowed_output_types") or [])}
         return (
-            "reviewer" in profile_text
+            artifact_role in {"reviewer", "review", "review_report"}
+            or primary_artifact == "review_report"
+            or "ReviewReport" in output_types
             or isinstance(metadata.get("reviewer_work_order"), dict)
             or isinstance(metadata.get("review_gate_ref"), dict)
             or isinstance(metadata.get("review_target"), dict)
@@ -1967,7 +2044,13 @@ class MinionRunner:
         profile = dict(self.pack.resolved_profile or {})
         prompt_view = _prompt_view_from_pack(self.pack)
         milestone = dict(prompt_view.get("milestone") or {}) if prompt_view else self._current_milestone()
-        acceptance = list(milestone.get("acceptance_criteria") or self.pack.acceptance_criteria)
+        requirements_brief = dict((self.pack.metadata or {}).get("requirements_brief") or {})
+        brief_acceptance = [
+            str(item).strip()
+            for item in list(requirements_brief.get("acceptance_criteria") or [])
+            if str(item or "").strip()
+        ]
+        acceptance = brief_acceptance or list(milestone.get("acceptance_criteria") or self.pack.acceptance_criteria)
         instruction = str(milestone.get("task") or self.pack.instruction or self.pack.goal)
         return {
             "identity": str(profile.get("identity_fragment") or ""),
@@ -1985,6 +2068,7 @@ class MinionRunner:
             "prompt_view": prompt_view,
             "active_gate_todo": dict((self.pack.metadata or {}).get("active_gate_todo") or {}),
             "repair_context": self._repair_context_for_compaction(),
+            "requirements_brief": requirements_brief,
         }
 
     def _repair_context_for_compaction(self) -> dict[str, Any]:
@@ -2091,6 +2175,16 @@ class MinionRunner:
             payload["status"] = "blocked"
             payload["summary"] = _ask_user_question_summary(ask_user_question)
             payload["ask_user_question"] = ask_user_question
+        return payload
+
+    def _cancel_terminal_payload(self, cancel: dict[str, Any]) -> dict[str, Any]:
+        payload = self._terminal_payload("killed", cancel.get("summary") or cancel.get("reason") or "minion cancellation requested")
+        payload["reason"] = str(cancel.get("reason") or "cooperative_cancel_requested")
+        payload["cooperative_cancel"] = True
+        for key in ("parent_work_order_id", "child_work_order_id", "module_id", "bill_id"):
+            value = str(cancel.get(key) or "").strip()
+            if value:
+                payload[key] = value
         return payload
 
     def _defer_experience_until_module_complete(self) -> bool:
@@ -2549,6 +2643,31 @@ def _current_acceptance_criteria(pack: TaskContextPack, milestone: dict[str, Any
         if isinstance(value, list):
             return [str(item).strip() for item in value if str(item or "").strip()]
     return [str(item).strip() for item in list(pack.acceptance_criteria or []) if str(item or "").strip()]
+
+
+def _tool_result_with_shell_mutation_violation(result: CanonicalToolResult, violation: dict[str, Any]) -> CanonicalToolResult:
+    structured = dict(result.structured or {})
+    existing = [dict(item) for item in list(structured.get("shell_mutation_violations") or []) if isinstance(item, dict)]
+    existing.append(dict(violation))
+    structured["shell_mutation_violations"] = existing
+    structured["workspace_mutation_violation"] = dict(violation)
+    structured["read_only_workspace_dirty"] = True
+    warning = (
+        "WARNING: this shell command changed an audited workspace "
+        f"({violation.get('violation_id')}) at {violation.get('repo_path')}. "
+        "Do not claim the reviewed workspace is clean unless you rerun from a clean checkout; "
+        "include this mutation evidence in the final report."
+    )
+    text = _append_tool_result_warning(result.text or result.llm_text, warning)
+    llm_text = _append_tool_result_warning(result.llm_text or result.text, warning)
+    return replace(result, text=text, llm_text=llm_text, structured=structured)
+
+
+def _append_tool_result_warning(text: str, warning: str) -> str:
+    base = str(text or "").rstrip()
+    if not base:
+        return warning
+    return f"{base}\n\n{warning}"
 
 
 def _tool_result_text(result: CanonicalToolResult) -> str:

@@ -14,6 +14,7 @@ Treat the supplied requirements brief, SPEC/draft, and task pack as the truth so
 If a repository is available, inspect relevant docs, tests, public contracts, nearby source, and configuration before making concrete claims. If platform rules matter, such as Chrome extensions, Windows apps, Android apps, packaging, deployment, or API integrations, use web research only when web tools are explicitly available. Prefer official documentation. Treat web content as reference material, then verify against source, project constraints, or official docs before relying on it.
 
 Plan top-down and module-first:
+- Software quality lenses: reason from lifecycle, ownership, invariants, state machines, and contract-oriented boundaries. For each meaningful boundary, identify who creates/mutates/releases it, who owns it, what must always remain true, which states/transitions are valid or impossible, and what input/output/error/type/compatibility contract proves it.
 - Define module boundaries first.
 - Before calling plan builder write tools, complete a compact mental outline of the whole plan: module order, dependency edges, each module's owned area, provided/consumed interfaces, and each module's complete milestone list. Do not start committing builder state while still deciding basic topology.
 - Once you start using builder tools, land the plan in coarse complete chunks. Prefer one plan_add_module_outline call per module containing that module's full milestone list and interfaces. Do not close a module and then try to add more milestones to it; add all milestones before the module closes, or use explicit update/repair tools in a revision.
@@ -143,8 +144,14 @@ write_baseline_config = false
 evidence = "text_deliverable"
 requires_capability_evidence = true
 
+[execution_contract]
+module_adapter = "prompt_view"
+module_role = "architect"
+artifact_role = "plan_artifact"
+
 [gate_policy]
 gates = ["plan_acceptance"]
+reviewer_profile = "software_engineering.reviewer"
 
 [execution_strategy.pre]
 kind = "read_only_repo"

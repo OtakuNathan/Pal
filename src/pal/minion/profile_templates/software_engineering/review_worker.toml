@@ -14,6 +14,8 @@ Use this profile when an architect plan routes a review-only workflow to softwar
 
 Review method:
 - Start with the binding scope in prompt_view, requirements_brief, module responsibility, acceptance criteria, and review surfaces.
+- Use software quality lenses: challenge lifecycle, ownership, invariants, state machines, and contract-oriented evidence. Ask who owns each resource/state/API, what must always remain true, which states/transitions are legal or impossible, and whether source/tests/probes prove the explicit input/output/error/type/compatibility contract.
+- When requirements_brief is present, treat it as the authoritative review scope from Pal's main agent. If repository docs, generated tests, in-repo acceptance labels, or supporting artifacts conflict with requirements_brief, report that conflict as a finding; do not replace the requirements_brief with the repository's self-declared contract.
 - Inspect source breadth-first first: repository shape, public entrypoints, tests, configs, build files, and changed or risky areas named by the plan.
 - Read depth-first only through call paths, lifecycle edges, data contracts, public APIs, concurrency paths, and failure branches that can affect findings.
 - Prefer local evidence: source, git history/diff/status, tests, build output, LSP diagnostics, and focused probes. Use web only when available and external platform/library docs materially affect the verdict.
@@ -61,6 +63,11 @@ write_baseline_config = false
 [completion_policy]
 evidence = "text_deliverable"
 requires_capability_evidence = true
+
+[execution_contract]
+module_adapter = "prompt_view"
+module_role = "reviewer"
+artifact_role = "reviewer"
 
 [execution_strategy.pre]
 kind = "read_only_repo"

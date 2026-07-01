@@ -70,6 +70,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
     _streamed_text_handles: set[int] = field(default_factory=set)
     _streamed_text_keys: set[tuple[str, str, str]] = field(default_factory=set)
     _stream_handle_ids_by_key: dict[tuple[str, str, str], int] = field(default_factory=dict)
+    _owns_socket_path: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.socket_path is None:
@@ -79,9 +80,12 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         assert self.socket_path is not None
         await self._prepare_socket_path()
         self.server = await asyncio.start_unix_server(self._handle_client, path=str(self.socket_path))
+        self._owns_socket_path = True
         logger.info("socket endpoint listening on %s", self.socket_path)
 
     async def stop_async(self) -> None:
+        owns_socket_path = self._owns_socket_path
+        self._owns_socket_path = False
         if self.server is not None:
             self.server.close()
             await self.server.wait_closed()
@@ -97,7 +101,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
                 await session.writer.wait_closed()
             except Exception:
                 pass
-        if self.socket_path is not None and self.socket_path.exists():
+        if owns_socket_path and self.socket_path is not None and self.socket_path.exists():
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(self.socket_path)
 

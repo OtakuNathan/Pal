@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
+from pal.minion.dag_advancer import dag_state_to_runtime_dict as _dag_state_to_runtime_dict
 from pal.minion.ipc import MinionManagerClient
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
@@ -57,7 +58,9 @@ REPAIR_BILL_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "name": "op_minion_repair_bill_add_module_patch",
         "description": (
             "Add or merge a repair patch for one existing module. This does not create a module; module_id/module_key must already exist "
-            "in the parent DAG. Use defect_kind=module_defect or contract_defect to replay that module and downstream dependents."
+            "in the parent DAG. Use defect_kind=module_defect or contract_defect to replay that module and downstream dependents. "
+            "Use defect_kind=architecture_defect only when the current module split, dependency graph, or ownership boundary is wrong; "
+            "that blocks the parent for plan review instead of replaying locally."
         ),
         "parameters_schema": {
             "type": "object",
@@ -233,8 +236,8 @@ class RepairBillBuilderRuntime:
         plan_execution = dict(metadata.get("plan_execution") or {})
         if str(plan_execution.get("mode") or "").strip() != "module_parent_milestones":
             raise ValueError("parent_work_order_id must refer to a module-parent plan work order")
-        module_dag = dict(plan_execution.get("module_dag") or {})
-        module_ids = _string_list(plan_execution.get("module_order") or module_dag.get("module_order"))
+        dag = _plan_execution_dag_state(plan_execution)
+        module_ids = _string_list(plan_execution.get("module_order") or dag.get("module_order"))
         if not module_ids:
             raise ValueError("parent work order has no module DAG")
         handle = _text(args.get("bill_handle")) or f"repair_bill_{_safe_id(parent_id)}_{uuid4().hex[:8]}"
@@ -586,6 +589,10 @@ def _required(args: dict[str, Any], key: str) -> str:
 
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _plan_execution_dag_state(plan_execution: dict[str, Any]) -> dict[str, Any]:
+    return _dag_state_to_runtime_dict(dict(plan_execution.get("dag_state") or plan_execution.get("module_dag") or {}))
 
 
 def _string_list(value: Any) -> list[str]:

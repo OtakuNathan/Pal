@@ -9,7 +9,7 @@ from pal.memory.interactions import memory_candidate_approval_delivery
 from pal.minion.interactions import (
     minion_approval_delivery,
     minion_lesson_approval_delivery,
-    minion_module_continue_delivery,
+    minion_module_dag_tick_delivery,
     minion_plan_acceptance_delivery,
     minion_question_delivery,
 )
@@ -125,13 +125,13 @@ class MinionControlEventHandler(EventHandler):
                 notes="minion event notification",
             )
         elif event.event_kind in {EventKind.MINION_TERMINAL, EventKind.MINION_MODULE_COMPLETED, EventKind.MINION_WORK_ORDER_COMPLETED}:
-            module_continue_delivery = (
-                minion_module_continue_delivery(payload, route)
+            module_dag_tick_delivery = (
+                minion_module_dag_tick_delivery(payload, route)
                 if event.event_kind == EventKind.MINION_MODULE_COMPLETED
                 and not _payload_bool(payload.get("auto_advance_modules"), default=True)
                 else None
             )
-            if module_continue_delivery is not None:
+            if module_dag_tick_delivery is not None:
                 envelopes = [
                     EventEnvelope(
                         event_kind=EventKind.CONTROL_ACTION,
@@ -140,13 +140,13 @@ class MinionControlEventHandler(EventHandler):
                             action_kind="interactive_open",
                             target_scope="interaction",
                             target_id=(
-                                module_continue_delivery.interaction.interaction_id
-                                if module_continue_delivery.interaction is not None
+                                module_dag_tick_delivery.interaction.interaction_id
+                                if module_dag_tick_delivery.interaction is not None
                                 else None
                             ),
                             route=route,
-                            delivery=module_continue_delivery,
-                            notes="minion module continue",
+                            delivery=module_dag_tick_delivery,
+                            notes="minion module DAG tick",
                         ),
                         correlation_id=event.correlation_id,
                     )

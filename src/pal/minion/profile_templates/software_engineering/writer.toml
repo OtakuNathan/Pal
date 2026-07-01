@@ -61,6 +61,11 @@ write_baseline_config = false
 evidence = "text_deliverable"
 requires_capability_evidence = true
 
+[execution_contract]
+module_adapter = "prompt_view"
+module_role = "writer"
+artifact_role = "document"
+
 [execution_strategy.pre]
 kind = "git_worktree"
 

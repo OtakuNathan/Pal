@@ -14,8 +14,9 @@ from pal.lsp.config import LspServerConfig, LspServerFileConfig, load_builtin_ls
 from pal.lsp.connector import AsyncLspConnector
 from pal.lsp.ipc import LspManagerClient
 from pal.lsp.manager import LspManager, LspServerState
+from pal.lsp.plugin import LspManagerPluginProvider
 from pal.minion.ipc import MinionManagerClient
-from pal.minion.lsp_prewarm import lsp_prewarm_plan, prewarm_workspace_lsp
+from pal.minion.lsp_prewarm import DEFAULT_LSP_PREWARM_TIMEOUT_SECONDS, lsp_prewarm_plan, prewarm_workspace_lsp
 from pal.shared import RuntimeStatus
 
 
@@ -745,3 +746,78 @@ class LspPrewarmTests(unittest.TestCase):
         self.assertEqual(calls[0].args["server_id"], "pyright")
         self.assertEqual(calls[0].args["workspace_root"], str(self.root.resolve()))
         self.assertEqual(calls[0].args["workspace_languages"], ["python"])
+
+    def test_default_prewarm_provider_uses_short_lsp_rpc_timeout(self) -> None:
+        observed_timeouts = []
+
+        class FakeClient:
+            def __init__(self, *, runtime_root: Path, request_timeout_seconds: float = 180.0) -> None:
+                self.runtime_root = runtime_root
+                self.request_timeout_seconds = request_timeout_seconds
+
+        class FakeProvider(LspManagerPluginProvider):
+            def __init__(self, *, runtime_root: Path) -> None:
+                self.runtime_root = runtime_root
+                self.client = None
+
+            def doctor(self, call):
+                _ = call
+                observed_timeouts.append(self.client.request_timeout_seconds)
+                return CapabilityResult(
+                    status=RuntimeStatus.OK,
+                    text="ok",
+                    llm_text="ok",
+                    structured={"status": "ok"},
+                )
+
+        with patch("pal.minion.lsp_prewarm.LspManagerClient", FakeClient):
+            result = prewarm_workspace_lsp(
+                runtime_root=self.root,
+                workspace={
+                    "repo_path": str(self.root),
+                    "languages": ["python"],
+                    "lsp_setup": {"servers": ["pyright"], "languages": ["python"]},
+                },
+                provider_factory=FakeProvider,
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(observed_timeouts, [DEFAULT_LSP_PREWARM_TIMEOUT_SECONDS])
+
+    def test_prewarm_timeout_can_be_overridden_by_workspace(self) -> None:
+        observed_timeouts = []
+
+        class FakeClient:
+            def __init__(self, *, runtime_root: Path, request_timeout_seconds: float = 180.0) -> None:
+                self.runtime_root = runtime_root
+                self.request_timeout_seconds = request_timeout_seconds
+
+        class FakeProvider(LspManagerPluginProvider):
+            def __init__(self, *, runtime_root: Path) -> None:
+                self.runtime_root = runtime_root
+                self.client = None
+
+            def doctor(self, call):
+                _ = call
+                observed_timeouts.append(self.client.request_timeout_seconds)
+                return CapabilityResult(
+                    status=RuntimeStatus.OK,
+                    text="ok",
+                    llm_text="ok",
+                    structured={"status": "ok"},
+                )
+
+        with patch("pal.minion.lsp_prewarm.LspManagerClient", FakeClient):
+            result = prewarm_workspace_lsp(
+                runtime_root=self.root,
+                workspace={
+                    "repo_path": str(self.root),
+                    "languages": ["python"],
+                    "lsp_setup": {"servers": ["pyright"], "languages": ["python"]},
+                    "lsp_prewarm_timeout_seconds": 3,
+                },
+                provider_factory=FakeProvider,
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(observed_timeouts, [3.0])

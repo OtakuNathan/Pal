@@ -33,6 +33,11 @@ from pal.minion.capability_args import (
     validate_promote_work_order_args,
 )
 from pal.minion.config import effective_minion_runtime_config, merge_minion_runtime_config
+from pal.minion.dag_producer import (
+    build_generic_single_node_plan_artifact,
+    dag_producer_profile_for_family,
+    resolve_default_executor_profile,
+)
 from pal.minion.ipc import MinionManagerClient, minion_log_path, minion_port_path, open_manager_connection, python_subprocess_env
 from pal.minion.profiles import MinionProfileRegistry
 from pal.minion.prompt import TaskingPromptFragmentProvider
@@ -47,7 +52,6 @@ from pal.minion.validation import MinionWorkOrderValidationError
 from pal.minion.workflow import (
     DEFAULT_ARCHITECT_PROFILE,
     append_workflow_step,
-    canonical_profile_ref,
     split_profile_ref,
 )
 from pal.minion.work_order import build_planner_work_order, new_work_id, prompt_view_from_metadata
@@ -126,6 +130,14 @@ class MinionIntrospection(Protocol):
 )
 @capability_node(
     namespace=OPERATION_NAMESPACE,
+    scope="minion_task",
+    path_module_id="minion_task",
+    kind="module",
+    source="builtin:minion",
+    target_kind="task",
+)
+@capability_node(
+    namespace=OPERATION_NAMESPACE,
     scope="minion",
     kind="module",
     source="builtin:minion",
@@ -142,9 +154,11 @@ class MinionIntrospection(Protocol):
     prompt_hint=(
         "Consider Minion when the task is professional, async-friendly, and can be bounded by SPEC/work order/milestones. "
         "Pal remains responsible for user interaction, fact checks, progress reporting, and confirmation. "
-        "Use op_minion_dispatch_workflow as the normal public entrypoint; Pal owns requirements shaping, and the manager owns "
-        "internal architect dispatch, plan review, plan acceptance control, and coder module dispatch. "
-        "Use intro_minion_profile_list/read only when the user asks about available profiles or requests a specific profile. "
+        "Before dispatch, search existing tasks with intro_minion_task_search; reuse a matching task_id or create one with "
+        "op_minion_task_create so profile_family is bound once at the long-lived task layer. Then dispatch with "
+        "op_minion_dispatch_workflow(task_id=...). Pal owns requirements shaping, and the manager owns internal profile "
+        "dispatch, plan review, plan acceptance control, and module dispatch. Use intro_minion_profile_list/read only when "
+        "the user asks about available profiles or requests a specific profile. "
         "Do not use Minion for casual chat, simple Q&A, one-call capabilities, "
         "memory/preference correction, or tasks needing continuous user interaction."
     ),
@@ -170,6 +184,9 @@ class MinionIntrospection(Protocol):
         "draft",
     ),
     capability_refs=(
+        "intro_minion_task_search",
+        "intro_minion_task_read",
+        "op_minion_task_create",
         "op_minion_dispatch_workflow",
         "intro_minion_profile_list",
         "intro_minion_profile_read",
@@ -231,7 +248,7 @@ class MinionIntrospection(Protocol):
         "op_minion_configure",
         "op_minion_destroy_work_order_run",
         "op_minion_recover_work_order",
-        "op_minion_continue_work_order",
+        "op_minion_tick_parent_dag",
         "op_minion_finalize",
         "op_minion_submit_repair_bill",
     ),
@@ -498,7 +515,7 @@ class MinionManagerProvider:
             "runtime_profile_dir": str(Path(self.runtime_root) / "plugins" / "minion" / "profiles"),
             "runtime_profile_pattern": "runtime_root/plugins/minion/profiles/**/*.toml",
             "profile_source_order": ["builtin package TOML", "runtime TOML", "mounted provider declarations"],
-            "usage": "Use op_minion_dispatch_workflow for normal delegation. Use profile_group + profile_name only when a specific profile is requested.",
+            "usage": "Use intro_minion_task_search/op_minion_task_create before op_minion_dispatch_workflow. Dispatch uses task.profile_family; it does not take profile selectors.",
         }
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -697,13 +714,10 @@ class MinionManagerProvider:
         action_name="dispatch_workflow",
         description=(
             "Normal public entrypoint for Minion delegation. Pal's main agent owns requirements shaping; pass the prepared user "
-            "intent, requirements_brief, and workspace facts here. The manager dispatches the initial profile step, applies that "
-            "profile's post/gate policy, and follows artifact-declared workflow_next first, with profile workflow_next as the fallback, "
-            "instead of hard-coding profile transitions. "
-            "By default the initial profile is software_engineering.architect, whose reviewed implementation_plan next step is "
-            "software_engineering.coder. Non-software artifacts/profiles can set workflow_next=none and finish as a single step. Do not call "
-            "lower-level plan/spawn capabilities. Review-only software plans may route to software_engineering.review_worker when the "
-            "review artifact is the final deliverable. "
+            "intent, task_id, requirements_brief, and workspace facts here. Search/create a Minion task first; task.profile_family "
+            "selects how the DAG is interpreted. Dispatch does not accept profile selectors. The manager either runs the family DAG "
+            "producer or uses the generic single-node DAG producer, then consumes the resulting DAG mechanically. Do not call lower-level "
+            "plan/spawn capabilities. "
             "architecture_mode only affects the default software architect step: auto conservatively chooses micro/full from workspace "
             "kind, goal scope, repo scan hints, and explicit user hints. micro asks the architect for a small canonical plan, normally "
             "one implementation module plus a final verification join, with a prelude only when real shared setup/contracts are needed. "
@@ -711,7 +725,8 @@ class MinionManagerProvider:
             "interaction_mode controls user confirmation: interactive asks for plan acceptance and disables module auto-advance; "
             "auto_after_plan asks for plan acceptance, then auto-advances modules when gates pass; autonomous auto-accepts reviewed "
             "plans and asks only for failures, permissions, destructive/high-risk actions, or missing user-owned facts. "
-            "workspace.kind is new_project or existing_repo. New projects must include primary_language. Existing repos should "
+            "workspace.kind is new_project or existing_repo. software_engineering new projects must include primary_language; "
+            "non-software artifact/profile tasks may omit it. Existing repos should "
             "include repo_path or cwd; manager records origin_repo_path and prepares durable minion worktrees under runtime data."
         ),
         aliases=(
@@ -728,6 +743,12 @@ class MinionManagerProvider:
         args_schema={
             "type": "object",
             "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": (
+                        "Existing Minion task id. Call intro_minion_task_search first and op_minion_task_create when no matching task exists."
+                    ),
+                },
                 "goal": {"type": "string", "description": "User-visible outcome Minion should plan and execute."},
                 "requirements_brief": {
                     "type": "object",
@@ -739,8 +760,9 @@ class MinionManagerProvider:
                 "workspace": {
                     "type": "object",
                     "description": (
-                        "Intent-level workspace facts. Use kind=new_project with primary_language for 0-1 work, or "
-                        "kind=existing_repo with repo_path/cwd for repo changes. Do not provide runtime worktree paths; "
+                        "Intent-level workspace facts. Use kind=new_project with primary_language for software 0-1 work, or "
+                        "kind=existing_repo with repo_path/cwd for repo changes. Non-software artifact/profile tasks may use "
+                        "kind=new_project without primary_language. Do not provide runtime worktree paths; "
                         "manager allocates them under runtime_root/data/minion/repos."
                     ),
                     "properties": {
@@ -759,20 +781,6 @@ class MinionManagerProvider:
                     "description": (
                         "auto lets manager choose micro/full conservatively. micro still uses architect and must produce a canonical "
                         "plan with acceptance criteria and test strategy. full uses architect for a complete multi-module plan."
-                    ),
-                },
-                "profile_group": {
-                    "type": "string",
-                    "description": (
-                        "Optional initial profile group. Omit for software_engineering. Use with profile_name for non-software steps, "
-                        "for example lifestyle + nutritionist."
-                    ),
-                },
-                "profile_name": {
-                    "type": "string",
-                    "description": (
-                        "Optional initial profile name. Defaults to architect. The produced artifact may declare workflow_next; "
-                        "otherwise the profile's output_policy.workflow_next controls the next step. The minion itself does not spawn other minions."
                     ),
                 },
                 "interaction_mode": {
@@ -795,7 +803,7 @@ class MinionManagerProvider:
                 "title": {"type": "string", "description": "Optional short display title for the workflow."},
                 "approval_policy": {"type": "object"},
             },
-            "required": ["goal", "workspace"],
+            "required": ["task_id", "goal", "workspace"],
         },
         metadata={
             "search_priority": 50,
@@ -805,14 +813,20 @@ class MinionManagerProvider:
     def dispatch_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
             repository = self._repository()
-            pack, workflow_payload = _workflow_entry_pack_from_args(call.args)
+            args = _workflow_args_with_task_family(dict(call.args or {}), repository=repository)
+            profile_registry = self._profile_registry()
+            pack, workflow_payload = _workflow_entry_pack_from_args(
+                args,
+                repository=repository,
+                profile_registry=profile_registry,
+            )
             pack = self._inject_control_route(pack, call)
             pack = self._inject_debug_log_request(pack, call)
             pack = self._inject_preferred_endpoint(pack, call)
-            pack = self._profile_registry().resolve_pack(
+            pack = profile_registry.resolve_pack(
                 pack,
-                requested_profile_group=str(pack.profile_group or "software_engineering"),
-                requested_profile_name=str(pack.profile_name or "architect"),
+                requested_profile_group=str(pack.profile_group or ""),
+                requested_profile_name=str(pack.profile_name or ""),
             )
             pack = repository.prepare_pack_for_spawn(pack)
             self._ensure_manager_started()
@@ -822,7 +836,6 @@ class MinionManagerProvider:
                 "status": str(result.get("status") or "ok"),
                 "workflow_id": workflow_payload["workflow_id"],
                 "work_order_id": pack.work_order_id,
-                "initial_profile": pack.minion_profile,
                 "run_id": str(result.get("run_id") or ""),
                 "minion_id": str(result.get("minion_id") or ""),
                 "run": dict(result),
@@ -831,6 +844,7 @@ class MinionManagerProvider:
                 "requested_architecture_mode": workflow_payload["requested_architecture_mode"],
                 "interaction_mode": workflow_payload["interaction_mode"],
                 "initial_profile": workflow_payload["initial_profile"],
+                "profile_family": workflow_payload["profile_family"],
                 "next_action": workflow_payload["next_action"],
             }
             return _capability_from_rpc("minion workflow dispatched", payload)
@@ -838,6 +852,53 @@ class MinionManagerProvider:
             return _capability_invalid("minion workflow dispatch invalid", exc)
         except Exception as exc:
             return _capability_error("minion workflow dispatch failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion_task",
+        family="minion",
+        action_name="create",
+        description=(
+            "Create or update a long-lived Minion task after searching for an existing matching task. "
+            "Task is the durable semantic container and binds profile_family; work orders are execution attempts under it. "
+            "Call intro_minion_task_search first with the user goal/repo/domain and reuse a matching task_id instead of creating duplicates."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Optional stable task id. Omit to allocate one."},
+                "title": {"type": "string", "description": "Short task title."},
+                "goal": {"type": "string", "description": "Long-lived task goal or domain purpose."},
+                "summary": {"type": "string", "description": "Searchable task summary, constraints, repo/domain facts, or scope."},
+                "profile_family": {
+                    "type": "string",
+                    "description": "Required profile family that interprets this task's work orders, for example software_engineering or lifestyle.",
+                },
+                "workspace": {
+                    "type": "object",
+                    "description": "Optional durable task-level workspace facts such as repo_path/origin_repo_path, project_name, or domain context.",
+                },
+                "metadata": {"type": "object"},
+            },
+            "required": ["goal", "profile_family"],
+        },
+        metadata={"omit_family_in_canonical": True},
+    )
+    def create_task(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            args = dict(call.args or {})
+            profile_family = _profile_ref_text(args.get("profile_family") or args.get("family"))
+            if not profile_family:
+                raise MinionWorkOrderValidationError("profile_family is required", field="profile_family")
+            args["profile_family"] = profile_family
+            payload = self._repository().create_task(args)
+            return _capability_from_rpc("minion task created", payload)
+        except MinionWorkOrderValidationError as exc:
+            return _capability_invalid("minion task invalid", exc)
+        except ValueError as exc:
+            return _capability_invalid("minion task invalid", MinionWorkOrderValidationError(str(exc), field="task"))
+        except Exception as exc:
+            return _capability_error("minion task create failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -943,15 +1004,32 @@ class MinionManagerProvider:
                 "task_id": {"type": "string"},
                 "task_title": {"type": "string", "description": "Parent task title if different from work-order title."},
                 "proposed_work_order_id": {"type": "string"},
+                "profile_family": {
+                    "type": "string",
+                    "description": "Profile family for this draft, such as software_engineering. If profile_name is omitted, drafts the family architect profile.",
+                },
+                "profile_group": {
+                    "type": "string",
+                    "description": "Exact profile group when selecting a specific profile with profile_name.",
+                },
+                "profile_name": {
+                    "type": "string",
+                    "description": "Exact profile name within profile_family/profile_group.",
+                },
                 "minion_profile": {
                     "type": "string",
-                    "description": "Registered minion canonical_profile_id, such as software_engineering.architect, software_engineering.writer, or lifestyle.nutritionist. Discover with intro_minion_profile_list/read before use.",
+                    "description": "Registered canonical profile id. Prefer profile_family/profile_name unless a canonical id is already known.",
                 },
                 "metadata": {"type": "object"},
             },
             "required": [
                 "goal",
                 "milestones",
+            ],
+            "anyOf": [
+                {"required": ["minion_profile"]},
+                {"required": ["profile_family"]},
+                {"required": ["profile_group", "profile_name"]},
             ],
         },
     )
@@ -1045,21 +1123,27 @@ class MinionManagerProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         family="minion",
-        action_name="continue_work_order",
-        description="Continue a paused or awaiting minion parent work order from its current milestone",
+        action_name="tick_parent_dag",
+        description="Tick a minion parent DAG once so ready nodes can be claimed and dispatched through manager-owned slots",
         args_schema={
             "type": "object",
-            "properties": {"work_order_id": {"type": "string"}},
+            "properties": {"work_order_id": {"type": "string"}, "reason": {"type": "string"}},
             "required": ["work_order_id"],
         },
     )
-    def continue_work_order(self, call: CapabilityCall) -> CapabilityResult:
+    def tick_parent_dag(self, call: CapabilityCall) -> CapabilityResult:
         try:
             self._ensure_manager_started()
-            result = self.client.request_sync("continue_work_order", {"work_order_id": str(call.args.get("work_order_id") or "")})
-            return _capability_from_rpc("minion work order continued", result)
+            result = self.client.request_sync(
+                "tick_parent_dag",
+                {
+                    "work_order_id": str(call.args.get("work_order_id") or ""),
+                    "reason": str(call.args.get("reason") or "capability"),
+                },
+            )
+            return _capability_from_rpc("minion parent DAG ticked", result)
         except Exception as exc:
-            return _capability_error("minion work order continue failed", exc)
+            return _capability_error("minion parent DAG tick failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -1068,7 +1152,8 @@ class MinionManagerProvider:
         action_name="submit_repair_bill",
         description=(
             "Submit a structured repair bill for a parent plan work order. The bill must reference existing module ids; "
-            "module_defect and contract_defect replay the target module plus downstream dependents."
+            "module_defect and contract_defect replay the target module plus downstream dependents. "
+            "architecture_defect blocks the parent and requires plan/module-boundary review before a replacement DAG epoch."
         ),
         args_schema={
             "type": "object",
@@ -1184,7 +1269,7 @@ class MinionManagerProvider:
             return await self._handle_plan_accept_override_async(action)
         if action.action_kind in {"minion_plan_reject", "minion_plan_edit"}:
             return await self._handle_plan_review_decision_async(action)
-        if action.action_kind in {"minion_plan_continue", "minion_plan_pause", "minion_plan_finish"}:
+        if action.action_kind in {"minion_dag_tick", "minion_plan_pause", "minion_plan_finish"}:
             return await self._handle_plan_control_async(action)
         if action.action_kind != "minion_approval_decision":
             return ""
@@ -1350,15 +1435,15 @@ class MinionManagerProvider:
         if not work_order_id:
             return "Minion work order action is missing work_order_id."
         self._ensure_manager_started()
-        if action.action_kind == "minion_plan_continue":
-            result = await _to_thread(self.client.request_sync, "continue_work_order", {"work_order_id": work_order_id})
+        if action.action_kind == "minion_dag_tick":
+            result = await _to_thread(self.client.request_sync, "tick_parent_dag", {"work_order_id": work_order_id, "reason": "control_action"})
             if str(result.get("reason") or "") == "active_child_running":
                 child_id = str(result.get("active_child_work_order_id") or "")
                 return f"Minion work order already has an active module{f' ({child_id})' if child_id else ''}."
             if str(result.get("status") or "") == "running_module":
                 module_id = str(result.get("module_id") or "")
-                return f"Minion work order continued{f' with {module_id}' if module_id else ''}."
-            return f"Minion work order continue result: {result.get('status') or 'unknown'}."
+                return f"Minion DAG tick started{f' {module_id}' if module_id else ''}."
+            return f"Minion DAG tick result: {result.get('status') or 'unknown'}."
         if action.action_kind == "minion_plan_pause":
             result = await _to_thread(
                 self.client.request_sync,
@@ -1866,6 +1951,7 @@ class MinionManagerProvider:
             pack = repository.pack_for_work_order(work_order_id)
         except Exception as exc:
             return {"status": "error", "error": str(exc) or exc.__class__.__name__}
+        pack = self._profile_registry().resolve_pack(pack)
         if not _is_architect_pack(pack):
             return {"status": "skipped", "reason": "work_order_is_not_architect", "work_order_id": work_order_id}
         metadata = _architect_resume_metadata(pack, action)
@@ -1875,7 +1961,7 @@ class MinionManagerProvider:
             {
                 **pack.to_dict(),
                 "metadata": metadata,
-                "minion_profile": pack.minion_profile or "software_engineering.architect",
+                "minion_profile": pack.minion_profile,
             }
         )
         resumed = repository.prepare_pack_for_spawn(resumed)
@@ -1897,11 +1983,28 @@ def inspect_minion(provider: MinionManagerProvider) -> MinionSnapshot:
 
 
 def _is_architect_pack(pack: TaskContextPack) -> bool:
-    profile = str(pack.minion_profile or "").strip().lower()
-    if profile.endswith(".architect") or profile == "architect":
-        return True
     metadata = dict(pack.metadata or {})
-    if isinstance(metadata.get("planner_work_order"), dict):
+    execution_contract: dict[str, Any] = {}
+    for source in (
+        dict(pack.resolved_profile or {}).get("effective_execution_contract"),
+        dict(pack.resolved_profile or {}).get("execution_contract"),
+        pack.workspace.get("execution_contract") if isinstance(pack.workspace, dict) else {},
+        metadata.get("execution_contract"),
+    ):
+        if isinstance(source, dict):
+            execution_contract.update(dict(source))
+    role = str(
+        execution_contract.get("module_role")
+        or execution_contract.get("artifact_role")
+        or execution_contract.get("role")
+        or ""
+    ).strip().lower()
+    if role == "architect":
+        return True
+    planner_work_order = metadata.get("planner_work_order")
+    if isinstance(planner_work_order, dict) and str(planner_work_order.get("role") or "").strip().lower() == "architect":
+        return True
+    if isinstance(metadata.get("architect_work_order"), dict):
         return True
     prompt_view = prompt_view_from_metadata(metadata, workspace=dict(pack.workspace))
     return str(prompt_view.get("role") or "").strip().lower() == "architect"
@@ -1932,7 +2035,7 @@ def _architect_resume_metadata(pack: TaskContextPack, action: ControlAction) -> 
             turn_index=0,
             plan_revision=0,
         )
-    if str(pack.minion_profile or "").strip().endswith(".architect"):
+    if _is_architect_pack(pack):
         planner_work_order["role"] = "architect"
     planner_work_order["turn_index"] = int(_coerce_int(planner_work_order.get("turn_index"), default=0)) + 1
     planner_work_order["plan_revision"] = int(_coerce_int(planner_work_order.get("plan_revision"), default=0)) + 1
@@ -2018,7 +2121,7 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
             "minion_plan_accept_override": provider.handle_control_action_async,
             "minion_plan_reject": provider.handle_control_action_async,
             "minion_plan_edit": provider.handle_control_action_async,
-            "minion_plan_continue": provider.handle_control_action_async,
+            "minion_dag_tick": provider.handle_control_action_async,
             "minion_plan_pause": provider.handle_control_action_async,
             "minion_plan_finish": provider.handle_control_action_async,
         },
@@ -2234,31 +2337,77 @@ def _first_summary_sentence(text: str, *, limit: int = 180) -> str:
     return compact[: limit - 1].rstrip() + "..."
 
 
-def _workflow_entry_pack_from_args(args: dict[str, Any]) -> tuple[TaskContextPack, dict[str, Any]]:
+def _profile_ref_text(value: Any) -> str:
+    return str(value or "").strip().replace("/", ".")
+
+
+def _workflow_args_with_task_family(args: dict[str, Any], *, repository: Any) -> dict[str, Any]:
+    normalized = dict(args or {})
+    task_id = str(normalized.get("task_id") or "").strip()
+    requested_family = _profile_ref_text(normalized.get("profile_family") or normalized.get("family"))
+    if not task_id:
+        raise MinionWorkOrderValidationError(
+            "task_id is required; call intro_minion_task_search first and op_minion_task_create when no matching task exists",
+            field="task_id",
+        )
+    if str(normalized.get("profile_group") or normalized.get("profile_name") or "").strip():
+        raise MinionWorkOrderValidationError(
+            "dispatch_workflow no longer accepts profile_group/profile_name; bind profile_family on the task",
+            field="profile_name",
+        )
+
+    snapshot = repository.read_task(task_id)
+    if str(snapshot.get("status") or "") == "not_found":
+        raise MinionWorkOrderValidationError(
+            "task_id was not found; call op_minion_task_create first",
+            field="task_id",
+        )
+
+    task = dict(snapshot.get("task") or {})
+    metadata = dict(task.get("metadata") or {})
+    task_family = _profile_ref_text(task.get("profile_family") or metadata.get("profile_family"))
+    if not task_family:
+        raise MinionWorkOrderValidationError("task.profile_family is required", field="task_id")
+    if requested_family and requested_family != task_family:
+        raise MinionWorkOrderValidationError(
+            f"task_id uses profile_family {task_family}; dispatch requested {requested_family}",
+            field="profile_family",
+        )
+    normalized["profile_family"] = task_family
+    normalized["_task_snapshot"] = task
+    normalized["_task_metadata"] = metadata
+    return normalized
+
+
+def _workflow_entry_pack_from_args(
+    args: dict[str, Any],
+    *,
+    repository: Any,
+    profile_registry: MinionProfileRegistry,
+) -> tuple[TaskContextPack, dict[str, Any]]:
     goal = str(args.get("goal") or "").strip()
     if not goal:
         raise MinionWorkOrderValidationError("goal is required", field="goal")
-    workspace = _normalize_workflow_workspace(dict(args.get("workspace") or {}))
+    profile_family = _profile_ref_text(args.get("profile_family") or args.get("family")) or "general"
+    producer_profile = dag_producer_profile_for_family(profile_family)
+    software_producer = producer_profile == DEFAULT_ARCHITECT_PROFILE
+    workspace = _normalize_workflow_workspace(
+        dict(args.get("workspace") or {}),
+        require_primary_language=profile_family == "software_engineering",
+    )
     requirements_review = str(args.get("requirements_review") or "").strip().lower()
     if requirements_review and requirements_review != "skip":
         raise MinionWorkOrderValidationError(
             "requirements_review mode has been removed; Pal must prepare requirements_brief before dispatch_workflow",
             field="requirements_review",
         )
-    initial_profile = canonical_profile_ref(
-        profile_group=str(args.get("profile_group") or ""),
-        profile_name=str(args.get("profile_name") or ""),
-        profile=DEFAULT_ARCHITECT_PROFILE if not (args.get("profile_group") or args.get("profile_name")) else "",
-    )
-    initial_group, initial_name = split_profile_ref(initial_profile)
-    is_architect = initial_profile == DEFAULT_ARCHITECT_PROFILE
     requested_architecture_mode = str(args.get("architecture_mode") or "auto").strip().lower() or "auto"
     if requested_architecture_mode not in {"auto", "micro", "full"}:
         raise MinionWorkOrderValidationError(
             "architecture_mode must be auto, micro, or full",
             field="architecture_mode",
         )
-    architecture_mode = _resolve_architecture_mode(requested_architecture_mode, goal=goal, workspace=workspace)
+    architecture_mode = _resolve_architecture_mode(requested_architecture_mode, goal=goal, workspace=workspace) if software_producer else "none"
     interaction_mode = str(args.get("interaction_mode") or "auto_after_plan").strip().lower() or "auto_after_plan"
     if interaction_mode not in {"interactive", "auto_after_plan", "autonomous"}:
         raise MinionWorkOrderValidationError(
@@ -2269,6 +2418,26 @@ def _workflow_entry_pack_from_args(args: dict[str, Any]) -> tuple[TaskContextPac
     task_id = str(args.get("task_id") or new_work_id("task")).strip()
     work_order_id = str(args.get("work_order_id") or new_work_id("wo")).strip()
     title = str(args.get("title") or _first_summary_sentence(goal, limit=120) or goal).strip()
+    requirements_brief = _manager_requirements_brief_from_args(goal=goal, workspace=workspace, args=args)
+    if not software_producer:
+        return _generic_dag_workflow_entry_pack(
+            args,
+            repository=repository,
+            profile_registry=profile_registry,
+            goal=goal,
+            requirements_brief=requirements_brief,
+            workspace=workspace,
+            profile_family=profile_family,
+            requested_architecture_mode=requested_architecture_mode,
+            architecture_mode=architecture_mode,
+            interaction_mode=interaction_mode,
+            task_id=task_id,
+            work_order_id=work_order_id,
+            title=title,
+        )
+
+    initial_profile = producer_profile
+    initial_group, initial_name = split_profile_ref(initial_profile)
     workflow = {
         "workflow_id": workflow_id,
         "status": "running",
@@ -2278,99 +2447,76 @@ def _workflow_entry_pack_from_args(args: dict[str, Any]) -> tuple[TaskContextPac
         "interaction_mode": interaction_mode,
         "auto_advance_modules": interaction_mode != "interactive",
         "auto_accept_on_review_pass": interaction_mode == "autonomous",
+        "profile_family": profile_family,
+        "initial_profile": initial_profile,
+        "dag_producer": {"kind": "profile", "profile": initial_profile},
         "created_at": utc_now(),
     }
     workflow = append_workflow_step(
         workflow,
         profile=initial_profile,
-        input_artifact=_manager_requirements_brief_from_args(goal=goal, workspace=workspace, args=args),
+        input_artifact=requirements_brief,
     )
     approval_policy = dict(args.get("approval_policy") or {}) if isinstance(args.get("approval_policy"), dict) else {}
-    requirements_brief = _manager_requirements_brief_from_args(goal=goal, workspace=workspace, args=args)
     metadata: dict[str, Any] = {
         "task_id": task_id,
         "task_title": title,
-        "work_order_title": f"{'Plan' if is_architect else 'Run'}: {title}",
+        "work_order_title": f"Plan: {title}",
         "workflow": workflow,
         "requirements_brief": requirements_brief,
         "architecture_mode": architecture_mode,
         "requested_architecture_mode": requested_architecture_mode,
         "interaction_mode": interaction_mode,
+        "profile_family": profile_family,
+        "initial_profile": initial_profile,
     }
-    if is_architect:
-        planner_work_order = build_planner_work_order(goal=goal, task_id=task_id, work_order_id=work_order_id)
-        planner_work_order["role"] = "architect"
-        _apply_architecture_mode_requirements(
-            planner_work_order,
-            architecture_mode=architecture_mode,
-            requested_architecture_mode=requested_architecture_mode,
-        )
-        plan_review = {
-            "interaction_mode": interaction_mode,
-            "auto_accept_on_review_pass": interaction_mode == "autonomous",
-            "auto_advance_modules": interaction_mode != "interactive",
+    planner_work_order = build_planner_work_order(goal=goal, task_id=task_id, work_order_id=work_order_id)
+    planner_work_order["role"] = "architect"
+    _apply_architecture_mode_requirements(
+        planner_work_order,
+        architecture_mode=architecture_mode,
+        requested_architecture_mode=requested_architecture_mode,
+    )
+    architect_milestone = {
+        "milestone_id": "produce_architecture",
+        "title": "Produce reviewed architecture plan",
+        "summary": "Inspect the workspace as needed and submit a dispatchable plan draft for plan acceptance review.",
+        "acceptance": [
+            "Architect submits a canonical dispatchable plan draft.",
+            "Plan includes acceptance criteria, module contracts, and test strategy.",
+            "Architecture mode constraints are either satisfied or escalated with a concrete reason.",
+        ],
+    }
+    plan_review = {
+        "interaction_mode": interaction_mode,
+        "auto_accept_on_review_pass": interaction_mode == "autonomous",
+        "auto_advance_modules": interaction_mode != "interactive",
+    }
+    metadata.update(
+        {
+            "planner_work_order": planner_work_order,
+            "architect_work_order": planner_work_order,
+            "plan_review": plan_review,
+            "milestones": [architect_milestone],
         }
-        metadata.update(
-            {
-                "planner_work_order": planner_work_order,
-                "architect_work_order": planner_work_order,
-                "plan_review": plan_review,
-                "milestones": [
-                    {
-                        "milestone_id": "produce_architecture",
-                        "title": "Produce reviewed architecture plan",
-                        "summary": "Inspect the workspace as needed and submit a dispatchable plan draft for plan acceptance review.",
-                        "acceptance": [
-                            "Architect submits a canonical dispatchable plan draft.",
-                            "Plan includes acceptance criteria, module contracts, and test strategy.",
-                            "Architecture mode constraints are either satisfied or escalated with a concrete reason.",
-                        ],
-                    }
-                ],
-            }
-        )
-    else:
-        metadata["milestones"] = [
-            {
-                "milestone_id": "main",
-                "title": f"Run {initial_profile}",
-                "summary": "Produce the profile's requested artifact from the supplied goal, requirements brief, and workspace facts.",
-                "acceptance": [
-                    "The profile output contract is satisfied.",
-                    "The result is written through artifact tools when the profile requests an artifact deliverable.",
-                    "No downstream minion is spawned by the executor; workflow continuation is manager-owned.",
-                ],
-            }
-        ]
+    )
     if approval_policy:
         metadata["approval_policy"] = approval_policy
     pack = TaskContextPack.from_dict(
         {
             "work_order_id": work_order_id,
             "goal": goal,
-            "instruction": (
-                _architect_workflow_instruction(
-                    architecture_mode=architecture_mode,
-                    requested_architecture_mode=requested_architecture_mode,
-                )
-                if is_architect
-                else _single_step_workflow_instruction(initial_profile=initial_profile)
+            "instruction": _architect_workflow_instruction(
+                architecture_mode=architecture_mode,
+                requested_architecture_mode=requested_architecture_mode,
             ),
-            "acceptance_criteria": (
-                [
-                    "Submit a dispatchable plan draft through the plan builder tools.",
-                    "Include module acceptance criteria and test strategy in the plan.",
-                    "Do not implement code in the architect run.",
-                ]
-                if is_architect
-                else [
-                    "Satisfy the selected profile output contract.",
-                    "Use the supplied requirements_brief as the task scope.",
-                    "Do not spawn or request downstream minions from inside the executor.",
-                ]
-            ),
+            "acceptance_criteria": [
+                "Submit a dispatchable plan draft through the plan builder tools.",
+                "Include module acceptance criteria and test strategy in the plan.",
+                "Do not implement code in the architect run.",
+            ],
             "workspace": workspace,
-            "profile_group": initial_group or "general",
+            "profile_group": initial_group or "software_engineering",
             "profile_name": initial_name,
             "metadata": metadata,
         }
@@ -2381,12 +2527,122 @@ def _workflow_entry_pack_from_args(args: dict[str, Any]) -> tuple[TaskContextPac
         "architecture_mode": architecture_mode,
         "interaction_mode": interaction_mode,
         "initial_profile": initial_profile,
+        "profile_family": profile_family,
         "workspace_summary": _workflow_workspace_summary(workspace),
-        "next_action": "step_running",
+        "next_action": "dag_producer_running",
     }
 
 
-def _normalize_workflow_workspace(workspace: dict[str, Any]) -> dict[str, Any]:
+def _generic_dag_workflow_entry_pack(
+    args: dict[str, Any],
+    *,
+    repository: Any,
+    profile_registry: MinionProfileRegistry,
+    goal: str,
+    requirements_brief: dict[str, Any],
+    workspace: dict[str, Any],
+    profile_family: str,
+    requested_architecture_mode: str,
+    architecture_mode: str,
+    interaction_mode: str,
+    task_id: str,
+    work_order_id: str,
+    title: str,
+) -> tuple[TaskContextPack, dict[str, Any]]:
+    workflow_id = f"wf_{uuid4().hex[:12]}"
+    task_metadata = dict(args.get("_task_metadata") or {})
+    executor = resolve_default_executor_profile(
+        profile_family=profile_family,
+        registry=profile_registry,
+        task_metadata=task_metadata,
+        workflow_metadata=dict(args.get("metadata") or {}),
+    )
+    plan_artifact = build_generic_single_node_plan_artifact(
+        goal=goal,
+        task_id=task_id,
+        profile_family=profile_family,
+        requirements_brief=requirements_brief,
+        workspace=workspace,
+        executor_profile=executor.executor_profile,
+        title=title,
+    )
+    workflow = {
+        "workflow_id": workflow_id,
+        "status": "running",
+        "entrypoint": "op_minion_dispatch_workflow",
+        "requested_architecture_mode": requested_architecture_mode,
+        "architecture_mode": architecture_mode,
+        "interaction_mode": interaction_mode,
+        "auto_advance_modules": interaction_mode != "interactive",
+        "auto_accept_on_review_pass": interaction_mode == "autonomous",
+        "profile_family": profile_family,
+        "dag_producer": {
+            "kind": "generic_single_node",
+            "executor_profile": executor.executor_profile,
+            "executor_source": executor.source,
+        },
+        "created_at": utc_now(),
+    }
+    workflow = append_workflow_step(
+        workflow,
+        profile="dag_producer.generic",
+        input_artifact=requirements_brief,
+        adapter="mechanical_single_node_plan",
+    )
+    workflow = append_workflow_step(
+        workflow,
+        profile=executor.executor_profile,
+        input_artifact={"plan_id": plan_artifact["plan_id"], "module_id": "main"},
+        adapter="dag_node_executor",
+    )
+    approval_policy = dict(args.get("approval_policy") or {}) if isinstance(args.get("approval_policy"), dict) else {}
+    metadata: dict[str, Any] = {
+        "task_id": task_id,
+        "task_title": title,
+        "work_order_title": f"Execute: {title}",
+        "workflow": workflow,
+        "requirements_brief": requirements_brief,
+        "architecture_mode": architecture_mode,
+        "requested_architecture_mode": requested_architecture_mode,
+        "interaction_mode": interaction_mode,
+        "profile_family": profile_family,
+        "dag_producer": {
+            "kind": "generic_single_node",
+            "executor_profile": executor.executor_profile,
+            "executor_source": executor.source,
+        },
+        "plan_execution": {
+            "auto_advance_modules": interaction_mode != "interactive",
+            "dag_execution": {
+                "default_executor_profile": executor.executor_profile,
+                "node_executors": {"main": executor.executor_profile},
+            },
+        },
+    }
+    if approval_policy:
+        metadata["approval_policy"] = approval_policy
+    pack = repository.build_plan_parent_pack_from_plan(
+        plan_artifact,
+        work_order_id=work_order_id,
+        workspace=workspace,
+        metadata=metadata,
+        goal=goal,
+        instruction="Execute the generated single-node DAG through the manager DAG consumer.",
+    )
+    return pack, {
+        "workflow_id": workflow_id,
+        "requested_architecture_mode": requested_architecture_mode,
+        "architecture_mode": architecture_mode,
+        "interaction_mode": interaction_mode,
+        "initial_profile": executor.executor_profile,
+        "profile_family": profile_family,
+        "workspace_summary": _workflow_workspace_summary(workspace),
+        "next_action": "dag_parent_running",
+        "dag_producer": "generic_single_node",
+    }
+
+
+def _normalize_workflow_workspace(workspace: dict[str, Any], *, require_primary_language: bool = True) -> dict[str, Any]:
     normalized = dict(workspace or {})
     kind = str(normalized.get("kind") or normalized.get("workspace_kind") or normalized.get("type") or "").strip().lower()
     cwd = str(normalized.get("cwd") or normalized.get("working_dir") or normalized.get("working_directory") or "").strip()
@@ -2411,7 +2667,7 @@ def _normalize_workflow_workspace(workspace: dict[str, Any]) -> dict[str, Any]:
     languages = _workflow_language_list(normalized.get("languages"))
     if primary_language and primary_language not in languages:
         languages.insert(0, primary_language)
-    if kind == "new_project" and not primary_language:
+    if kind == "new_project" and require_primary_language and not primary_language:
         raise MinionWorkOrderValidationError(
             "workspace.primary_language is required for new_project workflows",
             field="workspace.primary_language",
@@ -2512,23 +2768,6 @@ def _architect_workflow_instruction(*, architecture_mode: str, requested_archite
         "implementation module plus final_verification. Do not create baseline/setup/contracts/prelude modules unless a real shared "
         "code or config artifact must be produced before multiple independent modules can start. If micro scope is unsafe, report escalation_required "
         "with a concrete reason instead of dispatching an under-specified plan."
-    )
-
-
-def _single_step_workflow_instruction(*, initial_profile: str) -> str:
-    return (
-        f"Run the {initial_profile} workflow step from the supplied goal, requirements_brief, and workspace facts. "
-        "You are a bounded executor, not a scheduler: do not spawn minions, do not dispatch follow-up work, and do not invent "
-        "workflow transitions. Produce the profile's contracted artifact or a concrete blocker; Pal's manager owns post-step "
-        "validation and next-step routing."
-    )
-
-
-def _requirements_workflow_instruction() -> str:
-    return (
-        "Produce requirements.md for human review. Capture what should be built, success criteria, constraints, "
-        "non-goals, open user-owned questions, and a suggested implementation direction. Do not produce a PlanArtifact, "
-        "module DAG, or coder work order."
     )
 
 

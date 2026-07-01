@@ -17,6 +17,11 @@ mode = "none"
 [completion_policy]
 evidence = "text_deliverable"
 
+[execution_contract]
+module_adapter = "prompt_view"
+module_role = "generic"
+artifact_role = "text_deliverable"
+
 [gate_policy]
 gates = ["none"]
 

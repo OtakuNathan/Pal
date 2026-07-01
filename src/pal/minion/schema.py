@@ -16,6 +16,7 @@ def ensure_minion_schema(runtime_root: Path, connection: sqlite3.Connection) -> 
             goal TEXT NOT NULL DEFAULT '',
             summary TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'active',
+            profile_family TEXT NOT NULL DEFAULT 'general',
             metadata_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
@@ -43,7 +44,7 @@ def ensure_minion_schema(runtime_root: Path, connection: sqlite3.Connection) -> 
             goal TEXT NOT NULL DEFAULT '',
             source_summary TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'draft',
-            minion_profile TEXT NOT NULL DEFAULT 'software_engineering.architect',
+            minion_profile TEXT NOT NULL DEFAULT 'generic',
             task_id TEXT NOT NULL DEFAULT '',
             proposed_work_order_id TEXT NOT NULL DEFAULT '',
             payload_json TEXT NOT NULL DEFAULT '{}',
@@ -152,6 +153,7 @@ def ensure_minion_schema(runtime_root: Path, connection: sqlite3.Connection) -> 
         );
         """
     )
+    _ensure_column(connection, "minion_tasks", "profile_family", "TEXT NOT NULL DEFAULT 'general'")
     _ensure_column(connection, "minion_work_orders", "profile_group", "TEXT NOT NULL DEFAULT 'general'")
     _ensure_column(connection, "minion_work_orders", "profile_name", "TEXT NOT NULL DEFAULT 'generic'")
     ensure_minion_runtime_settings_schema(connection)

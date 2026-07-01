@@ -168,8 +168,8 @@ class GateDefinition:
     gate_kind: str
     strategy: str = REVIEWER_GATE_STRATEGY
     trigger: str = GATE_TRIGGER_AFTER_EACH_MILESTONE
-    reviewer_profile_group: str = "software_engineering"
-    reviewer_profile_name: str = "reviewer"
+    reviewer_profile_group: str = ""
+    reviewer_profile_name: str = ""
     fallback_reviewer_profile_group: str = ""
     fallback_reviewer_profile_name: str = ""
     max_repair_attempts: int = 0
@@ -352,9 +352,9 @@ def checkpoint_review_policy_from_spec(spec: GateSpec | None, *, module_mode: st
     return {
         "enabled": True,
         "scope": scope,
-        "reviewer_profile_group": spec.reviewer_profile_group or "software_engineering",
-        "reviewer_profile_name": spec.reviewer_profile_name or "reviewer",
-        "reviewer_profile": spec.reviewer_profile or "software_engineering.reviewer",
+        "reviewer_profile_group": spec.reviewer_profile_group,
+        "reviewer_profile_name": spec.reviewer_profile_name,
+        "reviewer_profile": spec.reviewer_profile,
         "fallback_reviewer_profile": spec.fallback_reviewer_profile,
         "max_repair_attempts": int(spec.max_repair_attempts or 0) or 5,
         "require_test_or_blocker": bool(spec.policy.get("require_test_or_blocker")),
@@ -410,9 +410,9 @@ def plan_review_policy_from_spec(spec: GateSpec | None, metadata: dict[str, Any]
     base.setdefault("enabled", True)
     base.setdefault("auto_revise", bool(spec.auto_revise))
     base.setdefault("max_revision_attempts", int(spec.max_revision_attempts or 0) or 2)
-    base.setdefault("reviewer_profile_group", spec.reviewer_profile_group or "software_engineering")
-    base.setdefault("reviewer_profile_name", spec.reviewer_profile_name or "reviewer")
-    base.setdefault("reviewer_profile", spec.reviewer_profile or "software_engineering.reviewer")
+    base.setdefault("reviewer_profile_group", spec.reviewer_profile_group)
+    base.setdefault("reviewer_profile_name", spec.reviewer_profile_name)
+    base.setdefault("reviewer_profile", spec.reviewer_profile)
     if spec.fallback_reviewer_profile:
         base.setdefault("fallback_reviewer_profile", spec.fallback_reviewer_profile)
     base.setdefault("source", "gate_spec")
@@ -544,12 +544,12 @@ def _gate_spec_from_expanded_dict(raw: dict[str, Any], policy: dict[str, Any], *
         target_kind = _default_target_for_gate(gate_name)
     gate_kind = str(data.get("gate_kind") or _default_gate_kind_for_gate(gate_name)).strip()
     reviewer_group, reviewer_name = _profile_parts(
-        data.get("reviewer_profile"),
+        data.get("reviewer_profile") or policy.get("reviewer_profile"),
         group=data.get("reviewer_profile_group") or policy.get("reviewer_profile_group"),
         name=data.get("reviewer_profile_name") or policy.get("reviewer_profile_name"),
     )
     fallback_group, fallback_name = _profile_parts(
-        data.get("fallback_reviewer_profile"),
+        data.get("fallback_reviewer_profile") or policy.get("fallback_reviewer_profile"),
         group=data.get("fallback_reviewer_profile_group") or policy.get("fallback_reviewer_profile_group"),
         name=data.get("fallback_reviewer_profile_name") or policy.get("fallback_reviewer_profile_name"),
     )
@@ -561,8 +561,8 @@ def _gate_spec_from_expanded_dict(raw: dict[str, Any], policy: dict[str, Any], *
         strategy=strategy,
         target_kind=target_kind,
         gate_kind=gate_kind,
-        reviewer_profile_group=reviewer_group or "software_engineering",
-        reviewer_profile_name=reviewer_name or "reviewer",
+        reviewer_profile_group=reviewer_group,
+        reviewer_profile_name=reviewer_name,
         fallback_reviewer_profile_group=fallback_group,
         fallback_reviewer_profile_name=fallback_name,
         max_repair_attempts=_bounded_int(_merged_value(data, policy, "max_repair_attempts"), default=5),
@@ -964,8 +964,8 @@ def _gate_definition_from_dict(data: dict[str, Any]) -> GateDefinition:
         gate_kind=str(data.get("gate_kind") or _default_gate_kind_for_gate(name)).strip(),
         strategy=str(data.get("strategy") or REVIEWER_GATE_STRATEGY).strip() or REVIEWER_GATE_STRATEGY,
         trigger=_normalize_trigger(data.get("trigger") or data.get("when") or GATE_TRIGGER_AFTER_EACH_MILESTONE),
-        reviewer_profile_group=reviewer_group or "software_engineering",
-        reviewer_profile_name=reviewer_name or "reviewer",
+        reviewer_profile_group=reviewer_group,
+        reviewer_profile_name=reviewer_name,
         fallback_reviewer_profile_group=fallback_group,
         fallback_reviewer_profile_name=fallback_name,
         max_repair_attempts=_bounded_int(data.get("max_repair_attempts"), default=0),

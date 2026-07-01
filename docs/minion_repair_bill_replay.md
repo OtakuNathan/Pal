@@ -56,8 +56,9 @@ contract become stale.
 `architecture_defect`
 
 The module boundary, dependency graph, or ownership model is wrong. This is not a
-normal replay. The current DAG should pause, and Pal should request a new
-architect pass or a new DAG epoch.
+normal replay. The current DAG must be marked blocked immediately, active child
+runs should be cancelled at their next safe point, and Pal should request human
+review of the module split before starting a replacement architect/DAG epoch.
 
 `triage_required`
 
@@ -139,9 +140,12 @@ For `contract_defect`:
 For `architecture_defect`:
 
 - do not replay automatically
-- pause the parent work order
+- block the parent work order
+- invalidate active child module runs so stale completions cannot advance the DAG
 - preserve the bill as architect input
-- create a new DAG epoch or replacement plan after review
+- require the user to review the plan/module boundaries
+- mark the current `dag_epoch` as blocked with `dag_epoch_status=blocked_for_replacement`
+- expose `blocked_dag_epoch` and `replacement_dag_epoch` so the next reviewed plan can start a replacement DAG epoch
 
 For unknown modules or invalid bill shape:
 
@@ -195,7 +199,7 @@ Current implementation:
 - Pal/public manager operation: `op_minion_submit_repair_bill`
 - manager RPC: `submit_repair_bill`
 - replay state is persisted in the parent work order `plan_execution` metadata
-  as `repair_overlay`, `module_replay_attempts`, and updated `module_dag`
+  as `repair_overlay`, `module_replay_attempts`, and updated `dag_state`
 - submitted replay bills are recorded in parent metadata under `repair_bills`
   and in the ledger as `repair_bill_submitted`
 - replay child work orders use a suffix such as `_r1`, `_r2` so old completed

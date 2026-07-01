@@ -11,6 +11,7 @@ behavior_fragment = """
 Lead with findings grounded in evidence. Do not guess from a skim when the risk depends on control flow, lifecycle, or concurrency.
 
 Review method:
+- Software quality lenses: challenge lifecycle, ownership, invariants, state machines, and contract-oriented evidence. Ask who owns each resource/state/API, what must always remain true, which states/transitions are legal or impossible, and whether source/tests/probes prove the explicit input/output/error/type/compatibility contract.
 - Review like a software engineer: start with a breadth-first pass over the checkpoint/diff file list, source contract, public surfaces, tests, configuration, and reported evidence; then read depth-first only through modules, call paths, lifecycle edges, and edge cases that can affect the verdict.
 - Treat review as engineering acceptance. A pass means the next engineer, module, user, or runtime can safely depend on the contract you reviewed; a fail means you can point to a bounded repair that would make acceptance possible.
 - Batch independent inspection tool calls in one assistant turn when their results do not depend on each other: read changed source and matching tests together, inspect contract and evidence together, and avoid one-tool-per-turn probing when a small batch gives the same context.
@@ -115,6 +116,11 @@ write_baseline_config = false
 [completion_policy]
 evidence = "text_deliverable"
 requires_capability_evidence = true
+
+[execution_contract]
+module_adapter = "prompt_view"
+module_role = "reviewer"
+artifact_role = "reviewer"
 
 [gate_policy]
 submits_review_gate = true

@@ -37,6 +37,7 @@ Tool efficiency:
 - Web research is approval-budgeted. Use local source, repo docs, installed tool help, and prepared workspace evidence first; use web only for external platform/library documentation that materially changes the implementation path, and prefer official documentation.
 
 Implementation:
+- Software quality lenses: implement from lifecycle, ownership, invariants, state machines, and contract-oriented checks. For each changed boundary, make creation/mutation/release ownership explicit, preserve always-true properties, close valid/invalid state transitions, and prove input/output/error/type/compatibility contracts with focused evidence.
 - Engineering defaults: reduce uncertainty as early, explicitly, and close to the boundary as practical; prefer explicit state over ambient state, direct control flow over needless indirection, and validated inputs over defensive guessing in core logic.
 - These defaults are not aesthetic laws. Do not make the code more complex to satisfy a style preference; apply them when they reduce concrete correctness, maintainability, compatibility, lifecycle, or performance risk.
 - Shift guarantees left using the project's language and tools. In statically typed/system code, prefer types, constructors, ownership, compile-time checks, and layout-aware design where they simplify runtime behavior. In dynamic code, prefer schemas, validators, normalized dataclasses/TypedDicts, clear module boundaries, and focused tests before core logic runs.
@@ -119,8 +120,14 @@ requires_capability_evidence = true
 requires_developer_tests = true
 test_evidence = "focused_tests_or_explained_blocker"
 
+[execution_contract]
+module_adapter = "coder_work_order"
+module_role = "coder"
+artifact_role = "milestone_report"
+
 [gate_policy]
 gates = ["checkpoint_admission", "module_quality"]
+reviewer_profile = "software_engineering.reviewer"
 
 [gate_policy.warning_clean_verification]
 enabled = true

@@ -21,6 +21,7 @@ from pal.foundation.sidecar import (
 from pal.llm.runtime import scoped_llm_event_sink
 from pal.minion.config import DEFAULT_MINION_RUNNER_MODE, effective_minion_runtime_config, normalize_minion_runner_mode
 from pal.minion.coroutine_runner import CoroutineRunnerSupervisor
+from pal.minion.dag_advancer import dag_state_to_runtime_dict as _dag_state_to_runtime_dict
 from pal.minion.event_delivery import MinionEventDelivery
 from pal.minion.debug_log import minion_debug_log_enabled
 from pal.minion.gates import (
@@ -250,7 +251,7 @@ class MinionManager:
     async def _schedule_ready_modules_on_startup(self) -> dict[str, Any]:
         if not _coerce_bool(self.auto_resume_ready_modules):
             return {"status": "skipped", "reason": "auto_resume_ready_modules_disabled", "scheduled_count": 0}
-        return await self.schedule_ready_plan_modules(reason="manager_startup_recovery")
+        return await self.tick_ready_plan_dags(reason="manager_startup_recovery")
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -279,9 +280,9 @@ class MinionManager:
         await self.events.handle_subscription(request, reader, writer, shutdown_event=self._shutdown_event)
 
     async def _call_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        self._reconcile_runs()
         if method == "health":
             return self.health()
+        self._reconcile_runs()
         if method == "list_runs":
             return {"items": [state.summary() for state in sorted(self.runs.values(), key=lambda item: item.started_at)]}
         if method == "read_run":
@@ -304,8 +305,8 @@ class MinionManager:
             return await self.llm_broker_resolve_endpoint_facts(dict(params))
         if method == "finalize_work_order":
             return self.finalize_work_order(dict(params))
-        if method == "continue_work_order":
-            return await self.continue_work_order(str(params.get("work_order_id") or ""))
+        if method == "tick_parent_dag":
+            return await self.tick_parent_dag(str(params.get("work_order_id") or ""), reason=str(params.get("reason") or "manager_rpc"))
         if method == "submit_repair_bill":
             return await self.submit_repair_bill(dict(params))
         if method == "request_logical_slot":
@@ -339,10 +340,12 @@ class MinionManager:
 
     def health(self) -> dict[str, Any]:
         active = [state for state in self.runs.values() if state.status in _ACTIVE_RUN_STATUSES]
-        active_module_count = self._active_module_child_count()
+        active_module_count = self._active_module_child_count_from_ledger()
         allocated_logical_slots = self._allocated_logical_slot_count()
         return {
             "ok": True,
+            "health_source": "manager_memory_ledger",
+            "ledger_only": True,
             "started_at": self.started_at,
             "run_count": len(self.runs),
             "active_count": len(active),
@@ -353,7 +356,7 @@ class MinionManager:
             "auto_resume_ready_modules": bool(self.auto_resume_ready_modules),
             "active_module_count": active_module_count,
             "allocated_logical_slots": allocated_logical_slots,
-            "available_module_slots": self._available_module_slots(),
+            "available_module_slots": self._available_module_slots_from_ledger(active_module_count=active_module_count),
             "logical_slot_generation": self._logical_slot_generation,
             "pending_event_count": len(self.event_queue),
             "event_subscriber_count": len(self.event_subscribers),
@@ -392,13 +395,13 @@ class MinionManager:
         pack = self.tasking_repository.prepare_pack_for_spawn(pack)
         pack = profile_registry.resolve_pack(pack)
         if _is_plan_parent_pack(pack):
-            continued = await self.continue_work_order(pack.work_order_id)
+            ticked = await self.tick_parent_dag(pack.work_order_id, reason="plan_parent_spawn")
             return {
                 "work_order_id": pack.work_order_id,
                 "minion_profile": pack.minion_profile,
-                "status": str(continued.get("status") or "ok"),
+                "status": str(ticked.get("status") or "ok"),
                 "plan_parent": True,
-                "continuation": continued,
+                "dag_tick": ticked,
             }
         pack, metadata_updates = self._with_profile_gate_policy(pack)
         if metadata_updates:
@@ -675,11 +678,11 @@ class MinionManager:
         self.tasking_repository.record_minion_event(event)
         return {"status": "ok" if result.get("status") in {"committed", "no_changes"} else "error", "work_order_id": work_order_id, **result}
 
-    async def continue_work_order(self, work_order_id: str) -> dict[str, Any]:
-        return await self.step_runner.continue_work_order(work_order_id)
+    async def tick_parent_dag(self, work_order_id: str, *, reason: str = "") -> dict[str, Any]:
+        return await self.step_runner.tick_parent_dag(work_order_id, reason=reason)
 
-    async def schedule_ready_plan_modules(self, *, preferred_work_order_id: str = "", reason: str = "") -> dict[str, Any]:
-        return await self.step_runner.schedule_ready_plan_modules(preferred_work_order_id=preferred_work_order_id, reason=reason)
+    async def tick_ready_plan_dags(self, *, preferred_work_order_id: str = "", reason: str = "") -> dict[str, Any]:
+        return await self.step_runner.tick_ready_plan_dags(preferred_work_order_id=preferred_work_order_id, reason=reason)
 
     def request_logical_slot(self, params: dict[str, Any]) -> dict[str, Any]:
         run_id = str(params.get("run_id") or "").strip()
@@ -763,9 +766,13 @@ class MinionManager:
                 "plan_ref": dict(loaded.get("plan_ref") or {}),
                 "next_profile": NONE_PROFILE,
             }
+        if not next_group or not next_name or next_name == NONE_PROFILE:
+            raise ValueError("accepted plan workflow_next must resolve to a concrete executor profile")
         auto_advance = params.get("auto_advance_modules")
         if auto_advance is None:
             auto_advance = workflow.get("auto_advance_modules", plan_review.get("auto_advance_modules", True))
+        profile_family = str(workflow.get("profile_family") or source_metadata.get("profile_family") or next_group).strip() or next_group
+        workflow.setdefault("profile_family", profile_family)
         workflow = update_current_workflow_step(
             workflow,
             status="accepted",
@@ -804,8 +811,9 @@ class MinionManager:
             "plan_review": plan_review,
             "plan_ref": dict(loaded.get("plan_ref") or {}),
             "plan_validation": dict(loaded.get("plan_validation") or {}),
-            "dispatch_profile_group": next_group or "software_engineering",
-            "dispatch_profile_name": next_name if next_name != NONE_PROFILE else "coder",
+            "profile_family": profile_family,
+            "dispatch_profile_group": next_group,
+            "dispatch_profile_name": next_name,
             "plan_execution": {"auto_advance_modules": bool(auto_advance)},
         }
         for key in (
@@ -825,8 +833,8 @@ class MinionManager:
             metadata=metadata,
             goal=str(work_order.get("goal") or ""),
             instruction="Execute the accepted structured plan one module at a time.",
-            profile_group=next_group or "software_engineering",
-            profile_name=next_name if next_name != NONE_PROFILE else "coder",
+            profile_group=next_group,
+            profile_name=next_name,
         )
         spawned = await self.spawn(parent_pack.to_dict())
         event = {
@@ -931,7 +939,7 @@ class MinionManager:
             "run": dict(spawned),
         }
 
-    async def auto_continue_work_order(self, work_order_id: str, *, reason: str = "") -> dict[str, Any]:
+    async def auto_tick_parent_dag(self, work_order_id: str, *, reason: str = "") -> dict[str, Any]:
         normalized = str(work_order_id or "").strip()
         if not normalized:
             return {"status": "skipped", "reason": "work_order_id_required"}
@@ -948,10 +956,10 @@ class MinionManager:
             }
         if not bool(plan_execution.get("auto_advance_modules", True)):
             return {"status": "skipped", "reason": "auto_advance_modules_disabled", "work_order_id": normalized}
-        result = await self.continue_work_order(normalized)
-        global_schedule = await self.schedule_ready_plan_modules(preferred_work_order_id=normalized, reason=reason or "module_completed")
+        result = await self.tick_parent_dag(normalized, reason=reason or "module_completed")
+        global_schedule = await self.tick_ready_plan_dags(preferred_work_order_id=normalized, reason=reason or "module_completed")
         event = {
-            "event_kind": "plan_parent_auto_continue",
+            "event_kind": "plan_parent_auto_dag_tick",
             "minion_id": "",
             "run_id": "",
             "work_order_id": normalized,
@@ -966,6 +974,22 @@ class MinionManager:
     async def submit_repair_bill(self, params: dict[str, Any]) -> dict[str, Any]:
         bill = dict(params.get("repair_bill") or params)
         result = self.tasking_repository.submit_repair_bill(bill)
+        cancel_reason = (
+            "architecture_defect"
+            if str(result.get("reason") or result.get("blocked_reason") or "").strip().lower() == "architecture_defect"
+            else "repair_bill_replay"
+        )
+        cooperative_cancels = await self._request_cooperative_cancel_for_work_orders(
+            _string_list(result.get("invalidated_child_work_order_ids")),
+            reason=cancel_reason,
+            payload={
+                "parent_work_order_id": str(result.get("parent_work_order_id") or bill.get("parent_work_order_id") or ""),
+                "bill_id": str(result.get("bill_id") or bill.get("bill_id") or ""),
+                "summary": "repair bill invalidated this module run; stop at the next safe point",
+            },
+        )
+        if cooperative_cancels:
+            result = {**dict(result), "cooperative_cancel_requests": cooperative_cancels}
         parent_id = str(result.get("parent_work_order_id") or bill.get("parent_work_order_id") or "").strip()
         global_schedule: dict[str, Any] = {}
         if parent_id:
@@ -973,9 +997,9 @@ class MinionManager:
             metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {}
             plan_execution = dict(metadata.get("plan_execution") or {})
             auto_advance = bool(plan_execution.get("auto_advance_modules", True))
-            ready_modules = _string_list(result.get("ready_module_ids") or dict(plan_execution.get("module_dag") or {}).get("ready_modules"))
+            ready_modules = _string_list(result.get("ready_module_ids") or _plan_execution_dag_state(plan_execution).get("ready_modules"))
             if auto_advance and ready_modules and str(result.get("status") or "").strip().lower() in {"awaiting_continue", "running_module"}:
-                global_schedule = await self.schedule_ready_plan_modules(
+                global_schedule = await self.tick_ready_plan_dags(
                     preferred_work_order_id=parent_id,
                     reason="repair_bill_submitted",
                 )
@@ -989,6 +1013,10 @@ class MinionManager:
                 "status": str(result.get("status") or ""),
                 "summary": str(result.get("summary") or bill.get("summary") or "repair bill submitted"),
                 "bill_id": str(result.get("bill_id") or bill.get("bill_id") or ""),
+                "restart_required": bool(result.get("restart_required", False)),
+                "requires_plan_review": bool(result.get("requires_plan_review", False)),
+                "current_dag_epoch": result.get("current_dag_epoch", ""),
+                "replacement_dag_epoch": result.get("replacement_dag_epoch", ""),
                 "result": dict(result),
                 "global_schedule": dict(global_schedule),
             },
@@ -997,6 +1025,53 @@ class MinionManager:
         if parent_id:
             self._queue_event_delivery(event)
         return {**dict(result), "global_schedule": dict(global_schedule)}
+
+    async def _request_cooperative_cancel_for_work_orders(
+        self,
+        work_order_ids: list[str],
+        *,
+        reason: str,
+        payload: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for work_order_id in _dedupe_strings(_string_list(work_order_ids)):
+            state = self._find_active_run_for_work_order(work_order_id) or next(
+                (
+                    item
+                    for item in self.runs.values()
+                    if str(item.pack.work_order_id or "") == work_order_id
+                    and item.status in _ACTIVE_RUN_STATUSES
+                    and item.control_queue is not None
+                ),
+                None,
+            )
+            if state is None:
+                results.append({"status": "not_active", "child_work_order_id": work_order_id})
+                continue
+            module_id = str(state.pack.metadata.get("parent_module_id") or state.pack.metadata.get("module_id") or "")
+            message_payload = {
+                **dict(payload or {}),
+                "reason": reason,
+                "child_work_order_id": work_order_id,
+                "module_id": module_id,
+            }
+            sent = await self._send_runner_control_or_record(
+                state,
+                {
+                    "type": "cancel_requested",
+                    "payload": message_payload,
+                },
+            )
+            results.append(
+                {
+                    "status": "requested" if bool(sent.get("ok")) else "skipped",
+                    "child_work_order_id": work_order_id,
+                    "run_id": state.run_id,
+                    "module_id": module_id,
+                    "control": dict(sent),
+                }
+            )
+        return results
 
     def pause_work_order(self, work_order_id: str, reason: str = "") -> dict[str, Any]:
         return self.tasking_repository.set_plan_parent_status(work_order_id, "paused", reason=reason)
@@ -1201,13 +1276,58 @@ class MinionManager:
         return self.runner_process.active_runner_work_order_ids()
 
     def _active_module_child_work_order_ids(self) -> set[str]:
-        return set(self.tasking_repository.running_plan_module_child_work_order_ids())
+        active = set(self.tasking_repository.running_plan_module_child_work_order_ids())
+        for state in self.runs.values():
+            if state.runner_kind == "logical":
+                continue
+            if state.status not in _ACTIVE_RUN_STATUSES:
+                continue
+            metadata = dict(state.pack.metadata or {})
+            if not str(metadata.get("parent_work_order_id") or "").strip():
+                continue
+            if not str(metadata.get("parent_module_id") or metadata.get("module_id") or "").strip():
+                continue
+            work_order_id = str(state.pack.work_order_id or "").strip()
+            if work_order_id:
+                with contextlib.suppress(Exception):
+                    snapshot = self.tasking_repository.read_work_order(work_order_id)
+                    status = str((snapshot.get("work_order") or {}).get("status") or "").strip().lower()
+                    if status in _TERMINAL_RUN_STATUSES:
+                        continue
+                active.add(work_order_id)
+        return active
 
     def _active_module_child_count(self) -> int:
         return len(self._active_module_child_work_order_ids())
 
+    def _active_module_child_count_from_ledger(self) -> int:
+        count = 0
+        for state in self.runs.values():
+            if state.runner_kind == "logical":
+                continue
+            if state.status not in _ACTIVE_RUN_STATUSES:
+                continue
+            metadata = dict(state.pack.metadata or {})
+            if not str(metadata.get("parent_work_order_id") or "").strip():
+                continue
+            if not str(metadata.get("parent_module_id") or metadata.get("module_id") or "").strip():
+                continue
+            if _state_last_reported_final_milestone_completed(state):
+                continue
+            count += 1
+        return count
+
     def _allocated_logical_slot_count(self) -> int:
         return len(self._logical_slots)
+
+    def _available_module_slots_from_ledger(self, *, active_module_count: int | None = None) -> int:
+        active_count = self._active_module_child_count_from_ledger() if active_module_count is None else int(active_module_count)
+        return max(
+            0,
+            int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES)
+            - active_count
+            - self._allocated_logical_slot_count(),
+        )
 
     def _available_module_slots(self) -> int:
         return max(
@@ -1336,8 +1456,19 @@ class MinionManager:
         if event_kind == "terminal":
             self.reviews.schedule_reviewer_terminal_reconciliation(state, event)
             self._schedule_workflow_terminal_post(state, event)
+            self._schedule_ready_modules_after_terminal(state, event)
         if event_kind == "milestone_completed":
             self.serial_scheduler.schedule(state, event)
+
+    def _schedule_ready_modules_after_terminal(self, state: MinionRunState, event: dict[str, Any]) -> None:
+        _ = state, event
+        if self._shutdown_event.is_set():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self.tick_ready_plan_dags(reason="runner_terminal"), name=f"minion-terminal-dag-tick-{state.run_id}")
 
     def _schedule_resource_request(self, state: MinionRunState, event: dict[str, Any]) -> None:
         try:
@@ -1719,6 +1850,45 @@ def _is_plan_parent_pack(pack: TaskContextPack) -> bool:
     return str(plan_execution.get("mode") or "") == "module_parent_milestones"
 
 
+def _state_last_reported_final_milestone_completed(state: MinionRunState) -> bool:
+    events = list(state.ledger or [])
+    if state.last_event and (not events or dict(events[-1]) != dict(state.last_event)):
+        events.append(dict(state.last_event))
+    for raw_event in reversed(events):
+        event = dict(raw_event or {})
+        if str(event.get("event_kind") or "") != "milestone_completed":
+            continue
+        return _event_reports_final_milestone_completed(state, event)
+    return False
+
+
+def _event_reports_final_milestone_completed(state: MinionRunState, event: dict[str, Any]) -> bool:
+    if str(event.get("event_kind") or "") != "milestone_completed":
+        return False
+    payload = dict(event.get("payload") or {})
+    if str(payload.get("status") or "").strip().lower() != "completed":
+        return False
+    try:
+        milestone_index = int(payload.get("milestone_index") or 0)
+    except (TypeError, ValueError):
+        milestone_index = 0
+    milestones = list((state.pack.metadata or {}).get("milestones") or [])
+    if milestones:
+        return milestone_index >= len(milestones) - 1
+    prompt_view = dict((state.pack.metadata or {}).get("prompt_view") or {})
+    current = dict(prompt_view.get("milestone") or state.pack.continuity.get("current_milestone") or {})
+    if not current:
+        return True
+    try:
+        return milestone_index >= int(current.get("milestone_index") or 0)
+    except (TypeError, ValueError):
+        return True
+
+
+def _plan_execution_dag_state(plan_execution: dict[str, Any]) -> dict[str, Any]:
+    return _dag_state_to_runtime_dict(dict(plan_execution.get("dag_state") or plan_execution.get("module_dag") or {}))
+
+
 def _pre_plan_gate_spec(pack: TaskContextPack) -> GateSpec | None:
     if not _pre_plan_contract_requested(pack):
         return None
@@ -1849,6 +2019,10 @@ def _build_pre_plan_contract_compiler_pack(pack: TaskContextPack, spec: GateSpec
     for key in ("preferred_endpoint_id", "preferred_endpoint_source"):
         if key in (pack.metadata or {}):
             metadata[key] = (pack.metadata or {})[key]
+    reviewer_group = str(spec.reviewer_profile_group or "").strip()
+    reviewer_name = str(spec.reviewer_profile_name or "").strip()
+    if not reviewer_group or not reviewer_name:
+        raise ValueError("source-contract gate requires an explicit reviewer profile")
     return TaskContextPack.from_dict(
         {
             "work_order_id": compiler_work_order_id,
@@ -1864,8 +2038,8 @@ def _build_pre_plan_contract_compiler_pack(pack: TaskContextPack, spec: GateSpec
             ),
             "acceptance_criteria": acceptance_criteria,
             "workspace": review_workspace,
-            "profile_group": spec.reviewer_profile_group or "software_engineering",
-            "profile_name": spec.reviewer_profile_name or "reviewer",
+            "profile_group": reviewer_group,
+            "profile_name": reviewer_name,
             "allowed_capabilities": list(SOURCE_CONTRACT_REVIEWER_CAPABILITIES),
             "metadata": metadata,
         }

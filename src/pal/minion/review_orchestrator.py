@@ -85,7 +85,7 @@ class ReviewOrchestrator:
         if latest.get("status") == "ok":
             gate = dict(latest.get("review_gate") or {})
             if str(gate.get("verdict") or "").strip().lower() == "pass":
-                return await self._continue_persisted_checkpoint_pass(resolved_checkpoint_id, latest, gate)
+                return await self._advance_persisted_checkpoint_pass(resolved_checkpoint_id, latest, gate)
             return {
                 "status": "review_gate_present",
                 "checkpoint_id": resolved_checkpoint_id,
@@ -286,6 +286,10 @@ class ReviewOrchestrator:
                     **plan_review_policy,
                     **dict((planner_state.pack.metadata or {}).get("plan_review") or {}),
                 }
+            reviewer_group = str(plan_review_policy.get("reviewer_profile_group") or spec.reviewer_profile_group or "").strip()
+            reviewer_name = str(plan_review_policy.get("reviewer_profile_name") or spec.reviewer_profile_name or "").strip()
+            if not reviewer_group or not reviewer_name:
+                raise ValueError("plan review gate requires an explicit reviewer profile")
             pack = TaskContextPack.from_dict(
                 {
                     "work_order_id": review_work_order_id,
@@ -310,8 +314,8 @@ class ReviewOrchestrator:
                         "review_target_gate_kind": spec.gate_kind or "plan_acceptance",
                         **({"review_target_source_contract": dict(source_contract)} if source_contract else {}),
                     },
-                    "profile_group": str(plan_review_policy.get("reviewer_profile_group") or spec.reviewer_profile_group or "software_engineering"),
-                    "profile_name": str(plan_review_policy.get("reviewer_profile_name") or spec.reviewer_profile_name or "reviewer"),
+                    "profile_group": reviewer_group,
+                    "profile_name": reviewer_name,
                     "allowed_capabilities": list(PLAN_REVIEWER_CAPABILITIES),
                     "metadata": metadata,
                 }
@@ -427,8 +431,10 @@ class ReviewOrchestrator:
             checkpoint_git_context = _checkpoint_git_context(repo_path, str(payload.get("commit_sha") or ""))
             if checkpoint_git_context:
                 review_target["checkpoint_git"] = checkpoint_git_context
-            reviewer_group = str(review_policy.get("reviewer_profile_group") or "software_engineering").strip() or "software_engineering"
-            reviewer_name = str(review_policy.get("reviewer_profile_name") or "reviewer").strip() or "reviewer"
+            reviewer_group = str(review_policy.get("reviewer_profile_group") or "").strip()
+            reviewer_name = str(review_policy.get("reviewer_profile_name") or "").strip()
+            if not reviewer_group or not reviewer_name:
+                raise ValueError("checkpoint review gate requires an explicit reviewer profile")
             review_work_order_id = f"wo_review_{safe_token(checkpoint_id)}"
             review_artifact = review_artifact_dir(self.runtime_root, review_work_order_id)
             review_scratch = prepare_review_scratch(self.runtime_root, review_work_order_id)
@@ -1090,7 +1096,7 @@ class ReviewOrchestrator:
             if coder_state is None:
                 verdict = str(gate.get("verdict") or "").strip().lower()
                 if verdict == "pass":
-                    await self._continue_persisted_checkpoint_pass(checkpoint_id, latest, gate)
+                    await self._advance_persisted_checkpoint_pass(checkpoint_id, latest, gate)
                     return
                 self._record_work_order_event(
                     work_order_id=str((gate.get("target") or {}).get("work_order_id") or ""),
@@ -1154,7 +1160,7 @@ class ReviewOrchestrator:
         finally:
             self.checkpoint_reviews.release(checkpoint_id)
 
-    async def _continue_persisted_checkpoint_pass(self, checkpoint_id: str, latest: dict[str, Any], gate: dict[str, Any]) -> dict[str, Any]:
+    async def _advance_persisted_checkpoint_pass(self, checkpoint_id: str, latest: dict[str, Any], gate: dict[str, Any]) -> dict[str, Any]:
         closure = self.repository.close_checkpoint_from_review_gate(latest.get("review_gate_ref") or gate)
         payload = dict(closure.get("payload") or {})
         work_order_id = str(closure.get("work_order_id") or payload.get("work_order_id") or "").strip()
@@ -1176,7 +1182,7 @@ class ReviewOrchestrator:
             next_pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(next_pack)
             run = await self.manager.spawn(next_pack.to_dict())
             return {
-                "status": "continued",
+                "status": "spawned_next_milestone",
                 "checkpoint_id": checkpoint_id,
                 "work_order_id": work_order_id,
                 "closed_checkpoint": closure,
@@ -1198,7 +1204,7 @@ class ReviewOrchestrator:
                 and bool(parent_completion.get("has_next_module"))
                 and bool(parent_completion.get("auto_advance_modules", True))
             ):
-                await self.manager.auto_continue_work_order(event_work_order_id, reason="module_completed")
+                await self.manager.auto_tick_parent_dag(event_work_order_id, reason="module_completed")
         return {
             "status": str(completion.get("status") or "closed"),
             "checkpoint_id": checkpoint_id,

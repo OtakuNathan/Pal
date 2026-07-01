@@ -88,8 +88,8 @@ def minion_lesson_approval_delivery(payload: dict[str, Any], route: ControlRoute
     return delivery_for_interaction(route, "interactive_open", interaction)
 
 
-def minion_module_continue_delivery(payload: dict[str, Any], route: ControlRoute) -> ControlDelivery | None:
-    interaction = build_minion_module_continue_interaction(payload, route)
+def minion_module_dag_tick_delivery(payload: dict[str, Any], route: ControlRoute) -> ControlDelivery | None:
+    interaction = build_minion_module_dag_tick_interaction(payload, route)
     if interaction is None:
         return None
     return delivery_for_interaction(route, "interactive_open", interaction)
@@ -186,7 +186,7 @@ def build_minion_plan_acceptance_interaction(payload: dict[str, Any], route: Con
     )
 
 
-def build_minion_module_continue_interaction(payload: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec | None:
+def build_minion_module_dag_tick_interaction(payload: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec | None:
     if not bool(payload.get("has_next_module")):
         return None
     work_order_id = str(payload.get("parent_work_order_id") or payload.get("work_order_id") or "").strip()
@@ -195,7 +195,7 @@ def build_minion_module_continue_interaction(payload: dict[str, Any], route: Con
     module_id = str(payload.get("module_id") or "").strip()
     next_module_id = str(payload.get("next_module_id") or "").strip()
     milestone_index = payload.get("parent_milestone_index")
-    interaction_id = f"minion_continue_{work_order_id}"
+    interaction_id = f"minion_dag_tick_{work_order_id}"
     lines = [
         "Minion milestone completed.",
         "",
@@ -211,7 +211,7 @@ def build_minion_module_continue_interaction(payload: dict[str, Any], route: Con
     if next_module_id:
         lines.extend(["", f"Next module: {next_module_id}"])
     lines.append("")
-    lines.append("Continue to the next milestone?")
+    lines.append("Tick the DAG to start the next ready module?")
 
     def action_args(action_kind: str, *, reason: str = "") -> dict[str, Any]:
         return {
@@ -229,15 +229,15 @@ def build_minion_module_continue_interaction(payload: dict[str, Any], route: Con
 
     return InteractionMessageSpec(
         interaction_id=interaction_id,
-        interaction_kind="minion_module_continue",
+        interaction_kind="minion_module_dag_tick",
         route=route,
         text="\n".join(lines),
         buttons=(
             (
                 InteractionButtonSpec(
-                    label="Continue",
+                    label="Tick DAG",
                     action_key="control.action.dispatch",
-                    action_args=action_args("minion_plan_continue"),
+                    action_args=action_args("minion_dag_tick"),
                 ),
                 InteractionButtonSpec(
                     label="Pause",

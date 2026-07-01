@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from pal.foundation import utc_now
+from pal.minion.dag_advancer import dag_state_to_runtime_dict as _dag_state_to_runtime_dict
 from pal.minion.profiles import MinionProfileRegistry
 from pal.minion.utils import dedupe_strings as _dedupe_strings
 from pal.minion.utils import string_list as _string_list
@@ -290,7 +291,7 @@ class ModuleStepRunner:
         if self.slot_broker is None:
             self.slot_broker = LocalLogicalSlotBroker(self.manager)
 
-    async def continue_work_order(self, work_order_id: str) -> dict[str, Any]:
+    async def tick_parent_dag(self, work_order_id: str, *, reason: str = "") -> dict[str, Any]:
         normalized = str(work_order_id or "").strip()
         if not normalized:
             raise ValueError("work_order_id is required")
@@ -301,7 +302,7 @@ class ModuleStepRunner:
             plan_execution = dict(metadata.get("plan_execution") or {})
             status = str(plan_execution.get("status") or snapshot.get("status") or "not_available")
             active_child_work_order_ids = _active_child_work_order_ids_from_plan_execution(plan_execution)
-            ready_module_ids = _string_list(dict(plan_execution.get("module_dag") or {}).get("ready_modules"))
+            ready_module_ids = _string_list(_plan_execution_dag_state(plan_execution).get("ready_modules"))
             waiting_for_slot = bool(ready_module_ids)
             return {
                 "status": "waiting_for_slot" if waiting_for_slot else status,
@@ -312,6 +313,8 @@ class ModuleStepRunner:
                 "ready_module_ids": ready_module_ids,
                 "max_parallel_modules": self._max_parallel_modules(),
                 "active_module_count": self.manager._active_module_child_count(),
+                "dag_tick": True,
+                "tick_reason": str(reason or "").strip(),
             }
         packs = self.manager.tasking_repository.next_ready_plan_module_packs(normalized, allow_paused=True, limit=available_slots)
         if not packs:
@@ -326,6 +329,8 @@ class ModuleStepRunner:
                 "reason": "active_child_running" if status == "running_module" and active_child_work_order_ids else "no_next_module",
                 "active_child_work_order_id": active_child_work_order_ids[0] if active_child_work_order_ids else "",
                 "active_child_work_order_ids": active_child_work_order_ids,
+                "dag_tick": True,
+                "tick_reason": str(reason or "").strip(),
             }
         registry = MinionProfileRegistry(runtime_root=self.manager.runtime_root)
         runs: list[dict[str, Any]] = []
@@ -363,6 +368,8 @@ class ModuleStepRunner:
                 "failure_count": len(spawn_failures),
                 "max_parallel_modules": self._max_parallel_modules(),
                 "active_module_count": self.manager._active_module_child_count(),
+                "dag_tick": True,
+                "tick_reason": str(reason or "").strip(),
             }
         return {
             "status": "running_module",
@@ -376,9 +383,11 @@ class ModuleStepRunner:
             "spawn_failures": spawn_failures,
             "max_parallel_modules": self._max_parallel_modules(),
             "active_module_count": self.manager._active_module_child_count(),
+            "dag_tick": True,
+            "tick_reason": str(reason or "").strip(),
         }
 
-    async def schedule_ready_plan_modules(self, *, preferred_work_order_id: str = "", reason: str = "") -> dict[str, Any]:
+    async def tick_ready_plan_dags(self, *, preferred_work_order_id: str = "", reason: str = "") -> dict[str, Any]:
         preferred = str(preferred_work_order_id or "").strip()
         parent_ids = self.manager.tasking_repository.ready_plan_parent_work_order_ids()
         if preferred and preferred in parent_ids:
@@ -387,7 +396,7 @@ class ModuleStepRunner:
         for parent_id in parent_ids:
             if self.manager._available_module_slots() <= 0:
                 break
-            result = await self.continue_work_order(parent_id)
+            result = await self.tick_parent_dag(parent_id, reason=reason or "tick_ready_plan_dags")
             if str(result.get("status") or "") == "running_module":
                 scheduled.append(dict(result))
         return {
@@ -397,6 +406,7 @@ class ModuleStepRunner:
             "scheduled_count": len(scheduled),
             "max_parallel_modules": self._max_parallel_modules(),
             "active_module_count": self.manager._active_module_child_count(),
+            "dag_tick": True,
         }
 
     def request_logical_slot(self, state: Any, *, resource: str, module_id: str = "", reason: str = "") -> dict[str, Any]:
@@ -857,12 +867,16 @@ class ModuleStepRunner:
 def _active_child_work_order_ids_from_plan_execution(plan_execution: dict[str, Any]) -> list[str]:
     values = _string_list(plan_execution.get("active_child_work_order_ids"))
     if not values:
-        running_modules = dict(dict(plan_execution.get("module_dag") or {}).get("running_modules") or {})
+        running_modules = dict(_plan_execution_dag_state(plan_execution).get("running_modules") or {})
         values = _string_list(running_modules.values())
     active_child_work_order_id = str(plan_execution.get("active_child_work_order_id") or "").strip()
     if active_child_work_order_id and active_child_work_order_id not in values:
         values.insert(0, active_child_work_order_id)
     return _dedupe_strings(values)
+
+
+def _plan_execution_dag_state(plan_execution: dict[str, Any]) -> dict[str, Any]:
+    return _dag_state_to_runtime_dict(dict(plan_execution.get("dag_state") or plan_execution.get("module_dag") or {}))
 
 
 def _optional_timeout_seconds(value: Any) -> float | None:

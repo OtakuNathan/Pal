@@ -77,7 +77,7 @@ The intended route is:
 3. `plan_validate_and_submit_for_review` freezes a primary draft snapshot for the `plan_acceptance` gate and writes a mechanical `plan_review.md` summary artifact next to the machine `plan.draft.json`.
 4. Reviewer reads the plan through `plan_read`/`plan_find`/`plan_get` handles, submits a gate verdict, and cites target handles for required fixes.
 5. Pal/user accepts the reviewed `plan_ref`, or requests/rejects a revision through the plan control interaction.
-6. The manager continues the workflow from the accepted plan and dispatches downstream coder/join modules according to the plan DAG and profile policy.
+6. The manager ticks the accepted workflow DAG and dispatches downstream coder/join modules according to the plan DAG and profile policy.
 
 Architect must not invent task boundaries from raw chat history when a draft exists. The draft is the bounded source for review.
 
@@ -140,7 +140,7 @@ While a work order is running, each module worktree contains a full checkout of 
 
 Module boundaries are contract boundaries. Planner output must describe cross-module handoffs through `provided_interfaces`, `consumed_interfaces`, `cross_module_contracts`, and prelude/contracts stubs or public facades when downstream modules need importable types or APIs. Coder and reviewer profiles treat undeclared cross-module imports as contract violations, including in the join module. Join may compose modules only through declared public interfaces, exported facades, or prelude contracts.
 
-Plan-parent module scheduling is DAG-first. The accepted plan artifact remains the truth source, while the manager may compile a rebuildable `PlanDagProjection` file under `data/minion/plan_dags/{parent_work_order_id}.json` for scheduler reads. That projection contains module nodes, dependency edges, children, topology hash, and scheduler defaults such as `max_parallel_modules`; it must not become a second runtime-state database. If the file is missing or stale, it can be regenerated from the accepted plan artifact and validation output. DAG advancement is mechanism while manager policy is strategy: graph construction, indegree transitions, ready/running/completed/stale state, replay merge, and slot release should remain typed mechanical helpers; auto-advance policy, concurrency limit selection, profile selection, and user notification remain manager/control policy.
+Plan-parent module scheduling is DAG-first. The accepted plan artifact remains the truth source. The repository persists the serialized runtime state in `plan_execution.dag_state` plus `dag_revision`; storage uses canonical `node_*` fields while runtime views may still render nodes as modules for software-engineering profiles. `dag_advancer` owns the typed mechanical model (`DagSpec`, `DagState`, and `DagAdvanceResult`) for graph construction, indegree transitions, ready/running/completed/stale state, replay merge, and stale-child rejection. The manager does not own DAG truth: it supplies strategy and resources, including auto-advance policy, concurrency limit selection, profile selection, slot accounting, IPC, and user notification.
 
 The scheduler derives runtime state from minion-owned facts, not from the projection file: completed modules come from parent/module checkpoints, running modules come from active child work orders, and blocked/failed modules come from terminal ledger state. On each scheduling signal, the manager recomputes the ready set from the DAG:
 
@@ -148,10 +148,10 @@ The scheduler derives runtime state from minion-owned facts, not from the projec
 - ready modules enter a waiting queue ordered by the validated topology order
 - the global `max_parallel_modules` limit controls how many ready modules may start
 - `max_parallel_modules=5` is the default global module concurrency limit
-- `max_parallel_modules=1` gives serial behavior without a manual module-boundary continue step
+- `max_parallel_modules=1` gives serial behavior without a manual module-boundary DAG tick
 - larger values allow independent ready modules to run concurrently in isolated worktrees
 
-Module completion, parent spawn, manager startup recovery, retry, and explicit continue are scheduling signals. `continue_work_order` is a manual recovery/control path, not the normal module-boundary driver. The normal path is: gate passes a child module checkpoint, parent records the module completion, the scheduler recomputes ready modules, and the manager starts the next available child module when a global concurrency slot is free. On manager startup, stale `running_module` children without active runner processes are released back to the DAG as ready work, then ready parents are automatically scheduled after the manager socket is listening. Set `PAL_MINION_AUTO_RESUME_READY_MODULES=0` to keep startup recovery ledger-only and require an explicit continue. When the DAG completes, the parent writes a mechanical `completion_report.md` artifact under the work-order artifact directory; user-facing notifications should point to that artifact rather than paste the full report.
+Module completion, parent spawn, manager startup recovery, retry, and explicit DAG tick are scheduling signals. `tick_parent_dag` is a manual recovery/control path, not the normal module-boundary driver. The normal path is: gate passes a child module checkpoint, parent records the module completion, the scheduler recomputes ready modules, and the manager starts the next available child module when a global concurrency slot is free. On manager startup, stale `running_module` children without active runner processes are released back to the DAG as ready work, then ready parents are automatically scheduled after the manager socket is listening. Set `PAL_MINION_AUTO_RESUME_READY_MODULES=0` to keep startup recovery ledger-only and require an explicit DAG tick. When the DAG completes, the parent writes a mechanical `completion_report.md` artifact under the work-order artifact directory; user-facing notifications should point to that artifact rather than paste the full report.
 
 Concurrency is intentionally global at the minion scheduler layer. Per-endpoint request limits belong to the LLM broker or endpoint invoker because endpoint fallback can change the actual provider/model used by a child run. The parent module scheduler should not pre-resolve endpoint identity or duplicate broker fallback policy.
 
@@ -219,7 +219,7 @@ The minion module exposes:
 - `minion_promote_work_order_draft`
 - `minion_kill`
 - `minion_finalize`
-- `minion_continue_work_order`
+- `minion_tick_parent_dag`
 - `minion_submit_repair_bill`
 - `minion_pause_work_order`
 - `minion_recover_work_order`
@@ -229,9 +229,9 @@ The minion module exposes:
 
 `current_worker` comes from manager active runs bound to the work order. It is not inferred from conversation context.
 
-`minion_dispatch_workflow` is the normal public delegation entrypoint. Pal passes the prepared goal, optional `requirements_brief`, workspace facts, optional initial profile selection, `architecture_mode`, `interaction_mode`, and optional `preferred_endpoint_id`. The manager creates or binds the work order, starts the initial profile step, applies that profile's gate/output policy, and follows artifact-declared `workflow_next` first with profile `workflow_next` as the fallback, instead of exposing low-level runner mechanics.
+`minion_dispatch_workflow` is the normal public delegation entrypoint. Pal passes `task_id`, the prepared goal, optional `requirements_brief`, workspace facts, `architecture_mode`, `interaction_mode`, and optional `preferred_endpoint_id`. The task binds `profile_family`; dispatch does not take profile selectors. The manager creates the work order, runs the family DAG producer or generic single-node DAG producer, then consumes the resulting DAG mechanically instead of exposing low-level runner mechanics.
 
-Accepted plan artifacts are consumed as DAGs. `metadata.workflow_next` declares the default executor profile for that DAG, while module metadata or topology nodes may declare `executor_profile` for the rare mixed-DAG node that needs a different profile. Bare executor names are scoped to the default profile group, so `review_worker` under `software_engineering.coder` resolves to `software_engineering.review_worker`; use canonical `group.profile` ids only for explicit cross-group dispatch. The manager records `plan_execution.dag_execution.default_executor_profile` and `node_executors`, then schedules ready nodes mechanically from that table.
+Accepted or mechanically generated plan artifacts are consumed as DAGs. Module metadata or topology nodes may declare `executor_profile` for a node that needs a different executor from the DAG default. The manager records `plan_execution.dag_execution.default_executor_profile` and `node_executors`, then schedules ready nodes mechanically from that table.
 
 `minion_draft_work_order` and `minion_promote_work_order_draft` remain auxiliary paths for user brainstorming and draft reuse. Draft milestones are review input only; they should be promoted or folded into a normal workflow before execution work starts.
 
@@ -239,7 +239,7 @@ Plan refs are not dispatchable just because they are valid JSON. A plan must pas
 
 `minion_dispatch_workflow` may accept optional `preferred_endpoint_id`. Pal should set it only when the user explicitly asks for a specific model or LLM endpoint for that minion, after resolving the request to an enabled endpoint id. If omitted, the runner follows the normal Pal active endpoint setting from the runtime database.
 
-Natural-language minion control should resolve facts first. For requests like "what is it doing?", "replace it", "continue this task", or "merge the completed work", Pal should inspect active runs and work order snapshots, then call the relevant operation. Pal must not infer current worker, progress, or milestone completion from conversation text.
+Natural-language minion control should resolve facts first. For requests like "what is it doing?", "replace it", "tick this DAG", or "merge the completed work", Pal should inspect active runs and work order snapshots, then call the relevant operation. Pal must not infer current worker, progress, or milestone completion from conversation text.
 
 ## Runner Continuity
 

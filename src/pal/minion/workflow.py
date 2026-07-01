@@ -30,6 +30,32 @@ def split_profile_ref(profile: str) -> tuple[str, str]:
     return (group or "general", name or "generic")
 
 
+def profile_family_from_pack(pack: TaskContextPack) -> str:
+    metadata = dict(pack.metadata or {})
+    workflow = _mapping(metadata.get("workflow"))
+    for value in (
+        metadata.get("profile_family"),
+        workflow.get("profile_family"),
+        workflow.get("default_profile_group"),
+        pack.profile_group,
+        split_profile_ref(str(pack.minion_profile or ""))[0],
+    ):
+        raw = str(value or "").strip().replace("/", ".")
+        if raw:
+            return raw
+    return "general"
+
+
+def canonical_profile_ref_for_family(profile: Any, *, profile_family: str = "") -> str:
+    raw = str(profile or "").strip().replace("/", ".")
+    if not raw or raw == NONE_PROFILE:
+        return NONE_PROFILE
+    if "." in raw:
+        return raw
+    family = str(profile_family or "general").strip().replace("/", ".") or "general"
+    return raw if family == "general" else f"{family}.{raw}"
+
+
 def effective_output_policy(pack: TaskContextPack) -> dict[str, Any]:
     profile = dict(pack.resolved_profile or {})
     for key in ("effective_output_policy", "output_policy"):
@@ -93,14 +119,18 @@ def _next_profile_from_declaration(declaration: dict[str, Any]) -> str:
 def resolve_workflow_next(pack: TaskContextPack, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     policy = workflow_next_policy(pack)
     payload = dict(payload or {})
-    default_next = canonical_profile_ref(profile=str(policy.get("default_next_profile") or policy.get("next_profile") or NONE_PROFILE))
+    profile_family = profile_family_from_pack(pack)
+    default_next = canonical_profile_ref_for_family(
+        policy.get("default_next_profile") or policy.get("next_profile") or NONE_PROFILE,
+        profile_family=profile_family,
+    )
     declaration = _artifact_declared_next(payload)
     requested = _next_profile_from_declaration(declaration) or default_next
-    next_profile = canonical_profile_ref(profile=str(requested or NONE_PROFILE))
+    next_profile = canonical_profile_ref_for_family(requested or NONE_PROFILE, profile_family=profile_family)
     allowed = _string_list(policy.get("allowed_next_profiles"))
     if not allowed:
         allowed = [default_next, NONE_PROFILE]
-    allowed = [canonical_profile_ref(profile=item) for item in allowed]
+    allowed = [canonical_profile_ref_for_family(item, profile_family=profile_family) for item in allowed]
     if NONE_PROFILE not in allowed:
         allowed.append(NONE_PROFILE)
     if next_profile not in allowed:
@@ -122,6 +152,7 @@ def resolve_workflow_next(pack: TaskContextPack, payload: dict[str, Any] | None 
         "allowed_next_profiles": allowed,
         "policy": policy,
         "declaration": declaration,
+        "profile_family": profile_family,
         "source": "artifact" if declaration else "profile_default",
     }
 

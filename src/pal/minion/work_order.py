@@ -965,10 +965,10 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
     join_nodes = [node for node in nodes if node["kind"] == "join"]
     if len(prelude_nodes) > 1:
         errors.append("orchestration.topology.nodes must contain at most one prelude node")
-    if not module_nodes:
-        errors.append("orchestration.topology.nodes must contain at least one module node")
-    if len(join_nodes) != 1:
-        errors.append("orchestration.topology.nodes must contain exactly one join node")
+    if not module_nodes and not join_nodes:
+        errors.append("orchestration.topology.nodes must contain at least one executable module or join node")
+    if len(nodes) > 1 and not join_nodes:
+        errors.append("orchestration.topology.nodes must contain a join node when more than one node is present")
     module_kind_by_id = {str(node.get("module_id") or ""): str(node.get("kind") or "") for node in nodes}
     owned_area_owner: dict[str, str] = {}
     for module_index, module in enumerate(artifact.modules):
@@ -994,18 +994,17 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
     nodes_by_id = {str(node["node_id"]): node for node in nodes}
     if prelude_nodes and nodes_by_id[sorted_node_ids[0]]["kind"] != "prelude":
         raise ValueError("invalid dispatchable FinalPlanArtifact: topology must start with the prelude node when present")
-    if nodes_by_id[sorted_node_ids[-1]]["kind"] != "join":
-        raise ValueError("invalid dispatchable FinalPlanArtifact: topology must end with the join node")
     prelude_id = str(prelude_nodes[0]["node_id"]) if prelude_nodes else ""
-    join_id = str(join_nodes[0]["node_id"])
+    join_ids = [str(node["node_id"]) for node in join_nodes]
+    join_id = join_ids[0] if join_ids else ""
     for node in nodes:
         node_id = str(node["node_id"])
         if prelude_id and node_id != prelude_id and not _has_dependency_path(node_id, prelude_id, dependency_map):
             raise ValueError(
                 f"invalid dispatchable FinalPlanArtifact: node {node_id} must depend on the prelude node"
             )
-        if node_id not in {join_id} and not _has_dependency_path(join_id, node_id, dependency_map):
-            raise ValueError(f"invalid dispatchable FinalPlanArtifact: join node must depend on {node_id}")
+        if join_ids and node_id not in set(join_ids) and not any(_has_dependency_path(join_node_id, node_id, dependency_map) for join_node_id in join_ids):
+            raise ValueError(f"invalid dispatchable FinalPlanArtifact: node {node_id} must flow to a join node")
     declared_order = topology.get("order") or topology.get("node_order") or orchestration.get("node_order")
     if isinstance(declared_order, list) and declared_order:
         declared_node_ids = [str(item).strip() for item in declared_order if str(item or "").strip()]
@@ -1044,6 +1043,7 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
         "module_order": module_order,
         "prelude_node_id": prelude_id,
         "join_node_id": join_id,
+        "join_node_ids": join_ids,
         "nodes": normalized_nodes,
         "groups": groups,
     }

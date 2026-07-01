@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from pal.minion.repository import MinionTaskingRepository
+from pal.minion.workflow import canonical_profile_ref
 from pal.minion.validation import MinionWorkOrderValidationError, normalize_milestones
 
 
@@ -12,8 +13,38 @@ def validate_draft_work_order_args(args: dict[str, Any]) -> dict[str, Any]:
     normalized["milestones"] = milestones
     metadata = dict(normalized.get("metadata") or {})
     metadata["milestones"] = milestones
+    profile_family = _profile_ref_text(normalized.get("profile_family") or normalized.get("family"))
+    profile_group = _profile_ref_text(normalized.get("profile_group"))
+    profile_name = str(normalized.get("profile_name") or "").strip()
+    minion_profile = _profile_ref_text(normalized.get("minion_profile"))
+    if profile_family and profile_group and profile_family != profile_group:
+        raise MinionWorkOrderValidationError(
+            "profile_family must match profile_group when both are provided",
+            field="profile_family",
+        )
+    if not minion_profile:
+        if profile_family:
+            minion_profile = canonical_profile_ref(profile_group=profile_group or profile_family, profile_name=profile_name or "architect")
+        elif profile_group or profile_name:
+            minion_profile = canonical_profile_ref(profile_group=profile_group, profile_name=profile_name)
+    if not minion_profile:
+        raise MinionWorkOrderValidationError(
+            "draft_work_order requires minion_profile or profile_family/profile_name",
+            field="minion_profile",
+        )
+    normalized["minion_profile"] = minion_profile
+    if profile_family:
+        normalized["profile_family"] = profile_family
+    elif "." in minion_profile:
+        normalized["profile_family"] = minion_profile.rsplit(".", 1)[0]
+    if normalized.get("profile_family"):
+        metadata["profile_family"] = normalized["profile_family"]
     normalized["metadata"] = metadata
     return normalized
+
+
+def _profile_ref_text(value: Any) -> str:
+    return str(value or "").strip().replace("/", ".")
 
 
 def validate_promote_work_order_args(

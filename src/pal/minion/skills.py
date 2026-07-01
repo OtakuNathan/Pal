@@ -16,10 +16,13 @@ Use this skill when Pal needs to add, review, repair, or explain the Minion subs
 Minion is a detachable first-party subsystem. Keep the roles crisp:
 
 - Pal's main agent owns user conversation, requirements shaping, workspace fact collection, progress reporting, and user confirmation.
-- `op_minion_dispatch_workflow` is the normal public delegation entrypoint. Do not reintroduce public `op_minion_spawn`, `op_minion_submit_plan`, `op_minion_accept_plan`, or `op_minion_revise_plan`.
-- The manager is mechanical orchestration: it creates work orders, starts the initial profile step, follows artifact-declared `workflow_next` first and profile defaults second, applies gates, updates DAG state, and manages resource slots.
-- DAG advancement is mechanism; manager policy is strategy. Keep graph construction, indegree/ready/running/completed/stale transitions, replay merge, and slot release in typed mechanical helpers. Keep policy choices such as auto-advance, concurrency limits, profile selection, and user notification in the manager/control layer.
-- Accepted artifacts are DAGs consumed by role profiles. `workflow_next` is the default executor profile for the DAG; module/topology metadata such as `executor_profile` is a per-node override for mixed DAGs. Bare executor names are scoped to the default profile group, so `review_worker` under `software_engineering.coder` resolves to `software_engineering.review_worker`. The manager reads this metadata mechanically instead of branching on workflow kind.
+- Task is the durable semantic container. Bind `profile_family` on the task before creating work orders. Work orders are execution attempts under that task; runs are concrete runner executions.
+- Before normal delegation, Pal should call `intro_minion_task_search` with the user goal/repo/domain facts. Reuse a matching task_id, or create one with `op_minion_task_create(profile_family=...)`. Then call `op_minion_dispatch_workflow(task_id=...)`.
+- `op_minion_dispatch_workflow` is the normal work-order delegation entrypoint. It takes `task_id`, `goal`, optional `requirements_brief`, workspace facts, and optional endpoint. It must not take `profile_name`/`profile_group`; profile family is bound on the task.
+- The manager is mechanical orchestration: it creates work orders under tasks, snapshots `profile_family` into work order/workflow metadata, runs the family DAG producer or generic single-node DAG producer, consumes the resulting DAG, applies gates, updates DAG state, and manages resource slots.
+- DAG production and DAG consumption are separate. A family-specific producer may use a profile such as `software_engineering.architect`; otherwise the generic producer builds a closed single-node DAG with requirement/context/produce/verify milestones. The executor is resolved from task/family metadata or a family profile fallback, not from dispatch args.
+- DAG advancement is mechanism; manager policy is strategy. Keep graph construction, indegree/ready/running/completed/stale transitions, replay merge, and slot release in typed mechanical helpers. Keep policy choices such as auto-advance, concurrency limits, executor resolution, and user notification in the manager/control layer.
+- Accepted artifacts are DAGs consumed by role profiles. Module/topology metadata such as `executor_profile` is a per-node override for mixed DAGs. The manager reads this metadata mechanically instead of branching on workflow kind.
 - Minions do bounded execution. They do not spawn minions. A profile may declare what output unlocks the next workflow step; the manager consumes that declaration.
 - Reviewer is special inside the in-process repair loop. Treat `software_engineering.reviewer` as a gate strategy or repair loop participant. Use `software_engineering.review_worker` when a workflow step should produce a standalone review artifact as the final deliverable.
 - Domain interactions live with their domain. Minion approval/question/plan interactions belong under `pal.minion`; memory candidate approval belongs under `pal.memory`; `pal.control` transports and renders generic interaction deliveries.
@@ -29,23 +32,28 @@ Minion is a detachable first-party subsystem. Keep the roles crisp:
 For software work, the default flow is:
 
 1. Pal prepares `goal`, optional `requirements_brief`, and `workspace` facts.
-2. Manager dispatches the initial profile, normally `software_engineering.architect`.
-3. Architect uses plan builder tools and submits a canonical plan artifact. Pal's main agent does not hand-write plan JSON. Submission writes the machine plan and a mechanical `plan_review.md` artifact for user review.
-4. `plan_acceptance` gate reviews the plan. Passing review opens plan acceptance unless `interaction_mode` allows autonomous acceptance.
-5. Accepted plans compile into a module DAG. The manager schedules ready modules under the global concurrency limit.
-6. Each DAG node is consumed by its executor profile. Coder milestones run in isolated contexts and Git worktrees/checkouts. Reviewer gates run as module-local repair loops and share the module slot.
-7. Join/final verification is the only final product worktree that users normally need to inspect.
+2. Pal searches existing Minion tasks with `intro_minion_task_search`. If no matching long-lived task exists, Pal creates one with `op_minion_task_create`, binding `profile_family` such as `software_engineering`.
+3. Pal dispatches a work order with `op_minion_dispatch_workflow(task_id=...)`; dispatch inherits the task family and does not restate profile selectors.
+4. The family DAG producer creates the DAG. For software this is normally `software_engineering.architect` using plan builder tools. For families without a producer, the generic producer creates a closed single-node DAG with a few milestones and hands that node to the resolved executor.
+5. Architect-generated software plans write the machine plan and a mechanical `plan_review.md` artifact for user review. Generic single-node plans can run directly as parent DAGs.
+6. `plan_acceptance` gate reviews software plans. Passing review opens plan acceptance unless `interaction_mode` allows autonomous acceptance.
+7. Accepted or mechanically generated plans compile into a module DAG. The manager schedules ready modules under the global concurrency limit.
+8. Each DAG node is consumed by its executor profile. Coder milestones run in isolated contexts and Git worktrees/checkouts. Reviewer gates run as module-local repair loops and share the module slot.
+9. Join/final verification is the only final product worktree that users normally need to inspect.
 
-Non-software profiles can be one-step workflows by declaring `workflow_next = "none"` in the artifact or equivalent output policy. They still use the same pre/in/post shape: prepare environment, execute bounded work, then postprocess/gate/finalize.
+Non-software profiles usually run as generic single-node DAGs unless their family registers a richer DAG producer. They still use the same pre/in/post shape: prepare environment, execute bounded work, then postprocess/gate/finalize.
 
 ## Profile And Workflow Rules
 
 Profiles are extension points, not manager branches.
 
 - Builtin profiles live under `src/pal/minion/profile_templates/`; runtime overrides live under `runtime_root/plugins/minion/profiles/*.toml`.
-- Public profile selection is `profile_group` plus `profile_name`. Keep canonical ids such as `software_engineering.architect` as runtime metadata.
-- The produced artifact may declare `workflow_next`; `output_policy.workflow_next` is the profile default and allowed-next policy. Use these contracts instead of hard-coding architect -> coder or profile-specific if/else logic.
+- Public family selection happens at task creation through `profile_family`. Normal dispatch does not pass `profile_name` or `profile_group`.
+- The task `profile_family` is the default interpretation context for all work orders under that task. Work orders snapshot it into workflow metadata, and bare `workflow_next.profile` names are resolved inside that family before persistence. Keep canonical ids such as `software_engineering.architect` as runtime metadata.
+- A family DAG producer decides how to turn requirements into a DAG. Use the generic single-node producer when the family has no producer. Do not add dispatch-time profile-selection rules.
+- The produced artifact may declare node `executor_profile` values. Use these contracts instead of hard-coding architect -> coder or profile-specific if/else logic.
 - A plan module may declare `metadata.executor_profile` or topology `executor_profile` when one node needs a different executor from the DAG default. Prefer a single default executor for ordinary implementation or review DAGs, and prefer group-local profile names unless the node intentionally crosses profile groups.
+- Profile `[execution_contract]` declares how a DAG node is materialized for that profile: `module_adapter`, `module_role`, and `artifact_role`. Do not infer coder/reviewer/architect behavior from profile names or prompt text.
 - `gate_policy.gates = [...]` declares review requirements by stable gate names.
 - Use `gates = ["none"]` for profiles that intentionally complete without review.
 - Do not let prompt text be the only contract. If routing, capability exposure, workflow progression, or gate behavior matters, represent it in profile policy, gate definitions, repository metadata, or manager state.
@@ -165,7 +173,7 @@ Repair bills are downstream feedback projected back into the plan/module graph.
 - Keep patch shape isomorphic to plan shape: module patches attach to modules, acceptance criteria attach to the module or milestone they constrain, evidence attaches to the finding or criterion it proves, and replay scope follows dependency edges.
 - Module or contract defects can add acceptance criteria, counterexamples, tests, or repair notes to the affected module and then replay the relevant part of the DAG.
 - Integration defects should normally be fixed in the current join/integration context when possible.
-- Architecture defects, missing module boundaries, or invalid DAG structure should pause for architecture revision instead of pretending a local repair can fix the plan.
+- Architecture defects, missing module boundaries, or invalid DAG structure block the parent work order and require user plan/module-boundary review before a replacement DAG epoch. Do not pretend a local repair can fix a bad DAG.
 - Replay should merge new obligations into the manager/repository projection and schedule through the normal DAG, slot, workspace, and gate logic. Do not create a parallel scheduler or repair-only execution path.
 - The manager consumes repair bills mechanically. LLMs can produce evidence and proposed patches, but they should not decide hidden replay state outside the structured bill.
 - Preserve original plan identity and revision history; replay should merge new obligations rather than mutate old artifacts in place.
@@ -211,20 +219,20 @@ Prefer small typed runtime changes over prompt-only behavior. The LLM should ope
 Add focused tests near the changed layer. Do not run the full suite in one shot unless explicitly requested.
 
 - Profile tests: builtin/runtime profiles list, read, expand capability groups, gate policy, and `workflow_next` correctly.
-- Dispatch tests: `op_minion_dispatch_workflow` validates workspace facts, rejects removed `requirements_review`, and does not expose removed spawn/submit/accept/revise capabilities.
+- Task/dispatch tests: `op_minion_task_create` binds `profile_family`, task search can find durable tasks, `op_minion_dispatch_workflow(task_id=...)` inherits task family, conflicting family args are rejected, workspace facts are validated, removed `requirements_review` is rejected, and removed spawn/submit/accept/revise capabilities remain absent.
 - Scheduler tests: indegree rebuild, ready queue scheduling, global slot acquisition/release, kill/failure recovery, and module completion events.
 - Plan builder tests: alias tools map to core DAG operations, submitted plans write `plan_review.md`, and completion writes a work-order `completion_report.md`.
 - Runner/coroutine tests: independent context per logical coder, isolated scoped tools, isolated Git/workspace metadata, and clean LLM request hooks.
 - Workspace tests: language environment preparation happens before runner LLM calls and does not overwrite existing repo files unexpectedly.
 - Gate tests: `normalize_gate_policy(...)`, checklist refs, reviewer submission validation, pass/fail/repair max attempts, and active todo/repair ledger projection.
-- Repair bill tests: module-key merge, replay selection, architecture-defect pause, and plan revision history preservation.
+- Repair bill tests: module-key merge, replay selection, architecture-defect block, active child invalidation, and plan revision history preservation.
 - Packaging tests: `scripts/build_package.sh` includes builtin profiles, workspace templates, gates, scheduler, sandbox, and this internal skill.
 
 ## Verification Checklist
 
 Before calling a Minion subsystem change done:
 
-1. Public entrypoints still center on `op_minion_dispatch_workflow`; removed lower-level public operations remain absent.
+1. Public entrypoints stay task-first: search/read task, create task when needed, then dispatch work orders with `op_minion_dispatch_workflow(task_id=...)`; removed lower-level public operations remain absent.
 2. Pal/main-agent requirements shaping and manager mechanical orchestration remain separate.
 3. Profile policy or gate definitions express behavior instead of manager hard-coding whenever possible.
 4. Module/coder contexts, worktrees, artifacts, and scoped runtimes remain isolated.
@@ -272,6 +280,11 @@ write_baseline_config = false
 [capability_policy]
 mode = "profile_only"
 
+[execution_contract]
+module_adapter = "prompt_view"
+module_role = "nutritionist"
+artifact_role = "nutrition_plan"
+
 [gate_policy]
 gates = ["none"]
 
@@ -292,9 +305,11 @@ Choose policies deliberately:
 - Git-backed code work belongs to coder-style profiles and manager-prepared module worktrees; do not make arbitrary profiles mutate source repos.
 - `capability_policy.mode = "profile_only"` means the profile TOML is the upper bound.
 - `capability_policy.mode = "inherit_filtered"` starts from manager-visible capabilities, adds profile defaults/provider hooks, then applies the minion deny policy. Use it only when the profile genuinely needs Pal's current tool surface.
+- `execution_contract.module_adapter` is normally `prompt_view` for artifact/report/review roles and `coder_work_order` for implementation profiles that consume plan modules through the coder repair loop.
+- `execution_contract.module_role` and `artifact_role` are runtime contracts. Runner/repository/gate code should read them instead of checking whether a profile name contains `coder`, `reviewer`, or `architect`.
 - `gate_policy.gates = ["none"]` is correct for bounded one-shot profiles that finish with an artifact and no reviewer loop.
-- Software architecture profiles use `gates = ["plan_acceptance"]`; coder profiles use checkpoint/module-quality gates.
-- Artifact `workflow_next = "none"` or `output_policy.workflow_next = "none"` ends the workflow. Use `software_engineering.coder` or another canonical profile id only when the artifact output is meant to mechanically unlock a next step.
+- Software architecture profiles use `gates = ["plan_acceptance"]`; implementation profiles use checkpoint/module-quality gates. Any gate that launches a reviewer must explicitly name its reviewer profile in policy or gate definition; there is no implicit software reviewer fallback.
+- Artifact `workflow_next = "none"` or `output_policy.workflow_next = "none"` ends the workflow. Use a profile id only when the artifact output is meant to mechanically unlock a next step.
 
 ## Capability Groups
 
@@ -326,7 +341,7 @@ Profile prompt fragments should say what the role does and what it must produce,
 `workflow_next` is the artifact/profile-composition hook.
 
 - Use `none` for terminal artifacts or terminal profiles.
-- Use a canonical profile id, such as `software_engineering.coder`, only when the output has a typed artifact/gate that the manager can consume.
+- Use a canonical profile id, such as `software_engineering.coder`, only when the output intentionally crosses profile groups or needs to be unambiguous outside the current family. A bare profile name such as `coder` is resolved against the workflow `profile_family` and then persisted as a canonical id.
 - Do not encode continuation rules only in prose. If the manager must act on the result, the policy must be in TOML/output metadata and backed by tests.
 - Reviewer repair loops should remain gate strategy behavior, not profile-to-profile workflow chains.
 
@@ -336,10 +351,10 @@ For local or user-specific profiles:
 
 1. Create `runtime_root/plugins/minion/profiles/<group>/<profile>.toml`.
 2. Pick a stable `profile_group` and `profile_id`; avoid colliding with builtin profiles unless intentionally overriding.
-3. Start with `profile_only`, `folder`, `gates = ["none"]`, and profile `workflow_next = "none"` unless the profile proves it needs more.
+3. Start with `profile_only`, `folder`, `execution_contract.module_adapter = "prompt_view"`, `gates = ["none"]`, and profile `workflow_next = "none"` unless the profile proves it needs more.
 4. Add only the minimum capability groups needed for the role.
 5. Use `intro_minion_profile_list` and `intro_minion_profile_read` to confirm discovery and rendered policy.
-6. Dogfood with `op_minion_dispatch_workflow` using `profile_group` and `profile_name`.
+6. Dogfood through the task-first path: `intro_minion_task_search`, then `op_minion_task_create(profile_family=<group>)` when no matching task exists, then `op_minion_dispatch_workflow(task_id=...)` without profile selectors.
 
 For builtin profiles:
 
@@ -353,12 +368,12 @@ For builtin profiles:
 Before calling a new profile done:
 
 1. `intro_minion_profile_list` shows only `profile_group`, `profile_name`, and `description_summary`.
-2. `intro_minion_profile_read` shows expected fragments, workspace policy, capability groups, gate policy, and output policy.
+2. `intro_minion_profile_read` shows expected fragments, workspace policy, capability groups, execution contract, gate policy, and output policy.
 3. The profile does not expose recursive minion dispatch or Pal mutation capabilities.
 4. Workspace mode matches the role and does not require source mutation unless the role is explicitly an implementation profile.
 5. Gate policy is explicit, including `["none"]` for no-gate profiles.
-6. Artifact/profile `workflow_next` behavior is explicit and covered by a focused test when it is not `none`.
-7. The profile can be dispatched through `op_minion_dispatch_workflow` without lower-level spawn/submit/accept capabilities.
+6. Artifact/profile `workflow_next` behavior is explicit, family-scoped bare names are intentional, and non-terminal routing is covered by a focused test.
+7. The profile can be dispatched through a task-bound `op_minion_dispatch_workflow(task_id=...)` without lower-level spawn/submit/accept capabilities.
 8. Package checks include the profile when it is builtin.
 """
 
@@ -401,6 +416,9 @@ def minion_declared_skills(*, module_id: str = "minion") -> tuple[SkillDescripto
                 "gate ledger",
             ),
             capability_refs=(
+                "intro_minion_task_search",
+                "intro_minion_task_read",
+                "op_minion_task_create",
                 "op_minion_dispatch_workflow",
                 "op_minion_configure",
                 "op_minion_submit_repair_bill",
@@ -465,6 +483,8 @@ def minion_declared_skills(*, module_id: str = "minion") -> tuple[SkillDescripto
                 "minion_artifacts",
             ),
             capability_refs=(
+                "intro_minion_task_search",
+                "op_minion_task_create",
                 "intro_minion_profile_list",
                 "intro_minion_profile_read",
                 "op_minion_dispatch_workflow",
@@ -473,7 +493,7 @@ def minion_declared_skills(*, module_id: str = "minion") -> tuple[SkillDescripto
                 situation="Pal needs to create, repair, or review a Minion profile definition.",
                 task="Write or update profile TOML with the right fragments, capability groups, workspace policy, gate policy, and workflow_next.",
                 action="Use the profile TOML shape, policy choices, prompt contract rules, runtime/builtin workflow, and verification checklist.",
-                result="The profile is discoverable, minimally scoped, dispatchable through op_minion_dispatch_workflow, and package-checked when builtin.",
+                result="The profile is discoverable, minimally scoped, dispatchable through a task-bound op_minion_dispatch_workflow, and package-checked when builtin.",
             ),
             use_when=(
                 "Use when the user asks Pal to create a new Minion profile, add a runtime profile TOML, promote a profile to builtin, "

@@ -53,6 +53,7 @@ class MinionProfile:
     capability_policy: dict[str, Any] = field(default_factory=dict)
     gate_policy: dict[str, Any] = field(default_factory=dict)
     output_policy: dict[str, Any] = field(default_factory=dict)
+    execution_contract: dict[str, Any] = field(default_factory=dict)
     execution_strategy: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -83,6 +84,7 @@ class MinionProfile:
             "capability_policy": dict(self.capability_policy),
             "gate_policy": dict(self.gate_policy),
             "output_policy": dict(self.output_policy),
+            "execution_contract": dict(self.execution_contract),
             "execution_strategy": dict(self.execution_strategy),
             "metadata": dict(self.metadata),
         }
@@ -127,6 +129,7 @@ class MinionProfile:
             capability_policy=_dict(payload.get("capability_policy")),
             gate_policy=_dict(payload.get("gate_policy")),
             output_policy=_dict(payload.get("output_policy")),
+            execution_contract=_dict(payload.get("execution_contract")),
             execution_strategy=_dict(payload.get("execution_strategy") or payload.get("execution_policy")),
             metadata=metadata,
         )
@@ -240,6 +243,11 @@ class MinionProfileRegistry:
         output_policy = dict(profile.output_policy)
         if isinstance(pack.workspace.get("output_policy"), dict):
             output_policy.update(dict(pack.workspace.get("output_policy") or {}))
+        execution_contract = dict(profile.execution_contract)
+        if isinstance(pack.workspace.get("execution_contract"), dict):
+            execution_contract.update(dict(pack.workspace.get("execution_contract") or {}))
+        if isinstance(pack.metadata.get("execution_contract"), dict):
+            execution_contract.update(dict(pack.metadata.get("execution_contract") or {}))
         execution_strategy = merge_execution_strategy(
             profile.execution_strategy,
             _dict(pack.workspace.get("execution_strategy") or pack.workspace.get("execution_policy")),
@@ -270,6 +278,7 @@ class MinionProfileRegistry:
         resolved_profile["effective_capability_policy"] = dict(capability_policy)
         resolved_profile["effective_gate_policy"] = dict(gate_policy)
         resolved_profile["effective_output_policy"] = dict(output_policy)
+        resolved_profile["effective_execution_contract"] = dict(execution_contract)
         resolved_profile["effective_execution_strategy"] = dict(execution_strategy)
         workspace = dict(pack.workspace)
         if checkpoint_policy:
@@ -284,6 +293,8 @@ class MinionProfileRegistry:
             workspace["gate_policy"] = dict(gate_policy)
         if output_policy:
             workspace["output_policy"] = dict(output_policy)
+        if execution_contract:
+            workspace["execution_contract"] = dict(execution_contract)
         if execution_strategy:
             workspace["execution_strategy"] = dict(execution_strategy)
         metadata = dict(pack.metadata)
@@ -504,7 +515,14 @@ def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] 
 
 
 def _is_planner_revision_pack(profile: MinionProfile, pack: TaskContextPack) -> bool:
-    if profile.canonical_profile_id != "software_engineering.architect":
+    execution_contract = dict(profile.execution_contract or {})
+    role = str(
+        execution_contract.get("module_role")
+        or execution_contract.get("artifact_role")
+        or execution_contract.get("role")
+        or ""
+    ).strip().lower()
+    if role not in {"architect", "plan_artifact"}:
         return False
     metadata = dict(pack.metadata or {})
     workspace = dict(pack.workspace or {})
