@@ -920,6 +920,24 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
         kind = str(raw_node.get("kind") or raw_node.get("node_kind") or "").strip().lower()
         module_id = str(raw_node.get("module_id") or "").strip()
         depends_on = _node_dependencies(raw_node)
+        executor_profile = str(raw_node.get("executor_profile") or "").strip()
+        raw_executor = raw_node.get("executor")
+        if not executor_profile and isinstance(raw_executor, str):
+            executor_profile = raw_executor.strip()
+        executor = _dict(raw_executor)
+        if not executor_profile and executor:
+            executor_profile = str(
+                executor.get("profile")
+                or executor.get("executor_profile")
+                or executor.get("minion_profile")
+                or executor.get("dispatch_profile")
+                or ""
+            ).strip()
+            if not executor_profile:
+                profile_group = str(executor.get("profile_group") or executor.get("group") or "").strip()
+                profile_name = str(executor.get("profile_name") or executor.get("name") or "").strip()
+                if profile_group or profile_name:
+                    executor_profile = ".".join(item for item in (profile_group, profile_name) if item)
         if not node_id:
             errors.append(f"orchestration.topology.nodes[{node_index}].node_id is required")
             node_id = f"invalid_node_{node_index}"
@@ -935,7 +953,10 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
         elif module_id in module_node_ids:
             errors.append(f"orchestration.topology.nodes[{node_index}].module_id is duplicated: {module_id}")
         module_node_ids.add(module_id)
-        nodes.append({"node_id": node_id, "kind": kind, "module_id": module_id, "depends_on": depends_on})
+        node_payload = {"node_id": node_id, "kind": kind, "module_id": module_id, "depends_on": depends_on}
+        if executor_profile:
+            node_payload["executor_profile"] = executor_profile
+        nodes.append(node_payload)
     missing_modules = [module_id for module_id in module_ids if module_id not in module_node_ids]
     if missing_modules:
         errors.append("orchestration.topology.nodes missing module_id(s): " + ", ".join(missing_modules))
@@ -1004,6 +1025,11 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
             "kind": str(nodes_by_id[node_id]["kind"]),
             "module_id": str(nodes_by_id[node_id]["module_id"]),
             "depends_on": list(nodes_by_id[node_id]["depends_on"]),
+            **(
+                {"executor_profile": str(nodes_by_id[node_id]["executor_profile"])}
+                if str(nodes_by_id[node_id].get("executor_profile") or "").strip()
+                else {}
+            ),
         }
         for node_id in sorted_node_ids
     ]

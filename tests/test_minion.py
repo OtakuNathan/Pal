@@ -322,8 +322,8 @@ def _git_common_dir(repo: Path) -> Path:
     return common_dir.resolve()
 
 
-def _plan_module(module_id: str, *, title: str = "", task: str = "", acceptance: str = "") -> dict:
-    return {
+def _plan_module(module_id: str, *, title: str = "", task: str = "", acceptance: str = "", metadata: dict | None = None) -> dict:
+    payload = {
         "module_id": module_id,
         "owned_area": [f"src/{module_id}.py"],
         "responsibility": title or f"Implement {module_id}.",
@@ -339,6 +339,9 @@ def _plan_module(module_id: str, *, title: str = "", task: str = "", acceptance:
         ],
         "test_plan": {"unit": [f"test {module_id}"]},
     }
+    if metadata:
+        payload["metadata"] = dict(metadata)
+    return payload
 
 
 def _dispatchable_plan_payload(
@@ -635,32 +638,36 @@ def _builder_calls_from_plan_payload(plan: dict, *, call_prefix: str = "call_pla
             if node_id in dependency_node_ids
         ]
         kind = str(node.get("kind") or (module.get("metadata") or {}).get("module_kind") or "module")
+        executor_profile = str((module.get("metadata") or {}).get("executor_profile") or node.get("executor_profile") or "")
+        module_args = {
+            "plan_handle": plan_handle,
+            "module_key": module_id,
+            "kind": kind,
+            "depends_on_module_handles": [module_handle_by_id[item] for item in dependency_module_ids if item in module_handle_by_id],
+            "responsibility": str(module.get("responsibility") or f"Implement {module_id}."),
+            "owned_area": list(module.get("owned_area") or [module_id]),
+            **(
+                {
+                    "module_quality_criteria": list(
+                        ((module.get("metadata") or {}).get("module_quality_criteria") or [])
+                    )
+                    or [
+                        f"{module_id} satisfies its semantic contract, boundary behavior, and downstream readiness."
+                    ],
+                    "risk_surfaces": list(((module.get("metadata") or {}).get("risk_surfaces") or [])) or ["public_api_contract"],
+                    "delivery_surfaces": list(((module.get("metadata") or {}).get("delivery_surfaces") or []))
+                    or [f"{module_id} public behavior"],
+                }
+                if kind == "module"
+                else {}
+            ),
+        }
+        if executor_profile:
+            module_args["executor_profile"] = executor_profile
         calls.append(
             CanonicalToolCall(
                 name="plan_begin_module",
-                args={
-                    "plan_handle": plan_handle,
-                    "module_key": module_id,
-                    "kind": kind,
-                    "depends_on_module_handles": [module_handle_by_id[item] for item in dependency_module_ids if item in module_handle_by_id],
-                    "responsibility": str(module.get("responsibility") or f"Implement {module_id}."),
-                    "owned_area": list(module.get("owned_area") or [module_id]),
-                    **(
-                        {
-                            "module_quality_criteria": list(
-                                ((module.get("metadata") or {}).get("module_quality_criteria") or [])
-                            )
-                            or [
-                                f"{module_id} satisfies its semantic contract, boundary behavior, and downstream readiness."
-                            ],
-                            "risk_surfaces": list(((module.get("metadata") or {}).get("risk_surfaces") or [])) or ["public_api_contract"],
-                            "delivery_surfaces": list(((module.get("metadata") or {}).get("delivery_surfaces") or []))
-                            or [f"{module_id} public behavior"],
-                        }
-                        if kind == "module"
-                        else {}
-                    ),
-                },
+                args=module_args,
                 call_id=f"{call_prefix}_module_{module_index}",
             )
         )
@@ -1088,6 +1095,50 @@ class MinionContractTests(unittest.TestCase):
                         "reason": "The reviewed plan artifact is terminal.",
                     },
                 )
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_compiles_module_executor_profile_metadata(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_executor_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_constraint",
+                        "op_minion_plan_begin_module",
+                        "op_minion_plan_add_module_interface",
+                        "op_minion_plan_begin_milestone",
+                        "op_minion_plan_add_acceptance_criterion",
+                        "op_minion_plan_end_milestone",
+                        "op_minion_plan_end_module",
+                        "op_minion_plan_validate_and_submit_for_review",
+                    ],
+                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_builder_executor"},
+                )
+
+                calls = _builder_plan_calls_from_handles(
+                    plan_id="plan_builder_executor",
+                    module_key="module_builder_executor",
+                )
+                for call in calls:
+                    if call.name == "plan_begin_module" and call.args.get("module_key") == "module_builder_executor":
+                        call.args["executor_profile"] = "software_engineering.review_worker"
+                    result = await scoped.execute_tool_async(call)
+                    self.assertTrue(result.ok, result.text)
+
+                payload = json.loads((root / "artifacts" / "plan.draft.json").read_text(encoding="utf-8"))
+                module = next(item for item in payload["modules"] if item["module_id"] == "module_builder_executor")
+                node = next(
+                    item
+                    for item in payload["orchestration"]["topology"]["nodes"]
+                    if item["module_id"] == "module_builder_executor"
+                )
+                self.assertEqual(module["metadata"]["executor_profile"], "software_engineering.review_worker")
+                self.assertEqual(node["executor_profile"], "software_engineering.review_worker")
             finally:
                 shutil.rmtree(root, ignore_errors=True)
 
@@ -7962,6 +8013,75 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         prepared_child = self.repository.prepare_pack_for_spawn(child)
         self.assertIn("prompt_view", prepared_child.metadata)
         self.assertNotIn("coder_work_order", prepared_child.metadata)
+
+    def test_plan_parent_uses_module_executor_profile_override(self) -> None:
+        implementation = _plan_module(
+            "implementation",
+            title="Implementation review",
+            task="Review implementation boundaries.",
+            metadata={"executor_profile": "software_engineering.review_worker"},
+        )
+        final_verification = _plan_module("final_verification", title="Final verification")
+        plan = {
+            "type": "FinalPlanArtifact",
+            "plan_id": "plan_node_executor",
+            "task_id": "task_node_executor",
+            "summary": "Node executor override plan.",
+            "modules": [implementation, final_verification],
+            "orchestration": {
+                "execution_shape": "fork_join_linear",
+                "topology": {
+                    "nodes": [
+                        {
+                            "node_id": "node_implementation",
+                            "kind": "module",
+                            "module_id": "implementation",
+                            "depends_on": [],
+                        },
+                        {
+                            "node_id": "join",
+                            "kind": "join",
+                            "module_id": "final_verification",
+                            "depends_on": ["node_implementation"],
+                        },
+                    ],
+                    "order": ["node_implementation", "join"],
+                },
+            },
+            "system_test_plan": [{"level": "system", "evidence": "review report"}],
+            "risks": [],
+        }
+        parent = self.repository.build_plan_parent_pack_from_plan(
+            plan,
+            work_order_id="wo_node_executor",
+            workspace={"repo_path": str(self.root)},
+            profile_group="software_engineering",
+            profile_name="coder",
+        )
+        self.repository.prepare_pack_for_spawn(parent)
+
+        snapshot = self.repository.read_work_order("wo_node_executor")
+        plan_execution = snapshot["work_order"]["metadata"]["plan_execution"]
+        self.assertEqual(plan_execution["dag_execution"]["default_executor_profile"], "software_engineering.coder")
+        self.assertEqual(
+            plan_execution["dag_execution"]["node_executors"]["implementation"],
+            "software_engineering.review_worker",
+        )
+        self.assertEqual(
+            plan_execution["module_dag"]["node_executors"]["final_verification"],
+            "software_engineering.coder",
+        )
+
+        child = self.repository.next_plan_module_pack("wo_node_executor", allow_paused=True)
+
+        self.assertIsNotNone(child)
+        assert child is not None
+        self.assertEqual(child.minion_profile, "software_engineering.review_worker")
+        self.assertEqual(child.metadata["dispatch_profile_group"], "software_engineering")
+        self.assertEqual(child.metadata["dispatch_profile_name"], "review_worker")
+        self.assertEqual(child.metadata["executor_profile"], "software_engineering.review_worker")
+        self.assertEqual(child.metadata["dag_node"]["default_executor_profile"], "software_engineering.coder")
+        self.assertNotIn("coder_work_order", child.metadata)
 
     def test_plan_parent_reinitializes_cursor_when_reusing_architect_work_order_id(self) -> None:
         self.repository.prepare_pack_for_spawn(
@@ -20268,6 +20388,8 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("parse-layer", prompt)
         self.assertIn("The plan artifact owns workflow routing after plan acceptance", prompt)
         self.assertIn("Declare workflow_next through plan_begin or plan_update_plan", prompt)
+        self.assertIn("executor_profile", prompt)
+        self.assertIn("per-DAG-node override", prompt)
         self.assertIn("metadata.languages", prompt)
         self.assertIn("canonical implementation language ids", prompt)
         self.assertIn("python, cpp, c", prompt)

@@ -97,6 +97,88 @@ def _canonical_profile_id(group: str, name: str) -> str:
     return resolved_name if resolved_group == "general" else f"{resolved_group}.{resolved_name}"
 
 
+def _executor_profile_value(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("profile", "executor_profile", "minion_profile", "dispatch_profile", "next_profile"):
+            raw = str(value.get(key) or "").strip()
+            if raw:
+                return raw
+        group = str(value.get("profile_group") or value.get("group") or "").strip()
+        name = str(value.get("profile_name") or value.get("name") or "").strip()
+        if group or name:
+            return _canonical_profile_id(group, name)
+        return ""
+    return str(value or "").strip()
+
+
+def _executor_profile_from_mapping(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    for key in ("executor_profile", "dispatch_profile", "minion_profile"):
+        raw = _executor_profile_value(value.get(key))
+        if raw:
+            return raw
+    return _executor_profile_value(value.get("executor"))
+
+
+def _canonical_executor_profile(value: Any, *, default_profile: str) -> str:
+    fallback = str(default_profile or "software_engineering.coder").strip().replace("/", ".") or "software_engineering.coder"
+    raw = _executor_profile_value(value).replace("/", ".")
+    if not raw or raw.lower() in {"default", "inherit", NONE_PROFILE}:
+        return fallback
+    if "." not in raw:
+        fallback_group, _ = _profile_ref_parts_from_canonical(fallback)
+        if fallback_group and fallback_group != "general":
+            return _canonical_profile_id(fallback_group, raw)
+    return raw
+
+
+def _module_executor_profiles(
+    artifact: PlanArtifact,
+    validation: dict[str, Any],
+    *,
+    default_profile: str,
+    existing: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    default_profile = _canonical_executor_profile(default_profile, default_profile=default_profile)
+    existing = dict(existing or {})
+    existing_executors = dict(existing.get("node_executors") or existing.get("module_executors") or {})
+    node_executor_by_module: dict[str, str] = {}
+    for node in list(dict(validation or {}).get("nodes") or []):
+        if not isinstance(node, dict):
+            continue
+        module_id = str(node.get("module_id") or "").strip()
+        executor = _executor_profile_from_mapping(node)
+        if module_id and executor:
+            node_executor_by_module[module_id] = executor
+    result: dict[str, str] = {}
+    for module in artifact.modules:
+        module_id = str(module.module_id or "").strip()
+        if not module_id:
+            continue
+        module_executor = _executor_profile_from_mapping(dict(module.metadata or {}))
+        executor = (
+            node_executor_by_module.get(module_id)
+            or module_executor
+            or existing_executors.get(module_id)
+            or default_profile
+        )
+        result[module_id] = _canonical_executor_profile(executor, default_profile=default_profile)
+    return result
+
+
+def _dag_execution_metadata(default_executor_profile: str, node_executors: dict[str, str]) -> dict[str, Any]:
+    default_profile = _canonical_executor_profile(default_executor_profile, default_profile=default_executor_profile)
+    return {
+        "default_executor_profile": default_profile,
+        "node_executors": {
+            str(module_id): _canonical_executor_profile(profile, default_profile=default_profile)
+            for module_id, profile in dict(node_executors or {}).items()
+            if str(module_id or "").strip()
+        },
+    }
+
+
 def _plan_module_kind(validation: dict[str, Any], module_id: str) -> str:
     wanted = str(module_id or "").strip()
     for item in list(dict(validation or {}).get("nodes") or []):
@@ -143,6 +225,7 @@ def _module_dag_from_validation(validation: dict[str, Any], existing: dict[str, 
     existing_status = dict(existing.get("module_status") or {})
     existing_running = dict(existing.get("running_modules") or {})
     existing_outputs = dict(existing.get("module_outputs") or {})
+    existing_node_executors = dict(existing.get("node_executors") or {})
     completed_modules = {
         module_id
         for module_id in _coerce_text_list(existing.get("completed_modules"))
@@ -198,6 +281,12 @@ def _module_dag_from_validation(validation: dict[str, Any], existing: dict[str, 
             module_id: dict(output)
             for module_id, output in existing_outputs.items()
             if module_id in module_order and isinstance(output, dict)
+        },
+        "default_executor_profile": str(existing.get("default_executor_profile") or "").strip(),
+        "node_executors": {
+            module_id: str(existing_node_executors.get(module_id) or "").strip()
+            for module_id in module_order
+            if str(existing_node_executors.get(module_id) or "").strip()
         },
     }
 
@@ -536,6 +625,16 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         dispatch_profile_name = str(profile_name or pack_metadata.get("dispatch_profile_name") or "coder").strip() or "coder"
         plan_execution = dict(pack_metadata.get("plan_execution") or {})
         module_dag = _module_dag_from_validation(validation, dict(plan_execution.get("module_dag") or {}))
+        default_executor_profile = _canonical_profile_id(dispatch_profile_group, dispatch_profile_name)
+        node_executors = _module_executor_profiles(
+            artifact,
+            validation,
+            default_profile=default_executor_profile,
+            existing=module_dag,
+        )
+        dag_execution = _dag_execution_metadata(default_executor_profile, node_executors)
+        module_dag["default_executor_profile"] = dag_execution["default_executor_profile"]
+        module_dag["node_executors"] = dict(dag_execution["node_executors"])
         plan_execution.update(
             {
                 "mode": "module_parent_milestones",
@@ -549,6 +648,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "auto_advance_modules": bool(plan_execution.get("auto_advance_modules", True)),
                 "child_work_order_ids": dict(plan_execution.get("child_work_order_ids") or {}),
                 "active_child_work_order_ids": _coerce_text_list(plan_execution.get("active_child_work_order_ids")),
+                "dag_execution": dag_execution,
                 "module_dag": module_dag,
             }
         )
@@ -995,6 +1095,23 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         task_id = str(work_order.get("task_id") or metadata.get("task_id") or artifact.task_id)
         dispatch_profile_group = str(metadata.get("dispatch_profile_group") or "software_engineering").strip() or "software_engineering"
         dispatch_profile_name = str(metadata.get("dispatch_profile_name") or "coder").strip() or "coder"
+        default_executor_profile = _canonical_profile_id(dispatch_profile_group, dispatch_profile_name)
+        stored_dag_execution = dict(plan_execution.get("dag_execution") or {})
+        if str(stored_dag_execution.get("default_executor_profile") or "").strip():
+            default_executor_profile = _canonical_executor_profile(
+                stored_dag_execution.get("default_executor_profile"),
+                default_profile=default_executor_profile,
+            )
+        node_executors = _module_executor_profiles(
+            artifact,
+            validation,
+            default_profile=default_executor_profile,
+            existing={**dag, "node_executors": dict(stored_dag_execution.get("node_executors") or dag.get("node_executors") or {})},
+        )
+        dag_execution = _dag_execution_metadata(default_executor_profile, node_executors)
+        dag["default_executor_profile"] = dag_execution["default_executor_profile"]
+        dag["node_executors"] = dict(dag_execution["node_executors"])
+        plan_execution["dag_execution"] = dag_execution
         packs: list[TaskContextPack] = []
         running_modules = dict(dag.get("running_modules") or {})
         module_status = dict(dag.get("module_status") or {})
@@ -1019,7 +1136,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             )
             if integration_workspace:
                 module_workspace.update(integration_workspace)
-            child_profile = _canonical_profile_id(dispatch_profile_group, dispatch_profile_name)
+            child_profile = str(dag_execution["node_executors"].get(module_id) or dag_execution["default_executor_profile"])
+            child_profile_group, child_profile_name = _profile_ref_parts_from_canonical(child_profile)
             child_action = _module_dispatch_action(child_profile)
             child_metadata = {
                 "task_id": _safe_id(task_id),
@@ -1032,14 +1150,22 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "parent_module_name": module_name,
                 "module_name": module_name,
                 "module_dependency_outputs": dependency_outputs,
+                "executor_profile": child_profile,
+                "executor_role": _role_from_profile(child_profile),
+                "dag_node": {
+                    "module_id": module_id,
+                    "module_kind": str(dict(dag.get("module_kind") or {}).get(module_id) or ""),
+                    "executor_profile": child_profile,
+                    "default_executor_profile": str(dag_execution["default_executor_profile"]),
+                },
             }
             repair_context = _repair_context_for_module(repair_overlay, module_id)
             if repair_context:
                 child_metadata["repair_context"] = repair_context
             if isinstance(module_workspace.get("dependency_integration_baseline"), dict):
                 child_metadata["module_dependency_integration"] = dict(module_workspace.get("dependency_integration_baseline") or {})
-            child_metadata["dispatch_profile_group"] = dispatch_profile_group
-            child_metadata["dispatch_profile_name"] = dispatch_profile_name
+            child_metadata["dispatch_profile_group"] = child_profile_group
+            child_metadata["dispatch_profile_name"] = child_profile_name
             if isinstance(metadata.get("plan_ref"), dict):
                 child_metadata["plan_ref"] = dict(metadata.get("plan_ref") or {})
             if isinstance(metadata.get("plan_validation"), dict):

@@ -18,6 +18,7 @@ Minion is a detachable first-party subsystem. Keep the roles crisp:
 - Pal's main agent owns user conversation, requirements shaping, workspace fact collection, progress reporting, and user confirmation.
 - `op_minion_dispatch_workflow` is the normal public delegation entrypoint. Do not reintroduce public `op_minion_spawn`, `op_minion_submit_plan`, `op_minion_accept_plan`, or `op_minion_revise_plan`.
 - The manager is mechanical orchestration: it creates work orders, starts the initial profile step, follows artifact-declared `workflow_next` first and profile defaults second, applies gates, updates DAG state, and manages resource slots.
+- Accepted artifacts are DAGs consumed by role profiles. `workflow_next` is the default executor profile for the DAG; module/topology metadata such as `executor_profile` is a per-node override for mixed DAGs. The manager reads this metadata mechanically instead of branching on workflow kind.
 - Minions do bounded execution. They do not spawn minions. A profile may declare what output unlocks the next workflow step; the manager consumes that declaration.
 - Reviewer is special inside the in-process repair loop. Treat `software_engineering.reviewer` as a gate strategy or repair loop participant. Use `software_engineering.review_worker` when a workflow step should produce a standalone review artifact as the final deliverable.
 - Domain interactions live with their domain. Minion approval/question/plan interactions belong under `pal.minion`; memory candidate approval belongs under `pal.memory`; `pal.control` transports and renders generic interaction deliveries.
@@ -31,7 +32,7 @@ For software work, the default flow is:
 3. Architect uses plan builder tools and submits a canonical plan artifact. Pal's main agent does not hand-write plan JSON.
 4. `plan_acceptance` gate reviews the plan. Passing review opens plan acceptance unless `interaction_mode` allows autonomous acceptance.
 5. Accepted plans compile into a module DAG. The manager schedules ready modules under the global concurrency limit.
-6. Coder milestones run in isolated contexts and Git worktrees/checkouts. Reviewer gates run as module-local repair loops and share the module slot.
+6. Each DAG node is consumed by its executor profile. Coder milestones run in isolated contexts and Git worktrees/checkouts. Reviewer gates run as module-local repair loops and share the module slot.
 7. Join/final verification is the only final product worktree that users normally need to inspect.
 
 Non-software profiles can be one-step workflows by declaring `workflow_next = "none"` in the artifact or equivalent output policy. They still use the same pre/in/post shape: prepare environment, execute bounded work, then postprocess/gate/finalize.
@@ -43,6 +44,7 @@ Profiles are extension points, not manager branches.
 - Builtin profiles live under `src/pal/minion/profile_templates/`; runtime overrides live under `runtime_root/plugins/minion/profiles/*.toml`.
 - Public profile selection is `profile_group` plus `profile_name`. Keep canonical ids such as `software_engineering.architect` as runtime metadata.
 - The produced artifact may declare `workflow_next`; `output_policy.workflow_next` is the profile default and allowed-next policy. Use these contracts instead of hard-coding architect -> coder or profile-specific if/else logic.
+- A plan module may declare `metadata.executor_profile` or topology `executor_profile` when one node needs a different executor from the DAG default. Prefer a single default executor for ordinary implementation or review DAGs.
 - `gate_policy.gates = [...]` declares review requirements by stable gate names.
 - Use `gates = ["none"]` for profiles that intentionally complete without review.
 - Do not let prompt text be the only contract. If routing, capability exposure, workflow progression, or gate behavior matters, represent it in profile policy, gate definitions, repository metadata, or manager state.

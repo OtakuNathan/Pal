@@ -439,6 +439,13 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "decision_handles": {"type": "array", "items": {"type": "string"}},
                 "gate_check_refs": {"type": "array", "items": {"type": "string"}},
                 "languages": {"type": "array", "items": {"type": "string"}},
+                "executor_profile": {
+                    "type": "string",
+                    "description": (
+                        "Optional canonical profile id for this DAG node when it differs from the artifact default "
+                        "workflow_next profile, such as software_engineering.review_worker."
+                    ),
+                },
                 "module_quality_criteria": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -584,6 +591,10 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "decision_handles": {"type": "array", "items": {"type": "string"}},
                 "gate_check_refs": {"type": "array", "items": {"type": "string"}},
                 "languages": {"type": "array", "items": {"type": "string"}},
+                "executor_profile": {
+                    "type": "string",
+                    "description": "Optional canonical profile id for this DAG node when it differs from the artifact default workflow_next profile.",
+                },
                 "module_quality_criteria": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -819,6 +830,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "decision_handles": {"type": "array", "items": {"type": "string"}},
                 "gate_check_refs": {"type": "array", "items": {"type": "string"}},
                 "languages": {"type": "array", "items": {"type": "string"}},
+                "executor_profile": {"type": "string"},
                 "module_quality_criteria": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -1461,6 +1473,7 @@ class PlanBuilderRuntime:
                 "decision_handles",
                 "gate_check_refs",
                 "languages",
+                "executor_profile",
                 "module_quality_criteria",
                 "risk_surfaces",
                 "delivery_surfaces",
@@ -1492,6 +1505,7 @@ class PlanBuilderRuntime:
                 "decision_handles",
                 "gate_check_refs",
                 "languages",
+                "executor_profile",
                 "module_quality_criteria",
                 "risk_surfaces",
                 "delivery_surfaces",
@@ -1569,6 +1583,7 @@ class PlanBuilderRuntime:
                 "decision_handles",
                 "gate_check_refs",
                 "languages",
+                "executor_profile",
                 "module_quality_criteria",
                 "risk_surfaces",
                 "delivery_surfaces",
@@ -1606,6 +1621,7 @@ class PlanBuilderRuntime:
             "decision_handles": _known_handles(state, _string_list(args.get("decision_handles")), expected_prefix="decision"),
             "gate_check_refs": _known_gate_check_refs(state, args.get("gate_check_refs")),
             "languages": _normalize_language_ids(args.get("languages")),
+            "executor_profile": _text(args.get("executor_profile")),
             "module_quality_criteria": _string_list(args.get("module_quality_criteria")),
             "risk_surfaces": _string_list(args.get("risk_surfaces")),
             "delivery_surfaces": _string_list(args.get("delivery_surfaces")),
@@ -1949,6 +1965,7 @@ class PlanBuilderRuntime:
                 "decision_handles",
                 "gate_check_refs",
                 "languages",
+                "executor_profile",
                 "module_quality_criteria",
                 "risk_surfaces",
                 "delivery_surfaces",
@@ -1990,6 +2007,8 @@ class PlanBuilderRuntime:
             module["gate_check_refs"] = _known_gate_check_refs(state, args.get("gate_check_refs"))
         if "languages" in args:
             module["languages"] = _normalize_language_ids(args.get("languages"))
+        if "executor_profile" in args:
+            module["executor_profile"] = _text(args.get("executor_profile"))
         if "module_quality_criteria" in args:
             module["module_quality_criteria"] = _string_list(args.get("module_quality_criteria"))
         if "risk_surfaces" in args:
@@ -2449,6 +2468,9 @@ class PlanBuilderRuntime:
         delivery_surfaces = _string_list(module.get("delivery_surfaces"))
         if delivery_surfaces:
             metadata["delivery_surfaces"] = delivery_surfaces
+        executor_profile = _text(module.get("executor_profile"))
+        if executor_profile:
+            metadata["executor_profile"] = executor_profile
         return {
             "module_id": _text(module.get("module_id")),
             "owned_area": _string_list(module.get("owned_area")),
@@ -2563,14 +2585,16 @@ class PlanBuilderRuntime:
         for module in modules:
             node_id = node_by_handle[module["handle"]]
             depends_on = [node_by_handle[handle] for handle in list(module.get("depends_on_module_handles") or [])]
-            nodes.append(
-                {
-                    "node_id": node_id,
-                    "kind": _text(module.get("kind")).lower(),
-                    "module_id": _text(module.get("module_id")),
-                    "depends_on": depends_on,
-                }
-            )
+            node = {
+                "node_id": node_id,
+                "kind": _text(module.get("kind")).lower(),
+                "module_id": _text(module.get("module_id")),
+                "depends_on": depends_on,
+            }
+            executor_profile = _text(module.get("executor_profile"))
+            if executor_profile:
+                node["executor_profile"] = executor_profile
+            nodes.append(node)
         order = _topological_order(nodes)
         return {
             "nodes": [next(node for node in nodes if node["node_id"] == node_id) for node_id in order],
@@ -3001,7 +3025,7 @@ def _state_from_plan_payload(
     gate_contract = _normalize_gate_contract(metadata.get("gate_contract"))
     constraint_by_public = {_text(item.get("id")): _text(item.get("handle")) for item in constraints}
     decision_by_public = {_text(item.get("id")): _text(item.get("handle")) for item in decisions}
-    module_kind_by_id, dependency_ids_by_module_id = _artifact_topology_maps(artifact)
+    module_kind_by_id, dependency_ids_by_module_id, executor_by_module_id = _artifact_topology_maps(artifact)
     module_handle_by_id = {
         module.module_id: f"module_{resolved_handle}_{index}"
         for index, module in enumerate(artifact.modules, start=1)
@@ -3080,6 +3104,7 @@ def _state_from_plan_payload(
                 "decision_handles": _handles_from_public_refs(module_metadata.get("decision_refs"), decision_by_public),
                 "gate_check_refs": _gate_check_ref_list(module_metadata.get("gate_check_refs")),
                 "languages": _normalize_language_ids(module_metadata.get("languages")),
+                "executor_profile": _text(module_metadata.get("executor_profile") or executor_by_module_id.get(module.module_id)),
                 "module_quality_criteria": _string_list(module_metadata.get("module_quality_criteria"))
                 or _string_list((module.test_plan or {}).get("module_quality")),
                 "risk_surfaces": _string_list(module_metadata.get("risk_surfaces")),
@@ -3309,11 +3334,12 @@ def _state_decisions_from_metadata(metadata: dict[str, Any], plan_handle: str, c
     return result
 
 
-def _artifact_topology_maps(artifact: PlanArtifact) -> tuple[dict[str, str], dict[str, list[str]]]:
+def _artifact_topology_maps(artifact: PlanArtifact) -> tuple[dict[str, str], dict[str, list[str]], dict[str, str]]:
     nodes = list((artifact.orchestration or {}).get("topology", {}).get("nodes") or [])
     node_module_by_id: dict[str, str] = {}
     kind_by_module_id: dict[str, str] = {}
     depends_by_module_id: dict[str, list[str]] = {}
+    executor_by_module_id: dict[str, str] = {}
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -3322,6 +3348,22 @@ def _artifact_topology_maps(artifact: PlanArtifact) -> tuple[dict[str, str], dic
         if module_id and node_id:
             node_module_by_id[node_id] = module_id
             kind_by_module_id[module_id] = _module_kind(node.get("kind"))
+            raw_executor = node.get("executor")
+            executor_profile = _text(node.get("executor_profile") or (raw_executor if isinstance(raw_executor, str) else ""))
+            if not executor_profile and isinstance(raw_executor, dict):
+                executor_profile = _text(
+                    raw_executor.get("profile")
+                    or raw_executor.get("executor_profile")
+                    or raw_executor.get("minion_profile")
+                    or raw_executor.get("dispatch_profile")
+                )
+                if not executor_profile:
+                    profile_group = _text(raw_executor.get("profile_group") or raw_executor.get("group"))
+                    profile_name = _text(raw_executor.get("profile_name") or raw_executor.get("name"))
+                    if profile_group or profile_name:
+                        executor_profile = ".".join(item for item in (profile_group, profile_name) if item)
+            if executor_profile:
+                executor_by_module_id[module_id] = executor_profile
     for node in nodes:
         if not isinstance(node, dict):
             continue
@@ -3333,7 +3375,7 @@ def _artifact_topology_maps(artifact: PlanArtifact) -> tuple[dict[str, str], dic
             for item in _string_list(node.get("depends_on"))
             if item in node_module_by_id
         ]
-    return kind_by_module_id, depends_by_module_id
+    return kind_by_module_id, depends_by_module_id, executor_by_module_id
 
 
 def _handles_from_public_refs(value: Any, mapping: dict[str, str]) -> list[str]:
