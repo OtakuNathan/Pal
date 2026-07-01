@@ -872,7 +872,11 @@ class MinionManagerProvider:
                 "summary": {"type": "string", "description": "Searchable task summary, constraints, repo/domain facts, or scope."},
                 "profile_family": {
                     "type": "string",
-                    "description": "Required profile family that interprets this task's work orders, for example software_engineering or lifestyle.",
+                    "description": (
+                        "Required profile family that interprets this task's work orders. Use software_engineering for code/repo/review "
+                        "work; use lifestyle for nutrition, diet, meal-plan, training, health check-in, or similar personal-life coaching "
+                        "tasks. Use general only when no domain family fits."
+                    ),
                 },
                 "workspace": {
                     "type": "object",

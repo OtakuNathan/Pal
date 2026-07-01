@@ -619,8 +619,14 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             completion_policy["allow_artifact_evidence"] = True
             completion_policy.setdefault("artifact_evidence", "verification_report")
             resolved_workspace["completion_policy"] = completion_policy
+        artifact_metadata = dict(artifact.metadata or {})
         pack_metadata = dict(metadata or {})
-        profile_context = dict(artifact.metadata or {})
+        if isinstance(artifact_metadata.get("requirements_brief"), dict) and not isinstance(pack_metadata.get("requirements_brief"), dict):
+            pack_metadata["requirements_brief"] = dict(artifact_metadata.get("requirements_brief") or {})
+        artifact_profile_family = str(artifact_metadata.get("profile_family") or "").strip()
+        if artifact_profile_family and not str(pack_metadata.get("profile_family") or "").strip():
+            pack_metadata["profile_family"] = artifact_profile_family
+        profile_context = dict(artifact_metadata)
         profile_context.update(pack_metadata)
         profile_family = _profile_family_from_metadata(profile_context)
         resolved_profile = str(
@@ -1333,6 +1339,14 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 child_metadata["plan_ref"] = dict(metadata.get("plan_ref") or {})
             if isinstance(metadata.get("plan_validation"), dict):
                 child_metadata["plan_validation"] = dict(metadata.get("plan_validation") or {})
+            if isinstance(metadata.get("requirements_brief"), dict):
+                child_metadata["requirements_brief"] = dict(metadata.get("requirements_brief") or {})
+            for key in ("profile_family", "architecture_mode", "requested_architecture_mode", "interaction_mode"):
+                value = str(metadata.get(key) or "").strip()
+                if value:
+                    child_metadata[key] = value
+            if isinstance(metadata.get("dag_producer"), dict):
+                child_metadata["dag_producer"] = dict(metadata.get("dag_producer") or {})
             for key in ("control_route", "preferred_endpoint_id", "preferred_endpoint_source", "minion_debug_log_enabled", "debug_log"):
                 if key in metadata:
                     child_metadata[key] = metadata[key]

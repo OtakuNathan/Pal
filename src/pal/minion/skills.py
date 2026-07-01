@@ -49,6 +49,7 @@ Profiles are extension points, not manager branches.
 
 - Builtin profiles live under `src/pal/minion/profile_templates/`; runtime overrides live under `runtime_root/plugins/minion/profiles/*.toml`.
 - Public family selection happens at task creation through `profile_family`. Normal dispatch does not pass `profile_name` or `profile_group`.
+- Choose `profile_family` by domain before creating the task: code/repo/review work is `software_engineering`; nutrition, diet, meal planning, training, health check-in, and Nathan coaching tasks are `lifestyle`; use `general` only when no registered domain family fits.
 - The task `profile_family` is the default interpretation context for all work orders under that task. Work orders snapshot it into workflow metadata, and bare `workflow_next.profile` names are resolved inside that family before persistence. Keep canonical ids such as `software_engineering.architect` as runtime metadata.
 - A family DAG producer decides how to turn requirements into a DAG. Use the generic single-node producer when the family has no producer. Do not add dispatch-time profile-selection rules.
 - The produced artifact may declare node `executor_profile` values. Use these contracts instead of hard-coding architect -> coder or profile-specific if/else logic.

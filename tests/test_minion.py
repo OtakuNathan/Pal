@@ -8630,6 +8630,33 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertIn("prompt_view", prepared_child.metadata)
         self.assertNotIn("coder_work_order", prepared_child.metadata)
 
+    def test_plan_parent_child_inherits_requirements_brief(self) -> None:
+        module_a = _plan_module("module_a", title="A1", task="Do A1.")
+        plan = _dispatchable_plan_payload(plan_id="plan_requirements_brief_parent", task_id="task_requirements_brief", modules=[module_a])
+        requirements_brief = {
+            "goal": "Produce the exact requested five-field check-in template.",
+            "fields": [{"name": "date"}, {"name": "meals"}],
+            "acceptance_criteria": ["The child runner sees this brief."],
+        }
+        parent = self.repository.build_plan_parent_pack_from_plan(
+            plan,
+            work_order_id="wo_requirements_brief_parent",
+            workspace={"repo_path": str(self.root)},
+            metadata={
+                "requirements_brief": requirements_brief,
+                "profile_family": "software_engineering",
+            },
+        )
+        self.repository.prepare_pack_for_spawn(parent)
+
+        child = self.repository.next_plan_module_pack("wo_requirements_brief_parent", allow_paused=True)
+
+        self.assertIsNotNone(child)
+        assert child is not None
+        self.assertEqual(child.metadata["requirements_brief"], requirements_brief)
+        prepared_child = self.repository.prepare_pack_for_spawn(child)
+        self.assertEqual(prepared_child.metadata["requirements_brief"], requirements_brief)
+
     def test_plan_parent_uses_module_executor_profile_override(self) -> None:
         implementation = _plan_module(
             "implementation",
