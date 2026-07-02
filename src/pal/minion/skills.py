@@ -19,9 +19,10 @@ Minion is a detachable first-party subsystem. Keep the roles crisp:
 - Task is the durable semantic container. Bind `profile_family` on the task before creating work orders. Work orders are execution attempts under that task; runs are concrete runner executions.
 - Before normal delegation, Pal should call `intro_minion_task_search` with the user goal/repo/domain facts. Reuse a matching task_id, or create one with `op_minion_task_create(profile_family=...)`. Then call `op_minion_dispatch_workflow(task_id=...)`.
 - `op_minion_dispatch_workflow` is the normal work-order delegation entrypoint. It takes `task_id`, `goal`, optional `requirements_brief`, workspace facts, and optional endpoint. It must not take `profile_name`/`profile_group`; profile family is bound on the task.
-- The manager is mechanical orchestration: it creates work orders under tasks, snapshots `profile_family` into work order/workflow metadata, runs the family DAG producer or generic single-node DAG producer, consumes the resulting DAG, applies gates, updates DAG state, and manages resource slots.
+- The manager is mechanical orchestration: it creates work orders under tasks, snapshots `profile_family` into work order/workflow metadata, starts the family DAG producer or generic single-node DAG producer, supervises step executor processes, owns resource policy/IPC/notifications/ledger, and persists state through repositories.
 - DAG production and DAG consumption are separate. A family-specific producer may use a profile such as `software_engineering.architect`; otherwise the generic producer builds a closed single-node DAG with requirement/context/produce/verify milestones. The executor is resolved from task/family metadata or a family profile fallback, not from dispatch args.
-- DAG advancement is mechanism; manager policy is strategy. Keep graph construction, indegree/ready/running/completed/stale transitions, replay merge, and slot release in typed mechanical helpers. Keep policy choices such as auto-advance, concurrency limits, executor resolution, and user notification in the manager/control layer.
+- `dag_advancer` is the only DAG progression mechanism. Keep graph construction, indegree/ready/running/completed/stale transitions, replay merge, invalidation, and dispatch decisions there. Modules, runners, gates, and repair bills report events; they do not advance the DAG directly.
+- Manager policy is strategy. Keep policy choices such as auto-advance, concurrency limits, executor resolution, IPC process supervision, and user notification in the manager/control layer.
 - Accepted artifacts are DAGs consumed by role profiles. Module/topology metadata such as `executor_profile` is a per-node override for mixed DAGs. The manager reads this metadata mechanically instead of branching on workflow kind.
 - Minions do bounded execution. They do not spawn minions. A profile may declare what output unlocks the next workflow step; the manager consumes that declaration.
 - Reviewer is special inside the in-process repair loop. Treat `software_engineering.reviewer` as a gate strategy or repair loop participant. Use `software_engineering.review_worker` when a workflow step should produce a standalone review artifact as the final deliverable.
@@ -37,8 +38,8 @@ For software work, the default flow is:
 4. The family DAG producer creates the DAG. For software this is normally `software_engineering.architect` using plan builder tools. For families without a producer, the generic producer creates a closed single-node DAG with a few milestones and hands that node to the resolved executor.
 5. Architect-generated software plans write the machine plan and a mechanical `plan_review.md` artifact for user review. Generic single-node plans can run directly as parent DAGs.
 6. `plan_acceptance` gate reviews software plans. Passing review opens plan acceptance unless `interaction_mode` allows autonomous acceptance.
-7. Accepted or mechanically generated plans compile into a module DAG. The manager schedules ready modules under the global concurrency limit.
-8. Each DAG node is consumed by its executor profile. Coder milestones run in isolated contexts and Git worktrees/checkouts. Reviewer gates run as module-local repair loops and share the module slot.
+7. Accepted or mechanically generated plans compile into a module DAG. `dag_advancer` schedules ready nodes under the global LLM-node concurrency limit while the manager grants slots and records ledger state.
+8. Each DAG node is consumed by its executor profile. Coder milestones run in isolated contexts and Git worktrees/checkouts. Mutually exclusive phases share one logical slot: architect plus plan review share the plan-production slot, and coder plus gate reviewer share the module slot.
 9. Join/final verification publishes back to the project-root work-order branch when the parent DAG completes. Users normally inspect the project root; `.minion` is the internal execution/artifact area.
 
 Non-software profiles usually run as generic single-node DAGs unless their family registers a richer DAG producer. They still use the same pre/in/post shape: prepare environment, execute bounded work, then postprocess/gate/finalize.
@@ -59,13 +60,13 @@ Profiles are extension points, not manager branches.
 - Use `gates = ["none"]` for profiles that intentionally complete without review.
 - Do not let prompt text be the only contract. If routing, capability exposure, workflow progression, or gate behavior matters, represent it in profile policy, gate definitions, repository metadata, or manager state.
 
-## Scheduler And Resource Slots
+## DAG Advancement And Resource Slots
 
-The manager owns concurrency. A module occupies one global slot from module start until the module is finished, so coder and reviewer naturally share the same slot during repair.
+The manager owns resource policy; `dag_advancer` owns DAG readiness and progression. The global cap is `max_parallel_llm_nodes` (`max_parallel_modules` is a compatibility alias) because LLM provider capacity is the real bottleneck. One logical execution node holds a slot until its mutually exclusive phases finish, so coder and reviewer naturally share the same module slot during repair.
 
-- Build execution order from the accepted plan's module dependencies; do not add separate fork/join flags when the dependency graph already expresses the order.
-- Track per-work-order DAG state: module status, dependency graph, indegree table, ready queue, active children, completed modules, and join readiness.
-- Resource acquisition should be event-driven. If no slot is available, queue the ready module instead of busy-polling.
+- Build execution order from the accepted plan's module dependencies in `dag_advancer`; do not add separate fork/join flags when the dependency graph already expresses the order.
+- Track per-work-order DAG state through repository projections and advancer state: module status, dependency graph, indegree table, ready queue, active children, completed modules, stale/invalidated nodes, and join readiness.
+- Resource acquisition should be event-driven. If no slot is available, queue the ready node and wait on slot availability instead of busy-polling.
 - Always return slots on normal completion, failure, kill, timeout, and abandoned-run recovery.
 - Step execution is per DAG: one step executor child process hosts that DAG's runner coroutines. Each runner coroutine still needs isolated context, transcript, scoped execution runtime, workspace metadata, and Git environment.
 - Manager restart must be able to rebuild safe scheduling state from persisted work order metadata, plan DAG projection, active runs, and module statuses.
@@ -175,7 +176,7 @@ Repair bills are downstream feedback projected back into the plan/module graph.
 - Module or contract defects can add acceptance criteria, counterexamples, tests, or repair notes to the affected module and then replay the relevant part of the DAG.
 - Integration defects should normally be fixed in the current join/integration context when possible.
 - Architecture defects, missing module boundaries, or invalid DAG structure block the parent work order and require user plan/module-boundary review before a replacement DAG epoch. Do not pretend a local repair can fix a bad DAG.
-- Replay should merge new obligations into the manager/repository projection and schedule through the normal DAG, slot, workspace, and gate logic. Do not create a parallel scheduler or repair-only execution path.
+- Replay should merge new obligations into the repository/advancer projection and schedule through the normal DAG, slot, workspace, and gate logic. Do not create a parallel scheduler or repair-only execution path.
 - The manager consumes repair bills mechanically. LLMs can produce evidence and proposed patches, but they should not decide hidden replay state outside the structured bill.
 - Preserve original plan identity and revision history; replay should merge new obligations rather than mutate old artifacts in place.
 
@@ -189,7 +190,7 @@ Prefer these extension surfaces before adding manager special cases:
 - plan builder: typed plan operations in `src/pal/minion/plan_builder.py`; domain plugins may register deterministic alias tools with `@plan_builder_alias`/`register_plan_builder_alias` that map domain terminology back to the core plan DAG operations
 - scoped tools: `src/pal/minion/scoped_execution.py`
 - interactions: `src/pal/minion/interactions.py`
-- scheduler/resource behavior: manager plus scheduler/step runner state, with persistent recovery
+- DAG/resource behavior: `dag_advancer`, manager resource policy, step runner state, and persistent recovery
 - sandbox policy: `src/pal/minion/sandbox.py`
 
 Provider protocols for gate extensions:
@@ -204,9 +205,9 @@ Keep provider output deterministic and side-effect free.
 
 When changing Minion behavior:
 
-1. Identify the boundary first: profile policy, manager scheduling, runner execution, gate/review, workspace environment, repository persistence, interaction delivery, or packaging.
+1. Identify the boundary first: profile policy, DAG advancement, manager resource/IPC policy, runner execution, gate/review, workspace environment, repository persistence, interaction delivery, or packaging.
 2. Read the nearby module README/docs and current tests before editing. Minion has intentionally separated extension points; use them.
-3. Keep manager logic mechanical. Do not put LLM reasoning in scheduler, slot allocation, recovery, or DAG state transitions.
+3. Keep manager and `dag_advancer` logic mechanical. Do not put LLM reasoning in DAG advancement, slot allocation, recovery, or state transitions.
 4. Keep minion contexts isolated. Each logical runner needs its own prompt state, scoped runtime, workspace, artifact directory, and Git environment.
 5. Keep user-facing interactions domain-owned and delivered through control. Do not put Minion-specific renderers in `pal.control` or channel endpoints.
 6. If failed gate findings or repair bills should drive repairs, update the repair/todo ledger projection code instead of relying on reviewer prompt wording alone.
@@ -221,7 +222,7 @@ Add focused tests near the changed layer. Do not run the full suite in one shot 
 
 - Profile tests: builtin/runtime profiles list, read, expand capability groups, gate policy, and `workflow_next` correctly.
 - Task/dispatch tests: `op_minion_task_create` binds `profile_family`, task search can find durable tasks, `op_minion_dispatch_workflow(task_id=...)` inherits task family, conflicting family args are rejected, workspace facts are validated, removed `requirements_review` is rejected, and removed spawn/submit/accept/revise capabilities remain absent.
-- Scheduler tests: indegree rebuild, ready queue scheduling, global slot acquisition/release, kill/failure recovery, and module completion events.
+- DAG/resource tests: indegree rebuild, ready queue scheduling, stale/downstream invalidation, global LLM-node slot acquisition/release, kill/failure recovery, and module completion events.
 - Plan builder tests: alias tools map to core DAG operations, submitted plans write `plan_review.md`, and completion writes a work-order `completion_report.md`.
 - Runner/coroutine tests: independent context per logical coder, isolated scoped tools, isolated Git/workspace metadata, and clean LLM request hooks.
 - Workspace tests: language environment preparation happens before runner LLM calls and does not overwrite existing repo files unexpectedly.
@@ -252,7 +253,7 @@ Use this skill when Pal needs to create, review, repair, or explain a Minion pro
 
 A Minion profile describes one bounded executor role. It should not be a hidden manager branch.
 
-- The manager starts profiles and consumes profile policy. It owns scheduling, gates, resource slots, and workflow continuation.
+- The manager starts profiles and consumes profile policy. It owns resource policy, gates, IPC supervision, and workflow continuation; `dag_advancer` owns DAG progression.
 - The profile owns identity, behavior prompt, capability exposure, workspace expectations, output contract, and declared next workflow step.
 - A minion running a profile does not spawn other minions. Use artifact `workflow_next` plus profile `output_policy.workflow_next` policy so the manager can mechanically dispatch the next step.
 - Pal's main agent owns requirements shaping. Do not recreate the removed planner/requirements-review profile.
@@ -386,7 +387,7 @@ def minion_declared_skills(*, module_id: str = "minion") -> tuple[SkillDescripto
             module_id=module_id,
             title="Pal Minion Development",
             summary=(
-                "Develop and validate Minion workflow dispatch, profiles, gates, scheduler/resource slots, "
+                "Develop and validate Minion workflow dispatch, profiles, gates, DAG advancement/resource slots, "
                 "workspace setup, runner isolation, and repair bill replay."
             ),
             manual_text=PAL_MINION_DEVELOPMENT_MANUAL,
@@ -397,6 +398,8 @@ def minion_declared_skills(*, module_id: str = "minion") -> tuple[SkillDescripto
                 "workflow_next",
                 "minion profile",
                 "minion scheduler",
+                "dag advancer",
+                "dag advancement",
                 "resource slot",
                 "step executor",
                 "runner coroutine",

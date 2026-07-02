@@ -322,7 +322,7 @@ def _git_status_excluding_generated(repo: Path) -> GitCommandResult:
 
 
 def finalize_work_order_branch(repo_path: Path, *, work_order_branch: str, merge_target: str, message: str) -> dict[str, Any]:
-    repo = Path(repo_path)
+    repo = _finalize_repo_for_worktree(Path(repo_path))
     if not (repo / ".git").exists():
         return {"status": "error", "error": "workspace is not a git repository", "repo_path": str(repo)}
     _ensure_git_identity(repo)
@@ -353,6 +353,19 @@ def finalize_work_order_branch(repo_path: Path, *, work_order_branch: str, merge
         "merge_target": target,
         "merge_base": merge_base,
     }
+
+
+def _finalize_repo_for_worktree(repo_path: Path) -> Path:
+    repo = Path(repo_path)
+    common_git_dir = _git_common_dir(repo)
+    if common_git_dir is None:
+        return repo
+    project_root = _cleanup_project_root({}, common_git_dir=common_git_dir)
+    if project_root is None or project_root.resolve() == repo.resolve():
+        return repo
+    if (project_root / ".git").exists() and _git(project_root, "rev-parse", "--is-inside-work-tree").ok:
+        return project_root
+    return repo
 
 
 def prepare_dependency_integration_baseline(

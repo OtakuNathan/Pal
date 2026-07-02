@@ -2174,15 +2174,15 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertTrue(minion_record["attached"])
         self.assertIsNotNone(handle.core.context.module_registry.get("minion"))
         self.assertIn("minion_show", handle.core.context.capability_registry.descriptors)
-        self.assertIn("minion_spawn", handle.core.context.capability_registry.descriptors)
+        self.assertIn("minion_dispatch_workflow", handle.core.context.capability_registry.descriptors)
         observed = handle.core.context.execution_runtime.execute(CapabilityCall(name="minion_show"))
         self.assertEqual(observed.status, "ok")
         self.assertTrue(observed.structured["manager_running"])
         search = handle.core.context.execution_runtime.execute(
             CapabilityCall(name="op_tool_search", args={"query": "dispatch minion"})
         )
-        minion_hit = self._find_search_hit_by_canonical(handle.core, search, "minion_spawn")
-        self.assertEqual(minion_hit["name"], "minion_spawn")
+        minion_hit = self._find_search_hit_by_canonical(handle.core, search, "minion_dispatch_workflow")
+        self.assertEqual(minion_hit["name"], "minion_dispatch_workflow")
         self.assertNotIn("module_id", minion_hit)
         self.assertIn("required_params", minion_hit)
 
@@ -2196,12 +2196,12 @@ class PalV2BootstrapTests(unittest.TestCase):
                 registration=provisioned.registration,
                 database=provisioned.database,
             )
-            self.assertIn("minion_spawn", handle.core.context.capability_registry.descriptors)
+            self.assertIn("minion_dispatch_workflow", handle.core.context.capability_registry.descriptors)
             search = handle.core.context.execution_runtime.execute(
                 CapabilityCall(name="op_tool_search", args={"query": "minion"})
             )
-            minion_hit = self._find_search_hit_by_canonical(handle.core, search, "minion_spawn")
-            self.assertEqual(minion_hit["name"], "minion_spawn")
+            minion_hit = self._find_search_hit_by_canonical(handle.core, search, "minion_dispatch_workflow")
+            self.assertEqual(minion_hit["name"], "minion_dispatch_workflow")
             self.assertNotIn("module_id", minion_hit)
             self.assertIn("required_params", minion_hit)
         finally:

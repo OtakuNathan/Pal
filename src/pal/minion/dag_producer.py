@@ -91,6 +91,18 @@ def build_generic_single_node_plan_artifact(
                 "module_id": "main",
                 "owned_area": [f"task://{resolved_task_id}/main"],
                 "responsibility": "Execute the prepared requirements as one bounded deliverable.",
+                "ownership": [
+                    "The main node owns the single deliverable and task-local artifacts for this work order.",
+                    "Input requirements, workspace facts, and external source material are read-only unless the requirements explicitly grant edit authority.",
+                ],
+                "lifecycle": [
+                    "Analyze the goal and requirements before gathering or using context.",
+                    "Produce the deliverable after required context is available, then verify it against acceptance criteria before completion.",
+                ],
+                "invariants": [
+                    "The deliverable stays tied to the user goal, requirements brief, and declared constraints.",
+                    "Missing user-owned facts are reported as blockers or assumptions instead of being invented.",
+                ],
                 "internal_milestones": milestones,
                 "test_plan": {
                     "strategy": "Verify the deliverable against the user goal, requirements brief, and milestone acceptance criteria.",

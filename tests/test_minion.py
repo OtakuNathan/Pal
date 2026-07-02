@@ -4636,7 +4636,12 @@ class MinionContractTests(unittest.TestCase):
 
             async def read_decision(timeout):
                 _ = timeout
-                clarification = next(event for event in events if event["event_kind"] == "clarification_requested")
+                clarification = next(
+                    (event for event in events if event["event_kind"] == "clarification_requested"),
+                    None,
+                )
+                if clarification is None:
+                    return None
                 return {
                     "type": "clarification",
                     "clarification": {
@@ -4882,7 +4887,8 @@ class MinionContractTests(unittest.TestCase):
                 events.append(event)
 
             async def read_decision(timeout):
-                _ = timeout
+                if timeout is not None and float(timeout) <= 0.01:
+                    return None
                 raise AssertionError("runner should not wait on a non-interactive clarification")
 
             root = Path(tempfile.mkdtemp(prefix="pal_minion_planner_no_options_"))
@@ -5826,8 +5832,9 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(repair_context["defect_kind"], "module_defect")
         self.assertEqual(repair_context["overlay_version"], 1)
         self.assertIn("Engine handles grouped alternatives before concatenation.", replay_child.acceptance_criteria)
-        coder_order = dict(replay_child.metadata.get("coder_work_order") or {})
-        milestone = dict(coder_order.get("current_milestone") or {})
+        prepared_replay_child = self.repository.prepare_pack_for_spawn(replay_child)
+        prompt_view = dict(prepared_replay_child.metadata.get("prompt_view") or {})
+        milestone = dict(prompt_view.get("milestone") or {})
         self.assertIn("Engine handles grouped alternatives before concatenation.", milestone["acceptance_criteria"])
         self.assertEqual(milestone["metadata"]["repair_context"]["module_id"], "engine")
 
@@ -6841,6 +6848,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
             async def _start_runner(self, state: MinionRunState) -> None:
                 state.status = "running"
+                state.control_queue = asyncio.Queue()
                 if state.pack.minion_profile == "software_engineering.reviewer":
                     self.started_reviewers.append(state)
 
@@ -6995,6 +7003,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
             async def _start_runner(self, state: MinionRunState) -> None:
                 state.status = "running"
+                state.control_queue = asyncio.Queue()
                 if state.pack.minion_profile == "software_engineering.reviewer":
                     self.started_reviewers.append(state)
 
@@ -9001,6 +9010,13 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             "plan_id": "plan_join_artifact_evidence",
             "task_id": "task_join_artifact_evidence",
             "summary": "No-prelude join artifact evidence plan.",
+            "metadata": {
+                "workflow_next": {
+                    "profile": "software_engineering.coder",
+                    "artifact_type": "implementation_plan",
+                    "adapter": "accepted_plan",
+                }
+            },
             "modules": [implementation, final_verification],
             "orchestration": {
                 "execution_shape": "fork_join_linear",
@@ -9527,6 +9543,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             TaskContextPack(
                 work_order_id="wo_control_accept",
                 goal="Accept reviewed plan.",
+                minion_profile="software_engineering.architect",
                 metadata={"task_id": "task_control_accept", "milestones": ["Accept plan"]},
             )
         )
@@ -10214,8 +10231,8 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
 
         self.assertEqual(prepared.workspace["workspace_kind"], "git_worktree")
         self.assertEqual(
-            Path(prepared.workspace["common_git_dir"]).parent,
-            self.root / "data" / "minion" / "repos" / "wo_no_worktree" / "source_no_worktree",
+            Path(prepared.workspace["common_git_dir"]),
+            self.root / "data" / "minion" / "repos" / "wo_no_worktree" / "source_no_worktree" / ".minion" / "git",
         )
         self.assertNotEqual(_git_common_dir(repo), _git_common_dir(source))
         self.assertEqual((repo / "app.py").read_text(encoding="utf-8"), "print('hello')\n")
@@ -10717,7 +10734,10 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
 
         repo = Path(prepared.workspace["repo_path"])
-        self.assertEqual(repo, self.root / "data" / "minion" / "repos" / "wo_clone" / "source_repo" / "workspace")
+        self.assertEqual(
+            repo,
+            self.root / "data" / "minion" / "repos" / "wo_clone" / "source_repo" / ".minion" / "worktrees" / "task",
+        )
         self.assertEqual(prepared.workspace["project_name"], "source_repo")
         self.assertTrue((repo / ".git").exists())
         self.assertEqual(prepared.workspace["workspace_kind"], "git_worktree")
@@ -10745,7 +10765,10 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
 
         repo = Path(prepared.workspace["repo_path"])
-        self.assertEqual(repo, self.root / "data" / "minion" / "repos" / "wo_project_name" / "real_project" / "workspace")
+        self.assertEqual(
+            repo,
+            self.root / "data" / "minion" / "repos" / "wo_project_name" / "real_project" / ".minion" / "worktrees" / "task",
+        )
         self.assertEqual(prepared.workspace["project_name"], "real_project")
 
     def test_policy_workspace_keeps_planner_read_only_and_coder_writable(self) -> None:
@@ -11913,7 +11936,12 @@ class MinionManagerTests(unittest.TestCase):
                     work_order_id="wo_logical_review_child",
                     goal="child",
                     minion_profile="software_engineering.coder",
-                    workspace={"gate_policy": {"gates": [{"gate": "checkpoint_quality"}]}},
+                    workspace={
+                        "gate_policy": {
+                            "gates": [{"gate": "checkpoint_quality"}],
+                            "reviewer_profile": "software_engineering.reviewer",
+                        }
+                    },
                     continuity={"current_milestone": {"milestone_index": 0, "milestone_id": "m0", "title": "Implement"}},
                 )
             )
@@ -13471,7 +13499,7 @@ class MinionManagerTests(unittest.TestCase):
                     instruction="Hard requirement: create exactly one file.",
                     acceptance_criteria=["Exactly one file is created."],
                     minion_profile="software_engineering.coder",
-                    metadata={"milestones": ["Implement one bare coder task."]},
+                    metadata={"milestones": ["Implement one bare coder task."], "lsp_prewarm_disabled": True},
                 ).to_dict()
             )
             state = manager.runs[spawned["run_id"]]
@@ -13634,6 +13662,7 @@ class MinionManagerTests(unittest.TestCase):
 
             async def _start_runner(self, state: MinionRunState) -> None:
                 state.status = "running"
+                state.control_queue = asyncio.Queue()
                 if state.pack.minion_profile == "software_engineering.reviewer":
                     self.started_reviewers.append(state)
 
@@ -13650,7 +13679,7 @@ class MinionManagerTests(unittest.TestCase):
                     instruction="Hard requirement: create exactly one file.",
                     acceptance_criteria=["Exactly one file is created."],
                     minion_profile="software_engineering.coder",
-                    metadata={"milestones": ["Implement one bare coder task."]},
+                    metadata={"milestones": ["Implement one bare coder task."], "lsp_prewarm_disabled": True},
                 ).to_dict()
             )
             state = manager.runs[spawned["run_id"]]
@@ -13715,6 +13744,7 @@ class MinionManagerTests(unittest.TestCase):
 
             async def _start_runner(self, state: MinionRunState) -> None:
                 state.status = "running"
+                state.control_queue = asyncio.Queue()
                 if state.pack.minion_profile == "software_engineering.reviewer":
                     target = dict((state.pack.metadata or {}).get("review_target") or {})
                     self.started_review_gate_kinds.append(str(target.get("gate_kind") or ""))
@@ -13736,6 +13766,7 @@ class MinionManagerTests(unittest.TestCase):
                 plan,
                 module_id="module_repair_gate",
                 work_order_id="wo_repair_gate",
+                workspace={"lsp_prewarm_disabled": True},
             )
             spawned = await manager.spawn(pack.to_dict())
             state = manager.runs[spawned["run_id"]]
@@ -14366,6 +14397,7 @@ class MinionManagerTests(unittest.TestCase):
         class FailingControlManager(MinionManager):
             async def _start_runner(self, state: MinionRunState) -> None:
                 state.status = "running"
+                state.control_queue = asyncio.Queue()
 
             async def _send_runner_control(self, state: MinionRunState, message: dict) -> dict:
                 _ = state, message
@@ -14383,6 +14415,7 @@ class MinionManagerTests(unittest.TestCase):
                 plan,
                 module_id="module_control_failure",
                 work_order_id="wo_control_failure",
+                workspace={"lsp_prewarm_disabled": True},
             )
             spawned = await manager.spawn(pack.to_dict())
             state = manager.runs[spawned["run_id"]]
@@ -14609,6 +14642,7 @@ class MinionManagerTests(unittest.TestCase):
                 state.status = "running"
                 self.started_run_ids.append(state.run_id)
                 control_queue: asyncio.Queue = asyncio.Queue()
+                state.control_queue = control_queue
                 self.control_queues[state.run_id] = control_queue
 
                 async def write_event(event):
@@ -14820,7 +14854,7 @@ class MinionManagerTests(unittest.TestCase):
                 loaded["plan_artifact"],
                 module_id="module_dogfood_code",
                 work_order_id="wo_dogfood_code",
-                workspace={"source_repo": str(source_repo)},
+                workspace={"source_repo": str(source_repo), "lsp_prewarm_disabled": True},
                 metadata={"plan_ref": plan_ref},
             )
 
@@ -14979,6 +15013,7 @@ class MinionManagerTests(unittest.TestCase):
                 state.status = "running"
                 self.started_run_ids.append(state.run_id)
                 control_queue: asyncio.Queue = asyncio.Queue()
+                state.control_queue = control_queue
                 self.control_queues[state.run_id] = control_queue
 
                 async def write_event(event):
@@ -15111,8 +15146,8 @@ class MinionManagerTests(unittest.TestCase):
                 loaded["plan_artifact"],
                 module_id="module_breakpoint_code",
                 work_order_id="wo_breakpoint_code",
-                workspace={"source_repo": str(source_repo)},
-                metadata={"plan_ref": plan_ref},
+                workspace={"source_repo": str(source_repo), "lsp_prewarm_disabled": True},
+                metadata={"plan_ref": plan_ref, "manager_turn_timeout_seconds": 5},
             )
             coder_pack = _without_checkpoint_review(coder_pack)
 
@@ -15285,6 +15320,7 @@ class MinionManagerTests(unittest.TestCase):
                 state.status = "running"
                 self.started_run_ids.append(state.run_id)
                 control_queue: asyncio.Queue = asyncio.Queue()
+                state.control_queue = control_queue
                 self.control_queues[state.run_id] = control_queue
 
                 async def write_event(event):
@@ -15355,7 +15391,7 @@ class MinionManagerTests(unittest.TestCase):
                 plan,
                 module_id="module_disconnect_resume",
                 work_order_id="wo_disconnect_resume",
-                workspace={"source_repo": str(source_repo)},
+                workspace={"source_repo": str(source_repo), "lsp_prewarm_disabled": True},
                 metadata={"manager_turn_timeout_seconds": 0.2},
             )
             coder_pack = _without_checkpoint_review(coder_pack)
@@ -16055,7 +16091,8 @@ class MinionManagerTests(unittest.TestCase):
                 events.append(event)
 
             async def read_decision(timeout):
-                _ = timeout
+                if timeout is not None and float(timeout) <= 0.01:
+                    return None
                 return decisions.pop(0)
 
             code = await MinionRunner(
@@ -16128,7 +16165,8 @@ class MinionManagerTests(unittest.TestCase):
                 events.append(event)
 
             async def read_decision(timeout):
-                _ = timeout
+                if timeout is not None and float(timeout) <= 0.01:
+                    return None
                 return decisions.pop(0)
 
             code = await MinionRunner(
@@ -16200,7 +16238,8 @@ class MinionManagerTests(unittest.TestCase):
                 events.append(event)
 
             async def read_decision(timeout):
-                _ = timeout
+                if timeout is not None and float(timeout) <= 0.01:
+                    return None
                 return decisions.pop(0)
 
             runner = MinionRunner(
@@ -18143,7 +18182,8 @@ class MinionManagerTests(unittest.TestCase):
                 events.append(event)
 
             async def read_decision(timeout):
-                _ = timeout
+                if timeout is not None and float(timeout) <= 0.01:
+                    return None
                 return decisions.pop(0)
 
             runner = MinionRunner(

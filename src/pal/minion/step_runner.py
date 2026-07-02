@@ -581,6 +581,7 @@ class ModuleStepRunner:
             module_id=module_id,
             slot_id=str(grant.get("slot_id") or ""),
         )
+        self._bind_logical_slot_to_context(context, parent_state=parent_state)
         try:
             value = task(context)
             result = await value if inspect.isawaitable(value) else value
@@ -601,6 +602,20 @@ class ModuleStepRunner:
             }
         finally:
             self.release_logical_slot(context.slot_id, run_id=parent_state.run_id, reason="logical_module_lane_done")
+
+    def _bind_logical_slot_to_context(self, context: LogicalCoderContext, *, parent_state: Any) -> None:
+        if not context.slot_id or not hasattr(self.manager, "_logical_slots"):
+            return
+        slot = self.manager._logical_slots.get(context.slot_id)
+        if not isinstance(slot, dict):
+            return
+        parent_work_order_id = str(slot.get("work_order_id") or getattr(parent_state.pack, "work_order_id", "") or "").strip()
+        if parent_work_order_id:
+            slot.setdefault("parent_work_order_id", parent_work_order_id)
+        if context.work_order_id:
+            slot["work_order_id"] = context.work_order_id
+        if context.module_id:
+            slot["module_id"] = context.module_id
 
     async def run_logical_minion_runner(
         self,

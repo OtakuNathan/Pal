@@ -392,8 +392,8 @@ class MinionManager:
         active = [state for state in self.runs.values() if state.status in _ACTIVE_RUN_STATUSES]
         active_module_count = self._active_module_child_count_from_ledger()
         allocated_logical_slots = self._allocated_logical_slot_count()
-        active_llm_node_count = self._active_llm_node_slot_count_from_ledger()
-        available_llm_node_slots = self._available_llm_node_slots_from_ledger()
+        active_llm_node_count = len(self._active_llm_node_slot_keys_from_memory_ledger())
+        available_llm_node_slots = max(0, int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_LLM_NODES) - active_llm_node_count)
         return {
             "ok": True,
             "health_source": "manager_memory_ledger",
@@ -616,13 +616,14 @@ class MinionManager:
 
     async def _with_lsp_prewarm(self, pack: TaskContextPack) -> TaskContextPack:
         metadata = dict(pack.metadata or {})
-        if bool(metadata.get("lsp_prewarm_disabled")):
+        workspace = dict(pack.workspace or {})
+        if bool(metadata.get("lsp_prewarm_disabled")) or bool(workspace.get("lsp_prewarm_disabled")):
             return pack
         try:
             result = await asyncio.to_thread(
                 prewarm_workspace_lsp,
                 runtime_root=self.runtime_root,
-                workspace=dict(pack.workspace or {}),
+                workspace=workspace,
             )
         except Exception as exc:
             result = {
@@ -631,7 +632,6 @@ class MinionManager:
             }
         if str(result.get("status") or "") == "skipped":
             return pack
-        workspace = dict(pack.workspace or {})
         lsp_setup = dict(workspace.get("lsp_setup") or {})
         lsp_setup["prewarm"] = result
         workspace["lsp_setup"] = lsp_setup
@@ -1414,6 +1414,11 @@ class MinionManager:
             normalized = str(work_order_id or "").strip()
             if normalized:
                 keys.add(f"work_order:{normalized}")
+        keys.update(self._active_llm_node_slot_keys_from_memory_ledger())
+        return keys
+
+    def _active_llm_node_slot_keys_from_memory_ledger(self) -> set[str]:
+        keys: set[str] = set()
         for state in self.runs.values():
             if state.runner_kind == "logical":
                 continue
@@ -1437,9 +1442,8 @@ class MinionManager:
 
     def _llm_node_slot_key_for_logical_slot(self, slot: dict[str, Any]) -> str:
         work_order_id = str(slot.get("work_order_id") or "").strip()
-        module_id = str(slot.get("module_id") or "").strip()
-        if work_order_id and module_id:
-            return f"logical:{work_order_id}:{module_id}"
+        if work_order_id:
+            return f"work_order:{work_order_id}"
         slot_id = str(slot.get("slot_id") or "").strip()
         if slot_id:
             return f"logical:{slot_id}"
