@@ -71,7 +71,7 @@ from pal.minion import (
 )
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice
 from pal.minion.capability_args import validate_draft_work_order_args
-from pal.minion.config import effective_minion_runtime_config, merge_minion_runtime_config, minion_db_path
+from pal.minion.config import merge_minion_runtime_config, minion_db_path
 from pal.minion.dag_advancer import dag_state_to_runtime_dict
 from pal.minion.git_env import (
     _git,
@@ -343,6 +343,19 @@ def _plan_module(module_id: str, *, title: str = "", task: str = "", acceptance:
         "module_id": module_id,
         "owned_area": [f"src/{module_id}.py"],
         "responsibility": title or f"Implement {module_id}.",
+        "ownership": [
+            f"{module_id} owns writes under src/{module_id}.py.",
+            "Upstream dependency outputs are read-only unless explicitly listed in owned_area.",
+            "Shared package facades, manifests, and sibling internals are not owned by this module.",
+        ],
+        "lifecycle": [
+            f"{module_id} creates and validates its module output during its milestone.",
+            "Downstream modules may consume the output only after this module completes.",
+        ],
+        "invariants": [
+            f"{module_id} writes only its owned_area.",
+            "Declared public interfaces remain stable for downstream consumers.",
+        ],
         "provided_interfaces": [{"name": f"{module_id}.contract", "contract": f"{module_id} owns its contract."}],
         "consumed_interfaces": [],
         "internal_milestones": [
@@ -462,6 +475,18 @@ def _builder_plan_calls_from_handles(
                 "kind": "prelude",
                 "responsibility": "Define contracts and execution skeleton.",
                 "owned_area": ["docs/spec.md"],
+                "ownership": [
+                    "Prelude owns docs/spec.md as the shared planning contract.",
+                    "Implementation modules may read the contract but must not rewrite it.",
+                ],
+                "lifecycle": [
+                    "Prelude creates the contract before implementation modules start.",
+                    "Downstream modules consume the contract after prelude completion.",
+                ],
+                "invariants": [
+                    "The shared contract remains import/read-only for downstream modules.",
+                    "Prelude does not own implementation source files.",
+                ],
                 "constraint_handles": linked,
             },
             call_id=f"{call_prefix}_prelude",
@@ -512,6 +537,19 @@ def _builder_plan_calls_from_handles(
                 "depends_on_module_handles": [prelude_handle],
                 "responsibility": f"Implement {module_key}.",
                 "owned_area": [f"src/{module_key}.py", f"tests/test_{module_key}.py"],
+                "ownership": [
+                    f"{module_key} owns src/{module_key}.py and tests/test_{module_key}.py.",
+                    "Prelude contracts are read-only inputs.",
+                    "Package facades and sibling implementation files are not owned by this module.",
+                ],
+                "lifecycle": [
+                    f"{module_key} creates its implementation during the module milestone.",
+                    "Join consumes the public behavior only after module-quality review passes.",
+                ],
+                "invariants": [
+                    f"{module_key} writes only its declared owned_area.",
+                    "The public result contract remains stable for join verification.",
+                ],
                 "constraint_handles": linked,
                 "module_quality_criteria": [
                     f"{module_key} preserves its public contract, focused tests, and downstream integration readiness."
@@ -582,6 +620,18 @@ def _builder_plan_calls_from_handles(
                 "depends_on_module_handles": [implementation_handle],
                 "responsibility": "Integrate module outputs and run system verification.",
                 "owned_area": ["tests/test_integration.py"],
+                "ownership": [
+                    "Join owns final integration verification files.",
+                    "Join consumes module public behavior and does not edit sibling implementation internals.",
+                ],
+                "lifecycle": [
+                    "Join runs after implementation modules complete and their public contracts are available.",
+                    "Join records final verification evidence as the terminal DAG step.",
+                ],
+                "invariants": [
+                    "Join verifies declared public interfaces only.",
+                    "Join does not mutate upstream owned implementation files.",
+                ],
             },
             call_id=f"{call_prefix}_join",
         ),
@@ -676,6 +726,22 @@ def _builder_calls_from_plan_payload(plan: dict, *, call_prefix: str = "call_pla
             "depends_on_module_handles": [module_handle_by_id[item] for item in dependency_module_ids if item in module_handle_by_id],
             "responsibility": str(module.get("responsibility") or f"Implement {module_id}."),
             "owned_area": list(module.get("owned_area") or [module_id]),
+            "ownership": list(module.get("ownership") or [])
+            or [
+                f"{module_id} owns writes to its declared owned_area.",
+                "Dependency module outputs are read-only unless explicitly assigned here.",
+                "Shared facades, manifests, and sibling internals require a single owner or join ownership.",
+            ],
+            "lifecycle": list(module.get("lifecycle") or [])
+            or [
+                f"{module_id} creates or verifies its output during this DAG node.",
+                "Downstream nodes may consume the output only after this node completes.",
+            ],
+            "invariants": list(module.get("invariants") or [])
+            or [
+                f"{module_id} writes only its owned_area.",
+                "Declared public interfaces stay stable for downstream consumers.",
+            ],
             **(
                 {
                     "module_quality_criteria": list(
@@ -842,13 +908,13 @@ class SidecarFoundationTests(unittest.TestCase):
         asyncio.run(scenario())
         self.assertEqual(read_sidecar_message_sync(io.BytesIO(pack_sidecar_message({"n": 3}))), {"n": 3})
 
-    def test_runner_main_keeps_protocol_stdout_separate_from_prints(self) -> None:
+    def test_step_executor_main_keeps_protocol_stdout_separate_from_prints(self) -> None:
         script = (
             "import asyncio\n"
-            "import pal.minion.runner_main as runner_main\n"
-            "runner_main._redirect_stdout_to_stderr()\n"
+            "import pal.minion.step_executor_main as step_executor_main\n"
+            "step_executor_main._redirect_stdout_to_stderr()\n"
             "print('stdout noise')\n"
-            "asyncio.run(runner_main._write({'type': 'event', 'event_kind': 'probe'}))\n"
+            "asyncio.run(step_executor_main.StepExecutor(runtime_root='x')._write({'type': 'event', 'event_kind': 'probe'}))\n"
         )
 
         completed = subprocess.run(
@@ -861,67 +927,6 @@ class SidecarFoundationTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
         self.assertIn("stdout noise", completed.stderr.decode("utf-8", errors="replace"))
         self.assertEqual(read_sidecar_message_sync(io.BytesIO(completed.stdout)), {"type": "event", "event_kind": "probe"})
-
-    def test_runner_main_read_decision_timeout_does_not_block_process_exit(self) -> None:
-        script = (
-            "import asyncio, os, types\n"
-            "from pal.minion import runner_main\n"
-            "read_fd, write_fd = os.pipe()\n"
-            "runner_main.sys.stdin = types.SimpleNamespace(buffer=os.fdopen(read_fd, 'rb', buffering=0))\n"
-            "async def scenario():\n"
-            "    result = await runner_main._read_decision(timeout=0.01)\n"
-            "    assert result is None\n"
-            "asyncio.run(scenario())\n"
-            "os.close(write_fd)\n"
-            "print('ok')\n"
-        )
-
-        completed = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True,
-            env=python_subprocess_env(),
-            timeout=2,
-        )
-
-        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8", errors="replace"))
-        self.assertEqual(completed.stdout.decode("utf-8").strip(), "ok")
-
-    def test_runner_main_loads_task_json_from_file(self) -> None:
-        from pal.minion import runner_main
-
-        with tempfile.TemporaryDirectory(prefix="pal_runner_payload_test_") as tmp:
-            payload_path = Path(tmp) / "task.json"
-            payload = TaskContextPack(work_order_id="wo_file_payload", goal="read payload from file").to_json()
-            payload_path.write_text(payload, encoding="utf-8")
-
-            loaded = runner_main._load_task_json(SimpleNamespace(task_json=None, task_json_file=payload_path))
-
-        self.assertEqual(loaded, payload)
-
-    def test_runner_process_uses_file_payload_for_large_task_context(self) -> None:
-        from pal.minion.runner_process import RunnerProcessSupervisor, runner_payload_path
-
-        with tempfile.TemporaryDirectory(prefix="pal_runner_payload_test_") as tmp:
-            root = Path(tmp)
-            supervisor = RunnerProcessSupervisor(SimpleNamespace(runtime_root=root))
-            pack = TaskContextPack(
-                work_order_id="wo_large_payload",
-                goal="avoid argv bloat",
-                metadata={"large_review_context": "x" * 200_000},
-            )
-            state = SimpleNamespace(run_id="run/large payload", pack=pack, runner_payload_path="")
-
-            path = supervisor.write_runner_payload(state)
-
-            self.assertEqual(path, runner_payload_path(root, "run/large payload"))
-            self.assertEqual(Path(state.runner_payload_path), path)
-            self.assertEqual(path.read_text(encoding="utf-8"), pack.to_json())
-            self.assertLess(len(str(path)), 4096)
-
-            supervisor.cleanup_runner_payload(state)
-
-            self.assertEqual(state.runner_payload_path, "")
-            self.assertFalse(path.exists())
 
     def test_python_subprocess_env_includes_source_root_for_sidecars(self) -> None:
         env = python_subprocess_env()
@@ -943,58 +948,6 @@ class SidecarFoundationTests(unittest.TestCase):
             entries = [Path(item) for item in str(env.get("PATH") or "").split(os.pathsep) if item]
             self.assertEqual(entries[:2], [newer, older])
             self.assertIn(Path("/usr/bin"), entries)
-
-    def test_runner_main_liveness_watcher_resolves_when_manager_pipe_closes(self) -> None:
-        from pal.minion import runner_main
-
-        async def scenario() -> None:
-            read_fd, write_fd = os.pipe()
-            try:
-                task = asyncio.create_task(runner_main._watch_manager_liveness(read_fd))
-                await asyncio.sleep(0)
-                os.close(write_fd)
-                write_fd = -1
-                await asyncio.wait_for(task, timeout=1.0)
-            finally:
-                if write_fd >= 0:
-                    with contextlib.suppress(OSError):
-                        os.close(write_fd)
-                with contextlib.suppress(OSError):
-                    os.close(read_fd)
-
-        asyncio.run(scenario())
-
-    def test_runner_main_liveness_pipe_works_across_subprocess_pass_fds(self) -> None:
-        read_fd, write_fd = os.pipe()
-        script = (
-            "import asyncio, os, sys\n"
-            "from pal.minion.runner_main import _watch_manager_liveness\n"
-            "asyncio.run(_watch_manager_liveness(int(sys.argv[1])))\n"
-            "print('manager gone', flush=True)\n"
-        )
-        try:
-            process = subprocess.Popen(
-                [sys.executable, "-c", script, str(read_fd)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                pass_fds=(read_fd,),
-                env=python_subprocess_env(),
-            )
-            os.close(read_fd)
-            read_fd = -1
-            os.close(write_fd)
-            write_fd = -1
-            stdout, stderr = process.communicate(timeout=10)
-        finally:
-            if read_fd >= 0:
-                with contextlib.suppress(OSError):
-                    os.close(read_fd)
-            if write_fd >= 0:
-                with contextlib.suppress(OSError):
-                    os.close(write_fd)
-
-        self.assertEqual(process.returncode, 0, stderr.decode("utf-8", errors="replace"))
-        self.assertIn("manager gone", stdout.decode("utf-8", errors="replace"))
 
     def test_minion_runner_log_path_is_pal_log_sibling_and_sanitized(self) -> None:
         root = Path("C:/tmp/pal-runtime")
@@ -1107,6 +1060,18 @@ class MinionContractTests(unittest.TestCase):
                             "kind": "module",
                             "responsibility": args["summary"],
                             "owned_area": [f"domain:{args['section_key']}"],
+                            "ownership": [
+                                f"{args['section_key']} owns the domain section artifact.",
+                                "Other domain sections are read-only unless explicitly consumed.",
+                            ],
+                            "lifecycle": [
+                                "The section is produced during this single domain module.",
+                                "Summary consumers read it after the module completes.",
+                            ],
+                            "invariants": [
+                                "The section writes only its domain-owned area.",
+                                "The section remains self-contained for downstream consumption.",
+                            ],
                             "milestones": [
                                 {
                                     "title": args["title"],
@@ -1336,6 +1301,18 @@ class MinionContractTests(unittest.TestCase):
                             "kind": "module",
                             "responsibility": "Implement and test a small Python API.",
                             "owned_area": ["src/example/__init__.py", "tests/test_example.py"],
+                            "ownership": [
+                                "implementation owns the example package facade and focused test.",
+                                "No sibling module owns or edits src/example/__init__.py in this plan.",
+                            ],
+                            "lifecycle": [
+                                "The API is created during the implementation milestone.",
+                                "The focused test consumes the API after it is exported.",
+                            ],
+                            "invariants": [
+                                "The package facade remains importable after implementation.",
+                                "The module writes only its declared owned_area.",
+                            ],
                             "module_quality_criteria": ["The public API behavior is covered by focused tests."],
                             "milestones": [
                                 {
@@ -1420,6 +1397,18 @@ class MinionContractTests(unittest.TestCase):
                             "kind": "module",
                             "responsibility": "Implement the tinycalc subtract export and focused pytest coverage.",
                             "owned_area": ["src/tinycalc/__init__.py", "tests/test_tinycalc.py"],
+                            "ownership": [
+                                "implementation owns the tinycalc package facade export and focused pytest file.",
+                                "No other non-join module may edit src/tinycalc/__init__.py.",
+                            ],
+                            "lifecycle": [
+                                "subtract is added to the facade during the implementation milestone.",
+                                "final_verification consumes the public import after implementation completes.",
+                            ],
+                            "invariants": [
+                                "Existing add behavior remains compatible.",
+                                "subtract must remain importable from tinycalc.",
+                            ],
                             "constraint_handles": [constraint_handle],
                             "module_quality_criteria": [
                                 "subtract is exported from tinycalc and preserves existing add behavior.",
@@ -1463,6 +1452,18 @@ class MinionContractTests(unittest.TestCase):
                             "depends_on_module_keys": ["implementation"],
                             "responsibility": "Run final verification for the tinycalc package surface.",
                             "owned_area": ["tests/test_tinycalc.py"],
+                            "ownership": [
+                                "final_verification owns final verification evidence for the package surface.",
+                                "implementation owns the tinycalc API; join consumes it through public import only.",
+                            ],
+                            "lifecycle": [
+                                "Final verification runs after implementation completes.",
+                                "The DAG terminates after final_verification records pytest evidence.",
+                            ],
+                            "invariants": [
+                                "Final verification does not mutate implementation-owned source.",
+                                "Verification uses the declared public package surface.",
+                            ],
                             "consumed_interfaces": [
                                 {
                                     "name": "tinycalc.subtract",
@@ -1646,6 +1647,18 @@ class MinionContractTests(unittest.TestCase):
                             "kind": "prelude",
                             "responsibility": "Define boundary contracts before implementation.",
                             "owned_area": ["SPEC.md"],
+                            "ownership": [
+                                "module_prelude owns SPEC.md as the shared boundary contract source.",
+                                "Downstream modules consume SPEC.md through declared interfaces and do not rewrite it.",
+                            ],
+                            "lifecycle": [
+                                "Boundary contracts are produced before implementation modules start.",
+                                "Parser and join modules consume the contract after prelude completion.",
+                            ],
+                            "invariants": [
+                                "Prelude does not own implementation source files.",
+                                "The planning contract remains stable for downstream modules.",
+                            ],
                             "constraint_handles": [constraint_handle],
                             "provided_interfaces": [
                                 {
@@ -1718,6 +1731,19 @@ class MinionContractTests(unittest.TestCase):
                             "depends_on_module_keys": ["module_prelude"],
                             "responsibility": "Implement parser boundary validation.",
                             "owned_area": ["src/pal_dogfood/changelog.py", "tests/test_changelog.py"],
+                            "ownership": [
+                                "module_parser owns parser validation source and focused parser tests.",
+                                "module_prelude contract notes are read-only inputs.",
+                                "Package-level release note verification is owned by module_join.",
+                            ],
+                            "lifecycle": [
+                                "Parser validation is implemented after prelude contracts are available.",
+                                "Join consumes parser.api after module_parser completes.",
+                            ],
+                            "invariants": [
+                                "parse_entry never returns partially validated Entry objects.",
+                                "Parser writes only its declared owned_area.",
+                            ],
                             "constraint_handles": [constraint_handle],
                             "module_quality_criteria": [
                                 "Parser public API rejects invalid boundary inputs before normalized Entry objects reach downstream modules.",
@@ -1770,6 +1796,18 @@ class MinionContractTests(unittest.TestCase):
                             "depends_on_module_keys": ["module_parser"],
                             "responsibility": "Run final integration verification.",
                             "owned_area": ["tests/test_release_notes.py"],
+                            "ownership": [
+                                "module_join owns final release-notes verification evidence.",
+                                "module_parser owns parser implementation; join consumes parser.api only.",
+                            ],
+                            "lifecycle": [
+                                "Final verification runs after parser implementation completes.",
+                                "The plan closes after join records package-level evidence.",
+                            ],
+                            "invariants": [
+                                "Join does not reach into parser private internals.",
+                                "Join verifies observable parser behavior through declared contracts.",
+                            ],
                             "consumed_interfaces": [
                                 {
                                     "name": "parser.api",
@@ -1879,6 +1917,18 @@ class MinionContractTests(unittest.TestCase):
                             "kind": "prelude",
                             "responsibility": "Prepare contracts.",
                             "owned_area": ["SPEC.md"],
+                            "ownership": [
+                                "module_prelude owns SPEC.md contract notes.",
+                                "Core and join modules consume the notes as read-only input.",
+                            ],
+                            "lifecycle": [
+                                "Contract notes are prepared before core implementation.",
+                                "Downstream modules consume the notes after prelude completion.",
+                            ],
+                            "invariants": [
+                                "Prelude does not edit package source.",
+                                "Contract notes remain stable during downstream work.",
+                            ],
                             "provided_interfaces": [
                                 {
                                     "name": "contracts",
@@ -1918,6 +1968,19 @@ class MinionContractTests(unittest.TestCase):
                             "depends_on_module_keys": ["module_prelude"],
                             "responsibility": "Implement public function.",
                             "owned_area": ["src/pkg/core.py", "tests/test_core.py"],
+                            "ownership": [
+                                "module_core owns core.py and focused core tests.",
+                                "Prelude contract notes are read-only input.",
+                                "Integration tests are owned by module_join.",
+                            ],
+                            "lifecycle": [
+                                "normalize is implemented after contract notes exist.",
+                                "module_join consumes core.api after module_core completes.",
+                            ],
+                            "invariants": [
+                                "normalize returns a non-empty string for valid input.",
+                                "module_core writes only its declared owned_area.",
+                            ],
                             "provided_interfaces": [
                                 {
                                     "name": "core.api",
@@ -1956,6 +2019,18 @@ class MinionContractTests(unittest.TestCase):
                             "depends_on_module_keys": ["module_core"],
                             "responsibility": "Verify package workflow.",
                             "owned_area": ["tests/test_integration.py"],
+                            "ownership": [
+                                "module_join owns integration verification.",
+                                "module_core owns normalize implementation and focused tests.",
+                            ],
+                            "lifecycle": [
+                                "Integration verification runs after module_core completes.",
+                                "The plan completes after join records pytest evidence.",
+                            ],
+                            "invariants": [
+                                "Join verifies the public workflow without mutating core source.",
+                                "Join consumes only declared core.api behavior.",
+                            ],
                             "consumed_interfaces": [
                                 {
                                     "name": "core.api",
@@ -2103,6 +2178,18 @@ class MinionContractTests(unittest.TestCase):
                             "kind": "module",
                             "responsibility": "Own parser implementation.",
                             "owned_area": ["src/parser.py", "tests/test_parser.py"],
+                            "ownership": [
+                                "module_parser owns parser source and focused parser tests.",
+                                "No sibling module owns parser internals in this plan.",
+                            ],
+                            "lifecycle": [
+                                "Parser behavior is produced during this module.",
+                                "Consumers may use the parser interface after this module completes.",
+                            ],
+                            "invariants": [
+                                "Parser source changes stay within owned_area.",
+                                "Provided parser interface remains stable for consumers.",
+                            ],
                             "milestones": [
                                 {
                                     "title": "Parser core",
@@ -2501,6 +2588,18 @@ class MinionContractTests(unittest.TestCase):
                             "kind": "module",
                             "responsibility": "Implement parser boundaries.",
                             "owned_area": ["src/parser.py", "tests/test_parser.py"],
+                            "ownership": [
+                                "module_parser owns parser source and focused parser tests.",
+                                "No sibling module may edit parser internals.",
+                            ],
+                            "lifecycle": [
+                                "Parser validation is implemented during this module.",
+                                "Consumers may use parser behavior after module completion.",
+                            ],
+                            "invariants": [
+                                "Parser rejects invalid boundary inputs.",
+                                "Parser writes only its declared owned_area.",
+                            ],
                         },
                     ),
                     CanonicalToolCall(
@@ -2562,6 +2661,18 @@ class MinionContractTests(unittest.TestCase):
                             "kind": "module",
                             "responsibility": "Implement release note rendering.",
                             "owned_area": ["src/release_notes.py", "tests/test_release_notes.py"],
+                            "ownership": [
+                                "module_release_notes owns release note renderer source and focused tests.",
+                                "No sibling module edits renderer internals.",
+                            ],
+                            "lifecycle": [
+                                "Rendering behavior is created during this module.",
+                                "Downstream verification consumes rendered output after completion.",
+                            ],
+                            "invariants": [
+                                "Renderer ordering contract is internally consistent.",
+                                "Renderer writes only its declared owned_area.",
+                            ],
                         },
                     ),
                     CanonicalToolCall(
@@ -3836,6 +3947,18 @@ class MinionContractTests(unittest.TestCase):
                         "module_id": "module_a",
                         "owned_area": ["src/a.py"],
                         "responsibility": "Implement A.",
+                        "ownership": [
+                            "module_a owns src/a.py.",
+                            "module_b internals are not visible to module_a.",
+                        ],
+                        "lifecycle": [
+                            "module_a produces AResult during milestone a1.",
+                            "Downstream modules consume AResult after module_a completes.",
+                        ],
+                        "invariants": [
+                            "module_a writes only src/a.py.",
+                            "AResult remains the declared cross-module contract.",
+                        ],
                         "provided_interfaces": [{"name": "AResult", "contract": "A provides result"}],
                         "consumed_interfaces": [{"name": "BInput", "contract": "A consumes B contract only"}],
                         "metadata": {"skill_refs": ["contract_testing"]},
@@ -3854,6 +3977,9 @@ class MinionContractTests(unittest.TestCase):
                         "module_id": "module_b",
                         "owned_area": ["src/b.py"],
                         "responsibility": "Implement B.",
+                        "ownership": ["module_b owns src/b.py."],
+                        "lifecycle": ["module_b consumes AResult after module_a completion."],
+                        "invariants": ["module_b implementation details stay private."],
                         "internal_milestones": [
                             {
                                 "milestone_id": "b1",
@@ -3876,6 +4002,8 @@ class MinionContractTests(unittest.TestCase):
         self.assertEqual(order.module_id, "module_a")
         self.assertEqual(order.milestone_id, "a1")
         self.assertEqual(view["module"]["owned_area"], ["src/a.py"])
+        self.assertEqual(view["module"]["ownership"][0], "module_a owns src/a.py.")
+        self.assertIn("AResult remains the declared cross-module contract.", view["module"]["invariants"])
         self.assertEqual(order.skill_refs, ["python", "contract_testing"])
         self.assertEqual(view["skill_refs"], ["python", "contract_testing"])
         self.assertIn("A model roundtrips", rendered)
@@ -3970,6 +4098,29 @@ class MinionContractTests(unittest.TestCase):
         duplicate_owned_area["modules"][2]["owned_area"] = ["src/shared/contracts.py"]
         with self.assertRaisesRegex(ValueError, "owned_area duplicates module_owned_a"):
             validate_dispatchable_plan_artifact(duplicate_owned_area)
+        duplicate_changed_area = _dispatchable_plan_payload(
+            plan_id="plan_duplicate_changed_area",
+            task_id="task_duplicate_changed_area",
+            modules=[_plan_module("module_change_a", title="Change A"), _plan_module("module_change_b", title="Change B")],
+        )
+        duplicate_changed_area["modules"][1]["internal_milestones"][0]["metadata"] = {
+            "changed_area": ["src/shared/__init__.py"]
+        }
+        duplicate_changed_area["modules"][2]["internal_milestones"][0]["metadata"] = {
+            "changed_area": ["src/shared/__init__.py"]
+        }
+        with self.assertRaisesRegex(ValueError, "metadata.changed_area duplicates module_change_a"):
+            validate_dispatchable_plan_artifact(duplicate_changed_area)
+        missing_boundary = _dispatchable_plan_payload(
+            plan_id="plan_missing_module_boundary",
+            task_id="task_missing_module_boundary",
+            modules=[_plan_module("module_boundary", title="Boundary")],
+        )
+        missing_boundary["modules"][1].pop("ownership")
+        missing_boundary["modules"][1].pop("lifecycle")
+        missing_boundary["modules"][1].pop("invariants")
+        with self.assertRaisesRegex(ValueError, "ownership is required"):
+            validate_dispatchable_plan_artifact(missing_boundary)
         broken = dict(plan)
         broken["orchestration"] = {}
         with self.assertRaises(ValueError):
@@ -9054,7 +9205,18 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(second_child.metadata["task_id"], "task_parent_git_cursor")
         self.assertEqual(second_child.metadata["project_name"], "plan_source_repo")
         self.assertEqual(second_child.metadata["module_name"], "module_b")
-        self.assertEqual(second_repo, self.root / "data" / "minion" / "repos" / "wo_parent_git_cursor" / "plan_source_repo" / "module_b")
+        self.assertEqual(
+            second_repo,
+            self.root
+            / "data"
+            / "minion"
+            / "repos"
+            / "wo_parent_git_cursor"
+            / "plan_source_repo"
+            / ".minion"
+            / "worktrees"
+            / "module_b",
+        )
         self.assertEqual((second_repo / "src" / "pal_dogfood" / "taskflow" / "contracts.py").read_text(encoding="utf-8"), "CONTRACT = 'ready'\n")
         self.assertNotEqual(second_repo, first_repo)
         self.assertEqual(_git_common_dir(second_repo), _git_common_dir(first_repo))
@@ -9152,7 +9314,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual((final_repo / "src" / "pal_contract_guard" / "contracts.py").read_text(encoding="utf-8"), "CONTRACT = 'ready'\n")
         self.assertEqual((final_repo / "src" / "pal_contract_guard" / "engine.py").read_text(encoding="utf-8"), "ENGINE = 'ready'\n")
         self.assertEqual((final_repo / "src" / "pal_contract_guard" / "renderer.py").read_text(encoding="utf-8"), "RENDERER = 'ready'\n")
-        self.assertIn("_integrations/final_verification", final_child.workspace["source_repo"].replace("\\", "/"))
+        self.assertIn(".minion/integrations/final_verification", final_child.workspace["source_repo"].replace("\\", "/"))
         self.assertTrue(final_child.workspace["base_ref"].startswith("integration_wo_parallel_join_baseline_final_verification"))
         self.assertEqual(_git_common_dir(final_repo), _git_common_dir(contracts_repo))
         self.assertEqual(_git_common_dir(final_repo), _git_common_dir(engine_repo))
@@ -9186,6 +9348,9 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         parent_completion = self.repository.record_plan_module_completion(final_child.work_order_id, final_completion)
         parent_snapshot = self.repository.read_work_order("wo_parallel_join_baseline")
         cleanup = parent_snapshot["work_order"]["metadata"]["workspace_cleanup"]
+        published_workspace = parent_snapshot["work_order"]["metadata"]["workspace"]
+        published_repo = Path(published_workspace["repo_path"])
+        runtime_project_root = self.root / "data" / "minion" / "repos" / "wo_parallel_join_baseline" / "parallel_join_source_repo"
 
         self.assertEqual(parent_completion["status"], "completed")
         report_ref = parent_completion["completion_report_ref"]
@@ -9197,11 +9362,18 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(parent_snapshot["work_order"]["metadata"]["completion_report_ref"]["path"], str(report_path))
         self.assertEqual(parent_snapshot["work_order"]["status"], "completed")
         self.assertEqual(cleanup["status"], "ok")
-        self.assertTrue(final_repo.exists())
+        self.assertEqual(cleanup["mode"], "publish_final_to_project_root")
+        self.assertEqual(published_repo, runtime_project_root)
+        self.assertTrue(published_repo.exists())
+        self.assertEqual((published_repo / "src" / "pal_contract_guard" / "contracts.py").read_text(encoding="utf-8"), "CONTRACT = 'ready'\n")
+        self.assertEqual((published_repo / "src" / "pal_contract_guard" / "engine.py").read_text(encoding="utf-8"), "ENGINE = 'ready'\n")
+        self.assertEqual((published_repo / "src" / "pal_contract_guard" / "renderer.py").read_text(encoding="utf-8"), "RENDERER = 'ready'\n")
+        self.assertEqual((published_repo / "tests" / "test_integration.py").read_text(encoding="utf-8"), "def test_integration():\n    assert True\n")
+        self.assertFalse(final_repo.exists())
         self.assertFalse(contracts_repo.exists())
         self.assertFalse(engine_repo.exists())
         self.assertFalse(renderer_repo.exists())
-        self.assertFalse((self.root / "data" / "minion" / "repos" / "wo_parallel_join_baseline" / "parallel_join_source_repo" / "_integrations" / "final_verification").exists())
+        self.assertFalse((runtime_project_root / ".minion" / "integrations" / "final_verification").exists())
 
     def test_parallel_dependency_integration_unions_compile_flags_conflicts(self) -> None:
         source = self.root / "parallel_compile_flags_source_repo"
@@ -9290,7 +9462,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         integration_repo = Path(final_child.workspace["source_repo"])
 
         self.assertEqual(final_child.metadata["parent_module_id"], "final_verification")
-        self.assertIn("_integrations/final_verification", str(integration_repo).replace("\\", "/"))
+        self.assertIn(".minion/integrations/final_verification", str(integration_repo).replace("\\", "/"))
         self.assertEqual(
             (integration_repo / "compile_flags.txt").read_text(encoding="utf-8"),
             "-std=c++20\n-Iinclude\n-Isrc\n-Wall\n-Wextra\n-Wpedantic\n",
@@ -10000,7 +10172,18 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         prepared = prepare_git_task_environment(self.root, pack)
         repo = Path(prepared.workspace["repo_path"])
 
-        self.assertEqual(repo, self.root / "data" / "minion" / "repos" / "wo_cpp_lsp" / "source_cpp_lsp" / "module_cpp_lsp")
+        self.assertEqual(
+            repo,
+            self.root
+            / "data"
+            / "minion"
+            / "repos"
+            / "wo_cpp_lsp"
+            / "source_cpp_lsp"
+            / ".minion"
+            / "worktrees"
+            / "module_cpp_lsp",
+        )
         self.assertEqual(prepared.workspace["project_name"], "source_cpp_lsp")
         self.assertEqual(prepared.workspace["module_name"], "module_cpp_lsp")
         self.assertEqual(prepared.workspace["languages"], ["cpp"])
@@ -10539,7 +10722,10 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertTrue((repo / ".git").exists())
         self.assertEqual(prepared.workspace["workspace_kind"], "git_worktree")
         self.assertEqual(Path(prepared.workspace["work_order_repo_root"]), self.root / "data" / "minion" / "repos" / "wo_clone" / "source_repo")
-        self.assertEqual(Path(prepared.workspace["common_git_dir"]), self.root / "data" / "minion" / "repos" / "wo_clone" / "source_repo" / ".git")
+        self.assertEqual(
+            Path(prepared.workspace["common_git_dir"]),
+            self.root / "data" / "minion" / "repos" / "wo_clone" / "source_repo" / ".minion" / "git",
+        )
         self.assertNotEqual(_git_common_dir(repo), _git_common_dir(source))
         self.assertEqual((repo / "app.py").read_text(encoding="utf-8"), "print('hello')\n")
         self.assertEqual(prepared.workspace["source_repo"], str(source))
@@ -10621,7 +10807,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(coder_prepared.workspace["workspace_kind"], "git_worktree")
         self.assertTrue(Path(coder_prepared.workspace["artifact_dir"]).is_dir())
-        self.assertTrue(str(coder_prepared.workspace["artifact_dir"]).replace("\\", "/").endswith("_artifacts/wo_code_writable"))
+        self.assertTrue(str(coder_prepared.workspace["artifact_dir"]).replace("\\", "/").endswith(".minion/artifacts/wo_code_writable"))
         self.assertIn("work_order_branch", coder_prepared.workspace)
         self.assertNotEqual(Path(coder_prepared.workspace["repo_path"]), source)
 
@@ -11059,6 +11245,121 @@ class MinionManagerTests(unittest.TestCase):
         self.assertEqual(second["reason"], "global_parallel_limit")
         self.assertEqual(released["status"], "released")
         self.assertEqual(third["status"], "granted")
+
+    def test_top_level_runs_consume_llm_node_slots(self) -> None:
+        class FakeManager(MinionManager):
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.runner_kind = "step_process"
+                state.status = "running"
+
+            async def _with_lsp_prewarm(self, pack: TaskContextPack) -> TaskContextPack:
+                return pack
+
+        async def scenario() -> None:
+            manager = FakeManager(runtime_root=self.root, max_parallel_modules=1)
+
+            first = await manager.spawn(TaskContextPack(work_order_id="wo_arch_a", goal="architect a").to_dict())
+            second = await manager.spawn(TaskContextPack(work_order_id="wo_arch_b", goal="architect b").to_dict())
+
+            self.assertEqual(first["status"], "running")
+            self.assertEqual(second["status"], "waiting_for_slot")
+            self.assertEqual(second["limit_kind"], "llm_node")
+            self.assertEqual(manager.health()["active_llm_node_count"], 1)
+            self.assertEqual(manager.health()["available_llm_node_slots"], 0)
+
+            manager._record_event(
+                manager.runs[first["run_id"]],
+                {
+                    "event_kind": "terminal",
+                    "payload": {"status": "completed", "summary": "done"},
+                    "created_at": utc_now(),
+                },
+            )
+            third = await manager.spawn(TaskContextPack(work_order_id="wo_arch_b", goal="architect b").to_dict())
+
+            self.assertEqual(third["status"], "running")
+            self.assertEqual(manager.health()["active_llm_node_count"], 1)
+
+        asyncio.run(scenario())
+
+    def test_plan_reviewer_shares_architect_llm_node_slot(self) -> None:
+        class FakeManager(MinionManager):
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.runner_kind = "step_process"
+                state.status = "running"
+
+            async def _with_lsp_prewarm(self, pack: TaskContextPack) -> TaskContextPack:
+                return pack
+
+        async def scenario() -> None:
+            manager = FakeManager(runtime_root=self.root, max_parallel_modules=1)
+
+            architect = await manager.spawn(TaskContextPack(work_order_id="wo_plan_source", goal="build plan").to_dict())
+            reviewer = await manager.spawn(
+                TaskContextPack(
+                    work_order_id="wo_plan_review",
+                    goal="review plan",
+                    metadata={
+                        "plan_review_for_work_order_id": "wo_plan_source",
+                        "review_target": {"planner_work_order_id": "wo_plan_source", "planner_run_id": architect["run_id"]},
+                    },
+                ).to_dict()
+            )
+            other = await manager.spawn(TaskContextPack(work_order_id="wo_other_plan", goal="other plan").to_dict())
+
+            self.assertEqual(architect["status"], "running")
+            self.assertEqual(reviewer["status"], "running")
+            self.assertTrue(manager.runs[reviewer["run_id"]].pack.metadata["llm_node_slot"]["shared_slot"])
+            self.assertEqual(other["status"], "waiting_for_slot")
+            health = manager.health()
+            self.assertEqual(health["active_count"], 2)
+            self.assertEqual(health["active_llm_node_count"], 1)
+            self.assertEqual(health["available_llm_node_slots"], 0)
+
+        asyncio.run(scenario())
+
+    def test_checkpoint_reviewer_shares_coder_llm_node_slot(self) -> None:
+        class FakeManager(MinionManager):
+            async def _start_runner(self, state: MinionRunState) -> None:
+                state.runner_kind = "step_process"
+                state.status = "running"
+
+            async def _with_lsp_prewarm(self, pack: TaskContextPack) -> TaskContextPack:
+                return pack
+
+        async def scenario() -> None:
+            manager = FakeManager(runtime_root=self.root, max_parallel_modules=1)
+
+            coder = await manager.spawn(
+                TaskContextPack(
+                    work_order_id="wo_parent_module_a",
+                    goal="implement module",
+                    metadata={"parent_work_order_id": "wo_parent", "parent_module_id": "module_a"},
+                ).to_dict()
+            )
+            reviewer = await manager.spawn(
+                TaskContextPack(
+                    work_order_id="wo_review_module_a",
+                    goal="review module",
+                    metadata={
+                        "checkpoint_review_for_work_order_id": "wo_parent_module_a",
+                        "checkpoint_review_for_run_id": coder["run_id"],
+                        "review_target": {"work_order_id": "wo_parent_module_a", "run_id": coder["run_id"]},
+                    },
+                ).to_dict()
+            )
+            other = await manager.spawn(TaskContextPack(work_order_id="wo_other_module", goal="other module").to_dict())
+
+            self.assertEqual(coder["status"], "running")
+            self.assertEqual(reviewer["status"], "running")
+            self.assertTrue(manager.runs[reviewer["run_id"]].pack.metadata["llm_node_slot"]["shared_slot"])
+            self.assertEqual(other["status"], "waiting_for_slot")
+            health = manager.health()
+            self.assertEqual(health["active_count"], 2)
+            self.assertEqual(health["active_llm_node_count"], 1)
+            self.assertEqual(health["active_module_count"], 1)
+
+        asyncio.run(scenario())
 
     def test_manager_logical_slot_rpc_enforces_owner_and_global_limit(self) -> None:
         async def scenario() -> None:
@@ -11756,6 +12057,52 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_tick_parent_dag_blocks_parent_when_ready_pack_prepare_fails(self) -> None:
+        from pal.minion.step_runner import ModuleStepRunner
+
+        class FailingRepository:
+            def __init__(self) -> None:
+                self.blocked: dict[str, Any] = {}
+                self.events: list[dict[str, Any]] = []
+
+            def next_ready_plan_module_packs(self, work_order_id: str, *, allow_paused: bool, limit: int) -> list[TaskContextPack]:
+                _ = work_order_id, allow_paused, limit
+                raise RuntimeError("integration conflict")
+
+            def block_plan_parent(self, work_order_id: str, *, reason: str = "", error: str = "") -> dict[str, Any]:
+                self.blocked = {"status": "blocked", "work_order_id": work_order_id, "reason": reason, "error": error}
+                return dict(self.blocked)
+
+            def record_minion_event(self, event: dict[str, Any]) -> None:
+                self.events.append(dict(event))
+
+        class FakeManager:
+            runtime_root = Path("/")
+            max_parallel_modules = 5
+
+            def __init__(self) -> None:
+                self.tasking_repository = FailingRepository()
+                self.queued_events: list[dict[str, Any]] = []
+
+            def _available_module_slots(self) -> int:
+                return 3
+
+            def _queue_event_delivery(self, event: dict[str, Any]) -> None:
+                self.queued_events.append(dict(event))
+
+        async def scenario() -> None:
+            manager = FakeManager()
+            result = await ModuleStepRunner(manager).tick_parent_dag("wo_prepare_failure")
+
+            self.assertEqual(result["status"], "blocked")
+            self.assertEqual(result["reason"], "dag_ready_module_prepare_failed")
+            self.assertIn("integration conflict", result["error"])
+            self.assertEqual(manager.tasking_repository.blocked["work_order_id"], "wo_prepare_failure")
+            self.assertEqual(manager.queued_events[-1]["event_kind"], "plan_parent_blocked")
+            self.assertEqual(manager.tasking_repository.events[-1]["payload"]["status"], "blocked")
+
+        asyncio.run(scenario())
+
     def test_repair_bill_cooperative_cancel_holds_slot_until_terminal(self) -> None:
         class FakePlanManager(MinionManager):
             def __post_init__(self) -> None:
@@ -12123,136 +12470,160 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_coroutine_runner_mode_runs_minion_in_process(self) -> None:
-        class FakeRunner:
-            def __init__(self, **kwargs: Any) -> None:
-                self.write_event = kwargs["write_event"]
+    def test_manager_uses_step_executor_backend(self) -> None:
+        manager = MinionManager(runtime_root=self.root)
 
-            async def run(self) -> int:
-                await self.write_event(
-                    {
-                        "event_kind": "progress",
-                        "payload": {"phase": "fake_running", "summary": "fake coroutine runner progressed"},
-                        "created_at": utc_now(),
-                    }
-                )
-                return 0
+        self.assertEqual(manager.step_executor.__class__.__name__, "StepExecutorRunnerSupervisor")
 
+    def test_step_executor_key_is_parent_dag_scoped(self) -> None:
+        manager = MinionManager(runtime_root=self.root)
+        first = MinionRunState(
+            minion_id="m_step_a",
+            run_id="r_step_a",
+            pack=TaskContextPack(
+                work_order_id="wo_child_a",
+                goal="child a",
+                metadata={"parent_work_order_id": "wo_parent"},
+            ),
+        )
+        second = MinionRunState(
+            minion_id="m_step_b",
+            run_id="r_step_b",
+            pack=TaskContextPack(
+                work_order_id="wo_child_b",
+                goal="child b",
+                metadata={"parent_work_order_id": "wo_parent"},
+            ),
+        )
+        other = MinionRunState(
+            minion_id="m_step_other",
+            run_id="r_step_other",
+            pack=TaskContextPack(
+                work_order_id="wo_child_other",
+                goal="child other",
+                metadata={"parent_work_order_id": "wo_other_parent"},
+            ),
+        )
+
+        self.assertEqual(manager.step_executor._executor_key_for_state(first), "wo_parent")
+        self.assertEqual(manager.step_executor._executor_key_for_state(second), "wo_parent")
+        self.assertEqual(manager.step_executor._executor_key_for_state(other), "wo_other_parent")
+
+    def test_step_executor_process_accepts_shutdown_frame(self) -> None:
         async def scenario() -> None:
-            manager = MinionManager(runtime_root=self.root, runner_mode="coroutine")
-            with patch("pal.minion.runner.MinionRunner", FakeRunner):
-                result = await manager.spawn(
-                    TaskContextPack(
-                        work_order_id="wo_coroutine_runner",
-                        goal="Run fake coroutine minion.",
-                        minion_profile="generic",
-                    ).to_dict()
-                )
-                state = manager.runs[result["run_id"]]
-                self.assertEqual(state.runner_kind, "coroutine")
-                self.assertIsNone(state.process)
-                self.assertIsNotNone(state.wait_task)
-                assert state.wait_task is not None
-                await state.wait_task
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "pal.minion.step_executor_main",
+                "--runtime-root",
+                str(self.root),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=python_subprocess_env(),
+            )
+            assert process.stdin is not None
+            process.stdin.write(pack_sidecar_message({"type": "shutdown"}))
+            await process.stdin.drain()
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5)
+
+            self.assertEqual(process.returncode, 0, stderr.decode("utf-8", errors="replace"))
+            self.assertEqual(stdout, b"")
+
+        asyncio.run(scenario())
+
+    def test_step_executor_event_updates_run_ledger(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root)
+            state = MinionRunState(
+                minion_id="m_step_event",
+                run_id="r_step_event",
+                pack=TaskContextPack(work_order_id="wo_step_event", goal="step executor event"),
+                runner_kind="step_process",
+                status="running",
+            )
+            manager.runs[state.run_id] = state
+            future = asyncio.get_running_loop().create_future()
+            executor = SimpleNamespace(executor_key="wo_step_event", run_futures={state.run_id: future}, stderr_tail=[])
+            manager.step_executor.executors["wo_step_event"] = executor  # type: ignore[assignment]
+
+            manager.step_executor._record_executor_event(
+                executor,  # type: ignore[arg-type]
+                {
+                    "type": "event",
+                    "event_kind": "terminal",
+                    "minion_id": state.minion_id,
+                    "run_id": state.run_id,
+                    "work_order_id": state.pack.work_order_id,
+                    "minion_profile": state.pack.minion_profile,
+                    "payload": {"status": "completed", "summary": "done"},
+                    "created_at": utc_now(),
+                }
+            )
 
             self.assertEqual(state.status, "completed")
-            self.assertEqual(state.returncode, 0)
-            detail = manager.read_run(state.run_id)
-            self.assertEqual(detail["runner_kind"], "coroutine")
-            self.assertIsNone(detail["pid"])
-            self.assertEqual(detail["returncode"], 0)
-            self.assertTrue(any(event["event_kind"] == "progress" for event in detail["ledger"]))
+            self.assertTrue(future.done())
+            self.assertEqual(state.ledger[-1]["event_kind"], "terminal")
 
         asyncio.run(scenario())
 
-    def test_coroutine_runner_mode_accepts_manager_control(self) -> None:
-        class FakeRunner:
-            def __init__(self, **kwargs: Any) -> None:
-                self.write_event = kwargs["write_event"]
-                self.read_decision = kwargs["read_decision"]
-
-            async def run(self) -> int:
-                await self.write_event(
-                    {
-                        "event_kind": "approval_requested",
-                        "payload": {"approval_id": "approval_coroutine", "summary": "needs approval"},
-                        "created_at": utc_now(),
-                    }
-                )
-                message = await self.read_decision(1.0)
-                if str((message or {}).get("type") or "") != "decision":
-                    return 1
-                await self.write_event(
-                    {
-                        "event_kind": "terminal",
-                        "payload": {"status": "completed", "summary": "decision received"},
-                        "created_at": utc_now(),
-                    }
-                )
-                return 0
-
+    def test_step_executor_reconciles_terminal_work_order_status(self) -> None:
         async def scenario() -> None:
-            manager = MinionManager(runtime_root=self.root, runner_mode="coroutine")
-            with patch("pal.minion.runner.MinionRunner", FakeRunner):
-                result = await manager.spawn(
-                    TaskContextPack(
-                        work_order_id="wo_coroutine_control",
-                        goal="Run fake coroutine minion with approval.",
-                        minion_profile="generic",
-                    ).to_dict()
-                )
-                state = manager.runs[result["run_id"]]
-                for _ in range(50):
-                    if state.status == "approval_pending":
-                        break
-                    await asyncio.sleep(0.01)
-                self.assertEqual(state.status, "approval_pending")
+            manager = MinionManager(runtime_root=self.root)
+            pack = manager.tasking_repository.prepare_pack_for_spawn(
+                TaskContextPack(work_order_id="wo_step_terminal_reconcile", goal="already completed")
+            )
+            with manager.tasking_repository._connect() as db:
+                manager.tasking_repository._update_work_order_status(db, pack.work_order_id, "completed")
+            state = MinionRunState(
+                minion_id="m_step_terminal_reconcile",
+                run_id="r_step_terminal_reconcile",
+                pack=pack,
+                runner_kind="step_process",
+                status="running",
+            )
+            manager.runs[state.run_id] = state
+            future = asyncio.get_running_loop().create_future()
+            executor = SimpleNamespace(
+                executor_key=pack.work_order_id,
+                process=SimpleNamespace(returncode=None),
+                stdout_task=None,
+                stderr_task=None,
+                wait_task=None,
+                run_futures={state.run_id: future},
+                stderr_tail=[],
+            )
+            manager.step_executor.executors[pack.work_order_id] = executor  # type: ignore[assignment]
 
-                decision = await manager.send_decision(
-                    {"approval_id": "approval_coroutine", "decision": "accept", "run_id": state.run_id}
-                )
-                self.assertTrue(decision["ok"])
-                assert state.wait_task is not None
-                await state.wait_task
+            manager.step_executor.reconcile_runs()
 
             self.assertEqual(state.status, "completed")
-            event_kinds = [event["event_kind"] for event in state.ledger]
-            self.assertIn("decision_received", event_kinds)
-            self.assertIn("terminal", event_kinds)
+            self.assertTrue(future.done())
+            self.assertEqual(state.ledger[-1]["payload"]["reason"], "work_order_terminal_reconcile")
+            self.assertNotIn(state.run_id, executor.run_futures)
 
         asyncio.run(scenario())
 
-    def test_coroutine_runner_crash_does_not_escape_manager_process(self) -> None:
-        class FakeRunner:
-            def __init__(self, **kwargs: Any) -> None:
-                _ = kwargs
+    def test_step_executor_crash_does_not_escape_manager_process(self) -> None:
+        manager = MinionManager(runtime_root=self.root)
+        state = MinionRunState(
+            minion_id="m_step_crash",
+            run_id="r_step_crash",
+            pack=TaskContextPack(work_order_id="wo_step_crash", goal="step executor crash"),
+            runner_kind="step_process",
+            status="running",
+        )
+        manager.runs[state.run_id] = state
 
-            async def run(self) -> int:
-                raise SystemExit("runner crashed hard")
+        executor = SimpleNamespace(executor_key="wo_step_crash", run_futures={}, stderr_tail=[])
+        manager.step_executor.executors["wo_step_crash"] = executor  # type: ignore[assignment]
+        manager.step_executor._mark_active_runs_failed_after_executor_exit(executor, 9)  # type: ignore[arg-type]
 
-        async def scenario() -> None:
-            manager = MinionManager(runtime_root=self.root, runner_mode="coroutine")
-            with patch("pal.minion.runner.MinionRunner", FakeRunner):
-                result = await manager.spawn(
-                    TaskContextPack(
-                        work_order_id="wo_coroutine_crash",
-                        goal="Crash fake coroutine minion.",
-                        minion_profile="generic",
-                    ).to_dict()
-                )
-                state = manager.runs[result["run_id"]]
-                assert state.wait_task is not None
-                await state.wait_task
-
-            self.assertFalse(manager.health()["shutdown_requested"])
-            self.assertEqual(state.status, "failed")
-            self.assertEqual(state.returncode, 1)
-            self.assertIn("SystemExit", state.last_error)
-            terminal = next(event for event in state.ledger if event["event_kind"] == "terminal")
-            self.assertEqual(terminal["payload"]["status"], "failed")
-            self.assertEqual(terminal["payload"]["error_type"], "SystemExit")
-
-        asyncio.run(scenario())
+        self.assertFalse(manager.health()["shutdown_requested"])
+        self.assertEqual(state.status, "failed")
+        terminal = next(event for event in state.ledger if event["event_kind"] == "terminal")
+        self.assertEqual(terminal["payload"]["status"], "failed")
+        self.assertEqual(terminal["payload"]["reason"], "step_executor_exited")
 
     def test_workspace_file_tools_use_relative_paths_and_cache_safety(self) -> None:
         async def scenario() -> None:
@@ -12840,7 +13211,7 @@ class MinionManagerTests(unittest.TestCase):
             turn = manager.sent_messages[-1]["message"]["turn"]
             self.assertEqual(turn["turn_kind"], "checkpoint_repair")
             self.assertIn("abc123", turn["instruction"])
-            self.assertIn("minion_outputs is excluded", turn["instruction"])
+            self.assertIn("minion artifact directories are excluded", turn["instruction"])
             self.assertIn("Structured repair payload", turn["instruction"])
             self.assertIn("before the first successful workspace edit", turn["instruction"])
             self.assertIn("do not call op_lsp_*", turn["instruction"])
@@ -15905,16 +16276,15 @@ class MinionManagerTests(unittest.TestCase):
                 minion_id="m_stderr",
                 run_id="r_stderr",
                 pack=TaskContextPack(work_order_id="wo_stderr", goal="stderr failure"),
+                runner_kind="step_process",
                 status="running",
             )
 
-            class FakeProcess:
-                async def wait(self):
-                    return 1
-
-            state.process = FakeProcess()  # type: ignore[assignment]
+            manager.runs[state.run_id] = state
+            executor = SimpleNamespace(executor_key="wo_stderr", run_futures={}, stderr_tail=[])
+            manager.step_executor.executors["wo_stderr"] = executor  # type: ignore[assignment]
             manager._record_runner_stderr_line(state, "Traceback: boom")
-            await manager._wait_runner(state)
+            manager.step_executor._mark_active_runs_failed_after_executor_exit(executor, 1)  # type: ignore[arg-type]
 
             terminal = manager.event_queue[-1]
             self.assertEqual(terminal["event_kind"], "terminal")
@@ -15924,61 +16294,35 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_manager_close_all_closes_runner_liveness_pipe(self) -> None:
+    def test_manager_close_all_marks_active_step_executor_runs_killed(self) -> None:
         async def scenario() -> None:
-            manager = MinionManager(runtime_root=self.root, runner_mode="process")
-            read_fd, write_fd = os.pipe()
-            try:
-                state = MinionRunState(
-                    minion_id="m_liveness",
-                    run_id="r_liveness",
-                    pack=TaskContextPack(work_order_id="wo_liveness", goal="liveness"),
-                    status="running",
-                    manager_liveness_write_fd=write_fd,
-                )
+            manager = MinionManager(runtime_root=self.root)
+            state = MinionRunState(
+                minion_id="m_step_close",
+                run_id="r_step_close",
+                pack=TaskContextPack(work_order_id="wo_step_close", goal="close active step executor run"),
+                runner_kind="step_process",
+                status="running",
+            )
+            manager.runs[state.run_id] = state
 
-                class FakeProcess:
-                    returncode = None
+            await manager.close_all()
 
-                    def terminate(self):
-                        return None
-
-                    async def wait(self):
-                        self.returncode = 0
-                        return 0
-
-                    def kill(self):
-                        self.returncode = -9
-
-                state.process = FakeProcess()  # type: ignore[assignment]
-                manager.runs[state.run_id] = state
-
-                await manager.close_all()
-
-                write_fd = -1
-                self.assertIsNone(state.manager_liveness_write_fd)
-                self.assertEqual(os.read(read_fd, 1), b"")
-                terminal = manager.event_queue[-1]
-                self.assertEqual(terminal["event_kind"], "terminal")
-                self.assertEqual(terminal["payload"]["status"], "killed")
-                self.assertEqual(terminal["payload"]["reason"], "manager_shutdown")
-            finally:
-                if write_fd >= 0:
-                    with contextlib.suppress(OSError):
-                        os.close(write_fd)
-                with contextlib.suppress(OSError):
-                    os.close(read_fd)
+            terminal = manager.event_queue[-1]
+            self.assertEqual(terminal["event_kind"], "terminal")
+            self.assertEqual(terminal["payload"]["status"], "killed")
+            self.assertEqual(terminal["payload"]["reason"], "manager_shutdown")
 
         asyncio.run(scenario())
 
     def test_manager_graceful_shutdown_requests_runner_cancel_before_force_close(self) -> None:
         async def scenario() -> None:
-            manager = MinionManager(runtime_root=self.root, runner_mode="coroutine", graceful_shutdown_timeout_seconds=1.0)
+            manager = MinionManager(runtime_root=self.root, graceful_shutdown_timeout_seconds=1.0)
             state = MinionRunState(
                 minion_id="m_graceful",
                 run_id="r_graceful",
                 pack=TaskContextPack(work_order_id="wo_graceful", goal="graceful shutdown"),
-                runner_kind="coroutine",
+                runner_kind="logical",
                 status="running",
                 control_queue=asyncio.Queue(),
             )
@@ -16115,6 +16459,7 @@ class MinionManagerTests(unittest.TestCase):
                 minion_id="m_dead",
                 run_id="r_dead",
                 pack=TaskContextPack(work_order_id="wo_dead", goal="dead runner"),
+                runner_kind="step_process",
                 status="running",
             )
 
@@ -16122,50 +16467,48 @@ class MinionManagerTests(unittest.TestCase):
                 pid = 12345
                 returncode = 1
 
-            state.process = FakeProcess()  # type: ignore[assignment]
+            executor = SimpleNamespace(
+                executor_key="wo_dead",
+                process=FakeProcess(),
+                stdout_task=None,
+                stderr_task=None,
+                wait_task=None,
+                run_futures={},
+                stderr_tail=[],
+            )
+            manager.step_executor.executors["wo_dead"] = executor  # type: ignore[assignment]
             manager.runs[state.run_id] = state
 
             detail = await manager._call_method("read_run", {"run_id": state.run_id})
 
             self.assertEqual(detail["status"], "failed")
-            self.assertEqual(detail["returncode"], 1)
             self.assertEqual(manager.event_queue[-1]["event_kind"], "terminal")
             self.assertEqual(manager.event_queue[-1]["payload"]["status"], "failed")
 
         asyncio.run(scenario())
 
-    def test_manager_lets_runner_terminal_event_win_process_exit_race(self) -> None:
+    def test_manager_lets_runner_terminal_event_win_executor_exit_race(self) -> None:
         async def scenario() -> None:
             manager = MinionManager(runtime_root=self.root)
             state = MinionRunState(
                 minion_id="m_race",
                 run_id="r_race",
                 pack=TaskContextPack(work_order_id="wo_race", goal="race"),
+                runner_kind="step_process",
                 status="running",
             )
-
-            class FakeProcess:
-                returncode = 0
-
-                async def wait(self):
-                    self.returncode = 0
-                    return 0
-
-            async def emit_runner_terminal() -> None:
-                await asyncio.sleep(0)
-                manager._record_event(
-                    state,
-                    {
-                        "event_kind": "terminal",
-                        "payload": {"status": "blocked", "summary": "runner reported blocked"},
-                        "created_at": "2026-01-01T00:00:00Z",
-                    },
-                )
-
-            state.process = FakeProcess()  # type: ignore[assignment]
-            state.stdout_task = asyncio.create_task(emit_runner_terminal())
-
-            await manager._wait_runner(state)
+            manager.runs[state.run_id] = state
+            executor = SimpleNamespace(executor_key="wo_race", run_futures={}, stderr_tail=[])
+            manager.step_executor.executors["wo_race"] = executor  # type: ignore[assignment]
+            manager._record_event(
+                state,
+                {
+                    "event_kind": "terminal",
+                    "payload": {"status": "blocked", "summary": "runner reported blocked"},
+                    "created_at": "2026-01-01T00:00:00Z",
+                },
+            )
+            manager.step_executor._mark_active_runs_failed_after_executor_exit(executor, 0)  # type: ignore[arg-type]
 
             terminal_events = [event for event in manager.event_queue if event["event_kind"] == "terminal"]
             self.assertEqual(len(terminal_events), 1)
@@ -21612,6 +21955,9 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("not for a predetermined number of modules", prompt)
         self.assertIn("Prefer the simplest architecture", prompt)
         self.assertIn("explicit ownership, explicit data flow", prompt)
+        self.assertIn("ownership, lifecycle, and invariants builder fields", prompt)
+        self.assertIn("ownership must name the module's write authority", prompt)
+        self.assertIn("Each module call must include ownership, lifecycle, and invariants arrays", prompt)
         self.assertIn("Reduce uncertainty at boundaries", prompt)
         self.assertIn("In statically typed/system modules", prompt)
         self.assertIn("In dynamic modules", prompt)
@@ -21873,6 +22219,9 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("contract alignment", prompt)
         self.assertIn("semantic requirements, preferences, and only the mechanical dispatch/topology predicates", prompt)
         self.assertIn("Module count and module split are design choices", prompt)
+        self.assertIn("structured ownership, lifecycle, and invariants fields", prompt)
+        self.assertIn("competent coder could implement the module without guessing", prompt)
+        self.assertIn("Shared facades such as __init__.py", prompt)
         self.assertIn("do not fail only because the implementation work is split into a different number of modules", prompt)
         self.assertIn("boundaries are unclear or unsafe", prompt)
         self.assertIn("public API return types are not closed", prompt)
@@ -22599,7 +22948,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 configure_spec = core.context.execution_runtime.get_capability_spec("op_minion_configure")
                 self.assertIsNotNone(configure_spec)
                 assert configure_spec is not None
-                self.assertIn("runner_mode", configure_spec["parameters_schema"]["properties"])
+                self.assertNotIn("runner_mode", configure_spec["parameters_schema"]["properties"])
                 flush_spec = core.context.execution_runtime.get_capability_spec("op_minion_flush_runtime_config")
                 self.assertIsNotNone(flush_spec)
                 assert flush_spec is not None
@@ -22623,7 +22972,7 @@ class MinionIntegrationTests(unittest.TestCase):
             finally:
                 handle.shutdown_sync()
 
-    def test_minion_configure_persists_runner_mode_in_minion_db(self) -> None:
+    def test_minion_configure_persists_runtime_limits_in_minion_db(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_config_test_") as tmp:
             root = Path(tmp)
             core = PalCore()
@@ -22634,18 +22983,16 @@ class MinionIntegrationTests(unittest.TestCase):
                 configured = core.context.execution_runtime.execute(
                     CapabilityCall(
                         name="op_minion_configure",
-                        args={"runner_mode": "process", "max_parallel_modules": 3, "apply_now": False},
+                        args={"max_parallel_llm_nodes": 3, "apply_now": False},
                     )
                 )
 
                 self.assertEqual(configured.status, "ok")
-                self.assertEqual(configured.structured["config"]["runner_mode"], "process")
+                self.assertEqual(configured.structured["config"]["max_parallel_llm_nodes"], 3)
                 self.assertEqual(configured.structured["config"]["max_parallel_modules"], 3)
-                self.assertEqual(effective_minion_runtime_config(root)["runner_mode"], "process")
                 self.assertTrue(minion_db_path(root).exists())
 
                 manager = MinionManager(runtime_root=root)
-                self.assertEqual(manager.runner_mode, "process")
                 self.assertEqual(manager.max_parallel_modules, 3)
             finally:
                 handle.shutdown_sync()
@@ -22659,7 +23006,6 @@ class MinionIntegrationTests(unittest.TestCase):
                 merge_minion_runtime_config(
                     root,
                     {
-                        "runner_mode": "coroutine",
                         "max_parallel_modules": 4,
                         "auto_resume_ready_modules": False,
                     },
@@ -22667,7 +23013,6 @@ class MinionIntegrationTests(unittest.TestCase):
                 result = await manager._call_method("reload_runtime_config", {})
 
                 self.assertEqual(result["status"], "ok")
-                self.assertFalse(result["runner_mode_restart_required"])
                 self.assertEqual(manager.health()["max_parallel_modules"], 4)
                 self.assertFalse(manager.health()["auto_resume_ready_modules"])
 
@@ -22695,7 +23040,6 @@ class MinionIntegrationTests(unittest.TestCase):
                         "ok": True,
                         "status": "ok",
                         "max_parallel_modules": 5,
-                        "runner_mode_restart_required": False,
                     }
 
             provider = MinionManagerProvider(runtime_root=root)
@@ -22714,7 +23058,6 @@ class MinionIntegrationTests(unittest.TestCase):
             self.assertTrue(result.structured["manager_running"])
             self.assertTrue(result.structured["live_manager_running"])
             self.assertTrue(result.structured["applied_now"])
-            self.assertFalse(result.structured["restart_required"])
 
     def test_minion_flush_runtime_config_capability_reads_minion_db_and_flushes_live_manager(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_flush_config_live_test_") as tmp:
@@ -22736,7 +23079,6 @@ class MinionIntegrationTests(unittest.TestCase):
                         "ok": True,
                         "status": "ok",
                         "max_parallel_modules": 6,
-                        "runner_mode_restart_required": False,
                     }
 
             provider = MinionManagerProvider(runtime_root=root)
@@ -22753,7 +23095,6 @@ class MinionIntegrationTests(unittest.TestCase):
             self.assertEqual(result.structured["config"]["max_parallel_modules"], 6)
             self.assertEqual(FakeClient.reload_count, 1)
             self.assertTrue(result.structured["manager_running"])
-            self.assertFalse(result.structured["restart_required"])
 
     def test_root_architect_alias_resolves_to_builtin_architect(self) -> None:
         registry = MinionProfileRegistry()

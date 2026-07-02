@@ -20,6 +20,7 @@ from pal.shared import TaskContextPack
 
 
 GENERATED_COMMIT_EXCLUDES = (
+    ":(exclude,glob)**/.minion/**",
     ":(exclude,glob)**/__pycache__/**",
     ":(exclude,glob)**/.pytest_cache/**",
     ":(exclude,glob)**/.mypy_cache/**",
@@ -44,6 +45,7 @@ GENERATED_COMMIT_EXCLUDES = (
 )
 
 LOCAL_GIT_EXCLUDES = (
+    ".minion/",
     "__pycache__/",
     ".pytest_cache/",
     ".mypy_cache/",
@@ -97,15 +99,24 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
     work_order_root_id = str(metadata.get("parent_work_order_id") or workspace.get("parent_work_order_id") or pack.work_order_id).strip()
     project_root = _project_root_path(runtime_root, workspace, project_name, work_order_id=work_order_root_id)
     repo_path = _project_repo_path(runtime_root, workspace, project_name, work_order_id=work_order_root_id, module_name=module_name)
-    common_git_dir = project_root / ".git"
+    common_git_dir = _project_common_git_dir(project_root)
     created_repo = not (repo_path / ".git").exists()
     branch = str(workspace.get("work_order_branch") or f"work_order_{_safe_ref(pack.work_order_id)}").strip()
+    default_root_branch = (
+        f"work_order_root_{_safe_ref(work_order_root_id)}"
+        if str(work_order_root_id) == str(pack.work_order_id)
+        else f"work_order_{_safe_ref(work_order_root_id)}"
+    )
+    root_branch = str(workspace.get("root_work_order_branch") or default_root_branch).strip()
     worktree_base_ref = ""
     workspace_kind = "git_worktree"
 
     if created_repo:
         _ensure_project_git_store(common_git_dir, source_repo=source_repo, workspace=workspace)
-        worktree_base_ref = _worktree_base_ref_from_git_dir(common_git_dir, workspace)
+        initial_base_ref = _worktree_base_ref_from_git_dir(common_git_dir, workspace)
+        _ensure_project_root_branch(project_root, common_git_dir, branch=root_branch, base_ref=initial_base_ref)
+        workspace.setdefault("root_merge_target", initial_base_ref)
+        worktree_base_ref = str(workspace.get("base_ref") or root_branch).strip() or root_branch
         _add_worktree_from_git_dir(common_git_dir, repo_path, branch=branch, base_ref=worktree_base_ref)
     _ensure_git_identity(repo_path)
     if not _has_head(repo_path):
@@ -157,11 +168,13 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
             "base_ref": base_ref,
             "base_sha": base_sha,
             "work_order_branch": branch,
+            "root_work_order_branch": root_branch,
+            "root_merge_target": str(workspace.get("root_merge_target") or worktree_base_ref),
             "merge_target": merge_target,
             "workspace_kind": workspace_kind,
         }
     )
-    artifact_dir = project_root / "_artifacts" / _safe_ref(pack.work_order_id)
+    artifact_dir = _project_minion_dir(project_root) / "artifacts" / _safe_ref(pack.work_order_id)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     workspace.setdefault("run_dir", str(artifact_dir))
     workspace["artifact_dir"] = str(artifact_dir)
@@ -366,7 +379,8 @@ def prepare_dependency_integration_baseline(
     if not base_ref or not _git_bare(common_git_dir, "rev-parse", "--verify", base_ref).ok:
         return {}
     integration_branch = f"integration_{_safe_ref(parent_work_order_id)}_{_safe_ref(module_id)}"
-    integration_dir = common_git_dir.parent / "_integrations" / _safe_ref(module_id or "join")
+    project_root = _cleanup_project_root(workspace, common_git_dir=common_git_dir) or common_git_dir.parent.parent
+    integration_dir = _project_minion_dir(project_root) / "integrations" / _safe_ref(module_id or "join")
     _remove_integration_worktree(common_git_dir, integration_dir)
     _add_worktree_from_git_dir(common_git_dir, integration_dir, branch=integration_branch, base_ref=base_ref)
     _ensure_git_identity(integration_dir)
@@ -461,22 +475,58 @@ def _merged_compile_flags_content(contents: list[str]) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def cleanup_completed_plan_worktrees(
+def publish_completed_plan_workspace(
     workspace: dict[str, Any],
     *,
     module_outputs: list[dict[str, Any]],
-    keep_repo_path: str,
+    final_repo_path: str,
 ) -> dict[str, Any]:
-    keep = Path(str(keep_repo_path or "")).expanduser() if str(keep_repo_path or "").strip() else None
-    if keep is None or not (keep / ".git").exists():
-        return {"status": "skipped", "reason": "missing_keep_repo_path"}
-    common_git_dir = _git_common_dir(keep)
+    final_repo = Path(str(final_repo_path or "")).expanduser() if str(final_repo_path or "").strip() else None
+    if final_repo is None or not (final_repo / ".git").exists():
+        return {"status": "skipped", "reason": "missing_final_repo_path"}
+    common_git_dir = _git_common_dir(final_repo)
     if common_git_dir is None:
-        return {"status": "skipped", "reason": "missing_common_git_dir", "keep_repo_path": str(keep)}
+        return {"status": "skipped", "reason": "missing_common_git_dir", "final_repo_path": str(final_repo)}
     project_root = _cleanup_project_root(workspace, common_git_dir=common_git_dir)
     if project_root is None:
-        return {"status": "skipped", "reason": "missing_project_root", "keep_repo_path": str(keep)}
-    keep_resolved = keep.resolve()
+        return {"status": "skipped", "reason": "missing_project_root", "final_repo_path": str(final_repo)}
+    final_resolved = final_repo.resolve()
+    root_branch = str((workspace or {}).get("root_work_order_branch") or "").strip()
+    if not root_branch:
+        root_id = str((workspace or {}).get("parent_work_order_id") or "").strip()
+        root_branch = f"work_order_{_safe_ref(root_id)}" if root_id else ""
+    if not root_branch:
+        return {"status": "skipped", "reason": "missing_root_work_order_branch", "final_repo_path": str(final_resolved)}
+    final_branch = str((workspace or {}).get("work_order_branch") or _current_branch(final_resolved)).strip()
+    if not final_branch:
+        return {"status": "skipped", "reason": "missing_final_branch", "final_repo_path": str(final_resolved)}
+    if not _git_bare(common_git_dir, "rev-parse", "--verify", final_branch).ok:
+        return {
+            "status": "error",
+            "reason": "unknown_final_branch",
+            "final_branch": final_branch,
+            "final_repo_path": str(final_resolved),
+        }
+    root_merge_target = str((workspace or {}).get("root_merge_target") or "").strip()
+    if not root_merge_target:
+        root_merge_target = str((workspace or {}).get("merge_target") or (workspace or {}).get("base_ref") or "HEAD").strip() or "HEAD"
+    if not (project_root / ".git").exists():
+        _write_project_gitfile(project_root, common_git_dir)
+    _ensure_git_identity(project_root)
+    _ensure_local_git_excludes(project_root)
+    if not _git(project_root, "rev-parse", "--verify", root_branch).ok:
+        _git(project_root, "checkout", "-B", root_branch, root_merge_target, check=True)
+    else:
+        _git(project_root, "checkout", root_branch, check=True)
+    dirty = _git(project_root, "status", "--porcelain", "--untracked-files=no", check=True).stdout.strip()
+    if dirty:
+        return {
+            "status": "error",
+            "reason": "project_root_has_uncommitted_tracked_changes",
+            "project_root": str(project_root),
+            "dirty": dirty,
+        }
+    _git(project_root, "reset", "--hard", final_branch, check=True)
     candidates: list[Path] = []
     for output in module_outputs:
         if not isinstance(output, dict):
@@ -484,12 +534,13 @@ def cleanup_completed_plan_worktrees(
         repo_path = str(output.get("repo_path") or "").strip()
         if repo_path:
             candidates.append(Path(repo_path).expanduser())
+    candidates.append(final_resolved)
     integration = workspace.get("dependency_integration_baseline")
     if isinstance(integration, dict):
         repo_path = str(integration.get("repo_path") or "").strip()
         if repo_path:
             candidates.append(Path(repo_path).expanduser())
-    integrations_root = project_root / "_integrations"
+    integrations_root = _project_minion_dir(project_root) / "integrations"
     if integrations_root.is_dir():
         candidates.extend([item for item in integrations_root.iterdir() if item.is_dir()])
     removed: list[str] = []
@@ -504,8 +555,8 @@ def cleanup_completed_plan_worktrees(
         if resolved in seen:
             continue
         seen.add(resolved)
-        if resolved == keep_resolved:
-            skipped.append({"path": str(resolved), "reason": "keep_repo_path"})
+        if resolved == project_root:
+            skipped.append({"path": str(resolved), "reason": "project_root"})
             continue
         if not _is_relative_to(resolved, project_root):
             skipped.append({"path": str(resolved), "reason": "outside_project_root"})
@@ -523,11 +574,20 @@ def cleanup_completed_plan_worktrees(
     _git_bare(common_git_dir, "worktree", "prune")
     with contextlib.suppress(OSError):
         integrations_root.rmdir()
+    worktrees_root = _project_minion_dir(project_root) / "worktrees"
+    with contextlib.suppress(OSError):
+        worktrees_root.rmdir()
     return {
         "status": "ok" if not errors else "partial",
-        "mode": "keep_final_worktree",
-        "keep_repo_path": str(keep_resolved),
+        "mode": "publish_final_to_project_root",
+        "project_repo_path": str(project_root),
         "project_root": str(project_root),
+        "common_git_dir": str(common_git_dir),
+        "work_order_branch": root_branch,
+        "merge_target": root_merge_target,
+        "final_repo_path": str(final_resolved),
+        "final_branch": final_branch,
+        "commit_sha": _current_head(project_root),
         "removed": removed,
         "skipped": skipped,
         "errors": errors,
@@ -567,7 +627,18 @@ def _cleanup_project_root(workspace: dict[str, Any], *, common_git_dir: Path) ->
             if path.exists():
                 return path.resolve()
     parent = common_git_dir.parent
+    if parent.name == ".minion":
+        project_root = parent.parent
+        return project_root.resolve() if project_root.exists() else None
     return parent.resolve() if parent.exists() else None
+
+
+def _project_minion_dir(project_root: Path) -> Path:
+    return Path(project_root) / ".minion"
+
+
+def _project_common_git_dir(project_root: Path) -> Path:
+    return _project_minion_dir(project_root) / "git"
 
 
 def _git_common_dir(repo_path: Path) -> Path | None:
@@ -715,97 +786,101 @@ def _git_bare(git_dir: Path, *args: str, check: bool = False) -> GitCommandResul
     return result
 
 
-def _git_bare_input(git_dir: Path, *args: str, input_text: str, check: bool = False) -> GitCommandResult:
-    completed = subprocess.run(
-        ["git", f"--git-dir={git_dir}", *args],
-        cwd=str(Path(git_dir).parent),
-        input=input_text,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    result = GitCommandResult(
-        ok=completed.returncode == 0,
-        stdout=completed.stdout or "",
-        stderr=completed.stderr or "",
-        returncode=int(completed.returncode),
-    )
-    if check and not result.ok:
-        raise RuntimeError(result.stderr or result.stdout or f"git --git-dir={git_dir} {' '.join(args)} failed")
-    return result
-
-
 def _ensure_project_git_store(git_dir: Path, *, source_repo: str, workspace: dict[str, Any]) -> None:
     git_dir = Path(git_dir)
-    if git_dir.exists() and _git_bare(git_dir, "rev-parse", "--git-dir").ok:
+    project_root = _cleanup_project_root(workspace, common_git_dir=git_dir) or git_dir.parent.parent
+    if (project_root / ".git").exists() and _git(project_root, "rev-parse", "--git-dir").ok:
+        _ensure_git_identity(project_root)
+        _ensure_local_git_excludes(project_root)
         return
-    git_dir.parent.mkdir(parents=True, exist_ok=True)
+    if git_dir.exists() and _git_bare(git_dir, "rev-parse", "--git-dir").ok:
+        _write_project_gitfile(project_root, git_dir)
+        _ensure_git_identity(project_root)
+        _ensure_local_git_excludes(project_root)
+        return
     source = str(source_repo or "").strip()
     if source:
-        _clone_bare_repo(source, git_dir)
+        _clone_project_checkout(source, project_root)
+        _move_project_git_dir(project_root, git_dir)
     else:
-        _init_bare_repo(git_dir)
-        _create_initial_bare_commit(git_dir, branch=str(workspace.get("base_ref") or "main").strip() or "main")
-    _ensure_bare_git_identity(git_dir)
+        _init_project_checkout(project_root, branch=str(workspace.get("base_ref") or "main").strip() or "main")
+        _move_project_git_dir(project_root, git_dir)
+    _ensure_git_identity(project_root)
+    _ensure_local_git_excludes(project_root)
 
 
-def _clone_bare_repo(source: str, git_dir: Path) -> None:
-    git_dir = Path(git_dir)
-    if git_dir.exists() and any(git_dir.iterdir()):
-        raise RuntimeError(f"target common git dir is not empty: {git_dir}")
+def _clone_project_checkout(source: str, project_root: Path) -> None:
+    project_root = Path(project_root)
+    if project_root.exists() and any(project_root.iterdir()):
+        raise RuntimeError(f"target project root is not empty: {project_root}")
+    project_root.parent.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run(
-        ["git", "clone", "--bare", str(source), str(git_dir)],
-        cwd=str(git_dir.parent),
+        ["git", "clone", str(source), str(project_root)],
+        cwd=str(project_root.parent),
         capture_output=True,
         text=True,
         timeout=180,
     )
     if completed.returncode != 0:
-        raise RuntimeError(completed.stderr or completed.stdout or f"git clone --bare {source} failed")
-    _ensure_bare_git_identity(git_dir)
+        raise RuntimeError(completed.stderr or completed.stdout or f"git clone {source} failed")
 
 
-def _init_bare_repo(git_dir: Path) -> None:
-    git_dir = Path(git_dir)
-    git_dir.parent.mkdir(parents=True, exist_ok=True)
+def _init_project_checkout(project_root: Path, *, branch: str) -> None:
+    project_root = Path(project_root)
+    if project_root.exists() and any(project_root.iterdir()):
+        raise RuntimeError(f"target project root is not empty: {project_root}")
+    project_root.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run(
-        ["git", "init", "--bare", str(git_dir)],
-        cwd=str(git_dir.parent),
+        ["git", "init", str(project_root)],
+        cwd=str(project_root.parent),
         capture_output=True,
         text=True,
         timeout=60,
     )
     if completed.returncode != 0:
-        raise RuntimeError(completed.stderr or completed.stdout or f"git init --bare {git_dir} failed")
-    _ensure_bare_git_identity(git_dir)
+        raise RuntimeError(completed.stderr or completed.stdout or f"git init {project_root} failed")
+    _ensure_git_identity(project_root)
+    _git(project_root, "checkout", "-B", _safe_ref(branch or "main"), check=True)
+    _git(project_root, "commit", "--allow-empty", "-m", "minion: initialize project repo", check=True)
 
 
-def _create_initial_bare_commit(git_dir: Path, *, branch: str) -> None:
-    if _git_bare(git_dir, "rev-parse", "--verify", "HEAD").ok:
+def _move_project_git_dir(project_root: Path, git_dir: Path) -> None:
+    project_root = Path(project_root)
+    git_dir = Path(git_dir)
+    original_git = project_root / ".git"
+    if not original_git.exists():
+        raise RuntimeError(f"project checkout is missing .git: {project_root}")
+    git_dir.parent.mkdir(parents=True, exist_ok=True)
+    if git_dir.exists():
+        raise RuntimeError(f"target common git dir is not empty: {git_dir}")
+    shutil.move(str(original_git), str(git_dir))
+    _write_project_gitfile(project_root, git_dir)
+
+
+def _write_project_gitfile(project_root: Path, git_dir: Path) -> None:
+    project_root = Path(project_root)
+    git_dir = Path(git_dir)
+    project_root.mkdir(parents=True, exist_ok=True)
+    relative = git_dir
+    with contextlib.suppress(ValueError):
+        relative = git_dir.relative_to(project_root)
+    value = relative.as_posix() if not relative.is_absolute() else str(relative)
+    (project_root / ".git").write_text(f"gitdir: {value}\n", encoding="utf-8")
+
+
+def _ensure_project_root_branch(project_root: Path, git_dir: Path, *, branch: str, base_ref: str) -> None:
+    _ = git_dir
+    project_root = Path(project_root)
+    branch = str(branch or "").strip()
+    if not branch:
         return
-    tree = _git_bare_input(git_dir, "mktree", input_text="", check=True).stdout.strip()
-    commit = _git_bare(
-        git_dir,
-        "-c",
-        "user.email=minion@pal.local",
-        "-c",
-        "user.name=Pal Minion",
-        "commit-tree",
-        tree,
-        "-m",
-        "minion: initialize project repo",
-        check=True,
-    ).stdout.strip()
-    ref = f"refs/heads/{_safe_ref(branch or 'main')}"
-    _git_bare(git_dir, "update-ref", ref, commit, check=True)
-    _git_bare(git_dir, "symbolic-ref", "HEAD", ref, check=True)
-
-
-def _ensure_bare_git_identity(git_dir: Path) -> None:
-    if not _git_bare(git_dir, "config", "user.email").stdout.strip():
-        _git_bare(git_dir, "config", "user.email", "minion@pal.local", check=True)
-    if not _git_bare(git_dir, "config", "user.name").stdout.strip():
-        _git_bare(git_dir, "config", "user.name", "Pal Minion", check=True)
+    base = str(base_ref or "HEAD").strip() or "HEAD"
+    _ensure_git_identity(project_root)
+    _ensure_local_git_excludes(project_root)
+    if _git(project_root, "rev-parse", "--verify", branch).ok:
+        _git(project_root, "checkout", branch, check=True)
+    else:
+        _git(project_root, "checkout", "-B", branch, base, check=True)
 
 
 def _worktree_base_ref_from_git_dir(git_dir: Path, workspace: dict[str, Any]) -> str:
@@ -853,7 +928,10 @@ def _project_repo_path(
     if explicit:
         return Path(explicit).expanduser()
     project_root = _project_root_path(runtime_root, workspace, project_name, work_order_id=work_order_id)
-    return project_root / _safe_ref(str(module_name or "").strip() or "workspace")
+    module = _safe_ref(str(module_name or "").strip())
+    if not module:
+        return project_root
+    return _project_minion_dir(project_root) / "worktrees" / module
 
 
 def _project_name(metadata: dict[str, Any], workspace: dict[str, Any], *, task_id: str, source_repo: str) -> str:

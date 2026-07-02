@@ -180,7 +180,7 @@ class MinionSandboxTests(unittest.TestCase):
             argv, env = build_sandboxed_runner_invocation(
                 runtime_root=root,
                 pack=pack,
-                argv=["python", "-m", "pal.minion.runner_main"],
+                argv=["python", "-m", "pal.minion.step_executor_main"],
                 env={"PATH": "/usr/bin", "OPENAI_API_KEY": "secret"},
             )
 

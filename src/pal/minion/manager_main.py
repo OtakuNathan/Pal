@@ -12,6 +12,7 @@ from pal.minion.manager import MinionManager
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pal-minion-manager")
     parser.add_argument("--runtime-root", type=Path, required=True)
+    parser.add_argument("--max-parallel-llm-nodes", type=int, default=None)
     parser.add_argument("--max-parallel-modules", type=int, default=None)
     return parser
 
@@ -35,7 +36,8 @@ async def amain(runtime_root: Path, *, max_parallel_modules: int | None = None) 
 
 def main() -> int:
     args = build_parser().parse_args()
-    return asyncio.run(amain(args.runtime_root, max_parallel_modules=args.max_parallel_modules))
+    max_parallel = args.max_parallel_llm_nodes if args.max_parallel_llm_nodes is not None else args.max_parallel_modules
+    return asyncio.run(amain(args.runtime_root, max_parallel_modules=max_parallel))
 
 
 if __name__ == "__main__":

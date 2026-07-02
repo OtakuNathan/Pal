@@ -520,6 +520,30 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 },
                 "responsibility": {"type": "string"},
                 "owned_area": {"type": "array", "items": {"type": "string"}},
+                "ownership": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Required module ownership bullets. State the concrete files/symbols/state/public exits this module "
+                        "may write, upstream artifacts it may only read, and shared facades/config/manifests it does not own."
+                    ),
+                },
+                "lifecycle": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Required module lifecycle bullets. State where key data/resources/states are created, mutated, "
+                        "validated, persisted, released, and when downstream modules may consume them."
+                    ),
+                },
+                "invariants": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Required module invariant bullets. State conditions that must always hold, illegal states, "
+                        "and cross-module assumptions this module must preserve."
+                    ),
+                },
                 "scope_guard": {"type": "string"},
                 "constraint_handles": {"type": "array", "items": {"type": "string"}},
                 "decision_handles": {"type": "array", "items": {"type": "string"}},
@@ -642,7 +666,16 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                     ),
                 },
             },
-            "required": ["plan_handle", "module_key", "responsibility", "owned_area", "milestones"],
+            "required": [
+                "plan_handle",
+                "module_key",
+                "responsibility",
+                "owned_area",
+                "ownership",
+                "lifecycle",
+                "invariants",
+                "milestones",
+            ],
             "additionalProperties": False,
         },
     },
@@ -673,6 +706,21 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 },
                 "responsibility": {"type": "string"},
                 "owned_area": {"type": "array", "items": {"type": "string"}},
+                "ownership": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Required module ownership bullets: write ownership, read-only dependencies, and non-owned shared surfaces.",
+                },
+                "lifecycle": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Required module lifecycle bullets: creation, mutation, validation, persistence/release, and downstream consumption timing.",
+                },
+                "invariants": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Required module invariant bullets: always-true conditions, illegal states, and cross-module assumptions.",
+                },
                 "scope_guard": {"type": "string"},
                 "constraint_handles": {"type": "array", "items": {"type": "string"}},
                 "decision_handles": {"type": "array", "items": {"type": "string"}},
@@ -693,7 +741,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "risk_surfaces": {"type": "array", "items": {"type": "string"}},
                 "delivery_surfaces": {"type": "array", "items": {"type": "string"}},
             },
-            "required": ["plan_handle", "module_key", "responsibility", "owned_area"],
+            "required": ["plan_handle", "module_key", "responsibility", "owned_area", "ownership", "lifecycle", "invariants"],
             "additionalProperties": False,
         },
     },
@@ -915,6 +963,9 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "depends_on_module_keys": {"type": "array", "items": {"type": "string"}},
                 "responsibility": {"type": "string"},
                 "owned_area": {"type": "array", "items": {"type": "string"}},
+                "ownership": {"type": "array", "items": {"type": "string"}},
+                "lifecycle": {"type": "array", "items": {"type": "string"}},
+                "invariants": {"type": "array", "items": {"type": "string"}},
                 "scope_guard": {"type": "string"},
                 "constraint_handles": {"type": "array", "items": {"type": "string"}},
                 "decision_handles": {"type": "array", "items": {"type": "string"}},
@@ -1572,6 +1623,9 @@ class PlanBuilderRuntime:
                 "depends_on_module_keys",
                 "responsibility",
                 "owned_area",
+                "ownership",
+                "lifecycle",
+                "invariants",
                 "scope_guard",
                 "constraint_handles",
                 "decision_handles",
@@ -1604,6 +1658,9 @@ class PlanBuilderRuntime:
                 "depends_on_module_keys",
                 "responsibility",
                 "owned_area",
+                "ownership",
+                "lifecycle",
+                "invariants",
                 "scope_guard",
                 "constraint_handles",
                 "decision_handles",
@@ -1682,6 +1739,9 @@ class PlanBuilderRuntime:
                 "depends_on_module_keys",
                 "responsibility",
                 "owned_area",
+                "ownership",
+                "lifecycle",
+                "invariants",
                 "scope_guard",
                 "constraint_handles",
                 "decision_handles",
@@ -1720,6 +1780,9 @@ class PlanBuilderRuntime:
             "depends_on_module_handles": dependencies,
             "responsibility": _required(args, "responsibility"),
             "owned_area": _string_list(args.get("owned_area")),
+            "ownership": _string_list(args.get("ownership")),
+            "lifecycle": _string_list(args.get("lifecycle")),
+            "invariants": _string_list(args.get("invariants")),
             "scope_guard": _text(args.get("scope_guard")),
             "constraint_handles": _known_handles(state, _string_list(args.get("constraint_handles")), expected_prefix="constraint"),
             "decision_handles": _known_handles(state, _string_list(args.get("decision_handles")), expected_prefix="decision"),
@@ -1736,6 +1799,12 @@ class PlanBuilderRuntime:
         }
         if not item["owned_area"]:
             raise ValueError("owned_area must contain at least one path, package, component, or responsibility boundary")
+        if not item["ownership"]:
+            raise ValueError("ownership must contain at least one module ownership bullet")
+        if not item["lifecycle"]:
+            raise ValueError("lifecycle must contain at least one module lifecycle bullet")
+        if not item["invariants"]:
+            raise ValueError("invariants must contain at least one module invariant bullet")
         state["modules"].append(item)
         self._save_state(state)
         return {
@@ -2064,6 +2133,9 @@ class PlanBuilderRuntime:
                 "depends_on_module_keys",
                 "responsibility",
                 "owned_area",
+                "ownership",
+                "lifecycle",
+                "invariants",
                 "scope_guard",
                 "constraint_handles",
                 "decision_handles",
@@ -2101,6 +2173,21 @@ class PlanBuilderRuntime:
             if not owned_area:
                 raise ValueError("owned_area must contain at least one path, package, component, or responsibility boundary")
             module["owned_area"] = owned_area
+        if "ownership" in args:
+            ownership = _string_list(args.get("ownership"))
+            if not ownership:
+                raise ValueError("ownership must contain at least one module ownership bullet")
+            module["ownership"] = ownership
+        if "lifecycle" in args:
+            lifecycle = _string_list(args.get("lifecycle"))
+            if not lifecycle:
+                raise ValueError("lifecycle must contain at least one module lifecycle bullet")
+            module["lifecycle"] = lifecycle
+        if "invariants" in args:
+            invariants = _string_list(args.get("invariants"))
+            if not invariants:
+                raise ValueError("invariants must contain at least one module invariant bullet")
+            module["invariants"] = invariants
         if "scope_guard" in args:
             module["scope_guard"] = _text(args.get("scope_guard"))
         if "constraint_handles" in args:
@@ -2163,6 +2250,9 @@ class PlanBuilderRuntime:
         )
 
         target["owned_area"] = _dedupe_strings([*list(target.get("owned_area") or []), *list(source.get("owned_area") or [])])
+        target["ownership"] = _dedupe_strings([*list(target.get("ownership") or []), *list(source.get("ownership") or [])])
+        target["lifecycle"] = _dedupe_strings([*list(target.get("lifecycle") or []), *list(source.get("lifecycle") or [])])
+        target["invariants"] = _dedupe_strings([*list(target.get("invariants") or []), *list(source.get("invariants") or [])])
         target["constraint_handles"] = _dedupe_strings(
             [*list(target.get("constraint_handles") or []), *list(source.get("constraint_handles") or [])]
         )
@@ -2519,6 +2609,7 @@ class PlanBuilderRuntime:
             raise ValueError("plan must contain at least one implementation module")
         if not _string_list(state.get("languages")):
             raise ValueError("metadata.languages must contain at least one canonical implementation language id")
+        self._validate_module_boundary_contracts(state)
         self._validate_module_interfaces(state)
         self._validate_gate_evidence_handoff(state)
         self._validate_design_decisions(state)
@@ -2595,6 +2686,9 @@ class PlanBuilderRuntime:
             "module_id": _text(module.get("module_id")),
             "owned_area": _string_list(module.get("owned_area")),
             "responsibility": _text(module.get("responsibility")),
+            "ownership": _string_list(module.get("ownership")),
+            "lifecycle": _string_list(module.get("lifecycle")),
+            "invariants": _string_list(module.get("invariants")),
             "provided_interfaces": [_public_interface_payload(item) for item in list(module.get("provided_interfaces") or [])],
             "consumed_interfaces": [_public_interface_payload(item) for item in list(module.get("consumed_interfaces") or [])],
             "internal_milestones": [self._milestone_payload(state, module, item, index=index) for index, item in enumerate(module.get("internal_milestones") or [])],
@@ -2820,6 +2914,19 @@ class PlanBuilderRuntime:
                 missing.append(f"{module.get('module_id')} must declare provided_interfaces consumed by the join module")
         if missing:
             raise ValueError("module interface contracts are required for module dependencies: " + "; ".join(missing))
+
+    def _validate_module_boundary_contracts(self, state: dict[str, Any]) -> None:
+        missing: list[str] = []
+        for module in list(state.get("modules") or []):
+            module_id = _text(module.get("module_id") or module.get("handle"))
+            if not _string_list(module.get("ownership")):
+                missing.append(f"{module_id} must declare ownership bullets")
+            if not _string_list(module.get("lifecycle")):
+                missing.append(f"{module_id} must declare lifecycle bullets")
+            if not _string_list(module.get("invariants")):
+                missing.append(f"{module_id} must declare invariant bullets")
+        if missing:
+            raise ValueError("module boundary contracts are incomplete: " + "; ".join(missing))
 
     def _validate_gate_evidence_handoff(self, state: dict[str, Any]) -> None:
         missing: list[str] = []
@@ -3306,6 +3413,9 @@ def _state_from_plan_payload(
                 ],
                 "responsibility": module.responsibility,
                 "owned_area": list(module.owned_area),
+                "ownership": list(module.ownership),
+                "lifecycle": list(module.lifecycle),
+                "invariants": list(module.invariants),
                 "scope_guard": _text(module_metadata.get("scope_guard")),
                 "constraint_handles": _handles_from_public_refs(module_metadata.get("constraint_refs"), constraint_by_public),
                 "decision_handles": _handles_from_public_refs(module_metadata.get("decision_refs"), decision_by_public),

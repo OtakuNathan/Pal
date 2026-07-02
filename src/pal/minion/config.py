@@ -9,9 +9,10 @@ from typing import Any
 from pal.minion.ipc import minion_runtime_dir
 
 
-DEFAULT_MINION_RUNNER_MODE = "coroutine"
-DEFAULT_MAX_PARALLEL_MODULES = 5
+DEFAULT_MAX_PARALLEL_LLM_NODES = 5
+DEFAULT_MAX_PARALLEL_MODULES = DEFAULT_MAX_PARALLEL_LLM_NODES
 MINION_DB_FILENAME = "minion.sqlite3"
+MINION_RUNTIME_SETTING_KEYS = {"max_parallel_llm_nodes", "max_parallel_modules", "auto_resume_ready_modules"}
 MINION_RUNTIME_SETTINGS_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS minion_runtime_settings (
     setting_key TEXT PRIMARY KEY,
@@ -27,17 +28,6 @@ def minion_db_path(runtime_root: Path) -> Path:
 
 def ensure_minion_runtime_settings_schema(connection: sqlite3.Connection) -> None:
     connection.execute(MINION_RUNTIME_SETTINGS_TABLE_SQL)
-
-
-def normalize_minion_runner_mode(value: Any, *, default: str | None = DEFAULT_MINION_RUNNER_MODE) -> str | None:
-    text = str(value or "").strip().lower().replace("_", "-")
-    if not text:
-        return default
-    if text in {"coroutine", "async", "in-process", "inprocess"}:
-        return "coroutine"
-    if text in {"process", "subprocess", "fork"}:
-        return "process"
-    return default
 
 
 def read_minion_runtime_config(runtime_root: Path) -> dict[str, Any]:
@@ -56,15 +46,17 @@ def read_minion_runtime_config(runtime_root: Path) -> dict[str, Any]:
 
 def effective_minion_runtime_config(runtime_root: Path) -> dict[str, Any]:
     raw = read_minion_runtime_config(runtime_root)
-    runner_mode = normalize_minion_runner_mode(raw.get("runner_mode"))
-    env_runner_mode = normalize_minion_runner_mode(os.environ.get("PAL_MINION_RUNNER_MODE"), default=None)
-    if env_runner_mode:
-        runner_mode = env_runner_mode
 
-    max_parallel_modules = _positive_int(raw.get("max_parallel_modules"), default=DEFAULT_MAX_PARALLEL_MODULES)
-    env_max_parallel = _positive_int(os.environ.get("PAL_MINION_MAX_PARALLEL_MODULES"), default=None)
+    max_parallel_llm_nodes = _positive_int(
+        raw.get("max_parallel_llm_nodes", raw.get("max_parallel_modules")),
+        default=DEFAULT_MAX_PARALLEL_LLM_NODES,
+    )
+    env_max_parallel = _positive_int(
+        os.environ.get("PAL_MINION_MAX_PARALLEL_LLM_NODES", os.environ.get("PAL_MINION_MAX_PARALLEL_MODULES")),
+        default=None,
+    )
     if env_max_parallel is not None:
-        max_parallel_modules = env_max_parallel
+        max_parallel_llm_nodes = env_max_parallel
 
     auto_resume = _optional_bool(raw.get("auto_resume_ready_modules"))
     env_auto_resume = _optional_bool(os.environ.get("PAL_MINION_AUTO_RESUME_READY_MODULES"))
@@ -72,8 +64,8 @@ def effective_minion_runtime_config(runtime_root: Path) -> dict[str, Any]:
         auto_resume = env_auto_resume
 
     config: dict[str, Any] = {
-        "runner_mode": runner_mode or DEFAULT_MINION_RUNNER_MODE,
-        "max_parallel_modules": int(max_parallel_modules or DEFAULT_MAX_PARALLEL_MODULES),
+        "max_parallel_llm_nodes": int(max_parallel_llm_nodes or DEFAULT_MAX_PARALLEL_LLM_NODES),
+        "max_parallel_modules": int(max_parallel_llm_nodes or DEFAULT_MAX_PARALLEL_LLM_NODES),
         "db_path": str(minion_db_path(runtime_root)),
     }
     if auto_resume is not None:
@@ -83,17 +75,14 @@ def effective_minion_runtime_config(runtime_root: Path) -> dict[str, Any]:
 
 def merge_minion_runtime_config(runtime_root: Path, patch: dict[str, Any]) -> dict[str, Any]:
     current = read_minion_runtime_config(runtime_root)
-    updated = dict(current)
-    if "runner_mode" in patch:
-        runner_mode = normalize_minion_runner_mode(patch.get("runner_mode"), default=None)
-        if runner_mode is None:
-            raise ValueError("runner_mode must be coroutine or process")
-        updated["runner_mode"] = runner_mode
-    if "max_parallel_modules" in patch:
-        max_parallel_modules = _positive_int(patch.get("max_parallel_modules"), default=None)
-        if max_parallel_modules is None:
-            raise ValueError("max_parallel_modules must be a positive integer")
-        updated["max_parallel_modules"] = int(max_parallel_modules)
+    updated = {str(key): value for key, value in dict(current).items() if str(key) in MINION_RUNTIME_SETTING_KEYS}
+    if "max_parallel_llm_nodes" in patch or "max_parallel_modules" in patch:
+        raw_limit = patch.get("max_parallel_llm_nodes", patch.get("max_parallel_modules"))
+        max_parallel_llm_nodes = _positive_int(raw_limit, default=None)
+        if max_parallel_llm_nodes is None:
+            raise ValueError("max_parallel_llm_nodes must be a positive integer")
+        updated["max_parallel_llm_nodes"] = int(max_parallel_llm_nodes)
+        updated.pop("max_parallel_modules", None)
     if "auto_resume_ready_modules" in patch:
         auto_resume = _optional_bool(patch.get("auto_resume_ready_modules"))
         if auto_resume is None:
@@ -103,6 +92,8 @@ def merge_minion_runtime_config(runtime_root: Path, patch: dict[str, Any]) -> di
     path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(path)) as db:
         ensure_minion_runtime_settings_schema(db)
+        for key in set(current) - MINION_RUNTIME_SETTING_KEYS:
+            db.execute("DELETE FROM minion_runtime_settings WHERE setting_key = ?", (str(key),))
         for key, value in updated.items():
             db.execute(
                 """

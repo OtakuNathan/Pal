@@ -19,8 +19,7 @@ from pal.foundation.sidecar import (
     read_sidecar_message,
 )
 from pal.llm.runtime import scoped_llm_event_sink
-from pal.minion.config import DEFAULT_MINION_RUNNER_MODE, effective_minion_runtime_config, normalize_minion_runner_mode
-from pal.minion.coroutine_runner import CoroutineRunnerSupervisor
+from pal.minion.config import effective_minion_runtime_config
 from pal.minion.dag_advancer import dag_state_to_runtime_dict as _dag_state_to_runtime_dict
 from pal.minion.event_delivery import MinionEventDelivery
 from pal.minion.debug_log import minion_debug_log_enabled
@@ -48,9 +47,9 @@ from pal.minion.llm_broker import (
 from pal.minion.profiles import MinionProfileRegistry, SOURCE_CONTRACT_REVIEWER_CAPABILITIES
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.review_orchestrator import ReviewOrchestrator
-from pal.minion.runner_process import RunnerProcessSupervisor
 from pal.minion.sandbox import with_minion_sandbox_metadata
 from pal.minion.serial_scheduler import SerialMilestoneScheduler
+from pal.minion.step_executor_runner import StepExecutorRunnerSupervisor
 from pal.minion.step_process_supervisor import StepProcessSupervisor
 from pal.minion.step_runner import ModuleStepRunner
 from pal.minion.turns import sanitize_runner_session_pack
@@ -71,7 +70,8 @@ from pal.shared import MinionApprovalDecision, TaskContextPack
 
 
 _DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS = 3600
-_DEFAULT_MAX_PARALLEL_MODULES = 5
+_DEFAULT_MAX_PARALLEL_LLM_NODES = 5
+_DEFAULT_MAX_PARALLEL_MODULES = _DEFAULT_MAX_PARALLEL_LLM_NODES
 _DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 _GRACEFUL_SHUTDOWN_POLL_SECONDS = 0.2
 _RUN_MEMORY_LEDGER_LIMIT = 500
@@ -91,7 +91,7 @@ class MinionRunState:
     run_id: str
     pack: TaskContextPack
     process: asyncio.subprocess.Process | None = None
-    runner_kind: str = "process"
+    runner_kind: str = "step_process"
     returncode: int | None = None
     control_queue: asyncio.Queue[dict[str, Any]] | None = None
     status: str = "starting"
@@ -108,11 +108,7 @@ class MinionRunState:
     pending_clarification: dict[str, Any] = field(default_factory=dict)
     ledger: list[dict[str, Any]] = field(default_factory=list)
     stderr_tail: list[str] = field(default_factory=list)
-    stdout_task: asyncio.Task[None] | None = None
-    stderr_task: asyncio.Task[None] | None = None
     wait_task: asyncio.Task[None] | None = None
-    manager_liveness_write_fd: int | None = None
-    runner_payload_path: str = ""
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -124,7 +120,7 @@ class MinionRunState:
             "status": self.status,
             "runner_kind": self.runner_kind,
             "pid": self.process.pid if self.process is not None else None,
-            "returncode": self.process.returncode if self.process is not None else self.returncode,
+            "returncode": self.returncode if self.returncode is not None else (self.process.returncode if self.process is not None else None),
             "instruction": self.pack.instruction,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
@@ -155,7 +151,6 @@ class MinionManager:
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("pal.minion.manager"))
     max_parallel_modules: int | None = None
     auto_resume_ready_modules: bool | None = None
-    runner_mode: str | None = None
     graceful_shutdown_timeout_seconds: float = _DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
     tasking_repository: MinionTaskingRepository = field(init=False)
     server: asyncio.base_events.Server | None = None
@@ -164,7 +159,7 @@ class MinionManager:
     started_at: str = field(default_factory=utc_now)
     events: MinionEventDelivery = field(init=False)
     reviews: ReviewOrchestrator = field(init=False)
-    runner_process: RunnerProcessSupervisor = field(init=False)
+    step_executor: StepExecutorRunnerSupervisor = field(init=False)
     serial_scheduler: SerialMilestoneScheduler = field(init=False)
     step_runner: ModuleStepRunner = field(init=False)
     step_processes: StepProcessSupervisor = field(init=False)
@@ -186,21 +181,23 @@ class MinionManager:
         if self.max_parallel_modules is None:
             self.max_parallel_modules = max(
                 1,
-                _coerce_int(runtime_config.get("max_parallel_modules"), _DEFAULT_MAX_PARALLEL_MODULES) or _DEFAULT_MAX_PARALLEL_MODULES,
+                _coerce_int(
+                    runtime_config.get("max_parallel_llm_nodes", runtime_config.get("max_parallel_modules")),
+                    _DEFAULT_MAX_PARALLEL_LLM_NODES,
+                )
+                or _DEFAULT_MAX_PARALLEL_LLM_NODES,
             )
         else:
-            self.max_parallel_modules = max(1, _coerce_int(self.max_parallel_modules, _DEFAULT_MAX_PARALLEL_MODULES) or _DEFAULT_MAX_PARALLEL_MODULES)
+            self.max_parallel_modules = max(1, _coerce_int(self.max_parallel_modules, _DEFAULT_MAX_PARALLEL_LLM_NODES) or _DEFAULT_MAX_PARALLEL_LLM_NODES)
         if self.auto_resume_ready_modules is None:
             self.auto_resume_ready_modules = _coerce_bool(runtime_config.get("auto_resume_ready_modules", True))
         else:
             self.auto_resume_ready_modules = _coerce_bool(self.auto_resume_ready_modules)
-        configured_runner_mode = normalize_minion_runner_mode(runtime_config.get("runner_mode"), default=DEFAULT_MINION_RUNNER_MODE)
-        self.runner_mode = normalize_minion_runner_mode(self.runner_mode, default=configured_runner_mode) or DEFAULT_MINION_RUNNER_MODE
         self.tasking_repository = MinionTaskingRepository(runtime_root=self.runtime_root)
         self.tasking_repository.ensure_schema()
         self.events = MinionEventDelivery()
         self.reviews = ReviewOrchestrator(self)
-        self.runner_process = CoroutineRunnerSupervisor(self) if self.runner_mode == "coroutine" else RunnerProcessSupervisor(self)
+        self.step_executor = StepExecutorRunnerSupervisor(self)
         self.serial_scheduler = SerialMilestoneScheduler(self)
         self.step_runner = ModuleStepRunner(self)
         self.step_processes = StepProcessSupervisor(self)
@@ -395,6 +392,8 @@ class MinionManager:
         active = [state for state in self.runs.values() if state.status in _ACTIVE_RUN_STATUSES]
         active_module_count = self._active_module_child_count_from_ledger()
         allocated_logical_slots = self._allocated_logical_slot_count()
+        active_llm_node_count = self._active_llm_node_slot_count_from_ledger()
+        available_llm_node_slots = self._available_llm_node_slots_from_ledger()
         return {
             "ok": True,
             "health_source": "manager_memory_ledger",
@@ -402,19 +401,20 @@ class MinionManager:
             "started_at": self.started_at,
             "run_count": len(self.runs),
             "active_count": len(active),
-            "runner_mode": self.runner_mode,
-            "configured_runner_mode": str(effective_minion_runtime_config(self.runtime_root).get("runner_mode") or ""),
             "shutdown_requested": self._shutdown_event.is_set(),
             "draining": self._draining,
             "shutdown_reason": self._shutdown_reason,
             "shutdown_started_at": self._shutdown_started_at,
             "graceful_shutdown_timeout_seconds": float(self.graceful_shutdown_timeout_seconds or _DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS),
             "minion_db_path": str(self.tasking_repository.db_path),
+            "max_parallel_llm_nodes": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_LLM_NODES),
             "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
             "auto_resume_ready_modules": bool(self.auto_resume_ready_modules),
+            "active_llm_node_count": active_llm_node_count,
             "active_module_count": active_module_count,
             "allocated_logical_slots": allocated_logical_slots,
-            "available_module_slots": self._available_module_slots_from_ledger(active_module_count=active_module_count),
+            "available_llm_node_slots": available_llm_node_slots,
+            "available_module_slots": available_llm_node_slots,
             "logical_slot_generation": self._logical_slot_generation,
             "pending_event_count": len(self.event_queue),
             "event_subscriber_count": len(self.event_subscribers),
@@ -425,26 +425,26 @@ class MinionManager:
     def reload_runtime_config(self) -> dict[str, Any]:
         config = effective_minion_runtime_config(self.runtime_root)
         previous = {
-            "runner_mode": str(self.runner_mode or ""),
+            "max_parallel_llm_nodes": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_LLM_NODES),
             "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
             "auto_resume_ready_modules": bool(self.auto_resume_ready_modules),
         }
         self.max_parallel_modules = max(
             1,
-            _coerce_int(config.get("max_parallel_modules"), _DEFAULT_MAX_PARALLEL_MODULES) or _DEFAULT_MAX_PARALLEL_MODULES,
+            _coerce_int(
+                config.get("max_parallel_llm_nodes", config.get("max_parallel_modules")),
+                _DEFAULT_MAX_PARALLEL_LLM_NODES,
+            )
+            or _DEFAULT_MAX_PARALLEL_LLM_NODES,
         )
         self.auto_resume_ready_modules = _coerce_bool(config.get("auto_resume_ready_modules", True))
-        configured_runner_mode = normalize_minion_runner_mode(config.get("runner_mode"), default=DEFAULT_MINION_RUNNER_MODE)
-        runner_mode_restart_required = bool(configured_runner_mode and configured_runner_mode != self.runner_mode)
         self._notify_logical_slot_available(reason="runtime_config_reload")
         return {
             "ok": True,
             "status": "ok",
             "config": config,
             "previous": previous,
-            "runner_mode": self.runner_mode,
-            "configured_runner_mode": configured_runner_mode,
-            "runner_mode_restart_required": runner_mode_restart_required,
+            "max_parallel_llm_nodes": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_LLM_NODES),
             "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
             "auto_resume_ready_modules": bool(self.auto_resume_ready_modules),
         }
@@ -500,12 +500,16 @@ class MinionManager:
         pre_plan_result = await self._maybe_spawn_pre_plan_contract_compiler(pack)
         if pre_plan_result:
             return pre_plan_result
+        slot_admission = self._admit_llm_node_for_spawn(pack)
+        if str(slot_admission.get("status") or "") != "admitted":
+            return slot_admission
         pack = self._inject_skill_manual_context(pack)
         minion_id = f"minion_{uuid4().hex[:10]}"
         run_id = f"run_{uuid4().hex[:12]}"
         metadata = dict(pack.metadata)
         metadata["run_id"] = run_id
         metadata["minion_id"] = minion_id
+        metadata["llm_node_slot"] = dict(slot_admission)
         pack = TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
         pack = prepare_task_workspace(self.runtime_root, pack, run_id=run_id)
         pack = await self._with_lsp_prewarm(pack)
@@ -518,6 +522,13 @@ class MinionManager:
         pack = with_minion_sandbox_metadata(self.runtime_root, pack, run_id=run_id)
         state = MinionRunState(minion_id=minion_id, run_id=run_id, pack=pack)
         async with self._lock:
+            slot_admission = self._admit_llm_node_for_spawn(pack)
+            if str(slot_admission.get("status") or "") != "admitted":
+                return slot_admission
+            metadata = dict(pack.metadata)
+            metadata["llm_node_slot"] = dict(slot_admission)
+            pack = TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
+            state.pack = pack
             self.runs[run_id] = state
         await self._start_runner(state)
         self._record_event(
@@ -629,7 +640,7 @@ class MinionManager:
     async def kill(self, run_id: str, reason: str = "") -> dict[str, Any]:
         state = self._require_run(run_id)
         already_terminal = state.status not in _ACTIVE_RUN_STATUSES
-        await self.runner_process.stop_runner(state)
+        await self.step_executor.stop_runner(state)
         if state.status not in _ACTIVE_RUN_STATUSES:
             return state.summary()
         if already_terminal:
@@ -734,12 +745,10 @@ class MinionManager:
         return {"ok": True, "run": state.summary(), "clarification": response}
 
     async def _send_runner_control(self, state: MinionRunState, message: dict[str, Any]) -> dict[str, Any]:
-        if state.runner_kind == "logical":
-            if state.control_queue is None:
-                raise RuntimeError(f"logical runner control queue is not available: {state.run_id}")
+        if state.control_queue is not None:
             await state.control_queue.put(dict(message))
             return {"ok": True, "run_id": state.run_id, "message_type": str(message.get("type") or "")}
-        return await self.runner_process.send_runner_control(state, message)
+        return await self.step_executor.send_runner_control(state, message)
 
     def finalize_work_order(self, params: dict[str, Any]) -> dict[str, Any]:
         work_order_id = str(params.get("work_order_id") or "").strip()
@@ -1249,7 +1258,7 @@ class MinionManager:
 
     async def close_all(self) -> None:
         await self.step_processes.close_all()
-        await self.runner_process.close_all()
+        await self.step_executor.close_all()
         if self._llm_broker_bundle is not None:
             close = getattr(self._llm_broker_bundle, "close", None)
             if callable(close):
@@ -1257,7 +1266,7 @@ class MinionManager:
             self._llm_broker_bundle = None
 
     async def _start_runner(self, state: MinionRunState) -> None:
-        await self.runner_process.start_runner(state)
+        await self.step_executor.start_runner(state)
 
     async def llm_broker_preflight(self, params: dict[str, Any]) -> dict[str, Any]:
         self._require_broker_run(params)
@@ -1345,26 +1354,11 @@ class MinionManager:
         }
         return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
 
-    async def _read_runner_stdout(self, state: MinionRunState) -> None:
-        await self.runner_process.read_runner_stdout(state)
-
-    async def _read_runner_stderr(self, state: MinionRunState) -> None:
-        await self.runner_process.read_runner_stderr(state)
-
-    async def _wait_runner(self, state: MinionRunState) -> None:
-        await self.runner_process.wait_runner(state)
-
-    async def _wait_for_stream_tasks(self, state: MinionRunState) -> None:
-        await self.runner_process.wait_for_stream_tasks(state)
-
-    def _record_runner_exit(self, state: MinionRunState, returncode: int | None) -> None:
-        self.runner_process.record_runner_exit(state, returncode)
-
     def _reconcile_runs(self) -> None:
-        self.runner_process.reconcile_runs()
+        self.step_executor.reconcile_runs()
 
     def _active_runner_work_order_ids(self) -> set[str]:
-        return self.runner_process.active_runner_work_order_ids()
+        return self.step_executor.active_runner_work_order_ids()
 
     def _active_module_child_work_order_ids(self) -> set[str]:
         active = set(self.tasking_repository.running_plan_module_child_work_order_ids())
@@ -1411,31 +1405,126 @@ class MinionManager:
     def _allocated_logical_slot_count(self) -> int:
         return len(self._logical_slots)
 
-    def _available_module_slots_from_ledger(self, *, active_module_count: int | None = None) -> int:
-        active_count = self._active_module_child_count_from_ledger() if active_module_count is None else int(active_module_count)
+    def _active_llm_node_slot_count_from_ledger(self) -> int:
+        return len(self._active_llm_node_slot_keys_from_ledger())
+
+    def _active_llm_node_slot_keys_from_ledger(self) -> set[str]:
+        keys: set[str] = set()
+        for work_order_id in self.tasking_repository.running_plan_module_child_work_order_ids():
+            normalized = str(work_order_id or "").strip()
+            if normalized:
+                keys.add(f"work_order:{normalized}")
+        for state in self.runs.values():
+            if state.runner_kind == "logical":
+                continue
+            if state.status not in _ACTIVE_RUN_STATUSES:
+                continue
+            metadata = dict(state.pack.metadata or {})
+            is_module_child = bool(
+                str(metadata.get("parent_work_order_id") or "").strip()
+                and str(metadata.get("parent_module_id") or metadata.get("module_id") or "").strip()
+            )
+            if is_module_child and _state_last_reported_final_milestone_completed(state):
+                continue
+            key = self._llm_node_slot_key_for_pack(state.pack)
+            if key:
+                keys.add(key)
+        for slot in self._logical_slots.values():
+            key = self._llm_node_slot_key_for_logical_slot(slot)
+            if key:
+                keys.add(key)
+        return keys
+
+    def _llm_node_slot_key_for_logical_slot(self, slot: dict[str, Any]) -> str:
+        work_order_id = str(slot.get("work_order_id") or "").strip()
+        module_id = str(slot.get("module_id") or "").strip()
+        if work_order_id and module_id:
+            return f"logical:{work_order_id}:{module_id}"
+        slot_id = str(slot.get("slot_id") or "").strip()
+        if slot_id:
+            return f"logical:{slot_id}"
+        run_id = str(slot.get("run_id") or "").strip()
+        return f"logical:{run_id}" if run_id else ""
+
+    def _llm_node_slot_key_for_pack(self, pack: TaskContextPack) -> str:
+        metadata = dict(pack.metadata or {})
+        workspace = dict(pack.workspace or {})
+        for key in (
+            "checkpoint_review_for_work_order_id",
+            "plan_review_for_work_order_id",
+            "pre_plan_contract_source_work_order_id",
+            "source_work_order_id",
+        ):
+            value = str(metadata.get(key) or workspace.get(key) or "").strip()
+            if value:
+                return f"work_order:{value}"
+        review_target = metadata.get("review_target")
+        if isinstance(review_target, dict):
+            for key in (
+                "planner_work_order_id",
+                "source_work_order_id",
+                "source_work_order",
+                "work_order_id",
+            ):
+                value = str(review_target.get(key) or "").strip()
+                if value:
+                    return f"work_order:{value}"
+        work_order_id = str(pack.work_order_id or "").strip()
+        return f"work_order:{work_order_id}" if work_order_id else ""
+
+    def _admit_llm_node_for_spawn(self, pack: TaskContextPack) -> dict[str, Any]:
+        slot_key = self._llm_node_slot_key_for_pack(pack)
+        active_keys = self._active_llm_node_slot_keys_from_ledger()
+        shared = bool(slot_key and slot_key in active_keys)
+        available = max(0, int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_LLM_NODES) - len(active_keys))
+        if not shared and available <= 0:
+            return {
+                "status": "waiting_for_slot",
+                "reason": "global_parallel_limit",
+                "limit_kind": "llm_node",
+                "summary": "global LLM node concurrency limit reached",
+                "work_order_id": str(pack.work_order_id or ""),
+                "minion_profile": str(pack.minion_profile or ""),
+                "slot_key": slot_key,
+                "max_parallel_llm_nodes": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_LLM_NODES),
+                "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
+                "active_llm_node_count": len(active_keys),
+                "available_llm_node_slots": 0,
+                "available_module_slots": 0,
+                "logical_slot_generation": self._logical_slot_generation,
+            }
+        return {
+            "status": "admitted",
+            "limit_kind": "llm_node",
+            "slot_key": slot_key,
+            "shared_slot": shared,
+            "max_parallel_llm_nodes": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_LLM_NODES),
+            "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
+            "active_llm_node_count": len(active_keys),
+            "available_llm_node_slots": available if shared else max(0, available - 1),
+            "available_module_slots": available if shared else max(0, available - 1),
+            "logical_slot_generation": self._logical_slot_generation,
+        }
+
+    def _available_llm_node_slots_from_ledger(self) -> int:
         return max(
             0,
-            int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES)
-            - active_count
-            - self._allocated_logical_slot_count(),
+            int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_LLM_NODES)
+            - self._active_llm_node_slot_count_from_ledger(),
         )
+
+    def _available_llm_node_slots(self) -> int:
+        return self._available_llm_node_slots_from_ledger()
+
+    def _available_module_slots_from_ledger(self, *, active_module_count: int | None = None) -> int:
+        _ = active_module_count
+        return self._available_llm_node_slots_from_ledger()
 
     def _available_module_slots(self) -> int:
-        return max(
-            0,
-            int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES)
-            - self._active_module_child_count()
-            - self._allocated_logical_slot_count(),
-        )
+        return self._available_llm_node_slots()
 
     def _find_active_run_for_work_order(self, work_order_id: str) -> MinionRunState | None:
-        return self.runner_process.find_active_run_for_work_order(work_order_id)
-
-    def _consume_task_result(self, state: MinionRunState, task: asyncio.Task[None] | None, task_name: str) -> None:
-        self.runner_process.consume_task_result(state, task, task_name)
-
-    def _close_liveness_pipe(self, state: MinionRunState) -> None:
-        self.runner_process.close_liveness_pipe(state)
+        return self.step_executor.find_active_run_for_work_order(work_order_id)
 
     def _install_signal_handlers(self):
         try:
@@ -1535,7 +1624,7 @@ class MinionManager:
         return [state for state in self.runs.values() if state.status in _ACTIVE_RUN_STATUSES]
 
     def _record_runner_stderr_line(self, state: MinionRunState, line: str) -> None:
-        self.runner_process.record_runner_stderr_line(state, line)
+        self.step_executor.record_runner_stderr_line(state, line)
 
     def _record_event(self, state: MinionRunState, payload: dict[str, Any]) -> None:
         event_kind = str(payload.get("event_kind") or "")
@@ -1864,11 +1953,9 @@ class MinionManager:
     def runner_control_unavailable_reason(self, state: MinionRunState) -> str:
         if state.status in _TERMINAL_RUN_STATUSES:
             return f"run status is terminal: {state.status}"
-        if state.runner_kind == "logical":
-            if state.control_queue is None:
-                return "logical runner control queue is not available"
+        if state.control_queue is not None:
             return ""
-        return self.runner_process.runner_control_unavailable_reason(state)
+        return self.step_executor.runner_control_unavailable_reason(state)
 
     def record_runner_control_skipped(self, state: MinionRunState, message: dict[str, Any], *, reason: str) -> dict[str, Any]:
         payload = {

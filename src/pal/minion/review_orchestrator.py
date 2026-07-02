@@ -1978,7 +1978,7 @@ def review_gate_repair_note(gate: dict[str, Any]) -> str:
     )
     repair_rules = [
         "Change the workspace so the reviewer finding is actually addressed.",
-        "Do not use a verification-only artifact as the repair; minion_outputs is excluded from checkpoint commits.",
+        "Do not use a verification-only artifact as the repair; minion artifact directories are excluded from checkpoint commits.",
         "Rerun relevant verification before submitting a new checkpoint.",
         "Call op_minion_checkpoint_commit only after the workspace has a repair change.",
         "If no source, test, or README change is needed, stop as blocked and explain why instead of claiming the repair is complete.",

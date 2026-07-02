@@ -16,7 +16,9 @@ from pal.minion.utils import string_list as _string_list
 from pal.shared import TaskContextPack
 
 
-_DEFAULT_MAX_PARALLEL_MODULES = 5
+_DEFAULT_MAX_PARALLEL_LLM_NODES = 5
+_DEFAULT_MAX_PARALLEL_MODULES = _DEFAULT_MAX_PARALLEL_LLM_NODES
+_SUPPORTED_SLOT_RESOURCES = {"logical_minion_slot", "llm_node_slot"}
 
 
 @dataclass(frozen=True)
@@ -40,15 +42,15 @@ class LocalLogicalSlotBroker:
     manager: Any
 
     def available_slots(self) -> int | None:
-        return self.manager._available_module_slots()
+        return self.manager._available_llm_node_slots()
 
     def request(self, owner: LogicalSlotOwner, *, resource: str, module_id: str = "", reason: str = "") -> dict[str, Any]:
         # DAG resource isolation: a slot is only a global capacity token. It must
         # not carry mutable coder state, workspace handles, or git checkout state.
         # Each logical coder still gets a separate pack/context and its own
         # prepared git environment before execution.
-        normalized_resource = str(resource or "logical_minion_slot").strip()
-        if normalized_resource != "logical_minion_slot":
+        normalized_resource = str(resource or "llm_node_slot").strip()
+        if normalized_resource not in _SUPPORTED_SLOT_RESOURCES:
             return {
                 "status": "denied",
                 "reason": "unsupported_resource",
@@ -56,17 +58,21 @@ class LocalLogicalSlotBroker:
                 "run_id": owner.run_id,
                 "work_order_id": owner.work_order_id,
             }
-        available = self.manager._available_module_slots()
+        available = self.manager._available_llm_node_slots()
         if available <= 0:
             return {
                 "status": "denied",
                 "reason": "global_parallel_limit",
+                "limit_kind": "llm_node",
                 "resource": normalized_resource,
                 "run_id": owner.run_id,
                 "work_order_id": owner.work_order_id,
+                "max_parallel_llm_nodes": int(self.manager.max_parallel_modules or _DEFAULT_MAX_PARALLEL_LLM_NODES),
                 "max_parallel_modules": int(self.manager.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
+                "active_llm_node_count": self.manager._active_llm_node_slot_count_from_ledger(),
                 "active_module_count": self.manager._active_module_child_count(),
                 "allocated_logical_slots": self.manager._allocated_logical_slot_count(),
+                "available_llm_node_slots": 0,
                 "available_module_slots": 0,
                 "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
             }
@@ -87,6 +93,7 @@ class LocalLogicalSlotBroker:
             "run_id": owner.run_id,
             "work_order_id": owner.work_order_id,
             "module_id": str(module_id or "").strip(),
+            "available_llm_node_slots": self.manager._available_llm_node_slots(),
             "available_module_slots": self.manager._available_module_slots(),
             "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
         }
@@ -100,8 +107,8 @@ class LocalLogicalSlotBroker:
         reason: str = "",
         timeout_seconds: Any = None,
     ) -> dict[str, Any]:
-        normalized_resource = str(resource or "logical_minion_slot").strip()
-        if normalized_resource != "logical_minion_slot":
+        normalized_resource = str(resource or "llm_node_slot").strip()
+        if normalized_resource not in _SUPPORTED_SLOT_RESOURCES:
             return {
                 "status": "unsupported",
                 "reason": "unsupported_resource",
@@ -118,16 +125,18 @@ class LocalLogicalSlotBroker:
                 "run_id": owner.run_id,
                 "work_order_id": owner.work_order_id,
                 "module_id": str(module_id or "").strip(),
+                "available_llm_node_slots": self.manager._available_llm_node_slots(),
                 "available_module_slots": self.manager._available_module_slots(),
                 "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
             }
-        if self.manager._available_module_slots() > 0:
+        if self.manager._available_llm_node_slots() > 0:
             return {
                 "status": "available",
                 "resource": normalized_resource,
                 "run_id": owner.run_id,
                 "work_order_id": owner.work_order_id,
                 "module_id": str(module_id or "").strip(),
+                "available_llm_node_slots": self.manager._available_llm_node_slots(),
                 "available_module_slots": self.manager._available_module_slots(),
                 "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
             }
@@ -157,6 +166,7 @@ class LocalLogicalSlotBroker:
                 "work_order_id": owner.work_order_id,
                 "module_id": str(module_id or "").strip(),
                 "timeout_seconds": timeout,
+                "available_llm_node_slots": self.manager._available_llm_node_slots(),
                 "available_module_slots": self.manager._available_module_slots(),
                 "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
                 "previous_logical_slot_generation": generation,
@@ -168,6 +178,7 @@ class LocalLogicalSlotBroker:
                 "run_id": owner.run_id,
                 "work_order_id": owner.work_order_id,
                 "module_id": str(module_id or "").strip(),
+                "available_llm_node_slots": self.manager._available_llm_node_slots(),
                 "available_module_slots": self.manager._available_module_slots(),
                 "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
                 "previous_logical_slot_generation": generation,
@@ -179,6 +190,7 @@ class LocalLogicalSlotBroker:
             "work_order_id": owner.work_order_id,
             "module_id": str(module_id or "").strip(),
             "reason": str(reason or "").strip(),
+            "available_llm_node_slots": self.manager._available_llm_node_slots(),
             "available_module_slots": self.manager._available_module_slots(),
             "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
             "previous_logical_slot_generation": generation,
@@ -204,6 +216,7 @@ class LocalLogicalSlotBroker:
             "work_order_id": str(removed.get("work_order_id") or ""),
             "module_id": str(removed.get("module_id") or ""),
             "reason": str(reason or "").strip(),
+            "available_llm_node_slots": self.manager._available_llm_node_slots(),
             "available_module_slots": self.manager._available_module_slots(),
             "logical_slot_generation": int(getattr(self.manager, "_logical_slot_generation", 0)),
         }
@@ -274,10 +287,10 @@ class RpcLogicalSlotBroker:
         return [self.release(slot_id, run_id=normalized, reason=reason) for slot_id in slot_ids]
 
     def _remember_available_slots(self, payload: dict[str, Any]) -> None:
-        if "available_module_slots" not in payload:
+        if "available_llm_node_slots" not in payload and "available_module_slots" not in payload:
             return
         try:
-            self._known_available_slots = max(0, int(payload.get("available_module_slots") or 0))
+            self._known_available_slots = max(0, int(payload.get("available_llm_node_slots", payload.get("available_module_slots")) or 0))
         except (TypeError, ValueError):
             self._known_available_slots = None
 
@@ -295,7 +308,7 @@ class ModuleStepRunner:
         normalized = str(work_order_id or "").strip()
         if not normalized:
             raise ValueError("work_order_id is required")
-        available_slots = self.manager._available_module_slots()
+        available_slots = self._available_llm_node_slots()
         if available_slots <= 0:
             snapshot = self.manager.tasking_repository.read_work_order(normalized)
             metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {}
@@ -311,12 +324,51 @@ class ModuleStepRunner:
                 "active_child_work_order_id": active_child_work_order_ids[0] if active_child_work_order_ids else "",
                 "active_child_work_order_ids": active_child_work_order_ids,
                 "ready_module_ids": ready_module_ids,
+                "max_parallel_llm_nodes": self._max_parallel_llm_nodes(),
                 "max_parallel_modules": self._max_parallel_modules(),
+                "active_llm_node_count": self._active_llm_node_count(),
                 "active_module_count": self.manager._active_module_child_count(),
+                "available_llm_node_slots": 0,
+                "available_module_slots": 0,
                 "dag_tick": True,
                 "tick_reason": str(reason or "").strip(),
             }
-        packs = self.manager.tasking_repository.next_ready_plan_module_packs(normalized, allow_paused=True, limit=available_slots)
+        try:
+            packs = self.manager.tasking_repository.next_ready_plan_module_packs(normalized, allow_paused=True, limit=available_slots)
+        except Exception as exc:
+            error = f"{exc.__class__.__name__}: {exc}"
+            blocked = self.manager.tasking_repository.block_plan_parent(
+                normalized,
+                reason="dag_ready_module_prepare_failed",
+                error=error,
+            )
+            event = {
+                "event_kind": "plan_parent_blocked",
+                "minion_id": "",
+                "run_id": "",
+                "work_order_id": normalized,
+                "minion_profile": "",
+                "payload": {
+                    "status": "blocked",
+                    "summary": "DAG ready module preparation failed",
+                    "reason": "dag_ready_module_prepare_failed",
+                    "error": error,
+                    "blocked": dict(blocked),
+                    "tick_reason": str(reason or "").strip(),
+                },
+                "created_at": utc_now(),
+            }
+            self.manager._queue_event_delivery(event)
+            self.manager.tasking_repository.record_minion_event(event)
+            return {
+                "status": "blocked",
+                "work_order_id": normalized,
+                "reason": "dag_ready_module_prepare_failed",
+                "error": error,
+                "blocked": dict(blocked),
+                "dag_tick": True,
+                "tick_reason": str(reason or "").strip(),
+            }
         if not packs:
             snapshot = self.manager.tasking_repository.read_work_order(normalized)
             metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {}
@@ -357,6 +409,22 @@ class ModuleStepRunner:
                     }
                 )
                 continue
+            if str(run.get("status") or "") == "waiting_for_slot":
+                release = self.manager.tasking_repository.release_running_module_parent(
+                    resolved_pack.work_order_id,
+                    child_terminal_status="blocked",
+                    reason=f"manager deferred module {module_id or resolved_pack.work_order_id}: global LLM node limit reached",
+                )
+                spawn_failures.append(
+                    {
+                        "module_id": module_id,
+                        "child_work_order_id": resolved_pack.work_order_id,
+                        "error": "global LLM node limit reached",
+                        "deferred": dict(run),
+                        "release": dict(release),
+                    }
+                )
+                continue
             runs.append(dict(run))
             module_ids.append(module_id)
             child_work_order_ids.append(resolved_pack.work_order_id)
@@ -366,8 +434,12 @@ class ModuleStepRunner:
                 "work_order_id": normalized,
                 "failures": spawn_failures,
                 "failure_count": len(spawn_failures),
+                "max_parallel_llm_nodes": self._max_parallel_llm_nodes(),
                 "max_parallel_modules": self._max_parallel_modules(),
+                "active_llm_node_count": self._active_llm_node_count(),
                 "active_module_count": self.manager._active_module_child_count(),
+                "available_llm_node_slots": self._available_llm_node_slots(),
+                "available_module_slots": self.manager._available_module_slots(),
                 "dag_tick": True,
                 "tick_reason": str(reason or "").strip(),
             }
@@ -381,8 +453,12 @@ class ModuleStepRunner:
             "run": runs[0] if runs else {},
             "runs": runs,
             "spawn_failures": spawn_failures,
+            "max_parallel_llm_nodes": self._max_parallel_llm_nodes(),
             "max_parallel_modules": self._max_parallel_modules(),
+            "active_llm_node_count": self._active_llm_node_count(),
             "active_module_count": self.manager._active_module_child_count(),
+            "available_llm_node_slots": self._available_llm_node_slots(),
+            "available_module_slots": self.manager._available_module_slots(),
             "dag_tick": True,
             "tick_reason": str(reason or "").strip(),
         }
@@ -394,7 +470,7 @@ class ModuleStepRunner:
             parent_ids = [preferred, *[item for item in parent_ids if item != preferred]]
         scheduled: list[dict[str, Any]] = []
         for parent_id in parent_ids:
-            if self.manager._available_module_slots() <= 0:
+            if self._available_llm_node_slots() <= 0:
                 break
             result = await self.tick_parent_dag(parent_id, reason=reason or "tick_ready_plan_dags")
             if str(result.get("status") or "") == "running_module":
@@ -404,8 +480,12 @@ class ModuleStepRunner:
             "reason": reason,
             "scheduled": scheduled,
             "scheduled_count": len(scheduled),
+            "max_parallel_llm_nodes": self._max_parallel_llm_nodes(),
             "max_parallel_modules": self._max_parallel_modules(),
+            "active_llm_node_count": self._active_llm_node_count(),
             "active_module_count": self.manager._active_module_child_count(),
+            "available_llm_node_slots": self._available_llm_node_slots(),
+            "available_module_slots": self.manager._available_module_slots(),
             "dag_tick": True,
         }
 
@@ -862,6 +942,21 @@ class ModuleStepRunner:
 
     def _max_parallel_modules(self) -> int:
         return int(self.manager.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES)
+
+    def _max_parallel_llm_nodes(self) -> int:
+        return int(self.manager.max_parallel_modules or _DEFAULT_MAX_PARALLEL_LLM_NODES)
+
+    def _available_llm_node_slots(self) -> int:
+        available = getattr(self.manager, "_available_llm_node_slots", None)
+        if callable(available):
+            return int(available())
+        return int(self.manager._available_module_slots())
+
+    def _active_llm_node_count(self) -> int:
+        active = getattr(self.manager, "_active_llm_node_slot_count_from_ledger", None)
+        if callable(active):
+            return int(active())
+        return int(self.manager._active_module_child_count())
 
 
 def _active_child_work_order_ids_from_plan_execution(plan_execution: dict[str, Any]) -> list[str]:

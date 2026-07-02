@@ -57,6 +57,9 @@ class ModulePlan:
     module_id: str
     owned_area: list[str] = field(default_factory=list)
     responsibility: str = ""
+    ownership: list[str] = field(default_factory=list)
+    lifecycle: list[str] = field(default_factory=list)
+    invariants: list[str] = field(default_factory=list)
     provided_interfaces: list[dict[str, Any]] = field(default_factory=list)
     consumed_interfaces: list[dict[str, Any]] = field(default_factory=list)
     internal_milestones: list[MilestoneSpec] = field(default_factory=list)
@@ -68,6 +71,9 @@ class ModulePlan:
             "module_id": self.module_id,
             "owned_area": list(self.owned_area),
             "responsibility": self.responsibility,
+            "ownership": list(self.ownership),
+            "lifecycle": list(self.lifecycle),
+            "invariants": list(self.invariants),
             "provided_interfaces": [dict(item) for item in self.provided_interfaces],
             "consumed_interfaces": [dict(item) for item in self.consumed_interfaces],
             "internal_milestones": [item.to_dict() for item in self.internal_milestones],
@@ -78,6 +84,7 @@ class ModulePlan:
     @classmethod
     def from_dict(cls, payload: dict[str, Any], *, index: int = 0) -> "ModulePlan":
         data = dict(payload or {})
+        metadata = _dict(data.get("metadata"))
         module_id = str(data.get("module_id") or data.get("id") or f"module_{index + 1}").strip()
         milestones = data.get("internal_milestones")
         if milestones is None:
@@ -86,6 +93,9 @@ class ModulePlan:
             module_id=module_id,
             owned_area=_owned_area_list(data.get("owned_area") or data.get("owned_paths")),
             responsibility=str(data.get("responsibility") or data.get("purpose") or "").strip(),
+            ownership=_string_list(data.get("ownership") or metadata.get("ownership")),
+            lifecycle=_string_list(data.get("lifecycle") or metadata.get("lifecycle")),
+            invariants=_string_list(data.get("invariants") or metadata.get("invariants")),
             provided_interfaces=_dict_list(data.get("provided_interfaces")),
             consumed_interfaces=_dict_list(data.get("consumed_interfaces")),
             internal_milestones=[
@@ -94,7 +104,7 @@ class ModulePlan:
                 if isinstance(item, (dict, str))
             ],
             test_plan=_dict(data.get("test_plan")),
-            metadata=_dict(data.get("metadata")),
+            metadata=metadata,
         )
 
 
@@ -153,6 +163,9 @@ class CoderWorkOrder:
     role: str = "coder"
     owned_area: list[str] = field(default_factory=list)
     responsibility: str = ""
+    ownership: list[str] = field(default_factory=list)
+    lifecycle: list[str] = field(default_factory=list)
+    invariants: list[str] = field(default_factory=list)
     current_milestone: MilestoneSpec | None = None
     relevant_contracts: list[dict[str, Any]] = field(default_factory=list)
     skill_refs: list[str] = field(default_factory=list)
@@ -172,6 +185,9 @@ class CoderWorkOrder:
             "milestone_id": self.milestone_id,
             "owned_area": list(self.owned_area),
             "responsibility": self.responsibility,
+            "ownership": list(self.ownership),
+            "lifecycle": list(self.lifecycle),
+            "invariants": list(self.invariants),
             "current_milestone": self.current_milestone.to_dict() if self.current_milestone is not None else {},
             "relevant_contracts": [dict(item) for item in self.relevant_contracts],
             "skill_refs": list(self.skill_refs),
@@ -195,6 +211,9 @@ class CoderWorkOrder:
             milestone_id=str(data.get("milestone_id") or "").strip(),
             owned_area=_string_list(data.get("owned_area")),
             responsibility=str(data.get("responsibility") or "").strip(),
+            ownership=_string_list(data.get("ownership")),
+            lifecycle=_string_list(data.get("lifecycle")),
+            invariants=_string_list(data.get("invariants")),
             current_milestone=MilestoneSpec.from_dict(milestone) if isinstance(milestone, dict) else None,
             relevant_contracts=_dict_list(data.get("relevant_contracts")),
             skill_refs=_skill_refs_from(data),
@@ -622,6 +641,9 @@ def compile_coder_work_order(
         milestone_id=milestone.milestone_id,
         owned_area=list(module.owned_area),
         responsibility=module.responsibility,
+        ownership=list(module.ownership),
+        lifecycle=list(module.lifecycle),
+        invariants=list(module.invariants),
         current_milestone=milestone,
         relevant_contracts=relevant_contracts,
         skill_refs=_dedupe(
@@ -659,6 +681,9 @@ def prompt_view_for_coder(work_order: CoderWorkOrder | dict[str, Any]) -> Prompt
         "module_id": order.module_id,
         "owned_area": list(order.owned_area),
         "responsibility": order.responsibility,
+        "ownership": list(order.ownership),
+        "lifecycle": list(order.lifecycle),
+        "invariants": list(order.invariants),
     }
     dependency_context = _dict_list(order.metadata.get("module_dependency_context"))
     if dependency_context:
@@ -893,6 +918,12 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
             errors.append(f"modules[{module_index}].owned_area is required")
         if not module.responsibility:
             errors.append(f"modules[{module_index}].responsibility is required")
+        if not module.ownership:
+            errors.append(f"modules[{module_index}].ownership is required")
+        if not module.lifecycle:
+            errors.append(f"modules[{module_index}].lifecycle is required")
+        if not module.invariants:
+            errors.append(f"modules[{module_index}].invariants is required")
         for milestone_index, milestone in enumerate(module.internal_milestones):
             if not milestone.task:
                 errors.append(f"modules[{module_index}].internal_milestones[{milestone_index}].task is required")
@@ -974,13 +1005,25 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
     for module_index, module in enumerate(artifact.modules):
         if module_kind_by_id.get(module.module_id) == "join":
             continue
-        for raw_owned_area in module.owned_area:
+        declared_write_areas: list[tuple[str, str]] = [
+            (raw_owned_area, "owned_area") for raw_owned_area in module.owned_area
+        ]
+        for milestone_index, milestone in enumerate(module.internal_milestones):
+            changed_area = _string_list(milestone.metadata.get("changed_area"))
+            declared_write_areas.extend(
+                (
+                    raw_changed_area,
+                    f"internal_milestones[{milestone_index}].metadata.changed_area",
+                )
+                for raw_changed_area in changed_area
+            )
+        for raw_owned_area, source in declared_write_areas:
             owned_area = _normalized_owned_area_key(raw_owned_area)
             if not owned_area:
                 continue
             owner = owned_area_owner.get(owned_area)
             if owner and owner != module.module_id:
-                errors.append(f"modules[{module_index}].owned_area duplicates {owner}: {raw_owned_area}")
+                errors.append(f"modules[{module_index}].{source} duplicates {owner}: {raw_owned_area}")
             else:
                 owned_area_owner[owned_area] = module.module_id
     dependency_map = {str(node["node_id"]): list(node["depends_on"]) for node in nodes}
@@ -1193,6 +1236,9 @@ def _module_dependency_context(artifact: PlanArtifact, module_id: str) -> list[d
                 "node_kind": str(node.get("kind") or ""),
                 "responsibility": dependency.responsibility,
                 "owned_area": list(dependency.owned_area),
+                "ownership": list(dependency.ownership),
+                "lifecycle": list(dependency.lifecycle),
+                "invariants": list(dependency.invariants),
                 "provided_interfaces": [dict(item) for item in dependency.provided_interfaces],
                 "visibility": "declared public interfaces only",
             }

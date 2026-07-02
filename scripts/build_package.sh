@@ -55,11 +55,12 @@ required_wheel_paths=(
   "pal/minion/profile_templates/software_engineering/reviewer.toml"
   "pal/minion/profile_templates/software_engineering/review_worker.toml"
   "pal/minion/profile_templates/software_engineering/writer.toml"
-  "pal/minion/runner_process.py"
   "pal/minion/sandbox.py"
   "pal/minion/scoped_execution.py"
   "pal/minion/serial_scheduler.py"
   "pal/minion/skills.py"
+  "pal/minion/step_executor_main.py"
+  "pal/minion/step_executor_runner.py"
   "pal/minion/review_gate_store.py"
   "pal/minion/review_orchestrator.py"
   "pal/minion/workspace_environment.py"
@@ -283,7 +284,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
         "next_serial_module_turn",
         "mark_serial_module_completed",
         "record_plan_module_completion",
-        "auto_continue_work_order",
+        "auto_tick_parent_dag",
     ):
         if token not in scheduler_source:
             fail(f"pal/minion/serial_scheduler.py missing serial scheduler token {token!r}")
@@ -348,7 +349,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
         "workflow_next",
         "op_minion_submit_repair_bill",
         "resource slots",
-        "Coroutine runner mode",
+        "Step execution is per DAG",
         "workspace environment",
         "plugins/minion/workspace_environment",
         "src/pal/minion/workspace_environment.py",

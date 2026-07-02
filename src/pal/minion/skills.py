@@ -9,7 +9,7 @@ PAL_MINION_PROFILE_DEVELOPMENT_SKILL_ID = "pal.minion.profile.development"
 
 PAL_MINION_DEVELOPMENT_MANUAL = """# Pal Minion Development
 
-Use this skill when Pal needs to add, review, repair, or explain the Minion subsystem: workflow dispatch, profiles, gates, scheduler/resource slots, coroutine runner behavior, workspace environment setup, repair bill replay, sandboxing, or minion-facing internal tools.
+Use this skill when Pal needs to add, review, repair, or explain the Minion subsystem: workflow dispatch, profiles, gates, scheduler/resource slots, step executor behavior, runner coroutine isolation, workspace environment setup, repair bill replay, sandboxing, or minion-facing internal tools.
 
 ## Current Shape
 
@@ -39,7 +39,7 @@ For software work, the default flow is:
 6. `plan_acceptance` gate reviews software plans. Passing review opens plan acceptance unless `interaction_mode` allows autonomous acceptance.
 7. Accepted or mechanically generated plans compile into a module DAG. The manager schedules ready modules under the global concurrency limit.
 8. Each DAG node is consumed by its executor profile. Coder milestones run in isolated contexts and Git worktrees/checkouts. Reviewer gates run as module-local repair loops and share the module slot.
-9. Join/final verification is the only final product worktree that users normally need to inspect.
+9. Join/final verification publishes back to the project-root work-order branch when the parent DAG completes. Users normally inspect the project root; `.minion` is the internal execution/artifact area.
 
 Non-software profiles usually run as generic single-node DAGs unless their family registers a richer DAG producer. They still use the same pre/in/post shape: prepare environment, execute bounded work, then postprocess/gate/finalize.
 
@@ -67,7 +67,7 @@ The manager owns concurrency. A module occupies one global slot from module star
 - Track per-work-order DAG state: module status, dependency graph, indegree table, ready queue, active children, completed modules, and join readiness.
 - Resource acquisition should be event-driven. If no slot is available, queue the ready module instead of busy-polling.
 - Always return slots on normal completion, failure, kill, timeout, and abandoned-run recovery.
-- Coroutine runner mode should preserve per-coder isolation: each logical runner needs its own context, transcript, scoped execution runtime, workspace metadata, and Git environment.
+- Step execution is per DAG: one step executor child process hosts that DAG's runner coroutines. Each runner coroutine still needs isolated context, transcript, scoped execution runtime, workspace metadata, and Git environment.
 - Manager restart must be able to rebuild safe scheduling state from persisted work order metadata, plan DAG projection, active runs, and module statuses.
 
 ## Workspace And Environment
@@ -76,9 +76,9 @@ Workspace preparation should happen before slow LLM calls whenever possible.
 
 - New projects require a declared `primary_language`; existing repos should be inspected enough to infer the main language and repo path.
 - Language-specific setup belongs in workspace environment preparers, not in model troubleshooting. Prefer reusable templates under `plugins/minion/workspace_environment`.
-- Coder work is Git-backed and isolated. Each module sees a full checkout/worktree of its baseline; do not treat duplicated files across module worktrees as a contract-copy bug.
+- Coder work is Git-backed and isolated. Each module sees a full checkout/worktree of its baseline under `.minion/worktrees`; do not treat duplicated files across module worktrees as a contract-copy bug.
 - Shared contracts must have one canonical producer-owned source path and import/include path. Downstream modules consume that path; they must not create dependency source copies under their own owned areas.
-- Keep task repos under runtime data, not `/tmp`, so work survives cleanup and can be inspected after completion.
+- Keep task repos under runtime data, not `/tmp`, so work survives cleanup and can be inspected after completion. Completed parent DAGs publish the final branch to the project root and keep artifacts under `.minion/artifacts`.
 
 ## Workspace Environment Templates
 
@@ -398,7 +398,8 @@ def minion_declared_skills(*, module_id: str = "minion") -> tuple[SkillDescripto
                 "minion profile",
                 "minion scheduler",
                 "resource slot",
-                "coroutine runner",
+                "step executor",
+                "runner coroutine",
                 "repair bill",
                 "repair replay",
                 "workspace environment",
@@ -434,7 +435,7 @@ def minion_declared_skills(*, module_id: str = "minion") -> tuple[SkillDescripto
                 result="The change is profile-driven where possible, mechanically scheduled, runner-isolated, package-checked, and documented.",
             ),
             use_when=(
-                "Use when the user asks Pal to change Minion workflow, profiles, gates, scheduler/concurrency, coroutine runner, "
+                "Use when the user asks Pal to change Minion workflow, profiles, gates, scheduler/concurrency, step executor behavior, runner coroutine isolation, "
                 "workspace environment setup, repair bill replay, sandbox policy, or internal Minion developer guidance."
             ),
             avoid_when=(

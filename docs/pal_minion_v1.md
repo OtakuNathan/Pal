@@ -126,17 +126,17 @@ Coder work remains Git-backed:
 - A work order runs on its own branch in that project repo.
 - A milestone completion is represented by one Git commit on the work order branch.
 - A completed checkpoint records the milestone index and the corresponding commit SHA.
-- Coder reports and test notes are written under `minion_outputs/{work_order_id}/` inside the project repo/workspace and are included in the commit when relevant.
+- Coder reports and test notes are written under `.minion/artifacts/{work_order_id}/` and are not part of milestone source commits.
 
 This keeps the minion ledger and workspace state aligned: the minion tasking store knows which milestone is complete, and Git can restore the files for that milestone.
 
 Spawn must read or initialize the project repo before starting a runner. For an existing work order, spawn must checkout or create the work order branch from the recorded base ref. A runner must not do task work on Pal's live branch unless that workspace was explicitly assigned as the project repo.
 
-The default prepared repo layout is `data/minion/repos/{parent_work_order_id}/{project_name}/{module_name}` for module work, with explicit `task_repo_path` or `target_repo_path` still taking precedence. `project_name` is read from metadata/workspace when present, otherwise it falls back to the source repo name and then `task_id`. `module_name` is the human-readable module folder name and remains compatible with existing `module_id` plan artifacts.
+The default prepared repo layout is `data/minion/repos/{parent_work_order_id}/{project_name}` for the final inspectable project root. Module work runs in isolated worktrees under `.minion/worktrees/{module_name}`, temporary join baselines live under `.minion/integrations/{module_name}`, and reports/artifacts live under `.minion/artifacts/{work_order_id}`. Explicit `task_repo_path` or `target_repo_path` still takes precedence. `project_name` is read from metadata/workspace when present, otherwise it falls back to the source repo name and then `task_id`. `module_name` is the human-readable module worktree name and remains compatible with existing `module_id` plan artifacts.
 
 Plan-parent module execution keeps module branches isolated while preserving declared dependency flow. After a module checkpoint passes its gate and the module completes, the parent records that child repo/branch as the next serial dependency baseline. The next module child still gets its own module workspace and work-order branch, but local Git baselines are materialized as `git worktree` checkouts instead of full clones; remote or nonlocal baselines fall back to clone. This makes prelude/contracts and accepted upstream public interfaces visible without copying the same repository repeatedly or allowing arbitrary sibling internals.
 
-While a work order is running, each module worktree contains a full checkout of the current baseline. Seeing the same canonical path such as `src/package/contracts.py` under multiple module folders is expected worktree behavior, not a copied contract. After the parent work order completes, Pal cleans the execution scene by keeping the final/join worktree, common `.git` store, and `_artifacts`, then removing intermediate module and temporary integration worktrees with `git worktree remove --force`. Branches and commits remain in the common Git store for audit/recovery.
+While a work order is running, each module worktree contains a full checkout of the current baseline. Seeing the same canonical path such as `src/package/contracts.py` under multiple module worktrees is expected worktree behavior, not a copied contract. After the parent work order completes, Pal publishes the final/join branch back to the project-root work-order branch, then removes module and temporary integration worktrees with `git worktree remove --force`. Users inspect the project root; `.minion` remains the internal execution area for the common Git store and artifacts.
 
 Module boundaries are contract boundaries. Planner output must describe cross-module handoffs through `provided_interfaces`, `consumed_interfaces`, `cross_module_contracts`, and prelude/contracts stubs or public facades when downstream modules need importable types or APIs. Coder and reviewer profiles treat undeclared cross-module imports as contract violations, including in the join module. Join may compose modules only through declared public interfaces, exported facades, or prelude contracts.
 
@@ -146,10 +146,11 @@ The scheduler derives runtime state from minion-owned facts, not from the projec
 
 - a module is ready when it is not completed, not running, not blocked, and all dependency modules are completed
 - ready modules enter a waiting queue ordered by the validated topology order
-- the global `max_parallel_modules` limit controls how many ready modules may start
-- `max_parallel_modules=5` is the default global module concurrency limit
-- `max_parallel_modules=1` gives serial behavior without a manual module-boundary DAG tick
-- larger values allow independent ready modules to run concurrently in isolated worktrees
+- the global `max_parallel_llm_nodes` limit controls how many ready execution nodes may start; `max_parallel_modules` is accepted as a compatibility alias
+- `max_parallel_llm_nodes=5` is the default global LLM-node concurrency limit
+- architect plus plan review share one plan-production node slot, and a module coder plus gate reviewer share one module node slot
+- `max_parallel_llm_nodes=1` gives serial behavior without a manual module-boundary DAG tick
+- larger values allow independent ready nodes to run concurrently in isolated worktrees
 
 Module completion, parent spawn, manager startup recovery, retry, and explicit DAG tick are scheduling signals. `tick_parent_dag` is a manual recovery/control path, not the normal module-boundary driver. The normal path is: gate passes a child module checkpoint, parent records the module completion, the scheduler recomputes ready modules, and the manager starts the next available child module when a global concurrency slot is free. On manager startup, stale `running_module` children without active runner processes are released back to the DAG as ready work, then ready parents are automatically scheduled after the manager socket is listening. Set `PAL_MINION_AUTO_RESUME_READY_MODULES=0` to keep startup recovery ledger-only and require an explicit DAG tick. When the DAG completes, the parent writes a mechanical `completion_report.md` artifact under the work-order artifact directory; user-facing notifications should point to that artifact rather than paste the full report.
 

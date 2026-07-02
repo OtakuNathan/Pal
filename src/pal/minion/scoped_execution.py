@@ -331,7 +331,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": (
             "Create the current milestone checkpoint commit in the minion workspace git branch and return structured "
             "commit evidence. Use this after implementation and verification are complete. The tool stages source, "
-            "tests, docs, and project config while excluding generated build/cache artifacts and minion_outputs."
+            "tests, docs, and project config while excluding generated build/cache artifacts and minion artifact directories."
         ),
         "parameters_schema": {
             "type": "object",

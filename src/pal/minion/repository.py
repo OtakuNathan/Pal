@@ -30,7 +30,7 @@ from pal.minion.dag_advancer import (
     release_running_module as _dag_release_running_module,
 )
 from pal.minion.debug_log import minion_debug_log_enabled
-from pal.minion.git_env import cleanup_completed_plan_worktrees, prepare_dependency_integration_baseline
+from pal.minion.git_env import publish_completed_plan_workspace, prepare_dependency_integration_baseline
 from pal.minion.ledger_store import MinionLedgerStore
 from pal.minion.plan_store import MinionPlanStore
 from pal.minion.prompt_adapter import prompt_scaffold_summary as _prompt_scaffold_summary
@@ -1486,11 +1486,29 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 plan_execution.pop("next_module_id", None)
             if resolved_status == "completed":
                 parent_status = "completed"
-                cleanup = cleanup_completed_plan_worktrees(
+                cleanup = publish_completed_plan_workspace(
                     child_workspace,
                     module_outputs=[dict(value) for value in dict(dag.get("module_outputs") or {}).values() if isinstance(value, dict)],
-                    keep_repo_path=str(child_workspace.get("repo_path") or ""),
+                    final_repo_path=str(child_workspace.get("repo_path") or ""),
                 )
+                if str(cleanup.get("project_repo_path") or "").strip():
+                    final_workspace = _persistent_workspace_metadata(parent_metadata.get("workspace") if isinstance(parent_metadata.get("workspace"), dict) else {})
+                    final_workspace.update(
+                        {
+                            "repo_path": str(cleanup.get("project_repo_path") or ""),
+                            "source_repo": str(cleanup.get("project_repo_path") or ""),
+                            "runtime_project_path": str(cleanup.get("project_root") or cleanup.get("project_repo_path") or ""),
+                            "work_order_repo_root": str(cleanup.get("project_root") or cleanup.get("project_repo_path") or ""),
+                            "common_git_dir": str(cleanup.get("common_git_dir") or ""),
+                            "work_order_branch": str(cleanup.get("work_order_branch") or ""),
+                            "base_ref": str(cleanup.get("work_order_branch") or ""),
+                            "merge_target": str(cleanup.get("merge_target") or ""),
+                            "published_final_branch": str(cleanup.get("final_branch") or ""),
+                            "published_final_repo_path": str(cleanup.get("final_repo_path") or ""),
+                            "published_commit_sha": str(cleanup.get("commit_sha") or ""),
+                        }
+                    )
+                    parent_metadata["workspace"] = _drop_empty_dict(final_workspace)
                 parent_metadata["workspace_cleanup"] = cleanup
                 plan_execution["workspace_cleanup"] = cleanup
                 parent_metadata["plan_execution"] = plan_execution
@@ -1758,6 +1776,40 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             if not wrote:
                 return {"status": "stale_dag_revision", "work_order_id": str(work_order_id), "reason": reason}
         return {"status": normalized, "work_order_id": str(work_order_id), "reason": reason}
+
+    def block_plan_parent(self, work_order_id: str, *, reason: str = "", error: str = "") -> dict[str, Any]:
+        snapshot = self.read_work_order(str(work_order_id))
+        if snapshot.get("status") != "ok":
+            return {"status": "not_found", "work_order_id": str(work_order_id)}
+        work_order = dict(snapshot.get("work_order") or {})
+        metadata = _loads_or_dict(work_order.get("metadata"))
+        plan_execution = dict(metadata.get("plan_execution") or {})
+        if str(plan_execution.get("mode") or "") != "module_parent_milestones":
+            return {"status": "skipped", "reason": "not_plan_parent", "work_order_id": str(work_order_id)}
+        summary = str(error or reason or "plan parent blocked").strip()
+        plan_execution["status"] = "blocked"
+        plan_execution["blocked_reason"] = str(reason or "dag_tick_failed")
+        plan_execution["blocked_summary"] = summary
+        plan_execution["blocked_at"] = utc_now()
+        metadata["plan_execution"] = plan_execution
+        expected_metadata_json = _json(_loads_or_dict(work_order.get("metadata")))
+        with self._connect() as db:
+            wrote = self._write_plan_parent_metadata(
+                db,
+                str(work_order_id),
+                metadata,
+                expected_metadata_json=expected_metadata_json,
+                work_order_status="blocked",
+            )
+        if not wrote:
+            return {"status": "stale_dag_revision", "work_order_id": str(work_order_id), "reason": reason, "error": error}
+        return {
+            "status": "blocked",
+            "work_order_id": str(work_order_id),
+            "reason": str(reason or "dag_tick_failed"),
+            "error": str(error or ""),
+            "summary": summary,
+        }
 
     def submit_repair_bill(self, payload: dict[str, Any]) -> dict[str, Any]:
         last_result: dict[str, Any] = {}
