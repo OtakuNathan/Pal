@@ -39,6 +39,7 @@ EXPLICIT_LLM_TOOL_ALIASES: dict[str, str] = {
     "op_minion_plan_add_milestone_outline": "plan_add_milestone_outline",
     "op_minion_plan_add_module_interface": "plan_add_module_interface",
     "op_minion_plan_add_module_outline": "plan_add_module_outline",
+    "op_minion_plan_add_module_outlines_batch": "plan_add_module_outlines_batch",
     "op_minion_plan_begin": "plan_begin",
     "op_minion_plan_checkout": "plan_checkout",
     "op_minion_plan_begin_milestone": "plan_begin_milestone",

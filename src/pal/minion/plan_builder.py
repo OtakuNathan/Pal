@@ -34,6 +34,7 @@ PLAN_BUILDER_INITIAL_CAPABILITIES: tuple[str, ...] = (
     "op_minion_plan_add_constraint",
     "op_minion_plan_add_design_decision",
     "op_minion_plan_add_module_outline",
+    "op_minion_plan_add_module_outlines_batch",
     "op_minion_plan_begin_module",
     "op_minion_plan_add_module_interface",
     "op_minion_plan_add_milestone_outline",
@@ -57,6 +58,7 @@ PLAN_BUILDER_WRITE_CAPABILITIES: tuple[str, ...] = (
     "op_minion_plan_add_constraint",
     "op_minion_plan_add_design_decision",
     "op_minion_plan_add_module_outline",
+    "op_minion_plan_add_module_outlines_batch",
     "op_minion_plan_begin_module",
     "op_minion_plan_add_module_interface",
     "op_minion_plan_add_milestone_outline",
@@ -679,6 +681,74 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "op_minion_plan_add_module_outlines_batch": {
+        "name": "op_minion_plan_add_module_outlines_batch",
+        "description": (
+            "Add and close multiple module outlines in one transaction. Each module uses the same shape as "
+            "plan_add_module_outline except plan_handle is supplied once at the top level. Order modules by "
+            "dependency so later modules can reference earlier modules through depends_on_module_keys. If any "
+            "module fails validation, Pal rolls the whole batch back."
+        ),
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "plan_handle": {"type": "string"},
+                "modules": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "module_key": {
+                                "type": "string",
+                                "description": "Stable, human-readable module id/name. Prefer snake_case names.",
+                            },
+                            "kind": {"type": "string", "enum": ["prelude", "module", "join"], "default": "module"},
+                            "depends_on_module_handles": {"type": "array", "items": {"type": "string"}},
+                            "depends_on_module_keys": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Stable module_key/module_id values this module depends on. Prefer this when possible.",
+                            },
+                            "responsibility": {"type": "string"},
+                            "owned_area": {"type": "array", "items": {"type": "string"}},
+                            "ownership": {"type": "array", "items": {"type": "string"}},
+                            "lifecycle": {"type": "array", "items": {"type": "string"}},
+                            "invariants": {"type": "array", "items": {"type": "string"}},
+                            "scope_guard": {"type": "string"},
+                            "constraint_handles": {"type": "array", "items": {"type": "string"}},
+                            "decision_handles": {"type": "array", "items": {"type": "string"}},
+                            "gate_check_refs": {"type": "array", "items": {"type": "string"}},
+                            "languages": {"type": "array", "items": {"type": "string"}},
+                            "executor_profile": {"type": "string"},
+                            "module_quality_criteria": {"type": "array", "items": {"type": "string"}},
+                            "risk_surfaces": {"type": "array", "items": {"type": "string"}},
+                            "delivery_surfaces": {"type": "array", "items": {"type": "string"}},
+                            "interfaces": {"type": "array", "items": {"type": "object"}},
+                            "provided_interfaces": {"type": "array", "items": {"type": "object"}},
+                            "consumed_interfaces": {"type": "array", "items": {"type": "object"}},
+                            "milestones": {
+                                "type": "array",
+                                "items": {"type": "object"},
+                                "description": "Closed milestone outlines. Each item should include title, task, and acceptance_criteria.",
+                            },
+                        },
+                        "required": [
+                            "module_key",
+                            "responsibility",
+                            "owned_area",
+                            "ownership",
+                            "lifecycle",
+                            "invariants",
+                            "milestones",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["plan_handle", "modules"],
+            "additionalProperties": False,
+        },
+    },
     "op_minion_plan_begin_module": {
         "name": "op_minion_plan_begin_module",
         "description": (
@@ -1236,6 +1306,8 @@ class PlanBuilderRuntime:
             return self._add_design_decision(args)
         if name == "op_minion_plan_add_module_outline":
             return self._add_module_outline(args)
+        if name == "op_minion_plan_add_module_outlines_batch":
+            return self._add_module_outlines_batch(args)
         if name == "op_minion_plan_begin_module":
             return self._begin_module(args)
         if name == "op_minion_plan_add_module_interface":
@@ -1725,6 +1797,47 @@ class PlanBuilderRuntime:
                 "milestone_handles": [item for item in milestone_handles if item],
                 "acceptance_handles": [item for item in acceptance_handles if item],
                 "next_tool_hint": "Use plan_handle with plan_add_module_outline for the next module. Do not add milestones to this closed module.",
+            },
+        }
+
+    def _add_module_outlines_batch(self, args: dict[str, Any]) -> dict[str, Any]:
+        _reject_unknown_args(args, {"plan_handle", "modules"})
+        plan_handle = _required(args, "plan_handle")
+        modules = _dict_list(args.get("modules"))
+        if not modules:
+            raise ValueError("modules must contain at least one module outline")
+        before = self._load_state(plan_handle)
+        results: list[dict[str, Any]] = []
+        try:
+            for index, raw_module in enumerate(modules, start=1):
+                if "plan_handle" in raw_module:
+                    raise ValueError(f"modules[{index}].plan_handle is not allowed; pass top-level plan_handle")
+                module_args = {"plan_handle": plan_handle}
+                module_args.update(raw_module)
+                result = self._add_module_outline(module_args)
+                structured = dict(result.get("structured") or {})
+                results.append(
+                    {
+                        "module_key": str(structured.get("module_key") or raw_module.get("module_key") or ""),
+                        "module_handle": str(structured.get("module_handle") or ""),
+                        "module_closed": bool(structured.get("module_closed", True)),
+                        "milestone_handles": [str(item) for item in list(structured.get("milestone_handles") or []) if str(item or "").strip()],
+                        "acceptance_handles": [str(item) for item in list(structured.get("acceptance_handles") or []) if str(item or "").strip()],
+                    }
+                )
+        except Exception:
+            self._save_state(before)
+            raise
+        return {
+            "text": (
+                f"Module outline batch added and closed: {len(results)} module(s). "
+                "Use returned module_key/module_handle mappings for later repair or dependency references."
+            ),
+            "structured": {
+                "plan_handle": plan_handle,
+                "modules": results,
+                "module_handles": [item["module_handle"] for item in results if item["module_handle"]],
+                "module_keys": [item["module_key"] for item in results if item["module_key"]],
             },
         }
 

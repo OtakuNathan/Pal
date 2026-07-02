@@ -85,7 +85,7 @@ Architect plan construction is structured and mutable during drafting:
 
 - `plan_begin` creates a draft handle.
 - Module and milestone tools add bounded structure. `module_key` is caller-chosen, stable, and human-readable; generated handles are internal mutation references.
-- `plan_add_module_outline` and `plan_add_milestone_outline` close their nodes in one call. `begin_*`/`end_*` tools are for incremental construction and return parent handles so the planner can continue at the correct layer.
+- `plan_add_module_outlines_batch`, `plan_add_module_outline`, and `plan_add_milestone_outline` close their nodes in one call. `begin_*`/`end_*` tools are for incremental construction and return parent handles so the architect can continue at the correct layer.
 - Revision planners use `plan_checkout`, `plan_find`, `plan_get`, and `plan_update_*`/`plan_delete_*` tools to repair specific handles instead of rebuilding the whole plan from scratch.
 - The runtime validates topology, closed nodes, acceptance criteria, module dependencies, and gate evidence fields before a draft can be submitted for review.
 - Domain plugins may expose plan builder aliases for their own vocabulary, but aliases must deterministically map back to the core plan builder operations. The compiled artifact remains the canonical DAG; alias output is not a second plan format.
@@ -371,7 +371,7 @@ If `TaskContextPack.metadata.preferred_endpoint_id` is present, the runner forwa
 
 `TaskContextPack.allowed_capabilities` is the internal allowed pool. To keep token cost low, the normal LLM tool surface exposes only a small resident work set: `tool_search`, `tool_read`, `tool_call`, `file_read`, `file_edit`, `file_write`, `delete_path`, `git`, `shell`, `tree`, `search`, `artifact_write`/`artifact_edit`, architect `plan_*` builder tools, `web_search`, `web_read`, `memory_recall`, and LSP/code-intelligence tools when those capabilities are allowed. Discovery runs through a scoped execution view, so denied or non-allowed capabilities cannot appear in search/read results.
 
-When `artifact_write` is available, the runner prompt asks the minion to write the primary deliverable to `artifact_dir` and keep the final summary short. Software architect profiles instead use the plan builder tools, starting with `plan_begin`, adding module and milestone outlines plus acceptance criteria, then finishing with `plan_validate_and_submit_for_review`; that call validates the draft and submits the primary plan artifact for the existing `plan_acceptance` gate. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
+When `artifact_write` is available, the runner prompt asks the minion to write the primary deliverable to `artifact_dir` and keep the final summary short. Software architect profiles instead use the plan builder tools, starting with `plan_begin`, preferably adding a complete ordered module list through `plan_add_module_outlines_batch`, then finishing with `plan_validate_and_submit_for_review`; that call validates the draft and submits the primary plan artifact for the existing `plan_acceptance` gate. Single-outline and begin/end tools remain available for local repair or incremental construction. If a text-deliverable run finishes with text but no explicit artifact, the runner writes an automatic `milestone_{index}_{profile}.md` deliverable.
 
 Tool calls are executed through the existing `ExecutionRuntime` path and must be present in `TaskContextPack.allowed_capabilities`.
 

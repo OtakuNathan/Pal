@@ -1344,6 +1344,162 @@ class MinionContractTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_plan_builder_adds_module_outlines_batch_with_key_dependencies(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_module_batch_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_module_outlines_batch",
+                    ],
+                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_module_batch"},
+                )
+
+                begin = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_begin",
+                        args={
+                            "goal": "Plan a small parser split into contracts and implementation.",
+                            "plan_id": "plan_module_batch",
+                            "summary": "Module batch plan.",
+                            "languages": ["python"],
+                        },
+                    )
+                )
+                self.assertTrue(begin.ok, begin.text)
+                batch = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_module_outlines_batch",
+                        args={
+                            "plan_handle": "plan_module_batch",
+                            "modules": [
+                                {
+                                    "module_key": "contracts",
+                                    "kind": "prelude",
+                                    "responsibility": "Define the shared parser contract.",
+                                    "owned_area": ["src/parser/contracts.py"],
+                                    "ownership": ["contracts owns the shared parser contract source."],
+                                    "lifecycle": ["Contracts are created before implementation starts."],
+                                    "invariants": ["Downstream modules import contracts instead of copying them."],
+                                    "milestones": [
+                                        {
+                                            "title": "Define contracts",
+                                            "task": "Write shared parser data contracts.",
+                                            "acceptance_criteria": ["The shared parser contract is importable."],
+                                        }
+                                    ],
+                                },
+                                {
+                                    "module_key": "parser",
+                                    "kind": "module",
+                                    "depends_on_module_keys": ["contracts"],
+                                    "responsibility": "Implement parser behavior against the shared contract.",
+                                    "owned_area": ["src/parser/core.py", "tests/test_parser.py"],
+                                    "ownership": ["parser owns parser implementation and focused tests."],
+                                    "lifecycle": ["Parser consumes the shared contracts after contracts completes."],
+                                    "invariants": ["Parser does not modify the contracts source."],
+                                    "milestones": [
+                                        {
+                                            "title": "Implement parser",
+                                            "task": "Implement parser behavior and tests.",
+                                            "acceptance_criteria": ["Parser tests cover valid and invalid input."],
+                                        }
+                                    ],
+                                },
+                            ],
+                        },
+                    )
+                )
+
+                self.assertTrue(batch.ok, batch.text)
+                self.assertEqual(batch.structured["module_keys"], ["contracts", "parser"])
+                self.assertEqual(len(batch.structured["module_handles"]), 2)
+                payload = json.loads(
+                    (root / "artifacts" / ".plan_builder" / "plan_module_batch.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual([module["module_id"] for module in payload["modules"]], ["contracts", "parser"])
+                self.assertEqual(payload["modules"][1]["depends_on_module_handles"], [payload["modules"][0]["handle"]])
+                self.assertTrue(all(module["closed"] for module in payload["modules"]))
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_module_outlines_batch_rolls_back_on_failure(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_module_batch_rollback_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_module_outlines_batch",
+                    ],
+                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_module_batch_rollback"},
+                )
+
+                begin = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_begin",
+                        args={
+                            "goal": "Plan should roll back failed batch module additions.",
+                            "plan_id": "plan_module_batch_rollback",
+                            "summary": "Rollback module batch plan.",
+                            "languages": ["python"],
+                        },
+                    )
+                )
+                self.assertTrue(begin.ok, begin.text)
+                failed = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_module_outlines_batch",
+                        args={
+                            "plan_handle": "plan_module_batch_rollback",
+                            "modules": [
+                                {
+                                    "module_key": "contracts",
+                                    "kind": "prelude",
+                                    "responsibility": "Define shared contracts.",
+                                    "owned_area": ["src/contracts.py"],
+                                    "ownership": ["contracts owns shared contract source."],
+                                    "lifecycle": ["Contracts are produced first."],
+                                    "invariants": ["Contracts remain importable."],
+                                    "milestones": [
+                                        {
+                                            "title": "Define contracts",
+                                            "task": "Write contracts.",
+                                            "acceptance_criteria": ["Contracts are importable."],
+                                        }
+                                    ],
+                                },
+                                {
+                                    "module_key": "broken",
+                                    "kind": "module",
+                                    "responsibility": "This module is invalid because milestones are missing.",
+                                    "owned_area": ["src/broken.py"],
+                                    "ownership": ["broken owns its source."],
+                                    "lifecycle": ["Broken source would be created after contracts."],
+                                    "invariants": ["Broken source would stay isolated."],
+                                    "milestones": [],
+                                },
+                            ],
+                        },
+                    )
+                )
+
+                self.assertFalse(failed.ok)
+                self.assertIn("milestones must contain at least one milestone outline", failed.text)
+                payload = json.loads(
+                    (root / "artifacts" / ".plan_builder" / "plan_module_batch_rollback.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(payload["modules"], [])
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
     def test_plan_builder_allows_micro_plan_without_prelude(self) -> None:
         async def scenario() -> None:
             root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_micro_"))
