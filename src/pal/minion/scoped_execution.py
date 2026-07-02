@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
 import json
@@ -624,12 +625,12 @@ class MinionScopedExecutionRuntime:
         if call.name == "op_tool_search":
             return _capability_result_to_tool_result(
                 call,
-                ToolSearchTool(runtime=self).invoke(dict(call.args)),
+                await asyncio.to_thread(ToolSearchTool(runtime=self).invoke, dict(call.args)),
             )
         if call.name == "op_tool_read":
             return _capability_result_to_tool_result(
                 call,
-                ToolReadTool(runtime=self).invoke(dict(call.args)),
+                await asyncio.to_thread(ToolReadTool(runtime=self).invoke, dict(call.args)),
             )
         if call.name == "op_tool_call":
             return await self._execute_scoped_tool_call(call, allow_tools=allow_tools, turn_id=turn_id)
@@ -661,7 +662,7 @@ class MinionScopedExecutionRuntime:
                 )
                 _mark_repair_workspace_edit(self.workspace, call, result)
                 return result
-            result = _workspace_tool_result(call, self.workspace)
+            result = await asyncio.to_thread(_workspace_tool_result, call, self.workspace)
             if call.name in {"op_minion_artifact_write", "op_minion_artifact_edit"} and result.ok:
                 artifact = dict((result.structured or {}).get("artifact") or result.structured or {})
                 if artifact:

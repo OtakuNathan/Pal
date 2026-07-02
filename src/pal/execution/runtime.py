@@ -377,7 +377,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
                         llm_text=f"tool execution failed: {exc.__class__.__name__}",
                         status=RuntimeStatus.ERROR,
                     )
-        return self.execute_tool(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self.sync_executor,
+            lambda: self.execute_tool(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id),
+        )
 
     def _apply_tool_budget(
         self,

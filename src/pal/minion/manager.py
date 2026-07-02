@@ -72,6 +72,8 @@ from pal.shared import MinionApprovalDecision, TaskContextPack
 
 _DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS = 3600
 _DEFAULT_MAX_PARALLEL_MODULES = 5
+_DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 30.0
+_GRACEFUL_SHUTDOWN_POLL_SECONDS = 0.2
 _RUN_MEMORY_LEDGER_LIMIT = 500
 _RUNNER_TELEMETRY_EVENT_KINDS = {"phase_started", "progress"}
 _KEY_LLM_ENDPOINT_PROGRESS_PHASES = {
@@ -154,6 +156,7 @@ class MinionManager:
     max_parallel_modules: int | None = None
     auto_resume_ready_modules: bool | None = None
     runner_mode: str | None = None
+    graceful_shutdown_timeout_seconds: float = _DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
     tasking_repository: MinionTaskingRepository = field(init=False)
     server: asyncio.base_events.Server | None = None
     endpoint_info: dict[str, Any] = field(default_factory=dict)
@@ -167,6 +170,11 @@ class MinionManager:
     step_processes: StepProcessSupervisor = field(init=False)
     _llm_broker_bundle: Any | None = field(default=None, init=False, repr=False)
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event)
+    _shutdown_graceful: bool = field(default=True, init=False)
+    _shutdown_timeout_seconds: float = field(default=_DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS, init=False)
+    _shutdown_reason: str = field(default="", init=False)
+    _shutdown_started_at: str = field(default="", init=False)
+    _draining: bool = field(default=False, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _serial_turns_inflight: InflightTracker = field(default_factory=InflightTracker)
     _logical_slots: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -237,6 +245,15 @@ class MinionManager:
                 await self.server.wait_closed()
                 with contextlib.suppress(asyncio.CancelledError):
                     await serve_task
+                if self._shutdown_graceful:
+                    drain_result = await self._drain_active_runs_before_shutdown(
+                        timeout_seconds=self._shutdown_timeout_seconds,
+                        reason=self._shutdown_reason or "manager_shutdown",
+                    )
+                    if str(drain_result.get("status") or "") == "timeout":
+                        self.logger.warning("minion manager graceful shutdown drain timed out: %s", drain_result)
+                    else:
+                        self.logger.info("minion manager graceful shutdown drain: %s", drain_result)
                 await self.close_all()
                 await self.events.close()
                 await cleanup_manager_endpoint(self.runtime_root)
@@ -283,6 +300,11 @@ class MinionManager:
         if method == "health":
             return self.health()
         self._reconcile_runs()
+        if method == "reload_runtime_config":
+            result = self.reload_runtime_config()
+            if _coerce_bool(result.get("auto_resume_ready_modules", self.auto_resume_ready_modules)):
+                result["ready_schedule"] = await self.tick_ready_plan_dags(reason="runtime_config_reload")
+            return result
         if method == "list_runs":
             return {"items": [state.summary() for state in sorted(self.runs.values(), key=lambda item: item.started_at)]}
         if method == "read_run":
@@ -333,10 +355,41 @@ class MinionManager:
         if method == "finish_work_order":
             return self.finish_work_order(str(params.get("work_order_id") or ""), str(params.get("reason") or ""))
         if method == "shutdown":
-            self._shutdown_event.set()
-            self._notify_logical_slot_available(reason="shutdown")
-            return {"ok": True}
+            return self.request_shutdown(
+                reason=str(params.get("reason") or "manager_shutdown"),
+                graceful=_coerce_bool(params.get("graceful", True)),
+                timeout_seconds=_coerce_float(
+                    params.get("timeout_seconds"),
+                    default=float(self.graceful_shutdown_timeout_seconds or _DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS),
+                ),
+            )
         raise ValueError(f"unknown minion manager method: {method}")
+
+    def request_shutdown(self, *, reason: str = "manager_shutdown", graceful: bool = True, timeout_seconds: float | None = None) -> dict[str, Any]:
+        if not self._shutdown_started_at:
+            self._shutdown_started_at = utc_now()
+        self._shutdown_reason = str(reason or "manager_shutdown")
+        self._shutdown_graceful = bool(graceful)
+        self._shutdown_timeout_seconds = max(
+            0.0,
+            float(
+                timeout_seconds
+                if timeout_seconds is not None
+                else self.graceful_shutdown_timeout_seconds
+                or _DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+            ),
+        )
+        self._draining = True
+        self._shutdown_event.set()
+        self._notify_logical_slot_available(reason="shutdown")
+        return {
+            "ok": True,
+            "status": "shutdown_requested",
+            "reason": self._shutdown_reason,
+            "graceful": self._shutdown_graceful,
+            "timeout_seconds": self._shutdown_timeout_seconds,
+            "started_at": self._shutdown_started_at,
+        }
 
     def health(self) -> dict[str, Any]:
         active = [state for state in self.runs.values() if state.status in _ACTIVE_RUN_STATUSES]
@@ -351,6 +404,11 @@ class MinionManager:
             "active_count": len(active),
             "runner_mode": self.runner_mode,
             "configured_runner_mode": str(effective_minion_runtime_config(self.runtime_root).get("runner_mode") or ""),
+            "shutdown_requested": self._shutdown_event.is_set(),
+            "draining": self._draining,
+            "shutdown_reason": self._shutdown_reason,
+            "shutdown_started_at": self._shutdown_started_at,
+            "graceful_shutdown_timeout_seconds": float(self.graceful_shutdown_timeout_seconds or _DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS),
             "minion_db_path": str(self.tasking_repository.db_path),
             "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
             "auto_resume_ready_modules": bool(self.auto_resume_ready_modules),
@@ -362,6 +420,33 @@ class MinionManager:
             "event_subscriber_count": len(self.event_subscribers),
             "log_path": str(minion_log_path(self.runtime_root)),
             **dict(self.endpoint_info),
+        }
+
+    def reload_runtime_config(self) -> dict[str, Any]:
+        config = effective_minion_runtime_config(self.runtime_root)
+        previous = {
+            "runner_mode": str(self.runner_mode or ""),
+            "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
+            "auto_resume_ready_modules": bool(self.auto_resume_ready_modules),
+        }
+        self.max_parallel_modules = max(
+            1,
+            _coerce_int(config.get("max_parallel_modules"), _DEFAULT_MAX_PARALLEL_MODULES) or _DEFAULT_MAX_PARALLEL_MODULES,
+        )
+        self.auto_resume_ready_modules = _coerce_bool(config.get("auto_resume_ready_modules", True))
+        configured_runner_mode = normalize_minion_runner_mode(config.get("runner_mode"), default=DEFAULT_MINION_RUNNER_MODE)
+        runner_mode_restart_required = bool(configured_runner_mode and configured_runner_mode != self.runner_mode)
+        self._notify_logical_slot_available(reason="runtime_config_reload")
+        return {
+            "ok": True,
+            "status": "ok",
+            "config": config,
+            "previous": previous,
+            "runner_mode": self.runner_mode,
+            "configured_runner_mode": configured_runner_mode,
+            "runner_mode_restart_required": runner_mode_restart_required,
+            "max_parallel_modules": int(self.max_parallel_modules or _DEFAULT_MAX_PARALLEL_MODULES),
+            "auto_resume_ready_modules": bool(self.auto_resume_ready_modules),
         }
 
     def read_run(self, run_id: str) -> dict[str, Any]:
@@ -389,6 +474,12 @@ class MinionManager:
         return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata}), updates
 
     async def spawn(self, pack_payload: dict[str, Any]) -> dict[str, Any]:
+        if self._shutdown_event.is_set() or self._draining:
+            return {
+                "status": "shutdown",
+                "reason": self._shutdown_reason or "manager_shutdown",
+                "summary": "minion manager is shutting down and is not accepting new runs",
+            }
         pack = TaskContextPack.from_dict(pack_payload)
         profile_registry = MinionProfileRegistry(runtime_root=self.runtime_root)
         pack = profile_registry.resolve_pack(pack)
@@ -1354,7 +1445,14 @@ class MinionManager:
         installed: list[signal.Signals] = []
         for sig in (signal.SIGTERM, signal.SIGINT):
             with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
-                loop.add_signal_handler(sig, self._shutdown_event.set)
+                loop.add_signal_handler(
+                    sig,
+                    lambda sig=sig: self.request_shutdown(
+                        reason=f"signal_{sig.name.lower()}",
+                        graceful=True,
+                        timeout_seconds=float(self.graceful_shutdown_timeout_seconds or _DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS),
+                    ),
+                )
                 installed.append(sig)
 
         def remove() -> None:
@@ -1363,6 +1461,78 @@ class MinionManager:
                     loop.remove_signal_handler(sig)
 
         return remove
+
+    async def _drain_active_runs_before_shutdown(self, *, timeout_seconds: float | None = None, reason: str = "manager_shutdown") -> dict[str, Any]:
+        self._reconcile_runs()
+        active = self._active_states_for_shutdown()
+        if not active:
+            return {"status": "idle", "requested_count": 0, "remaining_count": 0}
+        timeout = max(
+            0.0,
+            float(
+                timeout_seconds
+                if timeout_seconds is not None
+                else self.graceful_shutdown_timeout_seconds
+                or _DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+            ),
+        )
+        requested: list[dict[str, Any]] = []
+        for state in active:
+            payload = {
+                "reason": str(reason or "manager_shutdown"),
+                "summary": "minion manager shutdown requested; stop at the next safe point",
+                "graceful_shutdown": True,
+                "run_id": state.run_id,
+                "work_order_id": state.pack.work_order_id,
+            }
+            try:
+                control = await self._send_runner_control_or_record(
+                    state,
+                    {
+                        "type": "cancel_requested",
+                        "payload": payload,
+                    },
+                )
+            except Exception as exc:
+                control = {
+                    "ok": False,
+                    "run_id": state.run_id,
+                    "message_type": "cancel_requested",
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+            requested.append(
+                {
+                    "run_id": state.run_id,
+                    "work_order_id": state.pack.work_order_id,
+                    "status": "requested" if bool(control.get("ok")) else "skipped",
+                    "control": dict(control),
+                }
+            )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            self._reconcile_runs()
+            remaining = self._active_states_for_shutdown()
+            if not remaining:
+                return {
+                    "status": "drained",
+                    "requested_count": len(requested),
+                    "remaining_count": 0,
+                    "requests": requested,
+                }
+            now = loop.time()
+            if now >= deadline:
+                return {
+                    "status": "timeout",
+                    "requested_count": len(requested),
+                    "remaining_count": len(remaining),
+                    "remaining_run_ids": [state.run_id for state in remaining],
+                    "requests": requested,
+                }
+            await asyncio.sleep(min(_GRACEFUL_SHUTDOWN_POLL_SECONDS, max(0.0, deadline - now)))
+
+    def _active_states_for_shutdown(self) -> list[MinionRunState]:
+        return [state for state in self.runs.values() if state.status in _ACTIVE_RUN_STATUSES]
 
     def _record_runner_stderr_line(self, state: MinionRunState, line: str) -> None:
         self.runner_process.record_runner_stderr_line(state, line)
@@ -1530,6 +1700,8 @@ class MinionManager:
         event.set()
 
     def _schedule_workflow_terminal_post(self, state: MinionRunState, event: dict[str, Any]) -> None:
+        if self._shutdown_event.is_set():
+            return
         metadata = self._work_order_metadata_for_state(state)
         workflow = dict(metadata.get("workflow") or {})
         if not workflow:
@@ -2171,6 +2343,14 @@ def _loads_json_list(value: Any) -> list[str]:
     if not isinstance(loaded, list):
         return []
     return _dedupe_strings([str(item) for item in loaded])
+
+
+def _coerce_float(value: Any, *, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return parsed
 
 
 def _debug_log_path_from_pack(pack: TaskContextPack) -> str:

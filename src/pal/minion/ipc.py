@@ -160,8 +160,14 @@ class MinionManagerClient:
             },
         )
 
-    def shutdown_sync(self) -> dict[str, Any]:
-        return self.request_sync("shutdown")
+    def reload_runtime_config_sync(self) -> dict[str, Any]:
+        return self.request_sync("reload_runtime_config")
+
+    def shutdown_sync(self, *, graceful: bool = True, timeout_seconds: float | None = None) -> dict[str, Any]:
+        params: dict[str, Any] = {"graceful": graceful}
+        if timeout_seconds is not None:
+            params["timeout_seconds"] = timeout_seconds
+        return self.request_sync("shutdown", params)
 
 
 async def open_manager_connection(runtime_root: Path):

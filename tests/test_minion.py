@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,7 +71,7 @@ from pal.minion import (
 )
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice
 from pal.minion.capability_args import validate_draft_work_order_args
-from pal.minion.config import effective_minion_runtime_config, minion_db_path
+from pal.minion.config import effective_minion_runtime_config, merge_minion_runtime_config, minion_db_path
 from pal.minion.dag_advancer import dag_state_to_runtime_dict
 from pal.minion.git_env import (
     _git,
@@ -12221,6 +12222,38 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_coroutine_runner_crash_does_not_escape_manager_process(self) -> None:
+        class FakeRunner:
+            def __init__(self, **kwargs: Any) -> None:
+                _ = kwargs
+
+            async def run(self) -> int:
+                raise SystemExit("runner crashed hard")
+
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, runner_mode="coroutine")
+            with patch("pal.minion.runner.MinionRunner", FakeRunner):
+                result = await manager.spawn(
+                    TaskContextPack(
+                        work_order_id="wo_coroutine_crash",
+                        goal="Crash fake coroutine minion.",
+                        minion_profile="generic",
+                    ).to_dict()
+                )
+                state = manager.runs[result["run_id"]]
+                assert state.wait_task is not None
+                await state.wait_task
+
+            self.assertFalse(manager.health()["shutdown_requested"])
+            self.assertEqual(state.status, "failed")
+            self.assertEqual(state.returncode, 1)
+            self.assertIn("SystemExit", state.last_error)
+            terminal = next(event for event in state.ledger if event["event_kind"] == "terminal")
+            self.assertEqual(terminal["payload"]["status"], "failed")
+            self.assertEqual(terminal["payload"]["error_type"], "SystemExit")
+
+        asyncio.run(scenario())
+
     def test_workspace_file_tools_use_relative_paths_and_cache_safety(self) -> None:
         async def scenario() -> None:
             from pal.execution.file_edit import FileEditTool
@@ -15893,7 +15926,7 @@ class MinionManagerTests(unittest.TestCase):
 
     def test_manager_close_all_closes_runner_liveness_pipe(self) -> None:
         async def scenario() -> None:
-            manager = MinionManager(runtime_root=self.root)
+            manager = MinionManager(runtime_root=self.root, runner_mode="process")
             read_fd, write_fd = os.pipe()
             try:
                 state = MinionRunState(
@@ -15935,6 +15968,52 @@ class MinionManagerTests(unittest.TestCase):
                         os.close(write_fd)
                 with contextlib.suppress(OSError):
                     os.close(read_fd)
+
+        asyncio.run(scenario())
+
+    def test_manager_graceful_shutdown_requests_runner_cancel_before_force_close(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root, runner_mode="coroutine", graceful_shutdown_timeout_seconds=1.0)
+            state = MinionRunState(
+                minion_id="m_graceful",
+                run_id="r_graceful",
+                pack=TaskContextPack(work_order_id="wo_graceful", goal="graceful shutdown"),
+                runner_kind="coroutine",
+                status="running",
+                control_queue=asyncio.Queue(),
+            )
+            manager.runs[state.run_id] = state
+
+            async def fake_runner() -> None:
+                assert state.control_queue is not None
+                message = await state.control_queue.get()
+                self.assertEqual(message["type"], "cancel_requested")
+                self.assertEqual(message["payload"]["reason"], "test_shutdown")
+                manager._record_event(
+                    state,
+                    {
+                        "event_kind": "terminal",
+                        "payload": {
+                            "status": "killed",
+                            "summary": "cooperative cancel observed",
+                            "reason": message["payload"]["reason"],
+                            "cooperative_cancel": True,
+                        },
+                        "created_at": "2026-01-01T00:00:00Z",
+                    },
+                )
+
+            fake_task = asyncio.create_task(fake_runner())
+            state.wait_task = fake_task
+            manager.request_shutdown(reason="test_shutdown", graceful=True, timeout_seconds=1.0)
+
+            result = await manager._drain_active_runs_before_shutdown(timeout_seconds=1.0, reason="test_shutdown")
+
+            self.assertEqual(result["status"], "drained")
+            self.assertEqual(result["requested_count"], 1)
+            self.assertEqual(state.status, "killed")
+            self.assertTrue(manager.event_queue[-1]["payload"]["cooperative_cancel"])
+            await fake_task
 
         asyncio.run(scenario())
 
@@ -16482,6 +16561,50 @@ class MinionManagerTests(unittest.TestCase):
             no_match = await runtime.execute_tool_async(CanonicalToolCall(name="op_search", args={"query": "missing"}), turn_id="r")
             self.assertTrue(no_match.ok)
             self.assertIn("No repo matches found", no_match.text)
+
+        asyncio.run(scenario())
+
+    def test_workspace_read_tools_do_not_block_event_loop(self) -> None:
+        async def scenario() -> None:
+            class FakeBase:
+                def list_capability_specs(self):
+                    return []
+
+                def get_capability_spec(self, name):
+                    _ = name
+                    return None
+
+                async def execute_tool_async(self, call, **kwargs):
+                    raise AssertionError("repo tools must not delegate to base runtime")
+
+            runtime = MinionScopedExecutionRuntime(
+                FakeBase(),
+                ["op_search"],
+                {"repo_path": str(self.root)},
+            )
+
+            def slow_workspace_tool(call, workspace):
+                _ = call, workspace
+                time.sleep(0.2)
+                return CanonicalToolResult(
+                    name="op_search",
+                    ok=True,
+                    text="ok",
+                    structured={},
+                    call_id="search",
+                    llm_text="ok",
+                    status=RuntimeStatus.OK,
+                )
+
+            with patch("pal.minion.scoped_execution._workspace_tool_result", side_effect=slow_workspace_tool):
+                task = asyncio.create_task(
+                    runtime.execute_tool_async(CanonicalToolCall(name="op_search", args={"query": "target"}, call_id="search"))
+                )
+                await asyncio.sleep(0.02)
+                self.assertFalse(task.done())
+                result = await task
+                self.assertTrue(result.ok)
+                self.assertEqual(result.text, "ok")
 
         asyncio.run(scenario())
 
@@ -22477,6 +22600,10 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIsNotNone(configure_spec)
                 assert configure_spec is not None
                 self.assertIn("runner_mode", configure_spec["parameters_schema"]["properties"])
+                flush_spec = core.context.execution_runtime.get_capability_spec("op_minion_flush_runtime_config")
+                self.assertIsNotNone(flush_spec)
+                assert flush_spec is not None
+                self.assertIn("max_parallel_modules", flush_spec["description"])
                 self.assertIsNotNone(core.context.execution_runtime.get_capability_spec("op_minion_recover_work_order"))
                 self.assertIsNotNone(core.context.execution_runtime.get_capability_spec("op_minion_destroy_work_order_run"))
                 review_gate_spec = core.context.execution_runtime.get_capability_spec("op_minion_review_gate_submit")
@@ -22522,6 +22649,111 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(manager.max_parallel_modules, 3)
             finally:
                 handle.shutdown_sync()
+
+    def test_manager_reload_runtime_config_flushes_live_values(self) -> None:
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory(prefix="pal_minion_reload_config_test_") as tmp:
+                root = Path(tmp)
+                manager = MinionManager(runtime_root=root, max_parallel_modules=2, auto_resume_ready_modules=True)
+
+                merge_minion_runtime_config(
+                    root,
+                    {
+                        "runner_mode": "coroutine",
+                        "max_parallel_modules": 4,
+                        "auto_resume_ready_modules": False,
+                    },
+                )
+                result = await manager._call_method("reload_runtime_config", {})
+
+                self.assertEqual(result["status"], "ok")
+                self.assertFalse(result["runner_mode_restart_required"])
+                self.assertEqual(manager.health()["max_parallel_modules"], 4)
+                self.assertFalse(manager.health()["auto_resume_ready_modules"])
+
+        asyncio.run(scenario())
+
+    def test_minion_configure_flushes_live_manager_when_socket_is_available(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_config_live_test_") as tmp:
+            root = Path(tmp)
+
+            class FakeClient:
+                reload_count = 0
+
+                def __init__(self, *args: Any, **kwargs: Any) -> None:
+                    _ = args, kwargs
+
+                def health_sync(self) -> dict[str, Any]:
+                    return {"ok": True}
+
+                def list_runs_sync(self) -> dict[str, Any]:
+                    return {"items": []}
+
+                def reload_runtime_config_sync(self) -> dict[str, Any]:
+                    FakeClient.reload_count += 1
+                    return {
+                        "ok": True,
+                        "status": "ok",
+                        "max_parallel_modules": 5,
+                        "runner_mode_restart_required": False,
+                    }
+
+            provider = MinionManagerProvider(runtime_root=root)
+            provider.client = FakeClient()  # type: ignore[assignment]
+
+            with patch("pal.minion.capabilities.MinionManagerClient", FakeClient):
+                result = provider.configure(
+                    CapabilityCall(
+                        name="op_minion_configure",
+                        args={"max_parallel_modules": 5},
+                    )
+                )
+
+            self.assertEqual(result.status, "ok")
+            self.assertEqual(FakeClient.reload_count, 1)
+            self.assertTrue(result.structured["manager_running"])
+            self.assertTrue(result.structured["live_manager_running"])
+            self.assertTrue(result.structured["applied_now"])
+            self.assertFalse(result.structured["restart_required"])
+
+    def test_minion_flush_runtime_config_capability_reads_minion_db_and_flushes_live_manager(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_flush_config_live_test_") as tmp:
+            root = Path(tmp)
+            merge_minion_runtime_config(root, {"max_parallel_modules": 6})
+
+            class FakeClient:
+                reload_count = 0
+
+                def __init__(self, *args: Any, **kwargs: Any) -> None:
+                    _ = args, kwargs
+
+                def health_sync(self) -> dict[str, Any]:
+                    return {"ok": True}
+
+                def reload_runtime_config_sync(self) -> dict[str, Any]:
+                    FakeClient.reload_count += 1
+                    return {
+                        "ok": True,
+                        "status": "ok",
+                        "max_parallel_modules": 6,
+                        "runner_mode_restart_required": False,
+                    }
+
+            provider = MinionManagerProvider(runtime_root=root)
+            with patch("pal.minion.capabilities.MinionManagerClient", FakeClient):
+                result = provider.flush_runtime_config(
+                    CapabilityCall(
+                        name="op_minion_flush_runtime_config",
+                        args={},
+                    )
+                )
+
+            self.assertEqual(result.status, "ok")
+            self.assertEqual(result.structured["status"], "flushed")
+            self.assertEqual(result.structured["config"]["max_parallel_modules"], 6)
+            self.assertEqual(FakeClient.reload_count, 1)
+            self.assertTrue(result.structured["manager_running"])
+            self.assertFalse(result.structured["restart_required"])
 
     def test_root_architect_alias_resolves_to_builtin_architect(self) -> None:
         registry = MinionProfileRegistry()

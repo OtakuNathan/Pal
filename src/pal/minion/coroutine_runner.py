@@ -85,6 +85,24 @@ class CoroutineRunnerSupervisor:
                     },
                 )
             return
+        except BaseException as exc:
+            state.returncode = 1
+            state.last_error = f"{exc.__class__.__name__}: {exc}"
+            if state.status in ACTIVE_RUN_STATUSES:
+                self.manager._record_event(
+                    state,
+                    {
+                        "event_kind": "terminal",
+                        "payload": {
+                            "status": "failed",
+                            "summary": "coroutine minion runner crashed",
+                            "error": state.last_error,
+                            "error_type": exc.__class__.__name__,
+                        },
+                        "created_at": utc_now(),
+                    },
+                )
+            return
         state.returncode = int(returncode or 0)
         if state.status in TERMINAL_RUN_STATUSES:
             return
@@ -194,6 +212,23 @@ class CoroutineRunnerSupervisor:
                             "status": "failed",
                             "summary": "coroutine minion task failed",
                             "error": state.last_error,
+                        },
+                        "created_at": utc_now(),
+                    },
+                )
+        except BaseException as exc:
+            state.last_error = f"{exc.__class__.__name__}: {exc}"
+            self.manager.logger.exception("minion %s background %s task crashed", state.run_id, task_name)
+            if state.status in ACTIVE_RUN_STATUSES:
+                self.manager._record_event(
+                    state,
+                    {
+                        "event_kind": "terminal",
+                        "payload": {
+                            "status": "failed",
+                            "summary": "coroutine minion task crashed",
+                            "error": state.last_error,
+                            "error_type": exc.__class__.__name__,
                         },
                         "created_at": utc_now(),
                     },

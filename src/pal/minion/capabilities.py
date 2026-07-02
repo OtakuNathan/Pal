@@ -647,7 +647,8 @@ class MinionManagerProvider:
         description=(
             "Configure Minion manager runtime behavior. runner_mode defaults to coroutine; set runner_mode=process only as a "
             "fallback. Configuration is persisted in Minion's own runtime database under data/minion/minion.sqlite3. If the "
-            "manager is currently running with active work, the new setting is recorded and takes effect after manager restart."
+            "manager is currently running, live-reloadable values such as max_parallel_modules and auto_resume_ready_modules "
+            "are flushed into manager memory immediately when apply_now=true. runner_mode changes still require an idle restart."
         ),
         args_schema={
             "type": "object",
@@ -684,11 +685,24 @@ class MinionManagerProvider:
             }
             config = merge_minion_runtime_config(self.runtime_root, patch) if patch else effective_minion_runtime_config(self.runtime_root)
             apply_now = bool(args.get("apply_now", True))
-            manager_running = self.process is not None and self.process.poll() is None
+            owned_process_running = self.process is not None and self.process.poll() is None
+            probe_client = MinionManagerClient(runtime_root=self.runtime_root, request_timeout_seconds=2.0)
+            live_health: dict[str, Any] = {}
+            with contextlib.suppress(Exception):
+                live_health = probe_client.health_sync()
+            live_manager_running = bool(live_health.get("ok"))
+            manager_running = bool(owned_process_running or live_manager_running)
             active_runs = self._has_active_runs_sync() if manager_running else False
             applied_now = False
-            restart_required = bool(manager_running and active_runs)
-            if apply_now and manager_running and not active_runs:
+            live_reload: dict[str, Any] = {}
+            restart_required = False
+            if apply_now and manager_running:
+                with contextlib.suppress(Exception):
+                    live_reload = probe_client.reload_runtime_config_sync()
+                if live_reload:
+                    applied_now = bool(live_reload.get("ok")) and not bool(live_reload.get("runner_mode_restart_required"))
+                    restart_required = bool(live_reload.get("runner_mode_restart_required"))
+            if apply_now and owned_process_running and not active_runs and restart_required:
                 self._stop_manager(force=True)
                 self._ensure_manager_started()
                 applied_now = True
@@ -699,13 +713,65 @@ class MinionManagerProvider:
                 "applied_now": applied_now,
                 "restart_required": restart_required,
                 "manager_running": manager_running,
+                "live_manager_running": live_manager_running,
+                "owned_process_running": owned_process_running,
                 "active_runs": active_runs,
+                "live_reload": live_reload,
             }
             return _capability_from_rpc("minion manager configured", payload)
         except ValueError as exc:
             return _capability_invalid("minion manager configuration invalid", MinionWorkOrderValidationError(str(exc), field="minion_config"))
         except Exception as exc:
             return _capability_error("minion manager configuration failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
+        family="minion",
+        action_name="flush_runtime_config",
+        description=(
+            "Flush persisted Minion runtime configuration from Minion's own database into the live manager memory ledger. "
+            "Use after changing max_parallel_modules or auto_resume_ready_modules when the manager is already running. "
+            "This capability does not modify configuration and does not start a stopped manager; runner_mode changes may still "
+            "report restart_required because the runner backend is process-level."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "request_timeout_seconds": {
+                    "type": "number",
+                    "minimum": 0.1,
+                    "default": 2.0,
+                    "description": "Short socket timeout for probing and flushing the live manager.",
+                },
+            },
+        },
+    )
+    def flush_runtime_config(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            args = dict(call.args or {})
+            config = effective_minion_runtime_config(self.runtime_root)
+            timeout_seconds = _bounded_timeout_seconds(args.get("request_timeout_seconds"), default=2.0)
+            probe_client = MinionManagerClient(runtime_root=self.runtime_root, request_timeout_seconds=timeout_seconds)
+            live_health: dict[str, Any] = {}
+            with contextlib.suppress(Exception):
+                live_health = probe_client.health_sync()
+            live_manager_running = bool(live_health.get("ok"))
+            live_reload: dict[str, Any] = {}
+            if live_manager_running:
+                live_reload = probe_client.reload_runtime_config_sync()
+            restart_required = bool(live_reload.get("runner_mode_restart_required", False))
+            payload = {
+                "status": "flushed" if live_reload else "not_running",
+                "config": config,
+                "manager_running": live_manager_running,
+                "live_manager_running": live_manager_running,
+                "restart_required": restart_required,
+                "live_reload": live_reload,
+            }
+            return _capability_from_rpc("minion runtime config flushed" if live_reload else "minion manager is not running", payload)
+        except Exception as exc:
+            return _capability_error("minion runtime config flush failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -2066,6 +2132,14 @@ def _coerce_int(value: Any, *, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return int(default)
+
+
+def _bounded_timeout_seconds(value: Any, *, default: float, minimum: float = 0.1, maximum: float = 30.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = float(default)
+    return max(float(minimum), min(float(maximum), parsed))
 
 
 def _minion_observation_from_terminal(payload: dict[str, Any]) -> dict[str, Any]:
