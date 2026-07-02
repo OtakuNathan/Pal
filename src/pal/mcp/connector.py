@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -31,6 +32,19 @@ class McpConnector(Protocol):
 
     async def close(self) -> None:
         ...
+
+
+_ENV_PATTERN = re.compile(r"\$\{(\w+)\}|\$(\w+)")
+
+
+def _expand_env_vars(value: str, env: dict[str, str]) -> str:
+    """Expand ``${VAR}`` and ``$VAR`` references using the merged env dict."""
+
+    def replacer(match: re.Match[str]) -> str:
+        key = match.group(1) or match.group(2)
+        return env.get(key, match.group(0))
+
+    return _ENV_PATTERN.sub(replacer, value)
 
 
 @dataclass
@@ -134,9 +148,12 @@ class AsyncStdioMcpConnector:
         if not self.config.command:
             raise McpProtocolError("MCP command is required")
         self._closed = False
-        env = None if not self.config.env else {**os.environ, **dict(self.config.env)}
+        merged_env = {**os.environ, **dict(self.config.env)}
+        env = merged_env if self.config.env else None
+        command_args = list(self.config.command)
+        command_args = [_expand_env_vars(arg, merged_env) for arg in command_args]
         self.process = await asyncio.create_subprocess_exec(
-            *list(self.config.command),
+            *command_args,
             cwd=self.config.cwd or None,
             env=env,
             stdin=asyncio.subprocess.PIPE,

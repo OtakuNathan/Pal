@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
 from pal.foundation import PalV2Database, SidecarEndpoint, SidecarRpcClient, SidecarRpcError
 from pal.mcp import AsyncStdioMcpConnector, McpCompiler, McpDiscoverySnapshot, McpProtocolError, McpServerConfig, load_mcp_server_file
+from pal.mcp.connector import _expand_env_vars
 from pal.mcp.ipc import McpManagerClient
 from pal.mcp.manager import McpManager
 from pal.mcp.model import McpPromptArgumentSpec, McpPromptSpec, McpToolSpec
@@ -160,6 +162,39 @@ class McpConnectorAndManagerTests(unittest.TestCase):
         self.assertEqual(McpServerConfig(server_id="demo", command=("cmd",)).request_timeout_ms, 300_000)
         self.assertEqual(file_config.config.request_timeout_ms, 300_000)
         self.assertEqual(McpManagerClient(runtime_root=self.root).request_timeout_seconds, 300.0)
+
+    def test_mcp_command_env_var_expansion_preserves_unknown_vars(self) -> None:
+        expanded = _expand_env_vars(
+            "$PAL_MCP_BIN --root=${PAL_MCP_HOME} --literal=$PAL_MCP_MISSING",
+            {"PAL_MCP_BIN": "/opt/mcp/server", "PAL_MCP_HOME": "/srv/mcp"},
+        )
+
+        self.assertEqual(expanded, "/opt/mcp/server --root=/srv/mcp --literal=$PAL_MCP_MISSING")
+
+    def test_mcp_command_env_var_expansion_uses_process_env_without_env_override(self) -> None:
+        captured: dict[str, object] = {}
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            captured["args"] = args
+            captured["env"] = kwargs.get("env")
+            raise RuntimeError("stop before spawning")
+
+        async def scenario() -> None:
+            connector = AsyncStdioMcpConnector(
+                McpServerConfig(
+                    server_id="env-command",
+                    command=("$PAL_MCP_BIN", "--root=${PAL_MCP_HOME}", "--literal=$PAL_MCP_MISSING"),
+                )
+            )
+            with patch.dict(os.environ, {"PAL_MCP_BIN": "/opt/mcp/server", "PAL_MCP_HOME": "/srv/mcp"}):
+                with patch("asyncio.create_subprocess_exec", side_effect=fake_create_subprocess_exec):
+                    with self.assertRaisesRegex(RuntimeError, "stop before spawning"):
+                        await connector._start()
+
+        asyncio.run(scenario())
+
+        self.assertEqual(captured["args"], ("/opt/mcp/server", "--root=/srv/mcp", "--literal=$PAL_MCP_MISSING"))
+        self.assertIsNone(captured["env"])
 
     def test_sidecar_rpc_timeout_covers_connection_phase(self) -> None:
         async def slow_open_connection(endpoint):
