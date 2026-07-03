@@ -512,13 +512,16 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "plan_handle": {"type": "string"},
-                "module_key": {"type": "string"},
+                "module_name": {
+                    "type": "string",
+                    "description": "Stable, human-readable module name. Pal stores this as the module_id.",
+                },
                 "kind": {"type": "string", "enum": ["prelude", "module", "join"], "default": "module"},
                 "depends_on_module_handles": {"type": "array", "items": {"type": "string"}},
-                "depends_on_module_keys": {
+                "depends_on_module_names": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Stable module_key/module_id values this module depends on. Prefer this when possible.",
+                    "description": "Stable module_name values this module depends on. Prefer this when possible.",
                 },
                 "responsibility": {"type": "string"},
                 "owned_area": {"type": "array", "items": {"type": "string"}},
@@ -670,7 +673,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             },
             "required": [
                 "plan_handle",
-                "module_key",
+                "module_name",
                 "responsibility",
                 "owned_area",
                 "ownership",
@@ -686,7 +689,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": (
             "Add and close multiple module outlines in one transaction. Each module uses the same shape as "
             "plan_add_module_outline except plan_handle is supplied once at the top level. Order modules by "
-            "dependency so later modules can reference earlier modules through depends_on_module_keys. If any "
+            "dependency so later modules can reference earlier modules through depends_on_module_names. If any "
             "module fails validation, Pal rolls the whole batch back."
         ),
         "parameters_schema": {
@@ -698,16 +701,16 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "module_key": {
+                            "module_name": {
                                 "type": "string",
-                                "description": "Stable, human-readable module id/name. Prefer snake_case names.",
+                                "description": "Stable, human-readable module name. Prefer snake_case names.",
                             },
                             "kind": {"type": "string", "enum": ["prelude", "module", "join"], "default": "module"},
                             "depends_on_module_handles": {"type": "array", "items": {"type": "string"}},
-                            "depends_on_module_keys": {
+                            "depends_on_module_names": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Stable module_key/module_id values this module depends on. Prefer this when possible.",
+                                "description": "Stable module_name values this module depends on. Prefer this when possible.",
                             },
                             "responsibility": {"type": "string"},
                             "owned_area": {"type": "array", "items": {"type": "string"}},
@@ -733,7 +736,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                             },
                         },
                         "required": [
-                            "module_key",
+                            "module_name",
                             "responsibility",
                             "owned_area",
                             "ownership",
@@ -760,19 +763,19 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "plan_handle": {"type": "string"},
-                "module_key": {
+                "module_name": {
                     "type": "string",
                     "description": (
-                        "Required stable, human-readable module id/name. Use snake_case names such as "
-                        "setup_contracts, slug_tools, implementation, or final_verification; Pal will not invent one."
+                        "Stable, human-readable module name. Use snake_case names such as "
+                        "setup_contracts, slug_tools, implementation, or final_verification."
                     ),
                 },
                 "kind": {"type": "string", "enum": ["prelude", "module", "join"], "default": "module"},
                 "depends_on_module_handles": {"type": "array", "items": {"type": "string"}},
-                "depends_on_module_keys": {
+                "depends_on_module_names": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Stable module_key/module_id values this module depends on. Prefer this when possible.",
+                    "description": "Stable module_name values this module depends on. Prefer this when possible.",
                 },
                 "responsibility": {"type": "string"},
                 "owned_area": {"type": "array", "items": {"type": "string"}},
@@ -811,7 +814,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "risk_surfaces": {"type": "array", "items": {"type": "string"}},
                 "delivery_surfaces": {"type": "array", "items": {"type": "string"}},
             },
-            "required": ["plan_handle", "module_key", "responsibility", "owned_area", "ownership", "lifecycle", "invariants"],
+            "required": ["plan_handle", "module_name", "responsibility", "owned_area", "ownership", "lifecycle", "invariants"],
             "additionalProperties": False,
         },
     },
@@ -819,14 +822,14 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "name": "op_minion_plan_add_module_interface",
         "description": (
             "Attach a provided or consumed module interface with data shape, lifecycle, ownership, error behavior, "
-            "and compatibility. Prefer module_key+plan_handle over copying generated module_handle strings."
+            "and compatibility. Prefer module_name+plan_handle over copying generated module_handle strings."
         ),
         "parameters_schema": {
             "type": "object",
             "properties": {
                 "module_handle": {"type": "string"},
-                "module_key": {"type": "string", "description": "Stable module_key/module_id for the target module."},
-                "plan_handle": {"type": "string", "description": "Required when module_key is used and more than one draft may exist."},
+                "module_name": {"type": "string", "description": "Stable module_name for the target module."},
+                "plan_handle": {"type": "string", "description": "Required when module_name is used and more than one draft may exist."},
                 "direction": {"type": "string", "enum": ["provided", "consumed"]},
                 "name": {"type": "string"},
                 "shape": {"type": "string"},
@@ -855,8 +858,8 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "module_handle": {"type": "string"},
-                "module_key": {"type": "string", "description": "Stable module_key/module_id for the target module."},
-                "plan_handle": {"type": "string", "description": "Required when module_key is used and more than one draft may exist."},
+                "module_name": {"type": "string", "description": "Stable module_name for the target module."},
+                "plan_handle": {"type": "string", "description": "Required when module_name is used and more than one draft may exist."},
                 "title": {"type": "string"},
                 "task": {"type": "string"},
                 "scope_guard": {"type": "string"},
@@ -895,8 +898,8 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "module_handle": {"type": "string"},
-                "module_key": {"type": "string", "description": "Stable module_key/module_id for the target module."},
-                "plan_handle": {"type": "string", "description": "Required when module_key is used and more than one draft may exist."},
+                "module_name": {"type": "string", "description": "Stable module_name for the target module."},
+                "plan_handle": {"type": "string", "description": "Required when module_name is used and more than one draft may exist."},
                 "title": {"type": "string"},
                 "task": {"type": "string"},
                 "scope_guard": {"type": "string"},
@@ -994,7 +997,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "module_handle": {"type": "string"},
-                "module_key": {"type": "string"},
+                "module_name": {"type": "string"},
                 "plan_handle": {"type": "string"},
             },
             "additionalProperties": False,
@@ -1026,11 +1029,11 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "module_handle": {"type": "string"},
-                "module_key": {"type": "string"},
+                "module_name": {"type": "string"},
                 "plan_handle": {"type": "string"},
                 "kind": {"type": "string", "enum": ["prelude", "module", "join"]},
                 "depends_on_module_handles": {"type": "array", "items": {"type": "string"}},
-                "depends_on_module_keys": {"type": "array", "items": {"type": "string"}},
+                "depends_on_module_names": {"type": "array", "items": {"type": "string"}},
                 "responsibility": {"type": "string"},
                 "owned_area": {"type": "array", "items": {"type": "string"}},
                 "ownership": {"type": "array", "items": {"type": "string"}},
@@ -1060,7 +1063,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "module_handle": {"type": "string"},
-                "module_key": {"type": "string"},
+                "module_name": {"type": "string"},
                 "plan_handle": {"type": "string"},
             },
             "additionalProperties": False,
@@ -1689,10 +1692,10 @@ class PlanBuilderRuntime:
             args,
             {
                 "plan_handle",
-                "module_key",
+                "module_name",
                 "kind",
                 "depends_on_module_handles",
-                "depends_on_module_keys",
+                "depends_on_module_names",
                 "responsibility",
                 "owned_area",
                 "ownership",
@@ -1724,10 +1727,10 @@ class PlanBuilderRuntime:
         try:
             module_args = {"plan_handle": plan_handle}
             for key in (
-                "module_key",
+                "module_name",
                 "kind",
                 "depends_on_module_handles",
-                "depends_on_module_keys",
+                "depends_on_module_names",
                 "responsibility",
                 "owned_area",
                 "ownership",
@@ -1747,6 +1750,7 @@ class PlanBuilderRuntime:
                     module_args[key] = args.get(key)
             opened = self._begin_module(module_args)
             module_handle = str((opened.get("structured") or {}).get("module_handle") or "")
+            module_name = str((opened.get("structured") or {}).get("module_name") or "")
             for raw_interface in _module_outline_interfaces(args):
                 interface_args = {"module_handle": module_handle}
                 interface_args.update(raw_interface)
@@ -1781,18 +1785,18 @@ class PlanBuilderRuntime:
             raise
         return {
             "text": (
-                f"Module outline added and closed: module_key={_text(args.get('module_key'))}; "
+                f"Module outline added and closed: module_name={module_name}; "
                 f"module_handle={module_handle}; "
                 f"milestone_handles={', '.join(item for item in milestone_handles if item) or '(none)'}; "
                 f"acceptance_handles={', '.join(item for item in acceptance_handles if item) or '(none)'}. "
                 f"This module is closed for milestone edits. Use plan_handle={plan_handle} to add the next module, "
-                "or use plan_add_module_interface with module_key only for later interface repair."
+                "or use plan_add_module_interface with module_name only for later interface repair."
             ),
             "structured": {
                 "plan_handle": plan_handle,
                 "parent_plan_handle": plan_handle,
                 "module_handle": module_handle,
-                "module_key": _text(args.get("module_key")),
+                "module_name": module_name,
                 "module_closed": True,
                 "milestone_handles": [item for item in milestone_handles if item],
                 "acceptance_handles": [item for item in acceptance_handles if item],
@@ -1818,7 +1822,7 @@ class PlanBuilderRuntime:
                 structured = dict(result.get("structured") or {})
                 results.append(
                     {
-                        "module_key": str(structured.get("module_key") or raw_module.get("module_key") or ""),
+                        "module_name": str(structured.get("module_name") or _text(raw_module.get("module_name")) or ""),
                         "module_handle": str(structured.get("module_handle") or ""),
                         "module_closed": bool(structured.get("module_closed", True)),
                         "milestone_handles": [str(item) for item in list(structured.get("milestone_handles") or []) if str(item or "").strip()],
@@ -1831,13 +1835,13 @@ class PlanBuilderRuntime:
         return {
             "text": (
                 f"Module outline batch added and closed: {len(results)} module(s). "
-                "Use returned module_key/module_handle mappings for later repair or dependency references."
+                "Use returned module_name/module_handle mappings for later repair or dependency references."
             ),
             "structured": {
                 "plan_handle": plan_handle,
                 "modules": results,
                 "module_handles": [item["module_handle"] for item in results if item["module_handle"]],
-                "module_keys": [item["module_key"] for item in results if item["module_key"]],
+                "module_names": [item["module_name"] for item in results if item["module_name"]],
             },
         }
 
@@ -1846,10 +1850,10 @@ class PlanBuilderRuntime:
             args,
             {
                 "plan_handle",
-                "module_key",
+                "module_name",
                 "kind",
                 "depends_on_module_handles",
-                "depends_on_module_keys",
+                "depends_on_module_names",
                 "responsibility",
                 "owned_area",
                 "ownership",
@@ -1875,16 +1879,16 @@ class PlanBuilderRuntime:
             state,
             [
                 *_string_list(args.get("depends_on_module_handles")),
-                *_string_list(args.get("depends_on_module_keys")),
+                *_string_list(args.get("depends_on_module_names")),
             ],
         )
         for dependency in dependencies:
             module = _find_module_by_handle(state, dependency)
             if not module.get("closed"):
                 raise ValueError(f"depends_on_module_handles includes an open module: {dependency}")
-        module_id = _explicit_module_id(args.get("module_key"))
+        module_id = _explicit_module_id(args.get("module_name"))
         if any(_text(module.get("module_id")) == module_id for module in state["modules"]):
-            raise ValueError(f"module_key/module_id is duplicated: {module_id}")
+            raise ValueError(f"module_name is duplicated: {module_id}")
         handle = self._next_handle(state, "module", "module")
         item = {
             "handle": handle,
@@ -1921,8 +1925,8 @@ class PlanBuilderRuntime:
         state["modules"].append(item)
         self._save_state(state)
         return {
-            "text": f"Module opened: {module_id} ({handle}). Use module_key={module_id} with later module-scoped tools.",
-            "structured": {"module_handle": handle, "module_key": module_id, "plan_handle": state["plan_handle"]},
+            "text": f"Module opened: {module_id} ({handle}). Use module_name={module_id} with later module-scoped tools.",
+            "structured": {"module_handle": handle, "module_name": module_id, "plan_handle": state["plan_handle"]},
         }
 
     def _add_module_interface(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -1930,7 +1934,7 @@ class PlanBuilderRuntime:
             args,
             {
                 "module_handle",
-                "module_key",
+                "module_name",
                 "plan_handle",
                 "direction",
                 "name",
@@ -1976,7 +1980,7 @@ class PlanBuilderRuntime:
         self._save_state(state)
         return {
             "text": f"Module interface added: {item['name']}",
-            "structured": {"module_handle": module["handle"], "module_key": module.get("module_id"), "plan_handle": state["plan_handle"]},
+            "structured": {"module_handle": module["handle"], "module_name": module.get("module_id"), "plan_handle": state["plan_handle"]},
         }
 
     def _add_milestone_outline(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -1984,7 +1988,7 @@ class PlanBuilderRuntime:
             args,
             {
                 "module_handle",
-                "module_key",
+                "module_name",
                 "plan_handle",
                 "title",
                 "task",
@@ -2034,20 +2038,20 @@ class PlanBuilderRuntime:
         return {
             "text": (
                 f"Milestone outline added and closed: milestone_handle={milestone_handle}; "
-                f"module_key={module.get('module_id')}; "
+                f"module_name={module.get('module_id')}; "
                 f"acceptance_handles={', '.join(str(item) for item in list((added.get('structured') or {}).get('acceptance_handles') or []) if item) or '(none)'}. "
-                f"This milestone is closed. Use module_handle={module_handle} or module_key={module.get('module_id')} "
+                f"This milestone is closed. Use module_handle={module_handle} or module_name={module.get('module_id')} "
                 "to add another milestone to this still-open module, or close the module when all milestones are present."
             ),
             "structured": {
                 "plan_handle": state["plan_handle"],
                 "module_handle": module_handle,
                 "parent_module_handle": module_handle,
-                "module_key": module.get("module_id"),
+                "module_name": module.get("module_id"),
                 "milestone_handle": milestone_handle,
                 "milestone_closed": True,
                 "acceptance_handles": list((added.get("structured") or {}).get("acceptance_handles") or []),
-                "next_tool_hint": "Use module_handle/module_key with plan_add_milestone_outline for another milestone, or plan_end_module when the module is complete.",
+                "next_tool_hint": "Use module_handle/module_name with plan_add_milestone_outline for another milestone, or plan_end_module when the module is complete.",
             },
         }
 
@@ -2056,7 +2060,7 @@ class PlanBuilderRuntime:
             args,
             {
                 "module_handle",
-                "module_key",
+                "module_name",
                 "plan_handle",
                 "title",
                 "task",
@@ -2179,22 +2183,22 @@ class PlanBuilderRuntime:
         return {
             "text": (
                 f"Milestone closed: {milestone['handle']}. "
-                f"Use module_handle={module['handle']} or module_key={module.get('module_id')} to add the next milestone, "
+                f"Use module_handle={module['handle']} or module_name={module.get('module_id')} to add the next milestone, "
                 "or close the module when all milestones are present."
             ),
             "structured": {
                 "module_handle": module["handle"],
                 "parent_module_handle": module["handle"],
-                "module_key": module.get("module_id"),
+                "module_name": module.get("module_id"),
                 "plan_handle": state["plan_handle"],
                 "milestone_handle": milestone["handle"],
                 "milestone_closed": True,
-                "next_tool_hint": "Use module_handle/module_key with plan_add_milestone_outline for another milestone, or plan_end_module when the module is complete.",
+                "next_tool_hint": "Use module_handle/module_name with plan_add_milestone_outline for another milestone, or plan_end_module when the module is complete.",
             },
         }
 
     def _end_module(self, args: dict[str, Any]) -> dict[str, Any]:
-        _reject_unknown_args(args, {"module_handle", "module_key", "plan_handle"})
+        _reject_unknown_args(args, {"module_handle", "module_name", "plan_handle"})
         state, module = self._load_module_from_args(args)
         _assert_open_module(module)
         if _open_milestone(module):
@@ -2213,7 +2217,7 @@ class PlanBuilderRuntime:
                 "plan_handle": state["plan_handle"],
                 "parent_plan_handle": state["plan_handle"],
                 "module_handle": module["handle"],
-                "module_key": module.get("module_id"),
+                "module_name": module.get("module_id"),
                 "module_closed": True,
                 "next_tool_hint": "Use plan_handle with plan_add_module_outline for the next module, or plan_validate_and_submit_for_review when all modules are complete.",
             },
@@ -2239,11 +2243,11 @@ class PlanBuilderRuntime:
             args,
             {
                 "module_handle",
-                "module_key",
+                "module_name",
                 "plan_handle",
                 "kind",
                 "depends_on_module_handles",
-                "depends_on_module_keys",
+                "depends_on_module_names",
                 "responsibility",
                 "owned_area",
                 "ownership",
@@ -2262,10 +2266,10 @@ class PlanBuilderRuntime:
         )
         state, module = self._load_module_from_args(args)
         _assert_editable_plan(state)
-        if "module_key" in args:
-            module_id = _explicit_module_id(args.get("module_key"))
+        if "module_name" in args:
+            module_id = _explicit_module_id(args.get("module_name"))
             if any(_text(item.get("module_id")) == module_id and _text(item.get("handle")) != module["handle"] for item in state["modules"]):
-                raise ValueError(f"module_key/module_id is duplicated: {module_id}")
+                raise ValueError(f"module_name is duplicated: {module_id}")
             module["module_id"] = module_id
         if "kind" in args:
             module["kind"] = _module_kind(args.get("kind"))
@@ -2274,8 +2278,8 @@ class PlanBuilderRuntime:
             if module["handle"] in dependencies:
                 raise ValueError("module cannot depend on itself")
             module["depends_on_module_handles"] = dependencies
-        if "depends_on_module_keys" in args:
-            dependencies = _known_module_refs(state, _string_list(args.get("depends_on_module_keys")))
+        if "depends_on_module_names" in args:
+            dependencies = _known_module_refs(state, _string_list(args.get("depends_on_module_names")))
             if module["handle"] in dependencies:
                 raise ValueError("module cannot depend on itself")
             module["depends_on_module_handles"] = dependencies
@@ -2323,11 +2327,11 @@ class PlanBuilderRuntime:
         self._save_state(state)
         return {
             "text": f"Module updated: {module['handle']}",
-            "structured": {"plan_handle": state["plan_handle"], "module_handle": module["handle"], "module_key": module.get("module_id")},
+            "structured": {"plan_handle": state["plan_handle"], "module_handle": module["handle"], "module_name": module.get("module_id")},
         }
 
     def _delete_module(self, args: dict[str, Any]) -> dict[str, Any]:
-        _reject_unknown_args(args, {"module_handle", "module_key", "plan_handle"})
+        _reject_unknown_args(args, {"module_handle", "module_name", "plan_handle"})
         state, module = self._load_module_from_args(args)
         module_handle = _text(module.get("handle"))
         _assert_editable_plan(state)
@@ -3063,10 +3067,10 @@ class PlanBuilderRuntime:
         module_handle = _text(args.get("module_handle"))
         if module_handle:
             return self._load_module(module_handle)
-        module_key = _text(args.get("module_key"))
-        if not module_key:
-            raise ValueError("module_handle or module_key is required")
-        module_id = _explicit_module_id(module_key)
+        module_name = _text(args.get("module_name"))
+        if not module_name:
+            raise ValueError("module_handle or module_name is required")
+        module_id = _explicit_module_id(module_name)
         plan_handle = _text(args.get("plan_handle"))
         if plan_handle:
             state = self._load_state(plan_handle)
@@ -3079,8 +3083,8 @@ class PlanBuilderRuntime:
         if len(matches) == 1:
             return matches[0]
         if not matches:
-            raise ValueError(f"unknown module_key: {module_id}")
-        raise ValueError(f"module_key is ambiguous across drafts: {module_id}; pass plan_handle")
+            raise ValueError(f"unknown module_name: {module_id}")
+        raise ValueError(f"module_name is ambiguous across drafts: {module_id}; pass plan_handle")
 
     def _load_milestone(self, milestone_handle: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         state = self._load_state_for_handle(milestone_handle)
@@ -3348,12 +3352,15 @@ def _plan_review_markdown(artifact: dict[str, Any], validation: dict[str, Any], 
                 title = _text(milestone.get("title") or milestone.get("milestone_id"))
                 task = _text(milestone.get("task"))
                 lines.append(f"  - {title}: {task or '-'}")
+                rendered_criteria: set[str] = set()
                 for criterion in _string_list(milestone.get("acceptance_criteria")):
+                    rendered_criteria.add(criterion)
                     lines.append(f"    - AC: {criterion}")
                 checklist = _dict_list(dict(milestone.get("metadata") or {}).get("acceptance_checklist"))
                 for item in checklist:
                     criterion = _text(item.get("criterion"))
-                    if criterion:
+                    if criterion and criterion not in rendered_criteria:
+                        rendered_criteria.add(criterion)
                         lines.append(f"    - AC: {criterion}")
     system_tests = _dict_list(artifact.get("system_test_plan"))
     if system_tests:
@@ -4805,12 +4812,12 @@ def _safe_id(value: Any, *, default_prefix: str) -> str:
 def _explicit_module_id(value: Any) -> str:
     raw = _text(value)
     if not raw:
-        raise ValueError("module_key is required; provide a stable human-readable module id")
+        raise ValueError("module_name is required")
     safe = re.sub(r"[^A-Za-z0-9_]+", "_", raw).strip("_").lower()
     if not safe:
-        raise ValueError("module_key must contain letters, numbers, or underscores")
+        raise ValueError("module_name must contain letters, numbers, or underscores")
     if safe[0].isdigit():
-        raise ValueError("module_key must start with a letter or underscore after normalization")
+        raise ValueError("module_name must start with a letter or underscore after normalization")
     return safe
 
 
@@ -5003,7 +5010,7 @@ def _assert_open_module(module: dict[str, Any]) -> None:
     if bool(module.get("closed")):
         raise ValueError(
             "module is already closed for milestone edits; do not restart the whole plan. "
-            "Use the returned plan_handle to add the next module, use plan_add_module_interface with module_key for interface repair, "
+            "Use the returned plan_handle to add the next module, use plan_add_module_interface with module_name for interface repair, "
             "or check out/update a revision if the module's milestone structure itself must change."
         )
 
@@ -5011,7 +5018,7 @@ def _assert_open_module(module: dict[str, Any]) -> None:
 def _assert_open_milestone(milestone: dict[str, Any]) -> None:
     if bool(milestone.get("closed")):
         raise ValueError(
-            "milestone is already closed; use the parent module_handle/module_key to add another milestone, "
+            "milestone is already closed; use the parent module_handle/module_name to add another milestone, "
             "or update/revise the existing milestone instead of reopening it."
         )
 
@@ -5042,7 +5049,7 @@ def _find_module_by_id(state: dict[str, Any], module_id: str) -> dict[str, Any]:
     for module in list(state.get("modules") or []):
         if _text(module.get("module_id")) == normalized:
             return module
-    raise ValueError(f"unknown module_key: {normalized}")
+    raise ValueError(f"unknown module_name: {normalized}")
 
 
 def _known_module_refs(state: dict[str, Any], refs: list[str]) -> list[str]:
@@ -5061,7 +5068,7 @@ def _known_module_refs(state: dict[str, Any], refs: list[str]) -> list[str]:
             except ValueError:
                 handle = ""
         if not handle:
-            raise ValueError(f"unknown module reference: {text}; pass an existing module_handle or module_key")
+            raise ValueError(f"unknown module reference: {text}; pass an existing module_handle or module_name")
         result.append(handle)
     return _dedupe_strings(result)
 

@@ -41,7 +41,7 @@ REPAIR_BILL_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "name": "op_minion_repair_bill_begin",
         "description": (
             "Start a structured repair bill against the current parent plan DAG. "
-            "Pal loads the parent work order and accepts only existing module_id/module_key values; do not hand-write repair JSON."
+            "Pal loads the parent work order and accepts only existing module_name values; do not hand-write repair JSON."
         ),
         "parameters_schema": {
             "type": "object",
@@ -57,7 +57,7 @@ REPAIR_BILL_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_repair_bill_add_module_patch": {
         "name": "op_minion_repair_bill_add_module_patch",
         "description": (
-            "Add or merge a repair patch for one existing module. This does not create a module; module_id/module_key must already exist "
+            "Add or merge a repair patch for one existing module. This does not create a module; module_name must already exist "
             "in the parent DAG. Use defect_kind=module_defect or contract_defect to replay that module and downstream dependents. "
             "Use defect_kind=architecture_defect only when the current module split, dependency graph, or ownership boundary is wrong; "
             "that blocks the parent for plan review instead of replaying locally."
@@ -66,8 +66,7 @@ REPAIR_BILL_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "bill_handle": {"type": "string"},
-                "module_id": {"type": "string"},
-                "module_key": {"type": "string"},
+                "module_name": {"type": "string"},
                 "defect_kind": {
                     "type": "string",
                     "enum": ["module_defect", "contract_defect", "integration_defect", "architecture_defect", "triage_required"],
@@ -90,8 +89,7 @@ REPAIR_BILL_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "bill_handle": {"type": "string"},
-                "module_id": {"type": "string"},
-                "module_key": {"type": "string"},
+                "module_name": {"type": "string"},
                 "defect_kind": {
                     "type": "string",
                     "enum": ["module_defect", "contract_defect", "integration_defect", "architecture_defect", "triage_required"],
@@ -114,8 +112,7 @@ REPAIR_BILL_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "bill_handle": {"type": "string"},
-                "module_id": {"type": "string"},
-                "module_key": {"type": "string"},
+                "module_name": {"type": "string"},
                 "criteria": {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "object"}]}},
                 "defect_kind": {
                     "type": "string",
@@ -134,8 +131,7 @@ REPAIR_BILL_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "type": "object",
             "properties": {
                 "bill_handle": {"type": "string"},
-                "module_id": {"type": "string"},
-                "module_key": {"type": "string"},
+                "module_name": {"type": "string"},
                 "evidence": {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "object"}]}},
             },
             "required": ["bill_handle", "evidence"],
@@ -264,8 +260,7 @@ class RepairBillBuilderRuntime:
             args,
             {
                 "bill_handle",
-                "module_id",
-                "module_key",
+                "module_name",
                 "defect_kind",
                 "summary",
                 "acceptance_criteria",
@@ -283,11 +278,11 @@ class RepairBillBuilderRuntime:
         self._save_state(state)
         return {
             "text": f"Repair patch added: {module_id}",
-            "structured": {"bill_handle": state["bill_handle"], "module_id": module_id, "patch_count": len(patches)},
+            "structured": {"bill_handle": state["bill_handle"], "module_name": module_id, "module_id": module_id, "patch_count": len(patches)},
         }
 
     def _add_acceptance_criteria_batch(self, args: dict[str, Any]) -> dict[str, Any]:
-        _reject_unknown_args(args, {"bill_handle", "module_id", "module_key", "criteria", "defect_kind"})
+        _reject_unknown_args(args, {"bill_handle", "module_name", "criteria", "defect_kind"})
         state = self._load_state(_required(args, "bill_handle"))
         module_id = self._module_id(state, args)
         criteria = _acceptance_items(args.get("criteria"))
@@ -307,11 +302,11 @@ class RepairBillBuilderRuntime:
         self._save_state(state)
         return {
             "text": f"Repair acceptance criteria added: {module_id} ({len(criteria)})",
-            "structured": {"bill_handle": state["bill_handle"], "module_id": module_id, "added_count": len(criteria)},
+            "structured": {"bill_handle": state["bill_handle"], "module_name": module_id, "module_id": module_id, "added_count": len(criteria)},
         }
 
     def _add_evidence(self, args: dict[str, Any]) -> dict[str, Any]:
-        _reject_unknown_args(args, {"bill_handle", "module_id", "module_key", "evidence"})
+        _reject_unknown_args(args, {"bill_handle", "module_name", "evidence"})
         state = self._load_state(_required(args, "bill_handle"))
         module_id = self._module_id(state, args)
         evidence = _evidence_items(args.get("evidence"))
@@ -331,7 +326,7 @@ class RepairBillBuilderRuntime:
         self._save_state(state)
         return {
             "text": f"Repair evidence added: {module_id} ({len(evidence)})",
-            "structured": {"bill_handle": state["bill_handle"], "module_id": module_id, "added_count": len(evidence)},
+            "structured": {"bill_handle": state["bill_handle"], "module_name": module_id, "module_id": module_id, "added_count": len(evidence)},
         }
 
     def _validate(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -372,15 +367,15 @@ class RepairBillBuilderRuntime:
         }
 
     def _module_id(self, state: dict[str, Any], args: dict[str, Any]) -> str:
-        module_id = _text(args.get("module_id") or args.get("module_key"))
+        module_id = _text(args.get("module_name"))
         known = _string_list(state.get("known_module_ids"))
         if not module_id:
             if len(known) == 1:
                 module_id = known[0]
             else:
-                raise ValueError("module_id or module_key is required")
+                raise ValueError("module_name is required")
         if module_id not in set(known):
-            raise ValueError(f"unknown module_id/module_key for parent DAG: {module_id}")
+            raise ValueError(f"unknown module_name for parent DAG: {module_id}")
         return module_id
 
     def _repository(self) -> MinionTaskingRepository:
@@ -458,7 +453,7 @@ def _normalize_module_patch(module_id: str, raw: dict[str, Any]) -> dict[str, An
     )
     return {
         "module_id": module_id,
-        "module_key": module_id,
+        "module_name": module_id,
         "defect_kind": defect_kind,
         "summary": _text(raw.get("summary")),
         "additional_acceptance_criteria": _dedupe_text([str(item.get("criterion") or "") for item in acceptance]),

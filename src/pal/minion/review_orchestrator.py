@@ -753,14 +753,21 @@ class ReviewOrchestrator:
             review_target = dict(metadata.get("review_target") or {})
             source_work_order_id = str(metadata.get("plan_review_for_work_order_id") or review_target.get("planner_work_order_id") or "")
             if latest.get("status") != "ok":
+                summary = "reviewer finished without submitting a plan_acceptance gate"
                 self._merge_plan_review_state(
                     source_work_order_id,
                     {
                         "status": "gate_missing",
                         "plan_ref": dict(plan_ref),
-                        "summary": "reviewer finished without submitting a plan_acceptance gate",
+                        "summary": summary,
                         "updated_at": utc_now(),
                     },
+                )
+                self._mark_plan_review_workflow_blocked(
+                    source_work_order_id,
+                    reason="plan_acceptance_gate_missing",
+                    summary=summary,
+                    plan_ref=plan_ref,
                 )
                 event = {
                     "event_kind": "plan_review_failed",
@@ -770,7 +777,7 @@ class ReviewOrchestrator:
                     "minion_profile": reviewer_state.pack.minion_profile,
                     "payload": {
                         "status": "failed",
-                        "summary": "reviewer finished without submitting a plan_acceptance gate",
+                        "summary": summary,
                         "plan_ref": dict(plan_ref),
                     },
                     "created_at": utc_now(),
@@ -994,6 +1001,13 @@ class ReviewOrchestrator:
                         "updated_at": utc_now(),
                     },
                 )
+                self._mark_plan_review_workflow_blocked(
+                    source_work_order_id,
+                    reason="plan_review_reconcile_failed",
+                    summary=payload["summary"],
+                    plan_ref=plan_ref,
+                    error=payload["error"],
+                )
             else:
                 event = {
                     "event_kind": "plan_review_reconcile_failed",
@@ -1008,6 +1022,45 @@ class ReviewOrchestrator:
                 self.repository.record_minion_event(event)
         finally:
             self.plan_reviews.release(review_key)
+
+    def _mark_plan_review_workflow_blocked(
+        self,
+        work_order_id: str,
+        *,
+        reason: str,
+        summary: str,
+        plan_ref: dict[str, Any],
+        error: str = "",
+    ) -> None:
+        normalized = str(work_order_id or "").strip()
+        if not normalized:
+            return
+        snapshot = self.repository.read_work_order(normalized)
+        if snapshot.get("status") != "ok":
+            return
+        metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {})
+        workflow = dict(metadata.get("workflow") or {})
+        if not workflow:
+            return
+        blocker = {
+            "reason": str(reason or "plan_review_blocked"),
+            "summary": str(summary or "plan review blocked"),
+            "plan_ref": dict(plan_ref or {}),
+        }
+        if error:
+            blocker["error"] = str(error)
+        workflow.update({"status": "blocked", "blocker": blocker, "updated_at": utc_now()})
+        steps = [dict(item) for item in list(workflow.get("steps") or []) if isinstance(item, dict)]
+        current_step_id = str(workflow.get("current_step_id") or "")
+        if steps:
+            target_index = next((index for index, item in enumerate(steps) if str(item.get("step_id") or "") == current_step_id), len(steps) - 1)
+            steps[target_index] = {**steps[target_index], "status": "blocked", "blocker": blocker}
+            workflow["steps"] = steps
+        self.repository.merge_work_order_metadata(
+            normalized,
+            {"workflow": workflow},
+            work_order_status="blocked",
+        )
 
     async def _spawn_plan_revision_from_gate(
         self,

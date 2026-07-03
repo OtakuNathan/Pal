@@ -3712,6 +3712,14 @@ def _latest_child_terminal_failure_status(db: sqlite3.Connection, child_work_ord
     ).fetchone()
     if row is not None:
         return str(dict(row).get("status") or "").strip().lower()
+    row = db.execute(
+        "SELECT status FROM minion_work_orders WHERE work_order_id = ? LIMIT 1",
+        (child_id,),
+    ).fetchone()
+    if row is not None:
+        status = str(dict(row).get("status") or "").strip().lower()
+        if status in {"failed", "blocked"}:
+            return status
     rows = db.execute(
         """
         SELECT payload_json FROM minion_worker_ledger
@@ -4122,7 +4130,7 @@ def _normalize_repair_bill_payload(
     unknown_modules: list[str] = []
 
     def add_patch(module_id: str, patch: dict[str, Any]) -> None:
-        normalized_module_id = str(module_id or patch.get("module_id") or patch.get("module_key") or "").strip()
+        normalized_module_id = str(module_id or patch.get("module_name") or patch.get("module_id") or "").strip()
         if not normalized_module_id:
             return
         if normalized_module_id not in known_modules:
@@ -4137,10 +4145,10 @@ def _normalize_repair_bill_payload(
             add_patch(str(module_id), patch)
     for patch in list(raw.get("modules") or []):
         if isinstance(patch, dict):
-            add_patch(str(patch.get("module_id") or patch.get("module_key") or ""), patch)
+            add_patch(str(patch.get("module_name") or patch.get("module_id") or ""), patch)
     if not module_patches and isinstance(raw.get("module_patch"), dict):
         patch = dict(raw.get("module_patch") or {})
-        add_patch(str(patch.get("module_id") or patch.get("module_key") or raw.get("module_id") or raw.get("module_key") or ""), patch)
+        add_patch(str(patch.get("module_name") or patch.get("module_id") or raw.get("module_name") or raw.get("module_id") or ""), patch)
     bill_id = str(raw.get("bill_id") or f"repair_bill_{uuid4().hex[:16]}").strip()
     return {
         "bill_id": bill_id,

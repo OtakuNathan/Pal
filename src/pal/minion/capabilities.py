@@ -1233,7 +1233,7 @@ class MinionManagerProvider:
                 },
                 "modules": {
                     "type": "array",
-                    "description": "Compatibility alias: list of existing module patch objects with module_id/module_key.",
+                    "description": "List of existing module patch objects with module_name or module_id.",
                     "items": {"type": "object"},
                 },
             },

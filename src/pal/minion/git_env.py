@@ -969,7 +969,7 @@ def _project_name(metadata: dict[str, Any], workspace: dict[str, Any], *, task_i
 
 def _module_name(metadata: dict[str, Any], workspace: dict[str, Any]) -> str:
     for source in (metadata, workspace):
-        for key in ("module_name", "parent_module_name", "module_key", "module_id", "parent_module_id"):
+        for key in ("module_name", "parent_module_name", "module_id", "parent_module_id"):
             value = str(source.get(key) or "").strip()
             if value:
                 return value

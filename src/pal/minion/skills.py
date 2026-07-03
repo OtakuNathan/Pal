@@ -170,8 +170,8 @@ Repair bills are downstream feedback projected back into the plan/module graph.
 - `op_minion_submit_repair_bill` is the public operation for submitting structured replay feedback.
 - A repair bill exists because integration, join, or downstream module verification can discover that an earlier module contract, acceptance criterion, or plan boundary was incomplete. It is the reverse-propagation mechanism from downstream evidence back to the affected plan DAG nodes.
 - Treat a repair bill as "amended obligations for the existing DAG", not as a new plan. It must preserve the original plan identity, module ids, dependency meaning, and revision history.
-- A bill must be module-key indexed and shape-compatible with the existing plan/module schema. Avoid a second truth source.
-- Use existing `module_id`/`module_key` values as the primary keys. Do not invent new names, duplicate modules, or describe repairs only in prose.
+- A bill must be module-name indexed and shape-compatible with the existing plan/module schema. Avoid a second truth source.
+- Use existing `module_name` values as the primary keys. Do not invent new names, duplicate modules, or describe repairs only in prose.
 - Keep patch shape isomorphic to plan shape: module patches attach to modules, acceptance criteria attach to the module or milestone they constrain, evidence attaches to the finding or criterion it proves, and replay scope follows dependency edges.
 - Module or contract defects can add acceptance criteria, counterexamples, tests, or repair notes to the affected module and then replay the relevant part of the DAG.
 - Integration defects should normally be fixed in the current join/integration context when possible.

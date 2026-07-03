@@ -84,7 +84,7 @@ Architect must not invent task boundaries from raw chat history when a draft exi
 Architect plan construction is structured and mutable during drafting:
 
 - `plan_begin` creates a draft handle.
-- Module and milestone tools add bounded structure. `module_key` is caller-chosen, stable, and human-readable; generated handles are internal mutation references.
+- Module and milestone tools add bounded structure. `module_name` is caller-chosen, stable, and human-readable; generated handles are internal mutation references.
 - `plan_add_module_outlines_batch`, `plan_add_module_outline`, and `plan_add_milestone_outline` close their nodes in one call. `begin_*`/`end_*` tools are for incremental construction and return parent handles so the architect can continue at the correct layer.
 - Revision planners use `plan_checkout`, `plan_find`, `plan_get`, and `plan_update_*`/`plan_delete_*` tools to repair specific handles instead of rebuilding the whole plan from scratch.
 - The runtime validates topology, closed nodes, acceptance criteria, module dependencies, and gate evidence fields before a draft can be submitted for review.

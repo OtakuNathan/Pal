@@ -1673,6 +1673,7 @@ class MinionManager:
             metadata.setdefault("control_route", dict(state.pack.metadata.get("control_route") or {}))
             event_payload["metadata"] = metadata
             event["payload"] = event_payload
+        event_recorded = False
         if event_kind == "terminal":
             terminal_status = str(event["payload"].get("status") or "completed")
             self._transition_run_status(state, terminal_status)
@@ -1681,6 +1682,7 @@ class MinionManager:
             state.pending_clarification = {}
             self._release_logical_slots_for_run(state.run_id, reason="runner_terminal")
             self._notify_logical_slot_available(reason="runner_terminal")
+            event_recorded = self._maybe_release_parent_module_on_terminal_failure(state, event)
         if event_kind == "resource_request":
             self._schedule_resource_request(state, event)
         if event_kind == "resource_release":
@@ -1708,7 +1710,7 @@ class MinionManager:
                 event["payload"].get("phase", ""),
                 str(event["payload"].get("summary") or "")[:240],
             )
-        if _should_record_runner_event(state.pack, event):
+        if _should_record_runner_event(state.pack, event) and not event_recorded:
             try:
                 self.tasking_repository.record_minion_event(event)
             except Exception:
@@ -1722,6 +1724,58 @@ class MinionManager:
             self._schedule_ready_modules_after_terminal(state, event)
         if event_kind == "milestone_completed":
             self.serial_scheduler.schedule(state, event)
+
+    def _maybe_release_parent_module_on_terminal_failure(self, state: MinionRunState, event: dict[str, Any]) -> bool:
+        payload = dict(event.get("payload") or {})
+        terminal_status = str(payload.get("status") or "").strip().lower()
+        if terminal_status not in {"blocked", "failed"}:
+            return False
+        metadata = dict(state.pack.metadata or {})
+        parent_work_order_id = str(metadata.get("parent_work_order_id") or "").strip()
+        parent_module_id = str(metadata.get("parent_module_id") or metadata.get("module_id") or "").strip()
+        child_work_order_id = str(state.pack.work_order_id or event.get("work_order_id") or "").strip()
+        if not parent_work_order_id or not parent_module_id or not child_work_order_id:
+            return False
+        recorded = False
+        try:
+            if _should_record_runner_event(state.pack, event):
+                self.tasking_repository.record_minion_event(event)
+                recorded = True
+            release = self.tasking_repository.release_running_module_parent(
+                child_work_order_id,
+                child_terminal_status=terminal_status,
+                reason=str(payload.get("summary") or f"module {parent_module_id} ended with status {terminal_status}"),
+            )
+        except Exception:
+            self.logger.exception("failed to release parent module on terminal failure: %s", state.run_id)
+            return recorded
+        payload["parent_module_release"] = dict(release)
+        event["payload"] = payload
+        parent_status = str(release.get("parent_status") or release.get("status") or "").strip().lower()
+        if parent_status == "blocked":
+            parent_event = {
+                "event_kind": "plan_parent_blocked",
+                "minion_id": "",
+                "run_id": state.run_id,
+                "work_order_id": parent_work_order_id,
+                "minion_profile": state.pack.minion_profile,
+                "payload": {
+                    "status": "blocked",
+                    "reason": "module_terminal_failure",
+                    "module_id": parent_module_id,
+                    "child_work_order_id": child_work_order_id,
+                    "child_terminal_status": terminal_status,
+                    "summary": str(payload.get("summary") or f"module {parent_module_id} ended with status {terminal_status}"),
+                    "release": dict(release),
+                },
+                "created_at": utc_now(),
+            }
+            self._queue_event_delivery(parent_event)
+            try:
+                self.tasking_repository.record_minion_event(parent_event)
+            except Exception:
+                self.logger.exception("failed to record parent block event after terminal failure: %s", parent_work_order_id)
+        return recorded
 
     def _schedule_ready_modules_after_terminal(self, state: MinionRunState, event: dict[str, Any]) -> None:
         _ = state, event

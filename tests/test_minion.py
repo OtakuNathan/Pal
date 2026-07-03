@@ -440,7 +440,7 @@ def _dispatchable_plan_payload(
 def _builder_plan_calls_from_handles(
     *,
     plan_id: str = "plan_builder",
-    module_key: str = "module_builder",
+    module_name: str = "module_builder",
     call_prefix: str = "call_builder",
 ) -> list[CanonicalToolCall]:
     plan_handle = plan_id if plan_id.startswith("plan_") else f"plan_{plan_id}"
@@ -455,7 +455,7 @@ def _builder_plan_calls_from_handles(
     return [
         CanonicalToolCall(
             name="plan_begin",
-            args={"goal": f"Plan {module_key}", "plan_id": plan_id, "summary": f"Dispatchable plan {plan_id}.", "languages": ["python"]},
+            args={"goal": f"Plan {module_name}", "plan_id": plan_id, "summary": f"Dispatchable plan {plan_id}.", "languages": ["python"]},
             call_id=f"{call_prefix}_begin",
         ),
         CanonicalToolCall(
@@ -471,7 +471,7 @@ def _builder_plan_calls_from_handles(
             name="plan_begin_module",
             args={
                 "plan_handle": plan_handle,
-                "module_key": "module_prelude",
+                "module_name": "module_prelude",
                 "kind": "prelude",
                 "responsibility": "Define contracts and execution skeleton.",
                 "owned_area": ["docs/spec.md"],
@@ -532,30 +532,30 @@ def _builder_plan_calls_from_handles(
             name="plan_begin_module",
             args={
                 "plan_handle": plan_handle,
-                "module_key": module_key,
+                "module_name": module_name,
                 "kind": "module",
                 "depends_on_module_handles": [prelude_handle],
-                "responsibility": f"Implement {module_key}.",
-                "owned_area": [f"src/{module_key}.py", f"tests/test_{module_key}.py"],
+                "responsibility": f"Implement {module_name}.",
+                "owned_area": [f"src/{module_name}.py", f"tests/test_{module_name}.py"],
                 "ownership": [
-                    f"{module_key} owns src/{module_key}.py and tests/test_{module_key}.py.",
+                    f"{module_name} owns src/{module_name}.py and tests/test_{module_name}.py.",
                     "Prelude contracts are read-only inputs.",
                     "Package facades and sibling implementation files are not owned by this module.",
                 ],
                 "lifecycle": [
-                    f"{module_key} creates its implementation during the module milestone.",
+                    f"{module_name} creates its implementation during the module milestone.",
                     "Join consumes the public behavior only after module-quality review passes.",
                 ],
                 "invariants": [
-                    f"{module_key} writes only its declared owned_area.",
+                    f"{module_name} writes only its declared owned_area.",
                     "The public result contract remains stable for join verification.",
                 ],
                 "constraint_handles": linked,
                 "module_quality_criteria": [
-                    f"{module_key} preserves its public contract, focused tests, and downstream integration readiness."
+                    f"{module_name} preserves its public contract, focused tests, and downstream integration readiness."
                 ],
                 "risk_surfaces": ["public_api_contract"],
-                "delivery_surfaces": [f"public import path for {module_key}"],
+                "delivery_surfaces": [f"public import path for {module_name}"],
             },
             call_id=f"{call_prefix}_module",
         ),
@@ -578,10 +578,10 @@ def _builder_plan_calls_from_handles(
             args={
                 "module_handle": implementation_handle,
                 "direction": "provided",
-                "name": f"{module_key}.result",
-                "shape": f"Implemented {module_key} behavior and tests.",
+                "name": f"{module_name}.result",
+                "shape": f"Implemented {module_name} behavior and tests.",
                 "lifecycle": "Produced by the implementation milestone before join verification.",
-                "ownership": f"{module_key} owns this result.",
+                "ownership": f"{module_name} owns this result.",
                 "error_behavior": "Failing implementation or tests blocks join verification.",
                 "compatibility": "Join consumes the public behavior, not private implementation details.",
             },
@@ -591,10 +591,10 @@ def _builder_plan_calls_from_handles(
             name="plan_begin_milestone",
             args={
                 "module_handle": implementation_handle,
-                "title": f"{module_key} implementation",
-                "task": f"Implement and test {module_key}.",
-                "tests_required": [f"python -m pytest tests/test_{module_key}.py"],
-                "checkpoint_admission_evidence": [f"python -m pytest tests/test_{module_key}.py passes."],
+                "title": f"{module_name} implementation",
+                "task": f"Implement and test {module_name}.",
+                "tests_required": [f"python -m pytest tests/test_{module_name}.py"],
+                "checkpoint_admission_evidence": [f"python -m pytest tests/test_{module_name}.py passes."],
             },
             call_id=f"{call_prefix}_module_ms",
         ),
@@ -602,8 +602,8 @@ def _builder_plan_calls_from_handles(
             name="plan_add_acceptance_criterion",
             args={
                 "milestone_handle": implementation_milestone_handle,
-                "criterion": f"{module_key} behavior is implemented with focused regression tests.",
-                "evidence_expectation": f"pytest for tests/test_{module_key}.py passes.",
+                "criterion": f"{module_name} behavior is implemented with focused regression tests.",
+                "evidence_expectation": f"pytest for tests/test_{module_name}.py passes.",
                 "linked_constraint_handles": linked,
                 "negative_cases": [],
             },
@@ -615,7 +615,7 @@ def _builder_plan_calls_from_handles(
             name="plan_begin_module",
             args={
                 "plan_handle": plan_handle,
-                "module_key": "module_join",
+                "module_name": "module_join",
                 "kind": "join",
                 "depends_on_module_handles": [implementation_handle],
                 "responsibility": "Integrate module outputs and run system verification.",
@@ -640,10 +640,10 @@ def _builder_plan_calls_from_handles(
             args={
                 "module_handle": join_handle,
                 "direction": "consumed",
-                "name": f"{module_key}.result",
-                "shape": f"Implemented {module_key} behavior and tests.",
+                "name": f"{module_name}.result",
+                "shape": f"Implemented {module_name} behavior and tests.",
                 "lifecycle": "Consumed during final integration verification.",
-                "ownership": f"{module_key} owns the produced behavior; join owns final verification.",
+                "ownership": f"{module_name} owns the produced behavior; join owns final verification.",
                 "error_behavior": "Join fails if implementation evidence or integration behavior is missing.",
                 "compatibility": "Join verifies observable contract behavior only.",
             },
@@ -721,7 +721,7 @@ def _builder_calls_from_plan_payload(plan: dict, *, call_prefix: str = "call_pla
         executor_profile = str((module.get("metadata") or {}).get("executor_profile") or node.get("executor_profile") or "")
         module_args = {
             "plan_handle": plan_handle,
-            "module_key": module_id,
+            "module_name": module_id,
             "kind": kind,
             "depends_on_module_handles": [module_handle_by_id[item] for item in dependency_module_ids if item in module_handle_by_id],
             "responsibility": str(module.get("responsibility") or f"Implement {module_id}."),
@@ -1056,7 +1056,7 @@ class MinionContractTests(unittest.TestCase):
                         },
                         map_args=lambda args: {
                             "plan_handle": args["plan_handle"],
-                            "module_key": args["section_key"],
+                            "module_name": args["section_key"],
                             "kind": "module",
                             "responsibility": args["summary"],
                             "owned_area": [f"domain:{args['section_key']}"],
@@ -1113,7 +1113,7 @@ class MinionContractTests(unittest.TestCase):
                 )
                 self.assertTrue(added.ok, added.text)
                 self.assertEqual(added.structured["plan_builder_alias"]["alias"], alias_name)
-                self.assertEqual(added.structured["module_key"], "domain_section")
+                self.assertEqual(added.structured["module_name"], "domain_section")
             finally:
                 unregister_plan_builder_alias(alias_name)
                 shutil.rmtree(root, ignore_errors=True)
@@ -1140,7 +1140,7 @@ class MinionContractTests(unittest.TestCase):
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_builder"},
                 )
 
-                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_direct", module_key="module_builder_direct")
+                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_direct", module_name="module_builder_direct")
                 calls[-1] = CanonicalToolCall(
                     name="plan_finalize",
                     args={
@@ -1187,7 +1187,7 @@ class MinionContractTests(unittest.TestCase):
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_builder_next"},
                 )
 
-                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_next", module_key="module_builder_next")
+                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_next", module_name="module_builder_next")
                 calls[0].args["workflow_next"] = {
                     "profile": "none",
                     "artifact_type": "review_report_plan",
@@ -1216,6 +1216,10 @@ class MinionContractTests(unittest.TestCase):
                 self.assertIn("## Modules", review_text)
                 self.assertIn("module_builder_next", review_text)
                 self.assertIn("## Validation", review_text)
+                self.assertEqual(
+                    review_text.count("module_builder_next behavior is implemented with focused regression tests."),
+                    1,
+                )
                 assert last_result is not None
                 self.assertEqual(last_result.structured["plan_ref"]["review_artifact_ref"]["relative_path"], "plan_review.md")
             finally:
@@ -1245,10 +1249,10 @@ class MinionContractTests(unittest.TestCase):
 
                 calls = _builder_plan_calls_from_handles(
                     plan_id="plan_builder_executor",
-                    module_key="module_builder_executor",
+                    module_name="module_builder_executor",
                 )
                 for call in calls:
-                    if call.name == "plan_begin_module" and call.args.get("module_key") == "module_builder_executor":
+                    if call.name == "plan_begin_module" and call.args.get("module_name") == "module_builder_executor":
                         call.args["executor_profile"] = "review_worker"
                     result = await scoped.execute_tool_async(call)
                     self.assertTrue(result.ok, result.text)
@@ -1297,7 +1301,7 @@ class MinionContractTests(unittest.TestCase):
                         name="plan_add_module_outline",
                         args={
                             "plan_handle": "plan_string_ac",
-                            "module_key": "implementation",
+                            "module_name": "implementation",
                             "kind": "module",
                             "responsibility": "Implement and test a small Python API.",
                             "owned_area": ["src/example/__init__.py", "tests/test_example.py"],
@@ -1376,7 +1380,7 @@ class MinionContractTests(unittest.TestCase):
                             "plan_handle": "plan_module_batch",
                             "modules": [
                                 {
-                                    "module_key": "contracts",
+                                    "module_name": "contracts",
                                     "kind": "prelude",
                                     "responsibility": "Define the shared parser contract.",
                                     "owned_area": ["src/parser/contracts.py"],
@@ -1392,9 +1396,9 @@ class MinionContractTests(unittest.TestCase):
                                     ],
                                 },
                                 {
-                                    "module_key": "parser",
+                                    "module_name": "parser",
                                     "kind": "module",
-                                    "depends_on_module_keys": ["contracts"],
+                                    "depends_on_module_names": ["contracts"],
                                     "responsibility": "Implement parser behavior against the shared contract.",
                                     "owned_area": ["src/parser/core.py", "tests/test_parser.py"],
                                     "ownership": ["parser owns parser implementation and focused tests."],
@@ -1414,7 +1418,7 @@ class MinionContractTests(unittest.TestCase):
                 )
 
                 self.assertTrue(batch.ok, batch.text)
-                self.assertEqual(batch.structured["module_keys"], ["contracts", "parser"])
+                self.assertEqual(batch.structured["module_names"], ["contracts", "parser"])
                 self.assertEqual(len(batch.structured["module_handles"]), 2)
                 payload = json.loads(
                     (root / "artifacts" / ".plan_builder" / "plan_module_batch.json").read_text(encoding="utf-8")
@@ -1422,6 +1426,71 @@ class MinionContractTests(unittest.TestCase):
                 self.assertEqual([module["module_id"] for module in payload["modules"]], ["contracts", "parser"])
                 self.assertEqual(payload["modules"][1]["depends_on_module_handles"], [payload["modules"][0]["handle"]])
                 self.assertTrue(all(module["closed"] for module in payload["modules"]))
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+        asyncio.run(scenario())
+
+    def test_plan_builder_module_outlines_batch_uses_module_name(self) -> None:
+        async def scenario() -> None:
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_module_batch_name_"))
+            try:
+                scoped = MinionScopedExecutionRuntime(
+                    SimpleNamespace(),
+                    [
+                        "op_minion_plan_begin",
+                        "op_minion_plan_add_module_outlines_batch",
+                    ],
+                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_module_batch_name"},
+                )
+
+                begin = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_begin",
+                        args={
+                            "goal": "Plan a one-module package.",
+                            "plan_id": "plan_module_batch_name",
+                            "summary": "Module batch module_name plan.",
+                            "languages": ["python"],
+                        },
+                    )
+                )
+                self.assertTrue(begin.ok, begin.text)
+
+                batch = await scoped.execute_tool_async(
+                    CanonicalToolCall(
+                        name="plan_add_module_outlines_batch",
+                        args={
+                            "plan_handle": "plan_module_batch_name",
+                            "modules": [
+                                {
+                                    "module_name": "Implementation",
+                                    "kind": "module",
+                                    "responsibility": "Implement the package public API.",
+                                    "owned_area": ["src/pkg/__init__.py", "tests/test_pkg.py"],
+                                    "ownership": ["implementation owns package source and focused tests."],
+                                    "lifecycle": ["Implementation creates the public API before final verification."],
+                                    "invariants": ["The public API remains importable and stateless."],
+                                    "module_quality_criteria": ["Public API contract and tests are complete."],
+                                    "milestones": [
+                                        {
+                                            "title": "Implement package API",
+                                            "task": "Implement and test the package API.",
+                                            "acceptance_criteria": ["Package API tests pass."],
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    )
+                )
+
+                self.assertTrue(batch.ok, batch.text)
+                self.assertEqual(batch.structured["module_names"], ["implementation"])
+                payload = json.loads(
+                    (root / "artifacts" / ".plan_builder" / "plan_module_batch_name.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(payload["modules"][0]["module_id"], "implementation")
             finally:
                 shutil.rmtree(root, ignore_errors=True)
 
@@ -1459,7 +1528,7 @@ class MinionContractTests(unittest.TestCase):
                             "plan_handle": "plan_module_batch_rollback",
                             "modules": [
                                 {
-                                    "module_key": "contracts",
+                                    "module_name": "contracts",
                                     "kind": "prelude",
                                     "responsibility": "Define shared contracts.",
                                     "owned_area": ["src/contracts.py"],
@@ -1475,7 +1544,7 @@ class MinionContractTests(unittest.TestCase):
                                     ],
                                 },
                                 {
-                                    "module_key": "broken",
+                                    "module_name": "broken",
                                     "kind": "module",
                                     "responsibility": "This module is invalid because milestones are missing.",
                                     "owned_area": ["src/broken.py"],
@@ -1549,7 +1618,7 @@ class MinionContractTests(unittest.TestCase):
                         name="plan_add_module_outline",
                         args={
                             "plan_handle": "plan_micro",
-                            "module_key": "implementation",
+                            "module_name": "implementation",
                             "kind": "module",
                             "responsibility": "Implement the tinycalc subtract export and focused pytest coverage.",
                             "owned_area": ["src/tinycalc/__init__.py", "tests/test_tinycalc.py"],
@@ -1603,9 +1672,9 @@ class MinionContractTests(unittest.TestCase):
                         name="plan_add_module_outline",
                         args={
                             "plan_handle": "plan_micro",
-                            "module_key": "final_verification",
+                            "module_name": "final_verification",
                             "kind": "join",
-                            "depends_on_module_keys": ["implementation"],
+                            "depends_on_module_names": ["implementation"],
                             "responsibility": "Run final verification for the tinycalc package surface.",
                             "owned_area": ["tests/test_tinycalc.py"],
                             "ownership": [
@@ -1690,7 +1759,7 @@ class MinionContractTests(unittest.TestCase):
                     workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_builder_draft"},
                 )
 
-                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_draft", module_key="module_builder_draft")[:-1]
+                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_draft", module_name="module_builder_draft")[:-1]
                 calls.append(
                     CanonicalToolCall(
                         name="plan_submit_for_review",
@@ -1799,7 +1868,7 @@ class MinionContractTests(unittest.TestCase):
                         name="plan_add_module_outline",
                         args={
                             "plan_handle": "plan_outline",
-                            "module_key": "module_prelude",
+                            "module_name": "module_prelude",
                             "kind": "prelude",
                             "responsibility": "Define boundary contracts before implementation.",
                             "owned_area": ["SPEC.md"],
@@ -1850,7 +1919,7 @@ class MinionContractTests(unittest.TestCase):
                     )
                 )
                 self.assertTrue(prelude.ok, prelude.text)
-                self.assertEqual(prelude.structured["module_key"], "module_prelude")
+                self.assertEqual(prelude.structured["module_name"], "module_prelude")
                 self.assertTrue(prelude.structured["module_closed"])
                 self.assertEqual(prelude.structured["parent_plan_handle"], "plan_outline")
                 self.assertIn("Do not add milestones to this closed module", prelude.structured["next_tool_hint"])
@@ -1861,7 +1930,7 @@ class MinionContractTests(unittest.TestCase):
                         name="plan_add_milestone_outline",
                         args={
                             "plan_handle": "plan_outline",
-                            "module_key": "module_prelude",
+                            "module_name": "module_prelude",
                             "task": "This should not be appended to a closed module.",
                             "acceptance_criteria": [
                                 {
@@ -1882,9 +1951,9 @@ class MinionContractTests(unittest.TestCase):
                         name="plan_add_module_outline",
                         args={
                             "plan_handle": "plan_outline",
-                            "module_key": "module_parser",
+                            "module_name": "module_parser",
                             "kind": "module",
-                            "depends_on_module_keys": ["module_prelude"],
+                            "depends_on_module_names": ["module_prelude"],
                             "responsibility": "Implement parser boundary validation.",
                             "owned_area": ["src/pal_dogfood/changelog.py", "tests/test_changelog.py"],
                             "ownership": [
@@ -1940,16 +2009,16 @@ class MinionContractTests(unittest.TestCase):
                     )
                 )
                 self.assertTrue(implementation.ok, implementation.text)
-                self.assertEqual(implementation.structured["module_key"], "module_parser")
+                self.assertEqual(implementation.structured["module_name"], "module_parser")
 
                 join = await scoped.execute_tool_async(
                     CanonicalToolCall(
                         name="plan_add_module_outline",
                         args={
                             "plan_handle": "plan_outline",
-                            "module_key": "module_join",
+                            "module_name": "module_join",
                             "kind": "join",
-                            "depends_on_module_keys": ["module_parser"],
+                            "depends_on_module_names": ["module_parser"],
                             "responsibility": "Run final integration verification.",
                             "owned_area": ["tests/test_release_notes.py"],
                             "ownership": [
@@ -2069,7 +2138,7 @@ class MinionContractTests(unittest.TestCase):
                         name="plan_add_module_outline",
                         args={
                             "plan_handle": "plan_gate_handoff",
-                            "module_key": "module_prelude",
+                            "module_name": "module_prelude",
                             "kind": "prelude",
                             "responsibility": "Prepare contracts.",
                             "owned_area": ["SPEC.md"],
@@ -2119,9 +2188,9 @@ class MinionContractTests(unittest.TestCase):
                         name="plan_add_module_outline",
                         args={
                             "plan_handle": "plan_gate_handoff",
-                            "module_key": "module_core",
+                            "module_name": "module_core",
                             "kind": "module",
-                            "depends_on_module_keys": ["module_prelude"],
+                            "depends_on_module_names": ["module_prelude"],
                             "responsibility": "Implement public function.",
                             "owned_area": ["src/pkg/core.py", "tests/test_core.py"],
                             "ownership": [
@@ -2170,9 +2239,9 @@ class MinionContractTests(unittest.TestCase):
                         name="plan_add_module_outline",
                         args={
                             "plan_handle": "plan_gate_handoff",
-                            "module_key": "module_join",
+                            "module_name": "module_join",
                             "kind": "join",
-                            "depends_on_module_keys": ["module_core"],
+                            "depends_on_module_names": ["module_core"],
                             "responsibility": "Verify package workflow.",
                             "owned_area": ["tests/test_integration.py"],
                             "ownership": [
@@ -2231,7 +2300,7 @@ class MinionContractTests(unittest.TestCase):
                         name="plan_update_module",
                         args={
                             "plan_handle": "plan_gate_handoff",
-                            "module_key": "module_core",
+                            "module_name": "module_core",
                             "module_quality_criteria": [
                                 "Core public API preserves str return type closure and rejects invalid boundary inputs."
                             ],
@@ -2302,9 +2371,9 @@ class MinionContractTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_plan_builder_accepts_module_key_for_closed_module_interface_repair(self) -> None:
+    def test_plan_builder_accepts_module_name_for_closed_module_interface_repair(self) -> None:
         async def scenario() -> None:
-            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_module_key_lookup_"))
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_module_name_lookup_"))
             try:
                 scoped = MinionScopedExecutionRuntime(
                     SimpleNamespace(),
@@ -2314,13 +2383,13 @@ class MinionContractTests(unittest.TestCase):
                         "op_minion_plan_add_module_interface",
                         "op_minion_plan_read",
                     ],
-                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_module_key_lookup"},
+                    workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_module_name_lookup"},
                 )
 
                 begin = await scoped.execute_tool_async(
                     CanonicalToolCall(
                         name="plan_begin",
-                        args={"goal": "Plan module key lookup.", "plan_id": "plan_module_key_lookup", "languages": ["python"]},
+                        args={"goal": "Plan module key lookup.", "plan_id": "plan_module_name_lookup", "languages": ["python"]},
                     )
                 )
                 self.assertTrue(begin.ok, begin.text)
@@ -2329,8 +2398,8 @@ class MinionContractTests(unittest.TestCase):
                     CanonicalToolCall(
                         name="plan_add_module_outline",
                         args={
-                            "plan_handle": "plan_module_key_lookup",
-                            "module_key": "module_parser",
+                            "plan_handle": "plan_module_name_lookup",
+                            "module_name": "module_parser",
                             "kind": "module",
                             "responsibility": "Own parser implementation.",
                             "owned_area": ["src/parser.py", "tests/test_parser.py"],
@@ -2368,8 +2437,8 @@ class MinionContractTests(unittest.TestCase):
                     CanonicalToolCall(
                         name="plan_add_module_interface",
                         args={
-                            "plan_handle": "plan_module_key_lookup",
-                            "module_key": "module_parser",
+                            "plan_handle": "plan_module_name_lookup",
+                            "module_name": "module_parser",
                             "direction": "provided",
                             "name": "parser.api",
                             "shape": "parse(text: str) -> ParsedResult",
@@ -2381,10 +2450,10 @@ class MinionContractTests(unittest.TestCase):
                     )
                 )
                 self.assertTrue(interface.ok, interface.text)
-                self.assertEqual(interface.structured["module_key"], "module_parser")
+                self.assertEqual(interface.structured["module_name"], "module_parser")
 
                 read = await scoped.execute_tool_async(
-                    CanonicalToolCall(name="plan_read", args={"plan_handle": "plan_module_key_lookup", "detail": "full"})
+                    CanonicalToolCall(name="plan_read", args={"plan_handle": "plan_module_name_lookup", "detail": "full"})
                 )
                 self.assertTrue(read.ok, read.text)
                 modules = read.structured["state"]["modules"]
@@ -2555,7 +2624,7 @@ class MinionContractTests(unittest.TestCase):
                     base_allowed,
                     workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_builder_checkout"},
                 )
-                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_checkout", module_key="module_builder_checkout")[:-1]
+                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_checkout", module_name="module_builder_checkout")[:-1]
                 calls.append(CanonicalToolCall(name="plan_submit_for_review", args={"plan_handle": "plan_builder_checkout"}))
                 draft_ref = {}
                 for call in calls:
@@ -2635,7 +2704,7 @@ class MinionContractTests(unittest.TestCase):
                     ],
                     workspace={"runtime_root": str(root), "artifact_dir": str(root / "artifacts"), "task_id": "task_builder_publish"},
                 )
-                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_publish", module_key="module_builder_publish")[:-1]
+                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_publish", module_name="module_builder_publish")[:-1]
                 calls.append(CanonicalToolCall(name="plan_submit_for_review", args={"plan_handle": "plan_builder_publish"}))
                 draft_ref = {}
                 for call in calls:
@@ -2677,9 +2746,9 @@ class MinionContractTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_plan_builder_requires_explicit_module_key(self) -> None:
+    def test_plan_builder_requires_explicit_module_name(self) -> None:
         async def scenario() -> None:
-            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_module_key_"))
+            root = Path(tempfile.mkdtemp(prefix="pal_plan_builder_module_name_"))
             try:
                 scoped = MinionScopedExecutionRuntime(
                     SimpleNamespace(),
@@ -2687,13 +2756,13 @@ class MinionContractTests(unittest.TestCase):
                         "op_minion_plan_begin",
                         "op_minion_plan_begin_module",
                     ],
-                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_module_key"},
+                    workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_module_name"},
                 )
 
                 result = await scoped.execute_tool_async(
                     CanonicalToolCall(
                         name="plan_begin",
-                        args={"goal": "Plan explicit module ids.", "plan_id": "plan_module_key", "languages": ["python"]},
+                        args={"goal": "Plan explicit module ids.", "plan_id": "plan_module_name", "languages": ["python"]},
                     )
                 )
                 self.assertTrue(result.ok, result.text)
@@ -2702,7 +2771,7 @@ class MinionContractTests(unittest.TestCase):
                     CanonicalToolCall(
                         name="plan_begin_module",
                         args={
-                            "plan_handle": "plan_module_key",
+                            "plan_handle": "plan_module_name",
                             "kind": "module",
                             "responsibility": "Implement the module.",
                             "owned_area": ["src/example.py"],
@@ -2710,7 +2779,7 @@ class MinionContractTests(unittest.TestCase):
                     )
                 )
                 self.assertFalse(result.ok)
-                self.assertIn("module_key is required", result.text)
+                self.assertIn("module_name is required", result.text)
             finally:
                 shutil.rmtree(root, ignore_errors=True)
 
@@ -2740,7 +2809,7 @@ class MinionContractTests(unittest.TestCase):
                         name="plan_begin_module",
                         args={
                             "plan_handle": "plan_negative_cases",
-                            "module_key": "module_parser",
+                            "module_name": "module_parser",
                             "kind": "module",
                             "responsibility": "Implement parser boundaries.",
                             "owned_area": ["src/parser.py", "tests/test_parser.py"],
@@ -2813,7 +2882,7 @@ class MinionContractTests(unittest.TestCase):
                         name="plan_begin_module",
                         args={
                             "plan_handle": "plan_ac_conflict",
-                            "module_key": "module_release_notes",
+                            "module_name": "module_release_notes",
                             "kind": "module",
                             "responsibility": "Implement release note rendering.",
                             "owned_area": ["src/release_notes.py", "tests/test_release_notes.py"],
@@ -2893,7 +2962,7 @@ class MinionContractTests(unittest.TestCase):
                     ],
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_contract"},
                 )
-                calls = _builder_plan_calls_from_handles(plan_id="plan_gate_contract", module_key="module_gate_contract")
+                calls = _builder_plan_calls_from_handles(plan_id="plan_gate_contract", module_name="module_gate_contract")
                 calls.insert(
                     1,
                     CanonicalToolCall(
@@ -3035,7 +3104,7 @@ class MinionContractTests(unittest.TestCase):
                     ],
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_mechanical"},
                 )
-                calls = _builder_plan_calls_from_handles(plan_id="plan_gate_mechanical", module_key="module_gate_mechanical")
+                calls = _builder_plan_calls_from_handles(plan_id="plan_gate_mechanical", module_name="module_gate_mechanical")
                 calls.insert(
                     1,
                     CanonicalToolCall(
@@ -3083,7 +3152,7 @@ class MinionContractTests(unittest.TestCase):
                     ],
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_gate_alias"},
                 )
-                calls = _builder_plan_calls_from_handles(plan_id="plan_gate_alias", module_key="module_gate_alias")
+                calls = _builder_plan_calls_from_handles(plan_id="plan_gate_alias", module_name="module_gate_alias")
                 calls.insert(
                     1,
                     CanonicalToolCall(
@@ -3361,7 +3430,7 @@ class MinionContractTests(unittest.TestCase):
                     ),
                 )
                 for index, call in enumerate(list(calls)):
-                    if call.name == "plan_begin_module" and call.args.get("module_key") == "module_prelude":
+                    if call.name == "plan_begin_module" and call.args.get("module_name") == "module_prelude":
                         args = dict(call.args)
                         args["gate_check_refs"] = ["gate:3", "gate:6", "gate:7", "gate:8", "gate:9", "gate:13", "gate:14"]
                         calls[index] = CanonicalToolCall(name=call.name, args=args, call_id=call.call_id)
@@ -3774,7 +3843,7 @@ class MinionContractTests(unittest.TestCase):
                     ],
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_unlinked"},
                 )
-                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_unlinked", module_key="module_unlinked")
+                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_unlinked", module_name="module_unlinked")
                 calls[1] = CanonicalToolCall(
                     name="plan_add_constraint",
                     args={
@@ -3820,7 +3889,7 @@ class MinionContractTests(unittest.TestCase):
                     ],
                     workspace={"artifact_dir": str(root / "artifacts"), "task_id": "task_no_languages"},
                 )
-                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_no_languages", module_key="module_no_languages")
+                calls = _builder_plan_calls_from_handles(plan_id="plan_builder_no_languages", module_name="module_no_languages")
                 first = calls[0]
                 first_args = dict(first.args)
                 first_args.pop("languages", None)
@@ -3858,7 +3927,7 @@ class MinionContractTests(unittest.TestCase):
                 )
                 calls = [
                     call
-                    for call in _builder_plan_calls_from_handles(plan_id="plan_builder_no_interfaces", module_key="module_no_interfaces")
+                    for call in _builder_plan_calls_from_handles(plan_id="plan_builder_no_interfaces", module_name="module_no_interfaces")
                     if call.name != "plan_add_module_interface"
                 ]
                 for call in calls[:-1]:
@@ -4751,7 +4820,7 @@ class MinionContractTests(unittest.TestCase):
                     self.calls = 0
                     self.plan_calls = _builder_plan_calls_from_handles(
                         plan_id="plan_planner_wait",
-                        module_key="module_planner_wait",
+                        module_name="module_planner_wait",
                         call_prefix="call_planner_wait",
                     )
 
@@ -4857,7 +4926,7 @@ class MinionContractTests(unittest.TestCase):
                     self.calls = 0
                     self.plan_calls = _builder_plan_calls_from_handles(
                         plan_id="plan_runtime_task_id",
-                        module_key="module_runtime_task_id",
+                        module_name="module_runtime_task_id",
                         call_prefix="call_runtime_task_id",
                     )
 
@@ -4949,7 +5018,7 @@ class MinionContractTests(unittest.TestCase):
                         self.repair_started = True
                         self.plan_calls = _builder_plan_calls_from_handles(
                             plan_id="plan_glm_repaired",
-                            module_key="module_glm_repaired",
+                            module_name="module_glm_repaired",
                             call_prefix="call_glm_repaired",
                         )
                     if self.plan_calls:
@@ -6375,7 +6444,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         self.assertEqual(stale_completion["reason"], "invalidated_child_work_order")
         self.assertIsNone(self.repository.next_plan_module_pack("wo_repair_architecture_parent", allow_paused=True))
 
-    def test_repair_bill_builder_reuses_existing_dag_module_keys(self) -> None:
+    def test_repair_bill_builder_reuses_existing_dag_module_names(self) -> None:
         plan = _dispatchable_plan_payload(
             plan_id="plan_repair_builder",
             task_id="task_repair_builder",
@@ -6412,21 +6481,21 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                     name="op_minion_repair_bill_add_module",
                     args={
                         "bill_handle": "repair_bill_test",
-                        "module_key": "new_engine",
+                        "module_name": "new_engine",
                         "acceptance_criteria": ["Should not be accepted."],
                     },
                     call_id="unknown",
                 )
             )
             self.assertFalse(unknown.ok)
-            self.assertIn("unknown module_id/module_key", unknown.text)
+            self.assertIn("unknown module_name", unknown.text)
 
             added = await runtime.execute(
                 CanonicalToolCall(
                     name="op_minion_repair_bill_add_module",
                     args={
                         "bill_handle": "repair_bill_test",
-                        "module_key": "engine",
+                        "module_name": "engine",
                         "defect_kind": "contract_defect",
                         "summary": "Engine violates the shared contract.",
                         "acceptance_criteria": [
@@ -7148,6 +7217,75 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
             snapshot = manager.tasking_repository.read_work_order("wo_auto_plan")
             self.assertEqual(snapshot["work_order"]["metadata"]["plan_review"]["status"], "acceptance_pending")
             self.assertEqual(snapshot["work_order"]["metadata"]["plan_review"]["review_artifact_ref"]["path"], str(review_path))
+
+        asyncio.run(scenario())
+
+    def test_plan_review_missing_gate_blocks_parent_workflow(self) -> None:
+        async def scenario() -> None:
+            manager = MinionManager(runtime_root=self.root)
+            plan_path = self.root / "plans" / "missing-gate-plan.json"
+            plan_path.parent.mkdir(parents=True)
+            plan = _dispatchable_plan_payload(
+                plan_id="plan_missing_gate",
+                task_id="task_missing_gate",
+                modules=[_plan_module("module_missing_gate", title="Missing gate module")],
+            )
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            plan_ref = {
+                "path": str(plan_path),
+                "sha256": hashlib.sha256(plan_path.read_bytes()).hexdigest(),
+                "plan_id": "plan_missing_gate",
+                "task_id": "task_missing_gate",
+                "plan_revision": 0,
+            }
+            workflow = {
+                "workflow_id": "wf_missing_gate",
+                "entrypoint": "op_minion_dispatch_workflow",
+                "status": "post_gate_pending",
+                "current_step_id": "step_0",
+                "current_profile": "software_engineering.architect",
+                "steps": [
+                    {
+                        "step_id": "step_0",
+                        "profile": "software_engineering.architect",
+                        "status": "post_gate_pending",
+                    }
+                ],
+            }
+            manager.tasking_repository.prepare_pack_for_spawn(
+                TaskContextPack(
+                    work_order_id="wo_missing_gate_parent",
+                    goal="Plan with missing gate.",
+                    metadata={"workflow": workflow, "plan_review": {"status": "reviewing", "plan_ref": dict(plan_ref)}},
+                    minion_profile="software_engineering.architect",
+                )
+            )
+            reviewer_state = MinionRunState(
+                minion_id="minion_missing_gate_reviewer",
+                run_id="run_missing_gate_reviewer",
+                pack=TaskContextPack(
+                    work_order_id="wo_missing_gate_reviewer",
+                    goal="Review plan but fail before gate.",
+                    metadata={
+                        "plan_review_for_work_order_id": "wo_missing_gate_parent",
+                        "plan_review_key": _plan_review_key_for_test(plan_ref),
+                        "review_target": {"planner_work_order_id": "wo_missing_gate_parent"},
+                    },
+                    minion_profile="software_engineering.reviewer",
+                ),
+                status="blocked",
+            )
+
+            await manager.reviews._reconcile_plan_review(reviewer_state, plan_ref, _plan_review_key_for_test(plan_ref))
+
+            snapshot = manager.tasking_repository.read_work_order("wo_missing_gate_parent")
+            metadata = snapshot["work_order"]["metadata"]
+            self.assertEqual(snapshot["work_order"]["status"], "blocked")
+            self.assertEqual(metadata["plan_review"]["status"], "gate_missing")
+            self.assertEqual(metadata["workflow"]["status"], "blocked")
+            self.assertEqual(metadata["workflow"]["blocker"]["reason"], "plan_acceptance_gate_missing")
+            self.assertEqual(metadata["workflow"]["steps"][0]["status"], "blocked")
+            self.assertTrue(any(event.get("event_kind") == "plan_review_failed" for event in manager.event_queue))
 
         asyncio.run(scenario())
 
@@ -16629,6 +16767,53 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_module_child_terminal_failure_blocks_parent_dag(self) -> None:
+        manager = MinionManager(runtime_root=self.root)
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_terminal_failed_parent",
+            task_id="task_terminal_failed_parent",
+            modules=[_plan_module("module_failed")],
+        )
+        parent = manager.tasking_repository.build_plan_parent_pack_from_plan(plan, work_order_id="wo_terminal_failed_parent")
+        manager.tasking_repository.prepare_pack_for_spawn(parent)
+        child_pack = manager.tasking_repository.next_plan_module_pack("wo_terminal_failed_parent", allow_paused=True)
+        assert child_pack is not None
+        child_pack = manager.tasking_repository.prepare_pack_for_spawn(child_pack)
+        state = MinionRunState(
+            minion_id="m_terminal_failed",
+            run_id="r_terminal_failed",
+            pack=child_pack,
+            status="running",
+        )
+        manager.runs[state.run_id] = state
+        failed_module_id = str(child_pack.metadata.get("parent_module_id") or "")
+
+        manager._record_event(
+            state,
+            {
+                "event_kind": "terminal",
+                "minion_id": state.minion_id,
+                "run_id": state.run_id,
+                "work_order_id": child_pack.work_order_id,
+                "minion_profile": child_pack.minion_profile,
+                "payload": {"status": "blocked", "summary": "llm endpoint returned no assistant content"},
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+        )
+
+        parent_snapshot = manager.tasking_repository.read_work_order("wo_terminal_failed_parent")
+        plan_execution = parent_snapshot["work_order"]["metadata"]["plan_execution"]
+        dag = _plan_execution_dag(plan_execution)
+        self.assertEqual(parent_snapshot["work_order"]["status"], "blocked")
+        self.assertEqual(plan_execution["status"], "blocked")
+        self.assertEqual(dag["module_status"][failed_module_id], "blocked")
+        self.assertEqual(dag["running_modules"], {})
+        self.assertNotIn("active_child_work_order_id", plan_execution)
+        child_snapshot = manager.tasking_repository.read_work_order(child_pack.work_order_id)
+        self.assertEqual(child_snapshot["work_order"]["status"], "blocked")
+        self.assertEqual(state.last_event["payload"]["parent_module_release"]["parent_status"], "blocked")
+        self.assertTrue(any(event["event_kind"] == "plan_parent_blocked" for event in manager.event_queue))
+
     def test_manager_does_not_treat_successful_tool_stderr_as_last_error(self) -> None:
         manager = MinionManager(runtime_root=self.root)
         state = MinionRunState(
@@ -22205,7 +22390,7 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("checkpoint_admission_evidence", prompt)
         self.assertIn("plan_add_milestone_outline", prompt)
         self.assertIn("plan_begin_module", prompt)
-        self.assertIn("module_key is required", prompt)
+        self.assertIn("module_name is required", prompt)
         self.assertIn("stable readable module id", prompt)
         self.assertIn("plan_add_acceptance_criteria_batch", prompt)
         self.assertIn("plan_add_acceptance_criterion", prompt)
@@ -23109,10 +23294,19 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertEqual(architect.structured["profile_group"], "software_engineering")
                 self.assertEqual(architect.structured["workspace_policy"]["mode"], "read_only_repo")
                 self.assertIn("structured planartifact", architect.structured["identity_fragment"].lower())
+                self.assertIn("independently checkpointable", architect.structured["behavior_fragment"].lower())
+                self.assertIn("real checkpointable source/test/config delta", architect.structured["output_contract_fragment"].lower())
 
                 read = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_read", args={"profile_id": "software_engineering.reviewer"}))
                 self.assertEqual(read.status, "ok")
                 self.assertEqual(read.structured["profile_id"], "reviewer")
+                self.assertIn("not independently checkpointable", read.structured["behavior_fragment"].lower())
+
+                coder = core.context.execution_runtime.execute(CapabilityCall(name="intro_minion_profile_read", args={"profile_id": "software_engineering.coder"}))
+                self.assertEqual(coder.status, "ok")
+                self.assertEqual(coder.structured["profile_id"], "coder")
+                self.assertIn("stay inside the current milestone", coder.structured["behavior_fragment"].lower())
+                self.assertIn("real source/test/config delta", coder.structured["behavior_fragment"].lower())
 
                 workflow_spec = core.context.execution_runtime.get_capability_spec("op_minion_dispatch_workflow")
                 self.assertIsNotNone(workflow_spec)
