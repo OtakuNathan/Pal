@@ -773,6 +773,10 @@ def _builtin_gate_checklist_entries() -> tuple[GateChecklistEntry, ...]:
             "Verify changed files do not duplicate dependency module source/contracts/DTOs/protocols/schemas/headers/facades under a new path; consumers must import/include declared public contracts instead.",
         ),
         GateChecklistEntry(
+            "plan.requirements_coverage",
+            "Verify every hard user/work-order REQ or source gate_contract item is preserved without weakening, covered by plan constraints/modules/milestones/acceptance criteria, and not expanded into new functional scope without a user-owned decision.",
+        ),
+        GateChecklistEntry(
             "plan.dispatchable",
             "Verify the plan is dispatchable and topology/module ordering is valid.",
         ),
@@ -916,6 +920,7 @@ def _builtin_gate_definitions() -> tuple[GateDefinition, ...]:
             auto_revise=True,
             max_revision_attempts=2,
             required_check_refs=(
+                "plan.requirements_coverage",
                 "plan.dispatchable",
                 "plan.boundary_import_contracts",
                 "plan.source_evidence",
@@ -926,6 +931,7 @@ def _builtin_gate_definitions() -> tuple[GateDefinition, ...]:
             blocking=(
                 "schema_invalid",
                 "undispatchable_plan",
+                "missing_or_weakened_requirement_coverage",
                 "missing_acceptance_criteria",
                 "missing_user_entrypoint_dogfood",
                 "unsafe_or_unclear_module_boundary",

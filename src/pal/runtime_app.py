@@ -12,6 +12,7 @@ from pathlib import Path
 from pal.bootstrap import StubRuntimeHandle, compose_runtime
 from pal.channel import ChannelEndpointRepository
 from pal.core.debug_dump import write_runtime_debug_dump
+from pal.foundation.log_paths import pal_debug_log_path
 from pal.wizard.runtime import DEFAULT_DB_FILENAME, DEFAULT_PAL_ENTRYPOINT, ensure_recovery_socket_channel
 from pal.wizard import PalRegistration, WizardService
 
@@ -135,7 +136,7 @@ class PalRuntimeApp:
         write_runtime_debug_dump(
             self.handle,
             app_snapshot=self._debug_snapshot(),
-            path=self._runtime_root() / "pal-debug.log",
+            path=pal_debug_log_path(self._runtime_root()),
         )
         self.last_debug_dump_utc = datetime.now(timezone.utc).isoformat()
         self.last_debug_dump_error = ""

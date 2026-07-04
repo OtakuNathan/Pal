@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from pal.foundation.log_paths import pal_debug_log_path
 
 _SENSITIVE_KEY_PARTS = (
     "api_key",
@@ -68,7 +69,7 @@ def build_runtime_debug_snapshot(
 
 def _default_debug_path(handle: Any) -> Path:
     runtime_root = _runtime_root(handle)
-    return runtime_root / "pal-debug.log"
+    return pal_debug_log_path(runtime_root)
 
 
 def _runtime_root(handle: Any) -> Path:
@@ -162,6 +163,8 @@ def _core_state_snapshot(state: Any) -> dict[str, Any]:
     return {
         "active_turn_count": len(active_turns),
         "active_turns": [_turn_snapshot(turn_id, continuation) for turn_id, continuation in active_turns.items()],
+        "active_channel_turn_id": str(getattr(state, "active_channel_turn_id", "") or ""),
+        "pending_channel_turn_count": _safe_len(getattr(state, "pending_channel_turns", ())),
         "turn_task_count": len(turn_tasks),
         "turn_tasks": [_turn_task_snapshot(turn_id, task) for turn_id, task in turn_tasks.items()],
         "control_scope_count": len(control_scopes),
@@ -204,7 +207,6 @@ def _control_scope_snapshot(key: Any, scope: Any) -> dict[str, Any]:
     return {
         "scope_key": str(key),
         "active_turn_id": str(getattr(scope, "active_turn_id", "") or ""),
-        "pending_channel_turn_count": _safe_len(getattr(scope, "pending_channel_turns", ())),
         "pending_request_count": _safe_len(getattr(scope, "pending_requests", {})),
         "quiescing": bool(getattr(scope, "quiescing", False)),
         "interrupting_turn_id": str(getattr(scope, "interrupting_turn_id", "") or ""),

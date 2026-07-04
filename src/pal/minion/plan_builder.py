@@ -56,7 +56,11 @@ PLAN_BUILDER_WRITE_CAPABILITIES: tuple[str, ...] = (
     "op_minion_plan_delete_gate_check",
     "op_minion_plan_add_constraints_batch",
     "op_minion_plan_add_constraint",
+    "op_minion_plan_update_constraint",
+    "op_minion_plan_delete_constraint",
     "op_minion_plan_add_design_decision",
+    "op_minion_plan_update_design_decision",
+    "op_minion_plan_delete_design_decision",
     "op_minion_plan_add_module_outline",
     "op_minion_plan_add_module_outlines_batch",
     "op_minion_plan_begin_module",
@@ -77,6 +81,7 @@ PLAN_BUILDER_WRITE_CAPABILITIES: tuple[str, ...] = (
     "op_minion_plan_update_acceptance_criterion",
     "op_minion_plan_delete_acceptance_criterion",
     "op_minion_plan_replace_milestone_acceptance_criteria",
+    "op_minion_plan_apply_revision_item",
     "op_minion_plan_validate_and_submit_for_review",
     "op_minion_plan_submit_for_review",
     "op_minion_plan_finalize",
@@ -478,6 +483,38 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "op_minion_plan_update_constraint": {
+        "name": "op_minion_plan_update_constraint",
+        "description": "Update one constraint by handle. Use this for reviewer-requested changes to stale or conflicting constraints.",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "constraint_handle": {"type": "string"},
+                "statement": {"type": "string"},
+                "kind": {"type": "string"},
+                "strength": {
+                    "type": "string",
+                    "enum": ["hard_contract", "chosen_contract", "preference", "out_of_scope"],
+                },
+                "source_ref": {"type": "string"},
+                "rationale": {"type": "string"},
+                "global_only": {"type": "boolean"},
+                "gate_check_refs": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["constraint_handle"],
+            "additionalProperties": False,
+        },
+    },
+    "op_minion_plan_delete_constraint": {
+        "name": "op_minion_plan_delete_constraint",
+        "description": "Delete one unreferenced constraint by handle. Deletion is rejected while plan nodes still reference it.",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {"constraint_handle": {"type": "string"}},
+            "required": ["constraint_handle"],
+            "additionalProperties": False,
+        },
+    },
     "op_minion_plan_add_design_decision": {
         "name": "op_minion_plan_add_design_decision",
         "description": "Record an architecture/design decision with its contract strength and downstream impact.",
@@ -499,6 +536,39 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "gate_check_refs": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["plan_handle", "decision"],
+            "additionalProperties": False,
+        },
+    },
+    "op_minion_plan_update_design_decision": {
+        "name": "op_minion_plan_update_design_decision",
+        "description": "Update one architecture/design decision by handle. Use this instead of adding a superseding decision for reviewer-requested changes.",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "decision_handle": {"type": "string"},
+                "question": {"type": "string"},
+                "decision": {"type": "string"},
+                "strength": {
+                    "type": "string",
+                    "enum": ["hard_contract", "chosen_contract", "preference", "out_of_scope"],
+                },
+                "rationale": {"type": "string"},
+                "alternatives": {"type": "array", "items": {"type": "string"}},
+                "downstream_effect": {"type": "string"},
+                "linked_constraint_handles": {"type": "array", "items": {"type": "string"}},
+                "gate_check_refs": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["decision_handle"],
+            "additionalProperties": False,
+        },
+    },
+    "op_minion_plan_delete_design_decision": {
+        "name": "op_minion_plan_delete_design_decision",
+        "description": "Delete one unreferenced architecture/design decision by handle. Deletion is rejected while modules or milestones still reference it.",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {"decision_handle": {"type": "string"}},
+            "required": ["decision_handle"],
             "additionalProperties": False,
         },
     },
@@ -1179,6 +1249,32 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "op_minion_plan_apply_revision_item": {
+        "name": "op_minion_plan_apply_revision_item",
+        "description": (
+            "Apply or record one active plan revision checklist item by item_id. Prefer this in plan revision mode: "
+            "Pal uses the checklist item's suggested_tool and target handle, so the model only supplies replacement "
+            "fields and evidence. For complex repairs already completed with lower-level tools, use resolution=manual."
+        ),
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "plan_handle": {"type": "string"},
+                "item_id": {"type": "string"},
+                "resolution": {"type": "string", "enum": ["apply", "manual", "keep"], "default": "apply"},
+                "replacement": {
+                    "type": "object",
+                    "description": "Fields to merge into suggested_args, such as decision, task, changed_area, criteria, or acceptance fields.",
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": "Concrete evidence that the revision item is resolved or intentionally kept.",
+                },
+            },
+            "required": ["plan_handle", "item_id", "evidence"],
+            "additionalProperties": False,
+        },
+    },
     "op_minion_plan_submit_for_review": {
         "name": "op_minion_plan_submit_for_review",
         "description": (
@@ -1305,8 +1401,16 @@ class PlanBuilderRuntime:
             return self._add_constraints_batch(args)
         if name == "op_minion_plan_add_constraint":
             return self._add_constraint(args)
+        if name == "op_minion_plan_update_constraint":
+            return self._update_constraint(args)
+        if name == "op_minion_plan_delete_constraint":
+            return self._delete_constraint(args)
         if name == "op_minion_plan_add_design_decision":
             return self._add_design_decision(args)
+        if name == "op_minion_plan_update_design_decision":
+            return self._update_design_decision(args)
+        if name == "op_minion_plan_delete_design_decision":
+            return self._delete_design_decision(args)
         if name == "op_minion_plan_add_module_outline":
             return self._add_module_outline(args)
         if name == "op_minion_plan_add_module_outlines_batch":
@@ -1347,6 +1451,8 @@ class PlanBuilderRuntime:
             return self._delete_acceptance_criterion(args)
         if name == "op_minion_plan_replace_milestone_acceptance_criteria":
             return self._replace_milestone_acceptance_criteria(args)
+        if name == "op_minion_plan_apply_revision_item":
+            return self._apply_revision_item(args)
         if name == "op_minion_plan_submit_for_review":
             return self._submit_for_review(args)
         if name == "op_minion_plan_finalize":
@@ -1647,6 +1753,50 @@ class PlanBuilderRuntime:
             "structured": {"plan_handle": state["plan_handle"], "constraint_handle": handle, "constraint_id": item["id"]},
         }
 
+    def _update_constraint(self, args: dict[str, Any]) -> dict[str, Any]:
+        _reject_unknown_args(
+            args,
+            {"constraint_handle", "statement", "kind", "strength", "source_ref", "rationale", "global_only", "gate_check_refs"},
+        )
+        state, item = self._load_constraint(_required(args, "constraint_handle"))
+        _assert_editable_plan(state)
+        if "statement" in args:
+            item["statement"] = _required(args, "statement")
+        if "kind" in args:
+            item["kind"] = _text(args.get("kind"))
+        if "strength" in args:
+            item["strength"] = _strength(args.get("strength"), default=_text(item.get("strength") or "hard_contract"))
+        if "source_ref" in args:
+            item["source_ref"] = _text(args.get("source_ref"))
+        if "rationale" in args:
+            item["rationale"] = _text(args.get("rationale"))
+        if "global_only" in args:
+            item["global_only"] = bool(args.get("global_only"))
+        if "gate_check_refs" in args:
+            item["gate_check_refs"] = _known_gate_check_refs(state, args.get("gate_check_refs"))
+        self._save_state(state)
+        return {
+            "text": f"Constraint updated: {item['handle']}",
+            "structured": {"plan_handle": state["plan_handle"], "constraint_handle": item["handle"]},
+        }
+
+    def _delete_constraint(self, args: dict[str, Any]) -> dict[str, Any]:
+        _reject_unknown_args(args, {"constraint_handle"})
+        constraint_handle = _required(args, "constraint_handle")
+        state, _item = self._load_constraint(constraint_handle)
+        _assert_editable_plan(state)
+        referrers = _constraint_referrers(state, constraint_handle)
+        if referrers:
+            raise ValueError("cannot delete referenced constraint: " + ", ".join(referrers[:8]))
+        state["constraints"] = [
+            item for item in list(state.get("constraints") or []) if _text(item.get("handle")) != constraint_handle
+        ]
+        self._save_state(state)
+        return {
+            "text": f"Constraint deleted: {constraint_handle}",
+            "structured": {"plan_handle": state["plan_handle"], "deleted_handle": constraint_handle},
+        }
+
     def _add_design_decision(self, args: dict[str, Any]) -> dict[str, Any]:
         _reject_unknown_args(
             args,
@@ -1686,6 +1836,69 @@ class PlanBuilderRuntime:
         state["design_decisions"].append(item)
         self._save_state(state)
         return {"text": f"Design decision added: {handle}", "structured": {"plan_handle": state["plan_handle"], "decision_handle": handle}}
+
+    def _update_design_decision(self, args: dict[str, Any]) -> dict[str, Any]:
+        _reject_unknown_args(
+            args,
+            {
+                "decision_handle",
+                "question",
+                "decision",
+                "strength",
+                "rationale",
+                "alternatives",
+                "downstream_effect",
+                "linked_constraint_handles",
+                "gate_check_refs",
+            },
+        )
+        state, item = self._load_design_decision(_required(args, "decision_handle"))
+        _assert_editable_plan(state)
+        if "question" in args:
+            item["question"] = _text(args.get("question"))
+        if "decision" in args:
+            item["decision"] = _required(args, "decision")
+        if "strength" in args:
+            item["strength"] = _strength(args.get("strength"), default=_text(item.get("strength") or "chosen_contract"))
+        if "rationale" in args:
+            item["rationale"] = _text(args.get("rationale"))
+        if "alternatives" in args:
+            item["alternatives"] = _string_list(args.get("alternatives"))
+        if "downstream_effect" in args:
+            item["downstream_effect"] = _text(args.get("downstream_effect"))
+        if "linked_constraint_handles" in args:
+            item["linked_constraint_handles"] = _known_handles(
+                state,
+                _string_list(args.get("linked_constraint_handles")),
+                expected_prefix="constraint",
+            )
+        if "gate_check_refs" in args:
+            item["gate_check_refs"] = _known_gate_check_refs(state, args.get("gate_check_refs"))
+        strength = _text(item.get("strength"))
+        if strength in {"hard_contract", "chosen_contract"} and not _text(item.get("rationale")):
+            raise ValueError("hard/chosen design decisions require rationale")
+        self._save_state(state)
+        return {
+            "text": f"Design decision updated: {item['handle']}",
+            "structured": {"plan_handle": state["plan_handle"], "decision_handle": item["handle"]},
+        }
+
+    def _delete_design_decision(self, args: dict[str, Any]) -> dict[str, Any]:
+        _reject_unknown_args(args, {"decision_handle"})
+        decision_handle = _required(args, "decision_handle")
+        state, _item = self._load_design_decision(decision_handle)
+        _assert_editable_plan(state)
+        referrers = _decision_referrers(state, decision_handle)
+        if referrers:
+            raise ValueError("cannot delete referenced design decision: " + ", ".join(referrers[:8]))
+        state["design_decisions"] = [
+            item for item in list(state.get("design_decisions") or []) if _text(item.get("handle")) != decision_handle
+        ]
+        self._save_state(state)
+        return {
+            "text": f"Design decision deleted: {decision_handle}",
+            "structured": {"plan_handle": state["plan_handle"], "deleted_handle": decision_handle},
+        }
 
     def _add_module_outline(self, args: dict[str, Any]) -> dict[str, Any]:
         _reject_unknown_args(
@@ -2592,6 +2805,61 @@ class PlanBuilderRuntime:
             "structured": {"plan_handle": state["plan_handle"], "milestone_handle": milestone["handle"], "module_handle": module["handle"], "acceptance_handles": [item["handle"] for item in items]},
         }
 
+    def _apply_revision_item(self, args: dict[str, Any]) -> dict[str, Any]:
+        _reject_unknown_args(args, {"plan_handle", "item_id", "resolution", "replacement", "evidence"})
+        state = self._load_state(_required(args, "plan_handle"))
+        _assert_editable_plan(state)
+        item = _revision_item_by_id(state, _required(args, "item_id"))
+        evidence = _required(args, "evidence")
+        resolution = _text(args.get("resolution") or "apply").lower()
+        if resolution not in {"apply", "manual", "keep"}:
+            raise ValueError("resolution must be apply, manual, or keep")
+        if resolution in {"manual", "keep"}:
+            _mark_revision_item_resolved(item, status=resolution, evidence=evidence)
+            self._save_state(state)
+            return {
+                "text": f"Revision item {item.get('id')} marked {resolution}.",
+                "structured": {"plan_handle": state["plan_handle"], "item_id": item.get("id"), "resolution": item.get("resolution")},
+            }
+
+        replacement = dict(args.get("replacement") or {}) if isinstance(args.get("replacement"), dict) else {}
+        if bool(item.get("needs_replacement")) and not replacement:
+            suggested = dict(item.get("suggested_args") or {})
+            raise ValueError(
+                f"{item.get('id')} requires replacement fields before apply; pass replacement to merge with suggested_args={json.dumps(suggested, ensure_ascii=False, sort_keys=True)}"
+            )
+        suggested_tool = _canonical_plan_builder_tool_name(item.get("suggested_tool"))
+        if suggested_tool not in _APPLY_REVISION_ALLOWED_TOOLS:
+            raise ValueError(f"{item.get('id')} has no safe suggested_tool for automatic apply: {item.get('suggested_tool') or ''}")
+        tool_args = dict(item.get("suggested_args") or {})
+        tool_args.update(replacement)
+        tool_schema = dict((PLAN_BUILDER_TOOL_SPECS.get(suggested_tool) or {}).get("parameters_schema") or {})
+        tool_properties = dict(tool_schema.get("properties") or {})
+        if "plan_handle" in tool_properties and not _text(tool_args.get("plan_handle")):
+            tool_args["plan_handle"] = state["plan_handle"]
+        result = self._execute(suggested_tool, tool_args)
+        structured = dict(result.get("structured") or {})
+        refreshed = self._load_state(_text(structured.get("plan_handle") or state["plan_handle"]))
+        refreshed_item = _revision_item_by_id(refreshed, _text(item.get("id")))
+        _mark_revision_item_resolved(
+            refreshed_item,
+            status="applied",
+            evidence=evidence,
+            tool=suggested_tool,
+            applied_args=tool_args,
+        )
+        self._save_state(refreshed)
+        return {
+            "text": f"Revision item {item.get('id')} applied via {suggested_tool}: {result.get('text')}",
+            "structured": {
+                **structured,
+                "plan_handle": refreshed["plan_handle"],
+                "item_id": item.get("id"),
+                "resolution": refreshed_item.get("resolution"),
+                "applied_tool": suggested_tool,
+            },
+        }
+
     def _submit_for_review(self, args: dict[str, Any]) -> dict[str, Any]:
         _reject_unknown_args(args, {"plan_handle", "summary", "system_test_plan", "risks", "assumptions"})
         state = self._load_state(_required(args, "plan_handle"))
@@ -2756,6 +3024,9 @@ class PlanBuilderRuntime:
         gate_contract = _compiled_gate_contract(state)
         if gate_contract:
             metadata["gate_contract"] = gate_contract
+        source_acceptance_coverage = _gate_check_coverage_projection(state)
+        if source_acceptance_coverage:
+            metadata["source_acceptance_coverage"] = source_acceptance_coverage
         if isinstance(state.get("source_plan_ref"), dict):
             metadata["revision_of"] = dict(state.get("source_plan_ref") or {})
         return {
@@ -3057,6 +3328,20 @@ class PlanBuilderRuntime:
                     missing.append(f"{module_id}.{milestone_id} must declare checkpoint_admission_evidence")
         if missing:
             raise ValueError("gate evidence handoff is incomplete: " + "; ".join(missing))
+
+    def _load_constraint(self, constraint_handle: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        state = self._load_state_for_handle(constraint_handle)
+        for item in list(state.get("constraints") or []):
+            if _text(item.get("handle")) == constraint_handle:
+                return state, item
+        raise ValueError(f"unknown constraint_handle: {constraint_handle}")
+
+    def _load_design_decision(self, decision_handle: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        state = self._load_state_for_handle(decision_handle)
+        for item in list(state.get("design_decisions") or []):
+            if _text(item.get("handle")) == decision_handle:
+                return state, item
+        raise ValueError(f"unknown decision_handle: {decision_handle}")
 
     def _load_module(self, module_handle: str) -> tuple[dict[str, Any], dict[str, Any]]:
         state = self._load_state_for_handle(module_handle)
@@ -3639,6 +3924,80 @@ def _remap_plan_handle_value(value: Any, *, source_plan_handle: str, target_plan
     return value
 
 
+_APPLY_REVISION_ALLOWED_TOOLS: frozenset[str] = frozenset(
+    {
+        "op_minion_plan_update_plan",
+        "op_minion_plan_add_constraint",
+        "op_minion_plan_update_constraint",
+        "op_minion_plan_delete_constraint",
+        "op_minion_plan_add_design_decision",
+        "op_minion_plan_update_design_decision",
+        "op_minion_plan_delete_design_decision",
+        "op_minion_plan_add_module_outline",
+        "op_minion_plan_update_module",
+        "op_minion_plan_delete_module",
+        "op_minion_plan_merge_modules",
+        "op_minion_plan_add_milestone_outline",
+        "op_minion_plan_update_milestone",
+        "op_minion_plan_delete_milestone",
+        "op_minion_plan_add_acceptance_criterion",
+        "op_minion_plan_update_acceptance_criterion",
+        "op_minion_plan_delete_acceptance_criterion",
+        "op_minion_plan_replace_milestone_acceptance_criteria",
+    }
+)
+
+
+def _revision_item_by_id(state: dict[str, Any], item_id: str) -> dict[str, Any]:
+    requested = _text(item_id)
+    for item in [raw for raw in list(state.get("plan_revision_checklist") or []) if isinstance(raw, dict)]:
+        if _text(item.get("id")) == requested:
+            return item
+    raise ValueError(f"unknown plan revision checklist item_id: {requested}")
+
+
+def _canonical_plan_builder_tool_name(value: Any) -> str:
+    raw = _text(value)
+    if not raw:
+        return ""
+    if raw in PLAN_BUILDER_TOOL_SPECS:
+        return raw
+    if raw in PLAN_BUILDER_ALIASES:
+        return raw
+    candidates: list[str] = []
+    if raw.startswith("plan_"):
+        candidates.append(f"op_minion_{raw}")
+    if raw.startswith("minion_plan_"):
+        candidates.append(f"op_{raw}")
+    candidates.append(raw if raw.startswith("op_") else f"op_minion_plan_{raw}")
+    for candidate in candidates:
+        if candidate in PLAN_BUILDER_TOOL_SPECS or candidate in PLAN_BUILDER_ALIASES:
+            return candidate
+    for candidate in PLAN_BUILDER_TOOL_SPECS:
+        if candidate.replace("op_minion_", "") == raw or candidate.endswith(raw):
+            return candidate
+    return raw
+
+
+def _mark_revision_item_resolved(
+    item: dict[str, Any],
+    *,
+    status: str,
+    evidence: str,
+    tool: str = "",
+    applied_args: dict[str, Any] | None = None,
+) -> None:
+    resolution = {
+        "status": _text(status),
+        "evidence": _text(evidence)[:700],
+    }
+    if tool:
+        resolution["tool"] = _canonical_plan_builder_tool_name(tool)
+    if applied_args:
+        resolution["applied_args"] = dict(applied_args)
+    item["resolution"] = {key: value for key, value in resolution.items() if value not in ("", [], {}, None)}
+
+
 def _revision_checklist_submit_errors(state: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     modules = [dict(item) for item in list(state.get("modules") or []) if isinstance(item, dict)]
@@ -3698,15 +4057,32 @@ def _revision_checklist_llm_text(checklist: list[dict[str, Any]]) -> str:
         item = dict(raw)
         item_id = _text(item.get("id") or "PRC")
         action = _text(item.get("action")) or _text(item.get("summary")) or "Address reviewer finding."
+        kind = _text(item.get("kind") or item.get("revision_kind"))
+        reject_reason = _text(item.get("reject_reason"))
         target = _text(item.get("target_handle"))
+        target_path = _text(item.get("target_path") or dict(item.get("target_node") or {}).get("path"))
+        suggested_tool = _canonical_plan_builder_tool_name(item.get("suggested_tool"))
+        suggested_args = dict(item.get("suggested_args") or {}) if isinstance(item.get("suggested_args"), dict) else {}
+        resolution = dict(item.get("resolution") or {}) if isinstance(item.get("resolution"), dict) else {}
         route = " -> ".join(_string_list(item.get("suggested_tool_route")))
         suffixes: list[str] = []
+        if kind:
+            suffixes.append(f"kind={kind}")
         if target:
             suffixes.append(f"target={target}")
+        if target_path:
+            suffixes.append(f"path={target_path}")
+        if suggested_tool:
+            suffixes.append(f"tool={suggested_tool.replace('op_minion_', '')}")
+        if suggested_args:
+            suffixes.append("args=" + json.dumps(suggested_args, ensure_ascii=False, sort_keys=True))
         if route:
             suffixes.append(f"route={route}")
+        if resolution:
+            suffixes.append(f"resolution={_text(resolution.get('status')) or 'set'}")
         suffix = f" ({'; '.join(suffixes)})" if suffixes else ""
-        lines.append(f"- {item_id}: {action}{suffix}")
+        reason = f" Reject reason: {reject_reason}" if reject_reason else ""
+        lines.append(f"- {item_id}: {action}{reason}{suffix}")
     return "\n".join(lines) or "- No revision checklist items."
 
 
@@ -3863,6 +4239,7 @@ def _plan_snapshot(state: dict[str, Any], *, full: bool) -> dict[str, Any]:
         "summary": state.get("summary"),
         "languages": list(state.get("languages") or []),
         "gate_contract": _compiled_gate_contract(state),
+        "source_acceptance_coverage": _gate_check_coverage_projection(state),
         "handle_tree": handle_tree,
     }
     if full:
@@ -4437,6 +4814,60 @@ def _compiled_gate_contract(state: dict[str, Any]) -> dict[str, Any]:
     if not checks:
         return {}
     return {"checks": [_drop_empty_gate_check(check) for check in checks]}
+
+
+def _gate_check_coverage_projection(state: dict[str, Any]) -> list[dict[str, Any]]:
+    checks = _gate_checks(state)
+    if not checks:
+        return []
+    projection: dict[str, dict[str, Any]] = {}
+    for check in checks:
+        ref = _text(check.get("ref") or f"gate:{int(check.get('index') or 0)}")
+        if not ref:
+            continue
+        projection[ref] = {
+            key: value
+            for key, value in {
+                "ref": ref,
+                "claim": _text(check.get("claim")),
+                "source_ref": _text(check.get("source_ref")),
+                "priority": _text(check.get("priority")),
+                "kind": _text(check.get("kind")),
+                "evidence": [],
+            }.items()
+            if value not in ("", [], {}, None)
+        }
+    if not projection:
+        return []
+    for node in _iter_plan_nodes(state):
+        fields = dict(node.get("fields") or {})
+        refs = _gate_check_ref_list(fields.get("gate_check_refs"))
+        if not refs:
+            continue
+        evidence = {
+            key: value
+            for key, value in {
+                "node_kind": _text(node.get("node_kind")),
+                "handle": _text(node.get("handle")),
+                "path": _text(node.get("path")),
+                "summary": _text(node.get("summary")),
+                "module_id": _text(node.get("module_id")),
+                "milestone_id": _text(node.get("milestone_id")),
+                "acceptance_id": _text(node.get("acceptance_id")),
+            }.items()
+            if value not in ("", [], {}, None)
+        }
+        if not evidence:
+            continue
+        for ref in refs:
+            item = projection.get(ref)
+            if item is None:
+                continue
+            entries = list(item.get("evidence") or [])
+            if evidence not in entries:
+                entries.append(evidence)
+            item["evidence"] = entries
+    return [item for item in projection.values()]
 
 
 def _drop_empty_gate_check(check: dict[str, Any]) -> dict[str, Any]:
@@ -5087,6 +5518,36 @@ def _known_handles(state: dict[str, Any], handles: list[str], *, expected_prefix
             raise ValueError(f"unknown {expected_prefix}_handle: {handle}")
         result.append(handle)
     return result
+
+
+def _constraint_referrers(state: dict[str, Any], constraint_handle: str) -> list[str]:
+    referrers: list[str] = []
+    handle = _text(constraint_handle)
+    for decision in list(state.get("design_decisions") or []):
+        if handle in _string_list(decision.get("linked_constraint_handles")):
+            referrers.append(f"decision {decision.get('id') or decision.get('handle')}")
+    for module in list(state.get("modules") or []):
+        if handle in _string_list(module.get("constraint_handles")):
+            referrers.append(f"module {module.get('module_id') or module.get('handle')}")
+        for milestone in list(module.get("internal_milestones") or []):
+            if handle in _string_list(milestone.get("constraint_handles")):
+                referrers.append(f"milestone {milestone.get('milestone_id') or milestone.get('handle')}")
+            for ac in list(milestone.get("acceptance") or []):
+                if handle in _string_list(ac.get("linked_constraint_handles")):
+                    referrers.append(f"acceptance {ac.get('id') or ac.get('handle')}")
+    return referrers
+
+
+def _decision_referrers(state: dict[str, Any], decision_handle: str) -> list[str]:
+    referrers: list[str] = []
+    handle = _text(decision_handle)
+    for module in list(state.get("modules") or []):
+        if handle in _string_list(module.get("decision_handles")):
+            referrers.append(f"module {module.get('module_id') or module.get('handle')}")
+        for milestone in list(module.get("internal_milestones") or []):
+            if handle in _string_list(milestone.get("decision_handles")):
+                referrers.append(f"milestone {milestone.get('milestone_id') or milestone.get('handle')}")
+    return referrers
 
 
 def _public_refs(state: dict[str, Any], handles: Any) -> list[str]:

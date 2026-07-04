@@ -19,6 +19,7 @@ class StepExecutorProcessState:
     stdout_task: asyncio.Task[None] | None = None
     stderr_task: asyncio.Task[None] | None = None
     wait_task: asyncio.Task[None] | None = None
+    idle_close_task: asyncio.Task[None] | None = None
     run_futures: dict[str, asyncio.Future[None]] = field(default_factory=dict)
     stderr_tail: list[str] = field(default_factory=list)
 
@@ -65,9 +66,16 @@ class StepExecutorRunnerSupervisor:
 
     async def _ensure_executor_started(self, executor_key: str) -> StepExecutorProcessState:
         existing = self.executors.get(executor_key)
-        if existing is not None and existing.process.returncode is None:
+        if (
+            existing is not None
+            and existing.executor_key not in self._closing_executor_keys
+            and existing.process.returncode is None
+        ):
             return existing
         if existing is not None:
+            if existing.process.returncode is None:
+                with contextlib.suppress(Exception):
+                    await existing.process.wait()
             await self._wait_for_executor_tasks(existing)
             self.executors.pop(executor_key, None)
         process = await asyncio.create_subprocess_exec(
@@ -193,6 +201,7 @@ class StepExecutorRunnerSupervisor:
         if str(event.get("event_kind") or "") == "terminal":
             self._finish_run_future(run_id)
             executor.run_futures.pop(run_id, None)
+            self._schedule_idle_executor_close(executor, reason="run_terminal")
 
     def _mark_active_runs_failed_after_executor_exit(self, executor: StepExecutorProcessState, returncode: int | None) -> None:
         for state in list(self._active_states_for_executor(executor.executor_key)):
@@ -268,6 +277,9 @@ class StepExecutorRunnerSupervisor:
             self.consume_task_result(None, executor.wait_task, "step_executor_wait")
             if executor.process.returncode is not None:
                 self._mark_active_runs_failed_after_executor_exit(executor, executor.process.returncode)
+                continue
+            if self._executor_is_idle(executor):
+                self._schedule_idle_executor_close(executor, reason="idle_reconcile")
         self._mark_active_runs_terminal_from_work_order_status()
         for state in list(self.manager.runs.values()):
             task = state.wait_task
@@ -283,6 +295,27 @@ class StepExecutorRunnerSupervisor:
             and state.status in ACTIVE_RUN_STATUSES
             and str(state.pack.work_order_id or "").strip()
         }
+
+    def executor_statuses(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for executor in self.executors.values():
+            process = executor.process
+            active_states = self._active_states_for_executor(executor.executor_key)
+            run_future_ids = list(dict(executor.run_futures or {}).keys())
+            items.append(
+                {
+                    "executor_key": executor.executor_key,
+                    "executor_pid": process.pid if process is not None else None,
+                    "executor_returncode": process.returncode if process is not None else None,
+                    "active_coroutine_count": len(run_future_ids),
+                    "active_run_ids": [str(state.run_id) for state in active_states],
+                    "active_work_order_ids": [str(state.pack.work_order_id) for state in active_states],
+                    "run_future_ids": run_future_ids,
+                    "idle": self._executor_is_idle(executor),
+                    "idle_close_pending": bool(executor.idle_close_task is not None and not executor.idle_close_task.done()),
+                }
+            )
+        return items
 
     def find_active_run_for_work_order(self, work_order_id: str) -> Any | None:
         wanted = str(work_order_id or "").strip()
@@ -367,6 +400,7 @@ class StepExecutorRunnerSupervisor:
             self._finish_run_future(state.run_id)
             for executor in self.executors.values():
                 executor.run_futures.pop(state.run_id, None)
+                self._schedule_idle_executor_close(executor, reason="work_order_terminal_reconcile")
 
     def _active_states_for_executor(self, executor_key: str) -> list[Any]:
         return [
@@ -376,6 +410,42 @@ class StepExecutorRunnerSupervisor:
             and state.status in ACTIVE_RUN_STATUSES
             and self._executor_key_for_state(state) == executor_key
         ]
+
+    def _executor_is_idle(self, executor: StepExecutorProcessState) -> bool:
+        return not dict(getattr(executor, "run_futures", {}) or {}) and not self._active_states_for_executor(executor.executor_key)
+
+    def _schedule_idle_executor_close(self, executor: StepExecutorProcessState, *, reason: str) -> None:
+        if executor.executor_key in self._closing_executor_keys:
+            return
+        if not self._executor_is_idle(executor):
+            return
+        close_task = getattr(executor, "idle_close_task", None)
+        if close_task is not None and not close_task.done():
+            return
+        process = getattr(executor, "process", None)
+        if process is None or getattr(process, "returncode", None) is not None:
+            self.executors.pop(executor.executor_key, None)
+            return
+        if not callable(getattr(process, "wait", None)):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        executor.idle_close_task = loop.create_task(
+            self._close_executor_if_still_idle(executor.executor_key, reason=reason),
+            name=f"minion-step-executor-idle-close-{executor.executor_key}",
+        )
+
+    async def _close_executor_if_still_idle(self, executor_key: str, *, reason: str) -> None:
+        await asyncio.sleep(0)
+        executor = self.executors.get(executor_key)
+        if executor is None:
+            return
+        executor.idle_close_task = None
+        if not self._executor_is_idle(executor):
+            return
+        await self._close_executor(executor, reason=reason or "executor_idle")
 
     def _executor_key_for_state(self, state: Any) -> str:
         metadata = dict(getattr(state.pack, "metadata", {}) or {})

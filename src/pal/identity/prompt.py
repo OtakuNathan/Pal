@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from pal.identity.service import IdentityService
 from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProvider
+from pal.shared.prompt_dates import today_for_timezone
 
 
 @dataclass
@@ -31,6 +32,7 @@ class IdentityPromptFragmentProvider(PromptFragmentProvider):
                 lines.extend(f"- {item}" for item in persona.core_policy)
         if preferences is not None and preferences.timezone:
             lines.append(f"Timezone: {preferences.timezone}")
+        lines.append(f"Today's date is {today_for_timezone(preferences.timezone if preferences is not None else None)}.")
         if preferences is not None and preferences.preferences_blob:
             lines.append("User preferences:")
             for key, value in sorted(preferences.preferences_blob.items()):

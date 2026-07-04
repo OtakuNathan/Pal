@@ -90,22 +90,22 @@ def build_generic_single_node_plan_artifact(
             {
                 "module_id": "main",
                 "owned_area": [f"task://{resolved_task_id}/main"],
-                "responsibility": "Execute the prepared requirements as one bounded deliverable.",
+                "responsibility": "Execute the prepared acceptance scope as one bounded deliverable.",
                 "ownership": [
                     "The main node owns the single deliverable and task-local artifacts for this work order.",
-                    "Input requirements, workspace facts, and external source material are read-only unless the requirements explicitly grant edit authority.",
+                    "Input scope, workspace facts, and external source material are read-only unless the accepted task scope explicitly grants edit authority.",
                 ],
                 "lifecycle": [
-                    "Analyze the goal and requirements before gathering or using context.",
+                    "Analyze the goal and acceptance scope before gathering or using context.",
                     "Produce the deliverable after required context is available, then verify it against acceptance criteria before completion.",
                 ],
                 "invariants": [
-                    "The deliverable stays tied to the user goal, requirements brief, and declared constraints.",
+                    "The deliverable stays tied to the user goal, task acceptance scope, and declared constraints.",
                     "Missing user-owned facts are reported as blockers or assumptions instead of being invented.",
                 ],
                 "internal_milestones": milestones,
                 "test_plan": {
-                    "strategy": "Verify the deliverable against the user goal, requirements brief, and milestone acceptance criteria.",
+                    "strategy": "Verify the deliverable against the user goal, task acceptance scope, and milestone acceptance criteria.",
                 },
                 "metadata": {
                     "profile_family": family,
@@ -181,8 +181,8 @@ def _generic_milestones(*, goal: str, requirements_brief: dict[str, Any]) -> lis
     return [
         {
             "milestone_id": "m0",
-            "title": "Analyze requirements",
-            "task": "Read the goal, requirements brief, and workspace facts; identify scope, blockers, and success criteria.",
+            "title": "Clarify acceptance scope",
+            "task": "Read the goal, task acceptance scope, and workspace facts; identify scope, blockers, and success criteria.",
             "acceptance_criteria": [
                 "Scope and success criteria are restated concretely.",
                 "User-owned blockers or missing facts are surfaced explicitly.",
@@ -203,7 +203,7 @@ def _generic_milestones(*, goal: str, requirements_brief: dict[str, Any]) -> lis
             "task": goal_text,
             "acceptance_criteria": [
                 "The deliverable directly satisfies the user goal.",
-                "The result follows constraints from the requirements brief.",
+                "The result follows constraints from the task acceptance scope.",
             ],
         },
         {

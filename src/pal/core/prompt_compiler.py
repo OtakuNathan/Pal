@@ -21,6 +21,35 @@ _BEHAVIOR_GUIDANCE_HEADER = (
 _BEHAVIOR_GUIDANCE_HEADER_LINES = frozenset(_BEHAVIOR_GUIDANCE_HEADER.splitlines())
 
 
+def normalize_prompt_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for raw_message in list(messages or []):
+        if not isinstance(raw_message, dict):
+            continue
+        message = dict(raw_message)
+        role = str(message.get("role") or "").strip()
+        if role == "user" and normalized and str(normalized[-1].get("role") or "").strip() == "user":
+            normalized[-1]["content"] = _merge_user_message_content(normalized[-1].get("content"), message.get("content"))
+            continue
+        normalized.append(message)
+    return normalized
+
+
+def _merge_user_message_content(left: Any, right: Any) -> str | list[dict[str, Any]]:
+    if isinstance(left, str) and isinstance(right, str):
+        if left.strip() and right.strip():
+            return f"{left.rstrip()}\n\n{right.lstrip()}"
+        return left or right
+    return [*_message_content_parts(left), *_message_content_parts(right)]
+
+
+def _message_content_parts(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [dict(item) for item in value if isinstance(item, dict)]
+    text = str(value or "")
+    return [{"type": "text", "text": text}] if text else []
+
+
 class PromptCompiler:
     def __init__(self, context) -> None:
         self.context = context
@@ -146,6 +175,15 @@ class PromptCompiler:
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
                 )
+            elif normalized_section == "behavior_guidance":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="behavior_guidance",
+                        title="Behavior Guidance",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
             elif normalized_section == "behavior_guidance_guide":
                 system_blocks.append(
                     PromptIRBlock(
@@ -160,6 +198,42 @@ class PromptCompiler:
                     PromptIRBlock(
                         block_id="skill_guide",
                         title="Skill Guide",
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
+            elif normalized_section == "requirements_brief":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="requirements_brief",
+                        title=str(fragment.title or "Requirements Brief"),
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
+            elif normalized_section == "requirements_policy":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="requirements_policy",
+                        title=str(fragment.title or "Requirements Policy"),
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
+            elif normalized_section == "task_acceptance":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="task_acceptance",
+                        title=str(fragment.title or "Task Acceptance"),
+                        content=rendered_body,
+                        metadata={"source_section": fragment.section, "source_title": fragment.title},
+                    )
+                )
+            elif normalized_section == "task_acceptance_policy":
+                system_blocks.append(
+                    PromptIRBlock(
+                        block_id="task_acceptance_policy",
+                        title=str(fragment.title or "Task Acceptance Policy"),
                         content=rendered_body,
                         metadata={"source_section": fragment.section, "source_title": fragment.title},
                     )
@@ -255,7 +329,7 @@ class PromptCompiler:
         from pal.llm.contracts import CanonicalLLMRequest
 
         prompt_ir = self.build_prompt_ir(assembly_context)
-        messages = self._compile_prompt_ir_messages(prompt_ir)
+        messages = normalize_prompt_messages(self._compile_prompt_ir_messages(prompt_ir))
         return CanonicalLLMRequest(
             messages=messages,
             max_output_tokens=max_output_tokens,
@@ -386,10 +460,15 @@ class PromptCompiler:
             "tool_efficiency",
             "mutation_policy",
             "memory_guide",
+            "behavior_guidance",
             "behavior_guidance_guide",
             "skill_guide",
             "knowledge_storage_boundary",
             "resident_affordances",
+            "requirements_brief",
+            "requirements_policy",
+            "task_acceptance",
+            "task_acceptance_policy",
         }:
             return lowered
         if lowered in {"control", "observation", "finalization"}:
@@ -477,7 +556,12 @@ class PromptCompiler:
         tool_efficiency_blocks = [block for block in blocks if block.block_id == "tool_efficiency"]
         mutation_policy_blocks = [block for block in blocks if block.block_id == "mutation_policy"]
         memory_guide_blocks = [block for block in blocks if block.block_id == "memory_guide"]
+        behavior_guidance_blocks = [block for block in blocks if block.block_id == "behavior_guidance"]
         behavior_guidance_guide_blocks = [block for block in blocks if block.block_id == "behavior_guidance_guide"]
+        requirements_blocks = [block for block in blocks if block.block_id == "requirements_brief"]
+        requirements_policy_blocks = [block for block in blocks if block.block_id == "requirements_policy"]
+        task_acceptance_blocks = [block for block in blocks if block.block_id == "task_acceptance"]
+        task_acceptance_policy_blocks = [block for block in blocks if block.block_id == "task_acceptance_policy"]
         skill_guide_blocks = [block for block in blocks if block.block_id == "skill_guide"]
         knowledge_storage_boundary_blocks = [block for block in blocks if block.block_id == "knowledge_storage_boundary"]
         resident_blocks = [block for block in blocks if block.block_id == "resident_affordances"]
@@ -496,7 +580,12 @@ class PromptCompiler:
             *tool_efficiency_blocks,
             *mutation_policy_blocks,
             *memory_guide_blocks,
+            *behavior_guidance_blocks,
             *behavior_guidance_guide_blocks,
+            *requirements_blocks,
+            *requirements_policy_blocks,
+            *task_acceptance_blocks,
+            *task_acceptance_policy_blocks,
             *skill_guide_blocks,
             *knowledge_storage_boundary_blocks,
             *resident_blocks,

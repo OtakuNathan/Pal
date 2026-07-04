@@ -738,16 +738,21 @@ def prompt_view_from_metadata(metadata: dict[str, Any], *, workspace: dict[str, 
             "planning_goal",
             "planning_requirements",
             "clarifications",
+            "repair_context",
             "turn_index",
             "plan_revision",
         ):
             if key in raw_prompt_view:
                 prompt_view[key] = raw_prompt_view[key]
+        if "repair_context" not in prompt_view and isinstance(data.get("repair_context"), dict):
+            prompt_view["repair_context"] = dict(data.get("repair_context") or {})
         if workspace:
             prompt_view["workspace"] = _merge_prompt_workspace(prompt_view.get("workspace"), workspace)
         return prompt_view
     if isinstance(data.get("coder_work_order"), dict):
         prompt_view = prompt_view_for_coder(dict(data.get("coder_work_order") or {})).to_dict()
+        if isinstance(data.get("repair_context"), dict):
+            prompt_view["repair_context"] = dict(data.get("repair_context") or {})
         if workspace:
             prompt_view["workspace"] = _prompt_workspace(workspace)
         return prompt_view
@@ -906,6 +911,7 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
     artifact = validate_final_plan_artifact(payload)
     errors: list[str] = []
     errors.extend(_plan_artifact_gate_check_ref_errors(artifact))
+    errors.extend(_plan_artifact_executor_semantic_errors(artifact))
     module_ids: list[str] = []
     modules_by_id: dict[str, ModulePlan] = {}
     for module_index, module in enumerate(artifact.modules):
@@ -1104,6 +1110,62 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
         ).encode("utf-8")
     ).hexdigest()
     return validation
+
+
+def _plan_artifact_executor_semantic_errors(artifact: PlanArtifact) -> list[str]:
+    metadata = dict(artifact.metadata or {})
+    workflow_next = _dict(metadata.get("workflow_next") or metadata.get("next"))
+    artifact_type = str(workflow_next.get("artifact_type") or metadata.get("artifact_type") or "").strip().lower()
+    is_review_artifact = _artifact_type_is_review_or_report(artifact_type)
+    errors: list[str] = []
+    next_profile = _canonical_profile_text(workflow_next.get("profile") or workflow_next.get("next_profile"))
+    if _profile_is_reviewer_like(next_profile) and not is_review_artifact:
+        errors.append(
+            "metadata.workflow_next.profile points to a reviewer profile for a non-review artifact; "
+            "use a coder/executor profile for implementation DAGs, or set workflow_next.artifact_type to a review/report artifact"
+        )
+    orchestration = dict(artifact.orchestration or {})
+    topology = _dict(orchestration.get("topology"))
+    raw_nodes = topology.get("nodes") if isinstance(topology.get("nodes"), list) else orchestration.get("nodes")
+    for node_index, raw_node in enumerate(list(raw_nodes or [])):
+        if not isinstance(raw_node, dict):
+            continue
+        executor_profile = _canonical_profile_text(raw_node.get("executor_profile"))
+        raw_executor = raw_node.get("executor")
+        if not executor_profile and isinstance(raw_executor, str):
+            executor_profile = _canonical_profile_text(raw_executor)
+        if not executor_profile and isinstance(raw_executor, dict):
+            executor_profile = _canonical_profile_text(
+                raw_executor.get("profile")
+                or raw_executor.get("executor_profile")
+                or raw_executor.get("minion_profile")
+                or raw_executor.get("dispatch_profile")
+            )
+        if _profile_is_reviewer_like(executor_profile) and not is_review_artifact:
+            errors.append(
+                f"orchestration.topology.nodes[{node_index}].executor_profile points to a reviewer profile for a non-review artifact"
+            )
+    return errors
+
+
+def _artifact_type_is_review_or_report(value: str) -> bool:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    if not normalized:
+        return False
+    tokens = set(filter(None, normalized.split("_")))
+    return bool(tokens & {"review", "report", "audit", "assessment"})
+
+
+def _canonical_profile_text(value: Any) -> str:
+    return str(value or "").strip().replace("/", ".").lower()
+
+
+def _profile_is_reviewer_like(value: str) -> bool:
+    normalized = _canonical_profile_text(value)
+    if not normalized or normalized == "none":
+        return False
+    leaf = normalized.rsplit(".", 1)[-1]
+    return leaf in {"reviewer", "review_worker"}
 
 
 def _plan_artifact_gate_check_ref_errors(artifact: PlanArtifact) -> list[str]:

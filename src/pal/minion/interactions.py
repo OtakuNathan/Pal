@@ -128,6 +128,15 @@ def build_minion_plan_acceptance_interaction(payload: dict[str, Any], route: Con
     gate_id = str(review_gate_ref.get("gate_id") or "").strip()
     if gate_id:
         lines.append(f"Review gate: {gate_id}")
+    review_artifact_ref = _plan_review_artifact_ref(payload, plan_ref)
+    artifact_relative_path = str(review_artifact_ref.get("relative_path") or "").strip()
+    artifact_path = str(review_artifact_ref.get("path") or "").strip()
+    if artifact_relative_path or artifact_path:
+        lines.extend(["", "Plan markdown:"])
+        if artifact_relative_path:
+            lines.append(f"- {artifact_relative_path}")
+        if artifact_path and artifact_path != artifact_relative_path:
+            lines.append(f"- {artifact_path}")
     if summary:
         lines.extend(["", "Summary:", _truncate_text(summary, 900)])
     lines.append("")
@@ -184,6 +193,18 @@ def build_minion_plan_acceptance_interaction(payload: dict[str, Any], route: Con
             ),
         ),
     )
+
+
+def _plan_review_artifact_ref(payload: dict[str, Any], plan_ref: dict[str, Any]) -> dict[str, Any]:
+    for candidate in (
+        payload.get("review_artifact_ref"),
+        payload.get("review_artifact"),
+        plan_ref.get("review_artifact_ref"),
+        plan_ref.get("review_artifact"),
+    ):
+        if isinstance(candidate, dict):
+            return dict(candidate)
+    return {}
 
 
 def build_minion_module_dag_tick_interaction(payload: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec | None:

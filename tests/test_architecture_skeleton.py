@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from pal.channel import (
     ChannelAdapter,
@@ -43,6 +44,7 @@ from pal.failure import (
 )
 from pal.foundation import EventEnvelope, RawSQLHookRegistry
 from pal.identity import IdentityRepository, IdentityService, register_with_core as register_identity_with_core
+from pal.identity.prompt import IdentityPromptFragmentProvider
 from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
 from pal.memory import (
     L1MessageKind,
@@ -63,6 +65,7 @@ from pal.plugins.l3 import MockL3Plugin, register_with_core as register_l3_with_
 from pal.proactive import ProactiveDefinition, ProactiveManager, ProactiveRepository, ProactiveRunner, ProactiveTriggerEvent, build_proactive_trigger_input, register_with_core as register_proactive_with_core
 from pal.proactive.scheduling import compute_next_proactive_run_at_utc, utc_now_dt
 from pal.shared import EventKind, LLMStreamEventKind, MinionProgressEvent, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, capability_action, capability_node, default_tool_result_text
+from pal.shared.prompt_dates import today_for_timezone
 from pal.stream_events import NormalizedLLMStreamEvent
 from pal.wizard import WizardService
 from pal.minion import TaskingService, register_with_core as register_minion_with_core
@@ -1445,6 +1448,32 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
+
+    def test_identity_prompt_includes_current_date(self) -> None:
+        service = SimpleNamespace(
+            get_persona=lambda: SimpleNamespace(
+                display_name="Pal",
+                language="zh",
+                vibe="",
+                tone="",
+                core_policy=[],
+            ),
+            get_preferences=lambda: SimpleNamespace(
+                timezone="Asia/Shanghai",
+                style_preference="",
+                preferences_blob={},
+            ),
+        )
+        fragment = IdentityPromptFragmentProvider(service=service).build_prompt_fragments(PromptAssemblyContext())[0]
+
+        self.assertIn("Timezone: Asia/Shanghai", fragment.content)
+        self.assertRegex(fragment.content, r"Today's date is \d{4}-\d{2}-\d{2}\.")
+
+    def test_today_for_timezone_uses_configured_timezone(self) -> None:
+        fixed_utc = datetime(2026, 7, 2, 16, 30, tzinfo=timezone.utc)
+
+        self.assertEqual(today_for_timezone("Asia/Shanghai", now_utc=fixed_utc), "2026-07-03")
+        self.assertEqual(today_for_timezone("UTC", now_utc=fixed_utc), "2026-07-02")
 
     def test_proactive_trigger_delivers_and_settles_all_turn_replies(self) -> None:
         runtime_root, database = self._create_database()

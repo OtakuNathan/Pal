@@ -12,6 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from pal.foundation.log_paths import pal_log_path, pal_log_root
 from pal.wizard.dependencies import WizardDependencyCheck, collect_dependency_checks
 from pal.wizard.prompts import ask, ask_yes_no, run_interactive_wizard
 from pal.wizard.runtime import DEFAULT_DB_FILENAME, DEFAULT_PAL_ENTRYPOINT, WizardService
@@ -84,6 +85,8 @@ def _generate_service_content(
     environment: dict[str, str] | None = None,
 ) -> str:
     runtime_path = runtime_root.as_posix()
+    log_root = pal_log_root(runtime_root).as_posix()
+    log_path = pal_log_path(runtime_root).as_posix()
     service_environment = environment or {"PYTHONUNBUFFERED": "1"}
     environment_lines = "\n".join(
         _format_systemd_environment_value(key, value)
@@ -98,12 +101,13 @@ def _generate_service_content(
         "\n"
         "[Service]\n"
         f"Type=simple\n"
+        f"ExecStartPre=/usr/bin/mkdir -p {log_root}\n"
         f"ExecStart={pal_bin} run --runtime-root {runtime_path}\n"
         "Restart=on-failure\n"
         "RestartSec=5\n"
         f"{environment_lines}\n"
-        f"StandardOutput=append:{runtime_path}/pal.log\n"
-        f"StandardError=append:{runtime_path}/pal.log\n"
+        f"StandardOutput=append:{log_path}\n"
+        f"StandardError=append:{log_path}\n"
         "\n"
         "[Install]\n"
         "WantedBy=default.target\n"
@@ -211,6 +215,7 @@ def _prompt_systemd_service_setup(runtime_root: Path) -> str | None:
         return None
 
     # Write the service file
+    pal_log_root(runtime_root).mkdir(parents=True, exist_ok=True)
     _SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
     service_path.write_text(content, encoding="utf-8")
 
@@ -275,6 +280,7 @@ def _generate_launchd_plist(
     environment: dict[str, str] | None = None,
 ) -> dict[str, object]:
     runtime_path = runtime_root.as_posix()
+    log_path = pal_log_path(runtime_root).as_posix()
     return {
         "Label": label,
         "ProgramArguments": [*pal_command, "run", "--runtime-root", runtime_path],
@@ -282,8 +288,8 @@ def _generate_launchd_plist(
         "KeepAlive": {"SuccessfulExit": False},
         "WorkingDirectory": runtime_path,
         "EnvironmentVariables": dict(environment or {"PYTHONUNBUFFERED": "1"}),
-        "StandardOutPath": (runtime_root / "pal.log").as_posix(),
-        "StandardErrorPath": (runtime_root / "pal.log").as_posix(),
+        "StandardOutPath": log_path,
+        "StandardErrorPath": log_path,
     }
 
 
@@ -349,6 +355,7 @@ def _prompt_launchd_service_setup(runtime_root: Path) -> str | None:
     if not ask_yes_no("  Register and start this LaunchAgent?", default=True):
         return None
 
+    pal_log_root(runtime_root).mkdir(parents=True, exist_ok=True)
     _LAUNCHD_USER_DIR.mkdir(parents=True, exist_ok=True)
     with plist_path.open("wb") as f:
         plistlib.dump(plist_payload, f, sort_keys=True)
@@ -451,7 +458,7 @@ def run_setup_wizard() -> int:
     print(f"    DB:      {db_path}")
     if svc_name:
         print(f"    Service: {svc_name} (running)")
-        print(f"    Log:     {runtime_root}/pal.log")
+        print(f"    Log:     {pal_log_path(runtime_root)}")
     else:
         print(f"\n    Run: pal run --runtime-root {runtime_root}")
     return 0

@@ -25,6 +25,9 @@ from pal.memory.contracts import L2Entry
 from pal.shared import LLMResponseMode, RuntimeStatus
 
 
+_SAFE_MODE_LLM_TIMEOUT_SECONDS = 45.0
+
+
 @dataclass(frozen=True)
 class FailureHandlingResult:
     verification: VerificationResult
@@ -234,6 +237,7 @@ class FailureOrchestrator:
                 "purpose": "failure_flow",
                 "prompt_profile": "safe_mode",
                 "failure_stage": stage,
+                "timeout_seconds": _SAFE_MODE_LLM_TIMEOUT_SECONDS,
             },
         )
 

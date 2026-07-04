@@ -15,6 +15,8 @@ from uuid import uuid4
 
 from pal.artifact import ArtifactManager, ArtifactRepository, register_with_core as register_artifact_with_core
 from pal.core import PalCore
+from pal.core.prompt_compiler import PromptCompiler
+from pal.core.prompt_fragment_registry import PromptFragmentRegistry
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import ToolStagnationGuardProcess
 from pal.core.turn_events import TurnEventBus
@@ -72,8 +74,8 @@ from pal.minion.scoped_execution import (
 )
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.minion.prompt_adapter import (
-    build_minion_prompt_messages,
     build_minion_task_envelope as _minion_task_envelope,
+    MinionPromptFragmentProvider,
     minion_primary_input as _minion_primary_input,
     prompt_scaffold_summary as _prompt_scaffold_summary,
     prompt_view_from_pack as _prompt_view_from_pack,
@@ -132,6 +134,7 @@ class MinionRuntimeBundle:
 @dataclass
 class _MinionTurnContext:
     execution_runtime: Any
+    prompt_fragment_registry: PromptFragmentRegistry
     port_registry: dict[str, Any]
     turn_event_bus: TurnEventBus = field(default_factory=TurnEventBus)
 
@@ -489,35 +492,42 @@ class MinionRunner:
 
     async def run(self) -> int:
         bundle: MinionRuntimeBundle | None = None
-        self._append_debug_log(
-            "runner_started",
-            {
-                "goal": self.pack.goal,
-                "instruction": self.pack.instruction,
-                "allowed_capabilities": list(self.pack.allowed_capabilities),
-            },
-        )
+        prompt_observation_tag = _prompt_observation_tag_from_pack(self.pack)
+        runner_started_payload = {
+            "goal": self.pack.goal,
+            "instruction": self.pack.instruction,
+            "allowed_capabilities": list(self.pack.allowed_capabilities),
+        }
+        if prompt_observation_tag:
+            runner_started_payload["prompt_observation_tag"] = prompt_observation_tag
+        self._append_debug_log("runner_started", runner_started_payload)
         try:
             bundle = self.runtime_bundle or build_slim_minion_runtime(self.runtime_root, run_id=self.run_id)
+            accepted_payload = {
+                "phase": "accepted",
+                "summary": "minion accepted task context",
+                "prompt_scaffold_summary": _prompt_scaffold_summary(self._prompt_scaffold()),
+            }
+            if prompt_observation_tag:
+                accepted_payload["prompt_observation_tag"] = prompt_observation_tag
             await self._emit(
                 "phase_started",
-                {
-                    "phase": "accepted",
-                    "summary": "minion accepted task context",
-                    "prompt_scaffold_summary": _prompt_scaffold_summary(self._prompt_scaffold()),
-                },
+                accepted_payload,
             )
             while True:
                 await self._raise_if_cancel_requested()
+                milestone_started_payload = {
+                    "phase": "milestone_started",
+                    "summary": self._current_milestone_title(),
+                    "milestone_index": self._current_milestone_index(),
+                    "milestone_id": str(self._current_milestone().get("milestone_id") or ""),
+                    "current_milestone": self._current_milestone(),
+                }
+                if prompt_observation_tag:
+                    milestone_started_payload["prompt_observation_tag"] = prompt_observation_tag
                 await self._emit(
                     "phase_started",
-                    {
-                        "phase": "milestone_started",
-                        "summary": self._current_milestone_title(),
-                        "milestone_index": self._current_milestone_index(),
-                        "milestone_id": str(self._current_milestone().get("milestone_id") or ""),
-                        "current_milestone": self._current_milestone(),
-                    },
+                    milestone_started_payload,
                 )
                 final_text = await self._run_agent_loop(bundle)
                 await self._raise_if_cancel_requested()
@@ -722,7 +732,7 @@ class MinionRunner:
             metadata = {
                 "retry_note": retry_note,
             }
-            return _minion_prompt_context(self.pack, metadata=metadata)
+            return _minion_prompt_context(self.pack, event=state.channel_envelope.event, metadata=metadata)
 
         def build_commit_payload(final_reply: str, observations: list[Any], reply_texts: list[str]) -> L1CommitPayload:
             _ = reply_texts
@@ -755,7 +765,7 @@ class MinionRunner:
             program=program,
             correlation_id=self.run_id,
             control_scope_key=f"minion:{self.run_id}",
-            turn_settings_snapshot={"prompt_log_enabled": bool((self.pack.metadata or {}).get("prompt_log_enabled"))},
+            turn_settings_snapshot=_minion_turn_settings_snapshot(self.pack),
             tool_protocol_messages=state.tool_protocol_messages,
         )
         executor = self._build_minion_turn_executor(bundle, state, continuation)
@@ -1024,8 +1034,16 @@ class MinionRunner:
         memory_service = _MinionMemoryServiceAdapter(self, state)
         output_port = _MinionOutputPort(self)
         execution_runtime = _MinionExecutionRuntimeAdapter(self, state, continuation)
+        prompt_fragment_registry = PromptFragmentRegistry()
+        prompt_fragment_registry.register(
+            MinionPromptFragmentProvider(
+                scaffold_factory=self._prompt_scaffold,
+                memory_text_factory=lambda: self._render_minion_memory_context(state),
+            )
+        )
         context = _MinionTurnContext(
             execution_runtime=execution_runtime,
+            prompt_fragment_registry=prompt_fragment_registry,
             port_registry={
                 "llm:llm": llm_runtime,
                 "memory:memory": memory_service,
@@ -1033,6 +1051,7 @@ class MinionRunner:
             },
             turn_event_bus=TurnEventBus(),
         )
+        prompt_compiler = PromptCompiler(context)
         turn_state = _MinionTurnState()
         turn_manager = _MinionTurnManager()
 
@@ -1042,19 +1061,18 @@ class MinionRunner:
             max_output_tokens: int = 1024,
             model_hint: str | None = None,
         ) -> CanonicalLLMRequest:
-            return CanonicalLLMRequest(
-                messages=build_minion_prompt_messages(
-                    scaffold=self._prompt_scaffold(),
-                    channel_envelope=state.channel_envelope,
-                    memory_text=self._render_minion_memory_context(state),
-                    retry_note=str((assembly_context.metadata or {}).get("retry_note") or ""),
-                    tool_protocol_messages=state.tool_protocol_messages,
-                    include_tool_protocol=False,
-                ),
+            prompt = prompt_compiler.build_canonical_prompt(
+                assembly_context,
                 max_output_tokens=max_output_tokens,
                 model_hint=model_hint,
-                tools=[],
-                metadata=_minion_llm_request_metadata(self.pack, self.run_id),
+            )
+            return CanonicalLLMRequest(
+                messages=list(prompt.messages),
+                max_output_tokens=prompt.max_output_tokens,
+                model_hint=prompt.model_hint,
+                temperature=prompt.temperature,
+                tools=list(prompt.tools),
+                metadata={**dict(prompt.metadata), **_minion_llm_request_metadata(self.pack, self.run_id)},
             )
 
         return TurnExecutor(
@@ -2426,6 +2444,9 @@ class MinionRunner:
             "run_id": self.run_id,
             "payload": dict(payload or {}),
         }
+        prompt_observation_tag = _prompt_observation_tag_from_pack(self.pack)
+        if prompt_observation_tag:
+            record["prompt_observation_tag"] = prompt_observation_tag
         try:
             path = Path(path_text)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -2516,8 +2537,9 @@ def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> Minion
     return MinionRuntimeBundle(llm_runtime=llm_runtime, execution_runtime=core.context.execution_runtime, close_async=close)
 
 
-def _minion_prompt_context(pack: TaskContextPack, *, metadata: dict[str, Any]) -> PromptAssemblyContext:
+def _minion_prompt_context(pack: TaskContextPack, *, event: EventEnvelope | None = None, metadata: dict[str, Any]) -> PromptAssemblyContext:
     return PromptAssemblyContext(
+        event=event,
         core_mode="minion",
         turn_kind="minion",
         work_order_id=pack.work_order_id,
@@ -2831,7 +2853,26 @@ def _minion_llm_request_metadata(pack: TaskContextPack, run_id: str) -> dict[str
     timeout_seconds = _minion_llm_request_timeout_seconds(pack)
     if timeout_seconds is not None:
         metadata["timeout_seconds"] = timeout_seconds
+    prompt_observation_tag = _prompt_observation_tag_from_pack(pack)
+    if prompt_observation_tag:
+        metadata["prompt_observation_tag"] = prompt_observation_tag
     return metadata
+
+
+def _minion_turn_settings_snapshot(pack: TaskContextPack) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "prompt_log_enabled": bool((pack.metadata or {}).get("prompt_log_enabled")),
+    }
+    prompt_observation_tag = _prompt_observation_tag_from_pack(pack)
+    if prompt_observation_tag:
+        snapshot["prompt_observation_tag"] = prompt_observation_tag
+    return snapshot
+
+
+def _prompt_observation_tag_from_pack(pack: TaskContextPack) -> str:
+    metadata = pack.metadata if isinstance(pack.metadata, dict) else {}
+    tag = str(metadata.get("prompt_observation_tag") or "").strip()
+    return tag
 
 
 def _minion_llm_request_timeout_seconds(pack: TaskContextPack) -> float | None:

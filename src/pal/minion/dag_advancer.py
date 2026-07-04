@@ -172,6 +172,7 @@ class DagState:
     running_nodes: dict[str, str] = field(default_factory=dict)
     completed_nodes: tuple[str, ...] = ()
     node_outputs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    node_cursors: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
     def from_validation(cls, validation: dict[str, Any], existing: dict[str, Any] | None = None) -> DagState:
@@ -180,6 +181,7 @@ class DagState:
         existing_status = dict(existing.get("module_status") or existing.get("node_status") or {})
         existing_running = dict(existing.get("running_modules") or existing.get("running_nodes") or {})
         existing_outputs = dict(existing.get("module_outputs") or existing.get("node_outputs") or {})
+        existing_cursors = dict(existing.get("module_cursors") or existing.get("node_cursors") or {})
         completed_modules = {
             module_id
             for module_id in _coerce_text_list(existing.get("completed_modules") or existing.get("completed_nodes"))
@@ -227,6 +229,11 @@ class DagState:
                 for module_id, output in existing_outputs.items()
                 if module_id in spec.node_order and isinstance(output, dict)
             },
+            node_cursors={
+                module_id: dict(cursor)
+                for module_id, cursor in existing_cursors.items()
+                if module_id in spec.node_order and isinstance(cursor, dict)
+            },
         )
 
     @classmethod
@@ -256,6 +263,11 @@ class DagState:
             for key, value in dict(source.get("module_outputs") or source.get("node_outputs") or {}).items()
             if str(key or "").strip() and isinstance(value, dict)
         }
+        node_cursors = {
+            str(key): dict(value)
+            for key, value in dict(source.get("module_cursors") or source.get("node_cursors") or {}).items()
+            if str(key or "").strip() and isinstance(value, dict)
+        }
         ready_nodes = tuple(_ready_ids_from_parts(spec.node_order, module_status, remaining_indegree))
         return cls(
             spec=spec,
@@ -265,6 +277,7 @@ class DagState:
             running_nodes={module_id: child_id for module_id, child_id in running_modules.items() if module_id in spec.node_order},
             completed_nodes=completed_modules,
             node_outputs={module_id: output for module_id, output in module_outputs.items() if module_id in spec.node_order},
+            node_cursors={module_id: cursor for module_id, cursor in node_cursors.items() if module_id in spec.node_order},
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -292,6 +305,11 @@ class DagState:
                     module_id: dict(output)
                     for module_id, output in self.node_outputs.items()
                     if module_id in node_order and isinstance(output, dict)
+                },
+                "module_cursors": {
+                    module_id: dict(cursor)
+                    for module_id, cursor in self.node_cursors.items()
+                    if module_id in node_order and isinstance(cursor, dict)
                 },
             }
         )
@@ -322,6 +340,11 @@ class DagState:
                     node_id: dict(output)
                     for node_id, output in self.node_outputs.items()
                     if node_id in node_order and isinstance(output, dict)
+                },
+                "node_cursors": {
+                    node_id: dict(cursor)
+                    for node_id, cursor in self.node_cursors.items()
+                    if node_id in node_order and isinstance(cursor, dict)
                 },
             }
         )
@@ -582,6 +605,44 @@ def release_running_module(
     return result
 
 
+def resume_blocked_module(dag: dict[str, Any], module_id: str) -> dict[str, Any]:
+    updated = _copy_dag(dag)
+    resolved_module_id = str(module_id or "").strip()
+    module_order = _coerce_text_list(updated.get("module_order"))
+    if resolved_module_id not in module_order:
+        result = _advance_result(updated)
+        result.update({"advanced": False, "reason": "unknown_module", "module_id": resolved_module_id})
+        return result
+    module_status = dict(updated.get("module_status") or {})
+    running_modules = dict(updated.get("running_modules") or {})
+    status = str(module_status.get(resolved_module_id) or "").strip().lower()
+    if status in {"completed", "running"}:
+        result = _advance_result(updated)
+        result.update({"advanced": False, "reason": f"module_{status}", "module_id": resolved_module_id})
+        return result
+    if status not in {"", "ready", "blocked", "failed", "paused"}:
+        result = _advance_result(updated)
+        result.update({"advanced": False, "reason": f"module_{status}_not_resumable", "module_id": resolved_module_id})
+        return result
+    remaining_indegree = dict(updated.get("remaining_indegree") or {})
+    if max(0, _coerce_int(remaining_indegree.get(resolved_module_id)) or 0) != 0:
+        result = _advance_result(updated)
+        result.update({"advanced": False, "reason": "dependencies_incomplete", "module_id": resolved_module_id})
+        return result
+    running_modules.pop(resolved_module_id, None)
+    module_status[resolved_module_id] = "ready"
+    updated["module_status"] = module_status
+    updated["running_modules"] = {
+        mid: str(value)
+        for mid, value in running_modules.items()
+        if mid in module_order and str(value or "").strip()
+    }
+    updated["ready_modules"] = ready_module_ids(updated)
+    result = _advance_result(updated)
+    result.update({"advanced": True, "reason": "resumed", "module_id": resolved_module_id})
+    return result
+
+
 def affected_modules_for_repair(dag: dict[str, Any], replay_targets: list[str]) -> list[str]:
     module_order = _coerce_text_list(dag.get("module_order"))
     dependents = dict(dag.get("dependents") or {})
@@ -629,11 +690,13 @@ def apply_repair_replay(
     module_status = dict(updated.get("module_status") or {})
     running_modules = dict(updated.get("running_modules") or {})
     module_outputs = dict(updated.get("module_outputs") or {})
+    module_cursors = dict(updated.get("module_cursors") or {})
     invalidated_child_ids: list[str] = []
     for module_id in affected_modules:
         attempts[module_id] = int(attempts.get(module_id) or 0) + 1
         invalidated_child_ids.extend([child_ids.pop(module_id, ""), running_modules.pop(module_id, "")])
         module_outputs.pop(module_id, None)
+        module_cursors.pop(module_id, None)
         module_status[module_id] = "needs_repair" if module_id in target_set else "stale"
 
     depends_on = dict(updated.get("depends_on") or {})
@@ -666,6 +729,11 @@ def apply_repair_replay(
         module_id: dict(output)
         for module_id, output in module_outputs.items()
         if module_id in module_order and isinstance(output, dict)
+    }
+    updated["module_cursors"] = {
+        module_id: dict(cursor)
+        for module_id, cursor in module_cursors.items()
+        if module_id in module_order and isinstance(cursor, dict)
     }
     updated["remaining_indegree"] = remaining_indegree
     updated["ready_modules"] = [module_id for module_id in module_order if module_id in set(ready_modules)]

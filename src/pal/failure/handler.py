@@ -18,6 +18,8 @@ class FailureEventHandler(EventHandler):
     async def handle(self, event: EventEnvelope, context) -> list[EventEnvelope] | None:
         _ = context
         payload = event.payload if isinstance(event.payload, dict) else {}
+        if _is_ephemeral_delivery_failure(payload):
+            return []
         await self.core.handle_failure_async(
             FailureSignal(
                 subsystem="channel",
@@ -37,3 +39,11 @@ class FailureEventHandler(EventHandler):
             conversation_context={"event_id": event.event_id},
         )
         return []
+
+
+def _is_ephemeral_delivery_failure(payload: dict) -> bool:
+    endpoint_id = str(payload.get("endpoint_id") or "").strip().lower()
+    reason = str(payload.get("reason") or "").strip().lower()
+    if not endpoint_id.startswith("sock"):
+        return False
+    return "socket session is closed" in reason or "session is closed" in reason

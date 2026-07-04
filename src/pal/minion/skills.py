@@ -15,10 +15,11 @@ Use this skill when Pal needs to add, review, repair, or explain the Minion subs
 
 Minion is a detachable first-party subsystem. Keep the roles crisp:
 
-- Pal's main agent owns user conversation, requirements shaping, workspace fact collection, progress reporting, and user confirmation.
+- Pal's main agent owns user conversation, source-scope shaping, workspace fact collection, progress reporting, and user confirmation.
 - Task is the durable semantic container. Bind `profile_family` on the task before creating work orders. Work orders are execution attempts under that task; runs are concrete runner executions.
 - Before normal delegation, Pal should call `intro_minion_task_search` with the user goal/repo/domain facts. Reuse a matching task_id, or create one with `op_minion_task_create(profile_family=...)`. Then call `op_minion_dispatch_workflow(task_id=...)`.
-- `op_minion_dispatch_workflow` is the normal work-order delegation entrypoint. It takes `task_id`, `goal`, optional `requirements_brief`, workspace facts, and optional endpoint. It must not take `profile_name`/`profile_group`; profile family is bound on the task.
+- `op_minion_dispatch_workflow` is the normal work-order delegation entrypoint. It takes `task_id`, `goal`, optional source acceptance ledger in `requirements_brief`, workspace facts, and optional endpoint. It must not take `profile_name`/`profile_group`; profile family is bound on the task.
+- If the user gives numbered requirements, preserve that numbered list in `requirements_brief` as atomic source items. Do not replace it with a prose summary, merge enumerated values, or expand it with Pal/architect-invented features. Dispatch mechanically compiles those items into an immutable source gate contract. Architect coverage evidence must come from plan `gate_check_refs`; downstream coder/reviewer work consumes module and milestone AC from the accepted plan.
 - The manager is mechanical orchestration: it creates work orders under tasks, snapshots `profile_family` into work order/workflow metadata, starts the family DAG producer or generic single-node DAG producer, supervises step executor processes, owns resource policy/IPC/notifications/ledger, and persists state through repositories.
 - DAG production and DAG consumption are separate. A family-specific producer may use a profile such as `software_engineering.architect`; otherwise the generic producer builds a closed single-node DAG with requirement/context/produce/verify milestones. The executor is resolved from task/family metadata or a family profile fallback, not from dispatch args.
 - `dag_advancer` is the only DAG progression mechanism. Keep graph construction, indegree/ready/running/completed/stale transitions, replay merge, invalidation, and dispatch decisions there. Modules, runners, gates, and repair bills report events; they do not advance the DAG directly.
@@ -32,7 +33,7 @@ Minion is a detachable first-party subsystem. Keep the roles crisp:
 
 For software work, the default flow is:
 
-1. Pal prepares `goal`, optional `requirements_brief`, and `workspace` facts.
+1. Pal prepares `goal`, optional source acceptance ledger in `requirements_brief`, and `workspace` facts. When the user provides `需求: 1. ... 2. ...`, copy those items as the canonical source ledger. Pal may add constraints, non-goals, acceptance notes, or resolved preferences, but must not weaken or expand the user's numbered source items.
 2. Pal searches existing Minion tasks with `intro_minion_task_search`. If no matching long-lived task exists, Pal creates one with `op_minion_task_create`, binding `profile_family` such as `software_engineering`.
 3. Pal dispatches a work order with `op_minion_dispatch_workflow(task_id=...)`; dispatch inherits the task family and does not restate profile selectors.
 4. The family DAG producer creates the DAG. For software this is normally `software_engineering.architect` using plan builder tools. For families without a producer, the generic producer creates a closed single-node DAG with a few milestones and hands that node to the resolved executor.
@@ -52,7 +53,7 @@ Profiles are extension points, not manager branches.
 - Public family selection happens at task creation through `profile_family`. Normal dispatch does not pass `profile_name` or `profile_group`.
 - Choose `profile_family` by domain before creating the task: code/repo/review work is `software_engineering`; nutrition, diet, meal planning, training, health check-in, and Nathan coaching tasks are `lifestyle`; use `general` only when no registered domain family fits.
 - The task `profile_family` is the default interpretation context for all work orders under that task. Work orders snapshot it into workflow metadata, and bare `workflow_next.profile` names are resolved inside that family before persistence. Keep canonical ids such as `software_engineering.architect` as runtime metadata.
-- A family DAG producer decides how to turn requirements into a DAG. Use the generic single-node producer when the family has no producer. Do not add dispatch-time profile-selection rules.
+- A family DAG producer decides how to turn source scope into a DAG. It may add boundary contracts, decisions, failure modes, negative cases, and verification criteria that make the source items implementable, but it must not create new functional scope. If user-owned scope is ambiguous, ask a question instead of inventing scope. Use the generic single-node producer when the family has no producer. Do not add dispatch-time profile-selection rules.
 - The produced artifact may declare node `executor_profile` values. Use these contracts instead of hard-coding architect -> coder or profile-specific if/else logic.
 - A plan module may declare `metadata.executor_profile` or topology `executor_profile` when one node needs a different executor from the DAG default. Prefer a single default executor for ordinary implementation or review DAGs, and prefer group-local profile names unless the node intentionally crosses profile groups.
 - Profile `[execution_contract]` declares how a DAG node is materialized for that profile: `module_adapter`, `module_role`, and `artifact_role`. Do not infer coder/reviewer/architect behavior from profile names or prompt text.
@@ -167,6 +168,8 @@ Keep these concepts separate:
 
 Repair bills are downstream feedback projected back into the plan/module graph.
 
+- Resume and repair are separate paths. Use `op_minion_resume_work_order` when the existing child work order should continue from its next incomplete milestone after provider failure, timeout, interrupted I/O, manager recovery, or stale blocked runner state. Use `op_minion_submit_repair_bill` only for semantic module defects, contract defects, or downstream verification evidence that changes the module obligations.
+- A resumed module reuses the same child work order and its milestone cursor. It must not create a replay child such as `_r1`, must not add repair acceptance criteria, and must not invalidate downstream nodes.
 - `op_minion_submit_repair_bill` is the public operation for submitting structured replay feedback.
 - A repair bill exists because integration, join, or downstream module verification can discover that an earlier module contract, acceptance criterion, or plan boundary was incomplete. It is the reverse-propagation mechanism from downstream evidence back to the affected plan DAG nodes.
 - Treat a repair bill as "amended obligations for the existing DAG", not as a new plan. It must preserve the original plan identity, module ids, dependency meaning, and revision history.
@@ -235,7 +238,7 @@ Add focused tests near the changed layer. Do not run the full suite in one shot 
 Before calling a Minion subsystem change done:
 
 1. Public entrypoints stay task-first: search/read task, create task when needed, then dispatch work orders with `op_minion_dispatch_workflow(task_id=...)`; removed lower-level public operations remain absent.
-2. Pal/main-agent requirements shaping and manager mechanical orchestration remain separate.
+2. Pal/main-agent source-scope shaping and manager mechanical orchestration remain separate.
 3. Profile policy or gate definitions express behavior instead of manager hard-coding whenever possible.
 4. Module/coder contexts, worktrees, artifacts, and scoped runtimes remain isolated.
 5. Resource slots are returned on every terminal path and can be reconstructed after manager restart.
@@ -256,7 +259,7 @@ A Minion profile describes one bounded executor role. It should not be a hidden 
 - The manager starts profiles and consumes profile policy. It owns resource policy, gates, IPC supervision, and workflow continuation; `dag_advancer` owns DAG progression.
 - The profile owns identity, behavior prompt, capability exposure, workspace expectations, output contract, and declared next workflow step.
 - A minion running a profile does not spawn other minions. Use artifact `workflow_next` plus profile `output_policy.workflow_next` policy so the manager can mechanically dispatch the next step.
-- Pal's main agent owns requirements shaping. Do not recreate the removed planner/requirements-review profile.
+- Pal's main agent owns source-scope shaping. Do not recreate the removed requirements-review profile.
 - Prefer runtime profile files under `runtime_root/plugins/minion/profiles/<group>/<profile>.toml` for local experiments; edit `src/pal/minion/profile_templates/` only for builtin product profiles.
 
 ## Profile TOML Shape
@@ -426,6 +429,7 @@ def minion_declared_skills(*, module_id: str = "minion") -> tuple[SkillDescripto
                 "op_minion_task_create",
                 "op_minion_dispatch_workflow",
                 "op_minion_configure",
+                "op_minion_resume_work_order",
                 "op_minion_submit_repair_bill",
                 "op_minion_review_gate_submit",
                 "intro_minion_profile_list",

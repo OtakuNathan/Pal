@@ -13,6 +13,7 @@ from pal.foundation.sidecar import (
     run_blocking,
     start_sidecar_server,
 )
+from pal.foundation.log_paths import pal_component_log_path
 
 
 def mcp_runtime_dir(runtime_root: Path) -> Path:
@@ -32,7 +33,7 @@ def mcp_config_root(runtime_root: Path) -> Path:
 
 
 def mcp_log_path(runtime_root: Path) -> Path:
-    return Path(runtime_root) / "data" / "mcp" / "manager.log"
+    return pal_component_log_path(runtime_root, "mcp", "manager.log")
 
 
 class McpManagerRpcError(SidecarRpcError):

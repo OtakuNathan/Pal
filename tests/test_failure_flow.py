@@ -9,8 +9,10 @@ from pal.core import PalCore, register_with_core as register_core_with_core
 from pal.core.turns import _render_failure_primary_input
 from pal.execution import CapabilityDescriptor, CapabilityResult
 from pal.failure import FAILURE_VERIFICATION_FAILED, FailureDraft, FailureSignal
+from pal.failure.handler import FailureEventHandler
+from pal.foundation import EventEnvelope
 from pal.llm import CanonicalLLMOutcome, CanonicalToolCall
-from pal.shared import RuntimeStatus
+from pal.shared import EventKind, RuntimeStatus, SourceKind
 
 
 class _RecordingFailureLLM:
@@ -66,6 +68,14 @@ class _ExplodingFailureLLM:
         raise RuntimeError("safe-mode llm down")
 
 
+class _RecordingFailureCore:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def handle_failure_async(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+
+
 def _exploding_failure_program(draft, *, allowed_tools):
     _ = (draft, allowed_tools)
     raise RuntimeError("failure program broke")
@@ -113,6 +123,50 @@ class FailureFlowTests(unittest.TestCase):
         self.assertNotIn("SECRET USER REQUEST", user_text)
         self.assertEqual(request.metadata.get("prompt_profile"), "safe_mode")
         self.assertEqual(request.metadata.get("purpose"), "failure_flow")
+        self.assertEqual(request.metadata.get("timeout_seconds"), 45.0)
+
+    def test_socket_session_closed_reply_failure_is_ephemeral(self) -> None:
+        core = _RecordingFailureCore()
+        handler = FailureEventHandler(core=core)
+
+        asyncio.run(
+            handler.handle(
+                EventEnvelope(
+                    event_kind=EventKind.REPLY_FAILED,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={
+                        "reply_id": "reply-1",
+                        "endpoint_id": "sock-1",
+                        "reason": "socket session is closed",
+                        "permanent": True,
+                    },
+                ),
+                context=None,
+            )
+        )
+
+        self.assertEqual(core.calls, [])
+
+    def test_non_socket_reply_failure_still_enters_failure_flow(self) -> None:
+        core = _RecordingFailureCore()
+        handler = FailureEventHandler(core=core)
+
+        asyncio.run(
+            handler.handle(
+                EventEnvelope(
+                    event_kind=EventKind.REPLY_FAILED,
+                    source_kind=SourceKind.CHANNEL,
+                    payload={
+                        "reply_id": "reply-1",
+                        "endpoint_id": "tg-1",
+                        "reason": "telegram application not running",
+                    },
+                ),
+                context=None,
+            )
+        )
+
+        self.assertEqual(len(core.calls), 1)
 
     def test_failure_flow_llm_exception_returns_failed_verification(self) -> None:
         core = PalCore()

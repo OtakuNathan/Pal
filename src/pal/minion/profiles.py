@@ -369,6 +369,7 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "minion_repair_bill_builder": REPAIR_BILL_BUILDER_CAPABILITIES,
     "minion_review_gate": ("op_minion_review_gate_submit", "op_minion_review_checkpoint", "op_minion_gate_contract_submit"),
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
+    "minion_checklist_read": ("op_minion_checklist_read", "op_minion_checklist_summary"),
     "memory_recall": ("op_memory_recall",),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
     "web_research": ("op_web_search", "op_web_read"),
@@ -395,6 +396,12 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
         "op_git",
         "op_exec_shell",
         "op_minion_checkpoint_commit",
+    ),
+    "minion_checklist": (
+        "op_minion_checklist_read",
+        "op_minion_checklist_mark_done",
+        "op_minion_checklist_mark_blocked",
+        "op_minion_checklist_summary",
     ),
 }
 
@@ -472,6 +479,10 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
         "op_minion_artifact_write",
         "op_minion_artifact_edit",
         "op_minion_checkpoint_commit",
+        "op_minion_checklist_read",
+        "op_minion_checklist_mark_done",
+        "op_minion_checklist_mark_blocked",
+        "op_minion_checklist_summary",
         "op_minion_gate_contract_submit",
         "op_minion_review_gate_submit",
         "op_minion_review_checkpoint",

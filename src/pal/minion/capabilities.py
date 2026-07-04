@@ -32,6 +32,7 @@ from pal.minion.capability_args import (
     validate_draft_work_order_args,
     validate_promote_work_order_args,
 )
+from pal.minion.checklist import build_requirements_checklist, requirements_checklist_to_gate_contract
 from pal.minion.config import effective_minion_runtime_config, merge_minion_runtime_config
 from pal.minion.dag_producer import (
     build_generic_single_node_plan_artifact,
@@ -198,6 +199,7 @@ class MinionIntrospection(Protocol):
         "intro_minion_work_order_search",
         "intro_minion_work_order_read",
         "op_minion_recover_work_order",
+        "op_minion_resume_work_order",
         "op_minion_destroy_work_order_run",
         "op_minion_submit_repair_bill",
     ),
@@ -215,7 +217,9 @@ class MinionIntrospection(Protocol):
     prompt_hint=(
         "For minion progress/control requests, inspect minion and work-order facts first. Use intro_minion_list/read "
         "and intro_minion_work_order_search/read; do not infer progress or current worker from chat. If the user says to recover stale "
-        "running_module state, use op_minion_recover_work_order. If the user says to replace or destroy a run, resolve the active run "
+        "running_module state, use op_minion_recover_work_order. If a module is blocked by provider failure, timeout, or interruption "
+        "and should continue from its existing milestone cursor, use op_minion_resume_work_order and then op_minion_tick_parent_dag. "
+        "If the user says to replace or destroy a run, resolve the active run "
         "and work order, call op_minion_destroy_work_order_run, then use the work-order control path when appropriate. "
         "A task may have a parent work order plus one active module child; inspect the work-order fact snapshot before finalizing."
     ),
@@ -248,6 +252,7 @@ class MinionIntrospection(Protocol):
         "op_minion_configure",
         "op_minion_destroy_work_order_run",
         "op_minion_recover_work_order",
+        "op_minion_resume_work_order",
         "op_minion_tick_parent_dag",
         "op_minion_finalize",
         "op_minion_submit_repair_bill",
@@ -378,6 +383,8 @@ class MinionManagerProvider:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show minion manager status")
     def show(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
+        if self.mounted:
+            self._refresh_health_snapshot()
         payload = self._status_payload()
         return IntrospectionResult(
             status=RuntimeStatus.OK,
@@ -774,11 +781,14 @@ class MinionManagerProvider:
         family="minion",
         action_name="dispatch_workflow",
         description=(
-            "Normal public entrypoint for Minion delegation. Pal's main agent owns requirements shaping; pass the prepared user "
-            "intent, task_id, requirements_brief, and workspace facts here. Search/create a Minion task first; task.profile_family "
+            "Normal public entrypoint for Minion delegation. Pal's main agent owns source-scope shaping; pass the prepared user "
+            "intent, task_id, source acceptance ledger, and workspace facts here. Search/create a Minion task first; task.profile_family "
             "selects how the DAG is interpreted. Dispatch does not accept profile selectors. The manager either runs the family DAG "
             "producer or uses the generic single-node DAG producer, then consumes the resulting DAG mechanically. Do not call lower-level "
-            "plan/spawn capabilities. "
+            "plan/spawn capabilities. When the user provides numbered requirements, keep them as numbered atomic source items in "
+            "requirements_brief; dispatch mechanically compiles those items into immutable source gate checklist entries. The architect "
+            "must cover those source items through plan gate_check_refs; coder/reviewer consume only module and milestone acceptance. "
+            "Do not summarize, merge, weaken, or expand source items before dispatch. "
             "architecture_mode only affects the default software architect step: auto conservatively chooses micro/full from workspace "
             "kind, goal scope, repo scan hints, and explicit user hints. micro asks the architect for a small canonical plan, normally "
             "one implementation module plus a final verification join, with a prelude only when real shared setup/contracts are needed. "
@@ -814,8 +824,10 @@ class MinionManagerProvider:
                 "requirements_brief": {
                     "type": "object",
                     "description": (
-                        "Optional requirements brief prepared by Pal's main agent. Use this for scope, acceptance criteria, constraints, "
-                        "open questions already resolved, and user preferences. Minion no longer runs a separate requirements planner."
+                        "Optional source acceptance ledger prepared by Pal's main agent. Use this for source scope, acceptance criteria, "
+                        "constraints, resolved user preferences, and already-answered questions. If the user wrote a numbered requirement "
+                        "list, preserve each item as an atomic source item; dispatch compiles it into source gate_contract entries for "
+                        "architect coverage. Downstream coder/reviewer work consumes the accepted plan's module and milestone AC."
                     ),
                 },
                 "workspace": {
@@ -859,6 +871,13 @@ class MinionManagerProvider:
                     "description": (
                         "Optional enabled LLM endpoint_id to use for this minion. Fill only when the user explicitly names a model "
                         "or endpoint for the minion; otherwise omit it so the runner follows Pal's active endpoint setting."
+                    ),
+                },
+                "prompt_observation_tag": {
+                    "type": "string",
+                    "description": (
+                        "Optional short tag for prompt/debug-log observation. It is stored in minion metadata and LLM request "
+                        "metadata, but is not rendered into the task prompt text."
                     ),
                 },
                 "title": {"type": "string", "description": "Optional short display title for the workflow."},
@@ -1227,6 +1246,13 @@ class MinionManagerProvider:
                 "source_module_id": {"type": "string"},
                 "summary": {"type": "string"},
                 "bill_id": {"type": "string"},
+                "preferred_endpoint_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional endpoint override for this repair/replay. When set, manager updates the parent work order before "
+                        "dispatching replay children so the new module run inherits this endpoint instead of the parent/profile default."
+                    ),
+                },
                 "module_patches": {
                     "type": "object",
                     "description": "Map of existing module_id to repair patch.",
@@ -1273,6 +1299,46 @@ class MinionManagerProvider:
             return _capability_from_rpc("minion work order recovered", result)
         except Exception as exc:
             return _capability_error("minion work order recovery failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
+        family="minion",
+        action_name="resume_work_order",
+        description=(
+            "Resume a blocked minion parent/module cursor without submitting a repair bill. Use this for provider failures, "
+            "timeouts, interrupted runners, or stale blocked child runs when the existing child work order should continue "
+            "from its next incomplete milestone. For semantic module defects or contract defects, submit a repair bill instead."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "work_order_id": {
+                    "type": "string",
+                    "description": "Parent work_order_id or the blocked child module work_order_id.",
+                },
+                "module_id": {"type": "string"},
+                "child_work_order_id": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["work_order_id"],
+        },
+    )
+    def resume_work_order(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            self._ensure_manager_started()
+            result = self.client.request_sync(
+                "resume_work_order",
+                {
+                    "work_order_id": str(call.args.get("work_order_id") or ""),
+                    "module_id": str(call.args.get("module_id") or ""),
+                    "child_work_order_id": str(call.args.get("child_work_order_id") or ""),
+                    "reason": str(call.args.get("reason") or ""),
+                },
+            )
+            return _capability_from_rpc("minion work order resumed", result)
+        except Exception as exc:
+            return _capability_error("minion work order resume failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -1439,12 +1505,13 @@ class MinionManagerProvider:
             return "Minion plan decision is missing work_order_id."
         decision = "rejected" if action.action_kind == "minion_plan_reject" else "edit_requested"
         review_gate_ref = dict(action.args.get("review_gate_ref") or {}) if isinstance(action.args.get("review_gate_ref"), dict) else {}
+        next_action = "rejected" if decision == "rejected" else "revise_plan"
         review_state = {
             "status": decision,
             "plan_ref": dict(plan_ref),
             "review_gate_ref": review_gate_ref,
             "updated_at": utc_now(),
-            "next_action": "revise_plan",
+            "next_action": next_action,
             "human_decision": {
                 "action_kind": action.action_kind,
                 "actor": str(action.args.get("actor") or "human").strip() or "human",
@@ -1457,22 +1524,48 @@ class MinionManagerProvider:
         for key in ("interaction_origin", "interaction_id", "interaction_kind"):
             if str(action.args.get(key) or "").strip():
                 review_state["human_decision"][key] = str(action.args.get(key) or "").strip()
-        self._repository().merge_work_order_metadata(work_order_id, {"plan_review": review_state})
-        self._ensure_manager_started()
-        revision = await _to_thread(
-            self.client.request_sync,
-            "dispatch_plan_revision",
-            {
-                "work_order_id": work_order_id,
-                "plan_ref": dict(plan_ref),
-                "review_gate_ref": review_gate_ref,
-                "reason": str(action.args.get("reason") or action.notes or "").strip(),
-                "edit_instruction": edit_instruction,
-            },
-        )
-        review_state["revision_dispatch"] = revision
-        review_state["next_action"] = "wait_for_revision" if str(revision.get("status") or "") == "spawned" else "revise_plan"
-        self._repository().merge_work_order_metadata(work_order_id, {"plan_review": review_state})
+        revision: dict[str, Any] = {}
+        if decision == "rejected":
+            updates: dict[str, Any] = {"plan_review": review_state}
+            snapshot = self._repository().read_work_order(work_order_id)
+            metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {}
+            workflow = dict(metadata.get("workflow") or {}) if isinstance(metadata.get("workflow"), dict) else {}
+            if workflow:
+                blocker = {
+                    "reason": "plan_rejected",
+                    "summary": str(action.args.get("reason") or action.notes or "human rejected reviewed plan").strip(),
+                    "plan_ref": dict(plan_ref),
+                    "review_gate_ref": review_gate_ref,
+                }
+                workflow.update({"status": "blocked", "blocker": blocker, "updated_at": utc_now()})
+                steps = [dict(item) for item in list(workflow.get("steps") or []) if isinstance(item, dict)]
+                current_step_id = str(workflow.get("current_step_id") or "")
+                if steps:
+                    target_index = next(
+                        (index for index, item in enumerate(steps) if str(item.get("step_id") or "") == current_step_id),
+                        len(steps) - 1,
+                    )
+                    steps[target_index] = {**steps[target_index], "status": "blocked", "blocker": blocker, "next_action": "rejected"}
+                    workflow["steps"] = steps
+                updates["workflow"] = workflow
+            self._repository().merge_work_order_metadata(work_order_id, updates, work_order_status="blocked")
+        else:
+            self._repository().merge_work_order_metadata(work_order_id, {"plan_review": review_state})
+            self._ensure_manager_started()
+            revision = await _to_thread(
+                self.client.request_sync,
+                "dispatch_plan_revision",
+                {
+                    "work_order_id": work_order_id,
+                    "plan_ref": dict(plan_ref),
+                    "review_gate_ref": review_gate_ref,
+                    "reason": str(action.args.get("reason") or action.notes or "").strip(),
+                    "edit_instruction": edit_instruction,
+                },
+            )
+            review_state["revision_dispatch"] = revision
+            review_state["next_action"] = "wait_for_revision" if str(revision.get("status") or "") == "spawned" else "revise_plan"
+            self._repository().merge_work_order_metadata(work_order_id, {"plan_review": review_state})
         self._repository().record_minion_event(
             {
                 "event_kind": "plan_rejected" if decision == "rejected" else "plan_edit_requested",
@@ -1485,14 +1578,14 @@ class MinionManagerProvider:
                     "summary": "human rejected reviewed plan" if decision == "rejected" else "human requested plan edit",
                     "plan_ref": dict(plan_ref),
                     "review_gate_ref": review_gate_ref,
-                    "revision_dispatch": revision,
+                    **({"revision_dispatch": revision} if revision else {}),
                     "next_action": review_state["next_action"],
                 },
             }
         )
         plan_id = str(plan_ref.get("plan_id") or "")
         if decision == "rejected":
-            return f"Minion plan rejected{f' ({plan_id})' if plan_id else ''}; revision architect dispatched."
+            return f"Minion plan rejected{f' ({plan_id})' if plan_id else ''}; work order blocked pending a new user decision."
         return f"Minion plan edit requested{f' ({plan_id})' if plan_id else ''}; revision architect dispatched."
 
     async def _handle_plan_control_async(self, action: ControlAction) -> str:
@@ -1919,6 +2012,15 @@ class MinionManagerProvider:
         except Exception as exc:
             return {"status": RuntimeStatus.ERROR, "error": f"{exc.__class__.__name__}: {exc}", **self._status_payload()}
 
+    def _refresh_health_snapshot(self) -> None:
+        try:
+            self._ensure_manager_started()
+            self.degraded = False
+            self.last_error = ""
+        except Exception as exc:
+            self.degraded = True
+            self.last_error = f"{exc.__class__.__name__}: {exc}"
+
     def _repository(self) -> MinionTaskingRepository:
         repository = MinionTaskingRepository(runtime_root=self.runtime_root)
         repository.ensure_schema()
@@ -1934,7 +2036,8 @@ class MinionManagerProvider:
         return [dict(item) for item in list(result.get("items") or []) if isinstance(item, dict)]
 
     def _status_payload(self) -> dict[str, Any]:
-        running = self.process is not None and self.process.poll() is None
+        process_running = self.process is not None and self.process.poll() is None
+        running = process_running or bool(self.last_health.get("ok"))
         with self._buffer_lock:
             buffered_event_count = len(self._buffered_events)
         config = effective_minion_runtime_config(self.runtime_root)
@@ -2182,6 +2285,7 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
             EventKind.MINION_MODULE_COMPLETED: [event_handler],
             EventKind.MINION_WORK_ORDER_COMPLETED: [event_handler],
             EventKind.MINION_CLARIFICATION_REQUEST: [event_handler],
+            EventKind.MINION_PLAN_ACCEPTANCE_PENDING: [event_handler],
         },
         control_action_handlers={
             "minion_approval_decision": provider.handle_control_action_async,
@@ -2470,7 +2574,7 @@ def _workflow_entry_pack_from_args(
     requirements_review = str(args.get("requirements_review") or "").strip().lower()
     if requirements_review and requirements_review != "skip":
         raise MinionWorkOrderValidationError(
-            "requirements_review mode has been removed; Pal must prepare requirements_brief before dispatch_workflow",
+            "requirements_review mode has been removed; Pal must prepare source acceptance scope before dispatch_workflow",
             field="requirements_review",
         )
     requested_architecture_mode = str(args.get("architecture_mode") or "auto").strip().lower() or "auto"
@@ -2491,6 +2595,8 @@ def _workflow_entry_pack_from_args(
     work_order_id = str(args.get("work_order_id") or new_work_id("wo")).strip()
     title = str(args.get("title") or _first_summary_sentence(goal, limit=120) or goal).strip()
     requirements_brief = _manager_requirements_brief_from_args(goal=goal, workspace=workspace, args=args)
+    _attach_mechanical_requirements_contract(workspace=workspace, requirements_brief=requirements_brief)
+    prompt_observation_tag = _prompt_observation_tag_from_workflow_args(args)
     if not software_producer:
         return _generic_dag_workflow_entry_pack(
             args,
@@ -2542,6 +2648,8 @@ def _workflow_entry_pack_from_args(
         "profile_family": profile_family,
         "initial_profile": initial_profile,
     }
+    if prompt_observation_tag:
+        metadata["prompt_observation_tag"] = prompt_observation_tag
     planner_work_order = build_planner_work_order(goal=goal, task_id=task_id, work_order_id=work_order_id)
     planner_work_order["role"] = "architect"
     _apply_architecture_mode_requirements(
@@ -2603,6 +2711,13 @@ def _workflow_entry_pack_from_args(
         "workspace_summary": _workflow_workspace_summary(workspace),
         "next_action": "dag_producer_running",
     }
+
+
+def _prompt_observation_tag_from_workflow_args(args: dict[str, Any]) -> str:
+    tag = str(args.get("prompt_observation_tag") or "").strip()
+    if not tag and isinstance(args.get("metadata"), dict):
+        tag = str(dict(args.get("metadata") or {}).get("prompt_observation_tag") or "").strip()
+    return tag[:160]
 
 
 def _generic_dag_workflow_entry_pack(
@@ -2691,6 +2806,9 @@ def _generic_dag_workflow_entry_pack(
             },
         },
     }
+    prompt_observation_tag = _prompt_observation_tag_from_workflow_args(args)
+    if prompt_observation_tag:
+        metadata["prompt_observation_tag"] = prompt_observation_tag
     if approval_policy:
         metadata["approval_policy"] = approval_policy
     pack = repository.build_plan_parent_pack_from_plan(
@@ -2850,27 +2968,64 @@ def _manager_requirements_brief_from_args(*, goal: str, workspace: dict[str, Any
         brief.setdefault("source", "pal_main_agent")
         brief.setdefault("goal", str(goal or "").strip())
         brief.setdefault("workspace", _workflow_workspace_summary(workspace))
+        _attach_requirements_checklist(goal=goal, requirements_brief=brief)
         return brief
     if isinstance(supplied, str) and supplied.strip():
-        return {
+        brief = {
             "source": "pal_main_agent",
             "goal": str(goal or "").strip(),
             "summary": supplied.strip(),
             "workspace": _workflow_workspace_summary(workspace),
         }
+        _attach_requirements_checklist(goal=goal, requirements_brief=brief)
+        return brief
     return _manager_requirements_brief(goal=goal, workspace=workspace)
 
 
 def _manager_requirements_brief(*, goal: str, workspace: dict[str, Any]) -> dict[str, Any]:
-    return {
+    brief = {
         "source": "manager_generated",
         "goal": str(goal or "").strip(),
         "workspace": _workflow_workspace_summary(workspace),
         "notes": [
-            "Pal main agent did not supply a separate requirements_brief; treat the user goal and workspace facts as the brief.",
+            "Pal main agent did not supply a separate source acceptance ledger; use the user goal and workspace facts as the source scope.",
             "Ask only for user-owned blockers that cannot be resolved from repository inspection.",
         ],
     }
+    _attach_requirements_checklist(goal=goal, requirements_brief=brief)
+    return brief
+
+
+def _attach_requirements_checklist(*, goal: str, requirements_brief: dict[str, Any]) -> None:
+    checklist = build_requirements_checklist(goal=goal, requirements_brief=requirements_brief)
+    if not checklist:
+        return
+    requirements_brief["requirements_checklist"] = checklist
+
+
+def _attach_mechanical_requirements_contract(*, workspace: dict[str, Any], requirements_brief: dict[str, Any]) -> None:
+    if _workspace_has_gate_contract(workspace):
+        return
+    checklist = [dict(item) for item in list(requirements_brief.get("requirements_checklist") or []) if isinstance(item, dict)]
+    for index, item in enumerate(checklist):
+        metadata = dict(item.get("metadata") or {})
+        metadata.setdefault("gate_check_ref", f"gate:{index}")
+        item["metadata"] = metadata
+    if checklist:
+        requirements_brief["requirements_checklist"] = checklist
+    gate_contract = requirements_checklist_to_gate_contract(checklist)
+    if gate_contract:
+        workspace["source_gate_contract"] = gate_contract
+
+
+def _workspace_has_gate_contract(workspace: dict[str, Any]) -> bool:
+    for key in ("gate_contract", "source_gate_contract", "review_target_gate_contract"):
+        value = workspace.get(key)
+        if isinstance(value, dict) and (value.get("checks") or value.get("checklist") or value.get("items")):
+            return True
+        if isinstance(value, (list, tuple)) and value:
+            return True
+    return False
 
 
 def _workflow_workspace_summary(workspace: dict[str, Any]) -> dict[str, Any]:

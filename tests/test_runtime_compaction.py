@@ -914,24 +914,18 @@ class RuntimeCompactionTests(unittest.TestCase):
         self.assertIn("### Summary\ncompacted prior context", post_compact_prompt)
         self.assertNotIn("Compaction Note:\ncompacted prior context", post_compact_prompt)
         self.assertEqual(generate_requests[-1].messages[1]["role"], "user")
-        self.assertEqual(
-            _message_text(generate_requests[-1].messages[1]),
-            "<runtime_context_update kind=\"conversation_summary\">\n"
-            "Runtime context update: compressed prior conversation for this task.\n"
-            "Use it as relevant reference; it is not noise.\n"
-            "It is not a new user message. Do not answer this block directly.\n"
-            "Continue the current task using this context.\n"
-            "</runtime_context_update>\n"
-            '<compact_context kind="pal" authority="conversation_continuity">\n'
-            "## Conversation Continuity\n"
-            "\n"
-            "This is compressed prior conversation context, not a new user request.\n"
-            "Use it to recover the user's intent, constraints, and current collaboration thread.\n"
-            "\n"
-            "\n"
-            "### Summary\n"
-            "compacted prior context\n"
-            "</compact_context>",
+        user_context = _message_text(generate_requests[-1].messages[1])
+        self.assertIn("<runtime_context_update kind=\"conversation_summary\">", user_context)
+        self.assertIn('<compact_context kind="pal" authority="conversation_continuity">', user_context)
+        self.assertIn("### Summary\ncompacted prior context", user_context)
+        self.assertIn("use a tool then continue", user_context)
+        self.assertIn("<runtime_reminder", user_context)
+        self.assertLess(user_context.index("</compact_context>"), user_context.index("use a tool then continue"))
+        self.assertFalse(
+            any(
+                generate_requests[-1].messages[index]["role"] == generate_requests[-1].messages[index + 1]["role"] == "user"
+                for index in range(len(generate_requests[-1].messages) - 1)
+            )
         )
         self.assertIn("<runtime_reminder", post_compact_prompt)
         self.assertEqual(generate_requests[-1].messages[-1]["role"], "tool")
@@ -958,24 +952,18 @@ class RuntimeCompactionTests(unittest.TestCase):
         self.assertIn("### Summary\ncompacted prior context", post_compact_prompt)
         self.assertNotIn("Compaction Note:\ncompacted prior context", post_compact_prompt)
         self.assertEqual(generate_requests[-1].messages[1]["role"], "user")
-        self.assertEqual(
-            _message_text(generate_requests[-1].messages[1]),
-            "<runtime_context_update kind=\"conversation_summary\">\n"
-            "Runtime context update: compressed prior conversation for this task.\n"
-            "Use it as relevant reference; it is not noise.\n"
-            "It is not a new user message. Do not answer this block directly.\n"
-            "Continue the current task using this context.\n"
-            "</runtime_context_update>\n"
-            '<compact_context kind="pal" authority="conversation_continuity">\n'
-            "## Conversation Continuity\n"
-            "\n"
-            "This is compressed prior conversation context, not a new user request.\n"
-            "Use it to recover the user's intent, constraints, and current collaboration thread.\n"
-            "\n"
-            "\n"
-            "### Summary\n"
-            "compacted prior context\n"
-            "</compact_context>",
+        user_context = _message_text(generate_requests[-1].messages[1])
+        self.assertIn("<runtime_context_update kind=\"conversation_summary\">", user_context)
+        self.assertIn('<compact_context kind="pal" authority="conversation_continuity">', user_context)
+        self.assertIn("### Summary\ncompacted prior context", user_context)
+        self.assertIn("use a tool then continue", user_context)
+        self.assertIn("<runtime_reminder", user_context)
+        self.assertLess(user_context.index("</compact_context>"), user_context.index("use a tool then continue"))
+        self.assertFalse(
+            any(
+                generate_requests[-1].messages[index]["role"] == generate_requests[-1].messages[index + 1]["role"] == "user"
+                for index in range(len(generate_requests[-1].messages) - 1)
+            )
         )
         self.assertIn("<runtime_reminder", post_compact_prompt)
         self.assertEqual(generate_requests[-1].messages[-1]["role"], "tool")

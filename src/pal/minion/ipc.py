@@ -14,6 +14,7 @@ from pal.foundation.sidecar import (
     run_blocking,
     start_sidecar_server,
 )
+from pal.foundation.log_paths import pal_component_log_path
 
 
 def minion_runtime_dir(runtime_root: Path) -> Path:
@@ -29,13 +30,13 @@ def minion_port_path(runtime_root: Path) -> Path:
 
 
 def minion_log_path(runtime_root: Path) -> Path:
-    return minion_runtime_dir(runtime_root) / "manager.log"
+    return pal_component_log_path(runtime_root, "minion", "manager.log")
 
 
 def minion_runner_log_path(runtime_root: Path, work_order_id: str, profile: str) -> Path:
     work_order_part = _safe_log_component(work_order_id) or "work_order"
     profile_part = _safe_log_component(profile) or "generic"
-    return Path(runtime_root) / f"{work_order_part}.{profile_part}.log"
+    return pal_component_log_path(runtime_root, "minion", "runners", f"{work_order_part}.{profile_part}.log")
 
 
 def _safe_log_component(value: str) -> str:

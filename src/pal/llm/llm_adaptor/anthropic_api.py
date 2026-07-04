@@ -48,23 +48,22 @@ def chat_messages_to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple
         if role in {"system", "developer"}:
             text = render_instruction_fallback_text(role, content)
             if text:
-                rendered_messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
+                _append_anthropic_message(rendered_messages, "user", [{"type": "text", "text": text}])
                 seen_conversation = True
             continue
         if role == "tool":
             call_id = str(message.get("tool_call_id") or "").strip()
             if call_id:
-                rendered_messages.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": call_id,
-                                "content": _content_text(content),
-                            }
-                        ],
-                    }
+                _append_anthropic_message(
+                    rendered_messages,
+                    "user",
+                    [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": call_id,
+                            "content": _content_text(content),
+                        }
+                    ],
                 )
                 seen_conversation = True
             continue
@@ -81,12 +80,21 @@ def chat_messages_to_anthropic_messages(messages: list[dict[str, Any]]) -> tuple
             continue
         blocks = _anthropic_user_blocks(content)
         if blocks:
-            rendered_messages.append({"role": "user", "content": blocks})
+            _append_anthropic_message(rendered_messages, "user", blocks)
             seen_conversation = True
     if not rendered_messages:
         rendered_messages.append({"role": "user", "content": [{"type": "text", "text": "Continue."}]})
     system = "\n\n".join(system_parts).strip()
     return system or None, rendered_messages
+
+
+def _append_anthropic_message(rendered_messages: list[dict[str, Any]], role: str, blocks: list[dict[str, Any]]) -> None:
+    if not blocks:
+        return
+    if role == "user" and rendered_messages and rendered_messages[-1].get("role") == "user":
+        rendered_messages[-1].setdefault("content", []).extend(blocks)
+        return
+    rendered_messages.append({"role": role, "content": blocks})
 
 
 def chat_tools_to_anthropic_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

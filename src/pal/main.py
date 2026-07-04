@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from pal.execution import CapabilityCall
+from pal.foundation.log_paths import pal_log_path
 from pal.llm import CanonicalToolCall
 from pal.runtime_app import build_runtime_app
 from pal.runtime_app import open_runtime
@@ -121,7 +122,8 @@ def _capability_result_debug_payload(result) -> dict[str, Any]:
 
 
 def _redirect_stdio_to_log(runtime_root: Path) -> None:
-    log_path = runtime_root / "pal.log"
+    log_path = pal_log_path(runtime_root)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     log_file = open(log_path, "a", encoding="utf-8")  # noqa: SIM115
     import sys
     sys.stdout = log_file

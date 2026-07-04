@@ -111,6 +111,10 @@ class MinionRunState:
     wait_task: asyncio.Task[None] | None = None
 
     def summary(self) -> dict[str, Any]:
+        run_active = self.status not in _TERMINAL_RUN_STATUSES
+        executor_pid = self.process.pid if self.process is not None else None
+        executor_returncode = self.process.returncode if self.process is not None else None
+        run_returncode = self.returncode if self.returncode is not None else (executor_returncode if run_active else None)
         return {
             "minion_id": self.minion_id,
             "run_id": self.run_id,
@@ -118,9 +122,13 @@ class MinionRunState:
             "minion_profile": self.pack.minion_profile,
             "profile_display_name": str((self.pack.resolved_profile or {}).get("display_name") or self.pack.minion_profile),
             "status": self.status,
+            "run_active": run_active,
+            "coroutine_status": "active" if run_active else "terminal",
             "runner_kind": self.runner_kind,
-            "pid": self.process.pid if self.process is not None else None,
-            "returncode": self.returncode if self.returncode is not None else (self.process.returncode if self.process is not None else None),
+            "pid": executor_pid if run_active else None,
+            "executor_pid": executor_pid,
+            "returncode": run_returncode,
+            "executor_returncode": executor_returncode,
             "instruction": self.pack.instruction,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
@@ -340,6 +348,13 @@ class MinionManager:
             return await self.dispatch_plan_revision(dict(params))
         if method == "recover_work_order":
             return self.recover_work_order(str(params.get("work_order_id") or ""), str(params.get("reason") or ""))
+        if method == "resume_work_order":
+            return self.resume_work_order(
+                str(params.get("work_order_id") or ""),
+                module_id=str(params.get("module_id") or ""),
+                child_work_order_id=str(params.get("child_work_order_id") or ""),
+                reason=str(params.get("reason") or ""),
+            )
         if method == "retry_checkpoint_review":
             return await self.reviews.retry_checkpoint_review(
                 checkpoint_id=str(params.get("checkpoint_id") or ""),
@@ -390,6 +405,7 @@ class MinionManager:
 
     def health(self) -> dict[str, Any]:
         active = [state for state in self.runs.values() if state.status in _ACTIVE_RUN_STATUSES]
+        active_run_summaries = [state.summary() for state in active]
         active_module_count = self._active_module_child_count_from_ledger()
         allocated_logical_slots = self._allocated_logical_slot_count()
         active_llm_node_count = len(self._active_llm_node_slot_keys_from_memory_ledger())
@@ -401,6 +417,7 @@ class MinionManager:
             "started_at": self.started_at,
             "run_count": len(self.runs),
             "active_count": len(active),
+            "active_runs": active_run_summaries,
             "shutdown_requested": self._shutdown_event.is_set(),
             "draining": self._draining,
             "shutdown_reason": self._shutdown_reason,
@@ -415,6 +432,7 @@ class MinionManager:
             "allocated_logical_slots": allocated_logical_slots,
             "available_llm_node_slots": available_llm_node_slots,
             "available_module_slots": available_llm_node_slots,
+            "step_executors": self.step_executor.executor_statuses(),
             "logical_slot_generation": self._logical_slot_generation,
             "pending_event_count": len(self.event_queue),
             "event_subscriber_count": len(self.event_subscribers),
@@ -659,10 +677,46 @@ class MinionManager:
 
     def recover_work_order(self, work_order_id: str = "", reason: str = "") -> dict[str, Any]:
         self._reconcile_runs()
-        return self.tasking_repository.recover_stale_running_modules(
+        result = self.tasking_repository.recover_stale_running_modules(
             active_child_work_order_ids=self._active_runner_work_order_ids(),
             work_order_id=str(work_order_id or ""),
             reason=reason or "manager recovered stale running module",
+        )
+        resumes: list[dict[str, Any]] = []
+        for item in list(result.get("recovered") or []):
+            if not isinstance(item, dict):
+                continue
+            module_id = str(item.get("module_id") or "").strip()
+            child_id = str(item.get("child_work_order_id") or "").strip()
+            parent_id = str(item.get("parent_work_order_id") or "").strip()
+            if not parent_id or not child_id:
+                continue
+            resumed = self.tasking_repository.resume_plan_module(
+                parent_id,
+                module_id=module_id,
+                child_work_order_id=child_id,
+                reason=reason or "manager recovered stale running module",
+            )
+            if str(resumed.get("status") or "") != "skipped":
+                resumes.append(dict(resumed))
+        if resumes:
+            return {**dict(result), "resumes": resumes, "resume_count": len(resumes)}
+        return result
+
+    def resume_work_order(
+        self,
+        work_order_id: str = "",
+        *,
+        module_id: str = "",
+        child_work_order_id: str = "",
+        reason: str = "",
+    ) -> dict[str, Any]:
+        self._reconcile_runs()
+        return self.tasking_repository.resume_plan_module(
+            work_order_id,
+            module_id=module_id,
+            child_work_order_id=child_work_order_id,
+            reason=reason or "manager resumed module cursor",
         )
 
     async def destroy_work_order_run(self, work_order_id: str, reason: str = "") -> dict[str, Any]:
@@ -922,6 +976,7 @@ class MinionManager:
             "preferred_endpoint_source",
             "minion_debug_log_enabled",
             "debug_log",
+            "prompt_observation_tag",
             "approval_policy",
         ):
             if key in source_metadata:
@@ -985,7 +1040,14 @@ class MinionManager:
                 "source_work_order_id": source_work_order_id,
             },
         }
-        for key in ("workflow", "preferred_endpoint_id", "preferred_endpoint_source", "minion_debug_log_enabled", "debug_log"):
+        for key in (
+            "workflow",
+            "preferred_endpoint_id",
+            "preferred_endpoint_source",
+            "minion_debug_log_enabled",
+            "debug_log",
+            "prompt_observation_tag",
+        ):
             if key in source_metadata:
                 metadata[key] = source_metadata[key]
         review_gate_ref = params.get("review_gate_ref")
@@ -1073,6 +1135,7 @@ class MinionManager:
 
     async def submit_repair_bill(self, params: dict[str, Any]) -> dict[str, Any]:
         bill = dict(params.get("repair_bill") or params)
+        preferred_endpoint_id = str(params.get("preferred_endpoint_id") or bill.get("preferred_endpoint_id") or "").strip()
         result = self.tasking_repository.submit_repair_bill(bill)
         cancel_reason = (
             "architecture_defect"
@@ -1093,6 +1156,16 @@ class MinionManager:
         parent_id = str(result.get("parent_work_order_id") or bill.get("parent_work_order_id") or "").strip()
         global_schedule: dict[str, Any] = {}
         if parent_id:
+            endpoint_override: dict[str, Any] = {}
+            if preferred_endpoint_id:
+                endpoint_override = self.tasking_repository.merge_work_order_metadata(
+                    parent_id,
+                    {
+                        "preferred_endpoint_id": preferred_endpoint_id,
+                        "preferred_endpoint_source": "repair_bill_override",
+                    },
+                )
+                result = {**dict(result), "endpoint_override": endpoint_override}
             snapshot = self.tasking_repository.read_work_order(parent_id)
             metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {}
             plan_execution = dict(metadata.get("plan_execution") or {})
@@ -2333,7 +2406,7 @@ def _build_pre_plan_contract_compiler_pack(pack: TaskContextPack, spec: GateSpec
     }
     if isinstance(pack.metadata.get("control_route"), dict):
         metadata["control_route"] = dict(pack.metadata.get("control_route") or {})
-    for key in ("preferred_endpoint_id", "preferred_endpoint_source"):
+    for key in ("preferred_endpoint_id", "preferred_endpoint_source", "prompt_observation_tag"):
         if key in (pack.metadata or {}):
             metadata[key] = (pack.metadata or {})[key]
     reviewer_group = str(spec.reviewer_profile_group or "").strip()

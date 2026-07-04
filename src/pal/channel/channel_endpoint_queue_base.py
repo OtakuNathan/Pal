@@ -546,6 +546,8 @@ class ChannelEndpointQueueBase(ABC):
                             "reply_id": item.reply_id,
                             "endpoint_id": self.endpoint.endpoint_id,
                             "reason": str(exc),
+                            "permanent": permanent,
+                            "attempts": item.attempts + 1,
                         },
                     )
                 )
@@ -590,6 +592,8 @@ class ChannelEndpointQueueBase(ABC):
                             "reply_id": item.event_id,
                             "endpoint_id": self.endpoint.endpoint_id,
                             "reason": str(exc),
+                            "permanent": permanent,
+                            "attempts": item.attempts + 1,
                         },
                     )
                 )
@@ -660,6 +664,8 @@ class ChannelEndpointQueueBase(ABC):
                             "reply_id": item.attachment_id,
                             "endpoint_id": self.endpoint.endpoint_id,
                             "reason": str(exc),
+                            "permanent": permanent,
+                            "attempts": item.attempts + 1,
                         },
                     )
                 )

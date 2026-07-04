@@ -621,13 +621,28 @@ class ReviewOrchestrator:
         normalized = str(work_order_id or "").strip()
         if not normalized:
             return
+        event_payload = dict(payload or {})
+        if not isinstance(event_payload.get("route"), dict):
+            event_metadata = dict(event_payload.get("metadata") or {}) if isinstance(event_payload.get("metadata"), dict) else {}
+            if not isinstance(event_metadata.get("control_route"), dict):
+                try:
+                    snapshot = self.repository.read_work_order(normalized)
+                except Exception:
+                    snapshot = {}
+                work_order = dict(snapshot.get("work_order") or {}) if isinstance(snapshot, dict) else {}
+                work_order_metadata = dict(work_order.get("metadata") or {}) if isinstance(work_order.get("metadata"), dict) else {}
+                control_route = dict(work_order_metadata.get("control_route") or {}) if isinstance(work_order_metadata.get("control_route"), dict) else {}
+                if control_route:
+                    event_metadata["control_route"] = control_route
+            if event_metadata:
+                event_payload["metadata"] = event_metadata
         event = {
             "event_kind": event_kind,
             "minion_id": str(minion_id or ""),
             "run_id": str(run_id or ""),
             "work_order_id": normalized,
             "minion_profile": str(minion_profile or ""),
-            "payload": dict(payload or {}),
+            "payload": event_payload,
             "created_at": utc_now(),
         }
         self.manager._queue_event_delivery(event)
@@ -636,7 +651,12 @@ class ReviewOrchestrator:
     def _merge_plan_review_state(self, work_order_id: str, payload: dict[str, Any]) -> None:
         if not str(work_order_id or "").strip():
             return
-        self.repository.merge_work_order_metadata(work_order_id, {"plan_review": dict(payload or {})})
+        review_state = dict(payload or {})
+        self.repository.merge_work_order_metadata(
+            work_order_id,
+            {"plan_review": review_state},
+            work_order_status=_work_order_status_for_plan_review_state(review_state),
+        )
 
     async def _reconcile_pre_plan_contract(self, reviewer_state: MinionRunState, source_work_order_id: str) -> None:
         metadata = dict(reviewer_state.pack.metadata or {})
@@ -1243,7 +1263,7 @@ class ReviewOrchestrator:
             }
         completion = self.repository.mark_serial_module_completed(work_order_id) if work_order_id else {"status": "skipped", "reason": "missing_work_order_id"}
         parent_completion: dict[str, Any] = {}
-        if str(completion.get("status") or "") == "completed":
+        if str(completion.get("status") or "") in {"completed", "already_completed"}:
             parent_completion = self.repository.record_plan_module_completion(work_order_id, completion)
             event_work_order_id = str(parent_completion.get("parent_work_order_id") or work_order_id)
             event_payload = {**completion, **parent_completion}
@@ -2198,6 +2218,17 @@ def plan_auto_revision_allowed(policy: dict[str, Any], *, spawned_count: int) ->
         return False
     max_attempts = max(0, coerce_int(policy.get("max_auto_revision_attempts") or policy.get("max_auto_revisions"), 1))
     return max(0, int(spawned_count or 0)) < max_attempts
+
+
+def _work_order_status_for_plan_review_state(review_state: dict[str, Any]) -> str | None:
+    status = str(review_state.get("status") or "").strip().lower()
+    if status in {"acceptance_pending", "human_decision_required"}:
+        return "approval_pending"
+    if status in {"revision_required", "revision_spawned", "reviewing"}:
+        return "active"
+    if status in {"failed", "gate_missing", "reconcile_failed"}:
+        return "blocked"
+    return None
 
 
 def _plan_auto_accept_allowed(policy: dict[str, Any]) -> bool:

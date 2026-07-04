@@ -9,6 +9,7 @@ from functools import singledispatchmethod
 from typing import Any, Awaitable, Callable
 
 from pal.execution.contracts import ToolCallBudget
+from pal.core.prompt_compiler import normalize_prompt_messages
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.tool_stagnation import (
     ToolExecutionRecord,
@@ -753,7 +754,7 @@ class TurnExecutor:
             tools=list(tools or []),
         )
         prompt = CanonicalLLMRequest(
-            messages=prompt_messages,
+            messages=normalize_prompt_messages(prompt_messages),
             max_output_tokens=prompt.max_output_tokens,
             model_hint=prompt.model_hint,
             temperature=prompt.temperature,

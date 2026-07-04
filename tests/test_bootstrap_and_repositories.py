@@ -1693,6 +1693,100 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(kwargs["force_timeout"], 37.0)
         self.assertEqual(kwargs["max_retries"], 0)
 
+    def test_routing_invoker_exposes_selected_provider_payload_summary(self) -> None:
+        endpoint = LLMEndpointRepository().upsert(
+            endpoint_id="stub_route",
+            provider="stub",
+            model_id="stub-model",
+            api_mode="openai_chat",
+            base_url="stub://local/route",
+            credential_ref="",
+            priority=0,
+            enabled=True,
+        )
+        invoker = build_default_endpoint_invoker()
+
+        outcome = invoker.invoke(
+            endpoint,
+            CanonicalLLMRequest(messages=[{"role": "user", "content": "hello"}], max_output_tokens=16),
+        )
+
+        self.assertEqual(outcome.text, "hello")
+        self.assertEqual(invoker.last_payload_summary["endpoint_id"], "stub_route")
+        self.assertEqual(invoker.last_payload_summary["message_count"], 1)
+
+    def test_llm_runtime_writes_failure_audit_for_empty_response(self) -> None:
+        class EmptyResponseInvoker:
+            def __init__(self) -> None:
+                self.last_payload_summary: dict[str, object] = {}
+
+            def invoke(self, endpoint, request):
+                _ = endpoint
+                self.last_payload_summary = {
+                    "message_count": len(request.messages),
+                    "roles": [message.get("role") for message in request.messages],
+                    "authorization": "Bearer secret-provider-token",
+                }
+                raise LLMEndpointInvocationError("llm response contained no assistant content or tool calls")
+
+            def invoke_stream(self, endpoint, request):
+                _ = endpoint, request
+                raise NotImplementedError
+
+        endpoint_repository = LLMEndpointRepository()
+        endpoint_repository.upsert(
+            endpoint_id="glm_demo",
+            provider="openai_compatible",
+            model_id="glm-demo",
+            api_mode="openai_chat",
+            base_url="https://example.invalid/v1",
+            credential_ref="secret-provider-token",
+            priority=0,
+            enabled=True,
+        )
+        events: list[dict[str, object]] = []
+        runtime = LLMRuntime(
+            endpoint_resolver=EndpointResolver(repository=endpoint_repository),
+            settings_repository=RuntimeSettingRepository(),
+            endpoint_invoker=EmptyResponseInvoker(),
+            config=RuntimeConfig(runtime_root=self.runtime_root, llm_endpoint_retry_attempts=1),
+            event_sink=events.append,
+        )
+
+        outcome = runtime.generate(
+            CanonicalLLMRequest(
+                messages=[
+                    {"role": "system", "content": "stable instructions"},
+                    {"role": "user", "content": "first user message"},
+                    {"role": "user", "content": "second user message"},
+                ],
+                max_output_tokens=64,
+                tools=[{"type": "function", "function": {"name": "op_demo", "parameters": {"type": "object"}}}],
+                metadata={
+                    "purpose": "minion_worker",
+                    "api_key": "secret-api-key",
+                    "prompt_observation_tag": "obs_failure_audit",
+                },
+            )
+        )
+
+        self.assertEqual(outcome.finish_reason, LLMFinishReason.ERROR)
+        audit_files = sorted((self.runtime_root / "data" / "llm" / "audit").glob("llm_failure_*.json"))
+        self.assertEqual(len(audit_files), 1)
+        payload = json.loads(audit_files[0].read_text(encoding="utf-8"))
+        self.assertTrue(payload["error"]["empty_response"])
+        self.assertEqual(payload["error"]["kind"], "unknown")
+        self.assertEqual(payload["endpoint"]["endpoint_id"], "glm_demo")
+        self.assertEqual(payload["request_summary"]["roles"], ["system", "user", "user"])
+        self.assertEqual(payload["request_summary"]["adjacent_same_roles"], [{"index": 2, "role": "user"}])
+        self.assertEqual(payload["request_summary"]["tool_names"], ["op_demo"])
+        self.assertEqual(payload["canonical_request"]["metadata"]["api_key"], "<redacted>")
+        self.assertEqual(payload["provider_payload_summary"]["authorization"], "<redacted>")
+        self.assertIn("audit_path", events[0])
+        audit_text = audit_files[0].read_text(encoding="utf-8")
+        self.assertNotIn("secret-api-key", audit_text)
+        self.assertNotIn("secret-provider-token", audit_text)
+
     def test_openai_chat_wall_timeout_returns_without_waiting_for_stuck_call(self) -> None:
         from pal.llm.runtime import LLMEndpointInvocationError, _run_llm_with_wall_timeout
 
@@ -3486,6 +3580,29 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual([block["type"] for block in blocks], ["thinking", "redacted_thinking", "tool_use"])
         self.assertEqual(blocks[0]["signature"], "sig-1")
 
+    def test_anthropic_renderer_coalesces_adjacent_user_turns(self) -> None:
+        _, messages = chat_messages_to_anthropic_messages(
+            [
+                {"role": "system", "content": "rules"},
+                {"role": "user", "content": "task"},
+                {"role": "user", "content": "runtime reminder"},
+                {
+                    "role": "assistant",
+                    "content": "use tools",
+                    "tool_calls": [
+                        {"id": "call_a", "type": "function", "function": {"name": "read_a", "arguments": "{}"}},
+                        {"id": "call_b", "type": "function", "function": {"name": "read_b", "arguments": "{}"}},
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_a", "content": "a"},
+                {"role": "tool", "tool_call_id": "call_b", "content": "b"},
+            ]
+        )
+
+        self.assertEqual([message["role"] for message in messages], ["user", "assistant", "user"])
+        self.assertEqual([block["type"] for block in messages[0]["content"]], ["text", "text"])
+        self.assertEqual([block["type"] for block in messages[2]["content"]], ["tool_result", "tool_result"])
+
     def test_openai_chat_responses_parser_extracts_text_and_tool_calls(self) -> None:
         invoker = OpenAIChatEndpointInvoker(
             credentials=LLMCredentialResolver(secret_store=InMemorySecretStore())
@@ -4729,6 +4846,8 @@ class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
         emitted = self.endpoint.flush_outbox()
 
         self.assertEqual([event.event_kind for event in emitted], ["reply.failed"])
+        self.assertEqual(emitted[0].payload.get("permanent"), True)
+        self.assertEqual(emitted[0].payload.get("attempts"), 1)
         self.assertFalse(self.endpoint.outbox)
 
 

@@ -23,7 +23,6 @@ class PendingControlRequest:
 @dataclass
 class ControlScopeState:
     active_turn_id: str | None = None
-    pending_channel_turns: deque[Any] = field(default_factory=deque)
     pending_requests: dict[str, PendingControlRequest] = field(default_factory=dict)
     transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     interrupt_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -44,6 +43,9 @@ class CoreRuntimeState:
     turn_tasks: dict[str, Any] = field(default_factory=dict)
     turn_scopes: dict[str, str] = field(default_factory=dict)
     control_scopes: dict[str, ControlScopeState] = field(default_factory=dict)
+    active_channel_turn_id: str | None = None
+    pending_channel_turns: deque[Any] = field(default_factory=deque)
+    channel_turn_transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     prompt_log_enabled: bool = False
     mode: str = "default"
     detached_modules: set[str] = field(default_factory=set)

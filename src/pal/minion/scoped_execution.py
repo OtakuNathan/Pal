@@ -17,6 +17,7 @@ from pal.execution.tool_search import ToolReadTool, ToolSearchTool
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.memory import L3CommitRequest
 from pal.minion.checklist import (
+    MilestoneChecklistLedger,
     build_acceptance_checklist,
     build_evidence_projection,
     compact_checklist,
@@ -86,6 +87,10 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_file_state",
     "op_git",
     "op_exec_shell",
+    "op_minion_checklist_read",
+    "op_minion_checklist_mark_done",
+    "op_minion_checklist_mark_blocked",
+    "op_minion_checklist_summary",
     "op_minion_checkpoint_commit",
     "op_minion_gate_contract_submit",
     "op_tree",
@@ -100,6 +105,14 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_memory_recall",
     *MINION_CODE_INTEL_TOOL_SURFACE,
 )
+
+
+MINION_CHECKLIST_TOOL_NAMES = {
+    "op_minion_checklist_read",
+    "op_minion_checklist_mark_done",
+    "op_minion_checklist_mark_blocked",
+    "op_minion_checklist_summary",
+}
 
 
 WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
@@ -232,6 +245,61 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 },
             },
             "required": ["summary"],
+            "additionalProperties": False,
+        },
+    },
+    "op_minion_checklist_read": {
+        "name": "op_minion_checklist_read",
+        "description": (
+            "Read the current milestone checklist ledger. Use this before implementation and before checkpointing. "
+            "Scopes: all, requirements, acceptance, steps, repair."
+        ),
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "scope": {"type": "string", "enum": ["all", "requirements", "acceptance", "steps", "repair"], "default": "all"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "op_minion_checklist_mark_done": {
+        "name": "op_minion_checklist_mark_done",
+        "description": (
+            "Mark one current milestone checklist item done with concrete evidence. "
+            "Evidence is required and should cite a source change, test command, LSP result, artifact, or explicit inspection result."
+        ),
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "item_id": {"type": "string"},
+                "evidence": {
+                    "type": "string",
+                    "description": "Concrete evidence summary citing a source change, test command, LSP result, artifact, or inspection result.",
+                },
+            },
+            "required": ["item_id", "evidence"],
+            "additionalProperties": False,
+        },
+    },
+    "op_minion_checklist_mark_blocked": {
+        "name": "op_minion_checklist_mark_blocked",
+        "description": "Mark one current milestone checklist item blocked with the concrete reason. Blocked required items prevent checkpoint completion.",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "item_id": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["item_id", "reason"],
+            "additionalProperties": False,
+        },
+    },
+    "op_minion_checklist_summary": {
+        "name": "op_minion_checklist_summary",
+        "description": "Return checklist completion counts and checkpoint blockers for the current milestone.",
+        "parameters_schema": {
+            "type": "object",
+            "properties": {},
             "additionalProperties": False,
         },
     },
@@ -512,6 +580,14 @@ def _canonical_minion_capability_name(name: object) -> str:
         return "op_web_read"
     if raw in _workspace_tool_specs():
         return raw
+    if raw.startswith("plan_"):
+        candidate = f"op_minion_{raw}"
+        if candidate in _workspace_tool_specs():
+            return candidate
+    if raw.startswith("minion_plan_"):
+        candidate = f"op_{raw}"
+        if candidate in _workspace_tool_specs():
+            return candidate
     candidates = tuple(dict.fromkeys((*MINION_DIRECT_WORK_TOOL_SURFACE, *MINION_DISCOVERY_TOOL_SURFACE)))
     for candidate in candidates:
         if llm_tool_name(candidate) == raw:
@@ -642,6 +718,8 @@ class MinionScopedExecutionRuntime:
                 return await repair_bill_builder_tool_result(call, self.workspace, self.produced_artifacts)
             if call.name == "op_minion_memory_candidate_write":
                 return _minion_memory_candidate_result(call, self.memory_l3)
+            if call.name in MINION_CHECKLIST_TOOL_NAMES:
+                return _minion_checklist_result(call, self.workspace)
             if call.name == "op_minion_gate_contract_submit":
                 return _minion_gate_contract_submit_result(call, self.workspace)
             if call.name == "op_minion_review_gate_submit":
@@ -1215,6 +1293,100 @@ def _minion_memory_candidate_result(call: CanonicalToolCall, memory_l3: MockL3Pl
             llm_text=message,
             status=RuntimeStatus.ERROR,
         )
+
+
+def _minion_checklist_result(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult:
+    try:
+        ledger = MilestoneChecklistLedger.from_workspace(workspace)
+        if call.name == "op_minion_checklist_read":
+            scope = str(call.args.get("scope") or "all").strip().lower() or "all"
+            text = ledger.render_for_llm(scope=scope)
+            return CanonicalToolResult(
+                name=call.name,
+                ok=True,
+                text=text,
+                structured={"scope": scope, "items": ledger.items(scope=scope), "summary": ledger.summary()},
+                call_id=call.call_id,
+                llm_text=text,
+                status=RuntimeStatus.OK,
+            )
+        if call.name == "op_minion_checklist_summary":
+            summary = ledger.summary()
+            text = _format_checklist_summary(summary)
+            return CanonicalToolResult(
+                name=call.name,
+                ok=True,
+                text=text,
+                structured={"summary": summary, "checklist": ledger.snapshot()},
+                call_id=call.call_id,
+                llm_text=text,
+                status=RuntimeStatus.OK,
+            )
+        if call.name == "op_minion_checklist_mark_done":
+            item = ledger.mark_done(str(call.args.get("item_id") or ""), call.args.get("evidence"))
+            workspace["milestone_checklist"] = ledger.state
+            text = f"Checklist item {item.get('id')} marked done with evidence."
+            return CanonicalToolResult(
+                name=call.name,
+                ok=True,
+                text=text,
+                structured={"item": item, "summary": ledger.summary(), "checklist": ledger.snapshot()},
+                call_id=call.call_id,
+                llm_text=text,
+                status=RuntimeStatus.OK,
+            )
+        if call.name == "op_minion_checklist_mark_blocked":
+            item = ledger.mark_blocked(str(call.args.get("item_id") or ""), str(call.args.get("reason") or ""))
+            workspace["milestone_checklist"] = ledger.state
+            text = f"Checklist item {item.get('id')} marked blocked."
+            return CanonicalToolResult(
+                name=call.name,
+                ok=True,
+                text=text,
+                structured={"item": item, "summary": ledger.summary(), "checklist": ledger.snapshot()},
+                call_id=call.call_id,
+                llm_text=text,
+                status=RuntimeStatus.OK,
+            )
+        raise ValueError(f"unsupported checklist tool: {call.name}")
+    except (KeyError, ValueError) as exc:
+        message = str(exc) or exc.__class__.__name__
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=message,
+            structured={"reason": "invalid_checklist_update", "error": message},
+            call_id=call.call_id,
+            llm_text=message,
+            status=RuntimeStatus.INVALID,
+        )
+    except Exception as exc:
+        message = str(exc) or exc.__class__.__name__
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=message,
+            structured={"error": message, "error_type": exc.__class__.__name__},
+            call_id=call.call_id,
+            llm_text=message,
+            status=RuntimeStatus.ERROR,
+        )
+
+
+def _format_checklist_summary(summary: dict[str, Any]) -> str:
+    counts = dict(summary.get("counts") or {})
+    blockers = list(summary.get("required_blockers") or [])
+    lines = [
+        (
+            "Checklist summary: "
+            f"{counts.get('done', 0)} done, {counts.get('pending', 0)} pending, {counts.get('blocked', 0)} blocked."
+        )
+    ]
+    if blockers:
+        lines.append("Checkpoint blockers:")
+        for blocker in blockers[:12]:
+            lines.append(f"- {blocker.get('id')}: {blocker.get('reason')} - {blocker.get('text')}")
+    return "\n".join(lines).strip()
 
 
 def _minion_gate_contract_submit_result(call: CanonicalToolCall, workspace: dict[str, Any]) -> CanonicalToolResult:
@@ -3068,6 +3240,24 @@ def _minion_checkpoint_commit_result(call: CanonicalToolCall, workspace: dict[st
         if not repo_path:
             raise ValueError("current project repo is not available")
         repo = Path(repo_path)
+        checklist = MilestoneChecklistLedger.from_workspace(workspace)
+        checklist_blockers = checklist.checkpoint_blockers()
+        if checklist_blockers:
+            text = "Checkpoint blocked: required milestone checklist items are not complete with evidence."
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text=text,
+                structured={
+                    "status": "blocked",
+                    "reason": "milestone_checklist_incomplete",
+                    "blockers": checklist_blockers,
+                    "checklist": checklist.snapshot(),
+                },
+                call_id=call.call_id,
+                llm_text=text + "\n" + checklist.render_for_llm(),
+                status=RuntimeStatus.INVALID,
+            )
         copy_violations = _cross_module_source_copy_violations(repo, workspace)
         if copy_violations:
             text = (
@@ -3120,6 +3310,7 @@ def _minion_checkpoint_commit_result(call: CanonicalToolCall, workspace: dict[st
                         status=RuntimeStatus.ERROR,
                     )
                 payload = {**inspected, "already_committed": True}
+                payload["checklist"] = checklist.snapshot()
                 return CanonicalToolResult(
                     name=call.name,
                     ok=True,
@@ -3139,6 +3330,8 @@ def _minion_checkpoint_commit_result(call: CanonicalToolCall, workspace: dict[st
                 status=RuntimeStatus.ERROR,
             )
         ok = status == "committed"
+        if isinstance(result, dict):
+            result["checklist"] = checklist.snapshot()
         text = (
             f"Milestone checkpoint committed: {result.get('commit_sha')}"
             if ok

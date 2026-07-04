@@ -77,6 +77,12 @@ GENERATED_ENVIRONMENT_UNION_MERGE_FILES = frozenset(
 
 
 CHECKPOINT_COMMIT_CAPABILITY = "op_minion_checkpoint_commit"
+CHECKPOINT_CHECKLIST_CAPABILITIES = (
+    "op_minion_checklist_read",
+    "op_minion_checklist_mark_done",
+    "op_minion_checklist_mark_blocked",
+    "op_minion_checklist_summary",
+)
 
 
 @dataclass(frozen=True)
@@ -246,8 +252,9 @@ def _with_checkpoint_commit_capability(pack: TaskContextPack) -> TaskContextPack
     if bool(metadata.get("allow_text_only_completion") or completion_policy.get("allow_artifact_evidence")):
         return pack
     allowed = [str(item).strip() for item in list(pack.allowed_capabilities or []) if str(item).strip()]
-    if CHECKPOINT_COMMIT_CAPABILITY not in allowed:
-        allowed.append(CHECKPOINT_COMMIT_CAPABILITY)
+    for capability in (CHECKPOINT_COMMIT_CAPABILITY, *CHECKPOINT_CHECKLIST_CAPABILITIES):
+        if capability not in allowed:
+            allowed.append(capability)
     return TaskContextPack.from_dict({**pack.to_dict(), "allowed_capabilities": allowed})
 
 
