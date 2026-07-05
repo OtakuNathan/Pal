@@ -4,4 +4,4 @@ command = ["lua-language-server"]
 extensions = [".lua"]
 language_ids = ["lua"]
 workspace_markers = [".luarc.json", ".git"]
-install_hint = "Install lua-language-server."
+install_hint = "Download lua-language-server from GitHub releases (sumneko)"

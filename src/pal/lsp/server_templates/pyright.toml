@@ -1,10 +1,10 @@
 server_id = "pyright"
 display_name = "pyright"
-command = ["npx"]
-args = ["--yes", "--package", "pyright", "pyright-langserver", "--stdio"]
+command = ["pyright-langserver"]
+args = ["--stdio"]
 extensions = [".py", ".pyi"]
 language_ids = ["python"]
 workspace_markers = ["pyproject.toml", "setup.py", ".git"]
-install_hint = "Install Node.js/npx or provide a runtime override for pyright-langserver."
-startup_timeout_ms = 120000
+install_hint = "Install pyright globally (npm i -g pyright) or provide a runtime override for pyright-langserver."
+startup_timeout_ms = 30000
 diagnostics_timeout_ms = 10000

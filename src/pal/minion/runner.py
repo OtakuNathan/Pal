@@ -62,6 +62,7 @@ from pal.memory.rendering import COMPACTION_SCHEMA_MINION_V1, is_compaction_payl
 from pal.minion.execution_strategy import execution_strategy_from_pack
 from pal.minion.git_env import inspect_milestone_checkpoint
 from pal.minion.gates import checkpoint_gate_spec_for_pack, pack_requires_plan_artifact_validation
+from pal.minion.debug_log import minion_debug_log_enabled
 from pal.minion.llm_broker import MinionBrokerLLMRuntime
 from pal.minion.scoped_execution import (
     MINION_DIRECT_WORK_TOOL_SURFACE,
@@ -736,6 +737,7 @@ class MinionRunner:
 
         def build_commit_payload(final_reply: str, observations: list[Any], reply_texts: list[str]) -> L1CommitPayload:
             _ = reply_texts
+            tool_trace = _render_minion_tool_summary(observations)
             transcript = [
                 L1TranscriptMessage(
                     role="user",
@@ -746,6 +748,7 @@ class MinionRunner:
                     role="assistant",
                     content=final_reply or "minion completed",
                     kind=L1MessageKind.ASSISTANT_REPLY,
+                    tool_trace=tool_trace or None,
                 ),
             ]
             return L1CommitPayload(turn_id=self.run_id, transcript=transcript, tool_observations=list(observations))
@@ -1117,7 +1120,11 @@ class MinionRunner:
             )
         if isinstance(effect, LLMRequestEffect):
             result = await self._postprocess_minion_llm_round(state, result)
-        if isinstance(effect, ToolCallEffect) and len(state.tool_protocol_messages) > before_protocol_len:
+        if (
+            isinstance(effect, ToolCallEffect)
+            and len(state.tool_protocol_messages) > before_protocol_len
+            and self._persist_tool_protocol_to_l1()
+        ):
             await self._commit_minion_l1(
                 state,
                 _tool_protocol_transcript(state.tool_protocol_messages[before_protocol_len:]),
@@ -1218,6 +1225,9 @@ class MinionRunner:
             return
         with contextlib.suppress(Exception):
             state.memory_service.commit_l1(MemoryCommitRequest(turn_id=self.run_id, transcript=transcript))
+
+    def _persist_tool_protocol_to_l1(self) -> bool:
+        return minion_debug_log_enabled(self.pack.metadata)
 
     def _render_minion_memory_context(self, state: MinionAgentLoopState) -> str:
         pack = state.memory_service.build_pack(MemoryPackRequest(turn_kind="minion", work_order_id=self.pack.work_order_id))
@@ -2602,6 +2612,29 @@ def _tool_protocol_transcript(messages: list[dict[str, Any]]) -> list[L1Transcri
                 )
             )
     return transcript
+
+
+def _render_minion_tool_summary(observations: list[Any], *, max_summary_chars: int = 500) -> str:
+    if not observations:
+        return ""
+    per_item_limit = max(80, max_summary_chars // 3)
+    parts: list[str] = []
+    total = 0
+    for observation in observations:
+        tool_name = str(getattr(observation, "tool_name", "") or getattr(observation, "name", "") or "tool")
+        ok = bool(getattr(observation, "ok", False))
+        status = "ok" if ok else "error"
+        summary = str(getattr(observation, "summary", "") or getattr(observation, "text", "") or "")
+        summary = " ".join(summary.split())[:per_item_limit]
+        line = f"{tool_name}({status}): {summary}"
+        if total + len(line) > max_summary_chars:
+            remaining = len(observations) - len(parts)
+            if remaining > 0:
+                parts.append(f"... +{remaining} more")
+            break
+        parts.append(line)
+        total += len(line)
+    return "\n".join(parts)
 
 
 def _llm_tools_for_allowed(execution_runtime: Any, allowed_capabilities: list[str]) -> list[dict[str, Any]]:

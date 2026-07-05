@@ -769,6 +769,9 @@ class MinionPromptFragmentProvider(PromptFragmentProvider):
         retry_note = str((context.metadata or {}).get("retry_note") or "").strip()
         if retry_note:
             add("memory", "Minion Retry Guidance", retry_note, 95, {"block_id": "minion_retry_guidance"})
+        skill_manual_context = _render_skill_manual_context(scaffold.get("skill_manual_context"))
+        if skill_manual_context:
+            add("memory", "Minion Skill Manual Context", skill_manual_context, 96, {"block_id": "skill_manual_context"})
 
         runtime_reminder = _render_minion_runtime_reminder(scaffold)
         add(
@@ -846,6 +849,29 @@ def _scaffold_role(scaffold: dict[str, Any]) -> str:
 
 def _task_acceptance_title(role: str) -> str:
     return "Source Requirements For Planning" if role in {"architect", "planner"} else "Task Acceptance Scope"
+
+
+def _render_skill_manual_context(value: Any) -> str:
+    items = [dict(item) for item in list(value or []) if isinstance(item, dict)]
+    if not items:
+        return ""
+    lines = [
+        "<skill_manual_context>",
+        "Reference material for activated minion skills. Use it only when relevant to the current scoped milestone.",
+    ]
+    for item in items:
+        skill_id = _compact_text(item.get("skill_id"), limit=120)
+        title = _compact_text(item.get("title") or skill_id, limit=160)
+        summary = _compact_text(item.get("summary"), limit=320)
+        manual = str(item.get("manual_text") or "").strip()
+        if not skill_id or not manual:
+            continue
+        lines.extend(["", f"## {title or skill_id}", f"- skill_id: {skill_id}"])
+        if summary:
+            lines.append(f"- summary: {summary}")
+        lines.extend(["", manual])
+    lines.append("</skill_manual_context>")
+    return "\n".join(lines).strip()
 
 
 def _render_minion_operating_rules(scaffold: dict[str, Any]) -> str:
@@ -958,7 +984,19 @@ def render_minion_task_prompt(pack: TaskContextPack) -> str:
     instruction = _compact_text(pack.instruction, limit=900)
     if instruction:
         lines.extend(["## Instruction", instruction])
-    acceptance = [item for item in _string_list(pack.acceptance_criteria) if item]
+    current_milestone = _current_milestone_from_pack(pack)
+    if current_milestone:
+        title = _first_markdown_text(current_milestone, "title")
+        task = _first_markdown_text(current_milestone, "task", "summary")
+        current_lines = ["## Current Task"]
+        if title:
+            current_lines.append(title)
+        if task and task != title:
+            current_lines.append(task)
+        if len(current_lines) > 1:
+            lines.extend(current_lines)
+    current_acceptance = _string_list(current_milestone.get("acceptance_criteria") or current_milestone.get("acceptance"))
+    acceptance = [item for item in (current_acceptance or _string_list(pack.acceptance_criteria)) if item]
     if isinstance(pack.metadata.get("requirements_brief"), dict):
         requirements_brief = dict(pack.metadata.get("requirements_brief") or {})
         brief_acceptance = [str(item).strip() for item in list(requirements_brief.get("acceptance_criteria") or []) if str(item or "").strip()]
@@ -986,6 +1024,22 @@ def render_minion_task_prompt(pack: TaskContextPack) -> str:
         ]
     )
     return _join_markdown_sections(lines)
+
+
+def _current_milestone_from_pack(pack: TaskContextPack) -> dict[str, Any]:
+    current = _dict((pack.continuity or {}).get("current_milestone"))
+    if current:
+        return current
+    metadata = dict(pack.metadata or {})
+    module_execution = _dict(metadata.get("module_execution"))
+    milestones = [dict(item) for item in list(metadata.get("milestones") or []) if isinstance(item, dict)]
+    if not milestones:
+        return {}
+    index = _int(module_execution.get("current_milestone_index"), default=0)
+    index = max(0, min(index, len(milestones) - 1))
+    current = dict(milestones[index])
+    current.setdefault("milestone_index", index)
+    return current
 
 
 def _render_fallback_reference_lines(pack: TaskContextPack) -> list[str]:

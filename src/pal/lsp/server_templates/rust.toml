@@ -4,4 +4,4 @@ command = ["rust-analyzer"]
 extensions = [".rs"]
 language_ids = ["rust"]
 workspace_markers = ["Cargo.toml", ".git"]
-install_hint = "Install rust-analyzer."
+install_hint = "rustup component add rust-analyzer (or system package)"

@@ -5,4 +5,4 @@ args = ["--stdio"]
 extensions = [".yaml", ".yml"]
 language_ids = ["yaml"]
 workspace_markers = [".git"]
-install_hint = "Install yaml-language-server."
+install_hint = "npm i -g yaml-language-server"

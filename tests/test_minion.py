@@ -25,7 +25,7 @@ from pal.behavior import (
     register_with_core as register_behavior_with_core,
 )
 from pal.control import ControlAction, ControlEvent, ControlPlane, ControlRoute, InteractionResult
-from pal.core import MemoryCompactEffect, PalCore
+from pal.core import EffectResult, MemoryCompactEffect, PalCore, ToolCallEffect
 from pal.core.prompt_compiler import normalize_prompt_messages
 from pal.core.turns import TurnContinuation
 from pal.channel.contracts import ChannelEnvelope, EndpointConfig, ResponseHandle
@@ -114,6 +114,7 @@ from pal.minion.runner import (
     MinionRuntimeBundle,
     _llm_tools_for_allowed,
     _minion_llm_request_metadata,
+    _render_minion_tool_summary,
     _resolve_minion_max_output_tokens,
     build_slim_minion_runtime,
 )
@@ -162,6 +163,19 @@ def _message_text(message: dict) -> str:
     if isinstance(content, list):
         return "\n".join(str(part.get("text") or "") for part in content if isinstance(part, dict))
     return str(content or "")
+
+
+def _request_prompt_text(request: Any) -> str:
+    return "\n".join(_message_text(message) for message in list(getattr(request, "messages", []) or []) if isinstance(message, dict))
+
+
+def _markdown_section(text: str, heading: str) -> str:
+    marker = f"## {heading}"
+    start = str(text or "").find(marker)
+    if start < 0:
+        return ""
+    next_start = str(text or "").find("\n## ", start + len(marker))
+    return str(text or "")[start : next_start if next_start >= 0 else len(str(text or ""))]
 
 
 def _compiled_minion_prompt_messages(
@@ -1301,7 +1315,7 @@ class MinionContractTests(unittest.TestCase):
                 )
                 for call in calls:
                     if call.name == "plan_begin_module" and call.args.get("module_name") == "module_builder_executor":
-                        call.args["executor_profile"] = "review_worker"
+                        call.args["executor_profile"] = "writer"
                     result = await scoped.execute_tool_async(call)
                     self.assertTrue(result.ok, result.text)
 
@@ -1312,8 +1326,8 @@ class MinionContractTests(unittest.TestCase):
                     for item in payload["orchestration"]["topology"]["nodes"]
                     if item["module_id"] == "module_builder_executor"
                 )
-                self.assertEqual(module["metadata"]["executor_profile"], "review_worker")
-                self.assertEqual(node["executor_profile"], "review_worker")
+                self.assertEqual(module["metadata"]["executor_profile"], "writer")
+                self.assertEqual(node["executor_profile"], "writer")
             finally:
                 shutil.rmtree(root, ignore_errors=True)
 
@@ -4848,7 +4862,7 @@ class MinionContractTests(unittest.TestCase):
                             "work_order_id": "wo_skill_context",
                             "skill_refs": ["superpower"],
                             "module": {},
-                            "milestone": {},
+                            "milestone": {"task": "Testing minion skill injection."},
                             "workspace": {},
                         }
                     },
@@ -4864,19 +4878,32 @@ class MinionContractTests(unittest.TestCase):
                     read_decision=lambda request_id: None,
                 )._prompt_scaffold()
                 system = _render_system_prompt(scaffold)
+                prompt_messages = _compiled_minion_prompt_messages(
+                    MinionRunner(
+                        runtime_root=root,
+                        pack=injected,
+                        minion_id="minion_skill_context",
+                        run_id="run_skill_context",
+                        write_event=lambda event: None,
+                        read_decision=lambda request_id: None,
+                    )
+                )
+                rendered_prompt = "\n".join(_message_text(message) for message in prompt_messages)
 
                 self.assertEqual(injected.metadata["injected_skill_refs"], ["superpower", "bonuspower"])
                 self.assertEqual(injected.metadata["profile_skill_refs"], ["superpower"])
                 self.assertEqual(injected.metadata["pack_allowed_skill_refs"], ["superpower"])
                 self.assertEqual(injected.metadata["work_order_skill_refs"], ["superpower"])
                 self.assertEqual(injected.metadata["spawn_bonus_skill_refs"], ["bonuspower"])
-                self.assertIn("<system-reminder>", system)
+                self.assertNotIn("<system-reminder>", system)
                 self.assertNotIn("<skill_manual_context>", system)
-                self.assertIn("SUPERPOWER MANUAL BEGIN", system)
-                self.assertIn("SUPERPOWER MANUAL END", system)
-                self.assertIn("BONUSPOWER MANUAL", system)
-                self.assertIn("Testing minion skill injection.", system)
-                self.assertNotIn("op_skill_inject", system)
+                self.assertIn("<system-reminder>", rendered_prompt)
+                self.assertIn("<skill_manual_context>", rendered_prompt)
+                self.assertIn("SUPERPOWER MANUAL BEGIN", rendered_prompt)
+                self.assertIn("SUPERPOWER MANUAL END", rendered_prompt)
+                self.assertIn("BONUSPOWER MANUAL", rendered_prompt)
+                self.assertIn("Testing minion skill injection.", rendered_prompt)
+                self.assertNotIn("op_skill_inject", rendered_prompt)
             finally:
                 database.close()
 
@@ -9359,6 +9386,7 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
                 self.assertIsNone(runtime.get_capability_spec("op_minion_revise_plan"))
                 self.assertIsNone(runtime.get_capability_spec("op_minion_spawn"))
                 self.assertIsNotNone(runtime.get_capability_spec("op_minion_dispatch_workflow"))
+                self.assertIsNotNone(runtime.get_capability_spec("op_minion_accept_reviewed_plan"))
             finally:
                 handle.shutdown_sync()
 
@@ -10502,6 +10530,71 @@ class MinionTaskingRepositoryTests(unittest.TestCase):
         snapshot = self.repository.read_work_order("wo_control_accept")
         self.assertEqual(snapshot["work_order"]["metadata"]["plan_review"]["status"], "accepted")
         self.assertEqual(snapshot["work_order"]["metadata"]["plan_review"]["plan_ref"]["accepted"], True)
+
+    def test_minion_accept_reviewed_plan_capability_dispatches_existing_plan(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, dict]] = []
+
+            def request_sync(self, method: str, params: dict | None = None) -> dict:
+                payload = dict(params or {})
+                self.calls.append((method, payload))
+                return {
+                    "status": "dispatched",
+                    "work_order_id": payload.get("work_order_id"),
+                    "next_profile": "software_engineering.coder",
+                    "plan_ref": dict(payload.get("plan_ref") or {}),
+                    "auto_advance_modules": payload.get("auto_advance_modules", True),
+                }
+
+        plan = _dispatchable_plan_payload(
+            plan_id="plan_accept_reviewed_cap",
+            task_id="task_accept_reviewed_cap",
+            modules=[_plan_module("module_accept_reviewed_cap", title="Accepted reviewed module")],
+        )
+        submitted = self.repository.submit_plan_ref(plan)
+        gate = _submit_plan_review_gate(self.repository, submitted["plan_ref"], verdict="pass")
+        self.repository.prepare_pack_for_spawn(
+            TaskContextPack(
+                work_order_id="wo_accept_reviewed_cap",
+                goal="Accept reviewed plan.",
+                minion_profile="software_engineering.architect",
+                metadata={
+                    "task_id": "task_accept_reviewed_cap",
+                    "milestones": ["Accept reviewed plan"],
+                    "plan_review": {
+                        "status": "acceptance_pending",
+                        "plan_ref": dict(submitted["plan_ref"]),
+                        "review_gate_ref": dict(gate),
+                    },
+                },
+            )
+        )
+        provider = MinionManagerProvider(runtime_root=self.root)
+        fake_client = FakeClient()
+        provider.client = fake_client  # type: ignore[assignment]
+        provider._ensure_manager_started = lambda: None  # type: ignore[method-assign]
+
+        result = provider.accept_reviewed_plan(
+            CapabilityCall(
+                name="accept_reviewed_plan",
+                args={"work_order_id": "wo_accept_reviewed_cap", "reason": "User confirmed the reviewed plan."},
+            )
+        )
+
+        self.assertEqual(result.status, RuntimeStatus.OK)
+        self.assertEqual(fake_client.calls[0][0], "dispatch_accepted_plan")
+        dispatch_params = fake_client.calls[0][1]
+        self.assertEqual(dispatch_params["work_order_id"], "wo_accept_reviewed_cap")
+        self.assertTrue(dispatch_params["plan_ref"]["accepted"])
+        self.assertEqual(dispatch_params["review_gate_ref"]["gate_id"], gate["gate_id"])
+        accepted = self.repository.load_accepted_plan_ref(dispatch_params["plan_ref"])
+        self.assertTrue(accepted["plan_ref"]["accepted"])
+        snapshot = self.repository.read_work_order("wo_accept_reviewed_cap")
+        plan_review = snapshot["work_order"]["metadata"]["plan_review"]
+        self.assertEqual(plan_review["status"], "accepted")
+        self.assertTrue(plan_review["plan_ref"]["accepted"])
+        self.assertEqual(plan_review["dispatch"]["status"], "dispatched")
 
     def test_minion_plan_reject_and_edit_control_actions_record_state_without_accepting(self) -> None:
         plan = _dispatchable_plan_payload(
@@ -15662,14 +15755,12 @@ class MinionManagerTests(unittest.TestCase):
                 self.calls_by_milestone: dict[str, int] = {}
 
             async def agenerate(self, request):
-                rendered = "\n".join(
-                    str(message.get("content") if isinstance(message, dict) else message)
-                    for message in list(getattr(request, "messages", []) or [])
-                )
-                if "Update feature result" in rendered:
+                rendered = _request_prompt_text(request)
+                current_task = _markdown_section(rendered, "Current Task")
+                if "Update feature result" in current_task:
                     milestone_id = "m2"
                     title = "Update feature result"
-                elif "Create feature file" in rendered:
+                elif "Create feature file" in current_task:
                     milestone_id = "m1"
                     title = "Create feature file"
                 else:
@@ -15695,7 +15786,17 @@ class MinionManagerTests(unittest.TestCase):
                 if call_count == 2:
                     return CanonicalLLMOutcome(
                         text="",
-                        tool_calls=[CanonicalToolCall(name="checkpoint_commit", args={"title": title})],
+                        tool_calls=[
+                            CanonicalToolCall(
+                                name="op_minion_checklist_mark_done",
+                                args={"item_id": "AC-1", "evidence": f"{title} implemented and verified by dogfood file write."},
+                            )
+                        ],
+                    )
+                if call_count == 3:
+                    return CanonicalLLMOutcome(
+                        text="",
+                        tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": title})],
                     )
                 return CanonicalLLMOutcome(
                     text=(
@@ -15953,7 +16054,7 @@ class MinionManagerTests(unittest.TestCase):
             if manager.runner_tasks:
                 await asyncio.gather(*manager.runner_tasks)
 
-            self.assertEqual(manager.started_milestones[:2], ["m1", "m2"])
+            self.assertEqual(manager.started_milestones[:2], ["m1", "m2"], manager.event_queue)
             self.assertEqual(manager.started_milestone_indices[:2], [0, 1])
             self.assertEqual(manager.started_milestone_work_order_ids[:2], ["wo_dogfood_code", "wo_dogfood_code"])
             self.assertEqual(len(manager.started_run_ids), 1)
@@ -16044,15 +16145,13 @@ class MinionManagerTests(unittest.TestCase):
                 self.calls_by_milestone: dict[str, int] = {}
 
             async def agenerate(self, request):
-                rendered = "\n".join(
-                    str(message.get("content") if isinstance(message, dict) else message)
-                    for message in list(getattr(request, "messages", []) or [])
-                )
-                if '"milestone_id": "m2"' in rendered or '"milestone_id":"m2"' in rendered:
+                rendered = _request_prompt_text(request)
+                current_task = _markdown_section(rendered, "Current Task")
+                if "Resume feature result" in current_task:
                     milestone_id = "m2"
                     title = "Resume feature result"
                     content = 'def status():\n    return "resumed-2"\n'
-                elif '"milestone_id": "m1"' in rendered or '"milestone_id":"m1"' in rendered:
+                elif "Create resumable feature" in current_task:
                     milestone_id = "m1"
                     title = "Create resumable feature"
                     content = 'def status():\n    return "resumed-1"\n'
@@ -16073,7 +16172,17 @@ class MinionManagerTests(unittest.TestCase):
                 if call_count == 2:
                     return CanonicalLLMOutcome(
                         text="",
-                        tool_calls=[CanonicalToolCall(name="checkpoint_commit", args={"title": title})],
+                        tool_calls=[
+                            CanonicalToolCall(
+                                name="op_minion_checklist_mark_done",
+                                args={"item_id": "AC-1", "evidence": f"{title} implemented and verified by dogfood file write."},
+                            )
+                        ],
+                    )
+                if call_count == 3:
+                    return CanonicalLLMOutcome(
+                        text="",
+                        tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": title})],
                     )
                 return CanonicalLLMOutcome(text=f"{milestone_id} completed with checkpoint commit.")
 
@@ -16242,7 +16351,7 @@ class MinionManagerTests(unittest.TestCase):
             await asyncio.gather(*manager.runner_tasks)
 
             self.assertEqual(manager.started_milestones, ["m1"])
-            self.assertTrue(manager.crashed_run_id)
+            self.assertTrue(manager.crashed_run_id, manager.event_queue)
             snapshot_after_crash = manager.tasking_repository.read_work_order("wo_breakpoint_code")
             self.assertEqual(snapshot_after_crash["current_milestone"]["milestone_index"], 1)
             self.assertEqual(snapshot_after_crash["current_milestone"]["title"], "Resume feature result")
@@ -16350,15 +16459,13 @@ class MinionManagerTests(unittest.TestCase):
                 self.calls_by_milestone: dict[str, int] = {}
 
             async def agenerate(self, request):
-                rendered = "\n".join(
-                    str(message.get("content") if isinstance(message, dict) else message)
-                    for message in list(getattr(request, "messages", []) or [])
-                )
-                if '"milestone_id": "m2"' in rendered or '"milestone_id":"m2"' in rendered:
+                rendered = _request_prompt_text(request)
+                current_task = _markdown_section(rendered, "Current Task")
+                if "Resume after disconnect" in current_task:
                     milestone_id = "m2"
                     title = "Resume after disconnect"
                     content = 'def status():\n    return "disconnect-2"\n'
-                elif '"milestone_id": "m1"' in rendered or '"milestone_id":"m1"' in rendered:
+                elif "Create disconnect feature" in current_task:
                     milestone_id = "m1"
                     title = "Create disconnect feature"
                     content = 'def status():\n    return "disconnect-1"\n'
@@ -16379,7 +16486,17 @@ class MinionManagerTests(unittest.TestCase):
                 if call_count == 2:
                     return CanonicalLLMOutcome(
                         text="",
-                        tool_calls=[CanonicalToolCall(name="checkpoint_commit", args={"title": title})],
+                        tool_calls=[
+                            CanonicalToolCall(
+                                name="op_minion_checklist_mark_done",
+                                args={"item_id": "AC-1", "evidence": f"{title} implemented and verified by dogfood file write."},
+                            )
+                        ],
+                    )
+                if call_count == 3:
+                    return CanonicalLLMOutcome(
+                        text="",
+                        tool_calls=[CanonicalToolCall(name="op_minion_checkpoint_commit", args={"title": title})],
                     )
                 return CanonicalLLMOutcome(text=f"{milestone_id} completed with checkpoint commit.")
 
@@ -16487,7 +16604,7 @@ class MinionManagerTests(unittest.TestCase):
             await asyncio.gather(*manager.runner_tasks)
 
             self.assertEqual(manager.started_milestones, ["m1"])
-            self.assertTrue(any(event.get("event_kind") == "manager_control_failed" for event in manager.event_queue))
+            self.assertTrue(any(event.get("event_kind") == "manager_control_failed" for event in manager.event_queue), manager.event_queue)
             first_terminal = next(
                 event
                 for event in manager.event_queue
@@ -17765,7 +17882,7 @@ class MinionManagerTests(unittest.TestCase):
             ).run()
 
             self.assertEqual(code, 0)
-            self.assertIn("You have not used any capability yet", llm_messages[1][-1]["content"])
+            self.assertIn("You have not used any capability yet", _message_text(llm_messages[1][-1]))
             self.assertEqual(executed, [{"content": "OK"}])
             self.assertEqual((repo / "evidence.txt").read_text(encoding="utf-8"), "OK")
             checkpoint = next(event for event in events if event["event_kind"] == "checkpoint")
@@ -18038,6 +18155,165 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(state.memory_service.l1_store.items[0][1].content, "done")
 
         asyncio.run(scenario())
+
+    def test_runner_does_not_commit_full_tool_protocol_to_l1_without_debug_log(self) -> None:
+        async def scenario() -> None:
+            class FakeExecutor:
+                async def execute_turn_effect_async(self, continuation, effect):
+                    _ = effect
+                    continuation.tool_protocol_messages.extend(
+                        [
+                            {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {"name": "op_probe", "arguments": "{}"},
+                                    }
+                                ],
+                            },
+                            {"role": "tool", "tool_call_id": "call_1", "content": "full tool result"},
+                        ]
+                    )
+                    return EffectResult(
+                        status=RuntimeStatus.OK,
+                        payload=CanonicalToolResult(
+                            name="op_probe",
+                            ok=True,
+                            text="full tool result",
+                            llm_text="full tool result",
+                            call_id="call_1",
+                            status=RuntimeStatus.OK,
+                        ),
+                    )
+
+            state = MinionAgentLoopState(
+                execution_runtime=SimpleNamespace(),
+                memory_service=MemoryService(),
+                memory_l3=SimpleNamespace(records=[]),
+            )
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=TaskContextPack(work_order_id="wo_l1_protocol_off", goal="no protocol l1"),
+                minion_id="m_l1_protocol_off",
+                run_id="r_l1_protocol_off",
+                write_event=lambda event: None,
+                read_decision=lambda timeout: None,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+            continuation = TurnContinuation(
+                turn_id=runner.run_id,
+                channel_envelope=state.channel_envelope,
+                program=(item for item in ()),
+                correlation_id=runner.run_id,
+                control_scope_key=f"minion:{runner.run_id}",
+                tool_protocol_messages=state.tool_protocol_messages,
+            )
+
+            await runner._execute_minion_agent_effect(
+                FakeExecutor(),
+                continuation,
+                state,
+                ToolCallEffect(tool_call=CanonicalToolCall(name="op_probe", args={}, call_id="call_1")),
+                max_output_tokens=1024,
+            )
+
+            self.assertEqual(len(state.tool_protocol_messages), 2)
+            self.assertEqual(state.memory_service.l1_store.items, [])
+
+        asyncio.run(scenario())
+
+    def test_runner_commits_full_tool_protocol_to_l1_when_debug_log_enabled(self) -> None:
+        async def scenario() -> None:
+            class FakeExecutor:
+                async def execute_turn_effect_async(self, continuation, effect):
+                    _ = effect
+                    continuation.tool_protocol_messages.extend(
+                        [
+                            {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {"name": "op_probe", "arguments": "{}"},
+                                    }
+                                ],
+                            },
+                            {"role": "tool", "tool_call_id": "call_1", "content": "full tool result"},
+                        ]
+                    )
+                    return EffectResult(
+                        status=RuntimeStatus.OK,
+                        payload=CanonicalToolResult(
+                            name="op_probe",
+                            ok=True,
+                            text="full tool result",
+                            llm_text="full tool result",
+                            call_id="call_1",
+                            status=RuntimeStatus.OK,
+                        ),
+                    )
+
+            state = MinionAgentLoopState(
+                execution_runtime=SimpleNamespace(),
+                memory_service=MemoryService(),
+                memory_l3=SimpleNamespace(records=[]),
+            )
+            runner = MinionRunner(
+                runtime_root=self.root,
+                pack=TaskContextPack(
+                    work_order_id="wo_l1_protocol_on",
+                    goal="protocol l1",
+                    metadata={"debug_log": {"enabled": True, "path": str(self.root / "runner.log")}},
+                ),
+                minion_id="m_l1_protocol_on",
+                run_id="r_l1_protocol_on",
+                write_event=lambda event: None,
+                read_decision=lambda timeout: None,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+            )
+            continuation = TurnContinuation(
+                turn_id=runner.run_id,
+                channel_envelope=state.channel_envelope,
+                program=(item for item in ()),
+                correlation_id=runner.run_id,
+                control_scope_key=f"minion:{runner.run_id}",
+                tool_protocol_messages=state.tool_protocol_messages,
+            )
+
+            await runner._execute_minion_agent_effect(
+                FakeExecutor(),
+                continuation,
+                state,
+                ToolCallEffect(tool_call=CanonicalToolCall(name="op_probe", args={}, call_id="call_1")),
+                max_output_tokens=1024,
+            )
+
+            self.assertEqual(len(state.memory_service.l1_store.items), 1)
+            transcript = state.memory_service.l1_store.items[0]
+            self.assertEqual([message.role for message in transcript], ["assistant", "tool"])
+            self.assertEqual(transcript[0].tool_calls[0]["id"], "call_1")
+            self.assertEqual(transcript[1].tool_call_id, "call_1")
+
+        asyncio.run(scenario())
+
+    def test_runner_tool_summary_keeps_short_result_without_full_protocol(self) -> None:
+        summary = _render_minion_tool_summary(
+            [
+                SimpleNamespace(
+                    tool_name="op_probe",
+                    ok=True,
+                    summary=" ".join(["large-result"] * 80),
+                )
+            ]
+        )
+
+        self.assertIn("op_probe(ok):", summary)
+        self.assertLessEqual(len(summary), 520)
 
     def test_workspace_read_tools_are_scoped_to_repo_path(self) -> None:
         async def scenario() -> None:
@@ -23890,6 +24166,7 @@ class MinionIntegrationTests(unittest.TestCase):
                 self.assertIn("minion_finalize", names)
                 self.assertIn("op_minion_task_create", canonical_paths)
                 self.assertIn("op_minion_dispatch_workflow", canonical_paths)
+                self.assertIn("op_minion_accept_reviewed_plan", canonical_paths)
                 self.assertNotIn("op_minion_spawn", canonical_paths)
                 self.assertNotIn("op_minion_submit_plan", canonical_paths)
                 self.assertNotIn("op_minion_accept_plan", canonical_paths)

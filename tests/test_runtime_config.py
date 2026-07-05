@@ -18,7 +18,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(cfg.llm_base_retry_delay_ms, 500)
         self.assertEqual(cfg.llm_request_timeout_seconds, 180.0)
         self.assertEqual(cfg.llm_compaction_timeout_seconds, 180.0)
-        self.assertEqual(cfg.keep_recent_tool_messages, 10)
+        self.assertEqual(cfg.keep_recent_tool_messages, 5)
         self.assertEqual(cfg.l1_tool_result_max_chars, 8_000)
         self.assertEqual(cfg.l1_tool_result_preview_chars, 4_000)
 

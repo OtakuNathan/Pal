@@ -86,7 +86,6 @@ def _generate_service_content(
 ) -> str:
     runtime_path = runtime_root.as_posix()
     log_root = pal_log_root(runtime_root).as_posix()
-    log_path = pal_log_path(runtime_root).as_posix()
     service_environment = environment or {"PYTHONUNBUFFERED": "1"}
     environment_lines = "\n".join(
         _format_systemd_environment_value(key, value)
@@ -106,8 +105,8 @@ def _generate_service_content(
         "Restart=on-failure\n"
         "RestartSec=5\n"
         f"{environment_lines}\n"
-        f"StandardOutput=append:{log_path}\n"
-        f"StandardError=append:{log_path}\n"
+        "StandardOutput=journal\n"
+        "StandardError=journal\n"
         "\n"
         "[Install]\n"
         "WantedBy=default.target\n"
@@ -280,7 +279,6 @@ def _generate_launchd_plist(
     environment: dict[str, str] | None = None,
 ) -> dict[str, object]:
     runtime_path = runtime_root.as_posix()
-    log_path = pal_log_path(runtime_root).as_posix()
     return {
         "Label": label,
         "ProgramArguments": [*pal_command, "run", "--runtime-root", runtime_path],
@@ -288,8 +286,6 @@ def _generate_launchd_plist(
         "KeepAlive": {"SuccessfulExit": False},
         "WorkingDirectory": runtime_path,
         "EnvironmentVariables": dict(environment or {"PYTHONUNBUFFERED": "1"}),
-        "StandardOutPath": log_path,
-        "StandardErrorPath": log_path,
     }
 
 

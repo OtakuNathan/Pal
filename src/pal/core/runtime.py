@@ -241,11 +241,13 @@ class TurnManager:
         if user_text:
             transcript.append(L1TranscriptMessage(role="user", content=user_text, kind=L1MessageKind.USER_REQUEST))
 
-        protocol_transcript, protocol_assistant_contents = self._build_l1_tool_protocol_transcript(
-            continuation,
-            diagnostic_kind="memory.exit_checkpoint.tool_protocol_invalid",
-        )
-        transcript.extend(protocol_transcript)
+        protocol_assistant_contents: list[str] = []
+        if self._persist_tool_protocol_to_l1(continuation):
+            protocol_transcript, protocol_assistant_contents = self._build_l1_tool_protocol_transcript(
+                continuation,
+                diagnostic_kind="memory.exit_checkpoint.tool_protocol_invalid",
+            )
+            transcript.extend(protocol_transcript)
 
         for text in continuation.emitted_reply_texts:
             rendered = str(text or "").strip()
@@ -341,6 +343,13 @@ class TurnManager:
                 )
             )
         return transcript, protocol_assistant_contents
+
+    @staticmethod
+    def _persist_tool_protocol_to_l1(continuation: TurnContinuation) -> bool:
+        snapshot = getattr(continuation, "turn_settings_snapshot", {}) or {}
+        if isinstance(snapshot, dict) and "prompt_log_enabled" in snapshot:
+            return bool(snapshot.get("prompt_log_enabled"))
+        return False
 
     @staticmethod
     def _tool_protocol_validation_error(messages: list[dict[str, Any]]) -> str:
@@ -1609,6 +1618,8 @@ class PalCore:
         from pal.memory.contracts import L1MessageKind, L1TranscriptMessage
 
         if not continuation.tool_protocol_messages:
+            return outcome
+        if not self.turn_manager._persist_tool_protocol_to_l1(continuation):
             return outcome
         original = outcome.commit_payload.transcript
         user_msg = next((m for m in original if m.role == "user"), None)

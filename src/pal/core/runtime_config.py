@@ -41,7 +41,7 @@ class RuntimeConfig:
     llm_compaction_timeout_seconds: float = 180.0
 
     # memory
-    keep_recent_tool_messages: int = 10
+    keep_recent_tool_messages: int = 5
     l1_tool_result_max_chars: int = 8_000
     l1_tool_result_preview_chars: int = 4_000
 

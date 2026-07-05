@@ -5,4 +5,4 @@ args = ["--stdio"]
 extensions = [".json", ".jsonc"]
 language_ids = ["json"]
 workspace_markers = [".git"]
-install_hint = "Install vscode-langservers-extracted."
+install_hint = "npm i -g vscode-langservers-extracted"

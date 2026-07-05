@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import shutil
 import socket
@@ -96,6 +97,7 @@ class _OutboundQueue:
 class PalV2BootstrapTests(unittest.TestCase):
     def setUp(self) -> None:
         self.runtime_root = Path(tempfile.mkdtemp(prefix="pal_bootstrap_test_"))
+        self._runtime_handles = []
         self.wizard = WizardService()
         self.registration = self.wizard.provision_runtime(
             display_name="PalV2 Test",
@@ -108,8 +110,16 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.wizard.provision_builtin_plugins(self.registration)
 
     def tearDown(self) -> None:
+        for handle in reversed(self._runtime_handles):
+            with contextlib.suppress(Exception):
+                asyncio.run(handle.stop_async())
         self.database.close()
         shutil.rmtree(self.runtime_root, ignore_errors=True)
+
+    def _compose_runtime(self, **kwargs):
+        handle = compose_runtime(**kwargs)
+        self._runtime_handles.append(handle)
+        return handle
 
     def _find_search_hit_by_canonical(self, core, search, canonical_path: str) -> dict:
         _ = core
@@ -215,7 +225,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertNotIn("pal_memories", tables)
 
     def test_compose_runtime_includes_proactive_runtime(self) -> None:
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -1035,12 +1045,14 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(calls[1][1]["model"], "claude-sonnet-4-5")
         self.assertEqual(calls[1][1]["system"], "rules")
         rendered_messages = calls[1][1]["messages"]
-        self.assertEqual(rendered_messages[1]["role"], "user")
-        self.assertIn("<developer-instruction>", rendered_messages[1]["content"][0]["text"])
-        self.assertIn("runtime guidance", rendered_messages[1]["content"][0]["text"])
-        self.assertEqual(rendered_messages[2]["role"], "user")
-        self.assertIn("<system-instruction>", rendered_messages[2]["content"][0]["text"])
-        self.assertIn("late system guidance", rendered_messages[2]["content"][0]["text"])
+        self.assertEqual(len(rendered_messages), 1)
+        self.assertEqual(rendered_messages[0]["role"], "user")
+        rendered_content = rendered_messages[0]["content"]
+        self.assertEqual(rendered_content[0]["text"], "hello")
+        self.assertIn("<developer-instruction>", rendered_content[1]["text"])
+        self.assertIn("runtime guidance", rendered_content[1]["text"])
+        self.assertIn("<system-instruction>", rendered_content[2]["text"])
+        self.assertIn("late system guidance", rendered_content[2]["text"])
         self.assertEqual(calls[1][1]["tools"][0]["name"], "probe_alias")
         self.assertEqual(calls[1][1]["thinking"], {"type": "enabled", "budget_tokens": 2048})
 
@@ -2184,7 +2196,7 @@ class PalV2BootstrapTests(unittest.TestCase):
     def test_compose_runtime_loads_first_party_sqlite_vec_plugin_via_plugin_host(self) -> None:
         self.wizard.seed_defaults(self.registration)
 
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -2217,7 +2229,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_compose_runtime_loads_first_party_web_plugins_and_default_tools(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -2256,7 +2268,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         if not _local_sidecar_bind_available():
             self.skipTest("local socket binding is unavailable in this test sandbox")
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -2285,7 +2297,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         wizard = WizardService()
         provisioned = wizard.provision_stub_runtime(root)
         try:
-            handle = compose_runtime(
+            handle = self._compose_runtime(
                 wizard=wizard,
                 registration=provisioned.registration,
                 database=provisioned.database,
@@ -2304,7 +2316,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_plugin_host_rescan_discovers_third_party_bundle_but_does_not_import_it(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -2333,7 +2345,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_plugin_host_rescan_and_attach_new_first_party_attaches_new_builtin_plugin(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -2398,7 +2410,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_plugin_attach_refreshes_import_cache_and_recompiles_capabilities(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -2507,7 +2519,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_builtin_plugins_detach_attach_refreshes_owned_module_caches(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -2556,7 +2568,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_core_reattach_delegates_plugin_owned_module_to_refresh_attach(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -2612,7 +2624,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_plugins_module_publishes_management_capabilities_and_can_detach_first_party_plugin(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -2634,7 +2646,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_plugin_detach_runs_module_cleanup_callbacks(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -2653,7 +2665,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_plugin_attach_detach_lifecycle_works_end_to_end(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -2705,7 +2717,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_memory_l3_regression_build_pack_uses_builtin_sqlite_vec_provider(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -2732,7 +2744,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_memory_l3_regression_capability_paths_round_trip_commit_recall_correct(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -3868,7 +3880,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_wizard_provisions_stub_runtime_before_bootstrap_composition(self) -> None:
         provisioned = self.wizard.provision_stub_runtime(self.runtime_root / "stub_runtime")
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=provisioned.registration,
             database=provisioned.database,
@@ -3886,7 +3898,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_compose_runtime_registers_seeded_socket_endpoint(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -3943,7 +3955,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.wizard.seed_defaults(self.registration)
 
         async def run() -> None:
-            handle = compose_runtime(
+            handle = self._compose_runtime(
                 wizard=self.wizard,
                 registration=self.registration,
                 database=self.database,
@@ -3966,7 +3978,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             binding_metadata={},
             send_policy_blob={},
         )
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -4054,7 +4066,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             binding_metadata={},
             send_policy_blob={},
         )
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -4093,7 +4105,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_core_lifecycle_owner_cannot_detach_recovery_socket_endpoint(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -4120,7 +4132,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             binding_metadata={"bot_token": "secret-bot-token"},
             send_policy_blob={"max_message_chars": 4096},
         )
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -4139,7 +4151,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_channel_provider_rescan_uses_manager_provider_registry(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -4165,7 +4177,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             enabled=True,
         )
 
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -4196,7 +4208,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_channel_provider_rescan_loads_new_runtime_root_provider(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -4280,7 +4292,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_llm_capabilities_are_read_only_and_do_not_expose_credentials(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -4313,7 +4325,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(llm_think_level.structured["effective_think_level"], DEFAULT_THINK_LEVEL)
 
     def test_compose_runtime_consumes_wizard_owned_database(self) -> None:
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -4324,7 +4336,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_web_search_capability_falls_back_and_auth_material_is_sanitized(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -4394,7 +4406,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_web_fetch_health_does_not_start_browser_service_and_disable_stops_manager(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,
@@ -4441,7 +4453,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_web_fetch_capability_falls_back_to_plain_http_and_runtime_stop_runs_shutdown_hook(self) -> None:
         self.wizard.seed_defaults(self.registration)
-        handle = compose_runtime(
+        handle = self._compose_runtime(
             wizard=self.wizard,
             registration=self.registration,
             database=self.database,

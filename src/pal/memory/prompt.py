@@ -10,7 +10,7 @@ from pal.shared import PromptAssemblyContext, PromptFragment, PromptFragmentProv
 if TYPE_CHECKING:
     from pal.core.runtime_config import RuntimeConfig
 
-_DEFAULT_KEEP_RECENT_TOOL_MESSAGES = 10
+_DEFAULT_KEEP_RECENT_TOOL_MESSAGES = 5
 
 
 @dataclass
@@ -255,18 +255,22 @@ def _is_synthetic_compaction_summary(message, *summary_texts: str) -> bool:
 
 def _build_cleared_tool_indices(messages: list, *, keep_recent: int) -> set[int]:
     turns = _build_l1_turn_tool_groups(messages)
-    total_groups = sum(len(groups) for groups in turns)
-    if total_groups <= keep_recent:
+    keep_turns = max(1, int(keep_recent or 0))
+    tool_turns = [groups for groups in turns if groups]
+    if len(tool_turns) <= keep_turns:
         return set()
 
     cleared: set[int] = set()
-    remaining_groups = total_groups
-    for groups in turns[:-1]:
-        if remaining_groups <= keep_recent:
+    turns_to_clear = len(tool_turns) - keep_turns
+    cleared_turns = 0
+    for groups in turns:
+        if not groups:
+            continue
+        if cleared_turns >= turns_to_clear:
             break
         for group in groups:
             cleared.update(group)
-        remaining_groups -= len(groups)
+        cleared_turns += 1
     return cleared
 
 

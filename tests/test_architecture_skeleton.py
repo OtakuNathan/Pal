@@ -3029,6 +3029,24 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
         self.assertEqual(cleared, {1, 2, 3, 4})
 
+    def test_memory_prompt_retention_counts_tool_turns_not_tool_batches(self) -> None:
+        from pal.memory.prompt import _build_cleared_tool_indices
+
+        messages = [
+            L1TranscriptMessage(role="user", content="turn 1"),
+            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_1"}]),
+            L1TranscriptMessage(role="tool", content="tool-1", tool_call_id="call_1"),
+            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_2"}]),
+            L1TranscriptMessage(role="tool", content="tool-2", tool_call_id="call_2"),
+            L1TranscriptMessage(role="user", content="turn 2"),
+            L1TranscriptMessage(role="assistant", content="", tool_calls=[{"id": "call_3"}]),
+            L1TranscriptMessage(role="tool", content="tool-3", tool_call_id="call_3"),
+        ]
+
+        cleared = _build_cleared_tool_indices(messages, keep_recent=2)
+
+        self.assertEqual(cleared, set())
+
     def test_memory_prompt_does_not_partially_clear_single_tool_heavy_turn(self) -> None:
         from pal.memory.prompt import _build_cleared_tool_indices
 

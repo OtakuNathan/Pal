@@ -4,4 +4,4 @@ command = ["csharp-ls"]
 extensions = [".cs"]
 language_ids = ["csharp"]
 workspace_markers = ["*.sln", "*.csproj", ".git"]
-install_hint = "Install csharp-ls or provide an OmniSharp runtime override."
+install_hint = "dotnet tool install -g csharp-ls (requires .NET SDK)"

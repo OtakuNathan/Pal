@@ -189,6 +189,7 @@ class MinionIntrospection(Protocol):
         "intro_minion_task_read",
         "op_minion_task_create",
         "op_minion_dispatch_workflow",
+        "op_minion_accept_reviewed_plan",
         "intro_minion_profile_list",
         "intro_minion_profile_read",
         "intro_minion_plan_search",
@@ -254,6 +255,7 @@ class MinionIntrospection(Protocol):
         "op_minion_recover_work_order",
         "op_minion_resume_work_order",
         "op_minion_tick_parent_dag",
+        "op_minion_accept_reviewed_plan",
         "op_minion_finalize",
         "op_minion_submit_repair_bill",
     ),
@@ -1228,6 +1230,162 @@ class MinionManagerProvider:
             return _capability_from_rpc("minion parent DAG ticked", result)
         except Exception as exc:
             return _capability_error("minion parent DAG tick failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
+        family="minion",
+        action_name="accept_reviewed_plan",
+        description=(
+            "Accept a reviewed minion plan already stored on a work order and resume execution by dispatching the accepted plan "
+            "to its workflow_next executor. Use after the user confirms an acceptance_pending plan. Normally pass only "
+            "work_order_id; Pal reads plan_review.plan_ref and review_gate_ref from that work order. If the work order is a "
+            "revision child with plan_review.source_work_order_id, manager dispatches the original source work order unless "
+            "dispatch_work_order_id is explicitly provided."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "work_order_id": {
+                    "type": "string",
+                    "description": "Work order holding plan_review.status=acceptance_pending or an equivalent reviewed plan state.",
+                },
+                "dispatch_work_order_id": {
+                    "type": "string",
+                    "description": "Optional work order to execute. Defaults to plan_review.source_work_order_id for revision children, otherwise work_order_id.",
+                },
+                "plan_ref": {
+                    "type": "object",
+                    "description": "Optional reviewed plan_ref override. Defaults to work_order.metadata.plan_review.plan_ref.",
+                },
+                "review_gate_ref": {
+                    "type": "object",
+                    "description": "Optional passing plan_acceptance gate ref. Defaults to work_order.metadata.plan_review.review_gate_ref.",
+                },
+                "reason": {"type": "string"},
+                "actor": {"type": "string"},
+                "auto_advance_modules": {"type": "boolean"},
+                "allow_human_override": {
+                    "type": "boolean",
+                    "description": "Allow acceptance without a review_gate_ref by recording an explicit human override. Defaults false.",
+                },
+            },
+            "required": ["work_order_id"],
+        },
+    )
+    def accept_reviewed_plan(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            args = dict(call.args or {})
+            work_order_id = str(args.get("work_order_id") or "").strip()
+            if not work_order_id:
+                raise MinionWorkOrderValidationError("work_order_id is required", field="work_order_id")
+            repository = self._repository()
+            snapshot = repository.read_work_order(work_order_id)
+            if snapshot.get("status") != "ok":
+                raise MinionWorkOrderValidationError(f"unknown work_order_id: {work_order_id}", field="work_order_id")
+            work_order = dict(snapshot.get("work_order") or {})
+            metadata = dict(work_order.get("metadata") or {})
+            plan_review = dict(metadata.get("plan_review") or {})
+            plan_ref = args.get("plan_ref") if isinstance(args.get("plan_ref"), dict) else plan_review.get("plan_ref")
+            if not isinstance(plan_ref, dict) or not plan_ref:
+                raise MinionWorkOrderValidationError(
+                    "reviewed plan acceptance requires plan_ref or work_order.metadata.plan_review.plan_ref",
+                    field="plan_ref",
+                )
+            review_gate_ref = (
+                dict(args.get("review_gate_ref"))
+                if isinstance(args.get("review_gate_ref"), dict)
+                else dict(plan_review.get("review_gate_ref") or {})
+            )
+            allow_human_override = _coerce_bool(args.get("allow_human_override"))
+            if not review_gate_ref and not allow_human_override:
+                raise MinionWorkOrderValidationError(
+                    "reviewed plan acceptance requires review_gate_ref unless allow_human_override=true",
+                    field="review_gate_ref",
+                )
+            reason = str(args.get("reason") or "user accepted reviewed minion plan").strip()
+            human_override = {
+                "reason": reason,
+                "actor": str(args.get("actor") or "human").strip() or "human",
+                "source": "control_action",
+                "action_kind": "minion_plan_accept_reviewed",
+                "target_scope": "minion",
+                "target_id": work_order_id,
+                "interaction_origin": "capability",
+                "interaction_kind": "minion_plan_acceptance",
+            }
+            accepted = repository.accept_plan_ref(
+                plan_ref,
+                reason=reason,
+                review_gate_ref=review_gate_ref or None,
+                human_override=human_override,
+            )
+            accepted_ref = dict(accepted.get("plan_ref") or {})
+            dispatch_work_order_id = str(args.get("dispatch_work_order_id") or "").strip()
+            if not dispatch_work_order_id:
+                dispatch_work_order_id = str(plan_review.get("source_work_order_id") or "").strip() or work_order_id
+            dispatch_params: dict[str, Any] = {
+                "work_order_id": dispatch_work_order_id,
+                "plan_ref": accepted_ref,
+                "review_gate_ref": review_gate_ref,
+            }
+            if "auto_advance_modules" in args:
+                dispatch_params["auto_advance_modules"] = _coerce_bool(args.get("auto_advance_modules"))
+            self._ensure_manager_started()
+            dispatch = self.client.request_sync("dispatch_accepted_plan", dispatch_params)
+            accepted_state = {
+                "status": "accepted",
+                "plan_ref": accepted_ref,
+                "review_gate_ref": review_gate_ref,
+                "acceptance": accepted,
+                "dispatch": dispatch,
+                "updated_at": utc_now(),
+                "next_action": "executing_plan",
+                "human_decision": human_override,
+            }
+            repository.merge_work_order_metadata(dispatch_work_order_id, {"plan_review": accepted_state})
+            if dispatch_work_order_id != work_order_id:
+                repository.merge_work_order_metadata(
+                    work_order_id,
+                    {
+                        "plan_review": {
+                            **accepted_state,
+                            "dispatch_work_order_id": dispatch_work_order_id,
+                        }
+                    },
+                )
+            repository.record_minion_event(
+                {
+                    "event_kind": "plan_accepted",
+                    "work_order_id": dispatch_work_order_id,
+                    "minion_id": "",
+                    "run_id": "",
+                    "minion_profile": "control",
+                    "payload": {
+                        "status": "accepted",
+                        "summary": "user accepted reviewed minion plan",
+                        "plan_ref": accepted_ref,
+                        "review_gate_ref": review_gate_ref,
+                        "dispatch": dispatch,
+                    },
+                }
+            )
+            return _capability_from_rpc(
+                "minion reviewed plan accepted and dispatched",
+                {
+                    "status": str(dispatch.get("status") or "accepted"),
+                    "work_order_id": work_order_id,
+                    "dispatch_work_order_id": dispatch_work_order_id,
+                    "plan_ref": accepted_ref,
+                    "review_gate_ref": review_gate_ref,
+                    "acceptance": accepted,
+                    "dispatch": dispatch,
+                },
+            )
+        except MinionWorkOrderValidationError as exc:
+            return _capability_invalid("minion reviewed plan acceptance invalid", exc)
+        except Exception as exc:
+            return _capability_error("minion reviewed plan acceptance failed", exc)
 
     @capability_action(
         namespace=OPERATION_NAMESPACE,

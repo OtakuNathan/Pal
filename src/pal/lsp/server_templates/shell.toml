@@ -5,4 +5,4 @@ args = ["start"]
 extensions = [".sh", ".bash", ".zsh"]
 language_ids = ["shellscript", "shell", "bash"]
 workspace_markers = [".git"]
-install_hint = "Install bash-language-server."
+install_hint = "npm i -g bash-language-server"

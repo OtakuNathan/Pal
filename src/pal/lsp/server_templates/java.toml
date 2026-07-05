@@ -4,4 +4,4 @@ command = ["jdtls"]
 extensions = [".java"]
 language_ids = ["java"]
 workspace_markers = ["pom.xml", "build.gradle", ".git"]
-install_hint = "Install jdtls."
+install_hint = "Install jdtls (Eclipse Java LSP) via system package manager"

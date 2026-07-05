@@ -496,7 +496,9 @@ class TestServiceGeneration(unittest.TestCase):
         self.assertIn("ExecStartPre=/usr/bin/mkdir -p /tmp/pal", content)
         self.assertNotIn("--debug-prompt", content)
         self.assertIn("Restart=on-failure", content)
-        self.assertIn("StandardOutput=append:/tmp/pal/pal.log", content)
+        self.assertIn("StandardOutput=journal", content)
+        self.assertIn("StandardError=journal", content)
+        self.assertNotIn("append:/tmp/pal/pal.log", content)
         self.assertIn("WantedBy=default.target", content)
 
     def test_generate_service_content_includes_proxy_environment(self) -> None:
@@ -585,8 +587,8 @@ class TestServiceGeneration(unittest.TestCase):
         self.assertEqual(payload["KeepAlive"], {"SuccessfulExit": False})
         self.assertEqual(payload["WorkingDirectory"], "/Users/test/.pal")
         self.assertEqual(payload["EnvironmentVariables"], {"PYTHONUNBUFFERED": "1"})
-        self.assertEqual(payload["StandardOutPath"], "/tmp/pal/pal.log")
-        self.assertEqual(payload["StandardErrorPath"], "/tmp/pal/pal.log")
+        self.assertNotIn("StandardOutPath", payload)
+        self.assertNotIn("StandardErrorPath", payload)
 
     def test_generate_launchd_plist_includes_proxy_environment(self) -> None:
         from pal.wizard.cli import _generate_launchd_plist

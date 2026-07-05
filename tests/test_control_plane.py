@@ -29,7 +29,7 @@ from pal.control import (
     route_from_channel_envelope,
 )
 from pal.control import interactions as control_interactions
-from pal.core import PalCore, TurnContinuation, register_with_core as register_core_with_core
+from pal.core import L1CommitPayload, PalCore, TurnContinuation, TurnOutcome, register_with_core as register_core_with_core
 from pal.core.contracts import PendingControlRequest
 from pal.core.runtime_config import RuntimeConfig
 from pal.core.turns import ToolObservation, channel_turn_program
@@ -37,7 +37,7 @@ from pal.execution import CapabilityResult
 from pal.foundation import EventEnvelope
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
 from pal.llm.repository import DEFAULT_THINK_LEVEL
-from pal.memory import L1MessageKind, MemoryService, register_with_core as register_memory_with_core
+from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryService, register_with_core as register_memory_with_core
 from pal.shared import EventKind, PromptAssemblyContext, RuntimeStatus, SourceKind
 from pal.stream_events import NormalizedLLMStreamEvent
 
@@ -541,6 +541,79 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                 },
             ),
         )
+
+    def _make_tool_protocol_continuation(self, *, prompt_log_enabled: bool) -> TurnContinuation:
+        envelope = self._make_channel_envelope(turn_id="turn-tool-memory", request_id="req-tool-memory")
+        continuation = TurnContinuation(
+            turn_id="turn-tool-memory",
+            channel_envelope=envelope,
+            program=channel_turn_program(envelope),
+            correlation_id="req-tool-memory",
+            control_scope_key="socket:socket_main:sess-1",
+            turn_settings_snapshot={"think_level": "balanced", "prompt_log_enabled": prompt_log_enabled},
+        )
+        continuation.tool_protocol_messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": "checking runtime state",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "shell", "arguments": "{\"cmd\": \"date\"}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "large tool result that should not be durable by default",
+                },
+            ]
+        )
+        return continuation
+
+    @staticmethod
+    def _make_tool_summary_outcome() -> TurnOutcome:
+        return TurnOutcome(
+            turn_id="turn-tool-memory",
+            final_reply="final answer",
+            commit_payload=L1CommitPayload(
+                turn_id="turn-tool-memory",
+                transcript=[
+                    L1TranscriptMessage(role="user", content="hello", kind=L1MessageKind.USER_REQUEST),
+                    L1TranscriptMessage(
+                        role="assistant",
+                        content="final answer",
+                        kind=L1MessageKind.ASSISTANT_REPLY,
+                        tool_trace="shell(ok): checked runtime state",
+                    ),
+                ],
+            ),
+        )
+
+    async def test_l1_commit_keeps_tool_summary_without_full_protocol_by_default(self) -> None:
+        continuation = self._make_tool_protocol_continuation(prompt_log_enabled=False)
+
+        outcome = self.core._enrich_transcript_with_tool_protocol(self._make_tool_summary_outcome(), continuation)
+
+        transcript = outcome.commit_payload.transcript
+        self.assertEqual([message.role for message in transcript], ["user", "assistant"])
+        self.assertEqual(transcript[-1].tool_trace, "shell(ok): checked runtime state")
+        self.assertFalse(any(message.tool_calls for message in transcript))
+        self.assertFalse(any(message.role == "tool" for message in transcript))
+
+    async def test_l1_commit_persists_full_tool_protocol_when_prompt_log_enabled(self) -> None:
+        continuation = self._make_tool_protocol_continuation(prompt_log_enabled=True)
+
+        outcome = self.core._enrich_transcript_with_tool_protocol(self._make_tool_summary_outcome(), continuation)
+
+        transcript = outcome.commit_payload.transcript
+        self.assertEqual([message.role for message in transcript], ["user", "assistant", "tool", "assistant"])
+        self.assertEqual(transcript[1].tool_calls[0]["id"], "call_1")
+        self.assertEqual(transcript[2].tool_call_id, "call_1")
+        self.assertIn("large tool result", transcript[2].content)
 
     async def test_set_think_updates_future_turn_snapshot_only(self) -> None:
         await self.core.handle_control_action_async(
@@ -1183,8 +1256,8 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         checkpoint = self.memory_service.l1_store.items[-1]
         kinds = [item.kind for item in checkpoint]
         self.assertIn(L1MessageKind.USER_REQUEST, kinds)
-        self.assertIn(L1MessageKind.ASSISTANT_TOOL_CALL, kinds)
-        self.assertIn(L1MessageKind.TOOL_RESULT, kinds)
+        self.assertNotIn(L1MessageKind.ASSISTANT_TOOL_CALL, kinds)
+        self.assertNotIn(L1MessageKind.TOOL_RESULT, kinds)
         self.assertIn(L1MessageKind.ASSISTANT_REPLY, kinds)
         self.assertIn(L1MessageKind.TURN_INTERRUPTED, kinds)
         summary = next(item.content for item in checkpoint if item.kind == L1MessageKind.TURN_INTERRUPTED)
