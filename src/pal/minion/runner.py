@@ -58,7 +58,14 @@ from pal.memory import (
     MemoryService,
     register_with_core as register_memory_with_core,
 )
-from pal.memory.rendering import COMPACTION_SCHEMA_MINION_V1, is_compaction_payload, render_compact_context_for_llm
+from pal.memory.tool_protocol import l1_tool_protocol_transcript
+from pal.minion.compact import (
+    build_minion_prior_user_inputs_compaction_payload,
+    build_minion_prior_user_inputs_source_text,
+    compact_minion_memory_service,
+    is_minion_compaction_payload,
+    render_minion_compact_context_for_llm,
+)
 from pal.minion.execution_strategy import execution_strategy_from_pack
 from pal.minion.git_env import inspect_milestone_checkpoint
 from pal.minion.gates import checkpoint_gate_spec_for_pack, pack_requires_plan_artifact_validation
@@ -328,8 +335,7 @@ class _MinionLLMRuntimeAdapter:
         if callable(method):
             result = await asyncio.to_thread(method, *args, **kwargs)
             return dict(result or {}) if isinstance(result, dict) else {}
-        source_text = str(args[0] if args else kwargs.get("source_text") or "").strip()
-        return _fallback_minion_compaction_payload(source_text)
+        return {}
 
     async def asummarize_compaction(self, *args, **kwargs) -> str:
         method = getattr(self._base, "asummarize_compaction", None)
@@ -355,8 +361,21 @@ class _MinionMemoryServiceAdapter:
     def build_compaction_source_text(self, *, target_input_budget: int) -> str:
         return self._runner._minion_compaction_source_text(self._state, target_input_budget=target_input_budget)
 
+    def build_compaction_payload(
+        self,
+        *,
+        target_input_budget: int,
+        reserved_output_tokens: int = 0,
+        profile: CompactionProfile = CompactionProfile.MINION,
+    ) -> dict[str, Any]:
+        _ = reserved_output_tokens
+        if profile != CompactionProfile.MINION and str(profile or "").strip().lower() != CompactionProfile.MINION.value:
+            return {}
+        items = getattr(getattr(self._state.memory_service, "l1_store", None), "items", [])
+        return build_minion_prior_user_inputs_compaction_payload(items, target_input_budget=target_input_budget)
+
     def compact(self, request: MemoryCompactRequest):
-        return self._state.memory_service.compact(request)
+        return compact_minion_memory_service(self._state.memory_service, request)
 
     def commit_l1(self, request: MemoryCommitRequest):
         return self._state.memory_service.commit_l1(request)
@@ -786,7 +805,6 @@ class MinionRunner:
 
         def build_commit_payload(final_reply: str, observations: list[Any], reply_texts: list[str]) -> L1CommitPayload:
             _ = reply_texts
-            tool_trace = _render_minion_tool_summary(observations)
             transcript = [
                 L1TranscriptMessage(
                     role="user",
@@ -797,7 +815,6 @@ class MinionRunner:
                     role="assistant",
                     content=final_reply or "minion completed",
                     kind=L1MessageKind.ASSISTANT_REPLY,
-                    tool_trace=tool_trace or None,
                 ),
             ]
             return L1CommitPayload(turn_id=self.run_id, transcript=transcript, tool_observations=list(observations))
@@ -1174,9 +1191,10 @@ class MinionRunner:
             and len(state.tool_protocol_messages) > before_protocol_len
             and self._persist_tool_protocol_to_l1()
         ):
+            protocol_transcript, _ = l1_tool_protocol_transcript(state.tool_protocol_messages[before_protocol_len:])
             await self._commit_minion_l1(
                 state,
-                _tool_protocol_transcript(state.tool_protocol_messages[before_protocol_len:]),
+                protocol_transcript,
             )
         return result
 
@@ -1276,7 +1294,7 @@ class MinionRunner:
             state.memory_service.commit_l1(MemoryCommitRequest(turn_id=self.run_id, transcript=transcript))
 
     def _persist_tool_protocol_to_l1(self) -> bool:
-        return minion_debug_log_enabled(self.pack.metadata)
+        return True
 
     def _render_minion_memory_context(self, state: MinionAgentLoopState) -> str:
         pack = state.memory_service.build_pack(MemoryPackRequest(turn_kind="minion", work_order_id=self.pack.work_order_id))
@@ -1301,40 +1319,13 @@ class MinionRunner:
         summary = str(getattr(entry, "summary", "") or "").strip()
         rendered = str(getattr(entry, "rendered", "") or "").strip()
         payload = getattr(entry, "payload", None)
-        if is_compaction_payload(payload):
-            return render_compact_context_for_llm(summary=summary, payload=dict(payload or {}))
+        if is_minion_compaction_payload(payload):
+            return render_minion_compact_context_for_llm(summary=summary, payload=dict(payload or {}))
         return rendered or summary
 
     def _minion_compaction_source_text(self, state: MinionAgentLoopState, *, target_input_budget: int) -> str:
-        parts: list[str] = []
-        with contextlib.suppress(Exception):
-            parts.append(
-                "[Task Assignment Snapshot]\n"
-                + json.dumps(
-                    _prompt_scaffold_summary(self._prompt_scaffold()),
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-            )
-        primary_input = _minion_primary_input(state.channel_envelope)
-        if primary_input:
-            parts.append("[Task Primary Input]\n" + primary_input)
-        existing = state.memory_service.build_compaction_source_text(target_input_budget=target_input_budget)
-        if existing:
-            parts.append("[Prior Task Memory]\n" + existing)
-        if state.tool_protocol_messages:
-            rendered = []
-            for message in state.tool_protocol_messages:
-                role = str(message.get("role") or "")
-                content = str(message.get("content") or "")
-                if message.get("tool_calls"):
-                    content += "\n" + json.dumps(message.get("tool_calls"), ensure_ascii=False, sort_keys=True)
-                rendered.append(f"{role}: {content}")
-            parts.append("[Current Task Trajectory]\n" + "\n".join(rendered))
-        if not parts:
-            parts.append(_minion_primary_input(state.channel_envelope))
-        raw = "\n\n".join(parts).strip()
-        return raw[: max(256, target_input_budget or 4096)]
+        items = getattr(getattr(state.memory_service, "l1_store", None), "items", [])
+        return build_minion_prior_user_inputs_source_text(items, target_input_budget=target_input_budget)
 
     def _requires_first_tool_call(self) -> bool:
         if bool((self.pack.metadata or {}).get("allow_text_only_completion")):
@@ -2636,56 +2627,6 @@ async def _minion_noop_failure_handler(*args: Any, **kwargs: Any) -> _MinionFail
     return _MinionFailureResult(user_feedback="minion turn failed before a normal reply could be produced")
 
 
-def _tool_protocol_transcript(messages: list[dict[str, Any]]) -> list[L1TranscriptMessage]:
-    transcript: list[L1TranscriptMessage] = []
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role") or "").strip()
-        if role == "assistant" and message.get("tool_calls"):
-            transcript.append(
-                L1TranscriptMessage(
-                    role="assistant",
-                    content=str(message.get("content") or ""),
-                    kind=L1MessageKind.ASSISTANT_TOOL_CALL,
-                    tool_calls=[dict(item) for item in list(message.get("tool_calls") or []) if isinstance(item, dict)],
-                )
-            )
-        elif role == "tool":
-            transcript.append(
-                L1TranscriptMessage(
-                    role="tool",
-                    content=str(message.get("content") or ""),
-                    kind=L1MessageKind.TOOL_RESULT,
-                    tool_call_id=str(message.get("tool_call_id") or ""),
-                )
-            )
-    return transcript
-
-
-def _render_minion_tool_summary(observations: list[Any], *, max_summary_chars: int = 500) -> str:
-    if not observations:
-        return ""
-    per_item_limit = max(80, max_summary_chars // 3)
-    parts: list[str] = []
-    total = 0
-    for observation in observations:
-        tool_name = str(getattr(observation, "tool_name", "") or getattr(observation, "name", "") or "tool")
-        ok = bool(getattr(observation, "ok", False))
-        status = "ok" if ok else "error"
-        summary = str(getattr(observation, "summary", "") or getattr(observation, "text", "") or "")
-        summary = " ".join(summary.split())[:per_item_limit]
-        line = f"{tool_name}({status}): {summary}"
-        if total + len(line) > max_summary_chars:
-            remaining = len(observations) - len(parts)
-            if remaining > 0:
-                parts.append(f"... +{remaining} more")
-            break
-        parts.append(line)
-        total += len(line)
-    return "\n".join(parts)
-
-
 def _llm_tools_for_allowed(execution_runtime: Any, allowed_capabilities: list[str]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -2847,31 +2788,6 @@ def _preview_text(value: Any, *, limit: int = 400) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 3)].rstrip() + "..."
-
-
-def _fallback_minion_compaction_payload(source_text: str) -> dict[str, Any]:
-    source_preview = _preview_text(source_text, limit=1200)
-    summary = (
-        "Minion run memory was compacted with a deterministic fallback because no model compaction "
-        "method was available. Recheck the work order, plan artifact, current milestone, checkpoint "
-        "ledger, and workspace before acting."
-    )
-    return {
-        "schema": COMPACTION_SCHEMA_MINION_V1,
-        "kind": "minion",
-        "continuity": {
-            "current_goal": "Continue the assigned minion task from current source-of-truth artifacts.",
-            "completed_work": [],
-            "current_position": source_preview,
-            "next_actions": ["Reconstruct the current milestone state from the work order, plan, and workspace."],
-            "open_questions": [],
-            "risks": ["This fallback summary is conservative and must be verified against source-of-truth state."],
-        },
-        "summary": {
-            "summary": summary,
-            "search_text": f"{summary}\n{source_preview}".strip(),
-        },
-    }
 
 
 def _optional_positive_int(value: Any) -> int | None:

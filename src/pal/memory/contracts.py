@@ -52,9 +52,9 @@ class L1TranscriptMessage:
     role: str
     content: str
     kind: L1MessageKind | str = ""
-    tool_trace: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

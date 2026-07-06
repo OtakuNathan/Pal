@@ -31,19 +31,19 @@ from pal.memory.contracts import (
     MemoryPack,
     MemoryPackRequest,
     MemoryServicePort,
-    CompactionProfile,
+)
+from pal.memory.compact import (
+    SUMMARY_ENTRY_ID,
+    SUMMARY_TITLE,
+    build_pal_compaction_source_text,
+    coerce_structured_compaction_payload,
+    current_summary_from_l1,
+    flatten_l1_context,
+    normalize_l1_transcript,
 )
 from pal.memory.repository import L3ProviderSelector
-from pal.memory.rendering import (
-    COMPACTION_SCHEMA_MINION_V1,
-    COMPACTION_SCHEMA_PAL_V1,
-    COMPACTION_SCHEMA_V2,
-    render_compact_context_for_llm,
-)
 from pal.shared import RuntimeStatus
 
-SUMMARY_ENTRY_ID = "memory_summary_current"
-SUMMARY_TITLE = "Conversation Summary"
 L2_WORKING_SET_CAPACITY = 128
 TOP_OF_MIND_LIMIT = 8
 LOGGER = logging.getLogger(__name__)
@@ -91,7 +91,7 @@ class InMemoryL1Store(L1Store):
     items: list[list[L1TranscriptMessage]] = field(default_factory=list)
 
     def append(self, item: list[L1TranscriptMessage] | str) -> None:
-        normalized = _normalize_l1_transcript(item)
+        normalized = normalize_l1_transcript(item)
         if normalized:
             self.items.append(normalized)
 
@@ -242,10 +242,10 @@ class MemoryService(MemoryServicePort):
     def compact(self, request: MemoryCompactRequest) -> MemoryCompactResult:
         if not request.metadata.get("structured_compaction") and not str(request.metadata.get("semantic_summary") or "").strip():
             raise ValueError("memory compact requires structured_compaction or semantic_summary")
-        payload = _coerce_structured_compaction_payload(
+        payload = coerce_structured_compaction_payload(
             request.metadata.get("structured_compaction"),
             fallback_summary=str(request.metadata.get("semantic_summary") or "").strip(),
-            existing_summary=_current_summary_from_l1(self.l1_store.items),
+            existing_summary=current_summary_from_l1(self.l1_store.items),
             profile=request.profile,
         )
         summary_entry = payload["summary_entry"]
@@ -260,6 +260,7 @@ class MemoryService(MemoryServicePort):
                     role="assistant",
                     content=summary_entry.rendered or summary_entry.summary,
                     kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
+                    payload=dict(summary_entry.payload or {}),
                 )
             ]]
             self.remove_projected_entries([SUMMARY_ENTRY_ID])
@@ -285,16 +286,9 @@ class MemoryService(MemoryServicePort):
         return self.compact(request)
 
     def commit_l1(self, request: MemoryCommitRequest) -> MemoryCommitResult:
-        committed_transcript = _normalize_l1_transcript(request.transcript)
+        committed_transcript = normalize_l1_transcript(request.transcript)
         if not committed_transcript:
             return MemoryCommitResult(status=RuntimeStatus.SKIPPED, committed_transcript=[])
-        validation = _validate_l1_tool_protocol(committed_transcript)
-        if not validation.ok:
-            return MemoryCommitResult(
-                status=RuntimeStatus.INVALID,
-                committed_transcript=[],
-                metadata={"turn_id": request.turn_id, "error": validation.reason},
-            )
         try:
             self.l1_store.append(committed_transcript)
         except Exception:
@@ -316,10 +310,10 @@ class MemoryService(MemoryServicePort):
     def build_pack(self, request: MemoryPackRequest) -> MemoryPack:
         if request.turn_kind == "proactive_trigger":
             return MemoryPack(metadata={"turn_kind": request.turn_kind})
-        current_summary = _current_summary_from_l1(self.l1_store.items)
+        current_summary = current_summary_from_l1(self.l1_store.items)
         hot_entries = self.l2_store.list_hot_entries()
         return MemoryPack(
-            l1_recent_context=_flatten_recent_l1_context(self.l1_store.items),
+            l1_recent_context=flatten_l1_context(self.l1_store.items),
             current_summary=current_summary,
             l2_working_memory=hot_entries,
             metadata={
@@ -333,24 +327,14 @@ class MemoryService(MemoryServicePort):
         return self.build_pack(request)
 
     def build_compaction_source_text(self, *, target_input_budget: int) -> str:
-        current_summary = _current_summary_from_l1(self.l1_store.items)
-        recent_l1 = _flatten_recent_l1_context(self.l1_store.items)
-        rendered_turns = _render_l1_recent_context(recent_l1)
-        limit = max(256, target_input_budget or 0)
-        summary_text = ""
-        if current_summary is not None:
-            summary_text = current_summary.rendered.strip() or current_summary.summary.strip()
-        return _render_compaction_source(
-            summary_text=summary_text,
-            recent_text=rendered_turns,
-            limit=limit,
-        )
+        return build_pal_compaction_source_text(self.l1_store.items, target_input_budget=target_input_budget)
 
     def project_l3_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = True) -> None:
         self.project_l2_entries(entries, touch=touch, top_of_mind=top_of_mind)
 
     def project_l2_entries(self, entries: list[L2Entry], *, touch: bool, top_of_mind: bool = True) -> None:
-        evicted = self.l2_store.upsert_entries(entries, touch=touch, top_of_mind=top_of_mind)
+        memory_entries = [entry for entry in entries if _is_memory_projection_entry(entry)]
+        evicted = self.l2_store.upsert_entries(memory_entries, touch=touch, top_of_mind=top_of_mind)
         self._retire_entries(evicted)
 
     def project_mutation(self, result: L3MutationResult) -> None:
@@ -400,263 +384,6 @@ class MemoryService(MemoryServicePort):
             return None
 
 
-def _normalize_l1_transcript(item: list[L1TranscriptMessage] | list[dict[str, object]] | str) -> list[L1TranscriptMessage]:
-    if isinstance(item, str):
-        content = item.strip()
-        return [L1TranscriptMessage(role="assistant", content=content)] if content else []
-    normalized: list[L1TranscriptMessage] = []
-    for entry in list(item or []):
-        if isinstance(entry, L1TranscriptMessage):
-            role = str(entry.role or "").strip()
-            content = entry.content.strip()
-            tool_calls = entry.tool_calls
-            tool_call_id = entry.tool_call_id
-            if content or (role == "assistant" and tool_calls) or (role == "tool" and tool_call_id):
-                normalized.append(
-                    L1TranscriptMessage(
-                        role=role,
-                        content=content,
-                        kind=_normalize_l1_message_kind(
-                            entry.kind,
-                            role=role,
-                            tool_calls=tool_calls,
-                            tool_call_id=tool_call_id,
-                        ),
-                        tool_trace=entry.tool_trace,
-                        tool_calls=tool_calls,
-                        tool_call_id=tool_call_id,
-                    )
-                )
-            continue
-        if isinstance(entry, dict):
-            role = str(entry.get("role") or "").strip()
-            content = str(entry.get("content") or "").strip()
-            tool_calls = entry.get("tool_calls")
-            tool_call_id = entry.get("tool_call_id")
-            if role and (content or (role == "assistant" and tool_calls) or (role == "tool" and tool_call_id)):
-                normalized.append(
-                    L1TranscriptMessage(
-                        role=role,
-                        content=content,
-                        kind=_normalize_l1_message_kind(
-                            entry.get("kind"),
-                            role=role,
-                            tool_calls=tool_calls,
-                            tool_call_id=tool_call_id,
-                        ),
-                        tool_calls=tool_calls,
-                        tool_call_id=tool_call_id,
-                    )
-                )
-    return normalized
-
-
-@dataclass(frozen=True)
-class _L1ToolProtocolValidation:
-    ok: bool
-    reason: str = ""
-
-
-def _validate_l1_tool_protocol(messages: list[L1TranscriptMessage]) -> _L1ToolProtocolValidation:
-    pending_tool_ids: set[str] = set()
-    pending_assistant_index: int | None = None
-    for index, message in enumerate(messages):
-        role = str(message.role or "").strip()
-        if pending_tool_ids and role != "tool":
-            return _L1ToolProtocolValidation(
-                ok=False,
-                reason=(
-                    f"assistant tool_calls at index {pending_assistant_index} missing tool results: "
-                    f"{', '.join(sorted(pending_tool_ids))}"
-                ),
-            )
-        if role == "assistant" and message.tool_calls:
-            tool_call_ids = _extract_l1_tool_call_ids(message.tool_calls)
-            if not tool_call_ids:
-                return _L1ToolProtocolValidation(
-                    ok=False,
-                    reason=f"assistant tool_calls at index {index} do not have complete ids",
-                )
-            if len(tool_call_ids) != len(set(tool_call_ids)):
-                return _L1ToolProtocolValidation(
-                    ok=False,
-                    reason=f"assistant tool_calls at index {index} contain duplicate ids",
-                )
-            pending_tool_ids = set(tool_call_ids)
-            pending_assistant_index = index
-            continue
-        if role == "tool":
-            tool_call_id = str(message.tool_call_id or "").strip()
-            if not tool_call_id:
-                return _L1ToolProtocolValidation(
-                    ok=False,
-                    reason=f"tool message at index {index} is missing tool_call_id",
-                )
-            if not pending_tool_ids:
-                return _L1ToolProtocolValidation(
-                    ok=False,
-                    reason=f"tool message at index {index} has no preceding assistant tool_calls",
-                )
-            if tool_call_id not in pending_tool_ids:
-                return _L1ToolProtocolValidation(
-                    ok=False,
-                    reason=f"tool message at index {index} has unexpected tool_call_id {tool_call_id}",
-                )
-            pending_tool_ids.remove(tool_call_id)
-            continue
-    if pending_tool_ids:
-        return _L1ToolProtocolValidation(
-            ok=False,
-            reason=(
-                f"assistant tool_calls at index {pending_assistant_index} missing tool results: "
-                f"{', '.join(sorted(pending_tool_ids))}"
-            ),
-        )
-    return _L1ToolProtocolValidation(ok=True)
-
-
-def _extract_l1_tool_call_ids(tool_calls: object) -> list[str]:
-    if not isinstance(tool_calls, list) or not tool_calls:
-        return []
-    ids: list[str] = []
-    for tool_call in tool_calls:
-        call_id = ""
-        if isinstance(tool_call, dict):
-            call_id = str(tool_call.get("id") or "").strip()
-        else:
-            call_id = str(getattr(tool_call, "id", "") or getattr(tool_call, "call_id", "") or "").strip()
-        if not call_id:
-            return []
-        ids.append(call_id)
-    return ids
-
-
-def _flatten_recent_l1_context(items: list[list[L1TranscriptMessage]]) -> list[L1TranscriptMessage]:
-    flattened: list[L1TranscriptMessage] = []
-    for transcript in items:
-        flattened.extend(_normalize_l1_transcript(transcript))
-    return flattened
-
-
-def _current_summary_from_l1(items: list[list[L1TranscriptMessage]]) -> L2Entry | None:
-    for message in _flatten_recent_l1_context(items):
-        kind = _normalize_l1_message_kind(
-            message.kind,
-            role=str(message.role or "").strip(),
-            tool_calls=message.tool_calls,
-            tool_call_id=message.tool_call_id,
-        )
-        if kind != L1MessageKind.RUNTIME_CONTEXT_SUMMARY:
-            continue
-        content = str(message.content or "").strip()
-        if not content:
-            continue
-        return L2Entry(
-            entry_id=SUMMARY_ENTRY_ID,
-            kind="summary",
-            scope="system",
-            title=SUMMARY_TITLE,
-            summary=content,
-            source_kind="l1_compaction",
-            candidate_state="stable",
-            rendered=content,
-            search_text=content,
-        )
-    return None
-
-
-def _render_l1_recent_context(messages: list[L1TranscriptMessage]) -> str:
-    lines: list[str] = []
-    for message in messages:
-        role = str(message.role or "").strip()
-        content = str(message.content or "").strip()
-        kind = _normalize_l1_message_kind(
-            message.kind,
-            role=role,
-            tool_calls=message.tool_calls,
-            tool_call_id=message.tool_call_id,
-        )
-        if kind not in _COMPACTABLE_L1_MESSAGE_KINDS:
-            continue
-        if role and content:
-            lines.append(f"{role}: {content}")
-    return "\n".join(lines).strip()
-
-
-_COMPACTABLE_L1_MESSAGE_KINDS = frozenset({
-    L1MessageKind.USER_REQUEST,
-    L1MessageKind.ASSISTANT_REPLY,
-    L1MessageKind.TURN_INTERRUPTED,
-    L1MessageKind.TURN_ABORTED,
-})
-
-
-def _normalize_l1_message_kind(
-    value: object,
-    *,
-    role: str,
-    tool_calls: object = None,
-    tool_call_id: object = None,
-) -> L1MessageKind:
-    raw = str(value or "").strip()
-    if raw:
-        try:
-            return L1MessageKind(raw)
-        except ValueError:
-            pass
-    normalized_role = str(role or "").strip()
-    if normalized_role == "tool":
-        return L1MessageKind.TOOL_RESULT
-    if normalized_role == "assistant" and tool_calls:
-        return L1MessageKind.ASSISTANT_TOOL_CALL
-    if normalized_role == "assistant":
-        return L1MessageKind.ASSISTANT_REPLY
-    if normalized_role == "user":
-        return L1MessageKind.USER_REQUEST
-    if tool_call_id:
-        return L1MessageKind.TOOL_RESULT
-    return L1MessageKind.ASSISTANT_REPLY
-
-
-def _render_compaction_source(*, summary_text: str, recent_text: str, limit: int) -> str:
-    summary_section = f"[Current Summary]\n{summary_text.strip()}" if summary_text.strip() else ""
-    recent_section = f"[Recent L1]\n{recent_text.strip()}" if recent_text.strip() else ""
-    raw = "\n\n".join(part for part in (summary_section, recent_section) if part).strip()
-    if not raw:
-        return ""
-    if len(raw) <= limit:
-        return raw
-    if not summary_section:
-        return _tail_clip(raw, limit)
-    if not recent_section:
-        return _head_clip(raw, limit)
-
-    separator = "\n\n"
-    summary_budget = min(len(summary_section), max(128, limit // 4))
-    recent_budget = max(1, limit - summary_budget - len(separator))
-    summary_part = _head_clip(summary_section, summary_budget)
-    recent_part = _tail_clip(recent_section, recent_budget)
-    return f"{summary_part}{separator}{recent_part}".strip()
-
-
-def _head_clip(text: str, limit: int) -> str:
-    normalized = str(text or "").strip()
-    if len(normalized) <= limit:
-        return normalized
-    if limit <= 20:
-        return normalized[:limit].rstrip()
-    return f"{normalized[: limit - 18].rstrip()}\n[... clipped]"
-
-
-def _tail_clip(text: str, limit: int) -> str:
-    normalized = str(text or "").strip()
-    if len(normalized) <= limit:
-        return normalized
-    if limit <= 20:
-        return normalized[-limit:].lstrip()
-    return f"[... clipped]\n{normalized[-(limit - 18):].lstrip()}"
-
-
 def _normalize_l2_entry(entry: L2Entry) -> L2Entry:
     payload = dict(entry.payload or {})
     kind = str(entry.kind or "").strip().lower() or "fact"
@@ -695,7 +422,7 @@ def _normalize_l2_entry(entry: L2Entry) -> L2Entry:
             payload=payload,
         )
 
-    if kind not in {"fact", "case", "behavior_rule"}:
+    if kind not in {"fact", "case"}:
         kind = "fact"
     rendered = rendered or _render_entry(kind=kind, title=title, summary=summary, payload=payload)
     search_text = search_text or _search_text_from_entry(kind=kind, title=title, summary=summary, payload=payload)
@@ -726,222 +453,6 @@ def _normalize_l2_entry(entry: L2Entry) -> L2Entry:
         dedupe_fingerprint=dedupe_fingerprint,
         payload=payload,
     )
-
-
-def _coerce_structured_compaction_payload(
-    raw: Any,
-    *,
-    fallback_summary: str,
-    existing_summary: L2Entry | None,
-    profile: CompactionProfile = CompactionProfile.PAL,
-) -> dict[str, Any]:
-    payload = raw if isinstance(raw, dict) else {}
-    schema = str(payload.get("schema") or "").strip()
-    if schema in {COMPACTION_SCHEMA_PAL_V1, COMPACTION_SCHEMA_MINION_V1, COMPACTION_SCHEMA_V2}:
-        return _coerce_current_structured_compaction_payload(
-            payload,
-            fallback_summary=fallback_summary,
-            existing_summary=existing_summary,
-            profile=profile,
-        )
-    if not payload and fallback_summary:
-        is_minion = profile == CompactionProfile.MINION
-        kind = "minion" if is_minion else "pal"
-        schema = COMPACTION_SCHEMA_MINION_V1 if kind == "minion" else COMPACTION_SCHEMA_PAL_V1
-        return _coerce_current_structured_compaction_payload(
-            {
-                "schema": schema,
-                "kind": kind,
-                "continuity": {},
-                "summary": {
-                    "summary": fallback_summary,
-                    "search_text": fallback_summary,
-                },
-            },
-            fallback_summary=fallback_summary,
-            existing_summary=existing_summary,
-            profile=profile,
-        )
-    if payload and not fallback_summary:
-        raise ValueError("structured compaction payload missing recognized schema")
-    summary_payload = payload.get("summary") if isinstance(payload, dict) else None
-    entries_payload = payload.get("entries") if isinstance(payload, dict) else None
-
-    summary_text = ""
-    summary_title = SUMMARY_TITLE
-    summary_rendered = ""
-    summary_search_text = ""
-    summary_payload_blob: dict[str, Any] = {}
-
-    if isinstance(summary_payload, dict):
-        summary_text = str(summary_payload.get("summary") or "").strip()
-        summary_title = str(summary_payload.get("title") or "").strip() or SUMMARY_TITLE
-        summary_rendered = str(summary_payload.get("rendered") or "").strip()
-        summary_search_text = str(summary_payload.get("search_text") or "").strip()
-        summary_payload_blob = dict(summary_payload.get("payload") or {})
-    elif isinstance(summary_payload, str):
-        summary_text = summary_payload.strip()
-
-    if not summary_text and fallback_summary:
-        summary_text = fallback_summary
-    if not summary_text:
-        raise ValueError("compact summary is empty")
-
-    summary_entry = _normalize_l2_entry(
-        L2Entry(
-            entry_id=SUMMARY_ENTRY_ID,
-            kind="summary",
-            scope="system",
-            title=summary_title,
-            summary=summary_text,
-            source_kind="l1_compaction",
-            candidate_state="stable",
-            touched_at=utc_now(),
-            rendered=summary_rendered or summary_text,
-            search_text=summary_search_text or summary_text,
-            payload=summary_payload_blob,
-        )
-    )
-
-    stable_entries: list[L2Entry] = []
-    for item in list(entries_payload or []):
-        if not isinstance(item, dict):
-            continue
-        kind = str(item.get("kind") or "").strip().lower()
-        if kind not in {"fact", "case"}:
-            continue
-        stable_entries.append(
-            _normalize_l2_entry(
-                L2Entry(
-                    entry_id=str(item.get("entry_id") or ""),
-                    kind=kind,
-                    scope=str(item.get("scope") or "system"),
-                    task_id=str(item.get("task_id")) if item.get("task_id") is not None else None,
-                    title=str(item.get("title") or ""),
-                    summary=str(item.get("summary") or ""),
-                    source_kind="l1_compaction",
-                    source_ref="",
-                    candidate_state="stable",
-                    touched_at=utc_now(),
-                    rendered=str(item.get("rendered") or ""),
-                    search_text=str(item.get("search_text") or ""),
-                    canonical_key=str(item.get("canonical_key")) if item.get("canonical_key") is not None else None,
-                    dedupe_fingerprint=str(item.get("dedupe_fingerprint")) if item.get("dedupe_fingerprint") is not None else None,
-                    payload=dict(item.get("payload") or {}),
-                )
-            )
-        )
-    return {"summary_entry": summary_entry, "stable_entries": stable_entries}
-
-
-def _coerce_current_structured_compaction_payload(
-    payload: dict[str, Any],
-    *,
-    fallback_summary: str,
-    existing_summary: L2Entry | None,
-    profile: CompactionProfile = CompactionProfile.PAL,
-) -> dict[str, Any]:
-    if profile == CompactionProfile.MINION:
-        return _coerce_minion_compaction_payload(
-            payload,
-            fallback_summary=fallback_summary,
-            existing_summary=existing_summary,
-        )
-    return _coerce_pal_compaction_payload(
-        payload,
-        fallback_summary=fallback_summary,
-        existing_summary=existing_summary,
-    )
-
-
-def _coerce_pal_compaction_payload(
-    payload: dict[str, Any],
-    *,
-    fallback_summary: str,
-    existing_summary: L2Entry | None,
-) -> dict[str, Any]:
-    summary_payload = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-    continuity = payload.get("continuity") if isinstance(payload.get("continuity"), dict) else {}
-    memory_candidates = payload.get("memory_candidates") if isinstance(payload.get("memory_candidates"), list) else []
-    summary_text = str(summary_payload.get("summary") or "").strip()
-    if not summary_text and fallback_summary:
-        summary_text = fallback_summary
-    if not summary_text:
-        raise ValueError("pal compact summary is empty")
-    search_text = str(summary_payload.get("search_text") or "").strip() or summary_text
-    summary_payload_blob = {
-        "schema": COMPACTION_SCHEMA_PAL_V1,
-        "kind": "pal",
-        "continuity": dict(continuity),
-        "summary": {
-            "summary": summary_text,
-            "search_text": search_text,
-        },
-        "memory_candidates": [
-            dict(item)
-            for item in memory_candidates
-            if isinstance(item, dict)
-        ],
-    }
-    rendered = render_compact_context_for_llm(summary=summary_text, payload=summary_payload_blob)
-    summary_entry = _normalize_l2_entry(
-        L2Entry(
-            entry_id=SUMMARY_ENTRY_ID,
-            kind="summary",
-            scope="system",
-            title=SUMMARY_TITLE,
-            summary=summary_text,
-            source_kind="l1_compaction",
-            candidate_state="stable",
-            touched_at=utc_now(),
-            rendered=rendered,
-            search_text=search_text,
-            payload=summary_payload_blob,
-        )
-    )
-    return {"summary_entry": summary_entry, "stable_entries": []}
-
-
-def _coerce_minion_compaction_payload(
-    payload: dict[str, Any],
-    *,
-    fallback_summary: str,
-    existing_summary: L2Entry | None,
-) -> dict[str, Any]:
-    summary_payload = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-    continuity = payload.get("continuity") if isinstance(payload.get("continuity"), dict) else {}
-    summary_text = str(summary_payload.get("summary") or "").strip()
-    if not summary_text and fallback_summary:
-        summary_text = fallback_summary
-    if not summary_text:
-        raise ValueError("minion compact summary is empty")
-    search_text = str(summary_payload.get("search_text") or "").strip() or summary_text
-    summary_payload_blob = {
-        "schema": COMPACTION_SCHEMA_MINION_V1,
-        "kind": "minion",
-        "continuity": dict(continuity),
-        "summary": {
-            "summary": summary_text,
-            "search_text": search_text,
-        },
-    }
-    rendered = render_compact_context_for_llm(summary=summary_text, payload=summary_payload_blob)
-    summary_entry = _normalize_l2_entry(
-        L2Entry(
-            entry_id=SUMMARY_ENTRY_ID,
-            kind="summary",
-            scope="system",
-            title=SUMMARY_TITLE,
-            summary=summary_text,
-            source_kind="l1_compaction",
-            candidate_state="stable",
-            touched_at=utc_now(),
-            rendered=rendered,
-            search_text=search_text,
-            payload=summary_payload_blob,
-        )
-    )
-    return {"summary_entry": summary_entry, "stable_entries": []}
 
 
 def _render_entry(*, kind: str, title: str, summary: str, payload: dict[str, Any]) -> str:
@@ -1004,7 +515,7 @@ def _stable_entry_fingerprint(
 
 
 def _counts_against_l2_capacity(entry: L2Entry) -> bool:
-    return entry.kind in {"fact", "case", "behavior_rule"}
+    return entry.kind in {"fact", "case"}
 
 
 def _is_summary_entry(entry: L2Entry) -> bool:
@@ -1016,10 +527,15 @@ def _is_summary_entry_by_id(entry_id: str) -> bool:
 
 
 def _should_retire_entry(entry: L2Entry) -> bool:
-    if entry.kind == "behavior_rule" or entry.source_kind == "behavior_advice":
-        return False
     if entry.kind not in {"fact", "case"}:
         return False
     if entry.candidate_state != "stable":
         return False
     return entry.source_kind != "l3_recall"
+
+
+def _is_memory_projection_entry(entry: L2Entry) -> bool:
+    kind = str(getattr(entry, "kind", "") or "").strip()
+    scope = str(getattr(entry, "scope", "") or "").strip()
+    source_kind = str(getattr(entry, "source_kind", "") or "").strip()
+    return scope != "behavior" and kind != "behavior_rule" and source_kind != "behavior_advice"

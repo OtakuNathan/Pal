@@ -323,6 +323,36 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(service.tick_affordance_heat(), ("hot.route",))
         self.assertIsNone(service.affordance_heat.get("hot.route"))
 
+    def test_advisor_hints_have_behavior_owned_capacity_and_heat_lifecycle(self) -> None:
+        service = BehaviorService(
+            repository=self.repository,
+            execution_runtime=self.runtime,
+            advisor_hint_capacity=1,
+            advisor_hint_heat=HeatStateRegistry(machine=HeatStateMachine(HeatPolicy(hot_ttl=1, ghost_ttl=1))),
+        )
+        for affordance_id, title in (("hot.route.a", "Hot route A"), ("hot.route.b", "Hot route B")):
+            self.repository.upsert_affordance(
+                AffordanceDescriptor(
+                    affordance_id=affordance_id,
+                    module_id="test",
+                    title=title,
+                    scenario_text="stabilize telegram routing",
+                    prompt_hint=f"Use {title}.",
+                    activation_terms=("stabilize", "telegram", "routing"),
+                    activation_threshold=0.0,
+                )
+            )
+
+        asyncio.run(service.advise_async(BehaviorAdviceRequest(scenario="stabilize telegram routing", top_k=2)))
+
+        self.assertEqual(len(service.advisor_hints), 1)
+        self.assertEqual(len(service.active_advisor_hints()), 1)
+        self.assertEqual(service.tick_advisor_hints(), ())
+        self.assertEqual(service.active_advisor_hints(), ())
+        expired = service.tick_advisor_hints()
+        self.assertEqual(len(expired), 1)
+        self.assertEqual(service.advisor_hints, {})
+
     def test_behavior_fts_index_updates_and_declared_delete_removes_stale_hits(self) -> None:
         self.repository.upsert_affordance(
             AffordanceDescriptor(
@@ -1041,7 +1071,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertNotIn("Use behavior_save only when the user explicitly asks Pal to adopt/follow/save a future behavior rule", system)
         self.assertIn("Stable fact, preference, project context, prior decision, or repair lesson -> memory", system)
 
-    def test_behavior_advice_tool_result_projects_to_behavior_guidance(self) -> None:
+    def test_behavior_advice_tool_result_activates_behavior_owned_advisor_hints(self) -> None:
         self.repository.upsert_affordance(
             AffordanceDescriptor(
                 affordance_id="commit.guidance",
@@ -1092,30 +1122,40 @@ class BehaviorSubsystemTests(unittest.TestCase):
             )
         )
 
-        entry = memory_service.l2_store.get_entry("behavior_advice:commit.guidance")
-        self.assertIsNotNone(entry)
-        self.assertEqual(entry.kind, "behavior_rule")
-        self.assertEqual(entry.source_kind, "behavior_advice")
-        self.assertEqual(entry.candidate_state, "active")
-        self.assertIn("skill_inject", entry.rendered)
-        self.assertIn("MUST NOT call `skill_inject` solely because listed", entry.rendered)
-        self.assertIn("commit preferences", entry.rendered)
+        self.assertIsNone(memory_service.l2_store.get_entry("behavior_advice:commit.guidance"))
+        hints = self.service.active_advisor_hints()
+        self.assertEqual([hint.hint_id for hint in hints], ["commit.guidance"])
+        self.assertIn("skill_inject", hints[0].rendered)
+        self.assertIn("MUST NOT call `skill_inject` solely because listed", hints[0].rendered)
+        self.assertIn("commit preferences", hints[0].rendered)
 
         generate_requests = [request for kind, request in scripted_llm.requests if kind == "generate"]
         self.assertGreaterEqual(len(generate_requests), 2)
         followup_system = generate_requests[1].messages[0]["content"]
         self.assertNotIn("Active Route Guidance", followup_system)
-        followup_text = _message_text(generate_requests[1].messages[-1])
+        followup_text = "\n".join(_message_text(message) for message in generate_requests[1].messages)
         self.assertIn("Behavior advice", followup_text)
+        self.assertIn("<advisor_hints>", followup_text)
         self.assertIn("Commit guidance", followup_text)
         self.assertIn("commit.skill", followup_text)
         self.assertIn("commit preferences", followup_text)
-        self.assertNotIn("<advisor_hints>", followup_text)
         self.assertNotIn("Route metadata", followup_text)
         self.assertNotIn("confidence=", followup_text)
         self.assertNotIn("lexical score", followup_text)
 
-    def test_behavior_guidance_renders_separately_from_working_memory(self) -> None:
+    def test_behavior_guidance_renders_from_behavior_not_working_memory(self) -> None:
+        self.repository.upsert_affordance(
+            AffordanceDescriptor(
+                affordance_id="commit.guidance",
+                module_id="test",
+                title="Commit guidance",
+                scenario_text="commit code",
+                prompt_hint="Consider checking the commit workflow.",
+                activation_terms=("commit", "code"),
+                activation_threshold=0.0,
+            )
+        )
+        asyncio.run(self.service.advise_async(BehaviorAdviceRequest(scenario="commit code")))
         pack = MemoryPack(
             l2_working_memory=[
                 L2Entry(
@@ -1148,25 +1188,28 @@ class BehaviorSubsystemTests(unittest.TestCase):
             ]
         )
 
-        fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext(metadata={"memory_pack": pack}))
-        by_title = {fragment.title: fragment.content for fragment in fragments}
+        memory_fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext(metadata={"memory_pack": pack}))
+        memory_by_title = {fragment.title: fragment.content for fragment in memory_fragments}
+        behavior_fragments = BehaviorPromptFragmentProvider(service=self.service).build_prompt_fragments(PromptAssemblyContext(metadata={"memory_pack": pack}))
+        behavior_by_title = {fragment.title: fragment.content for fragment in behavior_fragments}
 
-        self.assertIn("Recalled memories", by_title)
-        self.assertIn("Active route suggestions", by_title)
-        self.assertNotIn("Working Memory", by_title)
-        self.assertIn('<recalled_memories view="summary">', by_title["Recalled memories"])
-        self.assertIn("</recalled_memories>", by_title["Recalled memories"])
-        self.assertIn("[fact.timezone]: User prefers Asia/Hong_Kong timezone.", by_title["Recalled memories"])
-        self.assertIn("[case.plugin]: A prior plugin attach failure was fixed by rescanning.", by_title["Recalled memories"])
-        self.assertNotIn("Timezone Preference", by_title["Recalled memories"])
-        self.assertNotIn("Plugin repair", by_title["Recalled memories"])
-        self.assertIn("<advisor_hints>", by_title["Active route suggestions"])
-        self.assertIn("</advisor_hints>", by_title["Active route suggestions"])
-        self.assertNotIn("Commit guidance", by_title["Recalled memories"])
-        self.assertIn("Commit guidance", by_title["Active route suggestions"])
-        self.assertIn("Hint: Consider checking the commit workflow.", by_title["Active route suggestions"])
-        self.assertNotIn("origin available", by_title["Recalled memories"])
-        self.assertNotIn("origin available", by_title["Active route suggestions"])
+        self.assertIn("Recalled memories", memory_by_title)
+        self.assertNotIn("Active route suggestions", memory_by_title)
+        self.assertNotIn("Working Memory", memory_by_title)
+        self.assertIn('<recalled_memories view="summary">', memory_by_title["Recalled memories"])
+        self.assertIn("</recalled_memories>", memory_by_title["Recalled memories"])
+        self.assertIn("[fact.timezone]: User prefers Asia/Hong_Kong timezone.", memory_by_title["Recalled memories"])
+        self.assertIn("[case.plugin]: A prior plugin attach failure was fixed by rescanning.", memory_by_title["Recalled memories"])
+        self.assertNotIn("Timezone Preference", memory_by_title["Recalled memories"])
+        self.assertNotIn("Plugin repair", memory_by_title["Recalled memories"])
+        self.assertNotIn("Commit guidance", memory_by_title["Recalled memories"])
+        self.assertNotIn("origin available", memory_by_title["Recalled memories"])
+        self.assertIn("Active route suggestions", behavior_by_title)
+        self.assertIn("<advisor_hints>", behavior_by_title["Active route suggestions"])
+        self.assertIn("</advisor_hints>", behavior_by_title["Active route suggestions"])
+        self.assertIn("Commit guidance", behavior_by_title["Active route suggestions"])
+        self.assertIn("Hint: Consider checking the commit workflow.", behavior_by_title["Active route suggestions"])
+        self.assertNotIn("origin available", behavior_by_title["Active route suggestions"])
 
     def test_memory_prompt_leaves_static_routing_to_tool_descriptions(self) -> None:
         fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext())
@@ -1180,7 +1223,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertNotIn("memory_write", policy)
         self.assertNotIn("MUST call memory_recall", policy)
 
-    def test_behavior_guidance_l2_entries_do_not_retire_to_l3(self) -> None:
+    def test_memory_projection_ignores_behavior_scoped_entries(self) -> None:
         service = MemoryService()
         service.l2_store.capacity = 0
 

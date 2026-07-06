@@ -575,7 +575,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         return continuation
 
     @staticmethod
-    def _make_tool_summary_outcome() -> TurnOutcome:
+    def _make_tool_reply_outcome() -> TurnOutcome:
         return TurnOutcome(
             turn_id="turn-tool-memory",
             final_reply="final answer",
@@ -587,27 +587,27 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                         role="assistant",
                         content="final answer",
                         kind=L1MessageKind.ASSISTANT_REPLY,
-                        tool_trace="shell(ok): checked runtime state",
                     ),
                 ],
             ),
         )
 
-    async def test_l1_commit_keeps_tool_summary_without_full_protocol_by_default(self) -> None:
+    async def test_l1_commit_persists_full_tool_protocol_by_default(self) -> None:
         continuation = self._make_tool_protocol_continuation(prompt_log_enabled=False)
 
-        outcome = self.core._enrich_transcript_with_tool_protocol(self._make_tool_summary_outcome(), continuation)
+        outcome = self.core._enrich_transcript_with_tool_protocol(self._make_tool_reply_outcome(), continuation)
 
         transcript = outcome.commit_payload.transcript
-        self.assertEqual([message.role for message in transcript], ["user", "assistant"])
-        self.assertEqual(transcript[-1].tool_trace, "shell(ok): checked runtime state")
-        self.assertFalse(any(message.tool_calls for message in transcript))
-        self.assertFalse(any(message.role == "tool" for message in transcript))
+        self.assertEqual([message.role for message in transcript], ["user", "assistant", "tool", "assistant"])
+        self.assertEqual(transcript[1].tool_calls[0]["id"], "call_1")
+        self.assertEqual(transcript[2].tool_call_id, "call_1")
+        self.assertIn("large tool result", transcript[2].content)
+        self.assertFalse(any(hasattr(message, "tool_trace") for message in transcript))
 
     async def test_l1_commit_persists_full_tool_protocol_when_prompt_log_enabled(self) -> None:
         continuation = self._make_tool_protocol_continuation(prompt_log_enabled=True)
 
-        outcome = self.core._enrich_transcript_with_tool_protocol(self._make_tool_summary_outcome(), continuation)
+        outcome = self.core._enrich_transcript_with_tool_protocol(self._make_tool_reply_outcome(), continuation)
 
         transcript = outcome.commit_payload.transcript
         self.assertEqual([message.role for message in transcript], ["user", "assistant", "tool", "assistant"])
@@ -870,7 +870,21 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                 turn_settings_snapshot={"think_level": "balanced", "prompt_log_enabled": True},
             )
             request = CanonicalLLMRequest(
-                messages=[{"role": "user", "content": "hello"}],
+                messages=[
+                    {"role": "user", "content": "hello"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call_debug_1",
+                                "type": "function",
+                                "function": {"name": "demo", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call_debug_1", "content": "debug tool result"},
+                ],
                 max_output_tokens=64,
                 tools=[{"type": "function", "function": {"name": "demo", "parameters": {}}}],
             )
@@ -882,6 +896,12 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
 
             content = (Path(tmp) / "pal.log").read_text(encoding="utf-8")
             self.assertIn("=== PAL PROMPT DEBUG ===", content)
+            self.assertIn("'role': 'assistant'", content)
+            self.assertIn("'tool_calls'", content)
+            self.assertIn("'id': 'call_debug_1'", content)
+            self.assertIn("'role': 'tool'", content)
+            self.assertIn("'tool_call_id': 'call_debug_1'", content)
+            self.assertIn("debug tool result", content)
             self.assertIn("=== PAL LLM OUTCOME ===", content)
             self.assertIn("=== PAL TG REPLY ===", content)
 
@@ -1256,10 +1276,12 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         checkpoint = self.memory_service.l1_store.items[-1]
         kinds = [item.kind for item in checkpoint]
         self.assertIn(L1MessageKind.USER_REQUEST, kinds)
-        self.assertNotIn(L1MessageKind.ASSISTANT_TOOL_CALL, kinds)
-        self.assertNotIn(L1MessageKind.TOOL_RESULT, kinds)
+        self.assertIn(L1MessageKind.ASSISTANT_TOOL_CALL, kinds)
+        self.assertIn(L1MessageKind.TOOL_RESULT, kinds)
         self.assertIn(L1MessageKind.ASSISTANT_REPLY, kinds)
         self.assertIn(L1MessageKind.TURN_INTERRUPTED, kinds)
+        protocol_roles = [item.role for item in checkpoint if item.kind in {L1MessageKind.ASSISTANT_TOOL_CALL, L1MessageKind.TOOL_RESULT}]
+        self.assertEqual(protocol_roles, ["assistant", "tool"])
         summary = next(item.content for item in checkpoint if item.kind == L1MessageKind.TURN_INTERRUPTED)
         self.assertIn("This is recovery context", summary)
         self.assertIn("shell", summary)

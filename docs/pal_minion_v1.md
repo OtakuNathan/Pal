@@ -265,13 +265,15 @@ Runtime uses a dedicated minion compact schema:
 
 - `pal.compaction.minion.v1`
 
-The minion compact prompt and renderer are separate from Pal compact. The minion prompt does not ask for user preference tracking, collaboration history, or `memory_candidates`. The rendered context is:
+The minion compact path and renderer are separate from Pal compact. Minion compact is mechanical and does not use an LLM compaction prompt. It collects committed user/task inputs before the current active milestone turn, scrubs management ids, and renders them as already-handled or superseded history. The current active milestone user message and current tool protocol are hard-kept by the live turn and are not compacted.
+
+The rendered context is:
 
 - `<compact_context kind="minion" authority="reference_only">`
 - title: `Minion Task Continuity Reference`
-- task-oriented fields such as `task_goal`, `current_milestone_hint`, `claimed_completed`, `claimed_pending`, `implementation_decisions`, `verification_hints`, `review_or_repair_hints`, `must_verify_against`, and `next_action_hint`
+- mechanical resume fields such as `prior_completed_user_inputs`, `history_rule`, `current_turn_rule`, and optional `retired_prior_user_input_count`
 
-The compact output is explicitly reference-only. A runner must verify against the work order, accepted plan artifact, current milestone, checkpoint/ledger, Git state, and current files before claiming progress or completion. Compact text may say that work is "claimed completed", but it is not a truth source.
+The compact output is explicitly reference-only. A runner must verify against the work order, accepted plan artifact, current milestone, checkpoint/ledger, Git state, and current files before claiming progress or completion. Compact does not restate those truth-source facts because the manager already persists them structurally.
 
 Minion compact must not create durable memory candidates. Reusable lessons or case memories are proposed at work-order terminal/finalization time and then routed through Pal approval.
 

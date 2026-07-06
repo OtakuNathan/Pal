@@ -120,6 +120,7 @@ def _build_proactive_turn_transcript(
     observations: list[ToolObservation] | None = None,
     reply_texts: list[str] | tuple[str, ...] | None = None,
 ) -> list[L1TranscriptMessage]:
+    _ = observations
     transcript: list[L1TranscriptMessage] = []
     if proactive_input.strip():
         transcript.append(L1TranscriptMessage(
@@ -127,15 +128,13 @@ def _build_proactive_turn_transcript(
             content=proactive_input.strip(),
             kind=L1MessageKind.USER_REQUEST,
         ))
-    tool_summary = _render_tool_summary(observations or [])
     replies = tuple(str(item).strip() for item in (reply_texts or (final_reply,)) if str(item).strip())
-    for index, assistant_content in enumerate(replies):
+    for assistant_content in replies:
         transcript.append(
             L1TranscriptMessage(
                 role="assistant",
                 content=assistant_content,
                 kind=L1MessageKind.ASSISTANT_REPLY,
-                tool_trace=(tool_summary or None) if index == len(replies) - 1 else None,
             )
         )
     return transcript
@@ -178,23 +177,3 @@ def _resolve_proactive_reply_envelope(
         endpoint=endpoint_runtime.endpoint,
         response_handle=endpoint_runtime.build_response_handle(reply_target=reply_target),
     )
-
-
-def _render_tool_summary(observations: list[ToolObservation], *, max_summary_chars: int = 500) -> str:
-    if not observations:
-        return ""
-    per_item_limit = max_summary_chars // 3
-    parts: list[str] = []
-    total = 0
-    for obs in observations:
-        status = "ok" if obs.ok else "error"
-        summary = obs.summary[:per_item_limit]
-        line = f"{obs.tool_name}({status}): {summary}"
-        if total + len(line) > max_summary_chars:
-            remaining = len(observations) - len(parts)
-            if remaining > 0:
-                parts.append(f"... +{remaining} more")
-            break
-        parts.append(line)
-        total += len(line)
-    return "\n".join(parts)

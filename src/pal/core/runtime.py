@@ -32,7 +32,9 @@ from pal.foundation.log_paths import pal_log_path
 from pal.failure import FailureSignal, FailureUserFeedback
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest
 from pal.memory import L1MessageKind, L1TranscriptMessage, MemoryCommitRequest
+from pal.memory.compact import coerce_memory_candidate_list, memory_candidates_from_compact_result
 from pal.memory.interactions import memory_candidate_approval_delivery
+from pal.memory.tool_protocol import l1_tool_protocol_transcript
 from pal.shared import ChannelEnvelope, EventKind, SourceKind
 from pal.shared import IntrospectionPort, PromptAssemblyContext, PromptFragment, RuntimeStatus, llm_tool_name
 from pal.shared.payloads import extract_text_from_payload
@@ -323,33 +325,12 @@ class TurnManager:
                 }
             )
             return [], []
-        transcript: list[L1TranscriptMessage] = []
-        protocol_assistant_contents: list[str] = []
-        for msg in messages:
-            role = str(msg.get("role", "") or "").strip()
-            content = str(msg.get("content", "") or "")
-            if role == "tool":
-                content = self._truncate_tool_result_for_l1(content)
-            tool_calls = msg.get("tool_calls")
-            if role == "assistant" and tool_calls:
-                protocol_assistant_contents.append(content.strip())
-            transcript.append(
-                L1TranscriptMessage(
-                    role=role,
-                    content=content,
-                    kind=L1MessageKind.TOOL_RESULT if role == "tool" else L1MessageKind.ASSISTANT_TOOL_CALL,
-                    tool_calls=tool_calls if isinstance(tool_calls, list) else None,
-                    tool_call_id=msg.get("tool_call_id"),
-                )
-            )
-        return transcript, protocol_assistant_contents
+        return l1_tool_protocol_transcript(messages, truncate_tool_result=self._truncate_tool_result_for_l1)
 
     @staticmethod
     def _persist_tool_protocol_to_l1(continuation: TurnContinuation) -> bool:
-        snapshot = getattr(continuation, "turn_settings_snapshot", {}) or {}
-        if isinstance(snapshot, dict) and "prompt_log_enabled" in snapshot:
-            return bool(snapshot.get("prompt_log_enabled"))
-        return False
+        _ = continuation
+        return True
 
     @staticmethod
     def _tool_protocol_validation_error(messages: list[dict[str, Any]]) -> str:
@@ -1430,7 +1411,7 @@ class PalCore:
             action,
             f"Context compacted. {storage_text} {entry_count} L2 entries projected, {retired} retired to L3.",
         )
-        memory_candidates = _memory_candidates_from_compact_result(result)
+        memory_candidates = memory_candidates_from_compact_result(result)
         if memory_candidates:
             source_ref = f"compact_{uuid4().hex[:12]}"
             delivery = memory_candidate_approval_delivery(
@@ -1586,6 +1567,7 @@ class PalCore:
                 if isinstance(yielded, TurnOutcome):
                     outcome = self._enrich_transcript_with_tool_protocol(yielded, continuation)
                     await self._schedule_post_turn_commit_async(outcome)
+                    await self._deliver_pending_compact_memory_candidates_async(continuation)
                     return outcome
                 current = await self._execute_turn_effect_async(continuation, yielded)
         except asyncio.CancelledError:
@@ -1652,6 +1634,47 @@ class PalCore:
             ),
             reply_texts=outcome.reply_texts,
         )
+
+    async def _deliver_pending_compact_memory_candidates_async(self, continuation: TurnContinuation) -> None:
+        batches = list(getattr(continuation, "pending_compact_memory_candidate_batches", []) or [])
+        if not batches:
+            return
+        continuation.pending_compact_memory_candidate_batches.clear()
+        route = self._route_from_channel_envelope(continuation.channel_envelope)
+        if route is None:
+            self.state.diagnostics.append(
+                {
+                    "kind": "memory.compact_candidates.route_missing",
+                    "turn_id": continuation.turn_id,
+                    "batch_count": len(batches),
+                }
+            )
+            return
+        for batch in batches:
+            candidates = coerce_memory_candidate_list(batch.get("memory_candidates") if isinstance(batch, dict) else None)
+            if not candidates:
+                continue
+            source_ref = f"compact_{uuid4().hex[:12]}"
+            delivery = memory_candidate_approval_delivery(
+                {
+                    "source_kind": str(batch.get("source_kind") or "pal_compact"),
+                    "source_ref": source_ref,
+                    "source_label": str(batch.get("source_label") or "Pal compact"),
+                    "candidate_batch_id": source_ref,
+                    "memory_candidates": candidates,
+                },
+                route,
+            )
+            if delivery is None:
+                self.state.diagnostics.append(
+                    {
+                        "kind": "memory.compact_candidates.delivery_missing",
+                        "turn_id": continuation.turn_id,
+                        "candidate_count": len(candidates),
+                    }
+                )
+                continue
+            await self._deliver_control_delivery_async(delivery, fallback_route=route)
 
     async def _call_port_async(self, port, async_name: str, sync_name: str, *args, **kwargs):
         async_method = getattr(port, async_name, None)
@@ -1879,27 +1902,6 @@ class PalCore:
 
     def _build_compaction_source_text(self, memory_service, *, target_input_budget: int) -> str:
         return self.turn_executor.build_compaction_source_text(memory_service, target_input_budget=target_input_budget)
-
-
-def _memory_candidates_from_compact_result(result: Any) -> list[dict[str, Any]]:
-    if result is None:
-        return []
-    for entry in list(getattr(result, "projected_entries", []) or []):
-        payload = getattr(entry, "payload", None)
-        if isinstance(payload, dict):
-            candidates = _dict_list(payload.get("memory_candidates"))
-            if candidates:
-                return candidates
-    metadata = getattr(result, "metadata", None)
-    if isinstance(metadata, dict):
-        return _dict_list(metadata.get("memory_candidates"))
-    return []
-
-
-def _dict_list(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, (list, tuple)):
-        return []
-    return [dict(item) for item in value if isinstance(item, dict)]
 
 
 def effect_result_to_observation(tool_result) -> "ToolObservation":

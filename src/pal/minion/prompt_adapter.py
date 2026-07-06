@@ -19,7 +19,7 @@ from pal.shared import (
 )
 from pal.shared.payloads import extract_text_from_payload
 from pal.shared.prompt_dates import today_for_timezone
-from pal.shared.prompt_rendering import render_xml_block
+from pal.shared.prompt_rendering import render_system_reminder, render_xml_block
 
 
 def prompt_scaffold_summary(scaffold: dict[str, Any]) -> dict[str, Any]:
@@ -771,7 +771,13 @@ class MinionPromptFragmentProvider(PromptFragmentProvider):
             add("memory", "Minion Retry Guidance", retry_note, 95, {"block_id": "minion_retry_guidance"})
         skill_manual_context = _render_skill_manual_context(scaffold.get("skill_manual_context"))
         if skill_manual_context:
-            add("memory", "Minion Skill Manual Context", skill_manual_context, 96, {"block_id": "skill_manual_context"})
+            add(
+                "memory",
+                "Minion Skill Manual Context",
+                skill_manual_context,
+                96,
+                {"block_id": "skill_manual_context", "raw_user_context": True},
+            )
 
         runtime_reminder = _render_minion_runtime_reminder(scaffold)
         add(
@@ -856,7 +862,7 @@ def _render_skill_manual_context(value: Any) -> str:
     if not items:
         return ""
     lines = [
-        "<skill_manual_context>",
+        "Minion skill manual context:",
         "Reference material for activated minion skills. Use it only when relevant to the current scoped milestone.",
     ]
     for item in items:
@@ -870,8 +876,7 @@ def _render_skill_manual_context(value: Any) -> str:
         if summary:
             lines.append(f"- summary: {summary}")
         lines.extend(["", manual])
-    lines.append("</skill_manual_context>")
-    return "\n".join(lines).strip()
+    return render_system_reminder("\n".join(lines).strip())
 
 
 def _render_minion_operating_rules(scaffold: dict[str, Any]) -> str:

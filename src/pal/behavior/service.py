@@ -25,6 +25,7 @@ from pal.behavior.contracts import (
     AffordanceDescriptor,
     BehaviorAdviceRequest,
     BehaviorAdviceResult,
+    BehaviorAdvisorHint,
     BehaviorRouteCandidate,
 )
 from pal.behavior.decorators import AffordanceBlueprint
@@ -64,8 +65,11 @@ class BehaviorService:
     semantic_router: Callable[..., Any] | None = None
     router_timeout_seconds: float = 2.0
     resident_prompt_budget: int = 5
+    advisor_hint_capacity: int = 8
     declared_affordances: dict[str, tuple[AffordanceDescriptor, ...]] = field(default_factory=dict)
     affordance_heat: HeatStateRegistry = field(default_factory=HeatStateRegistry)
+    advisor_hints: dict[str, BehaviorAdvisorHint] = field(default_factory=dict)
+    advisor_hint_heat: HeatStateRegistry = field(default_factory=HeatStateRegistry)
 
     async def advise_async(self, request: BehaviorAdviceRequest) -> BehaviorAdviceResult:
         deterministic = self._rank_candidates(request)
@@ -331,6 +335,23 @@ class BehaviorService:
     def tick_affordance_heat(self) -> tuple[str, ...]:
         return tuple(transition.key for transition in self.affordance_heat.tick() if transition.expired)
 
+    def active_advisor_hints(self, *, limit: int | None = None) -> tuple[BehaviorAdvisorHint, ...]:
+        hot_ids = set(self.advisor_hint_heat.hot_keys())
+        if not hot_ids:
+            return ()
+        hints = [hint for hint_id, hint in self.advisor_hints.items() if hint_id in hot_ids]
+        hints.sort(key=lambda item: (item.touched_at, item.hint_id), reverse=True)
+        max_items = self.advisor_hint_capacity if limit is None else max(0, int(limit))
+        return tuple(hints[:max_items])
+
+    def tick_advisor_hints(self) -> tuple[str, ...]:
+        expired: list[str] = []
+        for transition in self.advisor_hint_heat.tick():
+            if transition.expired:
+                expired.append(transition.key)
+                self.advisor_hints.pop(transition.key, None)
+        return tuple(expired)
+
     def _register_declared_resident_prompt_provider(self, module_id: str, affordances: tuple[AffordanceDescriptor, ...]) -> None:
         registry = self.prompt_fragment_registry
         if registry is None:
@@ -352,7 +373,25 @@ class BehaviorService:
     def _record_affordance_heat(self, result: BehaviorAdviceResult) -> BehaviorAdviceResult:
         for candidate in result.candidates:
             self.affordance_heat.promote_to_hot(candidate.affordance_id)
+        self._record_advisor_hints(result.candidates)
         return result
+
+    def _record_advisor_hints(self, candidates: Iterable[BehaviorRouteCandidate]) -> None:
+        now = utc_now()
+        for candidate in candidates:
+            hint = _advisor_hint_from_candidate(candidate, now=now, existing=self.advisor_hints.get(candidate.affordance_id))
+            if not hint.rendered:
+                continue
+            self.advisor_hints[hint.hint_id] = hint
+            self.advisor_hint_heat.promote_to_hot(hint.hint_id)
+        self._evict_advisor_hint_overflow()
+
+    def _evict_advisor_hint_overflow(self) -> None:
+        capacity = max(0, int(self.advisor_hint_capacity or 0))
+        while len(self.advisor_hints) > capacity:
+            oldest = min(self.advisor_hints.values(), key=lambda item: (item.touched_at, item.hint_id))
+            self.advisor_hints.pop(oldest.hint_id, None)
+            self.advisor_hint_heat.remove(oldest.hint_id)
 
     def _forget_declared_affordance_heat(self, module_id: str) -> None:
         for descriptor in self.declared_affordances.get(str(module_id), ()):
@@ -697,6 +736,49 @@ def _resident_sort_key(affordance: AffordanceDescriptor) -> tuple[int, int, str,
         str(affordance.updated_at or ""),
         affordance.affordance_id,
     )
+
+
+def _advisor_hint_from_candidate(
+    candidate: BehaviorRouteCandidate,
+    *,
+    now: str,
+    existing: BehaviorAdvisorHint | None,
+) -> BehaviorAdvisorHint:
+    rendered = _render_advisor_hint_body(candidate)
+    return BehaviorAdvisorHint(
+        hint_id=candidate.affordance_id,
+        title=candidate.title or candidate.affordance_id,
+        rendered=rendered,
+        source_ref=candidate.affordance_id,
+        payload=candidate.to_dict(),
+        created_at=existing.created_at if existing is not None and existing.created_at else now,
+        touched_at=now,
+    )
+
+
+def _render_advisor_hint_body(candidate: BehaviorRouteCandidate) -> str:
+    parts: list[str] = []
+    if candidate.prompt_hint.strip():
+        parts.append(f"Hint: {candidate.prompt_hint.strip()}")
+    if candidate.skill_refs:
+        parts.append(
+            "Skill refs: "
+            + ", ".join(candidate.skill_refs)
+            + ". MUST NOT call `skill_inject` solely because listed; call it only when workflow/domain rules are needed."
+        )
+    if candidate.capability_refs:
+        parts.append(
+            "Capability refs: "
+            + ", ".join(candidate.capability_refs)
+            + ". Resolve current inventory before use; if one directly completes the request, use it without injecting a skill."
+        )
+    if candidate.memory_query_hints:
+        parts.append(
+            "Memory query hints: "
+            + ", ".join(candidate.memory_query_hints)
+            + ". They do not trigger recall by themselves; when recall is required, use them as query seeds."
+        )
+    return " ".join(parts).strip()
 
 
 def _string_tuple(value: object) -> tuple[str, ...]:

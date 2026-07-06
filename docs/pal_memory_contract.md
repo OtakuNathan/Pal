@@ -22,7 +22,7 @@ Current prompt projection:
 - Recent L1 context is projected as `Recent Context`.
 - Current summary is projected as `<conversation_summary>`.
 - Recalled durable facts, preferences, project context, and case knowledge are projected as `<recalled_memories view="summary">`.
-- Behavior-route entries are projected separately as `<advisor_hints>`.
+- Behavior-owned advisor hints are projected separately by the behavior module as `<advisor_hints>`; they do not live in memory L2.
 - The old single `Working Memory` prompt label is no longer the current projection.
 - Recalled memories render as `[mem_ref]: text`; `mem_ref` is operational metadata for `memory_update` and `memory_delete`.
 - L3 recall render suffixes such as `[L3 summary; origin available]` are not shown in prompt output.
@@ -113,7 +113,7 @@ flowchart LR
 
 - 决定 memory 行为的是 entry 内部 metadata
 - bucket 主要服务于 runtime 组织和 prompt 投影
-- HOT prompt projection 仅包含当前处于 HOT 状态的条目，并按 entry kind/source 渲染为 `<recalled_memories>` 或 `<advisor_hints>`
+- HOT prompt projection 仅包含当前处于 HOT 状态的 memory 条目，并渲染为 `<recalled_memories>`
 
 ### 内容
 
@@ -137,7 +137,7 @@ flowchart LR
 也就是说：
 
 - 它是当前热记忆的集合
-- HOT prompt projection 是 HOT 条目的 prompt 投影视图；当前实现不再使用一个通用 `Working Memory` 标签
+- HOT prompt projection 是 HOT memory 条目的 prompt 投影视图；当前实现不再使用一个通用 `Working Memory` 标签
 - 它不应被理解成先进先出的业务队列
 
 ### Scope 原则
@@ -277,11 +277,11 @@ TTL 是 turn-based，不是 function-call-based。`tick_heat()` 在 turn 结束�
 
 ### HOT Prompt Projection
 
-HOT prompt projection 是 L2 中所有 HOT 条目的 prompt 投影。当前实现按内容类型渲染为 XML-style user-context blocks，而不是一个通用 `Working Memory` block。
+HOT prompt projection 是 L2 中所有 HOT memory 条目的 prompt 投影。当前实现渲染为 XML-style user-context blocks，而不是一个通用 `Working Memory` block。
 
 核心原则：
 
-- HOT prompt projection 只包含 HOT 条目
+- HOT prompt projection 只包含 HOT memory 条目
 - 无 HOT 条目时不注入任何 L2 块
 - GHOST 条目不渲染
 - compact 只更新 L1，不直接触发 HOT
@@ -741,8 +741,8 @@ embedding provider 不可用时退化为原有 hash 去重。
 
 当前实现区分两类结构化 compact：
 
-- `pal.compaction.pal.v1`：本体会话连续性，允许提出 `memory_candidates`，但候选仍需 approval 后才可进入 L3。
-- `pal.compaction.minion.v1`：minion 任务恢复参考包，只保留 work order / milestone / checkpoint / repair / verification 线索，不生成 `memory_candidates`。
+- `pal.compaction.pal.v2`：本体会话连续性。按 committed turn 分层保留近端原文、轻压缩中端上下文、退役远端上下文；内部 payload 是结构化 dict，但 prompt 渲染为 XML 包裹 Markdown。允许提出 `memory_candidates`，但自动和手动 compact 的候选都必须 approval 后才可进入 L3。
+- `pal.compaction.minion.v1`：minion 任务恢复参考包。minion compact 不使用 LLM 摘要 prompt；它是机械 compact：只收集当前 active turn 之前已经提交的 user/task inputs，并把它们渲染为 already-handled/superseded history。work order、milestone、checkpoint、repair、todo/checklist、cursor 等事实仍以 minion 账本/仓库为 source of truth，不重复写进 compact。不生成 `memory_candidates`。
 
 ## retire
 
@@ -867,7 +867,7 @@ LLM 不应逐字段消费 `L2` 内部 schema。
 1. `Recent Context`
 2. `<conversation_summary>`
 3. `<recalled_memories view="summary">`
-4. `<advisor_hints>`
+4. Behavior-owned `<advisor_hints>` may appear as a separate runtime-reminder block, but it is not an L2 memory projection.
 
 这意味着：
 
@@ -885,7 +885,7 @@ LLM 不应逐字段消费 `L2` 内部 schema。
 - `L2 -> L3` 叫 retire。
 - `L3 -> L2` 叫 recall。
 - `commit` 是显式写入，不带 `level`。
-- HOT prompt projection 仅包含 HOT 条目，不是 durable bucket。
+- HOT prompt projection 仅包含 HOT memory 条目，不是 durable bucket。
 - L2 条目有 HOT / GHOST / DORMANT 生命周期，TTL 续命封顶 3 次。
 - `task-wise memory` 是 scope，不是 bucket。
 - `page_fault` 正式废弃。

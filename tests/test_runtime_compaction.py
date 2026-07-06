@@ -10,7 +10,8 @@ from pal.execution import CapabilityDescriptor, CapabilityResult
 from pal.foundation import EventEnvelope
 from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
 from pal.llm.runtime import LLMRuntime
-from pal.memory import CompactionProfile, L1MessageKind, L1TranscriptMessage, L2Entry, L3ProviderSelector, MemoryCompactRequest, MemoryPackRequest, MemoryService, register_with_core as register_memory_with_core
+from pal.memory import CompactionProfile, L1MessageKind, L1TranscriptMessage, L2Entry, L3ProviderSelector, MemoryCompactRequest, MemoryCompactResult, MemoryPackRequest, MemoryService, register_with_core as register_memory_with_core
+from pal.minion.compact import compact_minion_memory_service
 from pal.shared import LLMFinishReason, PromptAssemblyContext, RuntimeStatus
 
 
@@ -30,7 +31,7 @@ class EchoTool:
 
 
 class _CompactingLLMRuntime:
-    def __init__(self, *, compact_on: str) -> None:
+    def __init__(self, *, compact_on: str, memory_candidates: list[dict[str, object]] | None = None) -> None:
         self.compact_on = compact_on
         self.preflight_count = 0
         self.generate_count = 0
@@ -38,6 +39,7 @@ class _CompactingLLMRuntime:
         self.compaction_sources: list[str] = []
         self.compaction_profiles: list[CompactionProfile] = []
         self.structured_compaction_max_output_tokens: list[int] = []
+        self.memory_candidates = list(memory_candidates or [])
 
     def preflight(self, request) -> LLMPreflightAdvice:
         self.preflight_count += 1
@@ -92,8 +94,8 @@ class _CompactingLLMRuntime:
         self.compaction_sources.append(text)
         self.compaction_profiles.append(profile)
         self.structured_compaction_max_output_tokens.append(max_output_tokens)
-        schema = "pal.compaction.minion.v1" if profile == CompactionProfile.MINION else "pal.compaction.pal.v1"
-        return {
+        schema = "pal.compaction.minion.v1" if profile == CompactionProfile.MINION else "pal.compaction.pal.v2"
+        payload = {
             "schema": schema,
             "kind": profile.value,
             "continuity": {},
@@ -102,6 +104,9 @@ class _CompactingLLMRuntime:
                 "search_text": text,
             },
         }
+        if profile != CompactionProfile.MINION:
+            payload["memory_candidates"] = self.memory_candidates
+        return payload
 
 
 class _ManualCompactionLLMRuntime:
@@ -124,7 +129,7 @@ class _ManualCompactionLLMRuntime:
         self.compaction_sources.append(text)
         self.compaction_profiles.append(profile)
         self.structured_compaction_max_output_tokens.append(max_output_tokens)
-        schema = "pal.compaction.minion.v1" if profile == CompactionProfile.MINION else "pal.compaction.pal.v1"
+        schema = "pal.compaction.minion.v1" if profile == CompactionProfile.MINION else "pal.compaction.pal.v2"
         payload = {
             "schema": schema,
             "kind": profile.value,
@@ -155,7 +160,7 @@ class _FailingCompactionLLMRuntime:
         return ""
 
 
-def _build_core_with_compacting_llm(*, compact_on: str):
+def _build_core_with_compacting_llm(*, compact_on: str, memory_candidates: list[dict[str, object]] | None = None):
     core = PalCore()
     register_core_with_core(core)
     channel_runtime = ChannelRuntime()
@@ -168,7 +173,7 @@ def _build_core_with_compacting_llm(*, compact_on: str):
         ]
     )
     register_memory_with_core(core.context, memory_service)
-    scripted_llm = _CompactingLLMRuntime(compact_on=compact_on)
+    scripted_llm = _CompactingLLMRuntime(compact_on=compact_on, memory_candidates=memory_candidates)
     core.context.port_registry["llm:llm"] = scripted_llm
     core.context.execution_runtime.register_tool(EchoTool())
     return core, memory_service, scripted_llm
@@ -211,26 +216,26 @@ def _idle_program():
 class RuntimeCompactionTests(unittest.TestCase):
     def test_structured_compaction_prompt_guides_summary_and_l2_entries(self) -> None:
         pal_prompt = LLMRuntime._COMPACT_PAL_STRUCTURED_SYSTEM
-        minion_prompt = LLMRuntime._COMPACT_MINION_STRUCTURED_SYSTEM
 
-        self.assertIn("pal.compaction.pal.v1", pal_prompt)
+        self.assertIn("pal.compaction.pal.v2", pal_prompt)
         self.assertIn("memory_candidates", pal_prompt)
-        self.assertIn("latest_user_intent", pal_prompt)
-        self.assertIn("recent_user_delegated_tasks", pal_prompt)
+        self.assertIn("active_operating_instructions", pal_prompt)
+        self.assertIn("active_requests", pal_prompt)
+        self.assertIn("temporary_task_state", pal_prompt)
+        self.assertIn("Field boundaries", pal_prompt)
+        self.assertIn("HOW Pal should work", pal_prompt)
+        self.assertIn("WHAT Pal should do", pal_prompt)
+        self.assertIn("ephemeral progress needed to resume", pal_prompt)
+        self.assertIn("Previous compact data is already lossy", pal_prompt)
+        self.assertIn("Automatic and manual compact candidates both require approval", pal_prompt)
         self.assertIn("durable user preferences", pal_prompt)
         self.assertIn("stable user status/context", pal_prompt)
         self.assertIn("real goals/plans/commitments", pal_prompt)
         self.assertIn("Do not create entries from jokes", pal_prompt)
         self.assertIn("repair lessons", pal_prompt)
+        self.assertFalse(hasattr(LLMRuntime, "_COMPACT_MINION_STRUCTURED_SYSTEM"))
 
-        self.assertIn("pal.compaction.minion.v1", minion_prompt)
-        self.assertIn("continuity reference only", minion_prompt)
-        self.assertIn("must_verify_against", minion_prompt)
-        self.assertNotIn("memory_candidates", minion_prompt)
-        self.assertNotIn("latest_user_intent", minion_prompt)
-        self.assertIn("work-order completion/finalization", minion_prompt)
-
-    def test_llm_runtime_structured_compaction_profile_override_model_payload(self) -> None:
+    def test_llm_runtime_rejects_minion_structured_compaction(self) -> None:
         runtime = object.__new__(LLMRuntime)
         requests = []
 
@@ -238,7 +243,7 @@ class RuntimeCompactionTests(unittest.TestCase):
             requests.append(request)
             return CanonicalLLMOutcome(
                 text=(
-                    '{"schema":"pal.compaction.v2","kind":"pal","continuity":{},'
+                    '{"schema":"pal.compaction.pal.v2","kind":"pal","continuity":{},'
                     '"summary":{"summary":"ok","search_text":"ok"},'
                     '"memory_candidates":[{"kind":"fact","title":"bad","summary":"bad","source_excerpt":"bad"}]}'
                 ),
@@ -250,14 +255,33 @@ class RuntimeCompactionTests(unittest.TestCase):
 
         payload = runtime.compact_memory_structured("compact this", profile=CompactionProfile.MINION)
 
-        self.assertEqual(payload["schema"], "pal.compaction.minion.v1")
-        self.assertEqual(payload["kind"], "minion")
-        self.assertNotIn("memory_candidates", payload)
-        self.assertIn("pal.compaction.minion.v1", requests[0].messages[0]["content"])
-        self.assertNotIn("pal.compaction.pal.v1", requests[0].messages[0]["content"])
-        self.assertNotIn("memory_candidates", requests[0].messages[0]["content"])
+        self.assertEqual(payload, {})
+        self.assertEqual(requests, [])
 
-    def test_v1_pal_compaction_renders_xml_wrapped_markdown(self) -> None:
+    def test_llm_runtime_uses_zero_temperature_for_compaction(self) -> None:
+        runtime = object.__new__(LLMRuntime)
+        requests = []
+
+        def generate(request):
+            requests.append(request)
+            if request.metadata.get("purpose") == "memory_compaction":
+                return CanonicalLLMOutcome(text="compact summary", tool_calls=[], finish_reason=LLMFinishReason.STOP)
+            return CanonicalLLMOutcome(
+                text='{"schema":"pal.compaction.pal.v2","kind":"pal","continuity":{},'
+                '"summary":{"summary":"ok","search_text":"ok"},"memory_candidates":[]}',
+                tool_calls=[],
+                finish_reason=LLMFinishReason.STOP,
+            )
+
+        runtime.generate = generate
+
+        self.assertEqual(runtime.summarize_compaction("compact this"), "compact summary")
+        payload = runtime.compact_memory_structured("compact this")
+
+        self.assertEqual(payload["schema"], "pal.compaction.pal.v2")
+        self.assertEqual([request.temperature for request in requests], [0.0, 0.0])
+
+    def test_v2_pal_compaction_renders_xml_wrapped_markdown(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         memory_service = MemoryService()
@@ -269,14 +293,15 @@ class RuntimeCompactionTests(unittest.TestCase):
                 reserved_output_tokens=128,
                 metadata={
                     "structured_compaction": {
-                        "schema": "pal.compaction.pal.v1",
+                        "schema": "pal.compaction.pal.v2",
                         "kind": "pal",
                         "continuity": {
-                            "latest_user_intent": "Discuss compact v2 before implementation.",
-                            "active_thread": "Compact should track the user and recent delegated tasks.",
-                            "explicit_constraints": ["Do not directly mutate code while planning."],
-                            "recent_user_delegated_tasks": ["Inspect compact prompt."],
-                            "next_best_action": "Continue from the compact design discussion.",
+                            "current_focus": "Compact should track the user and recent delegated tasks.",
+                            "primary_request_and_intent": "Discuss compact v2 before implementation.",
+                            "active_operating_instructions": ["Do not directly mutate code while planning."],
+                            "active_requests": ["Inspect compact prompt."],
+                            "temporary_task_state": ["The team is still planning the Pal compact v2 shape."],
+                            "optional_next_step": "Continue from the compact design discussion.",
                         },
                         "summary": {
                             "summary": "The user is refining compact v2 semantics.",
@@ -296,7 +321,7 @@ class RuntimeCompactionTests(unittest.TestCase):
         )
 
         self.assertEqual(len(result.projected_entries), 1)
-        self.assertEqual(result.projected_entries[0].payload["schema"], "pal.compaction.pal.v1")
+        self.assertEqual(result.projected_entries[0].payload["schema"], "pal.compaction.pal.v2")
         request = core.prompt_compiler.build_canonical_prompt(
             PromptAssemblyContext(
                 event=EventEnvelope(
@@ -309,18 +334,18 @@ class RuntimeCompactionTests(unittest.TestCase):
         )
         prompt_text = _request_text(request)
         self.assertIn('<compact_context kind="pal" authority="conversation_continuity">', prompt_text)
-        self.assertIn("### Latest User Intent", prompt_text)
+        self.assertEqual(prompt_text.count('<compact_context kind="pal" authority="conversation_continuity">'), 1)
+        self.assertIn("### Primary Request And Intent", prompt_text)
         self.assertIn("Discuss compact v2 before implementation.", prompt_text)
-        self.assertIn("### Recent User Delegated Tasks", prompt_text)
-        self.assertNotIn('"schema": "pal.compaction.pal.v1"', prompt_text)
+        self.assertIn("### Active Requests", prompt_text)
+        self.assertIn("### Temporary Task State", prompt_text)
+        self.assertNotIn('"schema": "pal.compaction.pal.v2"', prompt_text)
 
-    def test_v1_minion_compaction_renders_reference_only_context(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
+    def test_minion_compaction_helper_renders_reference_only_context(self) -> None:
         memory_service = MemoryService()
-        register_memory_with_core(core.context, memory_service)
 
-        memory_service.compact(
+        compact_minion_memory_service(
+            memory_service,
             MemoryCompactRequest(
                 target_input_budget=512,
                 reserved_output_tokens=128,
@@ -353,17 +378,10 @@ class RuntimeCompactionTests(unittest.TestCase):
             )
         )
 
-        request = core.prompt_compiler.build_canonical_prompt(
-            PromptAssemblyContext(
-                event=EventEnvelope(
-                    event_kind="user.message",
-                    source_kind="channel",
-                    payload={"text": "continue"},
-                )
-            ),
-            max_output_tokens=128,
-        )
-        prompt_text = _request_text(request)
+        summary = memory_service.build_pack(MemoryPackRequest()).current_summary
+        self.assertIsNotNone(summary)
+        assert summary is not None
+        prompt_text = summary.rendered
         self.assertIn('<compact_context kind="minion" authority="reference_only">', prompt_text)
         self.assertIn("continuity reference only", prompt_text)
         self.assertIn("Verify against the work order, plan artifact, current milestone, checkpoint/ledger, and workspace before acting.", prompt_text)
@@ -425,7 +443,7 @@ class RuntimeCompactionTests(unittest.TestCase):
                 reserved_output_tokens=128,
                 metadata={
                     "structured_compaction": {
-                        "schema": "pal.compaction.pal.v1",
+                        "schema": "pal.compaction.pal.v2",
                         "kind": "pal",
                         "continuity": {},
                         "summary": {
@@ -483,29 +501,26 @@ class RuntimeCompactionTests(unittest.TestCase):
         self.assertEqual(memory_service.l1_store.items, before_l1)
         self.assertIsNone(memory_service.l2_store.get_entry("memory_summary_current"))
 
-    def test_compaction_request_profile_overrides_legacy_payload_kind(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
+    def test_minion_compaction_helper_strips_memory_candidates(self) -> None:
         memory_service = MemoryService()
-        register_memory_with_core(core.context, memory_service)
 
-        result = memory_service.compact(
+        result = compact_minion_memory_service(
+            memory_service,
             MemoryCompactRequest(
                 target_input_budget=512,
                 reserved_output_tokens=128,
                 profile=CompactionProfile.MINION,
                 metadata={
                     "structured_compaction": {
-                        "schema": "pal.compaction.v2",
-                        "kind": "pal",
+                        "schema": "pal.compaction.minion.v1",
+                        "kind": "minion",
                         "continuity": {
-                            "latest_user_intent": "Model used the wrong compact profile.",
                             "task_goal": "Continue a minion task safely.",
                             "must_verify_against": ["work_order", "current_files"],
                         },
                         "summary": {
-                            "summary": "A minion compact response was mislabeled as pal.",
-                            "search_text": "minion compact mislabeled pal",
+                            "summary": "A minion compact payload was produced mechanically.",
+                            "search_text": "minion compact mechanical payload",
                         },
                         "memory_candidates": [
                             {
@@ -528,11 +543,21 @@ class RuntimeCompactionTests(unittest.TestCase):
         self.assertIn("continuity reference only", summary.rendered)
         self.assertNotIn("should be stripped", summary.rendered)
 
-    def test_minion_compaction_effect_passes_minion_profile(self) -> None:
+    def test_minion_compaction_effect_does_not_call_llm(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         memory_service = MemoryService()
         memory_service.l1_store.append([L1TranscriptMessage(role="user", content="minion prior state")])
+        memory_service.build_compaction_payload = lambda **kwargs: {
+            "schema": "pal.compaction.minion.v1",
+            "kind": "minion",
+            "continuity": {"prior_completed_user_inputs": ["minion prior state"]},
+            "summary": {
+                "summary": "Mechanical minion compact summary.",
+                "search_text": "minion prior state",
+            },
+        }
+        memory_service.compact = lambda request: compact_minion_memory_service(memory_service, request)
         register_memory_with_core(core.context, memory_service)
         scripted_llm = _ManualCompactionLLMRuntime()
         core.context.port_registry["llm:llm"] = scripted_llm
@@ -562,7 +587,8 @@ class RuntimeCompactionTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(scripted_llm.compaction_profiles, [CompactionProfile.MINION])
+        self.assertEqual(scripted_llm.compaction_profiles, [])
+        self.assertIn("Mechanical minion compact summary.", memory_service.l1_store.items[0][0].content)
 
     def test_manual_compaction_uses_structured_compaction_path(self) -> None:
         core = PalCore()
@@ -719,13 +745,28 @@ class RuntimeCompactionTests(unittest.TestCase):
         self.assertEqual(call.args["payload"]["source_kind"], "pal_compact")
         self.assertEqual(call.args["payload"]["source_ref"], "compact_test")
 
-    def test_compaction_source_keeps_summary_and_recent_tail(self) -> None:
+    def test_compaction_source_uses_v2_seed_and_turn_windows(self) -> None:
         service = MemoryService()
         service.l1_store.items = [[
             L1TranscriptMessage(
                 role="assistant",
                 content="<compact_context kind=\"pal\" authority=\"conversation_continuity\">\nstable summary should be retained\n</compact_context>",
                 kind=L1MessageKind.RUNTIME_CONTEXT_SUMMARY,
+                payload={
+                    "schema": "pal.compaction.pal.v2",
+                    "kind": "pal",
+                    "continuity": {
+                        "active_operating_instructions": ["Do not mutate L3 while compact is being designed."],
+                        "active_requests": ["Implement Pal compact v2."],
+                        "temporary_task_state": ["hot/raw=5 and warm=20 are the first-pass windows."],
+                        "retired_or_superseded_context": ["Old v1 summary text should not be recursively summarized."],
+                    },
+                    "summary": {
+                        "summary": "stable summary should not be re-fed as transcript",
+                        "search_text": "compact v2 seed",
+                    },
+                    "memory_candidates": [],
+                },
             )
         ]]
         service.l2_store.items["memory_summary_current"] = L2Entry(
@@ -755,16 +796,110 @@ class RuntimeCompactionTests(unittest.TestCase):
             ]
         )
 
-        source = service.build_compaction_source_text(target_input_budget=600)
+        source = service.build_compaction_source_text(target_input_budget=4096)
 
-        self.assertIn("[Current Summary]", source)
-        self.assertIn("stable summary should be retained", source)
+        self.assertIn('<compact_source kind="pal" schema_target="pal.compaction.pal.v2">', source)
+        self.assertIn("## Previous Compact Seed", source)
+        self.assertIn("Do not mutate L3 while compact is being designed.", source)
+        self.assertIn("hot/raw=5 and warm=20", source)
+        self.assertNotIn("<compact_context", source)
+        self.assertNotIn("stable summary should be retained", source)
         self.assertIn("turn was interrupted before final reply", source)
         self.assertIn("assistant reply should be compacted", source)
         self.assertNotIn("tool result should not be compacted", source)
         self.assertNotIn("runtime memory", source)
         self.assertNotIn("not a real request", source)
-        self.assertNotIn("recent item 0", source)
+        self.assertIn("recent item 0", source)
+
+    def test_legacy_tool_trace_dict_is_dropped_before_prompt_or_compaction_source(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        memory_service = MemoryService()
+        memory_service.l1_store.append(
+            [
+                {"role": "user", "content": "keep this ordinary user context"},
+                {
+                    "role": "assistant",
+                    "content": (
+                        "ordinary assistant reply\n\n"
+                        "<system-reminder>Tools used: inline private artifact path "
+                        "/home/nathan/.pal/data/minion/inline-secret</system-reminder>"
+                    ),
+                    "kind": L1MessageKind.ASSISTANT_REPLY,
+                    "tool_trace": "call_tool(ok): private artifact path /home/nathan/.pal/data/minion/secret",
+                },
+            ]
+        )
+        register_memory_with_core(core.context, memory_service)
+
+        request = core.prompt_compiler.build_canonical_prompt(
+            PromptAssemblyContext(
+                event=EventEnvelope(
+                    event_kind="user.message",
+                    source_kind="channel",
+                    payload={"text": "continue"},
+                )
+            ),
+            max_output_tokens=128,
+        )
+        prompt_text = _request_text(request)
+        source = memory_service.build_compaction_source_text(target_input_budget=4096)
+
+        self.assertFalse(hasattr(memory_service.l1_store.items[0][1], "tool_trace"))
+        self.assertIn("ordinary assistant reply", prompt_text)
+        self.assertIn("ordinary assistant reply", source)
+        self.assertNotIn("Tools used:", prompt_text)
+        self.assertNotIn("private artifact path", prompt_text)
+        self.assertNotIn("inline private artifact path", prompt_text)
+        self.assertNotIn("tool_trace:", source)
+        self.assertNotIn("private artifact path", source)
+        self.assertNotIn("inline private artifact path", source)
+
+    def test_compaction_source_drops_old_warm_turns_by_turn(self) -> None:
+        service = MemoryService()
+        for index in range(30):
+            service.l1_store.append([L1TranscriptMessage(role="user", content=f"turn item {index}")])
+
+        source = service.build_compaction_source_text(target_input_budget=4096)
+
+        self.assertNotIn("turn item 0", source)
+        self.assertNotIn("turn item 4", source)
+        self.assertIn("turn item 5", source)
+        self.assertIn("turn item 29", source)
+
+    def test_second_compaction_source_does_not_recompact_rendered_context(self) -> None:
+        service = MemoryService()
+        service.l1_store.append([L1TranscriptMessage(role="user", content="first real turn")])
+        service.compact(
+            MemoryCompactRequest(
+                target_input_budget=512,
+                reserved_output_tokens=128,
+                metadata={
+                    "structured_compaction": {
+                        "schema": "pal.compaction.pal.v2",
+                        "kind": "pal",
+                        "continuity": {
+                            "active_operating_instructions": ["Keep L3 out of this compact implementation."],
+                            "active_requests": ["Implement Pal compact v2."],
+                            "retired_or_superseded_context": ["A completed old task must stay retired."],
+                        },
+                        "summary": {
+                            "summary": "First compact rendered context should not be re-fed as transcript.",
+                            "search_text": "first compact seed",
+                        },
+                        "memory_candidates": [],
+                    }
+                },
+            )
+        )
+        service.l1_store.append([L1TranscriptMessage(role="user", content="new turn after compact")])
+
+        source = service.build_compaction_source_text(target_input_budget=4096)
+
+        self.assertNotIn("<compact_context", source)
+        self.assertNotIn("First compact rendered context should not be re-fed as transcript.", source)
+        self.assertIn("Keep L3 out of this compact implementation.", source)
+        self.assertIn("new turn after compact", source)
 
     def test_prompt_after_interrupt_can_continue_from_checkpoint(self) -> None:
         core = PalCore()
@@ -866,7 +1001,7 @@ class RuntimeCompactionTests(unittest.TestCase):
                 reserved_output_tokens=128,
                 metadata={
                     "structured_compaction": {
-                        "schema": "pal.compaction.pal.v1",
+                        "schema": "pal.compaction.pal.v2",
                         "kind": "pal",
                         "continuity": {},
                         "summary": {
@@ -930,6 +1065,36 @@ class RuntimeCompactionTests(unittest.TestCase):
         self.assertIn("<runtime_reminder", post_compact_prompt)
         self.assertEqual(generate_requests[-1].messages[-1]["role"], "tool")
         self.assertNotIn("<runtime_reminder", _message_text(generate_requests[-1].messages[-1]))
+
+    def test_auto_budget_compaction_opens_memory_candidate_approval_after_turn(self) -> None:
+        candidate = {
+            "kind": "fact",
+            "title": "Budget compact candidates still require approval",
+            "summary": "Automatic compact may propose durable memory candidates, but must not write L3 directly.",
+            "source_excerpt": "automatic compact candidates require approval",
+        }
+        core, _memory_service, _scripted_llm = _build_core_with_compacting_llm(
+            compact_on="preflight",
+            memory_candidates=[candidate],
+        )
+        statuses: list[tuple[str, dict[str, object]]] = []
+
+        async def capture_status(route, kind: str, payload: dict[str, object]) -> None:
+            _ = route
+            statuses.append((kind, payload))
+
+        core._status_to_route_async = capture_status
+
+        outcome = _run_turn(core)
+
+        self.assertEqual(outcome.final_reply, "final answer")
+        self.assertTrue(statuses)
+        self.assertEqual(statuses[-1][0], "interactive_open")
+        spec = statuses[-1][1]["spec"]
+        self.assertEqual(spec.interaction_kind, "memory_candidate_approval")
+        self.assertIn("Budget compact candidates still require approval", spec.text)
+        accept = spec.buttons[0][0]
+        self.assertEqual(accept.action_args["args"]["memory_candidates"], [candidate])
 
     def test_generate_compact_during_tool_turn_preserves_tool_result_and_endpoint_hint(self) -> None:
         core, memory_service, scripted_llm = _build_core_with_compacting_llm(compact_on="generate")

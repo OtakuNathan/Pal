@@ -109,3 +109,14 @@ class BehaviorAdviceResult:
             "fallback_used": self.fallback_used,
             "router_error": self.router_error,
         }
+
+
+@dataclass(frozen=True)
+class BehaviorAdvisorHint:
+    hint_id: str
+    title: str
+    rendered: str
+    source_ref: str = ""
+    payload: dict[str, Any] = field(default_factory=dict)
+    created_at: str = ""
+    touched_at: str = ""

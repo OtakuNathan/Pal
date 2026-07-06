@@ -152,6 +152,7 @@ class TurnContinuation:
     pending_assistant_tool_text: str = ""
     pending_assistant_provider_specific_fields: dict[str, Any] = field(default_factory=dict)
     emitted_reply_texts: list[str] = field(default_factory=list)
+    pending_compact_memory_candidate_batches: list[dict[str, Any]] = field(default_factory=list)
     budget_failure_feedback_text: str = ""
     prompt_budget_snapshot: dict[str, Any] = field(default_factory=dict)
     l1_exit_checkpoint_committed: bool = False
@@ -311,26 +312,6 @@ def render_final_reply(channel_envelope: ChannelEnvelope, outcome: CanonicalLLMO
     return outcome.text
 
 
-def _render_tool_summary(observations: list[ToolObservation], *, max_summary_chars: int = 500) -> str:
-    if not observations:
-        return ""
-    per_item_limit = max_summary_chars // 3
-    parts: list[str] = []
-    total = 0
-    for obs in observations:
-        status = "ok" if obs.ok else "error"
-        summary = obs.summary[:per_item_limit]
-        line = f"{obs.tool_name}({status}): {summary}"
-        if total + len(line) > max_summary_chars:
-            remaining = len(observations) - len(parts)
-            if remaining > 0:
-                parts.append(f"... +{remaining} more")
-            break
-        parts.append(line)
-        total += len(line)
-    return "\n".join(parts)
-
-
 def _finish_compaction_failure_turn(
     *,
     turn_id: str,
@@ -364,19 +345,18 @@ def _build_turn_transcript(
     observations: list[ToolObservation] | None = None,
     reply_texts: list[str] | tuple[str, ...] | None = None,
 ) -> list[L1TranscriptMessage]:
+    _ = observations
     user_text = extract_text_from_payload(channel_envelope.event.payload)
     transcript: list[L1TranscriptMessage] = []
     if user_text:
         transcript.append(L1TranscriptMessage(role="user", content=user_text, kind=L1MessageKind.USER_REQUEST))
-    tool_summary = _render_tool_summary(observations or [])
     replies = tuple(str(item).strip() for item in (reply_texts or (final_reply,)) if str(item).strip())
-    for index, assistant_content in enumerate(replies):
+    for assistant_content in replies:
         transcript.append(
             L1TranscriptMessage(
                 role="assistant",
                 content=assistant_content,
                 kind=L1MessageKind.ASSISTANT_REPLY,
-                tool_trace=(tool_summary or None) if index == len(replies) - 1 else None,
             )
         )
     return transcript

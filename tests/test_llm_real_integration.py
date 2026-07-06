@@ -539,9 +539,20 @@ class RealLLMIntegrationTests(unittest.TestCase):
 
         result = runtime.compact_memory_structured(
             (
-                "The user treats Pal as a personal assistant, not a generic tool. "
-                "Pal should recall relevant repair experience when a tool call fails. "
-                "A recent repair found that mutating frozen ResponseHandle broke socket streaming."
+                "<compact_source kind=\"pal\" schema_target=\"pal.compaction.pal.v2\">\n"
+                "## Previous Compact Seed\n"
+                "- Active operating instruction: answer concisely in Chinese when the user writes Chinese.\n"
+                "- Retired context: an older plan to modify minion L3 storage was cancelled.\n"
+                "\n"
+                "## Warm Turns To Compress\n"
+                "user: L3 is already fine; do not change it for compact.\n"
+                "assistant: Agreed to keep L3 untouched.\n"
+                "\n"
+                "## Hot Raw Turns\n"
+                "user: Implement Pal compact v2. Preserve active operating instructions, active requests, temporary task state, and retired context.\n"
+                "assistant: Implemented the compact v2 source and renderer.\n"
+                "user: Run a real LLM compact test and make compact temperature very low.\n"
+                "</compact_source>"
             ),
             max_output_tokens=2048,
         )
@@ -549,8 +560,16 @@ class RealLLMIntegrationTests(unittest.TestCase):
         self.assertIsInstance(result, dict)
         self.assertIsInstance(result.get("summary"), dict)
         self.assertTrue(str(result["summary"].get("summary") or "").strip())
-        self.assertEqual(result.get("schema"), "pal.compaction.pal.v1")
+        self.assertEqual(result.get("schema"), "pal.compaction.pal.v2")
         self.assertEqual(result.get("kind"), "pal")
+        continuity = result.get("continuity")
+        self.assertIsInstance(continuity, dict)
+        assert isinstance(continuity, dict)
+        self.assertTrue(continuity.get("primary_request_and_intent") or continuity.get("current_focus"))
+        self.assertIsInstance(continuity.get("active_operating_instructions"), list)
+        self.assertIsInstance(continuity.get("active_requests"), list)
+        self.assertIsInstance(continuity.get("temporary_task_state"), list)
+        self.assertIsInstance(continuity.get("retired_or_superseded_context"), list)
         self.assertIsInstance(result.get("memory_candidates"), list)
 
     def test_real_runtime_channel_turn_replies_through_pal_core(self) -> None:

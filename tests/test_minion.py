@@ -70,7 +70,7 @@ from pal.minion import (
     prompt_view_from_metadata,
     register_with_core as register_minion_with_core,
 )
-from pal.llm.contracts import CanonicalLLMOutcome, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice
+from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice
 from pal.minion.capability_args import validate_draft_work_order_args
 from pal.minion.checklist import MilestoneChecklistLedger, build_requirements_checklist, requirements_checklist_to_gate_contract
 from pal.minion.config import merge_minion_runtime_config, minion_db_path
@@ -114,7 +114,6 @@ from pal.minion.runner import (
     MinionRuntimeBundle,
     _llm_tools_for_allowed,
     _minion_llm_request_metadata,
-    _render_minion_tool_summary,
     _resolve_minion_max_output_tokens,
     build_slim_minion_runtime,
 )
@@ -153,6 +152,7 @@ from pal.minion.prompt_adapter import (
 from pal.minion.turns import apply_minion_turn_to_pack, build_minion_turn_from_pack, sanitize_runner_session_pack
 from pal.minion.capabilities import _control_route_payload_for_turn, _prompt_log_enabled_for_turn
 from pal.minion.prompt import TaskingPromptFragmentProvider
+from pal.minion.compact import compact_minion_memory_service
 from pal.memory import CompactionProfile, L1MessageKind, L1TranscriptMessage, MemoryCommitRequest, MemoryCompactRequest, MemoryService
 from pal.foundation import EventEnvelope
 from pal.shared import EventKind, LLMFinishReason, LLMPreflightStatus, LLMStreamEventKind, MinionApprovalDecision, PromptAssemblyContext, RuntimeStatus, SourceKind, TaskContextPack, llm_tool_name
@@ -4916,7 +4916,9 @@ class MinionContractTests(unittest.TestCase):
                 self.assertNotIn("<system-reminder>", system)
                 self.assertNotIn("<skill_manual_context>", system)
                 self.assertIn("<system-reminder>", rendered_prompt)
-                self.assertIn("<skill_manual_context>", rendered_prompt)
+                self.assertNotIn("<skill_manual_context>", rendered_prompt)
+                self.assertIn("Minion skill manual context:", rendered_prompt)
+                self.assertNotIn("Minion Skill Manual Context:\n<system-reminder>", rendered_prompt)
                 self.assertIn("SUPERPOWER MANUAL BEGIN", rendered_prompt)
                 self.assertIn("SUPERPOWER MANUAL END", rendered_prompt)
                 self.assertIn("BONUSPOWER MANUAL", rendered_prompt)
@@ -18264,6 +18266,57 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_runner_debug_log_preserves_tool_protocol_messages(self) -> None:
+        log_path = self.root / "wo_debug_protocol.log"
+        state = MinionAgentLoopState(
+            execution_runtime=SimpleNamespace(),
+            memory_service=MemoryService(),
+            memory_l3=SimpleNamespace(records=[]),
+        )
+        runner = MinionRunner(
+            runtime_root=self.root,
+            pack=TaskContextPack(
+                work_order_id="wo_debug_protocol",
+                goal="debug protocol logging",
+                metadata={"debug_log": {"enabled": True, "path": str(log_path)}},
+            ),
+            minion_id="m_debug_protocol",
+            run_id="r_debug_protocol",
+            write_event=lambda event: None,
+            read_decision=lambda timeout: None,
+            runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+        )
+        request = CanonicalLLMRequest(
+            messages=[
+                {"role": "user", "content": "run a probe"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_debug_1",
+                            "type": "function",
+                            "function": {"name": "op_probe", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_debug_1", "content": "probe result"},
+            ],
+            max_output_tokens=128,
+            tools=[{"type": "function", "function": {"name": "op_probe", "parameters": {"type": "object"}}}],
+        )
+
+        runner._debug_log_minion_llm_request(state, request)
+
+        records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+        request_record = next(record for record in records if record["section"] == "llm_request")
+        messages = request_record["payload"]["messages"]
+        self.assertEqual([message["role"] for message in messages], ["user", "assistant", "tool"])
+        self.assertEqual(messages[1]["tool_calls"][0]["id"], "call_debug_1")
+        self.assertEqual(messages[1]["tool_calls"][0]["function"]["name"], "op_probe")
+        self.assertEqual(messages[2]["tool_call_id"], "call_debug_1")
+        self.assertEqual(messages[2]["content"], "probe result")
+
     def test_runner_l1_transcript_commit_keeps_runtime_context_without_debug_log(self) -> None:
         async def scenario() -> None:
             transcript = [
@@ -18292,7 +18345,7 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_runner_does_not_commit_full_tool_protocol_to_l1_without_debug_log(self) -> None:
+    def test_runner_commits_full_tool_protocol_to_l1_by_default(self) -> None:
         async def scenario() -> None:
             class FakeExecutor:
                 async def execute_turn_effect_async(self, continuation, effect):
@@ -18357,7 +18410,12 @@ class MinionManagerTests(unittest.TestCase):
             )
 
             self.assertEqual(len(state.tool_protocol_messages), 2)
-            self.assertEqual(state.memory_service.l1_store.items, [])
+            self.assertEqual(len(state.memory_service.l1_store.items), 1)
+            transcript = state.memory_service.l1_store.items[0]
+            self.assertEqual([message.role for message in transcript], ["assistant", "tool"])
+            self.assertEqual(transcript[0].tool_calls[0]["id"], "call_1")
+            self.assertEqual(transcript[1].tool_call_id, "call_1")
+            self.assertIn("full tool result", transcript[1].content)
 
         asyncio.run(scenario())
 
@@ -18436,20 +18494,6 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(transcript[1].tool_call_id, "call_1")
 
         asyncio.run(scenario())
-
-    def test_runner_tool_summary_keeps_short_result_without_full_protocol(self) -> None:
-        summary = _render_minion_tool_summary(
-            [
-                SimpleNamespace(
-                    tool_name="op_probe",
-                    ok=True,
-                    summary=" ".join(["large-result"] * 80),
-                )
-            ]
-        )
-
-        self.assertIn("op_probe(ok):", summary)
-        self.assertLessEqual(len(summary), 520)
 
     def test_workspace_read_tools_are_scoped_to_repo_path(self) -> None:
         async def scenario() -> None:
@@ -22647,6 +22691,10 @@ class MinionManagerTests(unittest.TestCase):
                     generated_messages.extend(request.messages)
                     return CanonicalLLMOutcome(text="compacted completion")
 
+                async def acompact_memory_structured(self, *args, **kwargs):
+                    _ = (args, kwargs)
+                    raise AssertionError("minion compaction should be mechanical")
+
             async def write_event(event):
                 events.append(event)
 
@@ -22677,12 +22725,67 @@ class MinionManagerTests(unittest.TestCase):
             rendered_messages = "\n".join(_message_text(message) for message in generated_messages)
             self.assertIn("<system-reminder>", rendered_messages)
             self.assertIn("Minion run memory", rendered_messages)
-            self.assertIn("Current summary", rendered_messages)
+            self.assertIn("current active milestone turn", rendered_messages)
             self.assertNotIn("Compaction Note", generated_messages[0]["content"])
             terminal = next(event for event in events if event["event_kind"] == "terminal")
             self.assertEqual(terminal["payload"]["status"], "completed")
 
         asyncio.run(scenario())
+
+    def test_runner_minion_compaction_source_keeps_only_prior_user_inputs(self) -> None:
+        runner = MinionRunner(
+            runtime_root=self.root,
+            pack=TaskContextPack(
+                work_order_id="wo_compact_source",
+                goal="current primary input must stay outside minion compact",
+                metadata={"allow_text_only_completion": True},
+            ),
+            minion_id="m_compact_source",
+            run_id="r_compact_source",
+            write_event=lambda event: None,
+            read_decision=lambda timeout: None,
+            runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
+        )
+        memory_service = MemoryService()
+        memory_service.l1_store.append(
+            [
+                L1TranscriptMessage(
+                    role="user",
+                    content=(
+                        "work_order_id: wo_old\n"
+                        "run_id: r_old\n"
+                        "module_id: module_old\n"
+                        "Prior milestone user instruction that still helps orient history."
+                    ),
+                    kind=L1MessageKind.USER_REQUEST,
+                ),
+                L1TranscriptMessage(
+                    role="assistant",
+                    content="assistant reply must not enter minion compact source",
+                    kind=L1MessageKind.ASSISTANT_REPLY,
+                ),
+            ]
+        )
+        state = MinionAgentLoopState(
+            execution_runtime=SimpleNamespace(),
+            memory_service=memory_service,
+            memory_l3=SimpleNamespace(records=[]),
+            channel_envelope=_build_minion_task_envelope(runner.pack, minion_id=runner.minion_id, run_id=runner.run_id),
+        )
+        state.tool_protocol_messages = [
+            {"role": "tool", "tool_call_id": "call_1", "content": "fresh tool result must stay current-turn only"},
+        ]
+
+        source = runner._minion_compaction_source_text(state, target_input_budget=4096)
+
+        self.assertIn('<compact_source kind="minion" mode="prior_completed_user_inputs">', source)
+        self.assertIn("Prior milestone user instruction that still helps orient history.", source)
+        self.assertNotIn("work_order_id", source)
+        self.assertNotIn("run_id", source)
+        self.assertNotIn("module_id", source)
+        self.assertNotIn("assistant reply must not enter", source)
+        self.assertNotIn("fresh tool result must stay current-turn only", source)
+        self.assertNotIn("current primary input must stay outside", source)
 
     def test_runner_compaction_preserves_current_tool_protocol(self) -> None:
         async def scenario() -> None:
@@ -22778,7 +22881,8 @@ class MinionManagerTests(unittest.TestCase):
             runtime_bundle=MinionRuntimeBundle(llm_runtime=SimpleNamespace(), execution_runtime=SimpleNamespace()),
         )
         memory_service = MemoryService()
-        memory_service.compact(
+        compact_minion_memory_service(
+            memory_service,
             MemoryCompactRequest(
                 target_input_budget=512,
                 reserved_output_tokens=128,

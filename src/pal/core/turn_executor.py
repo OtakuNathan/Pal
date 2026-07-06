@@ -28,7 +28,8 @@ from pal.core.turns import (
 )
 from pal.failure import FailureSignal
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolResult, LLMPreflightRequest
-from pal.memory.contracts import CompactionProfile, L2Entry, MemoryCommitRequest, MemoryCompactRequest, MemoryPackRequest
+from pal.memory.compact import memory_candidates_from_compact_result
+from pal.memory.contracts import CompactionProfile, MemoryCommitRequest, MemoryCompactRequest, MemoryPackRequest
 from pal.shared import (
     GuardAction,
     LLMFinishReason,
@@ -196,6 +197,15 @@ class TurnExecutor:
             return EffectResult(
                 status=RuntimeStatus.ERROR,
                 text=f"Memory compaction failed; the current turn cannot safely continue. {type(exc).__name__}: {exc}",
+            )
+        candidates = memory_candidates_from_compact_result(compact_result) if _profile_accepts_memory_candidates(profile) else []
+        if candidates:
+            continuation.pending_compact_memory_candidate_batches.append(
+                {
+                    "source_kind": "pal_compact",
+                    "source_label": "Pal compact",
+                    "memory_candidates": candidates,
+                }
             )
         return EffectResult(status=RuntimeStatus.OK, payload=compact_result)
 
@@ -366,7 +376,6 @@ class TurnExecutor:
                 structured=tool_result.structured,
             )
         )
-        await self._project_behavior_advice_result_async(execution_call.name, tool_result)
         record = ToolExecutionRecord(
             turn_id=continuation.turn_id,
             sequence=continuation.tool_batch_count,
@@ -393,37 +402,6 @@ class TurnExecutor:
             payload=tool_result,
             text=tool_result.text,
         )
-
-    async def _project_behavior_advice_result_async(self, tool_name: str, tool_result: CanonicalToolResult) -> None:
-        if not self._is_behavior_advise_tool_call(tool_name):
-            return
-        if not tool_result.ok:
-            return
-        entries = self._behavior_advice_l2_entries(tool_result)
-        if not entries:
-            return
-        try:
-            memory_service = self.context.require_port("memory:memory")
-        except KeyError:
-            return
-        try:
-            await self._call_port_async(
-                memory_service,
-                "aproject_l2_entries",
-                "project_l2_entries",
-                entries,
-                touch=True,
-                top_of_mind=True,
-            )
-        except Exception:
-            diagnostics = getattr(self.state, "diagnostics", None)
-            if isinstance(diagnostics, list):
-                diagnostics.append(
-                    {
-                        "kind": "memory.behavior_advice_projection_failed",
-                        "tool": tool_name,
-                    }
-                )
 
     def _log_tool_call_start(self, continuation, tool_call: Any) -> None:
         LOGGER.debug(
@@ -466,93 +444,13 @@ class TurnExecutor:
             return text
         return f"{text[:max_chars].rstrip()}...[truncated {len(text)} chars]"
 
-    @staticmethod
-    def _behavior_advice_l2_entries(tool_result: CanonicalToolResult) -> list[L2Entry]:
-        structured = tool_result.structured if isinstance(tool_result.structured, dict) else {}
-        raw_candidates = structured.get("candidates") if isinstance(structured, dict) else None
-        if not isinstance(raw_candidates, list):
-            return []
-        entries: list[L2Entry] = []
-        for raw_candidate in raw_candidates:
-            if not isinstance(raw_candidate, dict):
-                continue
-            candidate = dict(raw_candidate)
-            affordance_id = str(candidate.get("affordance_id") or "").strip()
-            if not affordance_id:
-                continue
-            entry_id = f"behavior_advice:{affordance_id}"
-            title = str(candidate.get("title") or affordance_id).strip()
-            summary = str(candidate.get("prompt_hint") or candidate.get("reason") or title).strip()
-            rendered = TurnExecutor._render_behavior_guidance_entry(candidate)
-            entries.append(
-                L2Entry(
-                    entry_id=entry_id,
-                    kind="behavior_rule",
-                    scope="behavior",
-                    title=title,
-                    summary=summary,
-                    source_kind="behavior_advice",
-                    source_ref=affordance_id,
-                    candidate_state="active",
-                    rendered=rendered,
-                    search_text=TurnExecutor._behavior_candidate_search_text(candidate),
-                    canonical_key=entry_id,
-                    dedupe_fingerprint=entry_id,
-                    payload=candidate,
-                )
-            )
-        return entries
-
-    @staticmethod
-    def _is_behavior_advise_tool_call(name: str) -> bool:
-        normalized = str(name or "").strip()
-        return normalized in {"op_behavior_advise", "advise_behavior"} or normalized.endswith("_behavior_advise")
-
-    @staticmethod
-    def _render_behavior_guidance_entry(candidate: dict[str, Any]) -> str:
-        hint = str(candidate.get("prompt_hint") or "").strip()
-        skill_refs = TurnExecutor._string_list(candidate.get("skill_refs"))
-        capability_refs = TurnExecutor._string_list(candidate.get("capability_refs"))
-        memory_query_hints = TurnExecutor._string_list(candidate.get("memory_query_hints"))
-
-        parts: list[str] = []
-        if hint:
-            parts.append(f"Hint: {hint}")
-        if skill_refs:
-            parts.append(f"Skill refs: {', '.join(skill_refs)}. MUST NOT call `skill_inject` solely because listed; call it only when workflow/domain rules are needed.")
-        if capability_refs:
-            parts.append(f"Capability refs: {', '.join(capability_refs)}. Resolve current inventory before use; if one directly completes the request, use it without injecting a skill.")
-        if memory_query_hints:
-            parts.append(f"Memory query hints: {', '.join(memory_query_hints)}. They do not trigger recall by themselves; when recall is required, use them as query seeds.")
-        return " ".join(parts).strip()
-
-    @staticmethod
-    def _behavior_candidate_search_text(candidate: dict[str, Any]) -> str:
-        parts = [
-            str(candidate.get("title") or "").strip(),
-            str(candidate.get("prompt_hint") or "").strip(),
-            str(candidate.get("reason") or "").strip(),
-            " ".join(TurnExecutor._string_list(candidate.get("skill_refs"))),
-            " ".join(TurnExecutor._string_list(candidate.get("capability_refs"))),
-            " ".join(TurnExecutor._string_list(candidate.get("memory_query_hints"))),
-        ]
-        return "\n".join(part for part in parts if part).strip()
-
-    @staticmethod
-    def _string_list(value: object) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            return [value.strip()] if value.strip() else []
-        if isinstance(value, (list, tuple, set)):
-            return [str(item).strip() for item in value if str(item).strip()]
-        return []
-
     @_dispatch_effect.register(MailboxReplyEffect)
     async def _handle_mailbox_reply(self, effect, continuation):
         if continuation.interrupted:
             return EffectResult(status=RuntimeStatus.SKIPPED, text="interrupted")
-        output_port = self._require_agent_output_port()
+        output_port = self._agent_output_port()
+        if output_port is None:
+            return EffectResult(status=RuntimeStatus.SKIPPED, text=effect.text)
         reply_id = await self._call_output_port_async(output_port, "queue_reply", effect.channel_envelope, effect.text)
         text = str(effect.text or "").strip()
         if text:
@@ -564,12 +462,14 @@ class TurnExecutor:
     async def _handle_mailbox_reply_stream(self, effect, continuation):
         if continuation.interrupted:
             return EffectResult(status=RuntimeStatus.SKIPPED, text="interrupted")
-        output_port = self._require_agent_output_port()
+        output_port = self._agent_output_port()
+        if output_port is None:
+            return EffectResult(status=RuntimeStatus.SKIPPED)
         event_id = await self._call_output_port_async(output_port, "queue_stream_event", effect.channel_envelope, effect.event)
         return EffectResult(status=RuntimeStatus.QUEUED, payload={"event_id": event_id})
 
-    def _require_agent_output_port(self):
-        return self.context.port_registry.get("agent_io:output") or self.context.require_port("channel:channel")
+    def _agent_output_port(self):
+        return self.context.port_registry.get("agent_io:output") or self.context.port_registry.get("channel:channel")
 
     async def _call_output_port_async(self, output_port, method_name: str, *args, **kwargs):
         method = getattr(output_port, method_name)
@@ -1140,32 +1040,41 @@ class TurnExecutor:
     # ── post-turn commit ─────────────────────────────────────────────────
 
     async def schedule_post_turn_commit_async(self, outcome) -> None:
-        try:
-            memory_service = self.context.require_port("memory:memory")
-        except KeyError:
+        memory_service = self.context.port_registry.get("memory:memory")
+        if memory_service is not None:
+            result = await self._call_port_async(
+                memory_service,
+                "acommit_l1",
+                "commit_l1",
+                MemoryCommitRequest(
+                    turn_id=outcome.commit_payload.turn_id,
+                    transcript=list(outcome.commit_payload.transcript),
+                    metadata={
+                        "tool_observation_count": len(outcome.commit_payload.tool_observations),
+                    },
+                )
+            )
+            if result.status != RuntimeStatus.OK:
+                self.state.diagnostics.append(
+                    {
+                        "kind": "memory.commit.retry",
+                        "turn_id": outcome.commit_payload.turn_id,
+                        "status": result.status,
+                    }
+                )
+            try:
+                memory_service.l2_store.tick_heat()
+            except Exception:
+                pass
+        self._tick_behavior_lifecycle()
+
+    def _tick_behavior_lifecycle(self) -> None:
+        behavior_service = self.context.port_registry.get("behavior:behavior")
+        tick = getattr(behavior_service, "tick_advisor_hints", None)
+        if not callable(tick):
             return
-        result = await self._call_port_async(
-            memory_service,
-            "acommit_l1",
-            "commit_l1",
-            MemoryCommitRequest(
-                turn_id=outcome.commit_payload.turn_id,
-                transcript=list(outcome.commit_payload.transcript),
-                metadata={
-                    "tool_observation_count": len(outcome.commit_payload.tool_observations),
-                },
-            )
-        )
-        if result.status != RuntimeStatus.OK:
-            self.state.diagnostics.append(
-                {
-                    "kind": "memory.commit.retry",
-                    "turn_id": outcome.commit_payload.turn_id,
-                    "status": result.status,
-                }
-            )
         try:
-            memory_service.l2_store.tick_heat()
+            tick()
         except Exception:
             pass
 
@@ -1228,6 +1137,16 @@ class TurnExecutor:
         profile: CompactionProfile = CompactionProfile.PAL,
         retry_attempts: int = 3,
     ) -> dict[str, Any]:
+        mechanical_payload = self.build_mechanical_compaction_payload(
+            memory_service,
+            target_input_budget=target_input_budget,
+            reserved_output_tokens=reserved_output_tokens,
+            profile=profile,
+        )
+        if _is_valid_structured_compaction_payload(mechanical_payload):
+            return {"structured_compaction": mechanical_payload}
+        if not _profile_uses_llm_compaction(profile):
+            return {"semantic_summary": _empty_compaction_summary(profile)}
         source_text = self.build_compaction_source_text(memory_service, target_input_budget=target_input_budget)
         if not source_text:
             return {"semantic_summary": _empty_compaction_summary(profile)}
@@ -1266,6 +1185,32 @@ class TurnExecutor:
         except Exception:
             return ""
 
+    def build_mechanical_compaction_payload(
+        self,
+        memory_service,
+        *,
+        target_input_budget: int,
+        reserved_output_tokens: int,
+        profile: CompactionProfile,
+    ) -> dict[str, Any]:
+        builder = getattr(memory_service, "build_compaction_payload", None)
+        if not callable(builder):
+            return {}
+        try:
+            payload = builder(
+                target_input_budget=target_input_budget,
+                reserved_output_tokens=reserved_output_tokens,
+                profile=profile,
+            )
+        except TypeError:
+            try:
+                payload = builder(target_input_budget=target_input_budget)
+            except Exception:
+                return {}
+        except Exception:
+            return {}
+        return dict(payload or {}) if isinstance(payload, dict) else {}
+
     async def build_structured_compaction_async(
         self,
         memory_service,
@@ -1276,6 +1221,8 @@ class TurnExecutor:
         preferred_model_id: str | None = None,
         profile: CompactionProfile = CompactionProfile.PAL,
     ) -> dict[str, Any]:
+        if not _profile_uses_llm_compaction(profile):
+            return {}
         llm_runtime = self.context.port_registry.get("llm:llm")
         if llm_runtime is None:
             return {}
@@ -1317,11 +1264,19 @@ def _empty_compaction_summary(profile: CompactionProfile) -> str:
     return "No prior runtime context was retained before this compaction request."
 
 
+def _profile_uses_llm_compaction(profile: CompactionProfile) -> bool:
+    return profile == CompactionProfile.PAL
+
+
+def _profile_accepts_memory_candidates(profile: CompactionProfile) -> bool:
+    return profile == CompactionProfile.PAL
+
+
 def _is_valid_structured_compaction_payload(payload: object) -> bool:
     if not isinstance(payload, dict):
         return False
     schema = str(payload.get("schema") or "").strip()
-    if schema not in {"pal.compaction.pal.v1", "pal.compaction.minion.v1", "pal.compaction.v2"}:
+    if schema not in {"pal.compaction.pal.v2", "pal.compaction.minion.v1"}:
         return False
     summary = payload.get("summary")
     if not isinstance(summary, dict):
