@@ -172,6 +172,21 @@ class _MinionLLMRuntimeAdapter:
         self._base = base_runtime
         self._state = state
 
+    @property
+    def supports_streaming(self) -> bool:
+        supports_streaming = getattr(self._base, "supports_streaming", None)
+        if callable(supports_streaming):
+            try:
+                supports_streaming = supports_streaming()
+            except Exception:
+                supports_streaming = False
+        if supports_streaming is not None:
+            return bool(supports_streaming) and (
+                callable(getattr(self._base, "agenerate_stream", None))
+                or callable(getattr(self._base, "generate_stream", None))
+            )
+        return callable(getattr(self._base, "agenerate_stream", None)) or callable(getattr(self._base, "generate_stream", None))
+
     def resolve_max_output_tokens(
         self,
         *,
@@ -233,6 +248,40 @@ class _MinionLLMRuntimeAdapter:
                 round=self._state.llm_round_count,
                 tool_call_count=self._state.tool_call_count,
             )
+        finally:
+            restore_event_sink()
+
+    def generate_stream(self, request: CanonicalLLMRequest) -> list[Any]:
+        method = getattr(self._base, "generate_stream", None)
+        if not callable(method):
+            raise AttributeError("wrapped minion LLM runtime does not support generate_stream")
+        result = method(request)
+        return list(result or [])
+
+    async def agenerate_stream(self, request: CanonicalLLMRequest) -> list[Any]:
+        await self._runner._emit_progress(
+            "llm_round_started",
+            round=self._state.llm_round_count,
+            tool_call_count=self._state.tool_call_count,
+            tool_count=len(list(request.tools or [])),
+        )
+        restore_event_sink = self._install_llm_progress_sink()
+        async_method = getattr(self._base, "agenerate_stream", None)
+        try:
+            if callable(async_method):
+                awaitable = async_method(request)
+            else:
+                sync_method = getattr(self._base, "generate_stream", None)
+                if not callable(sync_method):
+                    raise AttributeError("wrapped minion LLM runtime does not support generate_stream")
+                awaitable = asyncio.to_thread(sync_method, request)
+            events = await self._runner._await_with_progress_heartbeat(
+                awaitable,
+                phase="llm_round_waiting",
+                round=self._state.llm_round_count,
+                tool_call_count=self._state.tool_call_count,
+            )
+            return list(events or [])
         finally:
             restore_event_sink()
 

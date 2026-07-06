@@ -21,9 +21,10 @@ from pal.shared.result_rendering import render_head_tail_preview_for_llm
 
 
 SHELL_EXEC_DESCRIPTION = (
-    "Execute a shell command in the local runtime and return stdout, stderr, and exit status. "
-    "Use this for tests, builds, scripts, process probes, and package commands. "
-    "When these capabilities are visible, use them before shell for their matching task: op_tree for structured directory listings; "
+    "Run shell; returns stdout, stderr, and exit status. "
+    "Use for tests, builds, scripts, process probes, and package commands. "
+    "Pal runtime, module, capability, minion state: use search_tools/read_tool/call_tool or the visible Pal tool before shell. "
+    "When visible, use op_tree for structured directory listings; "
     "op_search for repository text search; op_file_read for reading text files; op_file_edit for precise in-place edits after reading; "
     "op_file_write for creating, overwriting, or appending UTF-8 text files; op_path_delete for deleting files or directories; "
     "op_git for git status, diff, log, show, and audited git restore/revert. "
@@ -38,6 +39,7 @@ SHELL_EXEC_CMD_DESCRIPTION = (
     "If visible, prefer op_tree for listings, op_search for text search, op_file_read for file reads, op_file_edit for edits, "
     "op_file_write for writes, op_path_delete for deletion, and op_git for git status/diff/log/show. "
     "Avoid cat/head/tail/grep/rg/sed/awk/tee/echo/printf redirection/rm/unlink/rmdir/git rm/find -delete for repo file operations when the matching capability is visible. "
+    "For Pal runtime/module/minion/capability state or actions, use built-in Pal tools before shell. "
     "In minion workspaces, do not run git add/commit/reset/checkout/clean/merge/rebase/push for checkpointing; use the dedicated checkpoint commit capability instead."
 )
 

@@ -231,7 +231,7 @@ class TurnExecutor:
             metadata=dict(prompt.metadata),
         )
         self._debug_log_prompt(continuation, request)
-        if self.should_stream_reply(continuation.channel_envelope) and hasattr(llm_runtime, "generate_stream"):
+        if self._llm_runtime_supports_streaming(llm_runtime, request):
             outcome = await self.stream_llm_request_async(continuation, llm_runtime, request)
         else:
             outcome = await self._call_port_async(llm_runtime, "agenerate", "generate", request)
@@ -1078,8 +1078,40 @@ class TurnExecutor:
 
     # ── response / temperature helpers ───────────────────────────────────
 
-    def should_stream_reply(self, channel_envelope) -> bool:
-        return channel_envelope.endpoint.channel_kind in {"stdio", "socket"}
+    @staticmethod
+    def _llm_runtime_supports_streaming(llm_runtime, request: CanonicalLLMRequest | None = None) -> bool:
+        endpoint_facts = TurnExecutor._llm_runtime_endpoint_facts(llm_runtime, request)
+        if "supports_streaming" in endpoint_facts and not bool(endpoint_facts.get("supports_streaming")):
+            return False
+        supports_streaming = getattr(llm_runtime, "supports_streaming", None)
+        if callable(supports_streaming):
+            try:
+                supports_streaming = supports_streaming()
+            except Exception:
+                supports_streaming = False
+        if supports_streaming is not None and not bool(supports_streaming):
+            return False
+        return callable(getattr(llm_runtime, "agenerate_stream", None)) or callable(getattr(llm_runtime, "generate_stream", None))
+
+    @staticmethod
+    def _llm_runtime_endpoint_facts(llm_runtime, request: CanonicalLLMRequest | None) -> dict[str, Any]:
+        method = getattr(llm_runtime, "resolve_endpoint_facts", None)
+        if not callable(method):
+            return {}
+        metadata = dict(getattr(request, "metadata", {}) or {}) if request is not None else {}
+        try:
+            facts = method(
+                preferred_endpoint_id=str(metadata.get("preferred_endpoint_id") or "").strip() or None,
+                preferred_endpoint_source=str(metadata.get("preferred_endpoint_source") or "").strip() or None,
+            )
+        except TypeError:
+            try:
+                facts = method()
+            except Exception:
+                return {}
+        except Exception:
+            return {}
+        return dict(facts or {}) if isinstance(facts, dict) else {}
 
     def infer_response_mode(self, outcome: CanonicalLLMOutcome | None, *, used_tools: bool) -> str:
         if outcome is not None:

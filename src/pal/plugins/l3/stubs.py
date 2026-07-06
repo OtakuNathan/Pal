@@ -217,7 +217,7 @@ class _L3ProviderCapabilityMixin:
             "properties": {
                 "mem_ref": {
                     "type": "string",
-                    "description": "Opaque memory ref returned by memory_recall, such as fact:fact_abc or case:case_abc.",
+                    "description": "Opaque memory ref returned by recall_memory, such as fact:fact_abc or case:case_abc. Copy the complete value including the fact: or case: prefix.",
                 },
                 "title": {"type": "string"},
                 "summary": {"type": "string"},
@@ -271,7 +271,7 @@ class _L3ProviderCapabilityMixin:
             "properties": {
                 "mem_ref": {
                     "type": "string",
-                    "description": "Opaque memory ref returned by memory_recall, such as fact:fact_abc or case:case_abc.",
+                    "description": "Opaque memory ref returned by recall_memory, such as fact:fact_abc or case:case_abc. Copy the complete value including the fact: or case: prefix.",
                 },
                 "reason": {"type": "string", "description": "Brief reason for deletion"},
             },

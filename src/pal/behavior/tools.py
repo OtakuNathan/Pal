@@ -13,7 +13,7 @@ from pal.shared.result_rendering import render_titled_structured_for_llm
 ADVISE_ARGS_SCHEMA = {
     "type": "object",
     "properties": {
-        "scenario": {"type": "string", "description": "Current situation Pal is facing."},
+        "scenario": {"type": "string", "description": "Current situation Pal is facing; include the routing uncertainty or risky decision point."},
         "intent": {"type": "string", "description": "Optional intended outcome."},
         "turn_kind": {"type": "string", "description": "Turn type, such as chat, service, or minion."},
         "constraints": {"type": "array", "items": {"type": "string"}},
@@ -73,7 +73,13 @@ class BehaviorAdviceTool:
     name: str = "op_behavior_advise"
     display_name: str = "Behavior advice"
     family: str = "behavior"
-    description: str = "Ask Pal's behavior router which capabilities, skills, memory hints, or route guidance may fit the current scenario."
+    description: str = (
+        "Ask Pal's behavior router which capabilities, skills, memory hints, or route guidance may fit the current "
+        "scenario. Use when the task route is ambiguous, risky, multi-step, unfamiliar, design/debug/recovery oriented, "
+        "or the next capability is unclear. Skip when current context is sufficient, the user gave a clear direct "
+        "implementation command, a single visible capability obviously matches, or the failure is an obvious local/schema/input mistake. "
+        "Treat the result as routing resources, not orders."
+    )
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("behavior", "affordance", "routing")
@@ -115,7 +121,11 @@ class AffordanceSubmitTool:
     name: str = "op_behavior_save"
     display_name: str = "Save behavior guidance"
     family: str = "behavior"
-    description: str = "Persist a user-instructed or learned future behavior rule. This is not for ordinary memory cases."
+    description: str = (
+        "Persist a user-instructed or learned future behavior routing rule. Use only when the user explicitly asks Pal "
+        "to adopt/follow/save a future behavior rule or clearly teaches a durable route preference. Do not use for "
+        "ordinary facts, preferences, runtime state, reusable procedures, or memory cases."
+    )
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("behavior", "affordance", "write")
@@ -221,7 +231,9 @@ class AffordanceUpdateTool:
     description: str = (
         "Update persisted database behavior guidance by matching the original affordance text. "
         "For replacing the visible guidance line shown to Pal, set prompt_hint to the new text. "
-        "scenario_text is only the activation scenario. Injected/plugin affordances are read-only here."
+        "Pass the original rendered guidance line as affordance, not an internal id. "
+        "scenario_text is only the activation scenario. Injected/plugin affordances are read-only here. "
+        "Do not claim behavior guidance changed unless this tool confirms success."
     )
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
@@ -298,7 +310,11 @@ class AffordanceDeleteTool:
     name: str = "op_behavior_affordance_delete"
     display_name: str = "Delete behavior guidance"
     family: str = "behavior"
-    description: str = "Delete persisted database behavior guidance by matching the original affordance text. Injected/plugin affordances are read-only here."
+    description: str = (
+        "Delete persisted database behavior guidance by matching the original affordance text. Pass the original rendered "
+        "guidance line as affordance, not an internal id. Injected/plugin affordances are read-only here. Do not claim "
+        "behavior guidance changed unless this tool confirms success."
+    )
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("behavior", "affordance", "delete")

@@ -43,6 +43,7 @@ from pal.minion.llm_broker import (
     llm_request_from_payload,
     preflight_advice_to_payload,
     preflight_request_from_payload,
+    stream_event_to_payload,
 )
 from pal.minion.profiles import MinionProfileRegistry, SOURCE_CONTRACT_REVIEWER_CAPABILITIES
 from pal.minion.repository import MinionTaskingRepository
@@ -326,6 +327,8 @@ class MinionManager:
             return await self.llm_broker_preflight(dict(params))
         if method == "llm_generate":
             return await self.llm_broker_generate(dict(params))
+        if method == "llm_generate_stream":
+            return await self.llm_broker_generate_stream(dict(params))
         if method == "llm_resolve_max_output_tokens":
             return await self.llm_broker_resolve_max_output_tokens(dict(params))
         if method == "llm_resolve_endpoint_facts":
@@ -1352,6 +1355,21 @@ class MinionManager:
         state = self._require_broker_run(params)
         request = llm_request_from_payload(dict(params.get("request") or {}))
         runtime = await self._llm_broker_runtime()
+        with scoped_llm_event_sink(self._llm_broker_progress_sink(state)):
+            outcome = await runtime.agenerate(request)
+        await asyncio.sleep(0)
+        return {"ok": True, "outcome": llm_outcome_to_payload(outcome)}
+
+    async def llm_broker_generate_stream(self, params: dict[str, Any]) -> dict[str, Any]:
+        state = self._require_broker_run(params)
+        request = llm_request_from_payload(dict(params.get("request") or {}))
+        runtime = await self._llm_broker_runtime()
+        with scoped_llm_event_sink(self._llm_broker_progress_sink(state)):
+            events = await runtime.agenerate_stream(request)
+        await asyncio.sleep(0)
+        return {"ok": True, "events": [stream_event_to_payload(event) for event in list(events or [])]}
+
+    def _llm_broker_progress_sink(self, state: MinionRunState):
         loop = asyncio.get_running_loop()
 
         def sink(event: dict[str, Any]) -> None:
@@ -1372,10 +1390,7 @@ class MinionManager:
 
             loop.call_soon_threadsafe(record)
 
-        with scoped_llm_event_sink(sink):
-            outcome = await runtime.agenerate(request)
-        await asyncio.sleep(0)
-        return {"ok": True, "outcome": llm_outcome_to_payload(outcome)}
+        return sink
 
     async def llm_broker_resolve_max_output_tokens(self, params: dict[str, Any]) -> dict[str, Any]:
         self._require_broker_run(params)

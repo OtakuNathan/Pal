@@ -895,7 +895,6 @@ def _render_minion_operating_rules(scaffold: dict[str, Any]) -> str:
         "Your context is the current scoped milestone and the tools made available by Pal.\n"
         "Treat the prompt work view as the complete scoped assignment; do not infer or implement hidden modules or later milestones.\n"
         "Use only the tools exposed to this run. Report by milestone, never by percentage or ETA.\n"
-        "Use `op_memory_recall` when prior Pal experience, project lessons, or user preferences may materially improve the result.\n"
         "If capability evidence is required, use a relevant listed capability before completing the milestone.\n"
         f"{testing_guidance}"
         f"{artifact_completion_guidance}"
@@ -907,7 +906,6 @@ def _render_minion_operating_rules(scaffold: dict[str, Any]) -> str:
         "Use `op_minion_artifact_write` for one complete coherent file. Use `op_minion_artifact_edit` append for long deliverables split into coherent sections, or replace only when rewriting the complete artifact. Do not rely on final chat text for long plans or reports.\n"
         "When `op_minion_memory_candidate_write` is available and the run teaches something genuinely reusable, write a concise memory candidate there instead of asking Pal to remember it directly.\n"
         "If a tool/capability call fails because of an obvious schema, argument, path, or local input mistake, correct the call directly.\n"
-        "If a tool/capability call fails and the next step is unclear, repeated retries would be guesswork, or the failure may have prior Pal/project repair history, use `memory_recall` when it is listed below before retrying, debugging further, or reporting blocked.\n"
         "When the current milestone is complete, stop with a concise milestone summary. Pal will ask the user before absorbing minion memory candidates."
     )
 

@@ -1771,9 +1771,6 @@ class PalCore:
     def _fallback_final_reply(self, continuation: TurnContinuation) -> str:
         return self.turn_executor.fallback_final_reply(continuation)
 
-    def _should_stream_reply(self, channel_envelope: ChannelEnvelope) -> bool:
-        return self.turn_executor.should_stream_reply(channel_envelope)
-
     def _infer_response_mode(self, outcome: CanonicalLLMOutcome | None, *, used_tools: bool) -> str:
         return self.turn_executor.infer_response_mode(outcome, used_tools=used_tools)
 

@@ -12,6 +12,7 @@ from pal.llm.contracts import (
     LLMPreflightAdvice,
     LLMPreflightRequest,
 )
+from pal.stream_events import NormalizedLLMStreamEvent
 from pal.minion.ipc import MinionManagerClient
 
 
@@ -120,11 +121,59 @@ def llm_outcome_from_payload(payload: dict[str, Any]) -> CanonicalLLMOutcome:
     )
 
 
+def stream_event_to_payload(event: NormalizedLLMStreamEvent) -> dict[str, Any]:
+    tool_call = event.tool_call
+    return {
+        "event_kind": event.event_kind,
+        "text": event.text,
+        "reasoning_text": event.reasoning_text,
+        "provider_specific_fields": dict(event.provider_specific_fields or {}),
+        "tool_call": (
+            {"name": tool_call.name, "args": dict(tool_call.args or {}), "call_id": tool_call.call_id}
+            if tool_call is not None
+            else None
+        ),
+        "finish_reason": event.finish_reason,
+        "response_mode": event.response_mode,
+        "error_text": event.error_text,
+        "target_input_budget": int(event.target_input_budget or 0),
+        "reserved_output_tokens": int(event.reserved_output_tokens or 0),
+        "preferred_endpoint_id": event.preferred_endpoint_id,
+        "preferred_model_id": event.preferred_model_id,
+    }
+
+
+def stream_event_from_payload(payload: dict[str, Any]) -> NormalizedLLMStreamEvent:
+    tool_call_payload = payload.get("tool_call")
+    tool_call = None
+    if isinstance(tool_call_payload, dict):
+        tool_call = CanonicalToolCall(
+            name=str(tool_call_payload.get("name") or ""),
+            args=dict(tool_call_payload.get("args") or {}),
+            call_id=str(tool_call_payload.get("call_id") or "") or None,
+        )
+    return NormalizedLLMStreamEvent(
+        event_kind=str(payload.get("event_kind") or "text_delta"),
+        text=str(payload.get("text") or ""),
+        reasoning_text=str(payload.get("reasoning_text") or ""),
+        provider_specific_fields=dict(payload.get("provider_specific_fields") or {}),
+        tool_call=tool_call,
+        finish_reason=str(payload.get("finish_reason") or "") or None,
+        response_mode=str(payload.get("response_mode") or "") or None,
+        error_text=str(payload.get("error_text") or ""),
+        target_input_budget=int(payload.get("target_input_budget") or 0),
+        reserved_output_tokens=int(payload.get("reserved_output_tokens") or 0),
+        preferred_endpoint_id=str(payload.get("preferred_endpoint_id") or "") or None,
+        preferred_model_id=str(payload.get("preferred_model_id") or "") or None,
+    )
+
+
 @dataclass
 class MinionBrokerLLMRuntime:
     runtime_root: Path
     run_id: str
     request_timeout_seconds: float = 3900.0
+    supports_streaming: bool = True
 
     @property
     def _client(self) -> MinionManagerClient:
@@ -190,8 +239,15 @@ class MinionBrokerLLMRuntime:
         return llm_outcome_from_payload(dict(result.get("outcome") or {}))
 
     def generate_stream(self, request: CanonicalLLMRequest) -> list[Any]:
-        _ = request
-        raise NotImplementedError("minion LLM broker does not support streaming yet")
+        result = self._client.request_sync(
+            "llm_generate_stream",
+            {"run_id": self.run_id, "request": llm_request_to_payload(request)},
+        )
+        return [stream_event_from_payload(dict(item)) for item in list(result.get("events") or []) if isinstance(item, dict)]
 
     async def agenerate_stream(self, request: CanonicalLLMRequest) -> list[Any]:
-        return await asyncio.to_thread(self.generate_stream, request)
+        result = await self._client.request(
+            "llm_generate_stream",
+            {"run_id": self.run_id, "request": llm_request_to_payload(request)},
+        )
+        return [stream_event_from_payload(dict(item)) for item in list(result.get("events") or []) if isinstance(item, dict)]

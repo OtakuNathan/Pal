@@ -4706,6 +4706,25 @@ class PalV2SocketEndpointUnitTests(unittest.TestCase):
         self.assertEqual(len(endpoint.stream_outbox), 1)
         self.assertFalse(endpoint.outbox)
 
+    def test_telegram_streamed_text_keeps_final_reply_for_batched_delivery(self) -> None:
+        endpoint = TelegramChannelEndpoint(
+            endpoint=EndpointConfig(
+                endpoint_id="telegram_main",
+                channel_kind="telegram",
+                binding_key="chat:42",
+            )
+        )
+        response_handle = ResponseHandle(endpoint_id="telegram_main", reply_target={"chat_id": "42"})
+
+        endpoint.send_stream_event(
+            response_handle,
+            NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="pong"),
+        )
+        endpoint.queue_reply("pong", response_handle=response_handle)
+
+        self.assertEqual(len(endpoint.outbox), 1)
+        self.assertEqual(endpoint.outbox[0].text, "pong")
+
 
 class PalV2SocketEndpointTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:

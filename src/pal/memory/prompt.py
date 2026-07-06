@@ -179,46 +179,20 @@ class MemoryPromptFragmentProvider(PromptFragmentProvider):
         return fragments
 
 
-def _memory_guide_fragments() -> tuple[PromptFragment, PromptFragment]:
+def _memory_guide_fragments() -> tuple[PromptFragment, ...]:
     return (
         PromptFragment(
             section="memory_guide",
             title="Memory Guide",
             content=(
-                "Memory is the source of truth for durable user facts, preferences, prior Pal decisions, project history, repair lessons, and reusable case knowledge.\n\n"
-                "Do not recall:\n"
-                "- For purely local syntax errors, obvious code formatting, simple arithmetic, casual chat, or tasks fully answered by current visible context.\n"
-                "- For current runtime truth; inspect live runtime/capabilities instead.\n"
-                "- For current external facts; verify externally instead.\n\n"
-                "Write/update/delete:\n"
-                "- Write memory directly with memory_write only when the user explicitly asks Pal to remember/save it, or states a clear durable fact/preference with low ambiguity.\n"
-                "- Before memory_write, call memory_recall with the candidate summary/search_text, limit 3-5.\n"
-                "- If a recalled memory is semantically the same record, an older version, already covers the candidate, or is being corrected, use memory_update instead of writing a duplicate.\n"
-                "- When recalled memories are shown with [mem_ref], use that mem_ref when updating, merging, or deleting a recalled memory.\n"
-                "- Do not invent mem_ref values.\n"
-                "- If no relevant mem_ref is present, call memory_recall before update/delete.\n"
-                "- Use memory_update instead of writing duplicates when a recalled memory is being corrected.\n"
-                "- Use memory_delete only when the user explicitly asks to forget/delete a specific memory or approves deleting a clearly invalid recalled record."
+                "Memory is the source of truth for durable user facts, preferences, prior Pal decisions, project history, "
+                "repair lessons, and reusable case knowledge. Use memory tools for durable records only; current runtime "
+                "state and current external facts require live inspection or external verification. Memory tool descriptions "
+                "define the recall, de-duplication, update, and delete procedures. Recalled mem_ref values are opaque; "
+                "prefixes such as fact: and case: are part of the ref."
             ),
             priority=71,
             metadata={"module_id": "memory", "kind": "memory_guide"},
-        ),
-        PromptFragment(
-            section="memory_guide",
-                title="Memory Guidance",
-                content=(
-                    "MUST call memory_recall before acting when: user references prior context/decisions/custom Pal/project terms; task depends on preferences/history/project conventions/known failures; user corrects or challenges memory; a tool/action failure may have Pal-specific repair history; or Pal will write/update/delete memory, behavior guidance, or skill content.\n"
-                    "If recalled memories are already present in the prompt, account for them; do not re-recall unless new ambiguity appears.\n"
-                    "SHOULD recall when history materially improves correctness, continuity, personalization, or avoiding repeated mistakes.\n"
-                    "Recall budget: targeted queries, limit 3-5 by default, usually once per task phase; if no useful result, proceed with live/source inspection."
-                ),
-            priority=71,
-            metadata={
-                "module_id": "memory",
-                "kind": "memory_guidance",
-                "prompt_target": "runtime_reminder",
-                "source_priority": 71,
-            },
         ),
     )
 

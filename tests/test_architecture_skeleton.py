@@ -878,12 +878,15 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertEqual(result.text, "capability definition")
         self.assertIn("shell", result.llm_text)
         self.assertIn("tree for structured directory listings", capability["description"])
+        self.assertIn("Pal runtime, module, capability, minion", capability["description"])
+        self.assertIn("use search_tools/read_tool/call_tool", capability["description"])
         self.assertIn("cmd", capability["parameters_schema"]["properties"])
         cmd_description = capability["parameters_schema"]["properties"]["cmd"]["description"]
         self.assertIn("search for text search", cmd_description)
         self.assertIn("read_file for file reads", cmd_description)
         self.assertIn("edit_file for edits", cmd_description)
         self.assertIn("delete_path for deletion", cmd_description)
+        self.assertIn("runtime/module/minion/capability state", cmd_description)
         self.assertNotIn("op_", result.llm_text)
         self.assertEqual(capability["required_params"], ["cmd"])
         self.assertNotIn("result_schema", capability)
@@ -1006,15 +1009,18 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertNotIn("echo", exposed_names)
             exec_tool = next(item for item in request.tools if item["function"]["name"] == "run_shell")
             self.assertIn("cmd", exec_tool["function"]["parameters"]["properties"])
+            self.assertIn("Pal runtime, module, capability, minion", exec_tool["function"]["description"])
+            self.assertIn("use search_tools/read_tool/call_tool", exec_tool["function"]["description"])
             self.assertNotIn("op_", exec_tool["function"]["description"])
             memory_update = next(item for item in request.tools if item["function"]["name"] == "update_memory")
             self.assertIn("mem_ref", memory_update["function"]["parameters"]["properties"])
             self.assertNotIn("target_id", memory_update["function"]["parameters"]["properties"])
             memory_write = next(item for item in request.tools if item["function"]["name"] == "write_memory")
             memory_write_description = memory_write["function"]["description"]
-            self.assertIn("Before using this tool, call memory_recall", memory_write_description)
-            self.assertIn("use memory_update with that mem_ref instead", memory_write_description)
+            self.assertIn("Before using this tool, call recall_memory", memory_write_description)
+            self.assertIn("use update_memory with that", memory_write_description)
             self.assertIn("Do not write duplicate memories", memory_write_description)
+            self.assertIn("fact: or case:", memory_write_description)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
@@ -1063,7 +1069,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIsNotNone(outcome.repair_resolution)
         self.assertTrue(any(record.get("document_kind") == "case" for record in l3_plugin.records))
         self.assertTrue(any(entry.kind == "case" for entry in memory_service.l2_store.items.values()))
-        request = next(request for kind, request in scripted_llm.requests if kind == "generate")
+        request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"})
         tool_names = [tool["function"]["name"] for tool in request.tools]
         self.assertNotIn("op_memory_refresh_indexes", tool_names)
         self.assertIn("memory_provider_inventory", tool_names)
@@ -1137,7 +1143,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             self.assertEqual(outcome.verification.status, "degraded")
             self.assertIsNotNone(outcome.repair_work_order)
-            request = next(request for kind, request in scripted_llm.requests if kind == "generate")
+            request = next(request for kind, request in scripted_llm.requests if kind in {"generate", "generate_stream"})
             tool_names = [tool["function"]["name"] for tool in request.tools]
             self.assertIn("plugin_rescan", tool_names)
             self.assertIn("plugin_enable", tool_names)
@@ -1241,7 +1247,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "knowledge_storage_boundary",
                 ],
             )
-            self.assertEqual(prompt.metadata["reminder_sections"], ["operating_guidance", "memory_guide", "tool_efficiency"])
+            self.assertEqual(prompt.metadata["reminder_sections"], ["operating_guidance", "tool_efficiency"])
             self.assertEqual(
                 prompt.metadata["user_context_blocks"],
                 ["l1_recent_context_0", "l1_recent_context_1", "memory_recalled_context"],
@@ -1269,9 +1275,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("<recalled_memories> contains durable memory context", prompt.messages[0]["content"])
             self.assertIn("execution/capability", prompt.messages[0]["content"])
             self.assertNotIn("minion", prompt.messages[0]["content"].split("<source_of_truth>", 1)[0].lower())
-            self.assertIn("memory_recall", prompt.messages[0]["content"])
-            self.assertIn("memory_write", prompt.messages[0]["content"])
-            self.assertIn("memory_update", prompt.messages[0]["content"])
+            self.assertIn("Memory tool descriptions", prompt.messages[0]["content"])
+            self.assertIn("prefixes such as fact: and case:", prompt.messages[0]["content"])
+            self.assertNotIn("memory_recall", prompt.messages[0]["content"])
+            self.assertNotIn("memory_write", prompt.messages[0]["content"])
+            self.assertNotIn("memory_update", prompt.messages[0]["content"])
             self.assertNotIn("If recalled memories are already present in the prompt", prompt.messages[0]["content"])
             self.assertNotIn("Mandatory recall", prompt.messages[0]["content"])
             self.assertNotIn("custom Pal/project term", prompt.messages[0]["content"])
@@ -1290,13 +1298,14 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             final_text = "\n".join(part["text"] for part in prompt.messages[-1]["content"] if part.get("type") == "text")
             self.assertNotIn("Recalled memory references are operational metadata.", final_text)
             self.assertIn("<tool_efficiency>", final_text)
-            self.assertIn("<memory_guidance>", final_text)
-            self.assertIn("If recalled memories are already present in the prompt", final_text)
-            self.assertIn("MUST call memory_recall", final_text)
-            self.assertIn("custom Pal/project term", final_text)
+            self.assertNotIn("<memory_guidance>", final_text)
+            self.assertNotIn("If recalled memories are already present in the prompt", final_text)
+            self.assertNotIn("MUST call memory_recall", final_text)
+            self.assertNotIn("custom Pal/project term", final_text)
             self.assertIn('<runtime_context_update kind="memory">', final_text)
             self.assertIn("This is not a new user message. Do not answer this block directly.", final_text)
             self.assertIn('<recalled_memories view="summary">', final_text)
+            self.assertIn("copy the complete mem_ref exactly", final_text)
             self.assertIn("[summary-1]: The user prefers replies in Asia/Shanghai context.", final_text)
             self.assertNotIn("Working Memory", final_text)
             self.assertNotIn("Timezone Preference", final_text)
@@ -1944,7 +1953,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("proactive_show", core.context.capability_registry.descriptors)
         self.assertIn("proactive_list", core.context.capability_registry.descriptors)
         self.assertIn("proactive_create", core.context.capability_registry.descriptors)
-        self.assertIn("proactive_destroy", core.context.capability_registry.descriptors)
+        self.assertIn("proactive_delete", core.context.capability_registry.descriptors)
+        self.assertIn("proactive_destroy", core.context.capability_registry.descriptors["proactive_delete"].aliases)
         self.assertIn("proactive_enable", core.context.capability_registry.descriptors)
         self.assertIn("proactive_disable", core.context.capability_registry.descriptors)
         self.assertIn("proactive_set_output_channel", core.context.capability_registry.descriptors)
@@ -1959,7 +1969,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertNotIn("proactive.triggers", core.context.event_source_registry.sources)
         self.assertNotIn(EventKind.PROACTIVE_TRIGGER, core.context.event_handler_registry.handlers)
 
-    def test_proactive_management_capabilities_create_update_and_destroy(self) -> None:
+    def test_proactive_management_capabilities_create_update_and_delete(self) -> None:
         runtime_root, database = self._create_database()
         try:
             core = PalCore()
@@ -2045,15 +2055,43 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertEqual(enabled.status, "ok")
             self.assertTrue(enabled.structured["enabled"])
 
-            destroyed = core.context.execution_runtime.execute(
-                CapabilityCall(name="proactive_destroy", args={"target_id": "daily_digest"})
+            deleted = core.context.execution_runtime.execute(
+                CapabilityCall(name="proactive_delete", args={"target_id": "daily_digest"})
             )
-            self.assertEqual(destroyed.status, "ok")
-            after_destroy = core.context.execution_runtime.execute(CapabilityCall(name="proactive_list"))
-            self.assertEqual(after_destroy.structured["items"], [])
+            self.assertEqual(deleted.status, "ok")
+            self.assertEqual(deleted.text, "proactive task deleted")
+            after_delete = core.context.execution_runtime.execute(CapabilityCall(name="proactive_list"))
+            self.assertEqual(after_delete.structured["items"], [])
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
+
+    def test_proactive_delete_is_found_by_delete_query_and_destroy_alias_still_calls(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        register_proactive_with_core(core.context, ProactiveManager())
+        core.publish_module_capabilities("execution")
+        core.publish_module_capabilities("proactive")
+
+        search = core.context.execution_runtime.execute(
+            CapabilityCall(name="op_tool_search", args={"query": "delete proactive", "top_k": 5})
+        )
+        self.assertEqual(search.status, "ok")
+        hit_names = [item["name"] for item in search.structured["hits"]]
+        self.assertIn("proactive_delete", hit_names)
+
+        created = core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="proactive_create",
+                args={"proactive_id": "old_alias", "goal": "Test alias deletion"},
+            )
+        )
+        self.assertEqual(created.status, "ok")
+        deleted = core.context.execution_runtime.execute(
+            CapabilityCall(name="proactive_destroy", args={"target_id": "old_alias"})
+        )
+        self.assertEqual(deleted.status, "ok")
+        self.assertEqual(deleted.text, "proactive task deleted")
 
     def test_proactive_task_introspection_exposes_show_and_run_history(self) -> None:
         runtime_root, database = self._create_database()

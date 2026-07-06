@@ -152,7 +152,7 @@ class MemoryIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="active_provider",
-        description="Show the current active memory provider used by memory_recall, memory_write, memory_update, and memory_delete",
+        description="Show the current active memory provider used by recall_memory, write_memory, update_memory, and delete_memory",
     )
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -182,21 +182,30 @@ class MemoryIntrospectionProvider:
         family="recall",
         action_name="recall",
         description=(
-            "Recall durable memory records from the active memory provider. "
-            "The result renders each item as [mem_ref]: text. Use mem_ref only for memory_update or memory_delete."
+            "Recall durable memory records from the active memory provider. Use this before acting when the task depends "
+            "on prior Pal decisions, user preferences, project history, custom Pal/project terms, known failures, repair "
+            "lessons, or before writing/updating/deleting memory, behavior guidance, or skills. Do not use it for current "
+            "runtime state; inspect live runtime/capabilities instead. Do not use it for current external facts; verify "
+            "externally instead. Use targeted queries with limit 3-5 by default. Results render each item as "
+            "[mem_ref]: text. mem_ref is opaque; prefixes such as fact: or case: are part of the ref and must be copied "
+            "exactly when using update_memory or delete_memory."
         ),
         metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
-                "level": {"type": "string"},
-                "queries": {"type": "array", "items": {"type": "string"}},
-                "topic_scope": {"type": "array", "items": {"type": "string"}},
+                "level": {"type": "string", "description": "Recall temperature such as warm; omit unless narrowing behavior is needed."},
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Targeted query strings for the user/project fact, prior decision, repair lesson, or memory candidate.",
+                },
+                "topic_scope": {"type": "array", "items": {"type": "string"}, "description": "Optional topic narrowing terms."},
                 "task_id": {"type": "string"},
-                "limit": {"type": "integer"},
-                "kind": {"type": "string"},
-                "scope": {"type": "string"},
-                "view": {"type": "string", "enum": ["summary", "origin"]},
+                "limit": {"type": "integer", "description": "Maximum memories to return; use 3-5 by default."},
+                "kind": {"type": "string", "description": "Optional memory kind filter, such as fact or case."},
+                "scope": {"type": "string", "description": "Optional scope filter, such as system or task."},
+                "view": {"type": "string", "enum": ["summary", "origin"], "description": "summary is compact; origin includes source/origin detail when available."},
             },
         },
     )
@@ -228,11 +237,12 @@ class MemoryIntrospectionProvider:
         family="commit",
         action_name="write",
         description=(
-            "Commit a new durable memory record to the active memory provider only when no existing recalled memory covers it. "
-            "Before using this tool, call memory_recall with the candidate summary/search_text, limit 3-5. "
-            "If a recalled [mem_ref] is semantically the same record, an older version, or the memory being corrected, "
-            "use memory_update with that mem_ref instead. "
-            "Do not write duplicate memories. Do not invent mem_ref values. "
+            "Commit a new durable memory record only when the user explicitly asks Pal to remember/save it or states a "
+            "clear durable fact/preference with low ambiguity. Before using this tool, call recall_memory with the "
+            "candidate summary/search_text and limit 3-5. If a recalled [mem_ref] is semantically the same record, an "
+            "older version, already covers the candidate, or is the memory being corrected, use update_memory with that "
+            "complete mem_ref instead. Do not write duplicate memories. Do not invent mem_ref values; prefixes such as "
+            "fact: or case: are part of the ref. "
             "Use summary for prompt-ready memory text and search_text for source-of-truth retrieval text."
         ),
         metadata={"omit_family_in_canonical": True},
@@ -298,13 +308,18 @@ class MemoryIntrospectionProvider:
         action_name="update",
         description=(
             "Update an existing durable memory record in the active memory provider. "
-            "mem_ref is the opaque ref returned by memory_recall; do not invent it."
+            "Use this instead of write_memory when a recalled memory is being corrected, superseded, or already covers "
+            "the candidate. mem_ref is the opaque ref returned by recall_memory; copy it exactly, including prefixes "
+            "such as fact: or case:. Do not invent or shorten mem_ref values."
         ),
         metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
-                "mem_ref": {"type": "string", "description": "Opaque memory ref returned by memory_recall."},
+                "mem_ref": {
+                    "type": "string",
+                    "description": "Opaque memory ref returned by recall_memory. Copy the complete value, including prefixes such as fact: or case:.",
+                },
                 "summary": {"type": "string"},
                 "search_text": {"type": "string"},
                 "payload_patch": {"type": "object"},
@@ -348,14 +363,18 @@ class MemoryIntrospectionProvider:
         action_name="delete",
         description=(
             "Delete an existing durable memory record from the active memory provider. "
-            "mem_ref is the opaque ref returned by memory_recall; do not invent it. "
-            "Use only when the user explicitly asks to forget/delete a specific memory or a clearly invalid record."
+            "Use only when the user explicitly asks to forget/delete a specific memory or approves deleting a clearly "
+            "invalid record. mem_ref is the opaque ref returned by recall_memory; copy it exactly, including prefixes "
+            "such as fact: or case:. Do not invent or shorten mem_ref values."
         ),
         metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
-                "mem_ref": {"type": "string", "description": "Opaque memory ref returned by memory_recall."},
+                "mem_ref": {
+                    "type": "string",
+                    "description": "Opaque memory ref returned by recall_memory. Copy the complete value, including prefixes such as fact: or case:.",
+                },
                 "reason": {"type": "string"},
             },
             "required": ["mem_ref"],

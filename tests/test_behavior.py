@@ -950,31 +950,30 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertEqual(result.candidates[0].prompt_hint, "Dirty route: Use the clean hint.")
 
-    def test_behavior_prompt_always_mentions_advise_inject_and_submit_tools(self) -> None:
+    def test_behavior_prompt_leaves_static_routing_to_tool_descriptions(self) -> None:
         fragments = BehaviorPromptFragmentProvider(service=self.service).build_prompt_fragments(PromptAssemblyContext())
         content = "\n".join(fragment.content for fragment in fragments)
 
-        self.assertIn("behavior_advise", content)
-        self.assertIn("Simple/current-context sufficient", content)
-        self.assertIn("Clear single-capability action", content)
-        self.assertLess(content.index("Simple/current-context sufficient"), content.index("behavior_advise"))
-        self.assertIn("resolve contract if needed", content)
-        self.assertIn("design/debug/recovery/route-unclear", content)
-        self.assertIn("clear direct implementation command", content)
-        self.assertIn("obvious local/schema/input mistake", content)
-        self.assertIn("advisor output as route resources, not orders", content)
-        self.assertNotIn("If advice returns `skill_ref`, call `skill_inject` before executing that workflow", content)
         self.assertIn("Behavior guidance answers", content)
-        self.assertIn("behavior_save", content)
-        self.assertIn("behavior_affordance_update", content)
-        self.assertIn("behavior_affordance_delete", content)
-        self.assertIn("MUST call behavior_affordance_update", content)
-        self.assertIn("original rendered guidance line", content)
-        self.assertIn("rendered behavior guidance block, set prompt_hint to the new guidance text", content)
-        self.assertIn("scenario_text only when the user explicitly asks to change the activation scenario", content)
-        self.assertIn("Do not claim behavior guidance was updated or deleted unless the tool result confirms it", content)
+        self.assertIn("future routing rules and recurring decision hints", content)
+        self.assertIn("Behavior tools define advice, save, update", content)
+        self.assertNotIn("behavior_advise", content)
+        self.assertNotIn("behavior_save", content)
+        self.assertNotIn("behavior_affordance_update", content)
+        self.assertNotIn("If advice returns `skill_ref`, call `skill_inject` before executing that workflow", content)
         self.assertNotIn("affordances with affordance_id values", content)
         self.assertNotIn("op_memory_write", content)
+
+        advice_description = BehaviorAdviceTool(service=self.service).description
+        self.assertIn("ambiguous, risky, multi-step", advice_description)
+        self.assertIn("clear direct implementation command", advice_description)
+        self.assertIn("Treat the result as routing resources, not orders", advice_description)
+        save_description = AffordanceSubmitTool(service=self.service).description
+        self.assertIn("future behavior routing rule", save_description)
+        self.assertIn("Do not use for ordinary facts", save_description)
+        update_description = AffordanceUpdateTool(service=self.service).description
+        self.assertIn("Pass the original rendered guidance line", update_description)
+        self.assertIn("Do not claim behavior guidance changed unless this tool confirms success", update_description)
 
     def test_behavior_prompt_sections_enter_system_prompt_in_order(self) -> None:
         core = PalCore()
@@ -1016,7 +1015,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
                 "knowledge_storage_boundary",
             ],
         )
-        self.assertEqual(prompt.metadata["reminder_sections"], ["task_flow", "operating_guidance", "tool_efficiency"])
+        self.assertEqual(prompt.metadata["reminder_sections"], ["operating_guidance", "tool_efficiency"])
 
         surfaces = system.split("<operating_rules>", 1)[0]
         self.assertIn("execution/capability", surfaces)
@@ -1034,12 +1033,12 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("Runtime capability calls are governed actions", mutation)
         self.assertIn("Source code, config, policy, and approval-boundary changes require explicit user request or approval", mutation)
         self.assertIn("bypassing capability policy", mutation)
-        self.assertIn("<task_flow>", reminder)
+        self.assertNotIn("<task_flow>", reminder)
         self.assertIn("<tool_efficiency>", reminder)
         self.assertIn("behavior-routing guidance", reminder)
         self.assertIn("active system prompt's hard rules", reminder)
-        self.assertIn("behavior_advise", reminder)
-        self.assertIn("Use behavior_save only when the user explicitly asks Pal to adopt/follow/save a future behavior rule", system)
+        self.assertNotIn("behavior_advise", reminder)
+        self.assertNotIn("Use behavior_save only when the user explicitly asks Pal to adopt/follow/save a future behavior rule", system)
         self.assertIn("Stable fact, preference, project context, prior decision, or repair lesson -> memory", system)
 
     def test_behavior_advice_tool_result_projects_to_behavior_guidance(self) -> None:
@@ -1169,25 +1168,17 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertNotIn("origin available", by_title["Recalled memories"])
         self.assertNotIn("origin available", by_title["Active route suggestions"])
 
-    def test_memory_prompt_always_projects_memory_routing(self) -> None:
+    def test_memory_prompt_leaves_static_routing_to_tool_descriptions(self) -> None:
         fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext())
-        self.assertEqual([fragment.section for fragment in fragments], ["memory_guide", "memory_guide"])
+        self.assertEqual([fragment.section for fragment in fragments], ["memory_guide"])
         policy = fragments[0].content
-        routing = fragments[1].content
 
-        self.assertIn("memory_recall", routing)
-        self.assertIn("memory_write", policy)
-        self.assertIn("memory_update", policy)
-        self.assertIn("custom Pal/project term", routing)
         self.assertIn("repair lessons", policy)
-        self.assertIn("If recalled memories are already present in the prompt", routing)
-        self.assertEqual(fragments[1].metadata["prompt_target"], "runtime_reminder")
-        self.assertIn("Do not recall", policy)
-        self.assertIn("Write/update/delete", policy)
-        self.assertIn("MUST call memory_recall", routing)
-        self.assertIn("corrects or challenges memory", routing)
-        self.assertIn("Recall budget", routing)
-        self.assertIn("Do not invent mem_ref values.", policy)
+        self.assertIn("Memory tool descriptions", policy)
+        self.assertIn("prefixes such as fact: and case:", policy)
+        self.assertNotIn("memory_recall", policy)
+        self.assertNotIn("memory_write", policy)
+        self.assertNotIn("MUST call memory_recall", policy)
 
     def test_behavior_guidance_l2_entries_do_not_retire_to_l3(self) -> None:
         service = MemoryService()
@@ -1256,7 +1247,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         )
         self.assertEqual(
             with_resident_prompt.metadata["reminder_sections"],
-            ["task_flow", "operating_guidance", "resident_affordances", "tool_efficiency"],
+            ["operating_guidance", "resident_affordances", "tool_efficiency"],
         )
 
     def test_behavior_guidance_deduplicates_headers_and_uses_canonicalized_declared_titles(self) -> None:

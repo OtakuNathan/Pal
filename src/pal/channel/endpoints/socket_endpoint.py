@@ -215,6 +215,7 @@ class SocketChannelEndpoint(ChannelEndpointQueueBase):
         super().send_stream_event(response_handle, event)
         self._mark_stream_event_queued(response_handle, event)
         session.outbound.put_nowait(_stream_payload(response_handle, event))
+        self.mark_stream_text_delivered(response_handle, event)
 
     def send_attachment(self, response_handle: ResponseHandle, attachment: AttachmentSpec) -> None:
         session = self._require_session(response_handle)

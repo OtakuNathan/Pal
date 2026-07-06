@@ -1579,6 +1579,7 @@ class LLMRuntime(LLMRuntimePort):
                 "context_window": None,
                 "max_output_tokens": None,
                 "supports_vision": False,
+                "supports_streaming": False,
                 "input_modalities": [],
                 "capabilities": {},
             }
@@ -1588,6 +1589,7 @@ class LLMRuntime(LLMRuntimePort):
             "context_window": endpoint.context_window,
             "max_output_tokens": endpoint.max_output_tokens,
             "supports_vision": bool(endpoint.supports_vision),
+            "supports_streaming": bool(endpoint.supports_streaming),
             "input_modalities": list(endpoint.input_modalities_blob or []),
             "capabilities": dict(endpoint.capabilities_blob or {}),
         }

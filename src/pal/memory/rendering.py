@@ -54,7 +54,10 @@ def render_recall_result_for_llm(
 ) -> str:
     _ = (provider_id, query)
     normalized_view = normalize_recall_view(view)
-    lines: list[str] = [f'<recalled_memories view="{normalized_view.value}">']
+    lines: list[str] = [
+        f'<recalled_memories view="{normalized_view.value}">',
+        "When updating or deleting memory, copy the complete mem_ref exactly, including prefixes such as fact: or case:.",
+    ]
 
     item_lines = _render_hit_lines(list(result.hits or []), view=normalized_view)
     if item_lines:

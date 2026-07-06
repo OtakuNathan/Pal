@@ -133,7 +133,10 @@ class SkillAssimilateTool:
     name: str = "op_skill_assimilate"
     display_name: str = "Assimilate skill"
     family: str = "skill"
-    description: str = "Create a sanitized Pal skill candidate from plain text or SKILL.md content. Does not commit."
+    description: str = (
+        "Create a sanitized Pal skill candidate from plain text or SKILL.md content. Use for explicit learn, summarize, "
+        "sanitize, import, or reusable-procedure requests. Does not commit or persist the skill."
+    )
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("skill", "learn", "sanitize")
@@ -182,7 +185,10 @@ class SkillCommitTool:
     name: str = "op_skill_commit"
     display_name: str = "Commit skill"
     family: str = "skill"
-    description: str = "Commit a sanitized skill candidate and its thin affordance."
+    description: str = (
+        "Commit a sanitized skill candidate and its thin affordance. Use only when the user explicitly asks to save or "
+        "commit a candidate; do not commit for candidate, draft, summary, or review-only requests."
+    )
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("skill", "write")
@@ -303,7 +309,11 @@ class SkillSearchTool:
     name: str = "op_skill_search"
     display_name: str = "Search skills"
     family: str = "skill"
-    description: str = "Search normalized Pal skills for the current scenario or explicit skill name. Does not return manuals; call skill_inject next to use a matched active skill."
+    description: str = (
+        "Search normalized Pal skills for an explicit named skill request or a reusable workflow, review method, debugging "
+        "method, platform procedure, or task playbook. Does not return manuals; call skill_inject next to use a matched "
+        "active skill. Advisor skill refs are candidates, not automatic injections."
+    )
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("skill", "search")
@@ -412,7 +422,10 @@ class SkillInjectTool:
     name: str = "op_skill_inject"
     display_name: str = "Skill injection"
     family: str = "skill"
-    description: str = "Inject a registered active skill manual into the current tool observation."
+    description: str = (
+        "Inject a registered active skill manual into the current tool observation. Search alone is not using a skill; "
+        "call this before applying a matched active skill to the task."
+    )
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("skill",)

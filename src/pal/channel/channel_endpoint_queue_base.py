@@ -270,7 +270,7 @@ class ChannelEndpointQueueBase(ABC):
     def send_stream_event(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
         session = self._stream_sessions.setdefault(
             id(response_handle),
-            {"text": "", "reasoning": "", "events": [], "closed": False, "abort_reason": ""},
+            {"text": "", "reasoning": "", "events": [], "closed": False, "abort_reason": "", "text_delivered": False},
         )
         if bool(session.get("closed")):
             return
@@ -286,14 +286,23 @@ class ChannelEndpointQueueBase(ABC):
             return text
         if bool(session.get("closed")):
             return None
-        if self.endpoint.channel_kind in {"stdio", "socket"} and str(session.get("text") or "") == text:
+        if bool(session.get("text_delivered")) and str(session.get("text") or "") == text:
             return None
         return text
+
+    def mark_stream_text_delivered(self, response_handle: ResponseHandle, event: NormalizedLLMStreamEvent) -> None:
+        if not str(event.text or ""):
+            return
+        session = self._stream_sessions.setdefault(
+            id(response_handle),
+            {"text": "", "reasoning": "", "events": [], "closed": False, "abort_reason": "", "text_delivered": False},
+        )
+        session["text_delivered"] = True
 
     def abort_stream(self, response_handle: ResponseHandle, *, reason: str = "interrupted") -> None:
         session = self._stream_sessions.setdefault(
             id(response_handle),
-            {"text": "", "reasoning": "", "events": [], "closed": False, "abort_reason": ""},
+            {"text": "", "reasoning": "", "events": [], "closed": False, "abort_reason": "", "text_delivered": False},
         )
         session["closed"] = True
         session["abort_reason"] = str(reason or "interrupted")

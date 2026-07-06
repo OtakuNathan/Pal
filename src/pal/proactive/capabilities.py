@@ -345,15 +345,16 @@ class ProactiveIntrospectionProvider:
         namespace=OPERATION_NAMESPACE,
         scope="module",
         family="management",
-        action_name="destroy",
-        description="Destroy a proactive task",
+        action_name="delete",
+        description="Delete (destroy) a proactive task",
+        aliases=("proactive_destroy",),
         args_schema={
             "type": "object",
             "properties": {"target_id": {"type": "string"}},
             "required": ["target_id"],
         },
     )
-    def destroy(self, call: IntrospectionCall) -> IntrospectionResult:
+    def delete(self, call: IntrospectionCall) -> IntrospectionResult:
         proactive_id = str(call.args.get("target_id") or "").strip()
         if not proactive_id:
             return IntrospectionResult(
@@ -372,9 +373,9 @@ class ProactiveIntrospectionProvider:
         payload = {"proactive_id": proactive_id}
         return IntrospectionResult(
             status=RuntimeStatus.OK,
-            text="proactive task destroyed",
+            text="proactive task deleted",
             structured=payload,
-            llm_text=render_titled_structured_for_llm("Proactive task destroyed", payload),
+            llm_text=render_titled_structured_for_llm("Proactive task deleted", payload),
         )
 
     @capability_action(

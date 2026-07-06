@@ -155,7 +155,8 @@ from pal.minion.capabilities import _control_route_payload_for_turn, _prompt_log
 from pal.minion.prompt import TaskingPromptFragmentProvider
 from pal.memory import CompactionProfile, L1MessageKind, L1TranscriptMessage, MemoryCommitRequest, MemoryCompactRequest, MemoryService
 from pal.foundation import EventEnvelope
-from pal.shared import EventKind, LLMFinishReason, LLMPreflightStatus, MinionApprovalDecision, PromptAssemblyContext, RuntimeStatus, SourceKind, TaskContextPack, llm_tool_name
+from pal.shared import EventKind, LLMFinishReason, LLMPreflightStatus, LLMStreamEventKind, MinionApprovalDecision, PromptAssemblyContext, RuntimeStatus, SourceKind, TaskContextPack, llm_tool_name
+from pal.stream_events import NormalizedLLMStreamEvent
 
 
 def _message_text(message: dict) -> str:
@@ -12331,6 +12332,58 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_llm_broker_generate_stream_serializes_events(self) -> None:
+        class FakeRuntime:
+            def __init__(self):
+                self.requests = []
+
+            async def agenerate_stream(self, request):
+                self.requests.append(request)
+                return [
+                    NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="hello"),
+                    NormalizedLLMStreamEvent(
+                        event_kind=LLMStreamEventKind.TOOL_CALL,
+                        tool_call=CanonicalToolCall(name="op_fake", args={"x": 1}, call_id="call_fake"),
+                    ),
+                    NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.TOOL_CALLS),
+                ]
+
+        class FakeManager(MinionManager):
+            async def _llm_broker_runtime(self):
+                return fake_runtime
+
+        async def scenario() -> None:
+            nonlocal fake_runtime
+            fake_runtime = FakeRuntime()
+            manager = FakeManager(runtime_root=self.root)
+            state = MinionRunState(
+                minion_id="minion_broker_stream",
+                run_id="run_broker_stream",
+                pack=TaskContextPack(work_order_id="wo_broker_stream", goal="broker stream test"),
+                status="running",
+            )
+            manager.runs[state.run_id] = state
+
+            result = await manager.llm_broker_generate_stream(
+                {
+                    "run_id": state.run_id,
+                    "request": {
+                        "messages": [{"role": "user", "content": "stream"}],
+                        "max_output_tokens": 64,
+                    },
+                }
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(fake_runtime.requests[0].messages[0]["content"], "stream")
+            self.assertEqual(result["events"][0]["text"], "hello")
+            self.assertEqual(result["events"][1]["tool_call"]["name"], "op_fake")
+            self.assertEqual(result["events"][1]["tool_call"]["args"], {"x": 1})
+            self.assertEqual(result["events"][2]["finish_reason"], LLMFinishReason.TOOL_CALLS)
+
+        fake_runtime = FakeRuntime()
+        asyncio.run(scenario())
+
     def test_logical_slots_share_global_parallel_limit(self) -> None:
         manager = MinionManager(runtime_root=self.root, max_parallel_modules=1)
         state = MinionRunState(
@@ -18028,6 +18081,72 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_runner_uses_streaming_llm_when_available(self) -> None:
+        async def scenario() -> None:
+            events = []
+
+            class FakeStreamingLLM:
+                supports_streaming = True
+
+                def __init__(self):
+                    self.generate_calls = 0
+                    self.stream_calls = 0
+                    self.event_sink = None
+
+                async def agenerate(self, request):
+                    _ = request
+                    self.generate_calls += 1
+                    return CanonicalLLMOutcome(text="non-stream fallback")
+
+                async def agenerate_stream(self, request):
+                    _ = request
+                    self.stream_calls += 1
+                    if callable(self.event_sink):
+                        self.event_sink({"phase": "llm_endpoint_retry_scheduled", "endpoint_id": "fake_stream"})
+                    await asyncio.sleep(0.05)
+                    return [
+                        NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="stream "),
+                        NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.TEXT_DELTA, text="complete"),
+                        NormalizedLLMStreamEvent(event_kind=LLMStreamEventKind.DONE, finish_reason=LLMFinishReason.STOP),
+                    ]
+
+            llm = FakeStreamingLLM()
+
+            async def write_event(event):
+                events.append(event)
+
+            async def read_decision(timeout):
+                _ = timeout
+                return None
+
+            code = await MinionRunner(
+                runtime_root=self.root,
+                pack=TaskContextPack(
+                    work_order_id="wo_streaming",
+                    goal="complete through a streaming llm call",
+                    metadata={"heartbeat_interval_seconds": 0.01, "allow_text_only_completion": True},
+                ),
+                minion_id="m_streaming",
+                run_id="r_streaming",
+                write_event=write_event,
+                read_decision=read_decision,
+                runtime_bundle=MinionRuntimeBundle(llm_runtime=llm, execution_runtime=SimpleNamespace()),
+            ).run()
+
+            self.assertEqual(code, 0)
+            self.assertEqual(llm.stream_calls, 1)
+            self.assertEqual(llm.generate_calls, 0)
+            progress_events = [event["payload"] for event in events if event["event_kind"] == "progress"]
+            phases = [event["phase"] for event in progress_events]
+            self.assertIn("llm_round_started", phases)
+            self.assertIn("llm_round_waiting", phases)
+            self.assertIn("llm_endpoint_retry_scheduled", phases)
+            self.assertIn("llm_round_completed", phases)
+            terminal = next(event for event in events if event["event_kind"] == "terminal")
+            self.assertEqual(terminal["payload"]["summary"], "stream complete")
+
+        asyncio.run(scenario())
+
     def test_runner_bridges_llm_endpoint_progress_events(self) -> None:
         async def scenario() -> None:
             events = []
@@ -23514,7 +23633,7 @@ class MinionManagerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
-    def test_runner_system_prompt_uses_targeted_recall_after_tool_failure(self) -> None:
+    def test_runner_system_prompt_leaves_recall_routing_to_tool_description(self) -> None:
         prompt = _render_system_prompt(
             {
                 "identity": "You are a coder.",
@@ -23528,9 +23647,8 @@ class MinionManagerTests(unittest.TestCase):
         self.assertIn("Today's date is 2026-07-03.", prompt)
         self.assertIn("obvious schema, argument, path, or local input mistake", prompt)
         self.assertIn("correct the call directly", prompt)
-        self.assertIn("repeated retries would be guesswork", prompt)
-        self.assertIn("use `memory_recall`", prompt)
-        self.assertIn("before retrying, debugging further, or reporting blocked", prompt)
+        self.assertNotIn("repeated retries would be guesswork", prompt)
+        self.assertNotIn("recall_memory", prompt)
         self.assertIn("If completion evidence cannot be produced", prompt)
         self.assertIn("<operating_rules>", prompt)
         self.assertNotIn("<allowed_capabilities>", prompt)
