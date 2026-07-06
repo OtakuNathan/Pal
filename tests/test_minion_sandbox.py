@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from pal.llm import EndpointResolver, LLMRuntime
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice, LLMPreflightRequest
@@ -27,6 +28,7 @@ from pal.minion.sandbox import (
     build_sandboxed_runner_invocation,
     ensure_sandbox_files,
     _git_worktree_metadata_bind_paths,
+    minion_sandbox_scratch_dir,
     scrub_minion_sandbox_env,
     with_minion_sandbox_metadata,
 )
@@ -48,7 +50,8 @@ class MinionSandboxTests(unittest.TestCase):
             repo.mkdir()
             pack = TaskContextPack(work_order_id="wo", goal="g", workspace={"repo_path": str(repo)})
 
-            updated = with_minion_sandbox_metadata(root, pack, run_id="run_1")
+            with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")}):
+                updated = with_minion_sandbox_metadata(root, pack, run_id="run_1")
 
             sandbox = updated.metadata["sandbox"]
             self.assertIn("enabled", sandbox)
@@ -57,6 +60,7 @@ class MinionSandboxTests(unittest.TestCase):
                 self.assertEqual(sandbox["backend"], "bwrap")
                 self.assertEqual(sandbox["workspace_path"], str(repo))
                 self.assertEqual(sandbox["secret_policy"], "host_llm_broker")
+                self.assertEqual(sandbox["scratch_dir"], str(root / "tmp_scratch" / "run_1"))
                 self.assertIn("sudo", sandbox["blacklist_commands"])
             else:
                 self.assertTrue(sandbox["enabled"])
@@ -94,16 +98,17 @@ class MinionSandboxTests(unittest.TestCase):
 
     def test_sandbox_env_scrubs_secret_like_values_and_enables_broker(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_env_") as tmp:
-            env = scrub_minion_sandbox_env(
-                {
-                    "PATH": "/usr/bin",
-                    "OPENAI_API_KEY": "secret",
-                    "NORMAL_VALUE": "kept",
-                    "PAL_TOKEN": "secret",
-                },
-                runtime_root=Path(tmp),
-                run_id="run_env",
-            )
+            with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(Path(tmp) / "tmp_scratch")}):
+                env = scrub_minion_sandbox_env(
+                    {
+                        "PATH": "/usr/bin",
+                        "OPENAI_API_KEY": "secret",
+                        "NORMAL_VALUE": "kept",
+                        "PAL_TOKEN": "secret",
+                    },
+                    runtime_root=Path(tmp),
+                    run_id="run_env",
+                )
 
             self.assertEqual(env["PATH"], "/usr/bin")
             self.assertEqual(env["NORMAL_VALUE"], "kept")
@@ -111,7 +116,7 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertNotIn("PAL_TOKEN", env)
             self.assertEqual(env["PAL_MINION_LLM_BROKER"], "1")
             self.assertEqual(env["PAL_MINION_SANDBOXED"], "1")
-            self.assertIn("run_env", env["TMPDIR"])
+            self.assertEqual(env["TMPDIR"], str(Path(tmp) / "tmp_scratch" / "run_env" / "tmp"))
 
     def test_sandbox_env_applies_workspace_execution_env(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_workspace_env_") as tmp:
@@ -134,12 +139,13 @@ class MinionSandboxTests(unittest.TestCase):
                 },
             )
 
-            env = scrub_minion_sandbox_env(
-                {"PATH": "/usr/bin", "PYTHONPATH": "/existing"},
-                runtime_root=root,
-                run_id="run_workspace_env",
-                pack=pack,
-            )
+            with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")}):
+                env = scrub_minion_sandbox_env(
+                    {"PATH": "/usr/bin", "PYTHONPATH": "/existing"},
+                    runtime_root=root,
+                    run_id="run_workspace_env",
+                    pack=pack,
+                )
 
             self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(src))
             self.assertIn("/existing", env["PYTHONPATH"].split(os.pathsep))
@@ -149,9 +155,11 @@ class MinionSandboxTests(unittest.TestCase):
 
     def test_blacklist_wrappers_are_generated_as_executable_route_blocks(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_wrappers_") as tmp:
-            scratch, deny_dir = ensure_sandbox_files(Path(tmp), run_id="run_wrap", blacklist_commands=("sudo", "docker"))
+            with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(Path(tmp) / "tmp_scratch")}):
+                scratch, deny_dir = ensure_sandbox_files(Path(tmp), run_id="run_wrap", blacklist_commands=("sudo", "docker"))
 
             self.assertTrue((scratch / "tmp").is_dir())
+            self.assertEqual(scratch, Path(tmp) / "tmp_scratch" / "run_wrap")
             sudo = deny_dir / "sudo"
             docker = deny_dir / "docker"
             self.assertTrue(os.access(sudo, os.X_OK))
@@ -177,12 +185,13 @@ class MinionSandboxTests(unittest.TestCase):
                 metadata={"sandbox": {"enabled": True, "backend": "bwrap", "run_id": "run_inv"}},
             )
 
-            argv, env = build_sandboxed_runner_invocation(
-                runtime_root=root,
-                pack=pack,
-                argv=["python", "-m", "pal.minion.step_executor_main"],
-                env={"PATH": "/usr/bin", "OPENAI_API_KEY": "secret"},
-            )
+            with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")}):
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=root,
+                    pack=pack,
+                    argv=["python", "-m", "pal.minion.step_executor_main"],
+                    env={"PATH": "/usr/bin", "OPENAI_API_KEY": "secret"},
+                )
 
             self.assertTrue(argv[0].endswith("bwrap"))
             self.assertIn("--share-net", argv)
@@ -190,6 +199,50 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertNotIn("OPENAI_API_KEY", env)
             self.assertEqual(env["PAL_MINION_LLM_BROKER"], "1")
             self.assertIn("PYTHONPATH", env)
+
+    def test_sandbox_scratch_prefers_temp_root_and_falls_back_when_unusable(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_scratch_") as tmp:
+            root = Path(tmp)
+            temp_root = root / "tmp_scratch"
+            with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(temp_root)}):
+                self.assertEqual(minion_sandbox_scratch_dir(root, "run_a"), temp_root / "run_a")
+
+            unusable = root / "not_a_dir"
+            unusable.write_text("file", encoding="utf-8")
+            with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(unusable)}):
+                self.assertEqual(
+                    minion_sandbox_scratch_dir(root, "run_b"),
+                    root / "data" / "minion" / "sandbox" / "runs" / "run_b",
+                )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "PAL_MINION_SANDBOX_SCRATCH_ROOT": str(temp_root),
+                    "PAL_MINION_SANDBOX_MIN_FREE_MB": "999999999",
+                },
+            ):
+                self.assertEqual(
+                    minion_sandbox_scratch_dir(root, "run_c"),
+                    root / "data" / "minion" / "sandbox" / "runs" / "run_c",
+                )
+
+    def test_sandbox_run_dir_gc_keeps_recent_limited_scratch_dirs(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_gc_") as tmp:
+            root = Path(tmp)
+            temp_root = root / "tmp_scratch"
+            env = {
+                "PAL_MINION_SANDBOX_SCRATCH_ROOT": str(temp_root),
+                "PAL_MINION_SANDBOX_MAX_RUN_DIRS": "2",
+            }
+            with patch.dict(os.environ, env):
+                first, _ = ensure_sandbox_files(root, run_id="run_1", blacklist_commands=())
+                second, _ = ensure_sandbox_files(root, run_id="run_2", blacklist_commands=())
+                third, _ = ensure_sandbox_files(root, run_id="run_3", blacklist_commands=())
+
+            self.assertFalse(first.exists())
+            self.assertTrue(second.exists())
+            self.assertTrue(third.exists())
 
     def test_sandboxed_git_worktree_can_resolve_external_git_dir(self) -> None:
         if not shutil.which("bwrap"):
@@ -208,18 +261,19 @@ class MinionSandboxTests(unittest.TestCase):
             _git(source, "add", "README.md")
             _git(source, "commit", "-m", "initial")
             _git(source, "worktree", "add", "-B", "work", str(workspace), "main")
-            pack = with_minion_sandbox_metadata(
-                runtime_root,
-                TaskContextPack(work_order_id="wo", goal="g", workspace={"repo_path": str(workspace)}),
-                run_id="run_git_worktree",
-            )
+            with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")}):
+                pack = with_minion_sandbox_metadata(
+                    runtime_root,
+                    TaskContextPack(work_order_id="wo", goal="g", workspace={"repo_path": str(workspace)}),
+                    run_id="run_git_worktree",
+                )
 
-            argv, env = build_sandboxed_runner_invocation(
-                runtime_root=runtime_root,
-                pack=pack,
-                argv=["git", "status", "--porcelain"],
-                env={"PATH": "/usr/bin:/bin"},
-            )
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=runtime_root,
+                    pack=pack,
+                    argv=["git", "status", "--porcelain"],
+                    env={"PATH": "/usr/bin:/bin"},
+                )
             result = subprocess.run(argv, env=env, cwd=str(workspace), capture_output=True, text=True, timeout=20)
 
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -239,12 +293,13 @@ class MinionSandboxTests(unittest.TestCase):
                 metadata={"sandbox": {"enabled": True, "backend": "bwrap", "run_id": "run_import"}},
             )
 
-            argv, env = build_sandboxed_runner_invocation(
-                runtime_root=root,
-                pack=pack,
-                argv=["python", "-c", "import msgpack; import pal.foundation.sidecar; print('imports-ok')"],
-                env={"PATH": "/usr/bin:/bin"},
-            )
+            with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")}):
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=root,
+                    pack=pack,
+                    argv=["python", "-c", "import msgpack; import pal.foundation.sidecar; print('imports-ok')"],
+                    env={"PATH": "/usr/bin:/bin"},
+                )
             result = subprocess.run(argv, env=env, cwd=str(repo), capture_output=True, text=True, timeout=20)
 
             self.assertEqual(result.returncode, 0, result.stderr)

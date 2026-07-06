@@ -167,7 +167,7 @@ Current behavior:
 - Operators can disable sandboxing with `metadata.sandbox.enabled=false` or `PAL_MINION_SANDBOX=0`.
 - Network remains open so research-capable minions can use web tools and package managers when the task permits.
 - LLM credentials are not passed into the sandbox. Secret-like environment variables are scrubbed, and LLM calls go through the host minion LLM broker (`PAL_MINION_LLM_BROKER=1`).
-- The sandbox gives each run private `HOME`, `TMPDIR`, cache, and pycache paths under `runtime_root/data/minion/sandbox/runs/{run_id}`.
+- The sandbox gives each run private `HOME`, `TMPDIR`, cache, and pycache paths under `/tmp/pal/minion/sandbox/runs/{run_id}` by default, falling back to `runtime_root/data/minion/sandbox/runs/{run_id}` when the temp scratch root is unavailable or below the free-space threshold.
 - Pal source, Python dependency paths, config, plugin data, skills, and selected runtime data are mounted read-only unless the runner needs task-owned state.
 - The assigned repo/workspace is mounted writable only for coder-style workspaces that own that path.
 - A deny-bin projection replaces high-risk host commands such as `sudo`, `systemctl`, `docker`, `ssh`, and namespace/mount tools with wrappers that tell the runner to use resident Pal tools.

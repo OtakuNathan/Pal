@@ -1277,6 +1277,18 @@ class MinionContractTests(unittest.TestCase):
                 review_text = review_path.read_text(encoding="utf-8")
                 self.assertIn("## Modules", review_text)
                 self.assertIn("module_builder_next", review_text)
+                self.assertIn("## Constraints", review_text)
+                self.assertIn("Ownership:", review_text)
+                self.assertIn("Prelude owns docs/spec.md as the shared planning contract.", review_text)
+                self.assertIn("Lifecycle:", review_text)
+                self.assertIn("Invariants:", review_text)
+                self.assertIn("Quality criteria:", review_text)
+                self.assertIn("Risk surfaces:", review_text)
+                self.assertIn("Delivery surfaces:", review_text)
+                self.assertIn("Interfaces:", review_text)
+                self.assertIn("Error behavior:", review_text)
+                self.assertIn("Required tests:", review_text)
+                self.assertIn("- Depends on: `module_builder_next`", review_text)
                 self.assertIn("## Validation", review_text)
                 self.assertEqual(
                     review_text.count("module_builder_next behavior is implemented with focused regression tests."),
@@ -3307,6 +3319,11 @@ class MinionContractTests(unittest.TestCase):
                 self.assertTrue(any(item["node_kind"] == "acceptance_criterion" for item in coverage[0]["evidence"]))
                 checklist = payload["modules"][1]["internal_milestones"][0]["metadata"]["acceptance_checklist"]
                 self.assertEqual(checklist[0]["gate_check_refs"], ["gate:0"])
+                review_text = (root / "artifacts" / "plan_review.md").read_text(encoding="utf-8")
+                self.assertIn("## Source Requirements", review_text)
+                self.assertIn("`gate:0`: The user contract is covered by implementation acceptance criteria.", review_text)
+                self.assertIn("### Coverage", review_text)
+                self.assertIn("Gate refs: `gate:0`", review_text)
             finally:
                 shutil.rmtree(root, ignore_errors=True)
 

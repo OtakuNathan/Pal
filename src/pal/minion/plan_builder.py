@@ -3586,13 +3586,19 @@ def _plan_review_markdown(artifact: dict[str, Any], validation: dict[str, Any], 
     modules = [dict(item) for item in list(artifact.get("modules") or []) if isinstance(item, dict)]
     nodes = [dict(item) for item in list(dict(validation or {}).get("nodes") or []) if isinstance(item, dict)]
     node_by_module = {str(node.get("module_id") or ""): node for node in nodes}
+    module_by_node_id = {
+        str(node.get("node_id") or ""): str(node.get("module_id") or "")
+        for node in nodes
+        if _text(node.get("node_id")) and _text(node.get("module_id"))
+    }
     metadata = dict(artifact.get("metadata") or {})
     workflow_next = dict(metadata.get("workflow_next") or {})
     next_profile = _text(workflow_next.get("profile") or workflow_next.get("next_profile"))
     lines: list[str] = [
-        f"# Plan Review: {_text(artifact.get('summary') or artifact.get('plan_id') or 'Plan')}",
+        "# Plan Review",
         "",
         "## Summary",
+        f"- Summary: {_text(artifact.get('summary') or artifact.get('plan_id') or 'Plan')}",
         f"- Plan id: `{_text(artifact.get('plan_id'))}`",
         f"- Task id: `{_text(artifact.get('task_id'))}`",
         f"- Revision: `{int(plan_revision or 0)}`",
@@ -3603,6 +3609,8 @@ def _plan_review_markdown(artifact: dict[str, Any], validation: dict[str, Any], 
     languages = _string_list(metadata.get("languages"))
     if languages:
         lines.append("- Languages: " + ", ".join(f"`{item}`" for item in languages))
+    _append_plan_review_gate_contract(lines, metadata)
+    _append_plan_review_constraints(lines, metadata)
     lines.extend(["", "## Modules"])
     for module in modules:
         module_id = _text(module.get("module_id"))
@@ -3610,7 +3618,7 @@ def _plan_review_markdown(artifact: dict[str, Any], validation: dict[str, Any], 
         module_metadata = dict(module.get("metadata") or {})
         kind = _text(node.get("kind") or module_metadata.get("module_kind") or "module")
         executor = _text(module_metadata.get("executor_profile") or node.get("executor_profile") or next_profile or "default")
-        deps = _string_list(node.get("depends_on"))
+        deps = _plan_review_dependency_labels(node.get("depends_on"), module_by_node_id)
         lines.extend(
             [
                 "",
@@ -3622,31 +3630,80 @@ def _plan_review_markdown(artifact: dict[str, Any], validation: dict[str, Any], 
                 f"- Responsibility: {_text(module.get('responsibility')) or '-'}",
             ]
         )
+        _append_plan_review_list(lines, "Ownership", _string_list(module.get("ownership")), indent="")
+        _append_plan_review_list(lines, "Lifecycle", _string_list(module.get("lifecycle")), indent="")
+        _append_plan_review_list(lines, "Invariants", _string_list(module.get("invariants")), indent="")
+        _append_plan_review_list(lines, "Quality criteria", _string_list(module_metadata.get("module_quality_criteria")), indent="")
+        _append_plan_review_list(lines, "Risk surfaces", _string_list(module_metadata.get("risk_surfaces")), indent="")
+        _append_plan_review_list(lines, "Delivery surfaces", _string_list(module_metadata.get("delivery_surfaces")), indent="")
         provided = _dict_list(module.get("provided_interfaces"))
         consumed = _dict_list(module.get("consumed_interfaces"))
         if provided or consumed:
             lines.append("- Interfaces:")
             for item in provided:
-                lines.append(f"  - provides `{_text(item.get('name') or '-')}`: {_text(item.get('shape') or item.get('contract')) or '-'}")
+                _append_plan_review_interface(lines, "provides", item)
             for item in consumed:
-                lines.append(f"  - consumes `{_text(item.get('name') or '-')}`: {_text(item.get('shape') or item.get('contract')) or '-'}")
+                _append_plan_review_interface(lines, "consumes", item)
         milestones = _dict_list(module.get("internal_milestones"))
         if milestones:
             lines.append("- Milestones:")
             for milestone in milestones:
                 title = _text(milestone.get("title") or milestone.get("milestone_id"))
                 task = _text(milestone.get("task"))
-                lines.append(f"  - {title}: {task or '-'}")
+                milestone_metadata = dict(milestone.get("metadata") or {})
+                lines.append(f"  - {title or 'Milestone'}")
+                if task:
+                    lines.append(f"    - Task: {task}")
+                _append_plan_review_list(lines, "Gate refs", _string_list(milestone_metadata.get("gate_check_refs")), indent="    ")
+                _append_plan_review_list(lines, "Changed area", _string_list(milestone_metadata.get("changed_area")), indent="    ")
+                _append_plan_review_list(
+                    lines,
+                    "Checkpoint evidence",
+                    _string_list(milestone_metadata.get("checkpoint_admission_evidence")),
+                    indent="    ",
+                )
                 rendered_criteria: set[str] = set()
-                for criterion in _string_list(milestone.get("acceptance_criteria")):
-                    rendered_criteria.add(criterion)
-                    lines.append(f"    - AC: {criterion}")
-                checklist = _dict_list(dict(milestone.get("metadata") or {}).get("acceptance_checklist"))
+                checklist = _dict_list(milestone_metadata.get("acceptance_checklist"))
                 for item in checklist:
                     criterion = _text(item.get("criterion"))
+                    if not criterion:
+                        continue
+                    rendered_criteria.add(criterion)
+                    ac_id = _text(item.get("id"))
+                    refs = _string_list(item.get("gate_check_refs"))
+                    constraints = _string_list(item.get("linked_constraint_refs"))
+                    heading = f"    - AC `{ac_id}`" if ac_id else "    - AC"
+                    lines.append(heading)
+                    lines.append(f"      - Criterion: {criterion}")
+                    if refs:
+                        lines.append("      - Gate refs: " + ", ".join(f"`{ref}`" for ref in refs))
+                    if constraints:
+                        lines.append("      - Constraint refs: " + ", ".join(f"`{ref}`" for ref in constraints))
+                    evidence = _text(item.get("evidence_expectation"))
+                    if evidence:
+                        lines.append(f"      - Evidence: {evidence}")
+                    negative_cases = _string_list(item.get("negative_cases"))
+                    if negative_cases:
+                        lines.append("      - Negative cases: " + "; ".join(negative_cases))
+                for criterion in _string_list(milestone.get("acceptance_criteria")):
                     if criterion and criterion not in rendered_criteria:
                         rendered_criteria.add(criterion)
-                        lines.append(f"    - AC: {criterion}")
+                        lines.append("    - AC")
+                        lines.append(f"      - Criterion: {criterion}")
+                test_plan = dict(milestone.get("test_plan") or {})
+                _append_plan_review_list(lines, "Required tests", _string_list(test_plan.get("required")), indent="    ")
+        module_test_plan = dict(module.get("test_plan") or {})
+        _append_plan_review_list(lines, "Module tests", _string_list(module_test_plan.get("required") or module_test_plan.get("module")), indent="")
+    contracts = _dict_list(artifact.get("cross_module_contracts"))
+    if contracts:
+        lines.extend(["", "## Cross Module Contracts"])
+        for item in contracts:
+            summary = _text(item.get("summary") or item.get("statement") or item.get("contract") or item.get("name"))
+            if not summary:
+                continue
+            refs = _string_list(item.get("gate_check_refs") or item.get("constraint_refs") or item.get("decision_refs"))
+            suffix = " (" + ", ".join(f"`{ref}`" for ref in refs) + ")" if refs else ""
+            lines.append(f"- {summary}{suffix}")
     system_tests = _dict_list(artifact.get("system_test_plan"))
     if system_tests:
         lines.extend(["", "## System Verification"])
@@ -3670,6 +3727,108 @@ def _plan_review_markdown(artifact: dict[str, Any], validation: dict[str, Any], 
         ]
     )
     return "\n".join(lines)
+
+
+def _append_plan_review_list(lines: list[str], label: str, items: list[str], *, indent: str) -> None:
+    if not items:
+        return
+    lines.append(f"{indent}- {label}:")
+    for item in items:
+        lines.append(f"{indent}  - {item}")
+
+
+def _plan_review_dependency_labels(value: Any, module_by_node_id: dict[str, str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in _string_list(value):
+        label = module_by_node_id.get(item, item)
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        result.append(label)
+    return result
+
+
+def _append_plan_review_interface(lines: list[str], direction: str, item: dict[str, Any]) -> None:
+    name = _text(item.get("name") or "-")
+    shape = _text(item.get("shape") or item.get("contract")) or "-"
+    lines.append(f"  - {direction} `{name}`: {shape}")
+    for label, key in (
+        ("Lifecycle", "lifecycle"),
+        ("Ownership", "ownership"),
+        ("Error behavior", "error_behavior"),
+        ("Compatibility", "compatibility"),
+        ("Import path", "import_path"),
+        ("Source path", "source_path"),
+        ("Public entrypoint", "public_entrypoint"),
+        ("Copy policy", "copy_policy"),
+    ):
+        value = _text(item.get(key))
+        if value:
+            lines.append(f"    - {label}: {value}")
+
+
+def _append_plan_review_gate_contract(lines: list[str], metadata: dict[str, Any]) -> None:
+    checks = _dict_list(dict(metadata.get("gate_contract") or {}).get("checks"))
+    if checks:
+        lines.extend(["", "## Source Requirements"])
+        for check in checks:
+            ref = _text(check.get("ref") or f"gate:{int(check.get('index') or 0)}")
+            claim = _text(check.get("claim")) or "-"
+            priority = _text(check.get("priority"))
+            kind = _text(check.get("kind"))
+            source_ref = _text(check.get("source_ref"))
+            meta = ", ".join(item for item in (priority, kind, source_ref) if item)
+            suffix = f" ({meta})" if meta else ""
+            lines.append(f"- `{ref}`: {claim}{suffix}")
+    coverage = _dict_list(metadata.get("source_acceptance_coverage"))
+    if coverage:
+        if not checks:
+            lines.extend(["", "## Source Requirements"])
+        lines.append("")
+        lines.append("### Coverage")
+        for item in coverage:
+            ref = _text(item.get("ref"))
+            claim = _text(item.get("claim"))
+            evidence = _dict_list(item.get("evidence"))
+            if not ref:
+                continue
+            lines.append(f"- `{ref}`: {claim or '-'}")
+            if not evidence:
+                lines.append("  - Evidence: -")
+                continue
+            for entry in evidence:
+                path = _text(entry.get("path"))
+                node_kind = _text(entry.get("node_kind"))
+                module_id = _text(entry.get("module_id"))
+                milestone_id = _text(entry.get("milestone_id"))
+                summary = _text(entry.get("summary"))
+                where = " / ".join(item for item in (path, module_id, milestone_id, node_kind) if item)
+                lines.append(f"  - {where or 'plan node'}: {summary or '-'}")
+
+
+def _append_plan_review_constraints(lines: list[str], metadata: dict[str, Any]) -> None:
+    constraints = _dict_list(metadata.get("constraints"))
+    decisions = _dict_list(metadata.get("design_decisions"))
+    if constraints:
+        lines.extend(["", "## Constraints"])
+        for item in constraints:
+            statement = _text(item.get("statement") or item.get("summary"))
+            if not statement:
+                continue
+            strength = _text(item.get("strength"))
+            refs = _string_list(item.get("gate_check_refs"))
+            suffix_parts = [part for part in (strength, ", ".join(refs)) if part]
+            suffix = f" ({'; '.join(suffix_parts)})" if suffix_parts else ""
+            lines.append(f"- {statement}{suffix}")
+    if decisions:
+        lines.extend(["", "## Design Decisions"])
+        for item in decisions:
+            decision = _text(item.get("decision") or item.get("statement") or item.get("summary"))
+            rationale = _text(item.get("rationale") or item.get("reason"))
+            if not decision:
+                continue
+            lines.append(f"- {decision}" + (f" - {rationale}" if rationale else ""))
 
 
 def enrich_plan_review_gate_node_refs(args: dict[str, Any], workspace: dict[str, Any]) -> dict[str, Any]:

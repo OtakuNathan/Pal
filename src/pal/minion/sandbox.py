@@ -11,9 +11,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pal.foundation.log_paths import pal_log_root
 from pal.foundation.sidecar import python_subprocess_env
 from pal.shared import RUN_SHELL_SCOPE_HINT, TaskContextPack, format_dedicated_tool_route_hints
 
+
+PAL_MINION_SANDBOX_SCRATCH_ROOT_ENV = "PAL_MINION_SANDBOX_SCRATCH_ROOT"
+PAL_MINION_SANDBOX_MIN_FREE_MB_ENV = "PAL_MINION_SANDBOX_MIN_FREE_MB"
+PAL_MINION_SANDBOX_MAX_RUN_DIRS_ENV = "PAL_MINION_SANDBOX_MAX_RUN_DIRS"
+DEFAULT_MINION_SANDBOX_MIN_FREE_MB = 256
+DEFAULT_MINION_SANDBOX_MAX_RUN_DIRS = 128
 
 MINION_SANDBOX_BLACKLIST_COMMANDS = (
     "sudo",
@@ -96,7 +103,7 @@ def with_minion_sandbox_metadata(runtime_root: Path, pack: TaskContextPack, *, r
         metadata["sandbox"] = {"enabled": True, "backend": "unavailable", "reason": f"unsupported minion sandbox backend: {backend}"}
         return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
     workspace_path = _workspace_path_from_pack(pack)
-    scratch_dir = Path(runtime_root) / "data" / "minion" / "sandbox" / "runs" / _safe_component(run_id)
+    scratch_dir = minion_sandbox_scratch_dir(runtime_root, run_id)
     deny_dir = Path(runtime_root) / "data" / "minion" / "sandbox" / "deny-bin"
     metadata["sandbox"] = MinionSandboxSpec(
         enabled=True,
@@ -122,6 +129,14 @@ def minion_sandbox_is_enabled(pack: TaskContextPack | dict[str, Any] | None) -> 
     return bool(sandbox.get("enabled"))
 
 
+def minion_sandbox_scratch_dir(runtime_root: Path, run_id: str) -> Path:
+    safe_run_id = _safe_component(run_id or "run")
+    temp_root = _preferred_sandbox_scratch_root(runtime_root)
+    if _scratch_root_is_usable(temp_root):
+        return temp_root / safe_run_id
+    return _runtime_sandbox_scratch_root(runtime_root) / safe_run_id
+
+
 def build_sandboxed_runner_invocation(
     *,
     runtime_root: Path,
@@ -143,11 +158,64 @@ def build_sandboxed_runner_invocation(
             runtime_root=runtime_root,
             run_id=str(sandbox.get("run_id") or ""),
             pack=pack,
+            scratch_dir=sandbox.get("scratch_dir"),
         )
         return _build_bwrap_invocation(runtime_root=runtime_root, pack=pack, sandbox=sandbox, argv=argv), final_env
     if backend == "docker":
         raise RuntimeError("macOS Docker minion sandbox requires PAL_MINION_DOCKER_IMAGE; the Docker launcher is not wired yet")
     raise RuntimeError(f"unsupported minion sandbox backend: {backend or 'unknown'}")
+
+
+def _coerce_scratch_dir(runtime_root: Path, run_id: str, scratch_dir: str | Path | None) -> Path:
+    text = str(scratch_dir or "").strip()
+    if text:
+        return Path(text).expanduser()
+    return minion_sandbox_scratch_dir(runtime_root, run_id)
+
+
+def _preferred_sandbox_scratch_root(runtime_root: Path) -> Path:
+    override = str(os.environ.get(PAL_MINION_SANDBOX_SCRATCH_ROOT_ENV) or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return pal_log_root(runtime_root) / "minion" / "sandbox" / "runs"
+
+
+def _runtime_sandbox_scratch_root(runtime_root: Path) -> Path:
+    return Path(runtime_root) / "data" / "minion" / "sandbox" / "runs"
+
+
+def _scratch_root_is_usable(root: Path) -> bool:
+    probe = Path(root).expanduser() / f".probe_{os.getpid()}"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        probe.mkdir()
+        (probe / "write").write_text("ok", encoding="utf-8")
+        minimum = _sandbox_min_free_bytes()
+        if minimum > 0 and shutil.disk_usage(root).free < minimum:
+            return False
+        return True
+    except OSError:
+        return False
+    finally:
+        with contextlib.suppress(OSError):
+            (probe / "write").unlink()
+        with contextlib.suppress(OSError):
+            probe.rmdir()
+
+
+def _sandbox_min_free_bytes() -> int:
+    return max(0, _env_int(PAL_MINION_SANDBOX_MIN_FREE_MB_ENV, DEFAULT_MINION_SANDBOX_MIN_FREE_MB)) * 1024 * 1024
+
+
+def _sandbox_max_run_dirs() -> int:
+    return max(0, _env_int(PAL_MINION_SANDBOX_MAX_RUN_DIRS_ENV, DEFAULT_MINION_SANDBOX_MAX_RUN_DIRS))
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.environ.get(name) or "").strip() or default)
+    except ValueError:
+        return default
 
 
 def scrub_minion_sandbox_env(
@@ -156,6 +224,7 @@ def scrub_minion_sandbox_env(
     runtime_root: Path,
     run_id: str,
     pack: TaskContextPack | None = None,
+    scratch_dir: str | Path | None = None,
 ) -> dict[str, str]:
     result: dict[str, str] = {}
     for key, value in dict(env or {}).items():
@@ -165,7 +234,7 @@ def scrub_minion_sandbox_env(
         if upper in {"AWS_SESSION_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS"}:
             continue
         result[str(key)] = str(value)
-    scratch = Path(runtime_root) / "data" / "minion" / "sandbox" / "runs" / _safe_component(run_id or "run")
+    scratch = _coerce_scratch_dir(runtime_root, run_id, scratch_dir)
     result["PAL_MINION_SANDBOXED"] = "1"
     result["PAL_MINION_LLM_BROKER"] = "1"
     result["HOME"] = str(scratch / "home")
@@ -226,17 +295,51 @@ def _safe_workspace_env_var_name(name: str) -> bool:
     return all(char.isalnum() or char == "_" for char in name)
 
 
-def ensure_sandbox_files(runtime_root: Path, *, run_id: str, blacklist_commands: tuple[str, ...]) -> tuple[Path, Path]:
+def ensure_sandbox_files(
+    runtime_root: Path,
+    *,
+    run_id: str,
+    blacklist_commands: tuple[str, ...],
+    scratch_dir: str | Path | None = None,
+) -> tuple[Path, Path]:
     sandbox_root = Path(runtime_root) / "data" / "minion" / "sandbox"
-    scratch = sandbox_root / "runs" / _safe_component(run_id or "run")
+    scratch = _coerce_scratch_dir(runtime_root, run_id, scratch_dir)
     deny_dir = sandbox_root / "deny-bin"
     for path in (scratch / "tmp", scratch / "home", scratch / "cache", scratch / "pycache", deny_dir):
         path.mkdir(parents=True, exist_ok=True)
+    _prune_sandbox_run_dirs(scratch.parent, keep_run_id=_safe_component(run_id or "run"))
     for command in blacklist_commands:
         target = deny_dir / command
         target.write_text(_deny_wrapper_text(command), encoding="utf-8")
         target.chmod(0o755)
     return scratch, deny_dir
+
+
+def _prune_sandbox_run_dirs(root: Path, *, keep_run_id: str) -> None:
+    max_dirs = _sandbox_max_run_dirs()
+    if max_dirs <= 0:
+        return
+    try:
+        entries = [path for path in Path(root).iterdir() if path.is_dir() and not path.name.startswith(".")]
+    except OSError:
+        return
+    if len(entries) <= max_dirs:
+        return
+
+    def sort_key(path: Path) -> tuple[int, float, str]:
+        try:
+            stat = path.stat()
+            mtime = float(stat.st_mtime)
+        except OSError:
+            mtime = 0.0
+        is_current = 1 if path.name == keep_run_id else 0
+        return (is_current, mtime, path.name)
+
+    keep: set[Path] = set(sorted(entries, key=sort_key, reverse=True)[:max_dirs])
+    for path in entries:
+        if path in keep:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _build_bwrap_invocation(
@@ -251,7 +354,12 @@ def _build_bwrap_invocation(
         raise RuntimeError("bubblewrap is required for Linux minion sandboxing")
     run_id = str(sandbox.get("run_id") or (pack.metadata or {}).get("run_id") or "run")
     blacklist = tuple(str(item).strip() for item in list(sandbox.get("blacklist_commands") or MINION_SANDBOX_BLACKLIST_COMMANDS) if str(item).strip())
-    scratch, deny_dir = ensure_sandbox_files(runtime_root, run_id=run_id, blacklist_commands=blacklist)
+    scratch, deny_dir = ensure_sandbox_files(
+        runtime_root,
+        run_id=run_id,
+        blacklist_commands=blacklist,
+        scratch_dir=sandbox.get("scratch_dir"),
+    )
     workspace_path = Path(str(sandbox.get("workspace_path") or _workspace_path_from_pack(pack) or "")).expanduser()
 
     args: list[str] = [
