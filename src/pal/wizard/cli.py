@@ -12,7 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from pal.foundation.log_paths import pal_log_path, pal_log_root
+from pal.foundation.log_paths import pal_log_root
+from pal.foundation.service_logging import service_log_environment, service_log_plan
 from pal.wizard.dependencies import WizardDependencyCheck, collect_dependency_checks
 from pal.wizard.prompts import ask, ask_yes_no, run_interactive_wizard
 from pal.wizard.runtime import DEFAULT_DB_FILENAME, DEFAULT_PAL_ENTRYPOINT, WizardService
@@ -83,10 +84,14 @@ def _generate_service_content(
     pal_bin: str,
     runtime_root: Path,
     environment: dict[str, str] | None = None,
+    service_name: str = "pal",
 ) -> str:
     runtime_path = runtime_root.as_posix()
     log_root = pal_log_root(runtime_root).as_posix()
-    service_environment = environment or {"PYTHONUNBUFFERED": "1"}
+    service_environment = dict(environment or {"PYTHONUNBUFFERED": "1"})
+    service_environment.update(
+        service_log_environment(runtime_root, service_name=service_name, platform_name="Linux")
+    )
     environment_lines = "\n".join(
         _format_systemd_environment_value(key, value)
         for key, value in service_environment.items()
@@ -202,6 +207,7 @@ def _prompt_systemd_service_setup(runtime_root: Path) -> str | None:
         pal_bin=pal_bin,
         runtime_root=runtime_root,
         environment=_runtime_service_environment(),
+        service_name=service_name,
     )
 
     print()
@@ -279,13 +285,17 @@ def _generate_launchd_plist(
     environment: dict[str, str] | None = None,
 ) -> dict[str, object]:
     runtime_path = runtime_root.as_posix()
+    service_environment = dict(environment or {"PYTHONUNBUFFERED": "1"})
+    service_environment.update(
+        service_log_environment(runtime_root, service_name=label, platform_name="Darwin")
+    )
     return {
         "Label": label,
         "ProgramArguments": [*pal_command, "run", "--runtime-root", runtime_path],
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
         "WorkingDirectory": runtime_path,
-        "EnvironmentVariables": dict(environment or {"PYTHONUNBUFFERED": "1"}),
+        "EnvironmentVariables": service_environment,
     }
 
 
@@ -454,7 +464,8 @@ def run_setup_wizard() -> int:
     print(f"    DB:      {db_path}")
     if svc_name:
         print(f"    Service: {svc_name} (running)")
-        print(f"    Log:     {pal_log_path(runtime_root)}")
+        for label, value in service_log_plan(runtime_root, service_name=svc_name).summary_entries():
+            print(f"    {label}: {value}")
     else:
         print(f"\n    Run: pal run --runtime-root {runtime_root}")
     return 0

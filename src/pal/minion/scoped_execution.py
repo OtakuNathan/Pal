@@ -19,6 +19,7 @@ from pal.execution.tool_search import ToolCallTool, ToolReadTool, ToolSearchTool
 from pal.execution.tool_result_pager import ToolResultPageTool
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.memory import L3CommitRequest
+from pal.memory.candidates import memory_star_from_args, star_text_fields
 from pal.minion.checklist import (
     MilestoneChecklistLedger,
     build_acceptance_checklist,
@@ -220,17 +221,33 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "description": "Memory kind such as fact or case."},
-                "scope": {"type": "string", "default": "task"},
-                "title": {"type": "string"},
-                "summary": {"type": "string"},
-                "canonical_key": {"type": "string"},
-                "topics": {"type": "array", "items": {"type": "string"}},
-                "payload": {"type": "object"},
-                "situation_text": {"type": "string"},
-                "task_text": {"type": "string"},
-                "action_text": {"type": "string"},
-                "result_text": {"type": "string"},
+                "kind": {
+                    "type": "string",
+                    "enum": ["fact", "case"],
+                    "description": "Use fact for reusable task facts; use case for reusable failure/repair/task lessons. case requires star.",
+                },
+                "title": {"type": "string", "description": "Optional short candidate title."},
+                "summary": {"type": "string", "description": "Prompt-ready memory candidate text for future Pal."},
+                "search_text": {
+                    "type": "string",
+                    "description": "Concrete retrieval/source text. Defaults to summary when omitted.",
+                },
+                "topics": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional short topic tags such as project, subsystem, or failure domain.",
+                },
+                "star": {
+                    "type": "object",
+                    "description": "Required when kind='case'; omit for fact memories.",
+                    "properties": {
+                        "situation": {"type": "string", "description": "Situation or failure context."},
+                        "task": {"type": "string", "description": "Task or objective in that situation."},
+                        "action": {"type": "string", "description": "Action, repair, or decision that mattered."},
+                        "result": {"type": "string", "description": "Outcome or reusable lesson."},
+                    },
+                    "required": ["situation", "task", "action", "result"],
+                },
             },
             "required": ["kind", "summary"],
         },
@@ -1532,19 +1549,66 @@ def _minion_memory_candidate_result(call: CanonicalToolCall, memory_l3: MockL3Pl
             status=RuntimeStatus.ERROR,
         )
     try:
+        kind = str(call.args.get("kind") or "case").strip()
+        if kind not in {"fact", "case"}:
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text="kind must be fact or case",
+                structured={"reason": "invalid_kind"},
+                call_id=call.call_id,
+                llm_text="kind must be fact or case",
+                status=RuntimeStatus.INVALID,
+            )
+        star, star_error = memory_star_from_args(call.args)
+        if star_error:
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text=star_error,
+                structured={"reason": "invalid_star", "error": star_error},
+                call_id=call.call_id,
+                llm_text=star_error,
+                status=RuntimeStatus.INVALID,
+            )
+        if kind == "case" and not star:
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text="kind=case requires star with situation, task, action, and result",
+                structured={"reason": "star_required"},
+                call_id=call.call_id,
+                llm_text="kind=case requires star with situation, task, action, and result",
+                status=RuntimeStatus.INVALID,
+            )
+        if kind != "case" and star:
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text="star is only valid when kind=case",
+                structured={"reason": "star_only_for_case"},
+                call_id=call.call_id,
+                llm_text="star is only valid when kind=case",
+                status=RuntimeStatus.INVALID,
+            )
+        payload = dict(call.args.get("payload") or {})
+        if star:
+            payload.update(star)
+        star_fields = star_text_fields(star) if star else {}
         result = memory_l3.commit(
             L3CommitRequest(
-                kind=str(call.args.get("kind") or "case"),
+                kind=kind,
                 scope=str(call.args.get("scope") or "task"),
                 title=str(call.args.get("title") or ""),
                 summary=str(call.args.get("summary") or ""),
+                search_text=str(call.args.get("search_text") or call.args.get("summary") or ""),
                 canonical_key=str(call.args.get("canonical_key")) if call.args.get("canonical_key") is not None else None,
-                payload=dict(call.args.get("payload") or {}),
+                payload=payload,
                 topics=[str(value) for value in list(call.args.get("topics") or [])],
-                situation_text=str(call.args.get("situation_text") or ""),
-                task_text=str(call.args.get("task_text") or ""),
-                action_text=str(call.args.get("action_text") or ""),
-                result_text=str(call.args.get("result_text") or ""),
+                situation_text=star_fields.get("situation_text", ""),
+                task_text=star_fields.get("task_text", ""),
+                action_text=star_fields.get("action_text", ""),
+                result_text=star_fields.get("result_text", ""),
             )
         )
         payload = {"memory_candidate": result.hit or {"document_id": result.document_id}}

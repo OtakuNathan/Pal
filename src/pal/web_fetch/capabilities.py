@@ -220,12 +220,31 @@ class WebFetchIntrospectionProvider:
         args_schema={
             "type": "object",
             "properties": {
-                "url": {"type": "string"},
-                "timeout_ms": {"type": "integer"},
-                "max_chars": {"type": "integer"},
-                "max_raw_chars": {"type": "integer"},
-                "max_links": {"type": "integer"},
-                "user_agent": {"type": "string"},
+                "url": {"type": "string", "description": "Absolute webpage URL to fetch."},
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "description": "Fetch timeout in milliseconds. Leave unset for the default unless the page is known to be slow.",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "description": "Maximum rendered text characters returned to the model. Use the default unless a longer page excerpt is needed.",
+                },
+                "max_raw_chars": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Maximum raw HTML characters retained in structured output. Leave unset for normal reading.",
+                },
+                "max_links": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Maximum extracted links to include. Use 0 when links are irrelevant.",
+                },
+                "user_agent": {
+                    "type": "string",
+                    "description": "Optional browser user agent override. Leave unset unless a site requires a specific user agent.",
+                },
             },
             "required": ["url"],
         },

@@ -22,7 +22,7 @@ Current prompt projection:
 - Recent L1 context is projected as `Recent Context`.
 - Current summary is projected as `<conversation_summary>`.
 - Recalled durable facts, preferences, project context, and case knowledge are projected as `<recalled_memories view="summary">`.
-- Behavior-owned advisor hints are projected separately by the behavior module as `<advisor_hints>`; they do not live in memory L2.
+- Behavior-owned temporary guidance is projected by the behavior module as `<behavior_guidance>`; it does not live in memory L2.
 - The old single `Working Memory` prompt label is no longer the current projection.
 - Recalled memories render as `[mem_ref]: text`; `mem_ref` is operational metadata for `memory_update` and `memory_delete`.
 - L3 recall render suffixes such as `[L3 summary; origin available]` are not shown in prompt output.
@@ -867,7 +867,7 @@ LLM 不应逐字段消费 `L2` 内部 schema。
 1. `Recent Context`
 2. `<conversation_summary>`
 3. `<recalled_memories view="summary">`
-4. Behavior-owned `<advisor_hints>` may appear as a separate runtime-reminder block, but it is not an L2 memory projection.
+4. Behavior-owned temporary `<behavior_guidance>` may appear as a runtime-reminder block, but it is not an L2 memory projection.
 
 这意味着：
 

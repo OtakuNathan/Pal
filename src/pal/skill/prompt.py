@@ -17,12 +17,12 @@ class SkillPromptFragmentProvider:
                 section="skill_guide",
                 title="Skill Guide",
                 content=(
-                    "Skills answer: \"What reusable procedure should Pal follow?\"\n\n"
-                    "Skills are reusable workflows, review methods, debugging methods, platform procedures, or task playbooks. "
-                    "They are not durable facts, ordinary preferences, current runtime state, or one-off route hints. "
-                    "Activated skills guide execution only for the matched task; they do not override the user's current "
-                    "request, hard policy, source-of-truth requirements, capability policy, or mutation boundaries. Skill "
-                    "tools define search, injection, learning, and persistence procedures."
+                    "Skills answer: \"What reference manual or reusable procedure may help this task?\"\n\n"
+                    "Skills are optional operation manuals, review methods, debugging methods, platform procedures, or task playbooks. "
+                    "They are not durable facts, ordinary preferences, current runtime state, behavior guidance, or a replacement "
+                    "for minion/profile-based delegation. Activated skills guide execution only for the matched task; they do not "
+                    "override the user's current request, hard policy, source-of-truth requirements, capability policy, or mutation "
+                    "boundaries. Skill tools define search, injection, learning, and persistence procedures."
                 ),
                 priority=72,
                 metadata={"module_id": self.module_id, "kind": "skill_guide"},

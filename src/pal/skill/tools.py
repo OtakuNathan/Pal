@@ -13,7 +13,7 @@ from pal.skill.service import SkillService
 SKILL_ASSIMILATE_ARGS_SCHEMA = {
     "type": "object",
     "properties": {
-        "source_text": {"type": "string", "description": "Text or SKILL.md content to turn into a Pal skill candidate."},
+        "source_text": {"type": "string", "description": "Text or SKILL.md content to turn into an optional Pal operation manual candidate."},
         "source_format": {"type": "string", "enum": ["plain_text", "skill_md"], "default": "plain_text"},
         "intent": {"type": "string", "enum": ["learn", "summarize", "sanitize"], "default": "learn"},
         "desired_skill_id": {"type": "string"},
@@ -310,9 +310,10 @@ class SkillSearchTool:
     display_name: str = "Search skills"
     family: str = "skill"
     description: str = (
-        "Search normalized Pal skills for an explicit named skill request or a reusable workflow, review method, debugging "
-        "method, platform procedure, or task playbook. Does not return manuals; call skill_inject next to use a matched "
-        "active skill. Advisor skill refs are candidates, not automatic injections."
+        "Search optional Pal skill manuals for an explicit named skill request or a reusable workflow, review method, "
+        "debugging method, platform procedure, or task playbook. Skills are reference manuals, not a replacement for "
+        "minion/profile delegation. Does not return manuals; call skill_inject next to use a matched active skill. "
+        "Advisor skill refs are candidates, not automatic injections."
     )
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
@@ -383,7 +384,7 @@ class SkillReadTool:
     name: str = "op_skill_read"
     display_name: str = "Read skill"
     family: str = "skill"
-    description: str = "Read normalized Pal skill metadata, optionally including manual text."
+    description: str = "Read normalized Pal skill manual metadata, optionally including manual text."
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("skill", "read")
@@ -423,8 +424,8 @@ class SkillInjectTool:
     display_name: str = "Skill injection"
     family: str = "skill"
     description: str = (
-        "Inject a registered active skill manual into the current tool observation. Search alone is not using a skill; "
-        "call this before applying a matched active skill to the task."
+        "Inject a registered active skill manual into the current tool observation as reference material. "
+        "Search alone is not using a skill; call this before applying a matched active skill to the task."
     )
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]

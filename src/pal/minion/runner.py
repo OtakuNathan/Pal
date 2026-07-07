@@ -2773,6 +2773,9 @@ def _memory_candidates_from_l3(memory_l3: MockL3Plugin) -> list[dict[str, Any]]:
             "source_kind": "minion_ephemeral_l3",
             "candidate_state": "candidate",
         }
+        payload = item["payload"]
+        if item["kind"] == "case" and all(str(payload.get(field) or "").strip() for field in ("situation", "task", "action", "result")):
+            item["star"] = {field: str(payload.get(field) or "").strip() for field in ("situation", "task", "action", "result")}
         if item["summary"].strip() or item["title"].strip():
             result.append(item)
     return result

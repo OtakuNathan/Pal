@@ -12,9 +12,10 @@ from typing import Any, Callable
 
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
+from pal.foundation.service_logging import current_service_log_sink_description
 from pal.foundation.sidecar import python_subprocess_env
 from pal.mcp.compiler import McpCompiledProjection, McpCompiler
-from pal.mcp.ipc import McpManagerClient, McpManagerRpcError, mcp_log_path
+from pal.mcp.ipc import McpManagerClient, McpManagerRpcError
 from pal.mcp.model import McpDiscoverySnapshot
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -251,11 +252,8 @@ class McpManagerPluginProvider:
                 self._stop_process_only()
         self._cleanup_stale_socket()
         self.runtime_root.mkdir(parents=True, exist_ok=True)
-        mcp_log_path(self.runtime_root).parent.mkdir(parents=True, exist_ok=True)
         self.process = subprocess.Popen(
             [sys.executable, "-m", "pal.mcp.manager_main", "--runtime-root", str(self.runtime_root)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
             env=python_subprocess_env(),
         )
         for _ in range(150):
@@ -327,7 +325,7 @@ class McpManagerPluginProvider:
         payload = {
             "module_id": "mcp",
             "manager_running": running,
-            "log_path": str(mcp_log_path(self.runtime_root)),
+            "log_sink": current_service_log_sink_description(),
             "last_error": self.last_error,
             "projected_capability_count": len(self.projection.mounted_subtree.descriptors) if self.projection else 0,
             "projected_skill_count": len(self.projection.skills) if self.projection else 0,

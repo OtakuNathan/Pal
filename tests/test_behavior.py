@@ -34,7 +34,7 @@ from pal.behavior import (
 from pal.behavior.prompt import BehaviorPromptFragmentProvider
 from pal.channel import ChannelEnvelope, ChannelRuntime, EndpointConfig, ResponseHandle, register_with_core as register_channel_with_core
 from pal.core import PalCore, register_with_core as register_core_with_core
-from pal.execution import CapabilityDescriptor
+from pal.execution import CapabilityDescriptor, register_with_core as register_execution_with_core
 from pal.foundation import EventEnvelope, HeatLevel, HeatPolicy, HeatStateMachine, HeatStateRegistry, PalV2Database
 from pal.lsp.plugin import LspManagerPluginProvider
 from pal.llm import CanonicalLLMOutcome, CanonicalToolCall, LLMPreflightAdvice
@@ -541,7 +541,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         system = prompt.messages[0]["content"]
         reminder = str(prompt.messages[-1]["content"])
 
-        self.assertNotIn("<behavior_guidance>", system)
+        self.assertNotIn("\n<behavior_guidance>\n", system)
         self.assertIn("<behavior_guidance>", reminder)
         self.assertIn("Declared resident", reminder)
         self.assertIn("Consider declared resident guidance.", reminder)
@@ -568,7 +568,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         reminder = str(prompt.messages[-1]["content"])
         guidance = reminder.split("<behavior_guidance>", 1)[1].split("</behavior_guidance>", 1)[0]
 
-        self.assertNotIn("<behavior_guidance>", system)
+        self.assertNotIn("\n<behavior_guidance>\n", system)
         self.assertIn("LSP code intelligence", guidance)
         self.assertIn("When reading or changing code, consider LSP capabilities", guidance)
         self.assertIn("lsp_document_symbols/workspace_symbols", guidance)
@@ -763,6 +763,147 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.structured["prompt_hint"], "Handle chat directly and delegate concrete implementation work.")
         self.assertEqual(stored.prompt_hint, "Handle chat directly and delegate concrete implementation work.")
+
+    def test_learn_behavior_conflict_requires_user_decision_by_default(self) -> None:
+        first = AffordanceSubmitTool(service=self.service).invoke(
+            {
+                "scenario_text": "user asks for a careful commit",
+                "prompt_hint": "Inspect git status before committing.",
+            }
+        )
+        second = AffordanceSubmitTool(service=self.service).invoke(
+            {
+                "scenario_text": " user   asks for a careful commit ",
+                "prompt_hint": "Run tests before committing.",
+            }
+        )
+
+        self.assertEqual(first.status, "ok")
+        self.assertEqual(second.status, "invalid")
+        self.assertEqual(second.structured["reason"], "behavior_learn_conflict")
+        self.assertEqual(second.structured["action_required"], "ask_user")
+        self.assertEqual(second.structured["conflict_resolution_options"], ["merge", "overwrite", "skip"])
+        self.assertEqual(second.structured["candidates"][0]["affordance_id"], first.structured["affordance_id"])
+
+    def test_learn_behavior_merge_combines_same_scenario_when_explicit(self) -> None:
+        first = AffordanceSubmitTool(service=self.service).invoke(
+            {
+                "scenario_text": "user asks for a careful commit",
+                "prompt_hint": "Inspect git status before committing.",
+                "activation_terms": ["commit"],
+            }
+        )
+        merged = AffordanceSubmitTool(service=self.service).invoke(
+            {
+                "scenario_text": "user asks for a careful commit",
+                "prompt_hint": "Run tests before committing.",
+                "activation_terms": ["tests"],
+                "conflict_resolution": "merge",
+            }
+        )
+        stored = self.repository.get_affordance(first.structured["affordance_id"])
+
+        self.assertEqual(merged.status, "ok")
+        self.assertEqual(merged.structured["learn_result"], "merged")
+        self.assertEqual(merged.structured["affordance_id"], first.structured["affordance_id"])
+        self.assertIn("Inspect git status before committing.", stored.prompt_hint)
+        self.assertIn("Run tests before committing.", stored.prompt_hint)
+        self.assertEqual(stored.activation_terms, ("commit", "tests"))
+
+    def test_learn_behavior_overwrite_replaces_same_scenario_when_explicit(self) -> None:
+        first = AffordanceSubmitTool(service=self.service).invoke(
+            {
+                "scenario_text": "user asks for a careful commit",
+                "prompt_hint": "Inspect git status before committing.",
+                "activation_terms": ["commit"],
+            }
+        )
+        overwritten = AffordanceSubmitTool(service=self.service).invoke(
+            {
+                "scenario_text": "user asks for a careful commit",
+                "prompt_hint": "Run focused tests before committing.",
+                "activation_terms": ["tests"],
+                "conflict_resolution": "overwrite",
+            }
+        )
+        stored = self.repository.get_affordance(first.structured["affordance_id"])
+
+        self.assertEqual(overwritten.status, "ok")
+        self.assertEqual(overwritten.structured["learn_result"], "overwritten")
+        self.assertEqual(overwritten.structured["affordance_id"], first.structured["affordance_id"])
+        self.assertEqual(stored.prompt_hint, "Run focused tests before committing.")
+        self.assertEqual(stored.activation_terms, ("tests",))
+
+    def test_learn_behavior_skip_keeps_same_scenario_when_explicit(self) -> None:
+        first = AffordanceSubmitTool(service=self.service).invoke(
+            {
+                "scenario_text": "user asks for a careful commit",
+                "prompt_hint": "Inspect git status before committing.",
+                "activation_terms": ["commit"],
+            }
+        )
+        skipped = AffordanceSubmitTool(service=self.service).invoke(
+            {
+                "scenario_text": "user asks for a careful commit",
+                "prompt_hint": "Run focused tests before committing.",
+                "activation_terms": ["tests"],
+                "conflict_resolution": "skip",
+            }
+        )
+        stored = self.repository.get_affordance(first.structured["affordance_id"])
+
+        self.assertEqual(skipped.status, "ok")
+        self.assertEqual(skipped.structured["learn_result"], "skipped")
+        self.assertEqual(skipped.structured["affordance_id"], first.structured["affordance_id"])
+        self.assertEqual(stored.prompt_hint, "Inspect git status before committing.")
+        self.assertEqual(stored.activation_terms, ("commit",))
+
+    def test_read_tool_contracts_separate_memory_from_behavior(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        register_memory_with_core(core.context, MemoryService())
+        register_behavior_with_core(core.context, self.service)
+        for module_id in ("execution", "memory", "behavior"):
+            core.publish_module_capabilities(module_id)
+
+        exposed_names = [
+            item["function"]["name"]
+            for item in core.tool_surface.build_llm_tool_contracts()
+        ]
+        self.assertIn("learn_behavior", exposed_names)
+        self.assertIn("update_behavior", exposed_names)
+        self.assertIn("forget_behavior", exposed_names)
+        self.assertIn("remember_memory", exposed_names)
+        self.assertIn("forget_memory", exposed_names)
+        self.assertNotIn("save_behavior", exposed_names)
+        self.assertNotIn("write_memory", exposed_names)
+        self.assertNotIn("delete_memory", exposed_names)
+        learn_tool = next(item for item in core.tool_surface.build_llm_tool_contracts() if item["function"]["name"] == "learn_behavior")
+        learn_properties = learn_tool["function"]["parameters"]["properties"]
+        self.assertIn("resident", learn_properties)
+        self.assertNotIn("visibility_mode", learn_properties)
+        self.assertNotIn("activation_kind", learn_properties)
+        self.assertNotIn("activation_mode", learn_properties)
+        self.assertNotIn("source_kind", learn_properties)
+        self.assertNotIn("priority", learn_properties)
+        self.assertNotIn("activation_threshold", learn_properties)
+
+        def description(name: str) -> str:
+            result = core.context.execution_runtime.execute_tool(CanonicalToolCall(name="read_tool", args={"name": name}))
+            self.assertTrue(result.ok, result.text)
+            return str(result.structured["capability"]["description"])
+
+        recall_description = description("recall_memory")
+        remember_description = description("remember_memory")
+        learn_description = description("learn_behavior")
+        self.assertIn("Memory is Pal's remembered facts", recall_description)
+        self.assertIn("kind='case'", recall_description)
+        self.assertIn("prior failures and fixes", recall_description)
+        self.assertNotIn("behavior guidance, or skills", recall_description)
+        self.assertIn("Do not use for behavior rules", remember_description)
+        self.assertIn("condition-reflex layer", learn_description)
+        self.assertIn("use remember_memory for facts", learn_description)
 
     def test_update_affordance_tool_preserves_source_metadata_and_refs(self) -> None:
         self.repository.upsert_affordance(
@@ -986,21 +1127,25 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         self.assertIn("Behavior guidance answers", content)
         self.assertIn("future routing rules and recurring decision hints", content)
-        self.assertIn("Behavior tools define advice, save, update", content)
+        self.assertIn("Memory answers", content)
+        self.assertIn("Use memory for remembered facts and reusable case knowledge", content)
+        self.assertIn("Use the skill system for reusable procedures/playbooks", content)
+        self.assertIn("Behavior tools define advice, learn, update", content)
         self.assertNotIn("behavior_advise", content)
-        self.assertNotIn("behavior_save", content)
+        self.assertNotIn("save_behavior", content)
         self.assertNotIn("behavior_affordance_update", content)
         self.assertNotIn("If advice returns `skill_ref`, call `skill_inject` before executing that workflow", content)
         self.assertNotIn("affordances with affordance_id values", content)
         self.assertNotIn("op_memory_write", content)
 
         advice_description = BehaviorAdviceTool(service=self.service).description
+        self.assertIn("condition-reflex layer", advice_description)
         self.assertIn("ambiguous, risky, multi-step", advice_description)
         self.assertIn("clear direct implementation command", advice_description)
         self.assertIn("Treat the result as routing resources, not orders", advice_description)
         save_description = AffordanceSubmitTool(service=self.service).description
-        self.assertIn("future behavior routing rule", save_description)
-        self.assertIn("Do not use for ordinary facts", save_description)
+        self.assertIn("Learn a future behavior rule", save_description)
+        self.assertIn("use remember_memory for facts", save_description)
         update_description = AffordanceUpdateTool(service=self.service).description
         self.assertIn("Pass the original rendered guidance line", update_description)
         self.assertIn("Do not claim behavior guidance changed unless this tool confirms success", update_description)
@@ -1025,7 +1170,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("<behavior_guidance_guide>", system)
         self.assertIn("<knowledge_storage_boundary>", system)
         self.assertNotIn("<memory_guide>", system)
-        self.assertNotIn("<behavior_guidance>", system)
+        self.assertNotIn("\n<behavior_guidance>\n", system)
         self.assertNotIn("##", system)
         self.assertLess(system.index("<system_map>"), system.index("<source_of_truth>"))
         self.assertLess(system.index("<source_of_truth>"), system.index("<prompt_context_policy>"))
@@ -1049,7 +1194,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
 
         surfaces = system.split("<operating_rules>", 1)[0]
         self.assertIn("execution/capability", surfaces)
-        self.assertIn("behavior: advisor and behavior guidance", surfaces)
+        self.assertIn("behavior: behavior guidance", surfaces)
         self.assertNotIn("minion", system.split("</system_map>", 1)[0].lower())
         source_of_truth = system.split("<source_of_truth>", 1)[1].split("</source_of_truth>", 1)[0]
         self.assertIn("Use the right source for the truth needed", source_of_truth)
@@ -1068,10 +1213,10 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertIn("behavior-routing guidance", reminder)
         self.assertIn("active system prompt's hard rules", reminder)
         self.assertNotIn("behavior_advise", reminder)
-        self.assertNotIn("Use behavior_save only when the user explicitly asks Pal to adopt/follow/save a future behavior rule", system)
+        self.assertNotIn("save_behavior", system)
         self.assertIn("Stable fact, preference, project context, prior decision, or repair lesson -> memory", system)
 
-    def test_behavior_advice_tool_result_activates_behavior_owned_advisor_hints(self) -> None:
+    def test_behavior_advice_tool_result_activates_temporary_behavior_guidance(self) -> None:
         self.repository.upsert_affordance(
             AffordanceDescriptor(
                 affordance_id="commit.guidance",
@@ -1135,7 +1280,9 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertNotIn("Active Route Guidance", followup_system)
         followup_text = "\n".join(_message_text(message) for message in generate_requests[1].messages)
         self.assertIn("Behavior advice", followup_text)
-        self.assertIn("<advisor_hints>", followup_text)
+        self.assertIn("<behavior_guidance>", followup_text)
+        self.assertNotIn("<advisor_hints>", followup_text)
+        self.assertIn("Temporary behavior guidance from advise_behavior", followup_text)
         self.assertIn("Commit guidance", followup_text)
         self.assertIn("commit.skill", followup_text)
         self.assertIn("commit preferences", followup_text)
@@ -1194,7 +1341,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         behavior_by_title = {fragment.title: fragment.content for fragment in behavior_fragments}
 
         self.assertIn("Recalled memories", memory_by_title)
-        self.assertNotIn("Active route suggestions", memory_by_title)
+        self.assertNotIn("Active Behavior Guidance", memory_by_title)
         self.assertNotIn("Working Memory", memory_by_title)
         self.assertIn('<recalled_memories view="summary">', memory_by_title["Recalled memories"])
         self.assertIn("</recalled_memories>", memory_by_title["Recalled memories"])
@@ -1204,12 +1351,12 @@ class BehaviorSubsystemTests(unittest.TestCase):
         self.assertNotIn("Plugin repair", memory_by_title["Recalled memories"])
         self.assertNotIn("Commit guidance", memory_by_title["Recalled memories"])
         self.assertNotIn("origin available", memory_by_title["Recalled memories"])
-        self.assertIn("Active route suggestions", behavior_by_title)
-        self.assertIn("<advisor_hints>", behavior_by_title["Active route suggestions"])
-        self.assertIn("</advisor_hints>", behavior_by_title["Active route suggestions"])
-        self.assertIn("Commit guidance", behavior_by_title["Active route suggestions"])
-        self.assertIn("Hint: Consider checking the commit workflow.", behavior_by_title["Active route suggestions"])
-        self.assertNotIn("origin available", behavior_by_title["Active route suggestions"])
+        self.assertIn("Active Behavior Guidance", behavior_by_title)
+        self.assertNotIn("<advisor_hints>", behavior_by_title["Active Behavior Guidance"])
+        self.assertIn("Temporary behavior guidance from advise_behavior", behavior_by_title["Active Behavior Guidance"])
+        self.assertIn("Commit guidance", behavior_by_title["Active Behavior Guidance"])
+        self.assertIn("Hint: Consider checking the commit workflow.", behavior_by_title["Active Behavior Guidance"])
+        self.assertNotIn("origin available", behavior_by_title["Active Behavior Guidance"])
 
     def test_memory_prompt_leaves_static_routing_to_tool_descriptions(self) -> None:
         fragments = MemoryPromptFragmentProvider().build_prompt_fragments(PromptAssemblyContext())
@@ -1217,6 +1364,12 @@ class BehaviorSubsystemTests(unittest.TestCase):
         policy = fragments[0].content
 
         self.assertIn("repair lessons", policy)
+        self.assertIn("When work hits an error", policy)
+        self.assertIn("kind=case", policy)
+        self.assertIn('memory answers "what should Pal remember as true or reusable knowledge?"', policy)
+        self.assertIn('Behavior guidance answers "when this situation appears, what route/action should Pal consider?"', policy)
+        self.assertIn("use behavior guidance instead of memory", policy)
+        self.assertIn("Reusable procedures/playbooks belong to the skill system", policy)
         self.assertIn("Memory tool descriptions", policy)
         self.assertIn("prefixes such as fact: and case:", policy)
         self.assertNotIn("memory_recall", policy)
@@ -1252,7 +1405,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         register_behavior_with_core(core.context, self.service)
 
         without_resident = core.build_canonical_prompt(PromptAssemblyContext()).messages[0]["content"]
-        self.assertNotIn("<behavior_guidance>", without_resident)
+        self.assertNotIn("\n<behavior_guidance>\n", without_resident)
 
         self.repository.upsert_affordance(
             AffordanceDescriptor(
@@ -1271,7 +1424,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         with_resident = with_resident_prompt.messages[0]["content"]
         reminder = str(with_resident_prompt.messages[-1]["content"])
 
-        self.assertNotIn("<behavior_guidance>", with_resident)
+        self.assertNotIn("\n<behavior_guidance>\n", with_resident)
         self.assertIn("<behavior_guidance>", reminder)
         self.assertIn("OLED expression", reminder)
         self.assertIn("Use the OLED expression capability sparingly", reminder)
@@ -1332,9 +1485,9 @@ class BehaviorSubsystemTests(unittest.TestCase):
         reminder = str(prompt.messages[-1]["content"])
         guidance = reminder.split("<behavior_guidance>", 1)[1].split("</behavior_guidance>", 1)[0]
 
-        self.assertNotIn("<behavior_guidance>", system)
-        self.assertEqual(guidance.count("Active behavior-routing hints"), 1)
-        self.assertEqual(guidance.count("consider matching hints before choosing a route"), 1)
+        self.assertNotIn("\n<behavior_guidance>\n", system)
+        self.assertEqual(guidance.count("Behavior guidance is behavior-owned routing metadata"), 1)
+        self.assertEqual(guidance.count("Consider matching guidance before choosing a route"), 1)
         self.assertIn("- OLED expression: Use the OLED expression capability sparingly.", guidance)
         self.assertIn(
             "- Task routing: handle social/simple work directly, delegate implementation: "

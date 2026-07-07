@@ -304,13 +304,24 @@ class ExecutionDiscoveryCapabilityMixin:
         scope="module",
         family="exec",
         action_name="capability_call",
-        description="Invoke any registered capability by tool name or alias. Use search_tools to find available capabilities first.",
+        description=(
+            "Invoke any registered capability by exact tool name or alias. Resident tools are the fast path for common "
+            "capabilities already exposed directly to the model; call_tool is the generic execution path for the broader "
+            "capability surface. Use search_tools/read_tool when you need to discover a capability name or inspect its "
+            "argument schema; do not guess hidden capability names."
+        ),
         aliases=("capability_call",),
         args_schema={
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Tool name or alias of the capability to invoke."},
-                "args": {"type": "object", "description": "Arguments for the capability."},
+                "name": {
+                    "type": "string",
+                    "description": "Exact registered capability name or alias. Use search_tools/read_tool first when unsure.",
+                },
+                "args": {
+                    "type": "object",
+                    "description": "Arguments matching that capability's schema from read_tool.",
+                },
             },
             "required": ["name"],
         },

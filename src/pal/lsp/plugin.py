@@ -11,8 +11,9 @@ from typing import Any
 from pal.behavior.decorators import affordance
 from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.execution.contracts import CapabilityCall, CapabilityResult
+from pal.foundation.service_logging import current_service_log_sink_description
 from pal.foundation.sidecar import python_subprocess_env
-from pal.lsp.ipc import LspManagerClient, lsp_log_path
+from pal.lsp.ipc import LspManagerClient
 from pal.lsp.skills import PAL_LSP_TEMPLATE_DEVELOPMENT_SKILL_ID, lsp_declared_skills
 from pal.shared import (
     INTROSPECTION_NAMESPACE,
@@ -270,11 +271,8 @@ class LspManagerPluginProvider:
         except Exception:
             pass
         self._cleanup_stale_socket()
-        lsp_log_path(self.runtime_root).parent.mkdir(parents=True, exist_ok=True)
         self.process = subprocess.Popen(
             [sys.executable, "-m", "pal.lsp.manager_main", "--runtime-root", str(self.runtime_root)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
             env=python_subprocess_env(),
         )
         for _ in range(100):
@@ -334,7 +332,7 @@ class LspManagerPluginProvider:
             "module_id": "lsp",
             "manager_running": self._manager_running(),
             "manager_owned": self.process is not None and self.process.poll() is None,
-            "log_path": str(lsp_log_path(self.runtime_root)),
+            "log_sink": current_service_log_sink_description(),
             "last_error": self.last_error,
             **dict(self.last_health or {}),
         }

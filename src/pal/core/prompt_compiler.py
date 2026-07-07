@@ -15,7 +15,9 @@ from pal.shared.prompt_rendering import render_runtime_context_update, render_ru
 
 
 _BEHAVIOR_GUIDANCE_HEADER = (
-    "Active behavior-routing hints: consider matching hints before choosing a route.\n"
+    "Behavior guidance is behavior-owned routing metadata. It may include resident learned rules and temporary route hints produced by advise_behavior.\n"
+    "Temporary behavior guidance retires automatically; learned or resident behavior guidance may persist.\n"
+    "Consider matching guidance before choosing a route.\n"
     "Follow relevant hints unless higher-priority policy, current user instruction, live truth, or capability policy makes them inappropriate."
 )
 _BEHAVIOR_GUIDANCE_HEADER_LINES = frozenset(_BEHAVIOR_GUIDANCE_HEADER.splitlines())
@@ -533,7 +535,7 @@ class PromptCompiler:
             "skill_guide": 40,
             "skill_guidance": 40,
             "resident_affordances": 50,
-            "advisor_hints": 60,
+            "behavior_guidance": 60,
             "tool_efficiency": 70,
         }
         return sorted(
@@ -658,13 +660,10 @@ class PromptCompiler:
             content = replace_internal_tool_names(block.content.strip())
             if not content:
                 continue
-            if block.block_id == "resident_affordances":
+            if block.block_id in {"resident_affordances", "behavior_guidance"}:
                 behavior_parts.append(content)
                 continue
             flush_behavior_parts()
-            if block.block_id == "advisor_hints":
-                rendered_sections.append(content)
-                continue
             tag = PromptCompiler._runtime_reminder_block_tag(block)
             rendered = render_xml_block(tag, content)
             if rendered:
@@ -734,7 +733,7 @@ class PromptCompiler:
                 "Continue the current task using this context."
             ),
             "behavior": (
-                "Runtime context update: activated behavior or advisor hints for this turn.\n"
+                "Runtime context update: activated behavior guidance for this turn.\n"
                 "Evaluate relevant hints before continuing; they are not noise.\n"
                 "This is not a new user message. Do not answer this block directly.\n"
                 "Continue the current task using this context."

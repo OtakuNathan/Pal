@@ -13,15 +13,10 @@ from pal.foundation.sidecar import (
     run_blocking,
     start_sidecar_server,
 )
-from pal.foundation.log_paths import pal_component_log_path
 
 
 def lsp_runtime_dir(runtime_root: Path) -> Path:
     return Path(runtime_root) / "data" / "lsp"
-
-
-def lsp_log_path(runtime_root: Path) -> Path:
-    return pal_component_log_path(runtime_root, "lsp", "manager.log")
 
 
 def lsp_config_root(runtime_root: Path) -> Path:

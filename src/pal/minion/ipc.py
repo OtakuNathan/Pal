@@ -29,10 +29,6 @@ def minion_port_path(runtime_root: Path) -> Path:
     return _minion_endpoint(runtime_root).port_path
 
 
-def minion_log_path(runtime_root: Path) -> Path:
-    return pal_component_log_path(runtime_root, "minion", "manager.log")
-
-
 def minion_runner_log_path(runtime_root: Path, work_order_id: str, profile: str) -> Path:
     work_order_part = _safe_log_component(work_order_id) or "work_order"
     profile_part = _safe_log_component(profile) or "generic"

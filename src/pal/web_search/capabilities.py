@@ -217,10 +217,24 @@ class WebSearchIntrospectionProvider:
         args_schema={
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "integer"},
-                "region": {"type": "string"},
-                "safe_search": {"type": "string"},
+                "query": {
+                    "type": "string",
+                    "description": "Focused web search query. Include concrete names, dates, versions, or source terms when known.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Maximum search results to return. Use 3-5 for normal lookup; larger only when comparing sources.",
+                },
+                "region": {
+                    "type": "string",
+                    "description": "Optional search region/country code supported by the provider. Leave empty unless the user asks for regional results.",
+                },
+                "safe_search": {
+                    "type": "string",
+                    "description": "Optional provider safe-search setting. Leave empty unless the user or task requires a specific setting.",
+                },
             },
             "required": ["query"],
         },

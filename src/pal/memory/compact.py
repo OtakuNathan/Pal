@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from pal.foundation import utc_now
+from pal.memory.candidates import memory_star_from_args
 from pal.memory.contracts import CompactionProfile, L1MessageKind, L1TranscriptMessage, L2Entry
 
 COMPACTION_SCHEMA_PAL_V2 = "pal.compaction.pal.v2"
@@ -57,10 +58,9 @@ COMPACT_PAL_STRUCTURED_SYSTEM = (
     "    - source_excerpt (string, required): short source excerpt or key terms justifying the candidate\n"
     "    - why_durable (string, optional): why this may be worth long-term memory\n"
     "    - confidence (string, optional): low, medium, or high\n"
-    "    - canonical_key (string, optional): stable identity key for dedup\n"
-    '    - scope (string, optional): "system" or "task"\n'
     "    - task_id (string, optional)\n"
-    "    - payload (object, optional): for case kind, include situation/task/action/result\n"
+    "    - topics (array, optional): short topic tags\n"
+    "    - star (object, required for case kind, omitted for fact kind): situation/task/action/result strings\n"
     "\n"
     "Field boundaries. Do not mix these up:\n"
     "- active_operating_instructions = HOW Pal should work. Examples: 'plan first, do not edit code yet'; 'do not touch L3'; 'render prompt as XML+Markdown, not JSON'. Not a concrete implementation task.\n"
@@ -83,6 +83,8 @@ COMPACT_PAL_STRUCTURED_SYSTEM = (
     "- Do not invent information not present in the source.\n"
     "- summary is always required and should cover the recoverable context.\n"
     "- Create memory_candidates only for stable facts, preferences, status/context, goals/plans, commitments, project facts, confirmed decisions, or explicitly reusable task/project cases.\n"
+    "- For memory_candidates with kind='case', star is mandatory and must contain non-empty situation, task, action, and result strings.\n"
+    "- For memory_candidates with kind='fact', omit star.\n"
     "- memory_candidates are candidates only; they are not committed long-term memory. Automatic and manual compact candidates both require approval.\n"
     "- Do not create memory_candidates from temporary task state or todos unless the user explicitly asked Pal to remember/save them.\n"
     "- Do not create memory_candidates for repair lessons, procedures, behavior rules, routing advice, or skill workflows unless the user explicitly asked to remember/save them as memory.\n"
@@ -346,7 +348,22 @@ def memory_candidates_from_compact_result(result: Any) -> list[dict[str, Any]]:
 def coerce_memory_candidate_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, (list, tuple)):
         return []
-    return [dict(item) for item in value if isinstance(item, dict)]
+    result: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        candidate = dict(item)
+        kind = str(candidate.get("kind") or "case").strip() or "case"
+        candidate["kind"] = kind
+        star, star_error = memory_star_from_args(candidate)
+        if kind == "case":
+            if star_error or not star:
+                continue
+            candidate["star"] = star
+        elif star:
+            continue
+        result.append(candidate)
+    return result
 
 
 def coerce_structured_compaction_payload(
@@ -403,7 +420,7 @@ def _coerce_current_structured_compaction_payload(
 def _coerce_pal_compaction_payload(payload: dict[str, Any], *, fallback_summary: str) -> dict[str, Any]:
     summary_payload = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     continuity = payload.get("continuity") if isinstance(payload.get("continuity"), dict) else {}
-    memory_candidates = payload.get("memory_candidates") if isinstance(payload.get("memory_candidates"), list) else []
+    memory_candidates = coerce_memory_candidate_list(payload.get("memory_candidates"))
     summary_text = str(summary_payload.get("summary") or "").strip()
     if not summary_text and fallback_summary:
         summary_text = fallback_summary
@@ -418,11 +435,7 @@ def _coerce_pal_compaction_payload(payload: dict[str, Any], *, fallback_summary:
             "summary": summary_text,
             "search_text": search_text,
         },
-        "memory_candidates": [
-            dict(item)
-            for item in memory_candidates
-            if isinstance(item, dict)
-        ],
+        "memory_candidates": memory_candidates,
     }
     rendered = render_compact_context_for_llm(summary=summary_text, payload=summary_payload_blob)
     summary_entry = _make_summary_entry(

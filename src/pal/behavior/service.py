@@ -56,6 +56,35 @@ class AffordanceTextMatch:
     candidates: tuple[AffordanceDescriptor, ...] = ()
 
 
+class BehaviorLearnConflict(ValueError):
+    def __init__(self, *, scenario_text: str, prompt_hint: str, candidates: tuple[AffordanceDescriptor, ...]) -> None:
+        super().__init__("same scenario already has behavior guidance")
+        self.scenario_text = scenario_text
+        self.prompt_hint = prompt_hint
+        self.candidates = tuple(candidates)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "reason": "behavior_learn_conflict",
+            "action_required": "ask_user",
+            "message": "A behavior rule for this scenario already exists. Ask the user whether to merge, overwrite, or leave it unchanged.",
+            "scenario_text": self.scenario_text,
+            "prompt_hint": self.prompt_hint,
+            "conflict_resolution_options": ["merge", "overwrite", "skip"],
+            "candidates": [
+                {
+                    "affordance_id": item.affordance_id,
+                    "title": item.title,
+                    "scenario_text": item.scenario_text,
+                    "prompt_hint": item.prompt_hint,
+                    "source_kind": item.source_kind,
+                    "affordance_hash": _affordance_text_hash(item),
+                }
+                for item in self.candidates
+            ],
+        }
+
+
 @dataclass
 class BehaviorService:
     repository: BehaviorRepository = field(default_factory=BehaviorRepository)
@@ -240,6 +269,9 @@ class BehaviorService:
         source_kind = str(payload.get("source_kind") or AFFORDANCE_SOURCE_INSTRUCTED).strip()
         if source_kind not in {AFFORDANCE_SOURCE_INSTRUCTED, AFFORDANCE_SOURCE_LEARNED}:
             raise ValueError("source_kind must be instructed or learned for tool submissions")
+        conflict_resolution = str(payload.get("conflict_resolution") or "ask").strip().lower()
+        if conflict_resolution not in {"ask", "merge", "overwrite", "skip"}:
+            raise ValueError("conflict_resolution must be ask, merge, overwrite, or skip")
         visibility_mode = _validated_choice(
             payload.get("visibility_mode"),
             {AFFORDANCE_VISIBILITY_RESIDENT, AFFORDANCE_VISIBILITY_DISCOVERABLE},
@@ -260,8 +292,49 @@ class BehaviorService:
         if not prompt_hint:
             raise ValueError("prompt_hint is required")
         normalized_payload = {**payload, "title": title, "prompt_hint": prompt_hint}
+        requested_affordance_id = str(payload.get("affordance_id") or "").strip()
+        learn_result = "learned"
+        same_scenario = _same_scenario_affordances(
+            self.repository.list_affordances(enabled_only=True),
+            scenario_text=scenario_text,
+            exclude_affordance_id=requested_affordance_id,
+        )
+        if same_scenario:
+            if conflict_resolution == "ask":
+                raise BehaviorLearnConflict(
+                    scenario_text=scenario_text,
+                    prompt_hint=prompt_hint,
+                    candidates=same_scenario,
+                )
+            if len(same_scenario) > 1:
+                raise BehaviorLearnConflict(
+                    scenario_text=scenario_text,
+                    prompt_hint=prompt_hint,
+                    candidates=same_scenario,
+                )
+            existing = same_scenario[0]
+            if existing.source_kind == AFFORDANCE_SOURCE_DECLARED:
+                raise ValueError(_readonly_affordance_error(existing))
+            if conflict_resolution == "skip":
+                return replace(existing, metadata={**dict(existing.metadata), "_learn_behavior_result": "skipped"})
+            if conflict_resolution == "merge":
+                stored = self.repository.upsert_affordance(
+                    _merge_learned_affordance(
+                        existing,
+                        title=title,
+                        prompt_hint=prompt_hint,
+                        activation_terms=_string_tuple(payload.get("activation_terms")),
+                        capability_refs=_string_tuple(payload.get("capability_refs")),
+                        skill_refs=_string_tuple(payload.get("skill_refs")),
+                        memory_query_hints=_string_tuple(payload.get("memory_query_hints")),
+                        metadata=dict(payload.get("metadata") or {}),
+                    )
+                )
+                return replace(stored, metadata={**dict(stored.metadata), "_learn_behavior_result": "merged"})
+            requested_affordance_id = existing.affordance_id
+            learn_result = "overwritten"
         descriptor = AffordanceDescriptor(
-            affordance_id=str(payload.get("affordance_id") or _generated_affordance_id(normalized_payload, source_kind=source_kind)),
+            affordance_id=str(requested_affordance_id or _generated_affordance_id(normalized_payload, source_kind=source_kind)),
             module_id="behavior",
             title=title,
             scenario_text=scenario_text,
@@ -279,7 +352,10 @@ class BehaviorService:
             enabled=bool(payload.get("enabled", True)),
             metadata=dict(payload.get("metadata") or {}),
         )
-        return self.repository.upsert_affordance(descriptor)
+        stored = self.repository.upsert_affordance(descriptor)
+        if learn_result != "learned":
+            return replace(stored, metadata={**dict(stored.metadata), "_learn_behavior_result": learn_result})
+        return stored
 
     def register_declared_module(self, handle: Any) -> None:
         provider = getattr(handle, "introspection_provider", None)
@@ -812,6 +888,75 @@ def _affordance_match_text(affordance: AffordanceDescriptor) -> str:
 
 def _normalize_affordance_text(value: object) -> str:
     return " ".join(str(value or "").casefold().split())
+
+
+def _same_scenario_affordances(
+    affordances: Iterable[AffordanceDescriptor],
+    *,
+    scenario_text: str,
+    exclude_affordance_id: str = "",
+) -> tuple[AffordanceDescriptor, ...]:
+    normalized = _normalize_affordance_text(scenario_text)
+    if not normalized:
+        return ()
+    excluded = str(exclude_affordance_id or "").strip()
+    matches = [
+        item
+        for item in affordances
+        if item.affordance_id != excluded
+        and _normalize_affordance_text(item.scenario_text) == normalized
+    ]
+    return tuple(_unique_affordances(matches))
+
+
+def _merge_learned_affordance(
+    existing: AffordanceDescriptor,
+    *,
+    title: str,
+    prompt_hint: str,
+    activation_terms: tuple[str, ...],
+    capability_refs: tuple[str, ...],
+    skill_refs: tuple[str, ...],
+    memory_query_hints: tuple[str, ...],
+    metadata: dict[str, Any],
+) -> AffordanceDescriptor:
+    return replace(
+        existing,
+        title=existing.title or title,
+        prompt_hint=_merge_affordance_text(existing.prompt_hint, prompt_hint),
+        activation_terms=_merge_string_tuples(existing.activation_terms, activation_terms),
+        capability_refs=_merge_string_tuples(existing.capability_refs, capability_refs),
+        skill_refs=_merge_string_tuples(existing.skill_refs, skill_refs),
+        memory_query_hints=_merge_string_tuples(existing.memory_query_hints, memory_query_hints),
+        metadata={**dict(existing.metadata), **metadata},
+        enabled=True,
+    )
+
+
+def _merge_affordance_text(existing: str, incoming: str) -> str:
+    left = str(existing or "").strip()
+    right = str(incoming or "").strip()
+    if not left:
+        return right
+    if not right:
+        return left
+    if _normalize_affordance_text(left) == _normalize_affordance_text(right):
+        return left
+    return f"{left}\n{right}"
+
+
+def _merge_string_tuples(*values: tuple[str, ...]) -> tuple[str, ...]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for group in values:
+        for item in group:
+            text = str(item or "").strip()
+            key = text.casefold()
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            merged.append(text)
+    return tuple(merged)
 
 
 def _affordance_query_variants(value: object) -> tuple[str, ...]:

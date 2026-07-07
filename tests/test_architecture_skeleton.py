@@ -992,9 +992,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("delete_path", exposed_names)
             self.assertIn("call_tool", exposed_names)
             self.assertIn("recall_memory", exposed_names)
-            self.assertIn("write_memory", exposed_names)
+            self.assertIn("remember_memory", exposed_names)
             self.assertIn("update_memory", exposed_names)
-            self.assertIn("delete_memory", exposed_names)
+            self.assertIn("forget_memory", exposed_names)
             self.assertNotIn("file_state", exposed_names)
             self.assertNotIn("artifact_info", exposed_names)
             self.assertNotIn("list_artifacts", exposed_names)
@@ -1015,15 +1015,117 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             memory_update = next(item for item in request.tools if item["function"]["name"] == "update_memory")
             self.assertIn("mem_ref", memory_update["function"]["parameters"]["properties"])
             self.assertNotIn("target_id", memory_update["function"]["parameters"]["properties"])
-            memory_write = next(item for item in request.tools if item["function"]["name"] == "write_memory")
+            memory_recall = next(item for item in request.tools if item["function"]["name"] == "recall_memory")
+            memory_recall_properties = memory_recall["function"]["parameters"]["properties"]
+            self.assertIn("task_id", memory_recall_properties)
+            self.assertIn("queries", memory_recall_properties)
+            self.assertIn("topic_scope", memory_recall_properties)
+            self.assertIn("limit", memory_recall_properties)
+            self.assertIn("kind", memory_recall_properties)
+            self.assertIn("view", memory_recall_properties)
+            self.assertNotIn("level", memory_recall_properties)
+            self.assertNotIn("scope", memory_recall_properties)
+            memory_write = next(item for item in request.tools if item["function"]["name"] == "remember_memory")
             memory_write_description = memory_write["function"]["description"]
             self.assertIn("Before using this tool, call recall_memory", memory_write_description)
             self.assertIn("use update_memory with that", memory_write_description)
             self.assertIn("Do not write duplicate memories", memory_write_description)
             self.assertIn("fact: or case:", memory_write_description)
+            memory_write_properties = memory_write["function"]["parameters"]["properties"]
+            self.assertIn("star", memory_write_properties)
+            self.assertIn("task_id", memory_write_properties)
+            self.assertNotIn("scope", memory_write_properties)
+            self.assertNotIn("canonical_key", memory_write_properties)
+            self.assertNotIn("payload", memory_write_properties)
+            self.assertNotIn("situation_text", memory_write_properties)
+            self.assertNotIn("task_text", memory_write_properties)
+            self.assertNotIn("action_text", memory_write_properties)
+            self.assertNotIn("result_text", memory_write_properties)
+            memory_update_properties = memory_update["function"]["parameters"]["properties"]
+            self.assertIn("star", memory_update_properties)
+            self.assertNotIn("payload_patch", memory_update_properties)
+            self.assertNotIn("situation_text", memory_update_properties)
         finally:
             database.close()
             shutil.rmtree(runtime_root, ignore_errors=True)
+
+    def test_memory_recall_task_id_implies_task_scope(self) -> None:
+        class RecordingL3Plugin(MockL3Plugin):
+            def __init__(self) -> None:
+                super().__init__()
+                self.last_query: MemoryQuery | None = None
+
+            def recall(self, query: MemoryQuery):
+                self.last_query = query
+                return super().recall(query)
+
+        core = PalCore()
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        register_memory_with_core(core.context, memory_service)
+        l3_plugin = RecordingL3Plugin()
+        register_l3_with_core(core.context, l3_plugin)
+        memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
+        core.publish_module_capabilities("memory")
+        core.publish_module_capabilities(l3_plugin.module_id)
+
+        core.context.execution_runtime.execute(CapabilityCall(name="op_memory_recall", args={"queries": ["general"]}))
+        self.assertIsNotNone(l3_plugin.last_query)
+        self.assertIsNone(l3_plugin.last_query.scope)
+        self.assertIsNone(l3_plugin.last_query.task_id)
+
+        core.context.execution_runtime.execute(
+            CapabilityCall(name="op_memory_recall", args={"queries": ["task repair"], "task_id": "task_123"})
+        )
+        self.assertIsNotNone(l3_plugin.last_query)
+        self.assertEqual(l3_plugin.last_query.scope, "task")
+        self.assertEqual(l3_plugin.last_query.task_id, "task_123")
+
+    def test_memory_write_case_requires_star_object(self) -> None:
+        core = PalCore()
+        register_core_with_core(core)
+        register_execution_with_core(core.context)
+        memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
+        register_memory_with_core(core.context, memory_service)
+        l3_plugin = MockL3Plugin()
+        register_l3_with_core(core.context, l3_plugin)
+        memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
+        core.publish_module_capabilities("memory")
+        core.publish_module_capabilities(l3_plugin.module_id)
+
+        missing_star = core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="op_memory_write",
+                args={
+                    "kind": "case",
+                    "summary": "Recovered a failed task.",
+                    "search_text": "Recovered a failed task by retrying with a smaller scope.",
+                },
+            )
+        )
+        self.assertEqual(missing_star.status, RuntimeStatus.INVALID)
+        self.assertIn("requires star", missing_star.llm_text)
+
+        complete_star = core.context.execution_runtime.execute(
+            CapabilityCall(
+                name="op_memory_write",
+                args={
+                    "kind": "case",
+                    "summary": "Recovered a failed task by narrowing scope.",
+                    "search_text": "The task failed from too much scope. Pal narrowed the scope, retried the repair, and the test passed.",
+                    "star": {
+                        "situation": "The task failed from too much scope.",
+                        "task": "Recover the failed repair.",
+                        "action": "Narrowed the scope and retried the repair.",
+                        "result": "The focused test passed.",
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(complete_star.status, RuntimeStatus.OK)
+        self.assertTrue(any(record.get("document_kind") == "case" for record in l3_plugin.records))
 
     def test_failure_flow_success_writes_system_case_memory(self) -> None:
         core = PalCore()
@@ -3509,6 +3611,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("targeted search", tool_efficiency.content)
         self.assertIn("Runtime capability calls are governed actions", mutation_policy.content)
         self.assertIn("Future route hint or recurring decision rule -> behavior guidance", knowledge_storage_boundary.content)
+        self.assertIn('what should be remembered as true or reusable knowledge?', knowledge_storage_boundary.content)
+        self.assertIn('when this situation appears, what route/action should Pal consider?', knowledge_storage_boundary.content)
+        self.assertIn("multi-step reusable procedure", knowledge_storage_boundary.content)
         self.assertNotIn("op_memory_recall", rules.content)
         self.assertNotIn("op_memory_write", rules.content)
 

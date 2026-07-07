@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from pal.behavior.contracts import BehaviorAdviceRequest
-from pal.behavior.service import BehaviorService
+from pal.behavior.contracts import AFFORDANCE_VISIBILITY_DISCOVERABLE, AFFORDANCE_VISIBILITY_RESIDENT, BehaviorAdviceRequest
+from pal.behavior.service import BehaviorLearnConflict, BehaviorService
 from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus, replace_internal_tool_names_in_value
 from pal.shared.result_rendering import render_titled_structured_for_llm
@@ -32,6 +32,36 @@ ADVISE_RESULT_SCHEMA = {
     },
 }
 
+BEHAVIOR_ADVICE_DESCRIPTION = (
+    "Ask Pal's behavior router which capabilities, skills, memory query hints, or route guidance may fit the current "
+    "scenario. Behavior is Pal's condition-reflex layer: when situation X appears, consider route/action Y. "
+    "Use when the task route is ambiguous, risky, multi-step, unfamiliar, design/debug/recovery oriented, "
+    "or the next capability is unclear. Skip when current context is sufficient, the user gave a clear direct "
+    "implementation command, a single visible capability obviously matches, or the failure is an obvious local/schema/input mistake. "
+    "Treat the result as routing resources, not orders."
+)
+
+BEHAVIOR_LEARN_DESCRIPTION = (
+    "Learn a future behavior rule in Pal's condition-reflex layer: when situation X appears, Pal should consider route/action Y. "
+    "Use only when the user explicitly asks Pal to learn/adopt/follow a future behavior rule or clearly teaches a durable route preference. "
+    "Do not use for durable facts, ordinary preferences, runtime state, reusable procedures, or memory cases; use remember_memory for facts to remember. "
+    "If the same scenario already has behavior guidance, the default conflict_resolution='ask' returns a structured user-decision request instead of overwriting."
+)
+
+BEHAVIOR_UPDATE_DESCRIPTION = (
+    "Update persisted database behavior guidance by matching the original behavior text. "
+    "For replacing the visible guidance line shown to Pal, set prompt_hint to the new text. "
+    "Pass the original rendered guidance line as affordance, not an internal id. "
+    "scenario_text is only the activation scenario. Injected/plugin guidance is read-only here. "
+    "Do not claim behavior guidance changed unless this tool confirms success."
+)
+
+BEHAVIOR_FORGET_DESCRIPTION = (
+    "Forget persisted database behavior guidance by matching the original behavior text. Pass the original rendered "
+    "guidance line as affordance, not an internal id. Injected/plugin guidance is read-only here. Do not claim "
+    "behavior guidance changed unless this tool confirms success."
+)
+
 AFFORDANCE_SUBMIT_ARGS_SCHEMA = {
     "type": "object",
     "properties": {
@@ -40,18 +70,44 @@ AFFORDANCE_SUBMIT_ARGS_SCHEMA = {
             "type": "string",
             "description": "Short behavioral hint body Pal should remember. Do not repeat the title as a prefix.",
         },
-        "title": {"type": "string"},
-        "activation_terms": {"type": "array", "items": {"type": "string"}},
-        "capability_refs": {"type": "array", "items": {"type": "string"}},
-        "skill_refs": {"type": "array", "items": {"type": "string"}},
-        "memory_query_hints": {"type": "array", "items": {"type": "string"}},
-        "visibility_mode": {"type": "string", "enum": ["resident", "discoverable"], "default": "discoverable"},
-        "activation_kind": {"type": "string", "enum": ["deliberative", "reactive"], "default": "deliberative"},
-        "activation_mode": {"type": "string", "enum": ["suggest", "automatic", "require_approval"], "default": "suggest"},
-        "source_kind": {"type": "string", "enum": ["instructed", "learned"], "default": "instructed"},
-        "priority": {"type": "integer", "default": 100},
-        "activation_threshold": {"type": "number", "default": 0.25},
-        "enabled": {"type": "boolean", "default": True},
+        "title": {"type": "string", "description": "Optional short label for this behavior guidance."},
+        "activation_terms": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional concrete terms that help match this scenario later.",
+        },
+        "capability_refs": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional exact tool/capability names this behavior may route toward.",
+        },
+        "skill_refs": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional skill ids that may provide reference manuals for this scenario.",
+        },
+        "memory_query_hints": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Optional recall_memory query hints for facts/cases relevant to this behavior.",
+        },
+        "conflict_resolution": {
+            "type": "string",
+            "enum": ["ask", "merge", "overwrite", "skip"],
+            "default": "ask",
+            "description": (
+                "What to do when the same scenario already has behavior guidance. "
+                "Use ask by default so Pal asks the user whether to merge, overwrite, or leave it unchanged."
+            ),
+        },
+        "resident": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Set true only for behavior guidance that should be always visible in Pal's prompt. "
+                "Leave false for normal guidance that the behavior router recalls when the scenario matches."
+            ),
+        },
     },
     "required": ["scenario_text", "prompt_hint"],
 }
@@ -60,9 +116,14 @@ AFFORDANCE_SUBMIT_RESULT_SCHEMA = {
     "type": "object",
     "properties": {
         "affordance_id": {"type": "string"},
+        "learn_result": {"type": "string", "enum": ["learned", "merged", "overwritten", "skipped"]},
         "source_kind": {"type": "string"},
         "scenario_text": {"type": "string"},
         "prompt_hint": {"type": "string"},
+        "reason": {"type": "string"},
+        "action_required": {"type": "string"},
+        "conflict_resolution_options": {"type": "array", "items": {"type": "string"}},
+        "candidates": {"type": "array", "items": {"type": "object"}},
     },
 }
 
@@ -73,13 +134,7 @@ class BehaviorAdviceTool:
     name: str = "op_behavior_advise"
     display_name: str = "Behavior advice"
     family: str = "behavior"
-    description: str = (
-        "Ask Pal's behavior router which capabilities, skills, memory hints, or route guidance may fit the current "
-        "scenario. Use when the task route is ambiguous, risky, multi-step, unfamiliar, design/debug/recovery oriented, "
-        "or the next capability is unclear. Skip when current context is sufficient, the user gave a clear direct "
-        "implementation command, a single visible capability obviously matches, or the failure is an obvious local/schema/input mistake. "
-        "Treat the result as routing resources, not orders."
-    )
+    description: str = BEHAVIOR_ADVICE_DESCRIPTION
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("behavior", "affordance", "routing")
@@ -119,17 +174,13 @@ class BehaviorAdviceTool:
 class AffordanceSubmitTool:
     service: BehaviorService
     name: str = "op_behavior_save"
-    display_name: str = "Save behavior guidance"
+    display_name: str = "Learn behavior"
     family: str = "behavior"
-    description: str = (
-        "Persist a user-instructed or learned future behavior routing rule. Use only when the user explicitly asks Pal "
-        "to adopt/follow/save a future behavior rule or clearly teaches a durable route preference. Do not use for "
-        "ordinary facts, preferences, runtime state, reusable procedures, or memory cases."
-    )
+    description: str = BEHAVIOR_LEARN_DESCRIPTION
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("behavior", "affordance", "write")
-    keywords: tuple[str, ...] = ("affordance", "instructed", "learned", "behavior")
+    tags: tuple[str, ...] = ("behavior", "affordance", "learn")
+    keywords: tuple[str, ...] = ("affordance", "instructed", "learned", "behavior", "remember")
 
     def __post_init__(self) -> None:
         if self.args_schema is None:
@@ -145,20 +196,31 @@ class AffordanceSubmitTool:
         return self._submit(args)
 
     def _submit(self, args: dict[str, Any]) -> CapabilityResult:
+        payload = _normalize_affordance_mutation_args(args)
         try:
-            descriptor = self.service.submit_affordance(args)
+            descriptor = self.service.submit_affordance(payload)
+        except BehaviorLearnConflict as exc:
+            structured = exc.to_payload()
+            return CapabilityResult(
+                status=RuntimeStatus.INVALID,
+                text="behavior learning needs user decision",
+                structured=structured,
+                llm_text=_render_behavior_tool_payload("Behavior learning needs user decision", structured),
+            )
         except ValueError as exc:
             structured = {"reason": "invalid_request", "error": str(exc)}
             return CapabilityResult(
                 status=RuntimeStatus.INVALID,
-                text="behavior guidance save failed",
+                text="behavior learning failed",
                 structured=structured,
-                llm_text=_render_behavior_tool_payload("Behavior guidance save failed", structured),
+                llm_text=_render_behavior_tool_payload("Behavior learning failed", structured),
             )
+        learn_result = str((descriptor.metadata or {}).get("_learn_behavior_result") or "learned")
         structured = {
             "affordance_id": descriptor.affordance_id,
             "module_id": descriptor.module_id,
             "title": descriptor.title,
+            "learn_result": learn_result,
             "source_kind": descriptor.source_kind,
             "scenario_text": descriptor.scenario_text,
             "prompt_hint": descriptor.prompt_hint,
@@ -168,9 +230,12 @@ class AffordanceSubmitTool:
         }
         return CapabilityResult(
             status=RuntimeStatus.OK,
-            text="behavior guidance saved",
+            text="behavior guidance unchanged" if learn_result == "skipped" else "behavior guidance learned",
             structured=structured,
-            llm_text=_render_behavior_tool_payload("Behavior guidance saved", structured),
+            llm_text=_render_behavior_tool_payload(
+                "Behavior guidance unchanged" if learn_result == "skipped" else "Behavior guidance learned",
+                structured,
+            ),
         )
 
 
@@ -201,13 +266,12 @@ AFFORDANCE_UPDATE_ARGS_SCHEMA = {
         "capability_refs": {"type": "array", "items": {"type": "string"}},
         "skill_refs": {"type": "array", "items": {"type": "string"}},
         "memory_query_hints": {"type": "array", "items": {"type": "string"}},
-        "visibility_mode": {"type": "string", "enum": ["resident", "discoverable"]},
-        "activation_kind": {"type": "string", "enum": ["deliberative", "reactive"]},
-        "activation_mode": {"type": "string", "enum": ["suggest", "automatic", "require_approval"]},
-        "source_kind": {"type": "string", "enum": ["instructed", "learned"]},
-        "priority": {"type": "integer"},
-        "activation_threshold": {"type": "number"},
-        "enabled": {"type": "boolean"},
+        "resident": {
+            "type": "boolean",
+            "description": (
+                "Set true to make this guidance always visible in Pal's prompt, or false to keep it behavior-router recalled."
+            ),
+        },
     },
     "required": ["affordance"],
 }
@@ -226,15 +290,9 @@ AFFORDANCE_UPDATE_RESULT_SCHEMA = {
 class AffordanceUpdateTool:
     service: BehaviorService
     name: str = "op_behavior_affordance_update"
-    display_name: str = "Update behavior guidance"
+    display_name: str = "Update behavior"
     family: str = "behavior"
-    description: str = (
-        "Update persisted database behavior guidance by matching the original affordance text. "
-        "For replacing the visible guidance line shown to Pal, set prompt_hint to the new text. "
-        "Pass the original rendered guidance line as affordance, not an internal id. "
-        "scenario_text is only the activation scenario. Injected/plugin affordances are read-only here. "
-        "Do not claim behavior guidance changed unless this tool confirms success."
-    )
+    description: str = BEHAVIOR_UPDATE_DESCRIPTION
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
     tags: tuple[str, ...] = ("behavior", "affordance", "update")
@@ -254,8 +312,9 @@ class AffordanceUpdateTool:
         return self._update(args)
 
     def _update(self, args: dict[str, Any]) -> CapabilityResult:
+        payload = _normalize_affordance_mutation_args(args)
         try:
-            descriptor = self.service.update_affordance(args)
+            descriptor = self.service.update_affordance(payload)
         except ValueError as exc:
             structured = {"reason": "invalid_request", "error": str(exc)}
             return CapabilityResult(
@@ -264,7 +323,7 @@ class AffordanceUpdateTool:
                 structured=structured,
                 llm_text=_render_behavior_tool_payload("Behavior guidance update failed", structured),
             )
-        updated_fields = [k for k in args if k not in {"affordance", "affordance_id"} and args[k] is not None]
+        updated_fields = [k for k in payload if k not in {"affordance", "affordance_id"} and payload[k] is not None]
         structured = {
             "affordance_id": descriptor.affordance_id,
             "affordance_hash": self.service.affordance_text_hash(descriptor),
@@ -308,16 +367,12 @@ AFFORDANCE_DELETE_RESULT_SCHEMA = {
 class AffordanceDeleteTool:
     service: BehaviorService
     name: str = "op_behavior_affordance_delete"
-    display_name: str = "Delete behavior guidance"
+    display_name: str = "Forget behavior"
     family: str = "behavior"
-    description: str = (
-        "Delete persisted database behavior guidance by matching the original affordance text. Pass the original rendered "
-        "guidance line as affordance, not an internal id. Injected/plugin affordances are read-only here. Do not claim "
-        "behavior guidance changed unless this tool confirms success."
-    )
+    description: str = BEHAVIOR_FORGET_DESCRIPTION
     args_schema: dict[str, Any] = None  # type: ignore[assignment]
     result_schema: dict[str, Any] = None  # type: ignore[assignment]
-    tags: tuple[str, ...] = ("behavior", "affordance", "delete")
+    tags: tuple[str, ...] = ("behavior", "affordance", "forget")
     keywords: tuple[str, ...] = ("affordance", "delete", "behavior", "forget")
 
     def __post_init__(self) -> None:
@@ -340,9 +395,9 @@ class AffordanceDeleteTool:
             structured = {"reason": "invalid_request", "error": str(exc)}
             return CapabilityResult(
                 status=RuntimeStatus.INVALID,
-                text="behavior guidance delete failed",
+                text="behavior forgetting failed",
                 structured=structured,
-                llm_text=_render_behavior_tool_payload("Behavior guidance delete failed", structured),
+                llm_text=_render_behavior_tool_payload("Behavior forgetting failed", structured),
             )
         structured = {
             "affordance_id": descriptor.affordance_id,
@@ -353,9 +408,9 @@ class AffordanceDeleteTool:
         }
         return CapabilityResult(
             status=RuntimeStatus.OK,
-            text="behavior guidance deleted",
+            text="behavior guidance forgotten",
             structured=structured,
-            llm_text=_render_behavior_tool_payload("Behavior guidance deleted", structured),
+            llm_text=_render_behavior_tool_payload("Behavior guidance forgotten", structured),
         )
 
 
@@ -368,6 +423,14 @@ def _advice_request_from_args(args: dict[str, Any]) -> BehaviorAdviceRequest:
         already_considered=tuple(str(item) for item in (args.get("already_considered") or ()) if str(item).strip()),
         top_k=int(args.get("top_k") or 5),
     )
+
+
+def _normalize_affordance_mutation_args(args: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(args or {})
+    if "resident" in payload and "visibility_mode" not in payload:
+        payload["visibility_mode"] = AFFORDANCE_VISIBILITY_RESIDENT if bool(payload.get("resident")) else AFFORDANCE_VISIBILITY_DISCOVERABLE
+    payload.pop("resident", None)
+    return payload
 
 
 def _advice_llm_payload(structured: dict[str, Any]) -> dict[str, Any]:

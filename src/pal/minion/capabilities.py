@@ -25,6 +25,7 @@ from pal.minion.interactions import (
 )
 from pal.execution.contracts import CapabilityCall, CapabilityResult
 from pal.foundation import BoundedTTLBuffer, utc_now
+from pal.foundation.service_logging import current_service_log_sink_description
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
 from pal.memory.candidates import l3_commit_args_from_memory_candidate
 from pal.minion.capability_args import (
@@ -39,7 +40,7 @@ from pal.minion.dag_producer import (
     dag_producer_profile_for_family,
     resolve_default_executor_profile,
 )
-from pal.minion.ipc import MinionManagerClient, minion_log_path, minion_port_path, open_manager_connection, python_subprocess_env
+from pal.minion.ipc import MinionManagerClient, minion_port_path, open_manager_connection, python_subprocess_env
 from pal.minion.profiles import MinionProfileRegistry
 from pal.minion.prompt import TaskingPromptFragmentProvider
 from pal.minion.repository import MinionTaskingRepository
@@ -1933,6 +1934,12 @@ class MinionManagerProvider:
                     "task_id": work_order_id if scope == "task" else "",
                     "topics": ["minion", "lesson"],
                     "payload": {"source": "minion", "work_order_id": work_order_id},
+                    "star": {
+                        "situation": f"Minion produced a reusable {scope} lesson for work order {work_order_id}.",
+                        "task": "Preserve the lesson so future Pal/minion work can recall it.",
+                        "action": text,
+                        "result": "The lesson was accepted for durable memory absorption.",
+                    },
                 },
             )
         )
@@ -1985,11 +1992,8 @@ class MinionManagerProvider:
             pass
         self._cleanup_stale_endpoint()
         self.runtime_root.mkdir(parents=True, exist_ok=True)
-        minion_log_path(self.runtime_root).parent.mkdir(parents=True, exist_ok=True)
         self.process = subprocess.Popen(
             [sys.executable, "-m", "pal.minion.manager_main", "--runtime-root", str(self.runtime_root)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
             env=python_subprocess_env(),
             start_new_session=True,
         )
@@ -2211,7 +2215,7 @@ class MinionManagerProvider:
             "mounted": self.mounted,
             "degraded": self.degraded,
             "manager_running": running,
-            "log_path": str(minion_log_path(self.runtime_root)),
+            "log_sink": current_service_log_sink_description(),
             "minion_db_path": str(config.get("db_path") or ""),
             "last_error": self.last_error,
             "buffered_event_count": buffered_event_count,

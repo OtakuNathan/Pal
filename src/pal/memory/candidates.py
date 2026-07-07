@@ -2,6 +2,49 @@ from __future__ import annotations
 
 from typing import Any
 
+STAR_MEMORY_FIELDS = ("situation", "task", "action", "result")
+STAR_TEXT_FIELD_KEYS = {
+    "situation": "situation_text",
+    "task": "task_text",
+    "action": "action_text",
+    "result": "result_text",
+}
+
+
+def memory_star_from_args(args: dict[str, Any], *, allow_legacy: bool = True) -> tuple[dict[str, str], str]:
+    raw_star = args.get("star")
+    if raw_star is not None:
+        if not isinstance(raw_star, dict):
+            return {}, "star must be an object with situation, task, action, and result"
+        return _normalize_star(raw_star, label="star")
+
+    if not allow_legacy:
+        return {}, ""
+
+    payload = args.get("payload")
+    if isinstance(payload, dict):
+        payload_star = {
+            field: str(payload.get(field) or payload.get(text_key) or "").strip()
+            for field, text_key in STAR_TEXT_FIELD_KEYS.items()
+        }
+        if any(payload_star.values()):
+            return _normalize_star(payload_star, label="payload STAR fields")
+
+    legacy = {
+        field: str(args.get(text_key) or "").strip()
+        for field, text_key in STAR_TEXT_FIELD_KEYS.items()
+    }
+    if not any(legacy.values()):
+        return {}, ""
+    return _normalize_star(legacy, label="legacy STAR fields")
+
+
+def star_text_fields(star: dict[str, str]) -> dict[str, str]:
+    return {
+        text_key: str(star.get(field) or "").strip()
+        for field, text_key in STAR_TEXT_FIELD_KEYS.items()
+    }
+
 
 def l3_commit_args_from_memory_candidate(
     candidate: dict[str, Any],
@@ -12,6 +55,13 @@ def l3_commit_args_from_memory_candidate(
     source_ref: str = "",
 ) -> dict[str, Any]:
     kind = str(candidate.get("kind") or candidate.get("document_kind") or "case").strip() or "case"
+    star, star_error = memory_star_from_args(candidate)
+    if star_error:
+        return {}
+    if kind == "case" and not star:
+        return {}
+    if kind != "case" and star:
+        return {}
     scope = str(candidate.get("scope") or default_scope or "system").strip() or "system"
     title = " ".join(str(candidate.get("title") or "").split())
     summary = " ".join(
@@ -46,6 +96,8 @@ def l3_commit_args_from_memory_candidate(
         payload.setdefault("source_ref", str(source_ref))
     if source_kind or source_ref:
         payload.setdefault("memory_candidate_source", "approval")
+    if star:
+        payload.update(star)
     args: dict[str, Any] = {
         "kind": kind,
         "scope": scope,
@@ -55,16 +107,32 @@ def l3_commit_args_from_memory_candidate(
         "topics": _dedupe_nonempty([str(value) for value in topics]),
         "payload": payload,
     }
+    if star:
+        args["star"] = dict(star)
+        args.update(star_text_fields(star))
     task_id = str(candidate.get("task_id") or "").strip()
     if task_id:
         args["task_id"] = task_id
     elif scope == "task" and fallback_task_id:
         args["task_id"] = fallback_task_id
-    for key in ("canonical_key", "situation_text", "task_text", "action_text", "result_text"):
+    for key in ("canonical_key",):
         value = str(candidate.get(key) or "").strip()
         if value:
             args[key] = value
     return args
+
+
+def _normalize_star(value: dict[str, Any], *, label: str) -> tuple[dict[str, str], str]:
+    star: dict[str, str] = {}
+    missing: list[str] = []
+    for field in STAR_MEMORY_FIELDS:
+        text = " ".join(str(value.get(field) or "").split())
+        if not text:
+            missing.append(field)
+        star[field] = text
+    if missing:
+        return {}, f"{label} missing required field(s): {', '.join(missing)}"
+    return star, ""
 
 
 def _dedupe_nonempty(values: list[str]) -> list[str]:

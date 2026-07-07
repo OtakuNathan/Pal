@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from pal.control.contracts import ControlAction
 from pal.core.module_registry import MODULE_TIER_CORE_FOUNDATION, ModuleHandle
 from pal.execution.contracts import CapabilityCall
-from pal.memory.candidates import l3_commit_args_from_memory_candidate
+from pal.memory.candidates import l3_commit_args_from_memory_candidate, memory_star_from_args, star_text_fields
 from pal.memory.contracts import L3CommitRequest, L3CorrectRequest, L3DeleteRequest, MemoryQuery
 from pal.memory.rendering import (
     build_mutation_structured_payload,
@@ -35,11 +35,47 @@ def _read_mem_ref(args: dict[str, Any]) -> str:
     return str(args.get("mem_ref") or args.get("document_id") or "").strip()
 
 
+def _read_task_id(args: dict[str, Any]) -> str | None:
+    task_id = str(args.get("task_id") or "").strip()
+    return task_id or None
+
+
+def _recall_scope_for_task_id(task_id: str | None) -> str | None:
+    return "task" if task_id else None
+
+
 def _memory_title_from_summary(summary: str) -> str:
     normalized = " ".join(str(summary or "").strip().split())
     if not normalized:
         return "Memory"
     return normalized[:96].rstrip()
+
+
+MEMORY_STAR_SCHEMA = {
+    "type": "object",
+    "description": (
+        "Required when kind='case'; omit for fact memories. STAR case detail for reusable failures, repairs, or task lessons."
+    ),
+    "properties": {
+        "situation": {
+            "type": "string",
+            "description": "The situation or failure context that future Pal should recognize.",
+        },
+        "task": {
+            "type": "string",
+            "description": "The task or objective Pal was trying to complete in that situation.",
+        },
+        "action": {
+            "type": "string",
+            "description": "The action, repair, or decision that mattered.",
+        },
+        "result": {
+            "type": "string",
+            "description": "The outcome, lesson, or observed result that makes the case reusable.",
+        },
+    },
+    "required": ["situation", "task", "action", "result"],
+}
 
 
 @dataclass(frozen=True)
@@ -152,7 +188,7 @@ class MemoryIntrospectionProvider:
         namespace=INTROSPECTION_NAMESPACE,
         scope="module",
         action_name="active_provider",
-        description="Show the current active memory provider used by recall_memory, write_memory, update_memory, and delete_memory",
+        description="Show the current active memory provider used by recall_memory, remember_memory, update_memory, and forget_memory",
     )
     def active_provider(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
@@ -184,41 +220,80 @@ class MemoryIntrospectionProvider:
         description=(
             "Recall durable memory records from the active memory provider. Use this before acting when the task depends "
             "on prior Pal decisions, user preferences, project history, custom Pal/project terms, known failures, repair "
-            "lessons, or before writing/updating/deleting memory, behavior guidance, or skills. Do not use it for current "
-            "runtime state; inspect live runtime/capabilities instead. Do not use it for current external facts; verify "
+            "lessons, or before creating/changing/forgetting durable memory records. When an error, regression, failed "
+            "repair, repeated pitfall, or unfamiliar debugging situation appears, prefer a targeted recall with kind='case' "
+            "to check prior failures and fixes before improvising. Memory is Pal's remembered facts, "
+            "not behavior guidance: behavior is the condition-reflex layer for when situation X should trigger route/action Y. "
+            "Do not use memory for current runtime state; inspect live runtime/capabilities instead. Do not use it for current external facts; verify "
             "externally instead. Use targeted queries with limit 3-5 by default. Results render each item as "
             "[mem_ref]: text. mem_ref is opaque; prefixes such as fact: or case: are part of the ref and must be copied "
-            "exactly when using update_memory or delete_memory."
+            "exactly when using update_memory or forget_memory."
         ),
         metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
-                "level": {"type": "string", "description": "Recall temperature such as warm; omit unless narrowing behavior is needed."},
                 "queries": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Targeted query strings for the user/project fact, prior decision, repair lesson, or memory candidate.",
+                    "description": (
+                        "One to three focused natural-language search strings for the remembered fact, preference, "
+                        "project context, prior decision, repair lesson, failure case, or candidate memory. Include concrete names, "
+                        "modules, error text, symptoms, failed fixes, or user terms when known. Do not paste large raw context; summarize the lookup target."
+                    ),
                 },
-                "topic_scope": {"type": "array", "items": {"type": "string"}, "description": "Optional topic narrowing terms."},
-                "task_id": {"type": "string"},
-                "limit": {"type": "integer", "description": "Maximum memories to return; use 3-5 by default."},
-                "kind": {"type": "string", "description": "Optional memory kind filter, such as fact or case."},
-                "scope": {"type": "string", "description": "Optional scope filter, such as system or task."},
-                "view": {"type": "string", "enum": ["summary", "origin"], "description": "summary is compact; origin includes source/origin detail when available."},
+                "topic_scope": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional short topic keywords that narrow retrieval, such as a project, subsystem, user preference "
+                        "area, or failure domain. This is semantic narrowing, not the storage scope; do not use system/task here."
+                    ),
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional exact task, work order, run, or minion task identifier from current context. When provided, "
+                        "recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Maximum memories to return. Use 3-5 by default; use a larger value only when comparing several possible matches.",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["fact", "case"],
+                    "description": (
+                        "Optional memory type filter. Use fact for stable facts, preferences, project context, or prior "
+                        "decisions. Use case for prior failures, debugging attempts, repair lessons, task experience, "
+                        "or when current work hits an error and prior pitfall/fix experience may exist."
+                    ),
+                },
+                "view": {
+                    "type": "string",
+                    "enum": ["summary", "origin"],
+                    "description": (
+                        "Use summary by default for normal work. Use origin only when provenance, source text, or extra "
+                        "detail is needed to resolve a conflict, update/delete a memory safely, or audit where the memory came from."
+                    ),
+                },
             },
         },
     )
     def recall(self, call: IntrospectionCall) -> IntrospectionResult:
         provider = self.service.l3_selector.resolve()
+        task_id = _read_task_id(call.args)
         query = MemoryQuery(
             level=str(call.args.get("level") or "warm"),
             queries=[str(value) for value in list(call.args.get("queries") or [])],
             topic_scope=[str(value) for value in list(call.args.get("topic_scope") or [])],
-            task_id=str(call.args.get("task_id")) if call.args.get("task_id") is not None else None,
+            task_id=task_id,
             limit=int(call.args.get("limit") or 8),
             kind=str(call.args.get("kind")) if call.args.get("kind") is not None else None,
-            scope=str(call.args.get("scope")) if call.args.get("scope") is not None else None,
+            scope=_recall_scope_for_task_id(task_id),
             view=normalize_recall_view(call.args.get("view")),
         )
         result = provider.recall(query)
@@ -237,8 +312,10 @@ class MemoryIntrospectionProvider:
         family="commit",
         action_name="write",
         description=(
-            "Commit a new durable memory record only when the user explicitly asks Pal to remember/save it or states a "
-            "clear durable fact/preference with low ambiguity. Before using this tool, call recall_memory with the "
+            "Remember a new durable memory record only when the user explicitly asks Pal to remember/save it or states a "
+            "clear durable fact/preference with low ambiguity. Use for facts, preferences, project context, prior decisions, "
+            "and reusable repair lessons. Do not use for behavior rules about when Pal should take a route/action; use learn_behavior for that. "
+            "Before using this tool, call recall_memory with the "
             "candidate summary/search_text and limit 3-5. If a recalled [mem_ref] is semantically the same record, an "
             "older version, already covers the candidate, or is the memory being corrected, use update_memory with that "
             "complete mem_ref instead. Do not write duplicate memories. Do not invent mem_ref values; prefixes such as "
@@ -249,18 +326,38 @@ class MemoryIntrospectionProvider:
         args_schema={
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "description": "fact or case"},
-                "summary": {"type": "string", "description": "Concise memory text for future prompt display."},
-                "search_text": {"type": "string", "description": "Source-of-truth text used for retrieval indexing."},
-                "scope": {"type": "string", "description": "system or task"},
-                "task_id": {"type": "string"},
-                "canonical_key": {"type": "string"},
-                "payload": {"type": "object"},
-                "topics": {"type": "array", "items": {"type": "string"}},
-                "situation_text": {"type": "string"},
-                "task_text": {"type": "string"},
-                "action_text": {"type": "string"},
-                "result_text": {"type": "string"},
+                "kind": {
+                    "type": "string",
+                    "enum": ["fact", "case"],
+                    "description": (
+                        "Use fact for stable facts, preferences, project context, or decisions. "
+                        "Use case for reusable task/failure/repair lessons; case requires star."
+                    ),
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Concise prompt-ready memory text future Pal can read directly.",
+                },
+                "search_text": {
+                    "type": "string",
+                    "description": (
+                        "Retrieval/source text with concrete names, symptoms, decisions, or wording. "
+                        "This can be longer than summary but should not be raw unrelated context."
+                    ),
+                },
+                "topics": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional short semantic topic tags such as project, subsystem, preference area, or failure domain.",
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional exact task, work order, run, or minion task id from current context. "
+                        "Providing it binds this memory to that task scope. Do not invent task ids."
+                    ),
+                },
+                "star": MEMORY_STAR_SCHEMA,
             },
             "required": ["kind", "summary", "search_text"],
         },
@@ -275,6 +372,28 @@ class MemoryIntrospectionProvider:
             return IntrospectionResult(status=RuntimeStatus.INVALID, text="summary is required", llm_text="summary is required")
         if not search_text:
             return IntrospectionResult(status=RuntimeStatus.INVALID, text="search_text is required", llm_text="search_text is required")
+        if kind not in {"fact", "case"}:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="kind must be fact or case", llm_text="kind must be fact or case")
+        star, star_error = memory_star_from_args(call.args)
+        if star_error:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text=star_error, llm_text=star_error)
+        if kind == "case" and not star:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="kind=case requires star with situation, task, action, and result",
+                llm_text="kind=case requires star with situation, task, action, and result",
+            )
+        if kind != "case" and star:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="star is only valid when kind=case",
+                llm_text="star is only valid when kind=case",
+            )
+        task_id = _read_task_id(call.args)
+        payload = dict(call.args.get("payload") or {})
+        if star:
+            payload.update(star)
+        star_fields = star_text_fields(star) if star else {}
         provider = self.service.l3_selector.resolve()
         result = provider.commit(
             L3CommitRequest(
@@ -282,15 +401,15 @@ class MemoryIntrospectionProvider:
                 title=_memory_title_from_summary(summary),
                 summary=summary,
                 search_text=search_text,
-                scope=str(call.args.get("scope") or "system"),
-                task_id=str(call.args.get("task_id")) if call.args.get("task_id") is not None else None,
+                scope="task" if task_id else str(call.args.get("scope") or "system"),
+                task_id=task_id,
                 canonical_key=str(call.args.get("canonical_key")) if call.args.get("canonical_key") is not None else None,
-                payload=dict(call.args.get("payload") or {}),
+                payload=payload,
                 topics=[str(value) for value in list(call.args.get("topics") or [])],
-                situation_text=str(call.args.get("situation_text") or ""),
-                task_text=str(call.args.get("task_text") or ""),
-                action_text=str(call.args.get("action_text") or ""),
-                result_text=str(call.args.get("result_text") or ""),
+                situation_text=star_fields.get("situation_text", ""),
+                task_text=star_fields.get("task_text", ""),
+                action_text=star_fields.get("action_text", ""),
+                result_text=star_fields.get("result_text", ""),
             )
         )
         payload = build_mutation_structured_payload(result)
@@ -308,7 +427,7 @@ class MemoryIntrospectionProvider:
         action_name="update",
         description=(
             "Update an existing durable memory record in the active memory provider. "
-            "Use this instead of write_memory when a recalled memory is being corrected, superseded, or already covers "
+            "Use this instead of remember_memory when a recalled memory is being corrected, superseded, or already covers "
             "the candidate. mem_ref is the opaque ref returned by recall_memory; copy it exactly, including prefixes "
             "such as fact: or case:. Do not invent or shorten mem_ref values."
         ),
@@ -322,30 +441,51 @@ class MemoryIntrospectionProvider:
                 },
                 "summary": {"type": "string"},
                 "search_text": {"type": "string"},
-                "payload_patch": {"type": "object"},
-                "topics": {"type": "array", "items": {"type": "string"}},
-                "situation_text": {"type": "string"},
-                "task_text": {"type": "string"},
-                "action_text": {"type": "string"},
-                "result_text": {"type": "string"},
+                "topics": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional replacement topic tags for retrieval narrowing.",
+                },
+                "star": {
+                    **MEMORY_STAR_SCHEMA,
+                    "description": (
+                        "Optional full STAR replacement for a case memory. If provided, all four fields are required. "
+                        "Do not use star for fact memories."
+                    ),
+                },
             },
             "required": ["mem_ref"],
         },
     )
     def update(self, call: IntrospectionCall) -> IntrospectionResult:
         mem_ref = _read_mem_ref(call.args)
+        if not mem_ref:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="mem_ref is required", llm_text="mem_ref is required")
+        star, star_error = memory_star_from_args(call.args)
+        if star_error:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text=star_error, llm_text=star_error)
+        if star and mem_ref.startswith("fact:"):
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="star is only valid for case memories",
+                llm_text="star is only valid for case memories",
+            )
+        payload_patch = dict(call.args.get("payload_patch") or {})
+        if star:
+            payload_patch.update(star)
+        star_fields = star_text_fields(star) if star else {}
         provider = self.service.l3_selector.resolve()
         result = provider.correct(
             L3CorrectRequest(
                 document_id=mem_ref,
                 summary=str(call.args.get("summary")) if call.args.get("summary") is not None else None,
                 search_text=str(call.args.get("search_text")) if call.args.get("search_text") is not None else None,
-                payload_patch=dict(call.args.get("payload_patch") or {}),
+                payload_patch=payload_patch,
                 topics=[str(value) for value in list(call.args.get("topics") or [])] if call.args.get("topics") is not None else None,
-                situation_text=str(call.args.get("situation_text")) if call.args.get("situation_text") is not None else None,
-                task_text=str(call.args.get("task_text")) if call.args.get("task_text") is not None else None,
-                action_text=str(call.args.get("action_text")) if call.args.get("action_text") is not None else None,
-                result_text=str(call.args.get("result_text")) if call.args.get("result_text") is not None else None,
+                situation_text=star_fields.get("situation_text") if star else None,
+                task_text=star_fields.get("task_text") if star else None,
+                action_text=star_fields.get("action_text") if star else None,
+                result_text=star_fields.get("result_text") if star else None,
             )
         )
         payload = build_mutation_structured_payload(result)
@@ -362,7 +502,7 @@ class MemoryIntrospectionProvider:
         family="delete",
         action_name="delete",
         description=(
-            "Delete an existing durable memory record from the active memory provider. "
+            "Forget an existing durable memory record from the active memory provider. "
             "Use only when the user explicitly asks to forget/delete a specific memory or approves deleting a clearly "
             "invalid record. mem_ref is the opaque ref returned by recall_memory; copy it exactly, including prefixes "
             "such as fact: or case:. Do not invent or shorten mem_ref values."

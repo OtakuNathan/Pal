@@ -13,6 +13,10 @@ from pal.behavior.tools import (
     AFFORDANCE_SUBMIT_RESULT_SCHEMA,
     AFFORDANCE_UPDATE_ARGS_SCHEMA,
     AFFORDANCE_UPDATE_RESULT_SCHEMA,
+    BEHAVIOR_ADVICE_DESCRIPTION,
+    BEHAVIOR_FORGET_DESCRIPTION,
+    BEHAVIOR_LEARN_DESCRIPTION,
+    BEHAVIOR_UPDATE_DESCRIPTION,
     AffordanceDeleteTool,
     AffordanceSubmitTool,
     AffordanceUpdateTool,
@@ -82,7 +86,7 @@ class BehaviorIntrospectionProvider:
         scope="module",
         family="behavior",
         action_name="advise",
-        description="Ask the behavior router for scenario-to-action route candidates. Async tool path is required.",
+        description=BEHAVIOR_ADVICE_DESCRIPTION,
         args_schema=ADVISE_ARGS_SCHEMA,
         result_schema=ADVISE_RESULT_SCHEMA,
         metadata={"async_required": True},
@@ -102,9 +106,10 @@ class BehaviorIntrospectionProvider:
         scope="module",
         family="behavior",
         action_name="affordance_submit",
-        description="Persist a user-instructed or learned affordance. Do not use for ordinary memory cases.",
+        description=BEHAVIOR_LEARN_DESCRIPTION,
         args_schema=AFFORDANCE_SUBMIT_ARGS_SCHEMA,
         result_schema=AFFORDANCE_SUBMIT_RESULT_SCHEMA,
+        metadata={"canonical_path": "op_behavior_save"},
     )
     def submit_affordance(self, call: CapabilityCall) -> CapabilityResult:
         return AffordanceSubmitTool(service=self.service).invoke(call.args)
@@ -114,7 +119,7 @@ class BehaviorIntrospectionProvider:
         scope="module",
         family="behavior",
         action_name="affordance_update",
-        description="Update persisted database behavior guidance by matching the original affordance text. Injected/plugin affordances are read-only here.",
+        description=BEHAVIOR_UPDATE_DESCRIPTION,
         args_schema=AFFORDANCE_UPDATE_ARGS_SCHEMA,
         result_schema=AFFORDANCE_UPDATE_RESULT_SCHEMA,
     )
@@ -126,7 +131,7 @@ class BehaviorIntrospectionProvider:
         scope="module",
         family="behavior",
         action_name="affordance_delete",
-        description="Delete persisted database behavior guidance by matching the original affordance text. Injected/plugin affordances are read-only here.",
+        description=BEHAVIOR_FORGET_DESCRIPTION,
         args_schema=AFFORDANCE_DELETE_ARGS_SCHEMA,
         result_schema=AFFORDANCE_DELETE_RESULT_SCHEMA,
     )

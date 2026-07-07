@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from pal.foundation import utc_now
+from pal.foundation.service_logging import current_service_log_sink_description
 from pal.foundation.sidecar import (
     dispatch_sidecar_request,
     pack_sidecar_message,
@@ -33,7 +34,7 @@ from pal.minion.gates import (
 )
 from pal.minion.git_env import finalize_work_order_branch, prepare_task_workspace
 from pal.minion.inflight import InflightTracker
-from pal.minion.ipc import cleanup_manager_endpoint, minion_log_path, minion_runner_log_path, start_manager_server
+from pal.minion.ipc import cleanup_manager_endpoint, minion_runner_log_path, start_manager_server
 from pal.minion.lifecycle import ACTIVE_RUN_STATUSES as _ACTIVE_RUN_STATUSES
 from pal.minion.lifecycle import TERMINAL_RUN_STATUSES as _TERMINAL_RUN_STATUSES
 from pal.minion.lifecycle import transition_run_status
@@ -439,7 +440,7 @@ class MinionManager:
             "logical_slot_generation": self._logical_slot_generation,
             "pending_event_count": len(self.event_queue),
             "event_subscriber_count": len(self.event_subscribers),
-            "log_path": str(minion_log_path(self.runtime_root)),
+            "log_sink": current_service_log_sink_description(),
             **dict(self.endpoint_info),
         }
 

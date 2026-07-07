@@ -18,6 +18,7 @@ from pal.memory import (
     L3RetireResult,
     MemoryQuery,
 )
+from pal.memory.candidates import memory_star_from_args, star_text_fields
 from pal.memory.contracts import RECALL_PROMOTION_THRESHOLD, VECTOR_DEDUP_THRESHOLD
 from pal.memory.embedding import EmbeddingProviderPort, OllamaEmbeddingProvider
 from pal.memory.repository import (
@@ -55,6 +56,28 @@ def _stable_document_search_text(*parts: str) -> str:
 
 def _read_mem_ref(args: dict[str, Any]) -> str:
     return str(args.get("mem_ref") or args.get("document_id") or "").strip()
+
+
+def _read_task_id(args: dict[str, Any]) -> str | None:
+    task_id = str(args.get("task_id") or "").strip()
+    return task_id or None
+
+
+def _recall_scope_for_task_id(task_id: str | None) -> str | None:
+    return "task" if task_id else None
+
+
+MEMORY_STAR_SCHEMA = {
+    "type": "object",
+    "description": "Required when kind='case'; omit for fact memories.",
+    "properties": {
+        "situation": {"type": "string", "description": "Situation or failure context."},
+        "task": {"type": "string", "description": "Task or objective in that situation."},
+        "action": {"type": "string", "description": "Action, repair, or decision that mattered."},
+        "result": {"type": "string", "description": "Outcome or reusable lesson."},
+    },
+    "required": ["situation", "task", "action", "result"],
+}
 
 
 def _stable_hash(payload: dict[str, Any]) -> str:
@@ -229,33 +252,73 @@ class SQLiteVecL3Plugin:
         action_name="recall",
         description=(
             "Recall durable memory records by searching against the source-of-truth text. "
-            "queries: natural language search terms — the system will match against original verbatim facts. "
-            "Provide descriptive, specific queries for best recall results."
+            "When an error, regression, failed repair, repeated pitfall, or unfamiliar debugging situation appears, "
+            "prefer kind='case' with concrete error/symptom/fix terms to check prior failures and fixes before improvising. "
+            "queries: natural language search terms; provide descriptive, specific queries for best recall results."
         ),
         metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
-                "level": {"type": "string"},
-                "queries": {"type": "array", "items": {"type": "string"}},
-                "topic_scope": {"type": "array", "items": {"type": "string"}},
-                "task_id": {"type": "string"},
-                "limit": {"type": "integer"},
-                "kind": {"type": "string"},
-                "scope": {"type": "string"},
-                "view": {"type": "string", "enum": ["summary", "origin"]},
+                "queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "One to three focused natural-language search strings for durable facts, preferences, project "
+                        "context, prior decisions, repair cases, or task experience. Include concrete names, modules, "
+                        "error text, symptoms, failed fixes, or user terms when known; do not paste large raw context."
+                    ),
+                },
+                "topic_scope": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional short topic keywords that narrow retrieval, such as a project, subsystem, preference "
+                        "area, or failure domain. This is semantic narrowing, not the storage scope."
+                    ),
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional exact task, work order, run, or minion task identifier from current context. When provided, "
+                        "recall is narrowed to task-scoped memories for that task. Do not invent or guess task ids."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "description": "Maximum memories to return. Use 3-5 by default; use a larger value only when comparing several possible matches.",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["fact", "case"],
+                    "description": (
+                        "Optional memory type filter. Use fact for stable facts, preferences, project context, or prior "
+                        "decisions. Use case for prior failures, debugging attempts, repair lessons, or task experience."
+                    ),
+                },
+                "view": {
+                    "type": "string",
+                    "enum": ["summary", "origin"],
+                    "description": (
+                        "Use summary by default for normal work. Use origin only when provenance, source text, or extra "
+                        "detail is needed to resolve a conflict, update/delete a memory safely, or audit where the memory came from."
+                    ),
+                },
             },
         },
     )
     def recall_query(self, call: IntrospectionCall) -> IntrospectionResult:
+        task_id = _read_task_id(call.args)
         query = MemoryQuery(
             level=str(call.args.get("level") or "warm"),
             queries=[str(value) for value in list(call.args.get("queries") or [])],
             topic_scope=[str(value) for value in list(call.args.get("topic_scope") or [])],
-            task_id=str(call.args.get("task_id")) if call.args.get("task_id") is not None else None,
+            task_id=task_id,
             limit=int(call.args.get("limit") or 8),
             kind=str(call.args.get("kind")) if call.args.get("kind") is not None else None,
-            scope=str(call.args.get("scope")) if call.args.get("scope") is not None else None,
+            scope=_recall_scope_for_task_id(task_id),
             view=normalize_recall_view(call.args.get("view")),
         )
         result = self.recall(query)
@@ -284,60 +347,70 @@ class SQLiteVecL3Plugin:
         action_name="write",
         description=(
             "Commit a durable memory record. "
-            "title: short label for this memory. "
-            "summary: concise summary for future LLM consumption (compressed). "
-            "search_text: the original verbatim fact or statement — source of truth for retrieval indexing. "
-            "Do NOT omit or leave empty — all three are required for correct indexing."
+            "summary is prompt-ready memory text for future LLM consumption. "
+            "search_text is source-of-truth retrieval text for indexing. "
+            "For kind=case, provide star with situation, task, action, and result."
         ),
         metadata={"omit_family_in_canonical": True},
         args_schema={
             "type": "object",
             "properties": {
-                "kind": {"type": "string", "description": "fact or case"},
-                "title": {"type": "string", "description": "Short label for this memory"},
-                "summary": {"type": "string", "description": "Concise summary (compressed, for prompt display)"},
-                "search_text": {"type": "string", "description": "Original verbatim fact — source of truth, used for FTS and vector embedding"},
-                "scope": {"type": "string", "description": "system or task"},
-                "task_id": {"type": "string"},
-                "canonical_key": {"type": "string"},
-                "payload": {"type": "object"},
+                "kind": {"type": "string", "enum": ["fact", "case"], "description": "fact or case; case requires star."},
+                "title": {"type": "string", "description": "Optional short label for this memory."},
+                "summary": {"type": "string", "description": "Prompt-ready memory text future Pal can read directly."},
+                "search_text": {"type": "string", "description": "Retrieval/source text with concrete details for FTS and vector embedding."},
+                "task_id": {
+                    "type": "string",
+                    "description": "Optional exact task/work order/run id; providing it binds the memory to task scope.",
+                },
                 "topics": {"type": "array", "items": {"type": "string"}, "description": "Topic tags for filtering"},
-                "situation_text": {"type": "string", "description": "For case kind: situation description"},
-                "task_text": {"type": "string", "description": "For case kind: task description"},
-                "action_text": {"type": "string", "description": "For case kind: action taken"},
-                "result_text": {"type": "string", "description": "For case kind: result outcome"},
+                "star": MEMORY_STAR_SCHEMA,
             },
-            "required": ["kind", "title", "summary", "search_text"],
+            "required": ["kind", "summary", "search_text"],
         },
     )
     def commit_write(self, call: IntrospectionCall) -> IntrospectionResult:
         kind = str(call.args.get("kind") or "").strip()
-        title = str(call.args.get("title") or "").strip()
+        title = str(call.args.get("title") or call.args.get("summary") or "").strip()
         summary = str(call.args.get("summary") or "").strip()
         search_text = str(call.args.get("search_text") or "").strip()
-        if not kind:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="kind is required")
-        if not title:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="title is required")
+        if kind not in {"fact", "case"}:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="kind must be fact or case", llm_text="kind must be fact or case")
         if not summary:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="summary is required")
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="summary is required", llm_text="summary is required")
         if not search_text:
-            return IntrospectionResult(status=RuntimeStatus.INVALID, text="search_text is required")
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="search_text is required", llm_text="search_text is required")
+        star, star_error = memory_star_from_args(call.args)
+        if star_error:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text=star_error, llm_text=star_error)
+        if kind == "case" and not star:
+            return IntrospectionResult(
+                status=RuntimeStatus.INVALID,
+                text="kind=case requires star with situation, task, action, and result",
+                llm_text="kind=case requires star with situation, task, action, and result",
+            )
+        if kind != "case" and star:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="star is only valid when kind=case", llm_text="star is only valid when kind=case")
+        task_id = _read_task_id(call.args)
+        payload = dict(call.args.get("payload") or {})
+        if star:
+            payload.update(star)
+        star_fields = star_text_fields(star) if star else {}
         result = self.commit(
             L3CommitRequest(
                 kind=kind,
                 title=title,
                 summary=summary,
                 search_text=search_text,
-                scope=str(call.args.get("scope") or "system"),
-                task_id=str(call.args.get("task_id")) if call.args.get("task_id") is not None else None,
+                scope="task" if task_id else str(call.args.get("scope") or "system"),
+                task_id=task_id,
                 canonical_key=str(call.args.get("canonical_key")) if call.args.get("canonical_key") is not None else None,
-                payload=dict(call.args.get("payload") or {}),
+                payload=payload,
                 topics=[str(value) for value in list(call.args.get("topics") or [])],
-                situation_text=str(call.args.get("situation_text") or ""),
-                task_text=str(call.args.get("task_text") or ""),
-                action_text=str(call.args.get("action_text") or ""),
-                result_text=str(call.args.get("result_text") or ""),
+                situation_text=star_fields.get("situation_text", ""),
+                task_text=star_fields.get("task_text", ""),
+                action_text=star_fields.get("action_text", ""),
+                result_text=star_fields.get("result_text", ""),
             )
         )
         payload = build_mutation_structured_payload(result)
@@ -368,31 +441,41 @@ class SQLiteVecL3Plugin:
                 },
                 "title": {"type": "string", "description": "Updated short label"},
                 "summary": {"type": "string", "description": "Updated concise summary"},
-                "search_text": {"type": "string", "description": "Updated source of truth — original verbatim fact for retrieval"},
-                "payload_patch": {"type": "object", "description": "Merge patch for existing payload fields"},
+                "search_text": {"type": "string", "description": "Updated retrieval/source text for indexing."},
                 "topics": {"type": "array", "items": {"type": "string"}, "description": "Replacement topic tags"},
-                "situation_text": {"type": "string"},
-                "task_text": {"type": "string"},
-                "action_text": {"type": "string"},
-                "result_text": {"type": "string"},
+                "star": {
+                    **MEMORY_STAR_SCHEMA,
+                    "description": "Optional full STAR replacement for a case memory. If provided, all four fields are required.",
+                },
             },
             "required": ["mem_ref"],
         },
     )
     def correct_patch(self, call: IntrospectionCall) -> IntrospectionResult:
         mem_ref = _read_mem_ref(call.args)
+        if not mem_ref:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="mem_ref is required", llm_text="mem_ref is required")
+        star, star_error = memory_star_from_args(call.args)
+        if star_error:
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text=star_error, llm_text=star_error)
+        if star and mem_ref.startswith("fact:"):
+            return IntrospectionResult(status=RuntimeStatus.INVALID, text="star is only valid for case memories", llm_text="star is only valid for case memories")
+        payload_patch = dict(call.args.get("payload_patch") or {})
+        if star:
+            payload_patch.update(star)
+        star_fields = star_text_fields(star) if star else {}
         result = self.correct(
             L3CorrectRequest(
                 document_id=mem_ref,
                 title=str(call.args.get("title")) if call.args.get("title") is not None else None,
                 summary=str(call.args.get("summary")) if call.args.get("summary") is not None else None,
                 search_text=str(call.args.get("search_text")) if call.args.get("search_text") is not None else None,
-                payload_patch=dict(call.args.get("payload_patch") or {}),
+                payload_patch=payload_patch,
                 topics=[str(value) for value in list(call.args.get("topics") or [])] if call.args.get("topics") is not None else None,
-                situation_text=str(call.args.get("situation_text")) if call.args.get("situation_text") is not None else None,
-                task_text=str(call.args.get("task_text")) if call.args.get("task_text") is not None else None,
-                action_text=str(call.args.get("action_text")) if call.args.get("action_text") is not None else None,
-                result_text=str(call.args.get("result_text")) if call.args.get("result_text") is not None else None,
+                situation_text=star_fields.get("situation_text") if star else None,
+                task_text=star_fields.get("task_text") if star else None,
+                action_text=star_fields.get("action_text") if star else None,
+                result_text=star_fields.get("result_text") if star else None,
             )
         )
         payload = build_mutation_structured_payload(result)

@@ -545,6 +545,8 @@ class TestServiceGeneration(unittest.TestCase):
         self.assertIn("Restart=on-failure", content)
         self.assertIn("StandardOutput=journal", content)
         self.assertIn("StandardError=journal", content)
+        self.assertIn('Environment="PAL_SERVICE_LOG_SINK=systemd_journal"', content)
+        self.assertIn('Environment="PAL_SERVICE_LOG_TAG=pal"', content)
         self.assertNotIn("append:/tmp/pal/pal.log", content)
         self.assertIn("WantedBy=default.target", content)
 
@@ -559,6 +561,7 @@ class TestServiceGeneration(unittest.TestCase):
 
         self.assertIn('Environment="PYTHONUNBUFFERED=1"', content)
         self.assertIn('Environment="https_proxy=http://127.0.0.1:8118"', content)
+        self.assertIn('Environment="PAL_SERVICE_LOG_SINK=systemd_journal"', content)
 
     def test_runtime_service_environment_carries_proxy_vars(self) -> None:
         from pal.wizard.cli import _runtime_service_environment
@@ -633,7 +636,14 @@ class TestServiceGeneration(unittest.TestCase):
         self.assertEqual(payload["RunAtLoad"], True)
         self.assertEqual(payload["KeepAlive"], {"SuccessfulExit": False})
         self.assertEqual(payload["WorkingDirectory"], "/Users/test/.pal")
-        self.assertEqual(payload["EnvironmentVariables"], {"PYTHONUNBUFFERED": "1"})
+        self.assertEqual(
+            payload["EnvironmentVariables"],
+            {
+                "PYTHONUNBUFFERED": "1",
+                "PAL_SERVICE_LOG_SINK": "macos_unified",
+                "PAL_SERVICE_LOG_TAG": "com.pal.test",
+            },
+        )
         self.assertNotIn("StandardOutPath", payload)
         self.assertNotIn("StandardErrorPath", payload)
 
@@ -649,7 +659,12 @@ class TestServiceGeneration(unittest.TestCase):
 
         self.assertEqual(
             payload["EnvironmentVariables"],
-            {"PYTHONUNBUFFERED": "1", "HTTPS_PROXY": "http://127.0.0.1:8118"},
+            {
+                "PYTHONUNBUFFERED": "1",
+                "HTTPS_PROXY": "http://127.0.0.1:8118",
+                "PAL_SERVICE_LOG_SINK": "macos_unified",
+                "PAL_SERVICE_LOG_TAG": "com.pal.test",
+            },
         )
 
     def test_pick_launchd_label_no_conflict(self) -> None:

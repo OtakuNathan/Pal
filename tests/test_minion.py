@@ -23372,11 +23372,15 @@ class MinionManagerTests(unittest.TestCase):
                                     name="memory_candidate_write",
                                     args={
                                         "kind": "case",
-                                        "scope": "task",
                                         "title": "Minion compact contract",
                                         "summary": "Minion memory should be returned as a candidate for Pal to review.",
                                         "topics": ["minion", "memory"],
-                                        "payload": {"source": "test"},
+                                        "star": {
+                                            "situation": "A minion found reusable task-continuity behavior.",
+                                            "task": "Return the reusable lesson for Pal review.",
+                                            "action": "Recorded it as an ephemeral memory candidate.",
+                                            "result": "Pal can review it before durable absorption.",
+                                        },
                                     },
                                 )
                             ],
@@ -23415,7 +23419,8 @@ class MinionManagerTests(unittest.TestCase):
             self.assertEqual(candidates[0]["title"], "Minion compact contract")
             self.assertIn("Pal to review", candidates[0]["summary"])
             self.assertEqual(candidates[0]["topics"], ["minion", "memory"])
-            self.assertEqual(candidates[0]["payload"], {"source": "test"})
+            self.assertEqual(candidates[0]["payload"]["situation"], "A minion found reusable task-continuity behavior.")
+            self.assertEqual(candidates[0]["payload"]["result"], "Pal can review it before durable absorption.")
 
         asyncio.run(scenario())
 
@@ -23611,9 +23616,9 @@ class MinionManagerTests(unittest.TestCase):
             self.assertIn("read_web", hit_names)
             self.assertIn("recall_memory", hit_names)
             self.assertNotIn("minion_dispatch_workflow", hit_names)
-            self.assertNotIn("write_memory", hit_names)
+            self.assertNotIn("remember_memory", hit_names)
             self.assertNotIn("update_memory", hit_names)
-            self.assertNotIn("delete_memory", hit_names)
+            self.assertNotIn("forget_memory", hit_names)
 
             denied_read = await scoped.execute_tool_async(CanonicalToolCall(name="read_tool", args={"name": "minion_dispatch_workflow"}))
             self.assertEqual(denied_read.status, RuntimeStatus.NOT_FOUND)
@@ -26922,6 +26927,12 @@ class MinionIntegrationTests(unittest.TestCase):
                                     "summary": "Use the compact contract when minions need reusable memory.",
                                     "topics": ["minion", "memory"],
                                     "payload": {"source": "test"},
+                                    "star": {
+                                        "situation": "Minions need reusable memory without writing durable L3 directly.",
+                                        "task": "Record a candidate for Pal approval.",
+                                        "action": "Use the compact contract and memory candidate approval path.",
+                                        "result": "The candidate can be committed only after Pal/user acceptance.",
+                                    },
                                 }
                             ],
                         },
@@ -26937,7 +26948,9 @@ class MinionIntegrationTests(unittest.TestCase):
             self.assertEqual(call.args["title"], "Reusable minion pattern")
             self.assertEqual(call.args["search_text"], "Use the compact contract when minions need reusable memory.")
             self.assertEqual(call.args["task_id"], "wo_memory_accept")
-            self.assertEqual(call.args["payload"], {"source": "test"})
+            self.assertEqual(call.args["payload"]["source"], "test")
+            self.assertEqual(call.args["payload"]["situation"], "Minions need reusable memory without writing durable L3 directly.")
+            self.assertEqual(call.args["star"]["result"], "The candidate can be committed only after Pal/user acceptance.")
 
     def test_minion_lesson_reject_button_does_not_absorb_lessons(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_lesson_reject_") as tmp:
