@@ -188,14 +188,15 @@ def _required_params_from_schema(schema: object) -> list[str]:
     return [str(item) for item in required if str(item).strip()]
 
 
-def _llm_capability_contract(capability: dict[str, object]) -> dict[str, object]:
+def _llm_capability_contract(capability: dict[str, object], *, full_description: bool = False) -> dict[str, object]:
     parameters_schema = replace_internal_tool_names_in_value(
         dict(capability.get("parameters_schema") or {"type": "object", "properties": {}})
     )
     canonical = str(capability.get("canonical_path") or capability.get("name") or "").strip()
+    raw_description = replace_internal_tool_names(capability.get("description") or "")
     return {
         "name": llm_tool_name(canonical),
-        "description": _compact_description(capability.get("description")),
+        "description": " ".join(raw_description.strip().split()) if full_description else _compact_description(raw_description),
         "parameters_schema": parameters_schema,
         "required_params": _required_params_from_schema(parameters_schema),
     }
@@ -272,9 +273,12 @@ class ToolCallTool:
         resolve_tool_name = getattr(self.runtime, "resolve_llm_tool_name", None)
         resolved_tool_name = str(resolve_tool_name(target_name) if callable(resolve_tool_name) else target_name).strip()
         canonical_name = str((spec or {}).get("canonical_path") or (spec or {}).get("name") or resolved_tool_name or target_name).strip()
-        if spec is not None and canonical_name != self.name and canonical_name in getattr(self.runtime, "tools", {}):
-            result = await self.runtime.execute_tool_async(
+        execute_tool_async = getattr(self.runtime, "execute_tool_async", None)
+        if callable(execute_tool_async) and canonical_name != self.name:
+            result = await execute_tool_async(
                 CanonicalToolCall(name=canonical_name, args=capability_args),
+                allow_tools=bool(kwargs.get("allow_tools", True)),
+                budget=kwargs.get("budget"),
                 turn_id=str(kwargs.get("turn_id") or ""),
             )
             return CapabilityResult(
@@ -283,18 +287,15 @@ class ToolCallTool:
                 structured=result.structured,
                 llm_text=getattr(result, "llm_text", ""),
             )
-        if spec is None and canonical_name != self.name and canonical_name in getattr(self.runtime, "tools", {}):
-            result = await self.runtime.execute_tool_async(
-                CanonicalToolCall(name=canonical_name, args=capability_args),
-                turn_id=str(kwargs.get("turn_id") or ""),
-            )
-            return CapabilityResult(
-                status=result.status,
-                text=result.text,
-                structured=result.structured,
-                llm_text=getattr(result, "llm_text", ""),
-            )
-        return await self.runtime.execute_async(CapabilityCall(name=target_name, args=capability_args, meta=meta))
+        execute_async = getattr(self.runtime, "execute_async", None)
+        if callable(execute_async):
+            return await execute_async(CapabilityCall(name=target_name, args=capability_args, meta=meta))
+        return CapabilityResult(
+            status=RuntimeStatus.NOT_FOUND,
+            text=f"unknown capability: {target_name}",
+            structured={"reason": "unknown_capability", "capability": target_name},
+            llm_text=f"unknown capability: {target_name}",
+        )
 
 
 class ExecutionDiscoveryCapabilityMixin:
@@ -646,7 +647,7 @@ class ToolReadTool:
                 structured={"reason": "capability_not_found"},
                 llm_text="capability not found",
             )
-        projected = _llm_capability_contract(capability)
+        projected = _llm_capability_contract(capability, full_description=True)
         return CapabilityResult(
             status=RuntimeStatus.OK,
             text="capability definition",

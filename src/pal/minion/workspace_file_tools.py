@@ -115,6 +115,7 @@ async def workspace_file_tool_result(
     base_runtime: Any,
     *,
     allow_tools: bool = True,
+    budget: Any = None,
     turn_id: str | None = None,
 ) -> CanonicalToolResult:
     try:
@@ -136,6 +137,7 @@ async def workspace_file_tool_result(
     result = await base_runtime.execute_tool_async(
         CanonicalToolCall(name=tool_name, args=tool_args, call_id=call.call_id),
         allow_tools=allow_tools,
+        budget=budget,
         turn_id=turn_id,
     )
     return _workspace_result(call, result, relative=relative, absolute=absolute)

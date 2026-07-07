@@ -9,7 +9,6 @@ from pal.minion.workflow import canonical_profile_ref
 from pal.minion.work_order import new_work_id
 
 
-SOFTWARE_ENGINEERING_FAMILY = "software_engineering"
 DEFAULT_GENERIC_EXECUTOR_PROFILE = "general.generic"
 
 
@@ -19,10 +18,12 @@ class ExecutorResolution:
     source: str
 
 
-def dag_producer_profile_for_family(profile_family: str) -> str:
+def dag_producer_profile_for_family(profile_family: str, *, registry: MinionProfileRegistry | None = None) -> str:
     family = _profile_ref_text(profile_family)
-    if family == SOFTWARE_ENGINEERING_FAMILY:
-        return "software_engineering.architect"
+    profile_registry = registry or MinionProfileRegistry()
+    manifest = profile_registry.family_registry().get(family)
+    if manifest is not None:
+        return str(manifest.dag_producer_profile or "").strip()
     return ""
 
 
@@ -41,6 +42,10 @@ def resolve_default_executor_profile(
         candidate = _executor_profile_from_mapping(metadata)
         if candidate:
             return ExecutorResolution(_canonical_executor(candidate, profile_family=family), source_name)
+
+    manifest = registry.family_registry().get(family)
+    if manifest is not None and manifest.default_executor_profile:
+        return ExecutorResolution(manifest.default_executor_profile, "family_manifest_default_executor")
 
     if family == "general":
         return ExecutorResolution(DEFAULT_GENERIC_EXECUTOR_PROFILE, "builtin_general_generic")

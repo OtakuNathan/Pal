@@ -19,6 +19,13 @@ from pal.core.dispatcher import EventDispatcher
 from pal.core.failure_orchestrator import FailureHandlingResult, FailureOrchestrator
 from pal.core.main_context import MainContext
 from pal.core.module_lifecycle import ModuleLifecycle
+from pal.core.prompt_debug_log import (
+    append_prompt_debug_log,
+    render_llm_outcome_debug_log,
+    render_prompt_debug_log,
+    render_reply_debug_log,
+    summarize_last_provider_payload,
+)
 from pal.core.prompt_compiler import PromptCompiler
 from pal.core.tool_stagnation import ToolStagnationGuardProcess
 from pal.core.tool_surface import ToolSurface
@@ -1587,15 +1594,6 @@ class PalCore:
             )
             raise
 
-    def _truncate_tool_result_for_l1(self, content: str) -> str:
-        max_chars = max(0, int(getattr(self.config, "l1_tool_result_max_chars", 8_000) or 0))
-        if not max_chars or len(content) <= max_chars:
-            return content
-        configured_preview = int(getattr(self.config, "l1_tool_result_preview_chars", 4_000) or 0)
-        preview_chars = max(1, min(configured_preview or max_chars, max_chars))
-        preview = content[:preview_chars].rstrip()
-        return f"{preview}\n\n[... truncated, original: {len(content)} chars]"
-
     def _enrich_transcript_with_tool_protocol(self, outcome: TurnOutcome, continuation: TurnContinuation) -> TurnOutcome:
         from pal.memory.contracts import L1MessageKind, L1TranscriptMessage
 
@@ -1806,20 +1804,7 @@ class PalCore:
         request = _last_arg_of_type(args, CanonicalLLMRequest)
         if request is None:
             return
-        self._append_prompt_log(
-            "\n".join(
-                [
-                    "=== PAL PROMPT DEBUG ===",
-                    "--- request.messages ---",
-                    str(request.messages),
-                    "--- request.multimodal ---",
-                    _summarize_multimodal_prompt(request.messages),
-                    "--- request.tools ---",
-                    str(request.tools),
-                    "=== END PAL PROMPT DEBUG ===",
-                ]
-            )
-        )
+        self._append_prompt_log(render_prompt_debug_log(request, context=self._prompt_debug_context(*args)))
 
     def _debug_log_outcome(self, *args) -> None:
         if not self._prompt_log_enabled_from_args(*args):
@@ -1827,20 +1812,12 @@ class PalCore:
         outcome = _last_arg_of_type(args, CanonicalLLMOutcome)
         if outcome is None:
             return
-        provider_payload = _summarize_last_provider_payload(self.context.port_registry.get("llm:llm"))
+        provider_payload = summarize_last_provider_payload(self.context.port_registry.get("llm:llm"))
         self._append_prompt_log(
-            "\n".join(
-                [
-                    "=== PAL LLM OUTCOME ===",
-                    "--- provider.payload ---",
-                    provider_payload,
-                    f"finish_reason: {outcome.finish_reason}",
-                    f"response_mode: {outcome.response_mode}",
-                    f"tool_calls: {outcome.tool_calls}",
-                    f"reasoning_text (first 500): {str(outcome.reasoning_text or '')[:500]}",
-                    f"text (first 2000): {str(outcome.text or '')[:2000]}",
-                    "=== END PAL LLM OUTCOME ===",
-                ]
+            render_llm_outcome_debug_log(
+                outcome,
+                provider_payload=provider_payload,
+                context=self._prompt_debug_context(*args),
             )
         )
 
@@ -1848,15 +1825,14 @@ class PalCore:
         if not self._prompt_log_enabled_from_args(*args):
             return
         text = str(args[-1] if args else "")
-        self._append_prompt_log(
-            "\n".join(
-                [
-                    "=== PAL TG REPLY ===",
-                    text,
-                    "=== END PAL TG REPLY ===",
-                ]
-            )
-        )
+        self._append_prompt_log(render_reply_debug_log(text, context=self._prompt_debug_context(*args)))
+
+    @staticmethod
+    def _prompt_debug_context(*args) -> dict[str, Any]:
+        for item in args:
+            if isinstance(item, TurnContinuation):
+                return {"turn_id": item.turn_id}
+        return {}
 
     def _prompt_log_enabled_from_args(self, *args) -> bool:
         for item in args:
@@ -1873,9 +1849,7 @@ class PalCore:
             print(text)
             return
         log_path = pal_log_path(Path(root))
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as handle:
-            handle.write(text.rstrip() + "\n")
+        append_prompt_debug_log(log_path, text)
 
     def _schedule_post_turn_commit(self, outcome: TurnOutcome) -> None:
         asyncio.run(self._schedule_post_turn_commit_async(outcome))
@@ -1937,44 +1911,3 @@ def _last_arg_of_type(args: tuple[Any, ...], expected_type):
         if isinstance(item, expected_type):
             return item
     return None
-
-
-def _summarize_multimodal_prompt(messages: list[dict[str, Any]]) -> str:
-    items: list[dict[str, Any]] = []
-    for index, message in enumerate(messages):
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
-                continue
-            part_type = str(part.get("type") or "")
-            if part_type == "artifact_image":
-                items.append(
-                    {
-                        "message_index": index,
-                        "type": "artifact_image",
-                        "artifact_id": part.get("artifact_id"),
-                        "representation_id": part.get("representation_id"),
-                        "mime_type": part.get("mime_type"),
-                        "bytes": "omitted",
-                    }
-                )
-            elif part_type == "image_url":
-                url = str((part.get("image_url") or {}).get("url") or "")
-                items.append(
-                    {
-                        "message_index": index,
-                        "type": "image_url",
-                        "url_prefix": url[:32],
-                        "url_length": len(url),
-                        "bytes": "omitted",
-                    }
-                )
-    return str(items)
-
-
-def _summarize_last_provider_payload(llm_runtime: Any) -> str:
-    invoker = getattr(llm_runtime, "endpoint_invoker", None)
-    summary = getattr(invoker, "last_payload_summary", None)
-    return str(summary or {})

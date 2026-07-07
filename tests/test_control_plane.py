@@ -903,7 +903,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("'tool_call_id': 'call_debug_1'", content)
             self.assertIn("debug tool result", content)
             self.assertIn("=== PAL LLM OUTCOME ===", content)
-            self.assertIn("=== PAL TG REPLY ===", content)
+            self.assertIn("=== PAL REPLY ===", content)
 
     async def test_prompt_log_skips_when_turn_snapshot_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

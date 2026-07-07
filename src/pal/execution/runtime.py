@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -356,7 +357,17 @@ class ExecutionRuntime(ExecutionRuntimePort):
             async_invoke = getattr(tool, "ainvoke", None)
             if callable(async_invoke):
                 try:
-                    result = await async_invoke(dict(call.args), runtime=self, turn_id=turn_id)
+                    result = await async_invoke(
+                        dict(call.args),
+                        **_tool_invoke_kwargs(
+                            async_invoke,
+                            runtime=self,
+                            turn_id=turn_id,
+                            tool_call=call,
+                            budget=budget,
+                            allow_tools=allow_tools,
+                        ),
+                    )
                     canonical = CanonicalToolResult(
                         name=call.name,
                         ok=result.status == RuntimeStatus.OK,
@@ -392,15 +403,14 @@ class ExecutionRuntime(ExecutionRuntimePort):
     ) -> CanonicalToolResult:
         if budget is None:
             return result
-        normalized = self._apply_shell_exec_budget(call, result, budget=budget)
-        rendered = self._render_result_payload(normalized)
+        rendered = self._render_result_payload(result)
         original_size = len(rendered)
         char_limit = self._resolve_char_limit(budget)
         if char_limit is None or original_size <= char_limit:
-            return normalized
+            return result
         preview_chars = max(256, int(budget.preview_chars or 1000))
         page_size = min(preview_chars, char_limit)
-        result_ref = str(call.call_id or normalized.call_id or "").strip() or f"call_{uuid4().hex[:12]}"
+        result_ref = str(call.call_id or result.call_id or "").strip() or f"call_{uuid4().hex[:12]}"
         turn_id = str(budget.artifact_bucket_id or result_ref)
         result_handle = None
         preview_payload = ""
@@ -411,8 +421,8 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 turn_id=turn_id,
                 result_ref=result_ref,
                 tool_name=call.name,
-                status=normalized.status,
-                ok=normalized.ok,
+                status=result.status,
+                ok=result.ok,
                 rendered=rendered,
                 page_size=page_size,
             )
@@ -423,11 +433,11 @@ class ExecutionRuntime(ExecutionRuntimePort):
         if not preview_payload:
             preview_text, preview_size = render_head_tail_preview_for_llm(rendered, max_chars=page_size)
             preview_payload = (
-                f'<tool_result page="1" page_count="1" has_more="false" status="{normalized.status}">\n'
+                f'<tool_result page="1" page_count="1" has_more="false" status="{result.status}">\n'
                 f"{preview_text}\n"
                 f"</tool_result>"
             ).strip()
-        structured = dict(normalized.structured or {})
+        structured = dict(result.structured or {})
         structured.update(
             {
                 "truncated": True,
@@ -441,56 +451,14 @@ class ExecutionRuntime(ExecutionRuntimePort):
             }
         )
         return CanonicalToolResult(
-            name=normalized.name,
-            ok=normalized.ok,
-            text=preview_payload,
-            structured=structured,
-            call_id=normalized.call_id or result_ref,
-            llm_text=preview_payload,
-            status=normalized.status,
-            result_handle=result_handle,
-        )
-
-    def _apply_shell_exec_budget(
-        self,
-        call: CanonicalToolCall,
-        result: CanonicalToolResult,
-        *,
-        budget: ToolCallBudget,
-    ) -> CanonicalToolResult:
-        if call.name not in {"op_exec_shell", "run_shell", "shell_exec"}:
-            return result
-        structured = dict(result.structured or {})
-        max_lines = budget.max_lines_to_read
-        max_stdout_chars = budget.max_stdout_chars
-        changed = False
-        for key in ("stdout", "stderr", "display_text"):
-            value = structured.get(key)
-            if not isinstance(value, str):
-                continue
-            truncated_value, line_truncated = _truncate_linewise(value, max_lines=max_lines)
-            if max_stdout_chars is not None and len(truncated_value) > max_stdout_chars:
-                truncated_value = truncated_value[:max_stdout_chars].rstrip()
-                line_truncated = True
-            if truncated_value != value:
-                structured[key] = truncated_value
-                structured[f"{key}_truncated"] = True
-                if line_truncated and max_lines is not None:
-                    structured[f"{key}_line_limit"] = max_lines
-                changed = True
-        if not changed:
-            return result
-        display_text = str(structured.get("display_text") or result.text or result.llm_text or "").strip()
-        if not display_text:
-            display_text = result.text or result.llm_text
-        return CanonicalToolResult(
             name=result.name,
             ok=result.ok,
-            text=display_text,
+            text=preview_payload,
             structured=structured,
-            call_id=result.call_id,
-            llm_text=display_text,
+            call_id=result.call_id or result_ref,
+            llm_text=preview_payload,
             status=result.status,
+            result_handle=result_handle,
         )
 
     def _resolve_char_limit(self, budget: ToolCallBudget) -> int | None:
@@ -763,24 +731,6 @@ class ExecutionRuntime(ExecutionRuntimePort):
                 self._interrupt_handles.pop(turn_id, None)
 
 
-def _truncate_linewise(text: str, *, max_lines: int | None) -> tuple[str, bool]:
-    if not isinstance(max_lines, int) or max_lines <= 0:
-        return text, False
-    lines = text.splitlines()
-    if len(lines) <= max_lines:
-        return text, False
-    head_count = max(1, max_lines // 2)
-    tail_count = max(1, max_lines - head_count)
-    head = "\n".join(lines[:head_count]).rstrip()
-    tail = "\n".join(lines[-tail_count:]).lstrip()
-    omitted = max(0, len(lines) - head_count - tail_count)
-    marker = (
-        f"\n\n[... omitted {omitted} lines, showing first {head_count} "
-        f"and last {tail_count} of {len(lines)} lines]\n\n"
-    )
-    return f"{head}{marker}{tail}".strip(), True
-
-
 def _target_id_required_result(
     *,
     available_target_ids: list[str],
@@ -811,6 +761,17 @@ def _target_id_required_result(
 
 def _descriptor_base_name(name: str) -> str:
     return str(name or "").split("::", 1)[0]
+
+
+def _tool_invoke_kwargs(invoke: Any, **kwargs: Any) -> dict[str, Any]:
+    try:
+        signature = inspect.signature(invoke)
+    except (TypeError, ValueError):
+        return dict(kwargs)
+    parameters = signature.parameters
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+        return dict(kwargs)
+    return {key: value for key, value in kwargs.items() if key in parameters}
 
 
 def _capability_spec_payload(descriptor: CapabilityDescriptor) -> dict[str, Any]:

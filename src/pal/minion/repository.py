@@ -66,7 +66,7 @@ _CONTINUITY_TEXT_LIMIT = 500
 _WORK_ORDER_DRAFT_TEXT_LIMIT = 4000
 _WORK_ORDER_DRAFT_ITEM_TEXT_LIMIT = 1000
 _WORK_ORDER_DRAFT_METADATA_VALUE_LIMIT = 12000
-_RUN_WORKSPACE_KEYS = {"run_dir", "artifact_dir", "log_dir"}
+_RUN_WORKSPACE_KEYS = {"run_dir", "artifact_dir", "artifact_stage_dir", "log_dir"}
 _PROFILE_SCOPED_WORKSPACE_KEYS = {
     "checkpoint_policy",
     "workspace_policy",

@@ -25,15 +25,20 @@ from pal.memory.contracts import (
 )
 from pal.memory.embedding import (
     DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_OLLAMA_FALLBACK_COOLDOWN_SECONDS,
     DEFAULT_OLLAMA_KEEP_ALIVE,
+    DEFAULT_OLLAMA_LOCAL_TIMEOUT_SECONDS,
     DEFAULT_OLLAMA_MODEL_NAME,
     DEFAULT_OLLAMA_PROVIDER_ID,
+    DEFAULT_OLLAMA_REMOTE_TIMEOUT_SECONDS,
     EmbeddingProviderPort,
     EmbeddingRuntimePort,
     HashingEmbedder,
     InProcBGEEmbeddingProvider,
     OllamaEmbeddingProvider,
+    OllamaFallbackEmbeddingProvider,
     SentenceTransformerBGEEmbedder,
+    build_ollama_embedding_provider_from_config,
 )
 from pal.memory.capabilities import MemoryIntrospectionProvider, MemorySnapshot, inspect_memory, register_with_core
 from pal.memory.models import MemoryCaseModel, MemoryEmbeddingModel, MemoryEmbeddingVecModel, MemoryFactModel, MemoryTopicModel
@@ -43,9 +48,12 @@ from pal.memory.service import MemoryService
 
 __all__ = [
     "DEFAULT_OLLAMA_BASE_URL",
+    "DEFAULT_OLLAMA_FALLBACK_COOLDOWN_SECONDS",
     "DEFAULT_OLLAMA_KEEP_ALIVE",
+    "DEFAULT_OLLAMA_LOCAL_TIMEOUT_SECONDS",
     "DEFAULT_OLLAMA_MODEL_NAME",
     "DEFAULT_OLLAMA_PROVIDER_ID",
+    "DEFAULT_OLLAMA_REMOTE_TIMEOUT_SECONDS",
     "CompactionProfile",
     "EmbeddingProviderPort",
     "EmbeddingRuntimePort",
@@ -84,7 +92,9 @@ __all__ = [
     "MemoryServicePort",
     "MemoryTopicModel",
     "OllamaEmbeddingProvider",
+    "OllamaFallbackEmbeddingProvider",
     "SentenceTransformerBGEEmbedder",
+    "build_ollama_embedding_provider_from_config",
     "ensure_memory_schema",
     "ensure_sqlite_vec_loaded",
     "inspect_memory",

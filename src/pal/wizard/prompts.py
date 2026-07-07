@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from pal.wizard.config_file import DEFAULT_MEMORY_EMBEDDING_MODEL
+
 
 # ---------------------------------------------------------------------------
 # Model metadata query (ported from old wizard)
@@ -56,6 +58,7 @@ DEFAULT_CODEX_WIZARD_MODELS = (
 )
 DEFAULT_CODEX_CONTEXT_WINDOW = 200_000
 DEFAULT_CODEX_MAX_OUTPUT_TOKENS = 32_768
+WIZARD_STEP_TOTAL = 5
 
 
 def _models_url_from_base(base_url: str, model_id: str) -> str:
@@ -216,11 +219,18 @@ class WizardChannel:
 
 
 @dataclass
+class WizardMemoryEmbedding:
+    remote_ollama_base_urls: list[str] = field(default_factory=list)
+    model_name: str = DEFAULT_MEMORY_EMBEDDING_MODEL
+
+
+@dataclass
 class WizardCollectedData:
     identity: WizardIdentity
     endpoints: list[WizardLLMEndpoint]
     channel: WizardChannel
     active_endpoint_id: str
+    memory_embedding: WizardMemoryEmbedding = field(default_factory=WizardMemoryEmbedding)
 
 
 @dataclass(frozen=True)
@@ -280,7 +290,7 @@ def prompt_runtime_home() -> Path:
 
 
 def prompt_identity(current: WizardIdentity | None = None) -> WizardIdentity:
-    _print_step(1, 4, "Identity")
+    _print_step(1, WIZARD_STEP_TOTAL, "Identity")
 
     display_name = ask("Pal's display name", current.display_name if current else "Pal")
     language = ask("Language (en, zh, ja, ...)", current.language if current else "en")
@@ -676,7 +686,7 @@ def prompt_llm_endpoints_with_current(
     current_endpoints: list[WizardLLMEndpoint] | None = None,
     current_active_endpoint_id: str | None = None,
 ) -> tuple[list[WizardLLMEndpoint], str]:
-    _print_step(2, 4, "LLM Endpoints")
+    _print_step(2, WIZARD_STEP_TOTAL, "LLM Endpoints")
     print("(Codex uses your local Codex CLI subscription login.)")
     print("(OpenAI and Anthropic are API formats; compatible providers also work.)\n")
 
@@ -741,7 +751,7 @@ def prompt_llm_endpoints_with_current(
 
 
 def prompt_channel(runtime_root: Path, current: WizardChannel | None = None) -> WizardChannel:
-    _print_step(3, 4, "Channel")
+    _print_step(3, WIZARD_STEP_TOTAL, "Channel")
 
     if current is not None:
         print(f"  Existing channel: {current.channel_kind} ({current.binding_key})")
@@ -790,8 +800,51 @@ def prompt_channel(runtime_root: Path, current: WizardChannel | None = None) -> 
     )
 
 
+def _parse_remote_ollama_urls(raw: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for chunk in str(raw or "").replace("\n", ",").split(","):
+        url = chunk.strip().rstrip("/")
+        if not url:
+            continue
+        if "://" not in url:
+            url = f"http://{url}"
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def prompt_memory_embedding(current: WizardMemoryEmbedding | None = None) -> WizardMemoryEmbedding:
+    _print_step(4, WIZARD_STEP_TOTAL, "Memory Embeddings")
+    current_urls = list(current.remote_ollama_base_urls if current else [])
+    current_model = current.model_name if current and current.model_name else DEFAULT_MEMORY_EMBEDDING_MODEL
+
+    print("  Memory embeddings use Ollama bge-m3 by default.")
+    print("  Remote endpoints, when configured, are tried before local Ollama.")
+    if current_urls:
+        print("  Current remote endpoints:")
+        for url in current_urls:
+            print(f"    {url}")
+    print()
+
+    remote_urls: list[str] = []
+    if ask_yes_no("  Use remote Ollama before local fallback", bool(current_urls)):
+        raw = ask(
+            "  Remote Ollama base URL(s), comma-separated",
+            ", ".join(current_urls),
+        )
+        remote_urls = _parse_remote_ollama_urls(raw)
+        if not remote_urls:
+            print("  No remote URL entered; memory embeddings will use local Ollama only.")
+
+    model_name = ask("  Embedding model", current_model) or DEFAULT_MEMORY_EMBEDDING_MODEL
+    return WizardMemoryEmbedding(remote_ollama_base_urls=remote_urls, model_name=model_name)
+
+
 def prompt_review(data: WizardCollectedData, runtime_root: Path) -> bool:
-    _print_step(4, 4, "Review")
+    _print_step(5, WIZARD_STEP_TOTAL, "Review")
 
     id = data.identity
     print(f"  Home:        {runtime_root}")
@@ -824,6 +877,15 @@ def prompt_review(data: WizardCollectedData, runtime_root: Path) -> bool:
         print(f"  Recovery:    socket ({recovery_socket_path})")
 
     print()
+    mem = data.memory_embedding
+    if mem.remote_ollama_base_urls:
+        print(f"  Embedding:   remote Ollama -> local fallback ({mem.model_name})")
+        for url in mem.remote_ollama_base_urls:
+            print(f"    Remote:    {url}")
+    else:
+        print(f"  Embedding:   local Ollama ({mem.model_name})")
+
+    print()
     return ask_yes_no("  Proceed?", True)
 
 
@@ -847,12 +909,14 @@ def run_interactive_wizard(
         current.active_endpoint_id if current else None,
     )
     channel = prompt_channel(runtime_root, current.channel if current else None)
+    memory_embedding = prompt_memory_embedding(current.memory_embedding if current else None)
 
     data = WizardCollectedData(
         identity=identity,
         endpoints=endpoints,
         channel=channel,
         active_endpoint_id=active_endpoint_id,
+        memory_embedding=memory_embedding,
     )
 
     if not prompt_review(data, runtime_root):

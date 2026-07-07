@@ -11,7 +11,6 @@ from uuid import uuid4
 
 from pal.execution.contracts import CapabilityResult
 from pal.shared import RuntimeStatus
-from pal.shared.result_rendering import render_head_tail_preview_for_llm
 
 
 GIT_TOOL_DESCRIPTION = (
@@ -193,7 +192,6 @@ class GitTool:
     tags: tuple[str, ...] = ("git", "repository", "diff", "history", "system")
     keywords: tuple[str, ...] = ("git", "status", "diff", "log", "show", "restore", "revert")
     default_timeout_ms: int = 30_000
-    default_output_limit: int = 12_000
     args_schema: dict[str, Any] = field(default_factory=dict)
     result_schema: dict[str, Any] = field(default_factory=dict)
 
@@ -205,7 +203,6 @@ class GitTool:
                     "cmd": {"type": "string", "description": GIT_TOOL_CMD_DESCRIPTION},
                     "cwd": {"type": "string", "description": "Optional repository working directory."},
                     "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional timeout in milliseconds."},
-                    "output_limit": {"type": "integer", "minimum": 256, "description": "Maximum stdout/stderr characters kept."},
                 },
                 "required": ["cmd"],
                 "additionalProperties": False,
@@ -234,6 +231,9 @@ class GitTool:
             }
 
     def invoke(self, args: dict[str, Any]) -> CapabilityResult:
+        return self._invoke(args, budget=None)
+
+    def _invoke(self, args: dict[str, Any], *, budget: Any = None) -> CapabilityResult:
         cmd = str(args.get("cmd") or "").strip()
         if not cmd:
             return _err(RuntimeStatus.INVALID, "cmd is required", error_code="MISSING_CMD")
@@ -249,11 +249,10 @@ class GitTool:
 
         cwd = _resolve_cwd(args.get("cwd"))
         timeout_ms = _positive_int(args.get("timeout_ms"), default=self.default_timeout_ms, minimum=1)
-        output_limit = _positive_int(args.get("output_limit"), default=self.default_output_limit, minimum=256)
         before = _git_snapshot(cwd) if policy.is_mutation else {}
         completed = _run_git(policy.tokens, cwd=cwd, timeout_ms=timeout_ms)
-        stdout, stdout_truncated = _truncate(completed.stdout or "", output_limit)
-        stderr, stderr_truncated = _truncate(completed.stderr or "", output_limit)
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
         after = _git_snapshot(cwd) if policy.is_mutation else {}
         ok = completed.returncode == 0
         display = _render_git_result(
@@ -272,8 +271,8 @@ class GitTool:
             "returncode": completed.returncode,
             "stdout": stdout,
             "stderr": stderr,
-            "stdout_truncated": stdout_truncated,
-            "stderr_truncated": stderr_truncated,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
             "timeout_ms": timeout_ms,
         }
         if policy.is_mutation:
@@ -286,9 +285,7 @@ class GitTool:
         )
 
     async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
-        _ = kwargs
-        return self.invoke(args)
-
+        return self._invoke(args, budget=kwargs.get("budget"))
 
 def classify_git_command(cmd: object) -> GitCommandPolicy:
     raw = str(cmd or "").strip()
@@ -527,13 +524,6 @@ def _render_git_result(
             audit.append("output:\n" + body)
         return "\n".join(audit).strip()
     return f"{heading}\n{body}".strip() if body else heading
-
-
-def _truncate(text: str, limit: int) -> tuple[str, bool]:
-    if len(text) <= limit:
-        return text, False
-    preview, _preview_size = render_head_tail_preview_for_llm(text, max_chars=limit)
-    return preview, True
 
 
 def _blocked_text(policy: GitCommandPolicy) -> str:

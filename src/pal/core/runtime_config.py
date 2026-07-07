@@ -44,6 +44,13 @@ class RuntimeConfig:
     keep_recent_tool_messages: int = 5
     l1_tool_result_max_chars: int = 8_000
     l1_tool_result_preview_chars: int = 4_000
+    embedding_ollama_remote_base_urls: tuple[str, ...] = ()
+    embedding_ollama_local_base_url: str = "http://127.0.0.1:11434"
+    embedding_ollama_model_name: str = "bge-m3"
+    embedding_ollama_keep_alive: str = "5m"
+    embedding_ollama_remote_timeout_seconds: float = 8.0
+    embedding_ollama_local_timeout_seconds: float = 120.0
+    embedding_ollama_fallback_cooldown_seconds: float = 3600.0
 
     @classmethod
     def load(cls, runtime_root: Path | None) -> RuntimeConfig:
@@ -94,7 +101,20 @@ class RuntimeConfig:
             "keep_recent_tool_messages": int,
             "l1_tool_result_max_chars": int,
             "l1_tool_result_preview_chars": int,
+            "embedding_ollama_local_base_url": str,
+            "embedding_ollama_model_name": str,
+            "embedding_ollama_keep_alive": str,
+            "embedding_ollama_remote_timeout_seconds": float,
+            "embedding_ollama_local_timeout_seconds": float,
+            "embedding_ollama_fallback_cooldown_seconds": float,
         })
+        memory_section = raw.get("memory")
+        if isinstance(memory_section, dict):
+            remote_urls = memory_section.get("embedding_ollama_remote_base_urls")
+            if remote_urls is None:
+                remote_urls = memory_section.get("embedding_ollama_remote_base_url")
+            if remote_urls is not None:
+                kwargs["embedding_ollama_remote_base_urls"] = cls._string_tuple(remote_urls)
         return cls(**kwargs)
 
     @staticmethod
@@ -119,6 +139,24 @@ class RuntimeConfig:
                 kwargs[field_name] = field_type(value)
             except (ValueError, TypeError):
                 pass
+
+    @staticmethod
+    def _string_tuple(value: object) -> tuple[str, ...]:
+        if isinstance(value, str):
+            items = value.replace("\n", ",").split(",")
+        elif isinstance(value, (list, tuple)):
+            items = list(value)
+        else:
+            return ()
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            text = str(item or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            normalized.append(text)
+        return tuple(normalized)
 
     @classmethod
     def defaults(cls) -> RuntimeConfig:

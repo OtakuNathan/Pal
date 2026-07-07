@@ -17,7 +17,6 @@ from pal.shared import (
     RuntimeStatus,
     capability_action,
 )
-from pal.shared.result_rendering import render_head_tail_preview_for_llm
 
 
 SHELL_EXEC_DESCRIPTION = (
@@ -42,13 +41,6 @@ SHELL_EXEC_CMD_DESCRIPTION = (
     "For Pal runtime/module/minion/capability state or actions, use built-in Pal tools before shell. "
     "In minion workspaces, do not run git add/commit/reset/checkout/clean/merge/rebase/push for checkpointing; use the dedicated checkpoint commit capability instead."
 )
-
-def _truncate(text: str, limit: int) -> tuple[str, bool]:
-    if len(text) <= limit:
-        return text, False
-    preview, _preview_size = render_head_tail_preview_for_llm(text, max_chars=limit)
-    return preview, True
-
 
 @dataclass(unsafe_hash=True)
 class _TrackedShellProcess:
@@ -124,7 +116,6 @@ class ShellExecTool:
     args_schema: dict[str, object] = None  # type: ignore[assignment]   
     result_schema: dict[str, object] = None  # type: ignore[assignment]
     default_timeout_ms: int = 30_000
-    default_output_limit: int = 12_000
     shell_path: str = ""
 
     def __post_init__(self) -> None:
@@ -135,11 +126,6 @@ class ShellExecTool:
                     "cmd": {"type": "string", "description": SHELL_EXEC_CMD_DESCRIPTION},
                     "cwd": {"type": "string", "description": "Optional working directory."},
                     "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional timeout in milliseconds."},
-                    "output_limit": {
-                        "type": "integer",
-                        "minimum": 256,
-                        "description": "Maximum characters preserved for stdout and stderr.",
-                    },
                 },
                 "required": ["cmd"],
             }
@@ -172,7 +158,6 @@ class ShellExecTool:
         cwd_value = args.get("cwd")
         cwd = str(cwd_value).strip() if isinstance(cwd_value, str) and cwd_value.strip() else None
         timeout_ms = self._coerce_int(args.get("timeout_ms"), default=self.default_timeout_ms, minimum=1)
-        output_limit = self._coerce_int(args.get("output_limit"), default=self.default_output_limit, minimum=256)
 
         completed = subprocess.run(
             self._build_shell_command(cmd),
@@ -183,8 +168,8 @@ class ShellExecTool:
             check=False,
         )
 
-        stdout, stdout_truncated = _truncate(completed.stdout or "", output_limit)
-        stderr, stderr_truncated = _truncate(completed.stderr or "", output_limit)
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
         ok = completed.returncode == 0
         display_text = (stdout if ok else stderr or stdout).strip()
         if not display_text:
@@ -200,8 +185,8 @@ class ShellExecTool:
                 "returncode": completed.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
-                "stdout_truncated": stdout_truncated,
-                "stderr_truncated": stderr_truncated,
+                "stdout_truncated": False,
+                "stderr_truncated": False,
                 "timeout_ms": timeout_ms,
             },
             llm_text=display_text,
@@ -221,7 +206,6 @@ class ShellExecTool:
         cwd_value = args.get("cwd")
         cwd = str(cwd_value).strip() if isinstance(cwd_value, str) and cwd_value.strip() else None
         timeout_ms = self._coerce_int(args.get("timeout_ms"), default=self.default_timeout_ms, minimum=1)
-        output_limit = self._coerce_int(args.get("output_limit"), default=self.default_output_limit, minimum=256)
         proc = await self._create_async_process(cmd, cwd=cwd)
         tracked = _TrackedShellProcess(proc=proc)
         register = getattr(runtime, "register_interrupt_handle", None)
@@ -254,8 +238,6 @@ class ShellExecTool:
                 release(turn_id, tracked)
         stdout = stdout_bytes.decode("utf-8", errors="replace") if isinstance(stdout_bytes, (bytes, bytearray)) else str(stdout_bytes or "")
         stderr = stderr_bytes.decode("utf-8", errors="replace") if isinstance(stderr_bytes, (bytes, bytearray)) else str(stderr_bytes or "")
-        stdout, stdout_truncated = _truncate(stdout or "", output_limit)
-        stderr, stderr_truncated = _truncate(stderr or "", output_limit)
         ok = proc.returncode == 0
         display_text = (stdout if ok else stderr or stdout).strip()
         if not display_text:
@@ -270,8 +252,8 @@ class ShellExecTool:
                 "returncode": proc.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
-                "stdout_truncated": stdout_truncated,
-                "stderr_truncated": stderr_truncated,
+                "stdout_truncated": False,
+                "stderr_truncated": False,
                 "timeout_ms": timeout_ms,
             },
             llm_text=display_text,
@@ -326,7 +308,6 @@ class ShellExecTool:
             coerced = default
         return max(minimum, coerced)
 
-
 class ShellExecCapabilityMixin:
     @capability_action(
         namespace=OPERATION_NAMESPACE,
@@ -341,11 +322,6 @@ class ShellExecCapabilityMixin:
                 "cmd": {"type": "string", "description": SHELL_EXEC_CMD_DESCRIPTION},
                 "cwd": {"type": "string", "description": "Optional working directory."},
                 "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional timeout in milliseconds."},
-                "output_limit": {
-                    "type": "integer",
-                    "minimum": 256,
-                    "description": "Maximum characters preserved for stdout and stderr.",
-                },
             },
             "required": ["cmd"],
         },

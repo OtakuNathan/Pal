@@ -276,9 +276,9 @@ def _check_ollama_embedding() -> WizardDependencyCheck:
     if not ollama:
         return WizardDependencyCheck(
             check_id="embedding.ollama",
-            title="Ollama embedding model",
+            title="Local Ollama embedding fallback",
             status=CHECK_STATUS_WARN,
-            detail=f"ollama is not on PATH. Memory can run, but `{DEFAULT_OLLAMA_MODEL_NAME}` embeddings will not be available.",
+            detail=f"ollama is not on PATH. Remote memory embeddings can still work, but local `{DEFAULT_OLLAMA_MODEL_NAME}` fallback will not be available.",
             required=False,
             fix=f"Install Ollama, start it, then run: ollama pull {DEFAULT_OLLAMA_MODEL_NAME}",
         )
@@ -287,26 +287,26 @@ def _check_ollama_embedding() -> WizardDependencyCheck:
     if not health.get("healthy"):
         return WizardDependencyCheck(
             check_id="embedding.ollama",
-            title="Ollama embedding model",
+            title="Local Ollama embedding fallback",
             status=CHECK_STATUS_WARN,
-            detail=f"ollama found at {ollama}, but the local server is not healthy: {health.get('last_error') or 'unknown error'}",
+            detail=f"ollama found at {ollama}, but the local fallback server is not healthy: {health.get('last_error') or 'unknown error'}",
             required=False,
             fix=f"Start Ollama, then run: ollama pull {DEFAULT_OLLAMA_MODEL_NAME}",
         )
     if not health.get("model_available"):
         return WizardDependencyCheck(
             check_id="embedding.ollama",
-            title="Ollama embedding model",
+            title="Local Ollama embedding fallback",
             status=CHECK_STATUS_WARN,
-            detail=f"Ollama is running, but `{DEFAULT_OLLAMA_MODEL_NAME}` is not installed.",
+            detail=f"Local Ollama is running, but `{DEFAULT_OLLAMA_MODEL_NAME}` is not installed for fallback.",
             required=False,
             fix=f"ollama pull {DEFAULT_OLLAMA_MODEL_NAME}",
         )
     return WizardDependencyCheck(
         check_id="embedding.ollama",
-        title="Ollama embedding model",
+        title="Local Ollama embedding fallback",
         status=CHECK_STATUS_OK,
-        detail=f"Ollama is running and `{DEFAULT_OLLAMA_MODEL_NAME}` is available.",
+        detail=f"Local Ollama fallback is running and `{DEFAULT_OLLAMA_MODEL_NAME}` is available.",
         required=False,
     )
 

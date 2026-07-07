@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, field
+import inspect
 import json
 from pathlib import Path
 import re
@@ -12,8 +13,10 @@ from uuid import uuid4
 
 from pal.execution import CapabilityResult
 from pal.execution.git_tool import GIT_TOOL_CMD_DESCRIPTION, GIT_TOOL_DESCRIPTION, classify_git_command
+from pal.execution.runtime import ExecutionRuntime
 from pal.foundation import utc_now
-from pal.execution.tool_search import ToolReadTool, ToolSearchTool
+from pal.execution.tool_search import ToolCallTool, ToolReadTool, ToolSearchTool
+from pal.execution.tool_result_pager import ToolResultPageTool
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.memory import L3CommitRequest
 from pal.minion.checklist import (
@@ -42,6 +45,14 @@ from pal.minion.repair_bill_builder import (
 )
 from pal.minion.repository import MinionTaskingRepository
 from pal.minion.review_gate_store import plan_target_key
+from pal.minion.tool_admission import (
+    admit_minion_tool_call,
+    effective_minion_capability_name,
+    effective_minion_tool_args,
+    normalize_minion_allowed_capabilities,
+    normalize_minion_capability_name,
+    resolve_minion_tool_call_alias,
+)
 from pal.minion.utils import coerce_int as _coerce_int
 from pal.minion.workspace_file_tools import WORKSPACE_FILE_TOOL_SPECS, workspace_file_tool_result
 from pal.minion.workspace_tools import _append_unique_artifact, _workspace_tool_result
@@ -59,8 +70,11 @@ from pal.shared import (
 MINION_DISCOVERY_TOOL_SURFACE = (
     "op_tool_search",
     "op_tool_read",
+    "op_tool_result_page",
     "op_tool_call",
 )
+
+MINION_PROTOCOL_CAPABILITIES = ("op_tool_result_page",)
 
 
 MINION_CODE_INTEL_TOOL_SURFACE = (
@@ -160,7 +174,6 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "properties": {
                 "cmd": {"type": "string", "description": GIT_TOOL_CMD_DESCRIPTION},
                 "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional timeout in milliseconds."},
-                "output_limit": {"type": "integer", "minimum": 256, "description": "Maximum stdout/stderr characters kept."},
             },
             "required": ["cmd"],
             "additionalProperties": False,
@@ -569,30 +582,249 @@ def _minion_shell_dedicated_tool_guidance(allowed: set[str]) -> str:
 
 
 def _canonical_minion_capability_name(name: object) -> str:
-    raw = str(name or "").strip()
-    if not raw:
-        return ""
-    if raw in {"shell", "shell_exec", "run_shell"}:
-        return "op_exec_shell"
-    if raw in {"web_search", "search_web"}:
-        return "op_web_search"
-    if raw in {"web_read", "read_web"}:
-        return "op_web_read"
-    if raw in _workspace_tool_specs():
-        return raw
-    if raw.startswith("plan_"):
-        candidate = f"op_minion_{raw}"
-        if candidate in _workspace_tool_specs():
-            return candidate
-    if raw.startswith("minion_plan_"):
-        candidate = f"op_{raw}"
-        if candidate in _workspace_tool_specs():
-            return candidate
-    candidates = tuple(dict.fromkeys((*MINION_DIRECT_WORK_TOOL_SURFACE, *MINION_DISCOVERY_TOOL_SURFACE)))
-    for candidate in candidates:
-        if llm_tool_name(candidate) == raw:
-            return candidate
-    return raw
+    return normalize_minion_capability_name(
+        name,
+        visible_names=tuple(
+            dict.fromkeys(
+                (
+                    *MINION_DIRECT_WORK_TOOL_SURFACE,
+                    *MINION_DISCOVERY_TOOL_SURFACE,
+                    *_workspace_tool_specs().keys(),
+                )
+            )
+        ),
+    )
+
+
+@dataclass
+class _HydratedMinionTool:
+    name: str
+    spec: dict[str, Any]
+    handler: Any
+    display_name: str = ""
+    family: str = "minion"
+    tags: tuple[str, ...] = ("minion",)
+    keywords: tuple[str, ...] = ()
+
+    @property
+    def description(self) -> str:
+        return str(self.spec.get("description") or self.name)
+
+    @property
+    def args_schema(self) -> dict[str, Any]:
+        return dict(self.spec.get("parameters_schema") or {"type": "object", "properties": {}})
+
+    @property
+    def result_schema(self) -> dict[str, Any]:
+        return dict(self.spec.get("result_schema") or {"type": "object", "properties": {}})
+
+    def invoke(self, args: dict[str, Any]) -> CapabilityResult:
+        _ = args
+        return CapabilityResult(
+            status=RuntimeStatus.ERROR,
+            text="minion hydrated tools require async execution",
+            llm_text="minion hydrated tools require async execution",
+            structured={"reason": "async_required"},
+        )
+
+    async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
+        raw_call = kwargs.get("tool_call")
+        call = (
+            raw_call
+            if isinstance(raw_call, CanonicalToolCall)
+            else CanonicalToolCall(name=self.name, args=dict(args or {}))
+        )
+        result = self.handler(call, kwargs)
+        if hasattr(result, "__await__"):
+            result = await result
+        if not isinstance(result, CanonicalToolResult):
+            text = str(result or "tool completed")
+            return CapabilityResult(status=RuntimeStatus.OK, text=text, llm_text=text, structured={})
+        llm_text = default_tool_result_text(result, fallback_ok="tool completed", fallback_error="tool failed")
+        return CapabilityResult(
+            status=result.status or (RuntimeStatus.OK if result.ok else RuntimeStatus.ERROR),
+            text=result.text or llm_text,
+            structured=dict(result.structured or {}),
+            llm_text=llm_text,
+        )
+
+
+def _tool_spec_payload(tool: Any) -> dict[str, Any]:
+    name = str(getattr(tool, "name", "") or "").strip()
+    return {
+        "name": llm_tool_name(name),
+        "canonical_path": name,
+        "display_name": str(getattr(tool, "display_name", "") or name),
+        "family": str(getattr(tool, "family", "") or "general"),
+        "module_id": str(getattr(tool, "module_id", "") or "execution"),
+        "description": replace_internal_tool_names(getattr(tool, "description", "") or f"Tool {name}"),
+        "aliases": list(getattr(tool, "aliases", ()) or ()),
+        "tags": list(getattr(tool, "tags", ()) or ()),
+        "keywords": list(getattr(tool, "keywords", ()) or ()),
+        "parameters_schema": replace_internal_tool_names_in_value(
+            dict(getattr(tool, "args_schema", {}) or {"type": "object", "properties": {}})
+        ),
+        "result_schema": replace_internal_tool_names_in_value(
+            dict(getattr(tool, "result_schema", {}) or {"type": "object", "properties": {}})
+        ),
+    }
+
+
+def _tool_execution_kwargs(
+    execute: Any,
+    *,
+    allow_tools: bool,
+    budget: Any,
+    turn_id: str | None,
+) -> dict[str, Any]:
+    full = {"allow_tools": allow_tools, "budget": budget, "turn_id": turn_id}
+    try:
+        signature = inspect.signature(execute)
+    except (TypeError, ValueError):
+        return full
+    parameters = signature.parameters
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+        return full
+    return {key: value for key, value in full.items() if key in parameters}
+
+
+class _MinionExecutionDecorator:
+    def __init__(self, delegate: Any) -> None:
+        self.delegate = delegate
+        self.tools: dict[str, Any] = {}
+
+    def register_tool(self, tool: Any) -> None:
+        self.tools[str(getattr(tool, "name", "") or "")] = tool
+
+    def list_capability_specs(self) -> list[dict[str, Any]]:
+        specs: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        list_specs = getattr(self.delegate, "list_capability_specs", None)
+        if callable(list_specs):
+            for item in list(list_specs() or []):
+                if not isinstance(item, dict):
+                    continue
+                spec = dict(item)
+                canonical = str(spec.get("canonical_path") or spec.get("name") or "").strip()
+                if canonical:
+                    seen.add(canonical)
+                specs.append(spec)
+        for tool in self.tools.values():
+            spec = _tool_spec_payload(tool)
+            canonical = str(spec.get("canonical_path") or spec.get("name") or "").strip()
+            if canonical and canonical in seen:
+                continue
+            if canonical:
+                seen.add(canonical)
+            specs.append(spec)
+        return specs
+
+    def get_capability_spec(self, name: str) -> dict[str, Any] | None:
+        raw = str(name or "").strip()
+        get_spec = getattr(self.delegate, "get_capability_spec", None)
+        if callable(get_spec):
+            spec = get_spec(raw)
+            if spec is not None:
+                return dict(spec)
+        for tool_name, tool in self.tools.items():
+            if raw == tool_name or raw == llm_tool_name(tool_name):
+                return _tool_spec_payload(tool)
+        return None
+
+    async def execute_tool_async(
+        self,
+        call: CanonicalToolCall,
+        *,
+        allow_tools: bool = True,
+        budget: Any = None,
+        turn_id: str | None = None,
+    ) -> CanonicalToolResult:
+        if not allow_tools:
+            text = "tool execution disabled in finalization mode"
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text=text,
+                structured={"reason": "finalization_only"},
+                call_id=call.call_id,
+                llm_text=text,
+                status="finalization_only",
+            )
+        tool = self.tools.get(call.name)
+        if tool is not None:
+            async_invoke = getattr(tool, "ainvoke", None)
+            if callable(async_invoke):
+                result = await async_invoke(
+                    dict(call.args or {}),
+                    runtime=self,
+                    turn_id=turn_id,
+                    tool_call=call,
+                    budget=budget,
+                    allow_tools=allow_tools,
+                )
+            else:
+                result = await asyncio.to_thread(getattr(tool, "invoke"), dict(call.args or {}))
+            return CanonicalToolResult(
+                name=call.name,
+                ok=result.status == RuntimeStatus.OK,
+                text=result.text,
+                structured=result.structured,
+                call_id=call.call_id,
+                llm_text=getattr(result, "llm_text", ""),
+                status=result.status,
+            )
+        execute = getattr(self.delegate, "execute_tool_async", None)
+        if callable(execute):
+            return await execute(
+                call,
+                **_tool_execution_kwargs(execute, allow_tools=allow_tools, budget=budget, turn_id=turn_id),
+            )
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=f"unknown tool: {call.name}",
+            structured={"reason": "unknown_tool"},
+            call_id=call.call_id,
+            llm_text=f"unknown tool: {call.name}",
+            status="unknown_tool",
+        )
+
+    def begin_tool_result_turn(self, **kwargs: Any) -> None:
+        begin = getattr(self.delegate, "begin_tool_result_turn", None)
+        if callable(begin):
+            begin(**kwargs)
+
+    def read_tool_result_page(self, **kwargs: Any) -> Any:
+        read_page = getattr(self.delegate, "read_tool_result_page", None)
+        if not callable(read_page):
+            return None
+        return read_page(**kwargs)
+
+    def _apply_tool_budget(self, call: CanonicalToolCall, result: CanonicalToolResult, *, budget: Any = None) -> CanonicalToolResult:
+        apply_budget = getattr(self.delegate, "_apply_tool_budget", None)
+        if callable(apply_budget):
+            return apply_budget(call, result, budget=budget)
+        return result
+
+
+class _OriginalToolExecutionAdapter:
+    def __init__(self, runtime: "MinionScopedExecutionRuntime") -> None:
+        self._runtime = runtime
+
+    async def execute_tool_async(
+        self,
+        call: CanonicalToolCall,
+        *,
+        allow_tools: bool = True,
+        budget: Any = None,
+        turn_id: str | None = None,
+    ) -> CanonicalToolResult:
+        return await self._runtime._execute_original_tool_async(
+            call,
+            allow_tools=allow_tools,
+            budget=budget,
+            turn_id=turn_id,
+        )
 
 
 @dataclass
@@ -602,10 +834,160 @@ class MinionScopedExecutionRuntime:
     workspace: dict[str, Any] = field(default_factory=dict)
     produced_artifacts: list[dict[str, Any]] = field(default_factory=list)
     memory_l3: MockL3Plugin | None = None
+    _original_runtime: Any = field(default=None, init=False, repr=False)
+    _base_tools: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _base_adapter: _OriginalToolExecutionAdapter | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        normalized = [_canonical_minion_capability_name(item) for item in self.allowed_capabilities]
-        self.allowed_capabilities = filter_minion_allowed_capabilities(normalized)
+        original_runtime = self.base_runtime
+        if not callable(getattr(original_runtime, "execute_tool_async", None)):
+            original_runtime = ExecutionRuntime()
+        self._original_runtime = original_runtime
+        self.base_runtime = _MinionExecutionDecorator(original_runtime)
+        self.allowed_capabilities = normalize_minion_allowed_capabilities(
+            list(self.allowed_capabilities or []),
+            extra_visible_names=tuple(_workspace_tool_specs().keys()),
+        )
+        if self.allowed_capabilities:
+            self.allowed_capabilities = filter_minion_allowed_capabilities(
+                [*self.allowed_capabilities, *MINION_PROTOCOL_CAPABILITIES]
+            )
+        self._base_tools = dict(getattr(original_runtime, "tools", {}) or {})
+        self._base_adapter = _OriginalToolExecutionAdapter(self)
+        self._register_hydrated_tools()
+
+    def begin_tool_result_turn(self, **kwargs: Any) -> None:
+        begin = getattr(self.base_runtime, "begin_tool_result_turn", None)
+        if callable(begin):
+            begin(**kwargs)
+
+    def read_tool_result_page(self, **kwargs: Any) -> Any:
+        read_page = getattr(self.base_runtime, "read_tool_result_page", None)
+        if not callable(read_page):
+            return None
+        return read_page(**kwargs)
+
+    def _register_hydrated_tools(self) -> None:
+        register = getattr(self.base_runtime, "register_tool", None)
+        if not callable(register):
+            return
+        allowed = set(self.allowed_capabilities)
+        if "op_tool_search" in allowed:
+            register(ToolSearchTool(runtime=self))
+        if "op_tool_read" in allowed:
+            register(ToolReadTool(runtime=self))
+        if "op_tool_result_page" in allowed:
+            register(ToolResultPageTool(runtime=self))
+        if "op_tool_call" in allowed:
+            register(ToolCallTool(runtime=self))
+        for name, spec in _workspace_tool_specs().items():
+            if name not in allowed or is_minion_capability_denied(name):
+                continue
+            handler = self._hydrated_handler_for(name)
+            if handler is None:
+                continue
+            register(_HydratedMinionTool(name=name, spec=spec, handler=handler))
+
+    def _hydrated_handler_for(self, name: str) -> Any | None:
+        if is_plan_builder_capability(name):
+            return lambda call, _ctx: plan_builder_tool_result(call, self.workspace, self.produced_artifacts)
+        if name in REPAIR_BILL_BUILDER_CAPABILITIES:
+            return lambda call, _ctx: repair_bill_builder_tool_result(call, self.workspace, self.produced_artifacts)
+        if name == "op_minion_memory_candidate_write":
+            return lambda call, _ctx: _minion_memory_candidate_result(call, self.memory_l3)
+        if name in MINION_CHECKLIST_TOOL_NAMES:
+            return lambda call, _ctx: _minion_checklist_result(call, self.workspace)
+        if name == "op_minion_gate_contract_submit":
+            return lambda call, _ctx: _minion_gate_contract_submit_result(call, self.workspace)
+        if name == "op_minion_review_gate_submit":
+            return lambda call, _ctx: _minion_review_gate_submit_result(call, self.workspace)
+        if name == "op_minion_review_checkpoint":
+            return lambda call, _ctx: _minion_review_checkpoint_result(call, self.workspace)
+        if name == "op_minion_checkpoint_commit":
+            return lambda call, _ctx: _minion_checkpoint_commit_result(call, self.workspace)
+        if name == "op_git":
+            return lambda call, ctx: _minion_git_result(
+                call,
+                self.workspace,
+                self._base_adapter,
+                allow_tools=bool(ctx.get("allow_tools", True)),
+                budget=ctx.get("budget"),
+                turn_id=str(ctx.get("turn_id") or "") or None,
+            )
+        if name in WORKSPACE_FILE_TOOL_SPECS:
+            return self._workspace_file_handler
+        if name in _workspace_tool_specs():
+            return self._workspace_sync_tool_handler
+        return None
+
+    async def _workspace_file_handler(self, call: CanonicalToolCall, ctx: dict[str, Any]) -> CanonicalToolResult:
+        result = await workspace_file_tool_result(
+            call,
+            self.workspace,
+            self._base_adapter,
+            allow_tools=bool(ctx.get("allow_tools", True)),
+            budget=ctx.get("budget"),
+            turn_id=str(ctx.get("turn_id") or "") or None,
+        )
+        _mark_repair_workspace_edit(self.workspace, call, result)
+        return result
+
+    async def _workspace_sync_tool_handler(self, call: CanonicalToolCall, _ctx: dict[str, Any]) -> CanonicalToolResult:
+        return await asyncio.to_thread(_workspace_tool_result, call, self.workspace)
+
+    async def _execute_original_tool_async(
+        self,
+        call: CanonicalToolCall,
+        *,
+        allow_tools: bool = True,
+        budget: Any = None,
+        turn_id: str | None = None,
+    ) -> CanonicalToolResult:
+        if not allow_tools:
+            text = "tool execution disabled in finalization mode"
+            return CanonicalToolResult(
+                name=call.name,
+                ok=False,
+                text=text,
+                structured={"reason": "finalization_only"},
+                call_id=call.call_id,
+                llm_text=text,
+                status="finalization_only",
+            )
+        tool = self._base_tools.get(call.name)
+        if tool is None:
+            execute = getattr(self._original_runtime, "execute_tool_async", None)
+            if callable(execute):
+                return await execute(
+                    call,
+                    **_tool_execution_kwargs(execute, allow_tools=allow_tools, budget=budget, turn_id=turn_id),
+                )
+            return await self.base_runtime.execute_tool_async(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id)
+        async_invoke = getattr(tool, "ainvoke", None)
+        if callable(async_invoke):
+            capability_result = await async_invoke(
+                dict(call.args or {}),
+                runtime=self.base_runtime,
+                turn_id=turn_id,
+                tool_call=call,
+                budget=budget,
+            )
+        else:
+            invoke = getattr(tool, "invoke")
+            capability_result = await asyncio.to_thread(invoke, dict(call.args or {}))
+        result = CanonicalToolResult(
+            name=call.name,
+            ok=capability_result.status == RuntimeStatus.OK,
+            text=capability_result.text,
+            structured=capability_result.structured,
+            call_id=call.call_id,
+            llm_text=getattr(capability_result, "llm_text", ""),
+            status=capability_result.status,
+        )
+        apply_budget = getattr(self.base_runtime, "_apply_tool_budget", None)
+        if callable(apply_budget):
+            return apply_budget(call, result, budget=budget)
+        return result
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
         allowed = set(self.allowed_capabilities)
@@ -654,11 +1036,14 @@ class MinionScopedExecutionRuntime:
         call: CanonicalToolCall,
         *,
         allow_tools: bool = True,
+        budget: Any = None,
         turn_id: str | None = None,
     ) -> CanonicalToolResult:
-        resolved_name = self._resolve_minion_capability_alias(call.name)
-        if resolved_name != call.name:
-            call = CanonicalToolCall(name=resolved_name, args=dict(call.args), call_id=call.call_id)
+        call = resolve_minion_tool_call_alias(
+            call,
+            self.allowed_capabilities,
+            workspace_tool_names=tuple(_workspace_tool_specs().keys()),
+        )
         if not self._tool_visible_for_workspace(call.name):
             if call.name == "op_minion_gate_contract_submit":
                 text = "gate_contract_submit is only available for source_contract pre-plan review targets"
@@ -678,17 +1063,9 @@ class MinionScopedExecutionRuntime:
                 llm_text=text,
                 status=RuntimeStatus.INVALID,
             )
-        allowed = set(str(item) for item in self.allowed_capabilities)
-        if call.name not in allowed or is_minion_capability_denied(call.name):
-            return CanonicalToolResult(
-                name=call.name,
-                ok=False,
-                text="capability is not allowed for this minion run",
-                structured={"reason": "capability_not_allowed", "capability": call.name},
-                call_id=call.call_id,
-                llm_text="capability is not allowed for this minion run",
-                status=RuntimeStatus.ERROR,
-            )
+        admission = admit_minion_tool_call(call, self.allowed_capabilities, require_effective_target=False)
+        if not admission.ok:
+            return admission.to_result()
         repair_guard = _repair_pre_edit_tool_guard(call, self.workspace)
         if repair_guard is not None:
             return repair_guard
@@ -698,54 +1075,6 @@ class MinionScopedExecutionRuntime:
         plan_review_shell_guard = _plan_review_plan_artifact_shell_guard(call, self.workspace)
         if plan_review_shell_guard is not None:
             return plan_review_shell_guard
-        if call.name == "op_tool_search":
-            return _capability_result_to_tool_result(
-                call,
-                await asyncio.to_thread(ToolSearchTool(runtime=self).invoke, dict(call.args)),
-            )
-        if call.name == "op_tool_read":
-            return _capability_result_to_tool_result(
-                call,
-                await asyncio.to_thread(ToolReadTool(runtime=self).invoke, dict(call.args)),
-            )
-        if call.name == "op_tool_call":
-            return await self._execute_scoped_tool_call(call, allow_tools=allow_tools, turn_id=turn_id)
-        workspace_specs = _workspace_tool_specs()
-        if call.name in workspace_specs:
-            if is_plan_builder_capability(call.name):
-                return plan_builder_tool_result(call, self.workspace, self.produced_artifacts)
-            if call.name in REPAIR_BILL_BUILDER_CAPABILITIES:
-                return await repair_bill_builder_tool_result(call, self.workspace, self.produced_artifacts)
-            if call.name == "op_minion_memory_candidate_write":
-                return _minion_memory_candidate_result(call, self.memory_l3)
-            if call.name in MINION_CHECKLIST_TOOL_NAMES:
-                return _minion_checklist_result(call, self.workspace)
-            if call.name == "op_minion_gate_contract_submit":
-                return _minion_gate_contract_submit_result(call, self.workspace)
-            if call.name == "op_minion_review_gate_submit":
-                return _minion_review_gate_submit_result(call, self.workspace)
-            if call.name == "op_minion_review_checkpoint":
-                return _minion_review_checkpoint_result(call, self.workspace)
-            if call.name == "op_minion_checkpoint_commit":
-                return _minion_checkpoint_commit_result(call, self.workspace)
-            if call.name == "op_git":
-                return await _minion_git_result(call, self.workspace, self.base_runtime, allow_tools=allow_tools, turn_id=turn_id)
-            if call.name in WORKSPACE_FILE_TOOL_SPECS:
-                result = await workspace_file_tool_result(
-                    call,
-                    self.workspace,
-                    self.base_runtime,
-                    allow_tools=allow_tools,
-                    turn_id=turn_id,
-                )
-                _mark_repair_workspace_edit(self.workspace, call, result)
-                return result
-            result = await asyncio.to_thread(_workspace_tool_result, call, self.workspace)
-            if call.name in {"op_minion_artifact_write", "op_minion_artifact_edit"} and result.ok:
-                artifact = dict((result.structured or {}).get("artifact") or result.structured or {})
-                if artifact:
-                    _append_unique_artifact(self.produced_artifacts, artifact)
-            return result
         if _is_lsp_capability_name(call.name):
             blocked = _lsp_unavailable_for_turn_result(call, self.workspace)
             if blocked is not None:
@@ -754,64 +1083,20 @@ class MinionScopedExecutionRuntime:
             if isinstance(normalized, CanonicalToolResult):
                 return normalized
             call = normalized
-        result = await self.base_runtime.execute_tool_async(call, allow_tools=allow_tools, turn_id=turn_id)
+        result = await self.base_runtime.execute_tool_async(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id)
         if _is_lsp_capability_name(call.name):
             _mark_lsp_unavailable_for_turn(self.workspace, call, result)
+        if call.name in {"op_minion_artifact_write", "op_minion_artifact_edit"} and result.ok:
+            artifact = dict((result.structured or {}).get("artifact") or result.structured or {})
+            if artifact:
+                _append_unique_artifact(self.produced_artifacts, artifact)
         return result
 
-    async def _execute_scoped_tool_call(
-        self,
-        call: CanonicalToolCall,
-        *,
-        allow_tools: bool = True,
-        turn_id: str | None = None,
-    ) -> CanonicalToolResult:
-        target_name = self._resolve_minion_capability_alias(
-            str(call.args.get("name") or call.args.get("capability") or call.args.get("tool") or "").strip()
-        )
-        if not target_name:
-            return CanonicalToolResult(
-                name=call.name,
-                ok=False,
-                text="name is required",
-                structured={"reason": "name_required"},
-                call_id=call.call_id,
-                llm_text="name is required",
-                status=RuntimeStatus.INVALID,
-            )
-        spec = self.get_capability_spec(target_name)
-        canonical = str((spec or {}).get("canonical_path") or (spec or {}).get("name") or target_name).strip()
-        if spec is None or canonical == call.name:
-            return CanonicalToolResult(
-                name=call.name,
-                ok=False,
-                text=f"capability is not allowed for this minion: {target_name}",
-                structured={"reason": "capability_not_allowed", "target": target_name},
-                call_id=call.call_id,
-                llm_text=f"capability is not allowed for this minion: {target_name}",
-                status=RuntimeStatus.ERROR,
-            )
-        return await self.execute_tool_async(
-            CanonicalToolCall(name=canonical, args=dict(call.args.get("args") or {}), call_id=call.call_id),
-            allow_tools=allow_tools,
-            turn_id=turn_id,
-        )
-
     def _resolve_minion_capability_alias(self, name: object) -> str:
-        raw = str(name or "").strip()
-        if not raw:
-            return ""
-        canonical_raw = _canonical_minion_capability_name(raw)
-        if canonical_raw != raw and canonical_raw in set(self.allowed_capabilities) and not is_minion_capability_denied(canonical_raw):
-            return canonical_raw
-        if raw in set(self.allowed_capabilities) or raw in _workspace_tool_specs():
-            return raw
-        matches = [
-            canonical
-            for canonical in self.allowed_capabilities
-            if llm_tool_name(canonical) == raw and not is_minion_capability_denied(canonical)
-        ]
-        return matches[0] if len(matches) == 1 else raw
+        return normalize_minion_capability_name(
+            name,
+            visible_names=[*list(self.allowed_capabilities or []), *list(_workspace_tool_specs().keys())],
+        )
 
     def _tool_visible_for_workspace(self, name: str) -> bool:
         canonical = str(name or "").strip()
@@ -1156,6 +1441,7 @@ async def _minion_git_result(
     base_runtime: Any,
     *,
     allow_tools: bool = True,
+    budget: Any = None,
     turn_id: str | None = None,
 ) -> CanonicalToolResult:
     root = _effective_git_workspace_root(workspace)
@@ -1208,6 +1494,7 @@ async def _minion_git_result(
     return await base_runtime.execute_tool_async(
         CanonicalToolCall(name="op_git", args=args, call_id=call.call_id),
         allow_tools=allow_tools,
+        budget=budget,
         turn_id=turn_id,
     )
 
@@ -1231,18 +1518,6 @@ def _effective_lsp_workspace_root(workspace: dict[str, Any]) -> Path | None:
         if raw:
             return Path(raw).expanduser().resolve()
     return None
-
-
-def _capability_result_to_tool_result(call: CanonicalToolCall, result: CapabilityResult) -> CanonicalToolResult:
-    return CanonicalToolResult(
-        name=call.name,
-        ok=result.status == RuntimeStatus.OK,
-        text=result.text,
-        structured=result.structured,
-        call_id=call.call_id,
-        llm_text=getattr(result, "llm_text", ""),
-        status=result.status,
-    )
 
 
 def _minion_memory_candidate_result(call: CanonicalToolCall, memory_l3: MockL3Plugin | None) -> CanonicalToolResult:
@@ -3553,16 +3828,11 @@ def _dedupe_source_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _effective_capability_name(tool_call: CanonicalToolCall) -> str:
-    if tool_call.name in {"op_tool_call", "call_tool"}:
-        args = dict(tool_call.args or {})
-        return str(args.get("name") or args.get("capability") or args.get("tool") or tool_call.name).strip()
-    return tool_call.name
+    return effective_minion_capability_name(tool_call)
 
 
 def _effective_tool_args(tool_call: CanonicalToolCall) -> dict[str, Any]:
-    if tool_call.name in {"op_tool_call", "call_tool"} and isinstance((tool_call.args or {}).get("args"), dict):
-        return dict((tool_call.args or {}).get("args") or {})
-    return dict(tool_call.args or {})
+    return effective_minion_tool_args(tool_call)
 
 
 def _review_tool_evidence_ref(target_name: str, tool_call: CanonicalToolCall, result: CanonicalToolResult) -> dict[str, Any]:

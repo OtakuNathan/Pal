@@ -1,0 +1,21 @@
+family_id = "software_engineering"
+display_name = "Software Engineering"
+domain = "Software design, implementation, code review, repository maintenance, tests, and build verification."
+domain_keywords = ["code", "software", "repo", "test", "build", "review", "bug", "implementation"]
+default_executor_profile = "software_engineering.coder"
+dag_producer_profile = "software_engineering.architect"
+
+[metadata]
+require_primary_language = true
+uses_architecture_mode = true
+producer_role = "architect"
+producer_plan_label = "architecture plan"
+
+[capability_groups.software_read]
+include = ["workspace_read", "code_intel", "memory_recall"]
+
+[capability_groups.software_code_work]
+include = ["software_read", "code_work", "minion_checklist", "minion_artifacts", "minion_memory_candidates"]
+
+[capability_groups.software_review]
+include = ["software_read", "verification_shell", "minion_review_gate", "minion_artifacts", "minion_memory_candidates"]

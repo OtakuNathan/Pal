@@ -24,6 +24,7 @@ from pal.wizard.prompts import (
     WizardCollectedData,
     WizardIdentity,
     WizardLLMEndpoint,
+    WizardMemoryEmbedding,
     build_codex_wizard_endpoints,
     multiline_input,
     normalize_telegram_binding_key,
@@ -177,6 +178,52 @@ class TestSeedFromWizard(unittest.TestCase):
         self.assertEqual(existing.active_endpoint_id, "test-claude")
         self.assertEqual(existing.channel.endpoint_id, "socket_default")
         self.assertEqual(existing.channel.binding_key, "/tmp/test-pal-wizard/pal.sock")
+
+    def test_seed_from_wizard_writes_memory_embedding_remote_config(self) -> None:
+        from pal.core.runtime_config import RuntimeConfig
+
+        collected = _make_collected()
+        collected.memory_embedding = WizardMemoryEmbedding(
+            remote_ollama_base_urls=["192.168.31.145:11434", "http://mac.local:11434/"],
+            model_name="bge-m3",
+        )
+
+        self.wizard.seed_from_wizard(self.registration, collected)
+
+        config_text = (self.runtime_root / "config.toml").read_text(encoding="utf-8")
+        cfg = RuntimeConfig.load(self.runtime_root)
+        self.assertIn("[memory]", config_text)
+        self.assertEqual(
+            cfg.embedding_ollama_remote_base_urls,
+            ("http://192.168.31.145:11434", "http://mac.local:11434"),
+        )
+
+        existing = self.wizard.load_existing_wizard_data(self.runtime_root)
+        self.assertIsNotNone(existing)
+        assert existing is not None
+        self.assertEqual(
+            existing.memory_embedding.remote_ollama_base_urls,
+            ["http://192.168.31.145:11434", "http://mac.local:11434"],
+        )
+
+    def test_seed_from_wizard_can_remove_memory_embedding_remote_config(self) -> None:
+        from pal.core.runtime_config import RuntimeConfig
+
+        (self.runtime_root / "config.toml").write_text(
+            '[read]\nmax_lines_to_read = 123\n\n[memory]\nkeep_recent_tool_messages = 9\nembedding_ollama_remote_base_urls = ["http://old:11434"]\n',
+            encoding="utf-8",
+        )
+        collected = _make_collected()
+        collected.memory_embedding = WizardMemoryEmbedding(remote_ollama_base_urls=[], model_name="bge-m3")
+
+        self.wizard.seed_from_wizard(self.registration, collected)
+
+        config_text = (self.runtime_root / "config.toml").read_text(encoding="utf-8")
+        cfg = RuntimeConfig.load(self.runtime_root)
+        self.assertEqual(cfg.max_lines_to_read, 123)
+        self.assertEqual(cfg.keep_recent_tool_messages, 9)
+        self.assertEqual(cfg.embedding_ollama_remote_base_urls, ())
+        self.assertNotIn("http://old:11434", config_text)
 
     def test_seed_from_wizard_sets_active_endpoint(self) -> None:
         from pal.llm import RuntimeSettingRepository

@@ -15,11 +15,13 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
         if call.name == "op_minion_artifact_write":
             artifact = _write_minion_artifact(workspace, call.args)
             payload = {"artifact": artifact}
-            text = f"Artifact written: {artifact['relative_path']}"
+            action = "staged" if artifact.get("staged") else "written"
+            text = f"Artifact {action}: {artifact['relative_path']}"
         elif call.name == "op_minion_artifact_edit":
             artifact = _edit_minion_artifact(workspace, call.args)
             payload = {"artifact": artifact}
-            text = f"Artifact edited: {artifact['relative_path']}"
+            action = "staged" if artifact.get("staged") else "edited"
+            text = f"Artifact {action}: {artifact['relative_path']}"
         else:
             root = _workspace_root(workspace)
             if call.name == "op_tree":
@@ -64,13 +66,16 @@ def _workspace_root(workspace: dict[str, Any]) -> Path:
     return root
 
 
-def _artifact_root(workspace: dict[str, Any]) -> Path:
+def _artifact_roots(workspace: dict[str, Any]) -> tuple[Path, Path]:
     artifact_dir = str((workspace or {}).get("artifact_dir") or "").strip()
     if not artifact_dir:
         raise ValueError("workspace.artifact_dir is not available")
-    root = Path(artifact_dir).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    return root
+    final_root = Path(artifact_dir).expanduser().resolve()
+    stage_dir = str((workspace or {}).get("artifact_stage_dir") or "").strip()
+    write_root = Path(stage_dir).expanduser().resolve() if stage_dir else final_root
+    final_root.mkdir(parents=True, exist_ok=True)
+    write_root.mkdir(parents=True, exist_ok=True)
+    return final_root, write_root
 
 
 def _artifact_path(root: Path, raw_path: Any) -> Path:
@@ -89,8 +94,8 @@ def _artifact_path(root: Path, raw_path: Any) -> Path:
 
 def _write_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
     _reject_unknown_args(args, {"relative_path", "content", "title", "role", "mime_type", "overwrite"})
-    root = _artifact_root(workspace)
-    path = _artifact_path(root, args.get("relative_path"))
+    final_root, write_root = _artifact_roots(workspace)
+    path = _artifact_path(write_root, args.get("relative_path"))
     content = str(args.get("content") or "")
     if not content.strip():
         raise ValueError("artifact content is required")
@@ -99,13 +104,13 @@ def _write_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> d
         path = _next_available_artifact_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
-    return _artifact_metadata(root, path, args)
+    return _artifact_metadata(write_root, path, args, final_root=final_root)
 
 
 def _edit_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
     _reject_unknown_args(args, {"relative_path", "content", "operation", "create_if_missing", "title", "role", "mime_type"})
-    root = _artifact_root(workspace)
-    path = _artifact_path(root, args.get("relative_path"))
+    final_root, write_root = _artifact_roots(workspace)
+    path = _artifact_path(write_root, args.get("relative_path"))
     operation = str(args.get("operation") or "append").strip().lower() or "append"
     if operation not in {"append", "replace"}:
         raise ValueError("operation must be append or replace")
@@ -121,16 +126,16 @@ def _edit_minion_artifact(workspace: dict[str, Any], args: dict[str, Any]) -> di
     else:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(content)
-    return _artifact_metadata(root, path, args)
+    return _artifact_metadata(write_root, path, args, final_root=final_root)
 
 
-def _artifact_metadata(root: Path, path: Path, args: dict[str, Any]) -> dict[str, Any]:
+def _artifact_metadata(root: Path, path: Path, args: dict[str, Any], *, final_root: Path | None = None) -> dict[str, Any]:
     content = path.read_text(encoding="utf-8", errors="ignore")
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
     relative_path = str(path.relative_to(root)).replace("\\", "/")
     mime_type = str(args.get("mime_type") or mimetypes.guess_type(path.name)[0] or "text/plain").strip()
     role = str(args.get("role") or "primary").strip() or "primary"
-    return {
+    artifact = {
         "kind": "file",
         "path": str(path),
         "relative_path": relative_path,
@@ -140,6 +145,14 @@ def _artifact_metadata(root: Path, path: Path, args: dict[str, Any]) -> dict[str
         "size_bytes": path.stat().st_size,
         "sha256": digest,
     }
+    if final_root is not None and final_root != root:
+        artifact["staged"] = True
+        artifact["stage_path"] = str(path)
+        artifact["final_artifact_dir"] = str(final_root)
+        requested_relative = str(args.get("relative_path") or "").strip()
+        if requested_relative:
+            artifact["requested_relative_path"] = requested_relative
+    return artifact
 
 
 def _reject_unknown_args(args: dict[str, Any], allowed: set[str]) -> None:

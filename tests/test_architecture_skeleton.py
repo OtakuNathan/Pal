@@ -855,10 +855,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core = PalCore()
         modest = "x" * 4_409
 
-        self.assertEqual(core._truncate_tool_result_for_l1(modest), modest)
+        self.assertEqual(core.turn_manager._truncate_tool_result_for_l1(modest), modest)
 
         small_core = PalCore(config=RuntimeConfig(l1_tool_result_max_chars=100, l1_tool_result_preview_chars=30))
-        truncated = small_core._truncate_tool_result_for_l1("y" * 150)
+        truncated = small_core.turn_manager._truncate_tool_result_for_l1("y" * 150)
 
         self.assertTrue(truncated.startswith("y" * 30))
         self.assertIn("[... truncated, original: 150 chars]", truncated)
@@ -1204,6 +1204,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "system_map",
                     "source_of_truth",
                     "prompt_context_policy",
+                    "task_flow",
                     "operating_rules",
                     "operating_guidance",
                     "priority",
@@ -1241,6 +1242,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "prompt_context_policy",
                     "operating_rules",
                     "priority",
+                    "task_flow",
                     "mutation_policy",
                     "memory_guide",
                     "knowledge_storage_boundary",
@@ -1265,6 +1267,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("<prompt_context_policy>", prompt.messages[0]["content"])
             self.assertIn("<operating_rules>", prompt.messages[0]["content"])
             self.assertIn("<priority>", prompt.messages[0]["content"])
+            self.assertIn("<task_flow>", prompt.messages[0]["content"])
+            self.assertIn("Minion Usage", prompt.messages[0]["content"])
+            self.assertIn("minion_task_search", prompt.messages[0]["content"])
+            self.assertIn("minion_dispatch_workflow(task_id=...)", prompt.messages[0]["content"])
             self.assertNotIn("<tool_efficiency>", prompt.messages[0]["content"])
             self.assertIn("<mutation_policy>", prompt.messages[0]["content"])
             self.assertIn("<memory_guide>", prompt.messages[0]["content"])
@@ -1289,6 +1295,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertLess(prompt.messages[0]["content"].index("<source_of_truth>"), prompt.messages[0]["content"].index("<prompt_context_policy>"))
             self.assertLess(prompt.messages[0]["content"].index("<prompt_context_policy>"), prompt.messages[0]["content"].index("<operating_rules>"))
             self.assertLess(prompt.messages[0]["content"].index("<operating_rules>"), prompt.messages[0]["content"].index("<priority>"))
+            self.assertLess(prompt.messages[0]["content"].index("<priority>"), prompt.messages[0]["content"].index("<task_flow>"))
             self.assertLess(prompt.messages[0]["content"].index("<mutation_policy>"), prompt.messages[0]["content"].index("<memory_guide>"))
             self.assertNotIn("<runtime_overlay>", prompt.messages[0]["content"])
             self.assertNotIn("<memory_projection>", prompt.messages[0]["content"])
@@ -1938,6 +1945,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         self.assertIn("run_shell", [item["name"] for item in search.structured["hits"]])
         self.assertTrue(read.ok)
         self.assertEqual(read.structured["capability"]["name"], "run_shell")
+        self.assertNotIn("[truncated]", read.structured["capability"]["description"])
+        self.assertIn("checkpoint commit capability instead", read.structured["capability"]["description"])
         self.assertNotIn("op_exec_shell", read.llm_text)
         self.assertTrue(compat.ok)
         self.assertEqual(compat.structured["capability"]["name"], "run_shell")
@@ -2909,6 +2918,58 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("next_page: read_tool_result_page", result.llm_text)
             self.assertNotIn("backing_path", result.llm_text)
             self.assertNotIn(str(tmpdir), result.llm_text)
+
+    def test_execution_runtime_budget_fallback_without_runtime_root(self) -> None:
+        core = PalCore()
+        core.context.execution_runtime.runtime_root = None
+        core.context.execution_runtime.register_tool(HugeTool(size=60_000))
+        result = core.context.execution_runtime.execute_tool(
+            CanonicalToolCall(name="huge", args={"value": "head-tail"}),
+            budget=ToolCallBudget(max_output_chars=2_000, preview_chars=1_000),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.structured["truncated"])
+        self.assertEqual(result.structured["preview_strategy"], "head_tail")
+        self.assertTrue(str(result.structured["result_ref"]).startswith("call_"))
+        self.assertIn("<tool_result", result.llm_text)
+
+    def test_shell_output_uses_runtime_pager_without_tool_level_truncation(self) -> None:
+        core = PalCore()
+        register_execution_with_core(core.context)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            core.context.execution_runtime.runtime_root = Path(tmpdir)
+            result = core.context.execution_runtime.execute_tool(
+                CanonicalToolCall(
+                    name="shell_exec",
+                    args={
+                        "cmd": (
+                            "python - <<'PY'\n"
+                            "print('SHELL-PAGER-HEAD')\n"
+                            "print('x' * 20000)\n"
+                            "print('SHELL-PAGER-TAIL')\n"
+                            "PY"
+                        )
+                    },
+                    call_id="call_shell_pager",
+                ),
+                budget=ToolCallBudget(max_output_chars=2_000, preview_chars=1_000, artifact_bucket_id="turn_shell_pager"),
+            )
+            page_count = int(result.structured["result_handle"]["page_count"])
+            later = core.context.execution_runtime.execute_tool(
+                CanonicalToolCall(
+                    name="read_tool_result_page",
+                    args={"result_ref": "call_shell_pager", "page": page_count},
+                )
+            )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.structured["truncated"])
+        self.assertFalse(result.structured["stdout_truncated"])
+        self.assertEqual(result.structured["preview_strategy"], "pager")
+        self.assertIn("SHELL-PAGER-HEAD", result.llm_text)
+        self.assertTrue(later.ok)
+        self.assertIn("SHELL-PAGER-TAIL", later.llm_text)
 
     def test_execution_runtime_tool_result_page_reads_later_page(self) -> None:
         core = PalCore()

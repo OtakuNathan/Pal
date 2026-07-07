@@ -1,0 +1,9 @@
+family_id = "general"
+display_name = "General"
+domain = "Generic bounded task execution when no registered domain family fits."
+domain_keywords = ["general", "generic", "task"]
+default_executor_profile = "general.generic"
+dag_producer_profile = ""
+
+[capability_groups.general_report]
+include = ["core_minion_read", "minion_artifacts", "minion_memory_candidates"]

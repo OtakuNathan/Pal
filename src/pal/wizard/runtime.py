@@ -23,6 +23,7 @@ from pal.skill import SkillModel
 from pal.web_fetch import WebFetchProviderModel, WebFetchProviderRepository
 from pal.web_search import WebSearchProviderModel, WebSearchProviderRepository
 from pal.channel.models import ChannelEndpointModel
+from pal.core.runtime_config import RuntimeConfig
 from pal.wizard.contracts import PalRegistration, ProvisionedRuntime, RuntimeLaunchSpec, WizardServicePort
 
 
@@ -306,7 +307,7 @@ class WizardService(WizardServicePort):
         from pal.channel import ChannelEndpointRepository
         from pal.identity import IdentityRepository
         from pal.llm import LLMEndpointRepository, RuntimeSettingRepository
-        from pal.wizard.prompts import WizardChannel, WizardCollectedData, WizardIdentity, WizardLLMEndpoint
+        from pal.wizard.prompts import WizardChannel, WizardCollectedData, WizardIdentity, WizardLLMEndpoint, WizardMemoryEmbedding
 
         runtime_root = Path(runtime_root)
         db_path = runtime_root / DEFAULT_DB_FILENAME
@@ -376,12 +377,18 @@ class WizardService(WizardServicePort):
                     supports_typing=bool(channel_record.supports_typing),
                     supports_receipt_marker=bool(channel_record.supports_receipt_marker),
                 )
+            config = RuntimeConfig.load(runtime_root)
+            memory_embedding = WizardMemoryEmbedding(
+                remote_ollama_base_urls=list(config.embedding_ollama_remote_base_urls),
+                model_name=config.embedding_ollama_model_name,
+            )
 
             return WizardCollectedData(
                 identity=identity,
                 endpoints=endpoints,
                 channel=channel,
                 active_endpoint_id=active_endpoint_id or "",
+                memory_embedding=memory_embedding,
             )
         except Exception:
             return None
@@ -391,6 +398,7 @@ class WizardService(WizardServicePort):
     def seed_from_wizard(self, registration: PalRegistration, collected: object) -> None:
         """Seed the database from wizard-collected data."""
         from pal.wizard.prompts import WizardCollectedData
+        from pal.wizard.config_file import upsert_memory_embedding_config
         from pal.llm.secret_store import EncryptedFileSecretStore, SecretRef
         from pal.channel import ChannelEndpointRepository
         from pal.identity import IdentityRepository
@@ -521,3 +529,10 @@ class WizardService(WizardServicePort):
             settings.set("active_web_search_provider_id", "brave_search_default")
         if settings.get("active_web_fetch_provider_id") is None:
             settings.set("active_web_fetch_provider_id", "playwright_fetch_default")
+
+        # 6. Runtime config owned by the wizard
+        upsert_memory_embedding_config(
+            runtime_root,
+            remote_ollama_base_urls=data.memory_embedding.remote_ollama_base_urls,
+            model_name=data.memory_embedding.model_name,
+        )

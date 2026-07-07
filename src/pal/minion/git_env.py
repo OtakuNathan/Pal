@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pal.foundation.log_paths import pal_log_root
 from pal.minion.execution_strategy import (
     PREPARE_GIT_WORKTREE,
     PREPARE_READ_ONLY_REPO,
@@ -182,8 +183,15 @@ def prepare_git_task_environment(runtime_root: Path, pack: TaskContextPack) -> T
     )
     artifact_dir = _project_minion_dir(project_root) / "artifacts" / _safe_ref(pack.work_order_id)
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_stage_dir = _run_artifact_stage_dir(
+        runtime_root,
+        run_part=str(pack.metadata.get("run_id") or pack.work_order_id),
+        profile=_safe_ref(pack.minion_profile or "generic"),
+    )
+    artifact_stage_dir.mkdir(parents=True, exist_ok=True)
     workspace.setdefault("run_dir", str(artifact_dir))
     workspace["artifact_dir"] = str(artifact_dir)
+    workspace["artifact_stage_dir"] = str(artifact_stage_dir)
     workspace["workspace_policy"] = {"mode": "writable_git_branch"}
     workspace["completion_policy"] = {"evidence": "git_commit", "requires_capability_evidence": True}
     workspace["execution_strategy"] = normalize_execution_strategy(
@@ -1044,7 +1052,7 @@ def _with_folder_workspace(runtime_root: Path, pack: TaskContextPack, workspace:
                 prepared_workspace["execution_env"] = execution_env
     if str(run_id or "").strip():
         preserved_artifact_dir = bool(prepared_workspace.get("preserve_artifact_dir"))
-        for key in ("run_dir", "log_dir"):
+        for key in ("run_dir", "log_dir", "artifact_stage_dir"):
             prepared_workspace.pop(key, None)
         if not preserved_artifact_dir:
             prepared_workspace.pop("artifact_dir", None)
@@ -1052,14 +1060,22 @@ def _with_folder_workspace(runtime_root: Path, pack: TaskContextPack, workspace:
     run_part = _safe_ref(run_id or str(pack.metadata.get("run_id") or "") or pack.work_order_id)
     run_dir = Path(str(prepared_workspace.get("run_dir") or runtime_root / "data" / "minion" / "workspaces" / f"{run_part}_{profile}"))
     artifact_dir = Path(str(prepared_workspace.get("artifact_dir") or run_dir / "deliverables"))
+    artifact_stage_dir = Path(
+        str(
+            prepared_workspace.get("artifact_stage_dir")
+            or _run_artifact_stage_dir(runtime_root, run_part=run_part, profile=profile)
+        )
+    )
     log_dir = Path(str(prepared_workspace.get("log_dir") or run_dir / "logs"))
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_stage_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     prepared_workspace.update(
         {
             "workspace_kind": "folder",
             "run_dir": str(run_dir),
             "artifact_dir": str(artifact_dir),
+            "artifact_stage_dir": str(artifact_stage_dir),
             "log_dir": str(log_dir),
         }
     )
@@ -1111,3 +1127,9 @@ def _policy_from_pack(pack: TaskContextPack, key: str) -> dict[str, Any]:
 def _safe_ref(value: str) -> str:
     normalized = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in str(value or "").strip())
     return normalized.strip("_")[:80] or "task"
+
+
+def _run_artifact_stage_dir(runtime_root: Path, *, run_part: str, profile: str) -> Path:
+    safe_run = _safe_ref(run_part)
+    safe_profile = _safe_ref(profile)
+    return pal_log_root(runtime_root) / "minion" / "artifacts" / f"{safe_run}_{safe_profile}"

@@ -51,7 +51,6 @@ from pal.minion.skills import (
 from pal.minion.source import MinionControlEventHandler, MinionEventSource
 from pal.minion.validation import MinionWorkOrderValidationError
 from pal.minion.workflow import (
-    DEFAULT_ARCHITECT_PROFILE,
     append_workflow_step,
     split_profile_ref,
 )
@@ -788,18 +787,18 @@ class MinionManagerProvider:
             "selects how the DAG is interpreted. Dispatch does not accept profile selectors. The manager either runs the family DAG "
             "producer or uses the generic single-node DAG producer, then consumes the resulting DAG mechanically. Do not call lower-level "
             "plan/spawn capabilities. When the user provides numbered requirements, keep them as numbered atomic source items in "
-            "requirements_brief; dispatch mechanically compiles those items into immutable source gate checklist entries. The architect "
-            "must cover those source items through plan gate_check_refs; coder/reviewer consume only module and milestone acceptance. "
+            "requirements_brief; dispatch mechanically compiles those items into immutable source gate checklist entries. The family DAG "
+            "producer must cover those source items through plan gate_check_refs; downstream executors/reviewers consume only module and milestone acceptance. "
             "Do not summarize, merge, weaken, or expand source items before dispatch. "
-            "architecture_mode only affects the default software architect step: auto conservatively chooses micro/full from workspace "
-            "kind, goal scope, repo scan hints, and explicit user hints. micro asks the architect for a small canonical plan, normally "
+            "architecture_mode only affects families whose manifest enables architecture planning: auto conservatively chooses micro/full from workspace "
+            "kind, goal scope, repo scan hints, and explicit user hints. micro asks the producer for a small canonical plan, normally "
             "one implementation module plus a final verification join, with a prelude only when real shared setup/contracts are needed. "
-            "full asks for a complete multi-module plan. If micro scope is unsafe, the architect must escalate instead of weakening contracts. "
+            "full asks for a complete multi-module plan. If micro scope is unsafe, the producer must escalate instead of weakening contracts. "
             "interaction_mode controls user confirmation: interactive asks for plan acceptance and disables module auto-advance; "
             "auto_after_plan asks for plan acceptance, then auto-advances modules when gates pass; autonomous auto-accepts reviewed "
             "plans and asks only for failures, permissions, destructive/high-risk actions, or missing user-owned facts. "
-            "workspace.kind is new_project or existing_repo. software_engineering new projects must include primary_language; "
-            "non-software artifact/profile tasks may omit it. Existing repos should "
+            "workspace.kind is new_project or existing_repo. Families whose manifest requires primary_language must provide it for new_project; "
+            "other artifact/profile tasks may omit it. Existing repos should "
             "include repo_path or cwd; manager records origin_repo_path and prepares durable minion worktrees under runtime data."
         ),
         aliases=(
@@ -835,7 +834,7 @@ class MinionManagerProvider:
                 "workspace": {
                     "type": "object",
                     "description": (
-                        "Intent-level workspace facts. Use kind=new_project with primary_language for software 0-1 work, or "
+                        "Intent-level workspace facts. Use kind=new_project with primary_language when the family requires language metadata, or "
                         "kind=existing_repo with repo_path/cwd for repo changes. Non-software artifact/profile tasks may use "
                         "kind=new_project without primary_language. Do not provide runtime worktree paths; "
                         "manager allocates them under runtime_root/data/minion/repos."
@@ -854,8 +853,9 @@ class MinionManagerProvider:
                     "enum": ["auto", "micro", "full"],
                     "default": "auto",
                     "description": (
-                        "auto lets manager choose micro/full conservatively. micro still uses architect and must produce a canonical "
-                        "plan with acceptance criteria and test strategy. full uses architect for a complete multi-module plan."
+                        "For families whose manifest enables architecture planning, auto lets manager choose micro/full conservatively. "
+                        "micro still uses the family producer and must produce a canonical plan with acceptance criteria and test strategy. "
+                        "full uses the family producer for a complete multi-module plan. Ignored as none for families without architecture planning."
                     ),
                 },
                 "interaction_mode": {
@@ -914,13 +914,20 @@ class MinionManagerProvider:
             self._ensure_manager_started()
             result = self.client.spawn_sync(pack.to_dict())
             self.last_health = dict(result)
+            child_runs = _spawn_result_runs(result)
             payload = {
                 "status": str(result.get("status") or "ok"),
                 "workflow_id": workflow_payload["workflow_id"],
                 "work_order_id": pack.work_order_id,
-                "run_id": str(result.get("run_id") or ""),
-                "minion_id": str(result.get("minion_id") or ""),
+                "run_id": _spawn_result_value(result, "run_id"),
+                "minion_id": _spawn_result_value(result, "minion_id"),
                 "run": dict(result),
+                "child_runs": child_runs,
+                "child_run_ids": [str(item.get("run_id") or "") for item in child_runs if str(item.get("run_id") or "").strip()],
+                "child_work_order_id": _spawn_result_value(result, "child_work_order_id"),
+                "child_work_order_ids": _spawn_result_string_list(result, "child_work_order_ids"),
+                "module_id": _spawn_result_value(result, "module_id"),
+                "module_ids": _spawn_result_string_list(result, "module_ids"),
                 "workspace_summary": workflow_payload["workspace_summary"],
                 "architecture_mode": workflow_payload["architecture_mode"],
                 "requested_architecture_mode": workflow_payload["requested_architecture_mode"],
@@ -2217,6 +2224,7 @@ class MinionManagerProvider:
     def _profile_registry(self) -> MinionProfileRegistry:
         profile_providers: list[Any] = []
         capability_providers: list[Any] = []
+        family_providers: list[Any] = []
         if self.context is not None:
             for handle in self.context.module_registry.modules.values():
                 if not bool(getattr(handle, "mounted", True)) or bool(getattr(handle, "degraded", False)):
@@ -2226,9 +2234,12 @@ class MinionManagerProvider:
                         profile_providers.append(provider)
                     if callable(getattr(provider, "capabilities_for_minion_profile", None)):
                         capability_providers.append(provider)
+                    if callable(getattr(provider, "declared_minion_families", None)):
+                        family_providers.append(provider)
         return MinionProfileRegistry(
             profile_providers=tuple(profile_providers),
             capability_providers=tuple(capability_providers),
+            family_providers=tuple(family_providers),
             ambient_capabilities=tuple(self._ambient_capabilities()),
             runtime_root=self.runtime_root,
         )
@@ -2633,6 +2644,95 @@ def _capability_from_rpc(text: str, payload: dict[str, Any]) -> CapabilityResult
     )
 
 
+def _spawn_result_runs(result: dict[str, Any]) -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        run_id = str(value.get("run_id") or "").strip()
+        if not run_id or run_id in seen:
+            return
+        seen.add(run_id)
+        runs.append(dict(value))
+
+    continuation = result.get("continuation")
+    dag_tick = result.get("dag_tick")
+    has_nested_runs = (
+        isinstance(result.get("run"), dict)
+        or isinstance(continuation, dict)
+        or bool(result.get("child_runs"))
+        or bool(result.get("runs"))
+        or isinstance(dag_tick, dict)
+    )
+    if not has_nested_runs:
+        add(result)
+    add(result.get("run"))
+    if isinstance(continuation, dict):
+        add(continuation.get("run"))
+        for item in list(continuation.get("runs") or []):
+            add(item)
+    for item in list(result.get("child_runs") or []):
+        add(item)
+    for item in list(result.get("runs") or []):
+        add(item)
+    if isinstance(dag_tick, dict):
+        add(dag_tick.get("run"))
+        for item in list(dag_tick.get("runs") or []):
+            add(item)
+    if not runs:
+        add(result)
+    return runs
+
+
+def _spawn_result_primary_run(result: dict[str, Any]) -> dict[str, Any]:
+    runs = _spawn_result_runs(result)
+    return runs[0] if runs else {}
+
+
+def _spawn_result_value(result: dict[str, Any], key: str) -> str:
+    value = str(result.get(key) or "").strip()
+    if value:
+        return value
+    primary = _spawn_result_primary_run(result)
+    value = str(primary.get(key) or "").strip()
+    if value:
+        return value
+    dag_tick = result.get("dag_tick")
+    if isinstance(dag_tick, dict):
+        return str(dag_tick.get(key) or "").strip()
+    return ""
+
+
+def _spawn_result_string_list(result: dict[str, Any], key: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: Any) -> None:
+        text = str(raw or "").strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        values.append(text)
+
+    raw_value = result.get(key)
+    if isinstance(raw_value, str):
+        add(raw_value)
+    elif isinstance(raw_value, (list, tuple, set)):
+        for item in raw_value:
+            add(item)
+    dag_tick = result.get("dag_tick")
+    if isinstance(dag_tick, dict):
+        nested = dag_tick.get(key)
+        if isinstance(nested, str):
+            add(nested)
+        elif isinstance(nested, (list, tuple, set)):
+            for item in nested:
+                add(item)
+    return values
+
+
 def _runtime_status(payload: dict[str, Any]) -> str:
     status = str(payload.get("status") or "").strip()
     if status in {item.value for item in RuntimeStatus}:
@@ -2723,11 +2823,13 @@ def _workflow_entry_pack_from_args(
     if not goal:
         raise MinionWorkOrderValidationError("goal is required", field="goal")
     profile_family = _profile_ref_text(args.get("profile_family") or args.get("family")) or "general"
-    producer_profile = dag_producer_profile_for_family(profile_family)
-    software_producer = producer_profile == DEFAULT_ARCHITECT_PROFILE
+    family_manifest = profile_registry.family_registry().get(profile_family)
+    producer_profile = dag_producer_profile_for_family(profile_family, registry=profile_registry)
+    family_producer = bool(producer_profile)
+    uses_architecture_mode = _family_manifest_bool(family_manifest, "uses_architecture_mode")
     workspace = _normalize_workflow_workspace(
         dict(args.get("workspace") or {}),
-        require_primary_language=profile_family == "software_engineering",
+        require_primary_language=_family_manifest_bool(family_manifest, "require_primary_language"),
     )
     requirements_review = str(args.get("requirements_review") or "").strip().lower()
     if requirements_review and requirements_review != "skip":
@@ -2741,7 +2843,11 @@ def _workflow_entry_pack_from_args(
             "architecture_mode must be auto, micro, or full",
             field="architecture_mode",
         )
-    architecture_mode = _resolve_architecture_mode(requested_architecture_mode, goal=goal, workspace=workspace) if software_producer else "none"
+    architecture_mode = (
+        _resolve_architecture_mode(requested_architecture_mode, goal=goal, workspace=workspace)
+        if family_producer and uses_architecture_mode
+        else "none"
+    )
     interaction_mode = str(args.get("interaction_mode") or "auto_after_plan").strip().lower() or "auto_after_plan"
     if interaction_mode not in {"interactive", "auto_after_plan", "autonomous"}:
         raise MinionWorkOrderValidationError(
@@ -2755,7 +2861,7 @@ def _workflow_entry_pack_from_args(
     requirements_brief = _manager_requirements_brief_from_args(goal=goal, workspace=workspace, args=args)
     _attach_mechanical_requirements_contract(workspace=workspace, requirements_brief=requirements_brief)
     prompt_observation_tag = _prompt_observation_tag_from_workflow_args(args)
-    if not software_producer:
+    if not family_producer:
         return _generic_dag_workflow_entry_pack(
             args,
             repository=repository,
@@ -2774,6 +2880,8 @@ def _workflow_entry_pack_from_args(
 
     initial_profile = producer_profile
     initial_group, initial_name = split_profile_ref(initial_profile)
+    producer_role = _family_producer_role(family_manifest, initial_name)
+    producer_plan_label = _family_producer_plan_label(family_manifest, uses_architecture_mode=uses_architecture_mode)
     workflow = {
         "workflow_id": workflow_id,
         "status": "running",
@@ -2805,24 +2913,33 @@ def _workflow_entry_pack_from_args(
         "interaction_mode": interaction_mode,
         "profile_family": profile_family,
         "initial_profile": initial_profile,
+        "dag_producer": {"kind": "profile", "profile": initial_profile},
     }
     if prompt_observation_tag:
         metadata["prompt_observation_tag"] = prompt_observation_tag
     planner_work_order = build_planner_work_order(goal=goal, task_id=task_id, work_order_id=work_order_id)
-    planner_work_order["role"] = "architect"
-    _apply_architecture_mode_requirements(
+    planner_work_order["role"] = producer_role
+    _apply_family_producer_requirements(
         planner_work_order,
+        profile_family=profile_family,
+        producer_profile=initial_profile,
+        producer_role=producer_role,
         architecture_mode=architecture_mode,
         requested_architecture_mode=requested_architecture_mode,
+        uses_architecture_mode=uses_architecture_mode,
     )
     architect_milestone = {
-        "milestone_id": "produce_architecture",
-        "title": "Produce reviewed architecture plan",
-        "summary": "Inspect the workspace as needed and submit a dispatchable plan draft for plan acceptance review.",
+        "milestone_id": "produce_architecture" if producer_role == "architect" else "produce_dag_plan",
+        "title": f"Produce reviewed {producer_plan_label}",
+        "summary": f"Inspect the workspace as needed and submit a dispatchable {producer_plan_label} draft for plan acceptance review.",
         "acceptance": [
-            "Architect submits a canonical dispatchable plan draft.",
+            f"{producer_role.replace('_', ' ').title()} submits a canonical dispatchable plan draft.",
             "Plan includes acceptance criteria, module contracts, and test strategy.",
-            "Architecture mode constraints are either satisfied or escalated with a concrete reason.",
+            (
+                "Architecture mode constraints are either satisfied or escalated with a concrete reason."
+                if uses_architecture_mode
+                else "Family planning constraints are either satisfied or escalated with a concrete reason."
+            ),
         ],
     }
     plan_review = {
@@ -2844,17 +2961,20 @@ def _workflow_entry_pack_from_args(
         {
             "work_order_id": work_order_id,
             "goal": goal,
-            "instruction": _architect_workflow_instruction(
+            "instruction": _family_producer_workflow_instruction(
+                producer_role=producer_role,
+                producer_plan_label=producer_plan_label,
                 architecture_mode=architecture_mode,
                 requested_architecture_mode=requested_architecture_mode,
+                uses_architecture_mode=uses_architecture_mode,
             ),
             "acceptance_criteria": [
                 "Submit a dispatchable plan draft through the plan builder tools.",
                 "Include module acceptance criteria and test strategy in the plan.",
-                "Do not implement code in the architect run.",
+                f"Do not implement production work in the {producer_role} run.",
             ],
             "workspace": workspace,
-            "profile_group": initial_group or "software_engineering",
+            "profile_group": initial_group or profile_family,
             "profile_name": initial_name,
             "metadata": metadata,
         }
@@ -3046,6 +3166,42 @@ def _workflow_language_list(value: Any) -> list[str]:
     return result
 
 
+def _family_manifest_bool(manifest: Any, key: str, *, default: bool = False) -> bool:
+    metadata = dict(getattr(manifest, "metadata", {}) or {})
+    candidates = [key]
+    if key == "require_primary_language":
+        candidates.extend(["requires_primary_language", "require_primary_language_for_new_project"])
+    value = None
+    for candidate in candidates:
+        if candidate in metadata:
+            value = metadata.get(candidate)
+            break
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "required"}:
+        return True
+    if text in {"0", "false", "no", "off", "optional"}:
+        return False
+    return default
+
+
+def _family_producer_role(manifest: Any, fallback_profile_name: str) -> str:
+    metadata = dict(getattr(manifest, "metadata", {}) or {})
+    role = str(metadata.get("producer_role") or metadata.get("dag_producer_role") or fallback_profile_name or "dag_producer").strip()
+    return role or "dag_producer"
+
+
+def _family_producer_plan_label(manifest: Any, *, uses_architecture_mode: bool) -> str:
+    metadata = dict(getattr(manifest, "metadata", {}) or {})
+    label = str(metadata.get("producer_plan_label") or metadata.get("dag_producer_plan_label") or "").strip()
+    if label:
+        return label
+    return "architecture plan" if uses_architecture_mode else "DAG plan"
+
+
 def _resolve_architecture_mode(requested: str, *, goal: str, workspace: dict[str, Any]) -> str:
     if requested in {"micro", "full"}:
         return requested
@@ -3073,6 +3229,41 @@ def _resolve_architecture_mode(requested: str, *, goal: str, workspace: dict[str
         "rewrite",
     )
     return "full" if any(marker in text for marker in full_markers) else "micro"
+
+
+def _apply_family_producer_requirements(
+    planner_work_order: dict[str, Any],
+    *,
+    profile_family: str,
+    producer_profile: str,
+    producer_role: str,
+    architecture_mode: str,
+    requested_architecture_mode: str,
+    uses_architecture_mode: bool,
+) -> None:
+    requirements = dict(planner_work_order.get("planning_requirements") or {})
+    requirements["profile_family"] = profile_family
+    requirements["producer_profile"] = producer_profile
+    requirements["producer_role"] = producer_role
+    requirements["dispatchable_plan_required"] = True
+    planner_work_order["planning_requirements"] = requirements
+    planner_work_order["profile_family"] = profile_family
+    planner_work_order["producer_profile"] = producer_profile
+    if uses_architecture_mode:
+        _apply_architecture_mode_requirements(
+            planner_work_order,
+            architecture_mode=architecture_mode,
+            requested_architecture_mode=requested_architecture_mode,
+        )
+        return
+    requirements["requested_architecture_mode"] = requested_architecture_mode
+    requirements["architecture_mode"] = "none"
+    requirements["module_slug_policy"] = (
+        "Use short semantic module ids tied to the family deliverable; do not add a module_ prefix."
+    )
+    planner_work_order["planning_requirements"] = requirements
+    planner_work_order["architecture_mode"] = "none"
+    planner_work_order["requested_architecture_mode"] = requested_architecture_mode
 
 
 def _apply_architecture_mode_requirements(
@@ -3107,11 +3298,27 @@ def _apply_architecture_mode_requirements(
     planner_work_order["requested_architecture_mode"] = requested_architecture_mode
 
 
-def _architect_workflow_instruction(*, architecture_mode: str, requested_architecture_mode: str) -> str:
+def _family_producer_workflow_instruction(
+    *,
+    producer_role: str,
+    producer_plan_label: str,
+    architecture_mode: str,
+    requested_architecture_mode: str,
+    uses_architecture_mode: bool,
+) -> str:
+    role = str(producer_role or "dag_producer").replace("_", " ")
+    if not uses_architecture_mode:
+        return (
+            f"Produce a canonical dispatchable {producer_plan_label} for this workflow. "
+            f"Use {role} plan builder tools only; do not perform downstream production work. "
+            "The plan must include acceptance criteria, module contracts, test strategy, and dispatchable fork_join_linear topology. "
+            "If the family scope is unsafe or under-specified, report escalation_required with a concrete reason instead of dispatching "
+            "an under-specified plan."
+        )
     return (
-        f"Produce a {architecture_mode} canonical architecture plan for this workflow. "
+        f"Produce a {architecture_mode} canonical {producer_plan_label} for this workflow. "
         f"The requested architecture_mode is {requested_architecture_mode}. "
-        "Use architect plan builder tools only; do not implement code. The plan must include acceptance criteria, module contracts, "
+        f"Use {role} plan builder tools only; do not implement code. The plan must include acceptance criteria, module contracts, "
         "test strategy, and dispatchable fork_join_linear topology. In micro mode for narrow changes, use no prelude: produce one "
         "implementation module plus final_verification. Do not create baseline/setup/contracts/prelude modules unless a real shared "
         "code or config artifact must be produced before multiple independent modules can start. If micro scope is unsafe, report escalation_required "

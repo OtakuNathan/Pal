@@ -19,7 +19,6 @@ class GitCapabilityMixin:
                 "cmd": {"type": "string", "description": GIT_TOOL_CMD_DESCRIPTION},
                 "cwd": {"type": "string", "description": "Optional repository working directory."},
                 "timeout_ms": {"type": "integer", "minimum": 1, "description": "Optional timeout in milliseconds."},
-                "output_limit": {"type": "integer", "minimum": 256, "description": "Maximum stdout/stderr characters kept."},
             },
             "required": ["cmd"],
             "additionalProperties": False,

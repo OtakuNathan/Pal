@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -18,6 +19,12 @@ from pal.core import PalCore
 from pal.core.prompt_compiler import PromptCompiler
 from pal.core.prompt_fragment_registry import PromptFragmentRegistry
 from pal.core.runtime_config import RuntimeConfig
+from pal.core.prompt_debug_log import (
+    append_prompt_debug_log,
+    render_llm_outcome_debug_log,
+    render_prompt_debug_log,
+    render_reply_debug_log,
+)
 from pal.core.tool_stagnation import ToolStagnationGuardProcess
 from pal.core.turn_events import TurnEventBus
 from pal.core.turn_executor import TurnExecutor
@@ -56,6 +63,7 @@ from pal.memory import (
     MemoryCompactRequest,
     MemoryPackRequest,
     MemoryService,
+    build_ollama_embedding_provider_from_config,
     register_with_core as register_memory_with_core,
 )
 from pal.memory.tool_protocol import l1_tool_protocol_transcript
@@ -80,6 +88,11 @@ from pal.minion.scoped_execution import (
     _path_is_relative_to,
     _review_tool_evidence_ref,
 )
+from pal.minion.tool_admission import (
+    admit_minion_tool_call,
+    normalize_minion_allowed_capabilities,
+    resolve_minion_tool_call_alias,
+)
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.minion.prompt_adapter import (
     build_minion_task_envelope as _minion_task_envelope,
@@ -88,7 +101,6 @@ from pal.minion.prompt_adapter import (
     prompt_scaffold_summary as _prompt_scaffold_summary,
     prompt_view_from_pack as _prompt_view_from_pack,
 )
-from pal.minion.profiles import filter_minion_allowed_capabilities, is_minion_capability_denied
 from pal.minion.sandbox import minion_sandbox_is_enabled
 from pal.minion.turns import apply_minion_turn_to_pack
 from pal.minion.user_interaction import (
@@ -430,9 +442,6 @@ class _MinionExecutionRuntimeAdapter:
         budget: Any = None,
         turn_id: str | None = None,
     ) -> CanonicalToolResult:
-        _ = allow_tools
-        _ = budget
-        _ = turn_id
         target_name = _effective_capability_name(call)
         index = len(self._continuation.pending_tool_results)
         await self._runner._emit_progress(
@@ -455,7 +464,13 @@ class _MinionExecutionRuntimeAdapter:
         )
         try:
             result = await self._runner._await_with_progress_heartbeat(
-                self._runner._execute_allowed_tool(self._state.execution_runtime, call),
+                self._runner._execute_allowed_tool(
+                    self._state.execution_runtime,
+                    call,
+                    allow_tools=allow_tools,
+                    budget=budget,
+                    turn_id=turn_id or self._continuation.turn_id,
+                ),
                 phase="tool_call_waiting",
                 round=self._state.llm_round_count,
                 tool_call_index=index,
@@ -837,6 +852,9 @@ class MinionRunner:
             turn_settings_snapshot=_minion_turn_settings_snapshot(self.pack),
             tool_protocol_messages=state.tool_protocol_messages,
         )
+        begin_tool_results = getattr(state.execution_runtime, "begin_tool_result_turn", None)
+        if callable(begin_tool_results):
+            begin_tool_results(turn_id=turn_id, scope_key=f"minion:{self.run_id}")
         executor = self._build_minion_turn_executor(bundle, state, continuation)
         current: EffectResult | None = None
         while True:
@@ -1152,7 +1170,7 @@ class MinionRunner:
             build_canonical_prompt=build_canonical_prompt,
             debug_log_prompt=lambda _continuation, request: self._debug_log_minion_llm_request(state, request),
             debug_log_outcome=lambda _continuation, outcome: self._debug_log_minion_llm_outcome(state, outcome),
-            debug_log_reply=lambda _continuation, text: self._append_debug_log("reply", {"text": str(text or "")}),
+            debug_log_reply=lambda _continuation, text: self._debug_log_minion_reply(text),
             build_llm_tool_contracts=lambda: _llm_tools_for_allowed(state.execution_runtime, self.pack.allowed_capabilities),
             handle_failure_async=_minion_noop_failure_handler,
             render_failure_feedback_text=lambda feedback: str(feedback or ""),
@@ -1254,28 +1272,21 @@ class MinionRunner:
         state.pending_tool_results = list(continuation.pending_tool_results)
 
     def _debug_log_minion_llm_request(self, state: MinionAgentLoopState, request: CanonicalLLMRequest) -> None:
-        self._append_debug_log(
-            "llm_request",
-            {
-                "round": state.llm_round_count,
-                "messages": request.messages,
-                "tools": request.tools,
-                "metadata": request.metadata,
-            },
-        )
+        context = self._prompt_debug_context(round=state.llm_round_count)
+        self._append_prompt_debug_log(render_prompt_debug_log(request, context=context))
 
     def _debug_log_minion_llm_outcome(self, state: MinionAgentLoopState, outcome: Any) -> None:
-        self._append_debug_log(
-            "llm_outcome",
-            {
-                "round": state.llm_round_count,
-                "finish_reason": str(getattr(outcome, "finish_reason", "") or ""),
-                "response_mode": str(getattr(outcome, "response_mode", "") or ""),
-                "tool_calls": [_tool_call_summary(item) for item in list(getattr(outcome, "tool_calls", []) or [])],
-                "reasoning_text": str(getattr(outcome, "reasoning_text", "") or ""),
-                "text": str(getattr(outcome, "text", "") or "").strip(),
-            },
+        context = self._prompt_debug_context(round=state.llm_round_count)
+        self._append_prompt_debug_log(
+            render_llm_outcome_debug_log(
+                outcome,
+                provider_payload="{}",
+                context=context,
+            )
         )
+
+    def _debug_log_minion_reply(self, text: object) -> None:
+        self._append_prompt_debug_log(render_reply_debug_log(text, context=self._prompt_debug_context()))
 
     async def _call_port_async(self, port: Any, async_name: str, sync_name: str, *args: Any, **kwargs: Any) -> Any:
         async_method = getattr(port, async_name, None)
@@ -1335,33 +1346,30 @@ class MinionRunner:
             return bool(completion_policy.get("requires_capability_evidence")) and bool(self.pack.allowed_capabilities)
         return str(completion_policy.get("evidence") or "").strip().lower() == "git_commit" and bool(self.pack.allowed_capabilities)
 
-    async def _execute_allowed_tool(self, execution_runtime: "MinionScopedExecutionRuntime", tool_call: CanonicalToolCall) -> CanonicalToolResult:
-        tool_call = self._canonicalize_allowed_tool_call(tool_call)
+    async def _execute_allowed_tool(
+        self,
+        execution_runtime: "MinionScopedExecutionRuntime",
+        tool_call: CanonicalToolCall,
+        *,
+        allow_tools: bool = True,
+        budget: Any = None,
+        turn_id: str | None = None,
+    ) -> CanonicalToolResult:
+        effective_allowed = getattr(execution_runtime, "allowed_capabilities", None) or self.pack.allowed_capabilities
+        allowed_items = [
+            str(item).strip()
+            for item in [*list(self.pack.allowed_capabilities or []), *list(effective_allowed or [])]
+            if str(item).strip()
+        ]
+        allowed_items = normalize_minion_allowed_capabilities(allowed_items)
+        tool_call = resolve_minion_tool_call_alias(tool_call, allowed_items)
         tool_call = self._tool_call_with_minion_defaults(tool_call)
-        target_name = _effective_capability_name(tool_call)
-        allowed = set(str(item) for item in self.pack.allowed_capabilities)
-        if is_minion_capability_denied(tool_call.name) or is_minion_capability_denied(target_name):
-            self.blocked_summary = f"capability is denied by minion policy: {target_name}"
-            return CanonicalToolResult(
-                name=tool_call.name,
-                ok=False,
-                text="capability is denied by minion policy",
-                structured={"reason": "capability_denied_by_minion_policy", "capability": target_name},
-                call_id=tool_call.call_id,
-                llm_text="capability is denied by minion policy",
-                status=RuntimeStatus.ERROR,
-            )
-        if tool_call.name not in allowed or target_name not in allowed:
-            self.blocked_summary = f"capability is not allowed for this minion run: {target_name}"
-            return CanonicalToolResult(
-                name=tool_call.name,
-                ok=False,
-                text="capability is not allowed for this minion run",
-                structured={"reason": "capability_not_allowed", "capability": target_name},
-                call_id=tool_call.call_id,
-                llm_text="capability is not allowed for this minion run",
-                status=RuntimeStatus.ERROR,
-            )
+        admission = admit_minion_tool_call(tool_call, allowed_items, require_effective_target=True)
+        tool_call = admission.call
+        target_name = admission.target_name
+        if not admission.ok:
+            self.blocked_summary = f"{admission.message}: {target_name}"
+            return admission.to_result()
         policy_error = self._runner_owned_git_command_error(target_name, tool_call)
         if policy_error:
             return CanonicalToolResult(
@@ -1455,7 +1463,12 @@ class MinionRunner:
                     status=RuntimeStatus.ERROR,
                 )
         before_snapshot = {} if self._sandboxed() else self._shell_audit_snapshot(target_name)
-        result = await execution_runtime.execute_tool_async(tool_call, allow_tools=True, turn_id=self.run_id)
+        result = await execution_runtime.execute_tool_async(
+            tool_call,
+            allow_tools=allow_tools,
+            budget=budget,
+            turn_id=turn_id or self.run_id,
+        )
         self._record_web_research_usage(target_name)
         violation = self._record_shell_audit_violation(target_name, tool_call, before_snapshot)
         if violation:
@@ -1465,28 +1478,6 @@ class MinionRunner:
 
     def _sandboxed(self) -> bool:
         return minion_sandbox_is_enabled(self.pack) or os.environ.get("PAL_MINION_SANDBOXED") == "1"
-
-    def _canonicalize_allowed_tool_call(self, tool_call: CanonicalToolCall) -> CanonicalToolCall:
-        name = self._resolve_allowed_capability_name(tool_call.name)
-        args = dict(tool_call.args or {})
-        if name == "op_tool_call":
-            for key in ("name", "capability", "tool"):
-                if str(args.get(key) or "").strip():
-                    args[key] = self._resolve_allowed_capability_name(args.get(key))
-                    break
-        if name == tool_call.name and args == dict(tool_call.args or {}):
-            return tool_call
-        return CanonicalToolCall(name=name, args=args, call_id=tool_call.call_id)
-
-    def _resolve_allowed_capability_name(self, name: object) -> str:
-        raw = str(name or "").strip()
-        if not raw:
-            return ""
-        allowed = [str(item).strip() for item in self.pack.allowed_capabilities if str(item).strip()]
-        if raw in allowed:
-            return raw
-        matches = [canonical for canonical in allowed if llm_tool_name(canonical) == raw]
-        return matches[0] if len(matches) == 1 else raw
 
     def _tool_call_with_minion_defaults(self, tool_call: CanonicalToolCall) -> CanonicalToolCall:
         if not _is_shell_capability_name(_effective_capability_name(tool_call)):
@@ -1820,6 +1811,7 @@ class MinionRunner:
             else:
                 base_payload["expected_review_gate_kind"] = "checkpoint_verification"
         if ask_user_question:
+            self._finalize_produced_artifacts()
             return {
                 **base_payload,
                 "status": "blocked",
@@ -1829,6 +1821,7 @@ class MinionRunner:
             }
         if evidence == "git_commit":
             await self._persist_text_deliverable_if_needed(final_text)
+            self._finalize_produced_artifacts()
             checkpoint = await self._inspect_current_milestone_checkpoint()
             checkpoint_status = "claimed" if self._requires_checkpoint_review_gate() else "completed"
             if checkpoint.get("status") == "committed":
@@ -1868,6 +1861,7 @@ class MinionRunner:
                 **self._artifact_payload(),
             }
         await self._persist_text_deliverable_if_needed(final_text)
+        self._finalize_produced_artifacts()
         if not str(final_text or "").strip() and not self.produced_artifacts:
             return {
                 **base_payload,
@@ -2263,7 +2257,141 @@ class MinionRunner:
             or module_execution.get("defer_experience_until_module_complete")
         )
 
+    def _finalize_produced_artifacts(self) -> None:
+        if not self.produced_artifacts:
+            return
+        staged_present = any(bool(item.get("staged")) or str(item.get("stage_path") or "").strip() for item in self.produced_artifacts)
+        staging_enabled = bool(str((self.pack.workspace or {}).get("artifact_stage_dir") or "").strip() or staged_present)
+        if not staging_enabled:
+            return
+        accepted_indexes = self._accepted_artifact_indexes()
+        next_artifacts: list[dict[str, Any]] = []
+        for index, artifact in enumerate(list(self.produced_artifacts)):
+            if index in accepted_indexes:
+                next_artifacts.append(self._promote_produced_artifact(artifact))
+            else:
+                self._delete_registered_artifact_paths(artifact)
+        self.produced_artifacts[:] = next_artifacts
+        self._cleanup_artifact_stage_dir()
+
+    def _accepted_artifact_indexes(self) -> set[int]:
+        primary_indexes = [
+            index
+            for index, artifact in enumerate(self.produced_artifacts)
+            if str(artifact.get("role") or "").strip().lower() == "primary"
+        ]
+        if not primary_indexes:
+            return set(range(len(self.produced_artifacts)))
+        latest_primary = primary_indexes[-1]
+        return {
+            index
+            for index, artifact in enumerate(self.produced_artifacts)
+            if index == latest_primary or str(artifact.get("role") or "").strip().lower() != "primary"
+        }
+
+    def _promote_produced_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
+        promoted = dict(artifact)
+        source_text = str(promoted.get("stage_path") or promoted.get("path") or "").strip()
+        relative_path = str(promoted.get("relative_path") or "").strip()
+        if str(promoted.get("role") or "").strip().lower() == "primary":
+            relative_path = str(promoted.get("requested_relative_path") or relative_path).strip()
+        final_root_text = str(promoted.get("final_artifact_dir") or (self.pack.workspace or {}).get("artifact_dir") or "").strip()
+        if source_text and relative_path and final_root_text:
+            source = Path(source_text).expanduser()
+            final_root = Path(final_root_text).expanduser().resolve()
+            destination = (final_root / relative_path).resolve()
+            if destination != final_root and _path_is_relative_to(destination, final_root):
+                if source.exists():
+                    final_root.mkdir(parents=True, exist_ok=True)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        same_file = source.resolve() == destination.resolve()
+                    except OSError:
+                        same_file = False
+                    if not same_file:
+                        shutil.copy2(source, destination)
+                if destination.exists() and destination.is_file():
+                    promoted = self._refresh_artifact_file_metadata(promoted, destination)
+        for key in ("staged", "stage_path", "final_artifact_dir", "requested_relative_path"):
+            promoted.pop(key, None)
+        return promoted
+
+    def _refresh_artifact_file_metadata(self, artifact: dict[str, Any], path: Path) -> dict[str, Any]:
+        refreshed = dict(artifact)
+        data = path.read_bytes()
+        refreshed["path"] = str(path)
+        refreshed["size_bytes"] = path.stat().st_size
+        refreshed["sha256"] = hashlib.sha256(data).hexdigest()
+        final_root_text = str(refreshed.get("final_artifact_dir") or (self.pack.workspace or {}).get("artifact_dir") or "").strip()
+        if final_root_text:
+            final_root = Path(final_root_text).expanduser().resolve()
+            with contextlib.suppress(ValueError):
+                refreshed["relative_path"] = str(path.resolve().relative_to(final_root)).replace("\\", "/")
+        return refreshed
+
+    def _delete_registered_artifact_paths(self, artifact: dict[str, Any]) -> None:
+        cleanup_roots = self._artifact_cleanup_roots(artifact)
+        if not cleanup_roots:
+            return
+        seen: set[Path] = set()
+        for raw_path in (artifact.get("stage_path"), artifact.get("path")):
+            text = str(raw_path or "").strip()
+            if not text:
+                continue
+            path = Path(text).expanduser()
+            with contextlib.suppress(OSError):
+                path = path.resolve()
+            if path in seen:
+                continue
+            seen.add(path)
+            root = next((item for item in cleanup_roots if path != item and _path_is_relative_to(path, item)), None)
+            if root is None or not path.exists():
+                continue
+            with contextlib.suppress(OSError):
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+                elif path.is_dir():
+                    shutil.rmtree(path)
+            self._prune_empty_artifact_dirs(path.parent, stop=root)
+
+    def _artifact_cleanup_roots(self, artifact: dict[str, Any]) -> list[Path]:
+        roots: list[Path] = []
+        for raw_root in (
+            (self.pack.workspace or {}).get("artifact_stage_dir"),
+            artifact.get("final_artifact_dir"),
+            (self.pack.workspace or {}).get("artifact_dir"),
+        ):
+            text = str(raw_root or "").strip()
+            if not text:
+                continue
+            root = Path(text).expanduser()
+            with contextlib.suppress(OSError):
+                root = root.resolve()
+            if root not in roots:
+                roots.append(root)
+        return roots
+
+    def _cleanup_artifact_stage_dir(self) -> None:
+        stage_dir = str((self.pack.workspace or {}).get("artifact_stage_dir") or "").strip()
+        if not stage_dir:
+            return
+        root = Path(stage_dir).expanduser()
+        with contextlib.suppress(OSError):
+            root = root.resolve()
+        if root.exists():
+            shutil.rmtree(root, ignore_errors=True)
+
+    def _prune_empty_artifact_dirs(self, path: Path, *, stop: Path) -> None:
+        current = path
+        while current != stop and _path_is_relative_to(current, stop):
+            try:
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
+
     def _artifact_payload(self) -> dict[str, Any]:
+        self._finalize_produced_artifacts()
         artifacts = [dict(item) for item in self.produced_artifacts]
         payload: dict[str, Any] = {"artifacts": artifacts}
         primary = next((item for item in artifacts if str(item.get("role") or "") == "primary"), None)
@@ -2505,6 +2633,32 @@ class MinionRunner:
         except Exception:
             return
 
+    def _append_prompt_debug_log(self, text: str) -> None:
+        config = dict((self.pack.metadata or {}).get("debug_log") or {})
+        if not bool(config.get("enabled")):
+            return
+        path_text = str(config.get("path") or "").strip()
+        if not path_text:
+            return
+        try:
+            append_prompt_debug_log(Path(path_text), text)
+        except Exception:
+            return
+
+    def _prompt_debug_context(self, *, round: int | None = None) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "work_order_id": self.pack.work_order_id,
+            "minion_profile": self.pack.minion_profile,
+            "minion_id": self.minion_id,
+            "run_id": self.run_id,
+        }
+        if round is not None:
+            context["round"] = round
+        prompt_observation_tag = _prompt_observation_tag_from_pack(self.pack)
+        if prompt_observation_tag:
+            context["prompt_observation_tag"] = prompt_observation_tag
+        return context
+
 def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> MinionRuntimeBundle:
     from pal.core import register_with_core as register_core_with_core
 
@@ -2558,7 +2712,10 @@ def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> Minion
         )
     )
     register_memory_with_core(core.context, memory_service, config=config)
-    l3_plugin = SQLiteVecL3Plugin(service=memory_service)
+    l3_plugin = SQLiteVecL3Plugin(
+        service=memory_service,
+        embedding_provider=build_ollama_embedding_provider_from_config(config),
+    )
     memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
     register_l3_with_core(core.context, l3_plugin)
     register_web_search_with_core(core.context, WebSearchService(repository=web_search_repository, settings_repository=settings))
@@ -2630,7 +2787,8 @@ async def _minion_noop_failure_handler(*args: Any, **kwargs: Any) -> _MinionFail
 def _llm_tools_for_allowed(execution_runtime: Any, allowed_capabilities: list[str]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
-    filtered = filter_minion_allowed_capabilities(allowed_capabilities)
+    effective_allowed = getattr(execution_runtime, "allowed_capabilities", None) or allowed_capabilities
+    filtered = normalize_minion_allowed_capabilities(list(effective_allowed or []))
     tool_surface = _minion_llm_tool_surface(filtered)
     for name in tool_surface:
         canonical = str(name or "").strip()

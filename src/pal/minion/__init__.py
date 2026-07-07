@@ -31,6 +31,12 @@ from pal.minion.profiles import (
     MinionProfileProvider,
     MinionProfileRegistry,
 )
+from pal.minion.families import (
+    MinionCapabilityGroup,
+    MinionFamilyManifest,
+    MinionFamilyProvider,
+    MinionFamilyRegistry,
+)
 from pal.minion.execution_strategy import (
     EXECUTION_STRATEGY_VERSION,
     PREPARE_ARTIFACT_WORKSPACE,
@@ -104,6 +110,10 @@ __all__ = [
     "MinionManagerRpcError",
     "MinionProfile",
     "MinionProfileCapabilityProvider",
+    "MinionCapabilityGroup",
+    "MinionFamilyManifest",
+    "MinionFamilyProvider",
+    "MinionFamilyRegistry",
     "MinionProfileProvider",
     "MinionProfileRegistry",
     "EXECUTION_STRATEGY_VERSION",

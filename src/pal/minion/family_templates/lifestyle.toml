@@ -1,0 +1,12 @@
+family_id = "lifestyle"
+display_name = "Lifestyle"
+domain = "Nutrition, diet, meal planning, training, recovery, sleep, and personal health coaching tasks."
+domain_keywords = ["nutrition", "diet", "meal", "training", "fitness", "weight", "sleep", "recovery", "health"]
+default_executor_profile = ""
+dag_producer_profile = ""
+
+[capability_groups.lifestyle_report]
+include = ["core_minion_read", "minion_artifacts", "minion_memory_candidates"]
+
+[capability_groups.lifestyle_research]
+include = ["lifestyle_report", "web_research", "memory_recall"]

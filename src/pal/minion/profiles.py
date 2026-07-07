@@ -7,6 +7,7 @@ import tomllib
 from typing import Any, Protocol
 
 from pal.minion.execution_strategy import merge_execution_strategy, normalize_execution_strategy
+from pal.minion.families import MinionFamilyProvider, MinionFamilyRegistry
 from pal.minion.utils import dedupe_strings as _dedupe
 from pal.minion.utils import dict_from as _dict
 from pal.minion.utils import string_list as _string_list
@@ -29,7 +30,6 @@ _PROFILE_RUNTIME_METADATA_KEYS = frozenset(
         "timeout_seconds",
     }
 )
-
 
 @dataclass(frozen=True)
 class MinionProfile:
@@ -149,6 +149,7 @@ class MinionProfileCapabilityProvider(Protocol):
 class MinionProfileRegistry:
     profile_providers: tuple[MinionProfileProvider, ...] = ()
     capability_providers: tuple[MinionProfileCapabilityProvider, ...] = ()
+    family_providers: tuple[MinionFamilyProvider, ...] = ()
     ambient_capabilities: tuple[str, ...] = ()
     runtime_root: Path | None = None
     builtin_profiles: tuple[MinionProfile, ...] = field(default_factory=lambda: BUILTIN_MINION_PROFILES)
@@ -207,7 +208,11 @@ class MinionProfileRegistry:
         if profile is None:
             raise KeyError(f"unknown minion profile: {profile_id}")
         capability_policy = dict(profile.capability_policy)
-        base_capabilities = _expand_capabilities([*profile.capability_groups, *profile.default_allowed_capabilities])
+        base_capabilities = _expand_capabilities(
+            [*profile.capability_groups, *profile.default_allowed_capabilities],
+            family_id=profile.profile_group,
+            family_registry=self.family_registry(),
+        )
         if _should_inherit_ambient_capabilities(capability_policy) and self.ambient_capabilities:
             base_capabilities = _dedupe([*self.ambient_capabilities, *base_capabilities])
         if pack.allowed_capabilities:
@@ -336,6 +341,12 @@ class MinionProfileRegistry:
             return []
         profile_dir = Path(self.runtime_root) / "plugins" / "minion" / "profiles"
         return _load_profiles_from_dir(profile_dir)
+
+    def family_registry(self) -> MinionFamilyRegistry:
+        return MinionFamilyRegistry(
+            family_providers=self.family_providers,
+            runtime_root=self.runtime_root,
+        )
 
 
 CORE_MINION_CAPABILITIES = (
@@ -599,13 +610,40 @@ def _iter_profile_template_files(root: Any) -> list[tuple[Any, str]]:
     return result
 
 
-def _expand_capabilities(values: list[str]) -> list[str]:
+def _expand_capabilities(
+    values: list[str],
+    *,
+    family_id: str = "general",
+    family_registry: MinionFamilyRegistry | None = None,
+) -> list[str]:
+    registry = family_registry or MinionFamilyRegistry()
     result: list[str] = []
+    seen_groups: set[str] = set()
+
+    def expand_value(value: str) -> None:
+        group_name = str(value or "").strip()
+        if not group_name:
+            return
+        if group_name in CAPABILITY_GROUPS:
+            for item in CAPABILITY_GROUPS[group_name]:
+                expand_value(item)
+            return
+        family_group = registry.capability_group(family_id, group_name)
+        if family_group is None:
+            result.append(group_name)
+            return
+        key = f"{family_id}:{group_name}"
+        if "." in group_name:
+            key = group_name
+        if key in seen_groups:
+            return
+        seen_groups.add(key)
+        for included in family_group.include:
+            expand_value(included)
+        result.extend(family_group.capabilities)
+
     for value in values:
-        if value in CAPABILITY_GROUPS:
-            result.extend(CAPABILITY_GROUPS[value])
-        else:
-            result.append(value)
+        expand_value(value)
     return _dedupe(result)
 
 

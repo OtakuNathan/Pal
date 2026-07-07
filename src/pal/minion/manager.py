@@ -508,12 +508,26 @@ class MinionManager:
         pack = profile_registry.resolve_pack(pack)
         if _is_plan_parent_pack(pack):
             ticked = await self.tick_parent_dag(pack.work_order_id, reason="plan_parent_spawn")
+            child_runs = _runs_from_dag_tick(ticked)
+            first_run = child_runs[0] if child_runs else {}
             return {
                 "work_order_id": pack.work_order_id,
                 "minion_profile": pack.minion_profile,
                 "status": str(ticked.get("status") or "ok"),
+                "run_id": str(first_run.get("run_id") or ""),
+                "minion_id": str(first_run.get("minion_id") or ""),
                 "plan_parent": True,
                 "dag_tick": ticked,
+                "continuation": {
+                    "run": first_run,
+                    "runs": child_runs,
+                },
+                "child_runs": child_runs,
+                "child_run_ids": [str(item.get("run_id") or "") for item in child_runs if str(item.get("run_id") or "").strip()],
+                "child_work_order_id": str(ticked.get("child_work_order_id") or ""),
+                "child_work_order_ids": [str(item) for item in list(ticked.get("child_work_order_ids") or []) if str(item).strip()],
+                "module_id": str(ticked.get("module_id") or ""),
+                "module_ids": [str(item) for item in list(ticked.get("module_ids") or []) if str(item).strip()],
             }
         pack, metadata_updates = self._with_profile_gate_policy(pack)
         if metadata_updates:
@@ -2591,3 +2605,22 @@ def _debug_log_path_from_pack(pack: TaskContextPack) -> str:
     if not bool(debug_log.get("enabled")):
         return ""
     return str(debug_log.get("path") or "")
+
+
+def _runs_from_dag_tick(ticked: dict[str, Any]) -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        run_id = str(value.get("run_id") or "").strip()
+        if not run_id or run_id in seen:
+            return
+        seen.add(run_id)
+        runs.append(dict(value))
+
+    add(ticked.get("run"))
+    for item in list(ticked.get("runs") or []):
+        add(item)
+    return runs

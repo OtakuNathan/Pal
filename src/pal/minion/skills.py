@@ -320,7 +320,7 @@ Choose policies deliberately:
 
 Prefer existing capability groups over ad hoc tool lists:
 
-- `core_minion_read`: scoped discovery/read/call and read-only memory recall.
+- `core_minion_read`: scoped discovery/read and read-only memory recall; result-page reading is injected by minion execution as protocol support.
 - `workspace_read`: read-only workspace inspection tools.
 - `workspace_write`: source/workspace mutation tools; use sparingly and only for implementation profiles.
 - `minion_artifacts`: artifact write/edit tools under `workspace.artifact_dir`.
