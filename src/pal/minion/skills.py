@@ -50,6 +50,7 @@ Non-software profiles usually run as generic single-node DAGs unless their famil
 Profiles are extension points, not manager branches.
 
 - Builtin profiles live under `src/pal/minion/profile_templates/`; runtime overrides live under `runtime_root/plugins/minion/profiles/*.toml`.
+- Builtin family manifests live under `src/pal/minion/family_templates/`; runtime overrides live under `runtime_root/plugins/minion/families/*.toml`.
 - Public family selection happens at task creation through `profile_family`. Normal dispatch does not pass `profile_name` or `profile_group`.
 - Choose `profile_family` by domain before creating the task: code/repo/review work is `software_engineering`; nutrition, diet, meal planning, training, health check-in, and Nathan coaching tasks are `lifestyle`; use `general` only when no registered domain family fits.
 - The task `profile_family` is the default interpretation context for all work orders under that task. Work orders snapshot it into workflow metadata, and bare `workflow_next.profile` names are resolved inside that family before persistence. Keep canonical ids such as `software_engineering.architect` as runtime metadata.
@@ -187,6 +188,7 @@ Repair bills are downstream feedback projected back into the plan/module graph.
 
 Prefer these extension surfaces before adding manager special cases:
 
+- families: `src/pal/minion/family_templates/` or runtime family TOML
 - profiles: `src/pal/minion/profile_templates/` or runtime profile TOML
 - workspace environment: `src/pal/minion/workspace_environment.py` and runtime preparer templates
 - gates: `GateDefinition`, `GateChecklistEntry`, and `GateStrategy` provider protocols
@@ -260,7 +262,7 @@ A Minion profile describes one bounded executor role. It should not be a hidden 
 - The profile owns identity, behavior prompt, capability exposure, workspace expectations, output contract, and declared next workflow step.
 - A minion running a profile does not spawn other minions. Use artifact `workflow_next` plus profile `output_policy.workflow_next` policy so the manager can mechanically dispatch the next step.
 - Pal's main agent owns source-scope shaping. Do not recreate the removed requirements-review profile.
-- Prefer runtime profile files under `runtime_root/plugins/minion/profiles/<group>/<profile>.toml` for local experiments; edit `src/pal/minion/profile_templates/` only for builtin product profiles.
+- Prefer runtime family files under `runtime_root/plugins/minion/families/<family>.toml` and runtime profile files under `runtime_root/plugins/minion/profiles/<group>/<profile>.toml` for local experiments; edit `src/pal/minion/family_templates/` or `src/pal/minion/profile_templates/` only for builtin product definitions.
 
 ## Profile TOML Shape
 

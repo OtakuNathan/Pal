@@ -235,6 +235,10 @@ def prepare_task_workspace(runtime_root: Path, pack: TaskContextPack, *, run_id:
         repo_path = str(workspace.get("repo_path") or "").strip()
         if not repo_path and source_repo and _is_local_path(source_repo):
             repo_path = source_repo
+        if _read_only_runtime_repo_requested(runtime_root, workspace, source_repo=source_repo, repo_path=repo_path):
+            workspace = _prepare_runtime_read_only_repo(runtime_root, pack, workspace, source_repo=source_repo or repo_path)
+            repo_path = str(workspace.get("repo_path") or "").strip()
+            source_repo = str(workspace.get("source_repo") or source_repo or "").strip()
         if repo_path:
             workspace["repo_path"] = str(Path(repo_path).expanduser())
         if source_repo:
@@ -250,6 +254,70 @@ def prepare_task_workspace(runtime_root: Path, pack: TaskContextPack, *, run_id:
         workspace["completion_policy"] = dict(completion_policy)
     workspace["execution_strategy"] = dict(execution_strategy)
     return _with_folder_workspace(runtime_root, pack, workspace, run_id=run_id)
+
+
+def _read_only_runtime_repo_requested(runtime_root: Path, workspace: dict[str, Any], *, source_repo: str, repo_path: str) -> bool:
+    allocation = dict(workspace.get("workspace_allocation") or {})
+    mode = str(allocation.get("mode") or "").strip().lower()
+    if mode not in {"runtime_minion_repo", "runtime_repo", "minion_repo"}:
+        return False
+    source = str(source_repo or repo_path or "").strip()
+    if not source:
+        return False
+    current_repo = str(repo_path or "").strip()
+    if current_repo:
+        with contextlib.suppress(OSError, ValueError):
+            Path(current_repo).expanduser().resolve().relative_to(Path(runtime_root).expanduser().resolve() / "data" / "minion" / "repos")
+            return False
+    if _is_local_path(source):
+        path = Path(source).expanduser()
+        return (path / ".git").exists() or _git(path, "rev-parse", "--git-dir").ok
+    return True
+
+
+def _prepare_runtime_read_only_repo(
+    runtime_root: Path,
+    pack: TaskContextPack,
+    workspace: dict[str, Any],
+    *,
+    source_repo: str,
+) -> dict[str, Any]:
+    metadata = dict(pack.metadata)
+    task_id = _safe_ref(str(metadata.get("task_id") or f"task_{pack.work_order_id}"))
+    source = str(source_repo or "").strip()
+    project_name = _project_name(metadata, workspace, task_id=task_id, source_repo=source)
+    work_order_root_id = str(metadata.get("parent_work_order_id") or workspace.get("parent_work_order_id") or pack.work_order_id).strip()
+    project_root = _project_root_path(runtime_root, workspace, project_name, work_order_id=work_order_root_id)
+    common_git_dir = _project_common_git_dir(project_root)
+    provision_workspace = dict(workspace)
+    for key in (
+        "common_git_dir",
+        "runtime_project_path",
+        "work_order_repo_root",
+        "task_project_path",
+        "target_project_path",
+        "task_repo_path",
+        "target_repo_path",
+    ):
+        provision_workspace.pop(key, None)
+    _ensure_project_git_store(common_git_dir, source_repo=source, workspace=provision_workspace)
+    _ensure_git_identity(project_root)
+    _ensure_local_git_excludes(project_root)
+    updated = dict(workspace)
+    updated.update(
+        {
+            "repo_path": str(project_root),
+            "project_name": project_name,
+            "runtime_project_path": str(project_root),
+            "work_order_repo_root": str(project_root),
+            "common_git_dir": str(common_git_dir),
+            "workspace_kind": "runtime_read_only_repo",
+        }
+    )
+    if source:
+        updated.setdefault("source_repo", source)
+        updated.setdefault("origin_repo_path", source)
+    return updated
 
 
 def _with_checkpoint_commit_capability(pack: TaskContextPack) -> TaskContextPack:
@@ -1072,13 +1140,13 @@ def _with_folder_workspace(runtime_root: Path, pack: TaskContextPack, workspace:
     log_dir.mkdir(parents=True, exist_ok=True)
     prepared_workspace.update(
         {
-            "workspace_kind": "folder",
             "run_dir": str(run_dir),
             "artifact_dir": str(artifact_dir),
             "artifact_stage_dir": str(artifact_stage_dir),
             "log_dir": str(log_dir),
         }
     )
+    prepared_workspace.setdefault("workspace_kind", "folder")
     prepared = TaskContextPack.from_dict({**pack.to_dict(), "workspace": prepared_workspace})
     _write_folder_workspace_metadata(run_dir, prepared)
     return prepared

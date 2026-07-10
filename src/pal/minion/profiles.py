@@ -14,7 +14,10 @@ from pal.minion.utils import string_list as _string_list
 from pal.minion.plan_builder import (
     PLAN_BUILDER_CAPABILITIES,
     PLAN_BUILDER_INITIAL_CAPABILITIES,
+    PLAN_BUILDER_MODULE_DETAIL_CAPABILITIES,
     PLAN_BUILDER_READ_CAPABILITIES,
+    PLAN_BUILDER_REVISION_CAPABILITIES,
+    PLAN_BUILDER_SKETCH_CAPABILITIES,
     is_plan_builder_capability,
 )
 from pal.minion.repair_bill_builder import REPAIR_BILL_BUILDER_CAPABILITIES
@@ -98,6 +101,9 @@ class MinionProfile:
             raise ValueError("MinionProfile.profile_id is required")
         display_name = str(payload.get("display_name") or profile_id).strip()
         metadata = _dict(payload.get("metadata"))
+        for key in _PROFILE_RUNTIME_METADATA_KEYS:
+            if key in payload and key not in metadata:
+                metadata[key] = payload[key]
         skill_refs = tuple(
             _string_list(
                 payload.get("skill_refs")
@@ -374,7 +380,9 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "minion_artifacts": ("op_minion_artifact_write", "op_minion_artifact_edit"),
     "minion_plan_builder": PLAN_BUILDER_INITIAL_CAPABILITIES,
     "minion_plan_builder_initial": PLAN_BUILDER_INITIAL_CAPABILITIES,
-    "minion_plan_builder_revision": PLAN_BUILDER_CAPABILITIES,
+    "minion_plan_builder_sketch": PLAN_BUILDER_SKETCH_CAPABILITIES,
+    "minion_plan_builder_module_detail": PLAN_BUILDER_MODULE_DETAIL_CAPABILITIES,
+    "minion_plan_builder_revision": PLAN_BUILDER_REVISION_CAPABILITIES,
     "minion_plan_builder_full": PLAN_BUILDER_CAPABILITIES,
     "minion_plan_reader": PLAN_BUILDER_READ_CAPABILITIES,
     "minion_repair_bill_builder": REPAIR_BILL_BUILDER_CAPABILITIES,
@@ -509,9 +517,20 @@ def filter_minion_allowed_capabilities(
     *,
     capability_policy: dict[str, Any] | None = None,
 ) -> list[str]:
+    canonical_values = _dedupe(list(values))
+    noncanonical = [
+        name
+        for name in canonical_values
+        if not name.startswith(("op_", "intro_"))
+    ]
+    if noncanonical:
+        raise ValueError(
+            "allowed_capabilities must contain canonical capability paths; "
+            f"received aliases: {', '.join(noncanonical)}"
+        )
     return [
         value
-        for value in _dedupe(list(values))
+        for value in canonical_values
         if not is_minion_capability_denied(value, capability_policy=capability_policy)
     ]
 

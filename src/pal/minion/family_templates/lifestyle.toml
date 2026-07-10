@@ -5,6 +5,9 @@ domain_keywords = ["nutrition", "diet", "meal", "training", "fitness", "weight",
 default_executor_profile = ""
 dag_producer_profile = ""
 
+[metadata]
+builtin = true
+
 [capability_groups.lifestyle_report]
 include = ["core_minion_read", "minion_artifacts", "minion_memory_candidates"]
 

@@ -83,6 +83,8 @@ from pal.minion.work_order import (
     dispatchable_plan_validation,
     module_milestone_records,
     new_work_id,
+    normalize_plan_write_areas,
+    plan_write_area_covers,
     plan_module_order_for_execution,
     plan_milestone_id_at,
     plan_module_id_at,
@@ -93,6 +95,7 @@ from pal.minion.work_order import (
     validate_dispatchable_plan_artifact,
     validate_final_plan_artifact,
     validate_review_gate_result,
+    work_start_topology_validation,
 )
 
 __all__ = [
@@ -171,6 +174,8 @@ __all__ = [
     "inspect_tasking",
     "module_milestone_records",
     "new_work_id",
+    "normalize_plan_write_areas",
+    "plan_write_area_covers",
     "plan_module_order_for_execution",
     "plan_milestone_id_at",
     "plan_module_id_at",
@@ -182,4 +187,5 @@ __all__ = [
     "validate_dispatchable_plan_artifact",
     "validate_final_plan_artifact",
     "validate_review_gate_result",
+    "work_start_topology_validation",
 ]

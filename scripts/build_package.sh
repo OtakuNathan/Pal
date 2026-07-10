@@ -43,6 +43,10 @@ required_wheel_paths=(
   "pal/lsp/server_templates/yaml.toml"
   "pal/mcp/templates/stdio_server.toml"
   "pal/memory/interactions.py"
+  "pal/minion/families.py"
+  "pal/minion/family_templates/general.toml"
+  "pal/minion/family_templates/lifestyle.toml"
+  "pal/minion/family_templates/software_engineering.toml"
   "pal/minion/gates.py"
   "pal/minion/interactions.py"
   "pal/minion/llm_broker.py"
@@ -51,10 +55,22 @@ required_wheel_paths=(
   "pal/minion/plan_store.py"
   "pal/minion/profile_templates/generic.toml"
   "pal/minion/profile_templates/software_engineering/architect.toml"
+  "pal/minion/profile_templates/software_engineering/architect_module_detail.toml"
+  "pal/minion/profile_templates/software_engineering/architect_plan_revision.toml"
   "pal/minion/profile_templates/software_engineering/coder.toml"
   "pal/minion/profile_templates/software_engineering/reviewer.toml"
   "pal/minion/profile_templates/software_engineering/review_worker.toml"
   "pal/minion/profile_templates/software_engineering/writer.toml"
+  "pal/minion/profile_templates/software_engineering/v2_requirements_analyst.toml"
+  "pal/minion/profile_templates/software_engineering/v2_researcher.toml"
+  "pal/minion/profile_templates/software_engineering/v2_contract_planner.toml"
+  "pal/minion/profile_templates/software_engineering/v2_architecture_reviewer.toml"
+  "pal/minion/profile_templates/software_engineering/v2_coder.toml"
+  "pal/minion/profile_templates/software_engineering/v2_verifier.toml"
+  "pal/minion/v2/contracts.py"
+  "pal/minion/v2/machines.py"
+  "pal/minion/v2/orchestration.py"
+  "pal/minion/v2/worker_main.py"
   "pal/minion/sandbox.py"
   "pal/minion/scoped_execution.py"
   "pal/minion/serial_scheduler.py"
@@ -124,7 +140,9 @@ with zipfile.ZipFile(wheel_path) as wheel:
     expected_profile_gates = {
         "pal/minion/profile_templates/generic.toml": ["none"],
         "pal/minion/profile_templates/software_engineering/coder.toml": ["checkpoint_admission", "module_quality"],
-        "pal/minion/profile_templates/software_engineering/architect.toml": ["plan_acceptance"],
+        "pal/minion/profile_templates/software_engineering/architect.toml": ["none"],
+        "pal/minion/profile_templates/software_engineering/architect_module_detail.toml": ["none"],
+        "pal/minion/profile_templates/software_engineering/architect_plan_revision.toml": ["plan_acceptance"],
     }
     for path, expected_gates in expected_profile_gates.items():
         payload = tomllib.loads(read_text(path))
@@ -138,25 +156,94 @@ with zipfile.ZipFile(wheel_path) as wheel:
     if "pal/minion/profile_templates/software_engineering/planner.toml" in names:
         fail("planner.toml must not be packaged; Pal owns requirements shaping and architect is the first software step")
 
+    v2_profiles = {
+        "v2_requirements_analyst.toml": ("v2_requirements_analyst", "requirements.json", 32768),
+        "v2_researcher.toml": ("v2_researcher", "evidence_catalog.json", 32768),
+        "v2_contract_planner.toml": ("v2_contract_planner", "architecture_bundle.json", 65536),
+        "v2_architecture_reviewer.toml": ("v2_architecture_reviewer", "architecture_review.json", 32768),
+        "v2_coder.toml": ("v2_coder", "coder_report.json", 32768),
+        "v2_verifier.toml": ("v2_verifier", "verification_plan.json", 32768),
+    }
+    for filename, (profile_id, primary_artifact, max_output_tokens) in v2_profiles.items():
+        path = f"pal/minion/profile_templates/software_engineering/{filename}"
+        payload = tomllib.loads(read_text(path))
+        if payload.get("profile_id") != profile_id or payload.get("profile_group") != "software_engineering":
+            fail(f"{path} has an invalid V2 profile identity")
+        output_policy = payload.get("output_policy")
+        if not isinstance(output_policy, dict) or output_policy.get("primary_artifact") != primary_artifact:
+            fail(f"{path} must emit {primary_artifact}")
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict) or metadata.get("max_output_tokens") != max_output_tokens:
+            fail(f"{path} must set metadata.max_output_tokens={max_output_tokens}")
+
+    expected_family_manifests = {
+        "pal/minion/family_templates/general.toml": ("general", "general.generic", ""),
+        "pal/minion/family_templates/lifestyle.toml": ("lifestyle", "", ""),
+        "pal/minion/family_templates/software_engineering.toml": (
+            "software_engineering",
+            "software_engineering.coder",
+            "software_engineering.architect",
+        ),
+    }
+    for path, (family_id, default_executor, dag_producer) in expected_family_manifests.items():
+        payload = tomllib.loads(read_text(path))
+        if payload.get("family_id") != family_id:
+            fail(f"{path} family_id={payload.get('family_id')!r}, expected {family_id!r}")
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, dict) or metadata.get("builtin") is not True:
+            fail(f"{path} must declare metadata.builtin = true so runtime seeded copies can be refreshed safely")
+        if payload.get("default_executor_profile") != default_executor:
+            fail(f"{path} default_executor_profile={payload.get('default_executor_profile')!r}, expected {default_executor!r}")
+        if payload.get("dag_producer_profile") != dag_producer:
+            fail(f"{path} dag_producer_profile={payload.get('dag_producer_profile')!r}, expected {dag_producer!r}")
+        if family_id == "software_engineering":
+            if metadata.get("uses_architecture_mode") is not True:
+                fail("software_engineering family must enable architecture mode")
+            if metadata.get("require_primary_language") is not True:
+                fail("software_engineering family must require primary_language for new projects")
+
     architect_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/architect.toml"))
     if architect_profile.get("profile_id") != "architect" or architect_profile.get("profile_group") != "software_engineering":
         fail("architect.toml must declare software_engineering architect profile")
+    architect_metadata = architect_profile.get("metadata")
+    if not isinstance(architect_metadata, dict) or architect_metadata.get("max_output_tokens") != 65536:
+        fail("architect.toml must declare metadata.max_output_tokens = 65536")
     architect_capabilities = architect_profile.get("capability_groups")
-    if not isinstance(architect_capabilities, list) or "minion_plan_builder" not in architect_capabilities:
-        fail("architect.toml must expose plan builder capabilities")
+    if not isinstance(architect_capabilities, list) or "minion_plan_builder_sketch" not in architect_capabilities:
+        fail("architect.toml must expose staged sketch plan builder capabilities")
     architect_output_policy = architect_profile.get("output_policy")
     if not isinstance(architect_output_policy, dict):
         fail("architect.toml missing [output_policy]")
-    if architect_output_policy.get("requires_plan_artifact") is not True:
-        fail("architect.toml must require a plan artifact")
-    if architect_output_policy.get("primary_artifact") != "plan.json":
-        fail("architect.toml must emit plan.json as the primary artifact")
+    if architect_output_policy.get("requires_plan_artifact") is not False:
+        fail("architect.toml must not require a FinalPlanArtifact directly")
+    if architect_output_policy.get("primary_artifact") != "plan.sketch.json":
+        fail("architect.toml must emit plan.sketch.json as the primary artifact")
     architect_next = architect_output_policy.get("workflow_next")
     if not isinstance(architect_next, dict):
         fail("architect.toml missing [output_policy.workflow_next]")
     architect_allowed_next = architect_next.get("allowed_next_profiles")
-    if not isinstance(architect_allowed_next, list) or "software_engineering.review_worker" not in architect_allowed_next:
-        fail("architect.toml must allow software_engineering.review_worker for standalone review workflows")
+    if architect_allowed_next != ["none"]:
+        fail("architect.toml staged sketch workflow_next must be terminal; manager owns next planning stage")
+
+    module_detail_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/architect_module_detail.toml"))
+    if (
+        module_detail_profile.get("profile_id") != "architect_module_detail"
+        or module_detail_profile.get("profile_group") != "software_engineering"
+    ):
+        fail("architect_module_detail.toml must declare software_engineering architect_module_detail profile")
+    module_detail_capabilities = module_detail_profile.get("capability_groups")
+    if not isinstance(module_detail_capabilities, list) or "minion_plan_builder_module_detail" not in module_detail_capabilities:
+        fail("architect_module_detail.toml must expose staged module-detail plan builder capabilities")
+
+    plan_revision_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/architect_plan_revision.toml"))
+    if (
+        plan_revision_profile.get("profile_id") != "architect_plan_revision"
+        or plan_revision_profile.get("profile_group") != "software_engineering"
+    ):
+        fail("architect_plan_revision.toml must declare software_engineering architect_plan_revision profile")
+    plan_revision_capabilities = plan_revision_profile.get("capability_groups")
+    if not isinstance(plan_revision_capabilities, list) or "minion_plan_builder_revision" not in plan_revision_capabilities:
+        fail("architect_plan_revision.toml must expose revision plan builder capabilities")
 
     reviewer_profile = tomllib.loads(read_text("pal/minion/profile_templates/software_engineering/reviewer.toml"))
     reviewer_gate_policy = reviewer_profile.get("gate_policy")
@@ -271,7 +358,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
         "module_quality_criteria",
         "checkpoint_admission_evidence",
         "negative_cases",
-        "depends_on_module_keys",
+        "depends_on_module_names",
         "fork_join_linear",
     ):
         if token not in plan_builder_source:
@@ -351,15 +438,17 @@ with zipfile.ZipFile(wheel_path) as wheel:
         "resource slots",
         "Step execution is per DAG",
         "workspace environment",
+        "runtime_root/plugins/minion/families",
         "plugins/minion/workspace_environment",
+        "src/pal/minion/family_templates/",
         "src/pal/minion/workspace_environment.py",
         "WorkspaceEnvironmentPreparer",
         "repair bill replay",
         "reverse-propagation mechanism",
         "amended obligations for the existing DAG",
-        "module-key indexed",
+        "module-name indexed",
         "shape-compatible with the existing plan/module schema",
-        "Use existing `module_id`/`module_key` values",
+        "Use existing `module_name` values",
         "Keep patch shape isomorphic to plan shape",
         "normal DAG, slot, workspace, and gate logic",
         "GateDefinition",
@@ -388,7 +477,9 @@ with zipfile.ZipFile(wheel_path) as wheel:
         "PAL_MINION_PROFILE_DEVELOPMENT_MANUAL",
         "Pal Minion Profile Development",
         "Profile TOML Shape",
+        "runtime_root/plugins/minion/families",
         "runtime_root/plugins/minion/profiles",
+        "src/pal/minion/family_templates/",
         "capability_groups",
         "workspace_policy",
         "capability_policy",
@@ -438,7 +529,7 @@ with zipfile.ZipFile(wheel_path) as wheel:
         if token not in minion_capability_source:
             fail(f"pal/minion/capabilities.py missing minion profile development skill affordance token {token!r}")
 
-print("Verified minion profiles, workspace environment templates, sandbox, plan builder, scheduler, and minion development skill semantics")
+print("Verified minion families, profiles, workspace environment templates, sandbox, plan builder, scheduler, and minion development skill semantics")
 PY
 
 echo "Built $wheel_path"

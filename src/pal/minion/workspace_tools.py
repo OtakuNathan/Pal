@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import hashlib
 import mimetypes
 import os
@@ -23,12 +24,12 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
             action = "staged" if artifact.get("staged") else "edited"
             text = f"Artifact {action}: {artifact['relative_path']}"
         else:
-            root = _workspace_root(workspace)
+            root, root_info = _workspace_root_with_info(workspace, call.args)
             if call.name == "op_tree":
-                payload = _workspace_tree(root, call.args)
+                payload = _workspace_tree(root, call.args, root_info=root_info)
                 text = "\n".join(item["path"] for item in payload["items"])
             elif call.name == "op_search":
-                payload = _workspace_search(root, call.args)
+                payload = _workspace_search(root, call.args, root_info=root_info)
                 text = "\n".join(f"{item['path']}:{item['line_number']}: {item['line']}" for item in payload["matches"])
             else:
                 raise ValueError(f"unknown repo tool: {call.name}")
@@ -56,14 +57,173 @@ def _workspace_tool_result(call: CanonicalToolCall, workspace: dict[str, Any]) -
         )
 
 
-def _workspace_root(workspace: dict[str, Any]) -> Path:
+def _workspace_root(workspace: dict[str, Any], args: dict[str, Any] | None = None) -> Path:
+    root, _ = _workspace_root_with_info(workspace, args)
+    return root
+
+
+def _workspace_root_with_info(workspace: dict[str, Any], args: dict[str, Any] | None = None) -> tuple[Path, dict[str, Any]]:
+    args = dict(args or {})
+    reference_name = _requested_reference_name(args)
+    if reference_name:
+        return _reference_root(workspace, reference_name)
     repo_path = str((workspace or {}).get("repo_path") or "").strip()
     if not repo_path:
         raise ValueError("current project repo is not available")
     root = Path(repo_path).expanduser().resolve()
     if not root.exists() or not root.is_dir():
         raise ValueError(f"current project repo is not a directory: {root}")
+    return root, {
+        "root_kind": "project",
+        "root_name": "project",
+        "read_only": False,
+        "truth_source": False,
+    }
+
+
+def _requested_reference_name(args: dict[str, Any]) -> str:
+    reference_name = str(args.get("reference_name") or args.get("reference") or "").strip()
+    if reference_name:
+        return reference_name.removeprefix("reference:").strip()
+    root = str(args.get("root") or "").strip()
+    if not root or root in {"project", "repo", "workspace"}:
+        return ""
+    if root.startswith("reference:"):
+        return root.split(":", 1)[1].strip()
     return root
+
+
+def _reference_root(workspace: dict[str, Any], reference_name: str) -> tuple[Path, dict[str, Any]]:
+    normalized = _normalized_reference_paths(workspace)
+    if not normalized:
+        raise ValueError("workspace.reference_paths is not available")
+    requested = str(reference_name or "").strip()
+    for item in normalized:
+        if requested in {str(item.get("name") or ""), str(item.get("id") or "")}:
+            path = Path(str(item.get("path") or "")).expanduser().resolve()
+            if not path.exists() or not path.is_dir():
+                raise ValueError(f"reference path is not a directory: {path}")
+            info = {
+                **item,
+                "root_kind": "reference",
+                "root_name": str(item.get("name") or requested),
+                "reference_name": str(item.get("name") or requested),
+                "read_only": True,
+                "truth_source": bool(item.get("truth_source", True)),
+            }
+            return path, info
+    available = ", ".join(str(item.get("name") or "") for item in normalized if str(item.get("name") or ""))
+    raise ValueError(f"unknown reference root: {requested}; available references: {available or '(none)'}")
+
+
+def _normalized_reference_paths(workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = (workspace or {}).get("reference_paths")
+    if not isinstance(refs, (list, tuple)):
+        return []
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(refs, start=1):
+        item = _normalize_reference_path_item(raw, index=index)
+        name = str(item.get("name") or "").strip()
+        path = str(item.get("path") or "").strip()
+        if not name or not path or name in seen:
+            continue
+        seen.add(name)
+        result.append(item)
+    return result
+
+
+def _normalize_reference_path_item(raw: Any, *, index: int) -> dict[str, Any]:
+    if isinstance(raw, str):
+        payload: dict[str, Any] = {"path": raw}
+    elif isinstance(raw, dict):
+        payload = dict(raw)
+    else:
+        return {}
+    raw_path = str(
+        payload.get("path")
+        or payload.get("root")
+        or payload.get("base_path")
+        or payload.get("glob")
+        or payload.get("pattern")
+        or ""
+    ).strip()
+    if not raw_path:
+        return {}
+    root_path, include = _reference_root_and_include(raw_path)
+    extra_include = _string_list(payload.get("include") or payload.get("includes"))
+    if extra_include:
+        include = extra_include
+    root = Path(root_path).expanduser()
+    name = _safe_reference_name(str(payload.get("name") or payload.get("id") or "")) or _safe_reference_name(root.name) or f"reference_{index}"
+    item = {
+        "name": name,
+        "path": str(root),
+        "mode": "read_only",
+        "truth_source": _coerce_bool(payload.get("truth_source"), default=True),
+    }
+    if include:
+        item["include"] = include
+    for key in ("description", "role", "required"):
+        if key in payload:
+            item[key] = payload.get(key)
+    return item
+
+
+def _reference_root_and_include(raw_path: str) -> tuple[str, list[str]]:
+    path = str(raw_path or "").strip()
+    if not _has_glob(path):
+        expanded = Path(path).expanduser()
+        if expanded.exists() and expanded.is_file():
+            return str(expanded.parent), [expanded.name]
+        return path, []
+    normalized = path.replace("\\", "/")
+    parts = normalized.split("/")
+    prefix: list[str] = []
+    suffix: list[str] = []
+    glob_seen = False
+    for part in parts:
+        if not glob_seen and not _has_glob(part):
+            prefix.append(part)
+            continue
+        glob_seen = True
+        suffix.append(part)
+    root = "/".join(prefix) or "."
+    include = "/".join(suffix) if suffix else "*"
+    return root, [include]
+
+
+def _has_glob(value: str) -> bool:
+    return any(char in value for char in "*?[")
+
+
+def _safe_reference_name(value: str) -> str:
+    text = str(value or "").strip().lower()
+    safe = [char if char.isalnum() else "_" for char in text]
+    return "_".join("".join(safe).split("_")).strip("_")[:80]
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw = list(value)
+    else:
+        raw = []
+    result: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text:
+            result.append(text)
+    return result
+
+
+def _coerce_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on", "required", "source_of_truth", "truth_source"}
 
 
 def _artifact_roots(workspace: dict[str, Any]) -> tuple[Path, Path]:
@@ -195,6 +355,41 @@ def _workspace_path(root: Path, raw_path: Any = "") -> Path:
     return candidate
 
 
+def _workspace_path_allowed_by_reference(path: Path, root: Path, root_info: dict[str, Any]) -> bool:
+    if str(root_info.get("root_kind") or "") != "reference":
+        return True
+    includes = _string_list(root_info.get("include"))
+    if not includes:
+        return True
+    try:
+        relative = str(path.relative_to(root)).replace("\\", "/")
+    except ValueError:
+        return False
+    if path.is_dir():
+        return True
+    return any(fnmatch.fnmatch(relative, pattern) or fnmatch.fnmatch(path.name, pattern) for pattern in includes)
+
+
+def _workspace_root_payload(root: Path, root_info: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "root": str(root),
+        "root_kind": str(root_info.get("root_kind") or "project"),
+        "root_name": str(root_info.get("root_name") or root_info.get("reference_name") or "project"),
+    }
+    if str(root_info.get("root_kind") or "") == "reference":
+        payload.update(
+            {
+                "reference_name": str(root_info.get("reference_name") or root_info.get("root_name") or ""),
+                "read_only": True,
+                "truth_source": bool(root_info.get("truth_source", True)),
+            }
+        )
+        includes = _string_list(root_info.get("include"))
+        if includes:
+            payload["include"] = includes
+    return payload
+
+
 _WORKSPACE_SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".venv", "venv"}
 _WORKSPACE_SKIP_SUFFIXES = {
     ".a",
@@ -231,7 +426,8 @@ def _empty_workspace_tool_text(name: str, payload: dict[str, Any]) -> str:
     return "Repo tool completed with no textual output."
 
 
-def _workspace_tree(root: Path, args: dict[str, Any]) -> dict[str, Any]:
+def _workspace_tree(root: Path, args: dict[str, Any], *, root_info: dict[str, Any] | None = None) -> dict[str, Any]:
+    root_info = dict(root_info or {})
     base = _workspace_path(root, args.get("path") or ".")
     if not base.exists():
         raise ValueError(f"repo path does not exist: {base.relative_to(root)}")
@@ -241,7 +437,7 @@ def _workspace_tree(root: Path, args: dict[str, Any]) -> dict[str, Any]:
     if base.is_file():
         stat = base.stat()
         items.append({"path": str(base.relative_to(root)).replace("\\", "/"), "kind": "file", "size_bytes": stat.st_size})
-        return {"root": str(root), "items": items, "count": len(items)}
+        return {**_workspace_root_payload(root, root_info), "items": items, "count": len(items)}
     base_depth = len(base.relative_to(root).parts) if base != root else 0
     for current, dirs, files in os.walk(base):
         current_path = Path(current)
@@ -250,21 +446,24 @@ def _workspace_tree(root: Path, args: dict[str, Any]) -> dict[str, Any]:
         dirs[:] = [name for name in sorted(dirs) if name not in _WORKSPACE_SKIP_DIRS]
         for name in dirs:
             if len(items) >= limit:
-                return {"root": str(root), "items": items, "count": len(items), "truncated": True}
+                return {**_workspace_root_payload(root, root_info), "items": items, "count": len(items), "truncated": True}
             path = current_path / name
             items.append({"path": str(path.relative_to(root)).replace("\\", "/"), "kind": "dir"})
         for name in sorted(files):
             if len(items) >= limit:
-                return {"root": str(root), "items": items, "count": len(items), "truncated": True}
+                return {**_workspace_root_payload(root, root_info), "items": items, "count": len(items), "truncated": True}
             path = current_path / name
+            if not _workspace_path_allowed_by_reference(path, root, root_info):
+                continue
             with contextlib.suppress(OSError):
                 items.append({"path": str(path.relative_to(root)).replace("\\", "/"), "kind": "file", "size_bytes": path.stat().st_size})
         if depth >= max_depth:
             dirs[:] = []
-    return {"root": str(root), "items": items, "count": len(items)}
+    return {**_workspace_root_payload(root, root_info), "items": items, "count": len(items)}
 
 
-def _workspace_search(root: Path, args: dict[str, Any]) -> dict[str, Any]:
+def _workspace_search(root: Path, args: dict[str, Any], *, root_info: dict[str, Any] | None = None) -> dict[str, Any]:
+    root_info = dict(root_info or {})
     query = str(args.get("query") or "").strip()
     if not query:
         raise ValueError("query is required")
@@ -275,6 +474,8 @@ def _workspace_search(root: Path, args: dict[str, Any]) -> dict[str, Any]:
     paths = [base] if base.is_file() else [path for path in base.rglob("*") if path.is_file()]
     for path in paths:
         if _workspace_should_skip_generated(path, root):
+            continue
+        if not _workspace_path_allowed_by_reference(path, root, root_info):
             continue
         try:
             for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
@@ -288,10 +489,10 @@ def _workspace_search(root: Path, args: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
                 if len(matches) >= limit:
-                    return {"root": str(root), "query": query, "matches": matches, "count": len(matches), "truncated": True}
+                    return {**_workspace_root_payload(root, root_info), "query": query, "matches": matches, "count": len(matches), "truncated": True}
         except OSError:
             continue
-    return {"root": str(root), "query": query, "matches": matches, "count": len(matches)}
+    return {**_workspace_root_payload(root, root_info), "query": query, "matches": matches, "count": len(matches)}
 
 
 def _preview_text(value: Any, *, limit: int = 400) -> str:

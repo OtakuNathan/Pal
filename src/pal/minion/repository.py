@@ -52,6 +52,7 @@ from pal.minion.work_order import (
     prompt_view_for_coder,
     prompt_view_from_metadata,
     validate_dispatchable_plan_artifact,
+    validate_final_plan_artifact,
 )
 from pal.minion.turns import build_minion_turn_from_pack
 from pal.minion.validation import normalize_milestones
@@ -61,6 +62,7 @@ from pal.shared.text_search import jieba_fts_text
 
 
 ACTIVE_WORK_ORDER_STATUSES = ("active", "running", "blocked", "approval_pending")
+RUNNING_WORK_ORDER_STATUSES = ("active", "running", "approval_pending", "clarification_pending")
 _CONTINUITY_LEDGER_LIMIT = 20
 _CONTINUITY_TEXT_LIMIT = 500
 _WORK_ORDER_DRAFT_TEXT_LIMIT = 4000
@@ -412,7 +414,7 @@ def _module_status_items_from_metadata(
 ) -> list[dict[str, Any]]:
     plan_execution = dict(metadata.get("plan_execution") or {})
     if str(plan_execution.get("mode") or "").strip() != "module_parent_milestones":
-        return []
+        return _staged_module_status_items_from_metadata(metadata, active_runs=active_runs)
     dag = _plan_execution_dag_state(plan_execution)
     if not dag:
         return []
@@ -478,6 +480,62 @@ def _module_status_items_from_metadata(
                 "ready": status in {"ready", "needs_repair", "stale"} and int(remaining or 0) == 0,
                 "summary": summary,
                 "output": output,
+            }
+        )
+    return items
+
+
+def _staged_module_status_items_from_metadata(
+    metadata: dict[str, Any],
+    *,
+    active_runs: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    staged = dict(metadata.get("staged_planning") or {})
+    detail_modules = {
+        str(key): dict(value)
+        for key, value in dict(staged.get("detail_modules") or {}).items()
+        if str(key or "").strip() and isinstance(value, dict)
+    }
+    if not detail_modules:
+        return []
+    module_order = _dedupe_text(
+        [
+            *_coerce_text_list(staged.get("module_ids")),
+            *detail_modules.keys(),
+        ]
+    )
+    active_worker_by_work_order = _active_worker_by_work_order(active_runs or [])
+    items: list[dict[str, Any]] = []
+    for module_id in module_order:
+        detail = dict(detail_modules.get(module_id) or {})
+        child_id = str(detail.get("work_order_id") or "").strip()
+        active_worker = dict(active_worker_by_work_order.get(child_id) or {}) if child_id else {}
+        status = str(detail.get("status") or "pending").strip().lower() or "pending"
+        if active_worker:
+            status = "running"
+        artifact = dict(detail.get("artifact") or {}) if isinstance(detail.get("artifact"), dict) else {}
+        validation = dict(detail.get("validation") or {}) if isinstance(detail.get("validation"), dict) else {}
+        summary = str(detail.get("summary") or artifact.get("title") or "").strip()
+        items.append(
+            {
+                "module_id": module_id,
+                "kind": "module_detail",
+                "status": status,
+                "executor_profile": "software_engineering.architect_module_detail",
+                "depends_on": [],
+                "remaining_indegree": 0,
+                "child_work_order_id": child_id,
+                "running_child_work_order_id": child_id if status == "running" else "",
+                "current_worker": active_worker,
+                "node_cursor": {},
+                "completed": status == "completed",
+                "ready": status in {"pending", "waiting_for_slot"},
+                "summary": summary,
+                "output": artifact,
+                "validation": validation,
+                "recovered_at": str(detail.get("recovered_at") or ""),
+                "started_at": str(detail.get("started_at") or ""),
+                "completed_at": str(detail.get("completed_at") or ""),
             }
         )
     return items
@@ -570,22 +628,46 @@ class TaskingRepositoryPort(Protocol):
     def prepare_pack_for_spawn(self, pack: TaskContextPack) -> TaskContextPack:
         ...
 
+    def resumable_staged_module_detail_parent_work_order_ids(self) -> list[str]:
+        ...
+
     def search_tasks(self, query: str, *, limit: int = 10) -> dict[str, Any]:
         ...
 
     def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         ...
 
-    def search_work_orders(self, query: str, *, limit: int = 10) -> dict[str, Any]:
+    def search_work_orders(self, query: str, *, limit: int = 10, include_archived: bool = False) -> dict[str, Any]:
         ...
 
     def search_work_order_drafts(self, query: str, *, limit: int = 10) -> dict[str, Any]:
         ...
 
-    def read_task(self, task_id: str) -> dict[str, Any]:
+    def read_task(self, task_id: str, *, include_archived: bool = False) -> dict[str, Any]:
         ...
 
     def read_work_order(self, work_order_id: str, *, active_runs: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        ...
+
+    def archive_work_order(
+        self,
+        work_order_id: str,
+        *,
+        reason: str = "",
+        include_children: bool = False,
+        restore: bool = False,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        ...
+
+    def remove_work_order(
+        self,
+        work_order_id: str,
+        *,
+        reason: str = "",
+        include_children: bool = False,
+        force: bool = False,
+    ) -> dict[str, Any]:
         ...
 
     def read_work_order_draft(self, draft_id: str) -> dict[str, Any]:
@@ -974,8 +1056,8 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             if isinstance(target.get("source_contract"), dict)
             else {}
         )
-        loaded_plan = self.load_dispatchable_plan_ref(source_plan_ref)
-        artifact = validate_dispatchable_plan_artifact(loaded_plan.get("plan_artifact") or {})
+        loaded_plan = self.load_revisable_plan_ref(source_plan_ref)
+        artifact = validate_final_plan_artifact(loaded_plan.get("plan_artifact") or {})
         source_revision = _plan_revision_from_payload(loaded_plan.get("plan_artifact"), loaded_plan.get("plan_ref"))
         next_revision = source_revision + 1
         revision_checklist = _plan_revision_checklist(gate_payload)
@@ -985,6 +1067,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             value = str(target.get(key) or "").strip()
             if value:
                 resolved_workspace.setdefault(key, value)
+        resolved_workspace = _planner_revision_workspace(resolved_workspace)
         planner_goal = str(goal or f"Revise architecture plan {artifact.plan_id} from reviewer gate {gate_payload.get('gate_id') or ''}").strip()
         planner_instruction = str(
             instruction
@@ -1077,7 +1160,7 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "acceptance_criteria": [item for milestone in milestones for item in _coerce_text_list(milestone.get("acceptance"))],
                 "workspace": resolved_workspace,
                 "profile_group": "software_engineering",
-                "profile_name": "architect",
+                "profile_name": "architect_plan_revision",
                 "metadata": pack_metadata,
             }
         )
@@ -1092,8 +1175,9 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         reason: str = "",
         edit_instruction: str = "",
     ) -> TaskContextPack:
-        loaded_plan = self.load_dispatchable_plan_ref(plan_ref)
-        artifact = validate_dispatchable_plan_artifact(loaded_plan.get("plan_artifact") or {})
+        loaded_plan = self.load_revisable_plan_ref(plan_ref)
+        artifact = validate_final_plan_artifact(loaded_plan.get("plan_artifact") or {})
+        resolved_workspace = _planner_revision_workspace(dict(workspace or {}))
         source_revision = _plan_revision_from_payload(loaded_plan.get("plan_artifact"), loaded_plan.get("plan_ref"))
         next_revision = source_revision + 1
         resolved_work_order_id = str(work_order_id or new_work_id("wo")).strip()
@@ -1184,15 +1268,18 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "goal": planner_goal,
                 "instruction": planner_instruction,
                 "acceptance_criteria": [item for milestone in milestones for item in _coerce_text_list(milestone.get("acceptance"))],
-                "workspace": dict(workspace or {}),
+                "workspace": resolved_workspace,
                 "profile_group": "software_engineering",
-                "profile_name": "architect",
+                "profile_name": "architect_plan_revision",
                 "metadata": pack_metadata,
             }
         )
 
     def load_dispatchable_plan_ref(self, plan_ref: Any) -> dict[str, Any]:
         return self.plans.load_dispatchable_plan_ref(plan_ref)
+
+    def load_revisable_plan_ref(self, plan_ref: Any) -> dict[str, Any]:
+        return self.plans.load_revisable_plan_ref(plan_ref)
 
     def load_accepted_plan_ref(self, plan_ref: Any) -> dict[str, Any]:
         return self.plans.load_accepted_plan_ref(plan_ref)
@@ -1298,8 +1385,13 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         plan_artifact: dict[str, Any] | PlanArtifact,
         *,
         submission_notes: str = "",
+        replace_unaccepted_revision: bool = False,
     ) -> dict[str, Any]:
-        return self.plans.submit_plan_ref(plan_artifact, submission_notes=submission_notes)
+        return self.plans.submit_plan_ref(
+            plan_artifact,
+            submission_notes=submission_notes,
+            replace_unaccepted_revision=replace_unaccepted_revision,
+        )
 
     def accept_plan_ref(
         self,
@@ -2071,6 +2163,33 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             ready_modules = _coerce_text_list(_plan_execution_dag_state(plan_execution).get("ready_modules"))
             if ready_modules:
                 result.append(str(row["work_order_id"] or ""))
+        return _dedupe_text(result)
+
+    def resumable_staged_module_detail_parent_work_order_ids(self) -> list[str]:
+        self.ensure_schema()
+        result: list[str] = []
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT work_order_id, metadata_json FROM minion_work_orders "
+                "WHERE status IN ('active', 'running') ORDER BY updated_at ASC"
+            ).fetchall()
+        for row in rows:
+            metadata = _loads_or_dict(row["metadata_json"])
+            staged = dict(metadata.get("staged_planning") or {})
+            if str(staged.get("status") or "").strip().lower() != "module_detail_running":
+                continue
+            detail_modules = [
+                dict(item)
+                for item in dict(staged.get("detail_modules") or {}).values()
+                if isinstance(item, dict)
+            ]
+            if not any(
+                str(item.get("status") or "").strip().lower()
+                in {"pending", "waiting_for_slot", "running"}
+                for item in detail_modules
+            ):
+                continue
+            result.append(str(row["work_order_id"] or ""))
         return _dedupe_text(result)
 
     def set_plan_parent_status(self, work_order_id: str, status: str, *, reason: str = "") -> dict[str, Any]:
@@ -3087,28 +3206,45 @@ class MinionTaskingRepository(TaskingRepositoryPort):
             self._sync_task_fts(db, task_id)
         return self.read_task(task_id)
 
-    def search_work_orders(self, query: str, *, limit: int = 10) -> dict[str, Any]:
+    def search_work_orders(self, query: str, *, limit: int = 10, include_archived: bool = False) -> dict[str, Any]:
         self.ensure_schema()
         with self._connect() as db:
+            fallback_sql = """
+                SELECT work_order_id, 1.0 AS score FROM minion_work_orders
+                WHERE lower(title || ' ' || goal || ' ' || instruction) LIKE ?
+                  AND status != 'archived'
+                ORDER BY updated_at DESC
+                LIMIT ?
+            """
+            if include_archived:
+                fallback_sql = """
+                    SELECT work_order_id, 1.0 AS score FROM minion_work_orders
+                    WHERE lower(title || ' ' || goal || ' ' || instruction) LIKE ?
+                    ORDER BY updated_at DESC
+                    LIMIT ?
+                """
             items = self.search.search_fts(
                 db,
                 table_name="minion_work_orders_fts",
                 id_column="work_order_id",
                 query=query,
                 limit=limit,
-                fallback_sql="""
-                    SELECT work_order_id, 1.0 AS score FROM minion_work_orders
-                    WHERE lower(title || ' ' || goal || ' ' || instruction) LIKE ?
-                    ORDER BY updated_at DESC
-                    LIMIT ?
-                """,
+                fallback_sql=fallback_sql,
             )
+            visible: list[dict[str, Any]] = []
+            archived_count = 0
+            for item in items:
+                snapshot = self.read_work_order(item["id"])
+                status = str((snapshot.get("work_order") or {}).get("status") or "").strip().lower()
+                if status == "archived" and not include_archived:
+                    archived_count += 1
+                    continue
+                visible.append(_compact_work_order_search_item(snapshot) | {"score": item["score"]})
             return {
-                "items": [
-                    _compact_work_order_search_item(self.read_work_order(item["id"])) | {"score": item["score"]}
-                    for item in items
-                ],
-                "count": len(items),
+                "items": visible,
+                "count": len(visible),
+                "archived_filtered_count": archived_count,
+                "include_archived": bool(include_archived),
             }
 
     def search_work_order_drafts(self, query: str, *, limit: int = 10) -> dict[str, Any]:
@@ -3135,16 +3271,19 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "count": len(items),
             }
 
-    def read_task(self, task_id: str) -> dict[str, Any]:
+    def read_task(self, task_id: str, *, include_archived: bool = False) -> dict[str, Any]:
         self.ensure_schema()
         with self._connect() as db:
             task = self._fetch_one(db, "SELECT * FROM minion_tasks WHERE task_id = ?", (str(task_id),))
             if task is None:
                 return {"status": "not_found", "task_id": str(task_id)}
+            work_order_sql = "SELECT * FROM minion_work_orders WHERE task_id = ? AND status != 'archived' ORDER BY created_at DESC"
+            if include_archived:
+                work_order_sql = "SELECT * FROM minion_work_orders WHERE task_id = ? ORDER BY created_at DESC"
             work_orders = [
                 dict(row)
                 for row in db.execute(
-                    "SELECT * FROM minion_work_orders WHERE task_id = ? ORDER BY created_at DESC",
+                    work_order_sql,
                     (str(task_id),),
                 ).fetchall()
             ]
@@ -3243,6 +3382,157 @@ class MinionTaskingRepository(TaskingRepositoryPort):
                 "module_status_text": _module_status_text(module_status_list),
                 "task_lessons": task_lessons,
                 "pending_system_lesson_candidates": system_candidates,
+            }
+
+    def archive_work_order(
+        self,
+        work_order_id: str,
+        *,
+        reason: str = "",
+        include_children: bool = False,
+        restore: bool = False,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        normalized = str(work_order_id or "").strip()
+        if not normalized:
+            return {"status": "invalid", "error": "work_order_id is required"}
+        self.ensure_schema()
+        with self._connect() as db:
+            rows = self._work_order_rows_for_control(db, normalized, include_children=include_children)
+            if not rows:
+                return {"status": "not_found", "work_order_id": normalized}
+            now = utc_now()
+            changed: list[dict[str, Any]] = []
+            skipped: list[dict[str, Any]] = []
+            blocked: list[dict[str, Any]] = []
+            for row in rows:
+                current_id = str(row["work_order_id"])
+                current_status = str(row["status"] or "").strip().lower()
+                metadata = _loads(row["metadata_json"])
+                if restore:
+                    if current_status != "archived":
+                        skipped.append({"work_order_id": current_id, "status": current_status, "reason": "not_archived"})
+                        continue
+                    archive = dict(metadata.get("archive") or {})
+                    previous_status = str(archive.get("previous_status") or "completed").strip().lower() or "completed"
+                    if previous_status in RUNNING_WORK_ORDER_STATUSES and not force:
+                        blocked.append(
+                            {
+                                "work_order_id": current_id,
+                                "status": current_status,
+                                "previous_status": previous_status,
+                                "reason": "restore_would_make_work_order_active",
+                            }
+                        )
+                        continue
+                    archive.update(
+                        {
+                            "archived": False,
+                            "restored_at": now,
+                            "restore_reason": str(reason or "").strip(),
+                            "restored_from_status": current_status,
+                        }
+                    )
+                    metadata["archive"] = archive
+                    db.execute(
+                        "UPDATE minion_work_orders SET metadata_json = ?, updated_at = ? WHERE work_order_id = ?",
+                        (_json(metadata), now, current_id),
+                    )
+                    self._update_work_order_status(db, current_id, previous_status)
+                    changed.append({"work_order_id": current_id, "status": previous_status, "previous_status": current_status})
+                    continue
+                if current_status == "archived":
+                    skipped.append({"work_order_id": current_id, "status": current_status, "reason": "already_archived"})
+                    continue
+                if current_status in RUNNING_WORK_ORDER_STATUSES and not force:
+                    blocked.append({"work_order_id": current_id, "status": current_status, "reason": "work_order_may_be_running"})
+                    continue
+                archive = dict(metadata.get("archive") or {})
+                archive.update(
+                    {
+                        "archived": True,
+                        "archived_at": now,
+                        "reason": str(reason or "").strip(),
+                        "previous_status": current_status or "active",
+                    }
+                )
+                metadata["archive"] = archive
+                db.execute(
+                    "UPDATE minion_work_orders SET metadata_json = ?, updated_at = ? WHERE work_order_id = ?",
+                    (_json(metadata), now, current_id),
+                )
+                self._update_work_order_status(db, current_id, "archived")
+                changed.append({"work_order_id": current_id, "status": "archived", "previous_status": current_status})
+            if blocked and not changed:
+                status = "blocked"
+            elif changed and blocked:
+                status = "partial"
+            elif changed:
+                status = "restored" if restore else "archived"
+            else:
+                status = "skipped"
+            return {
+                "status": status,
+                "work_order_id": normalized,
+                "include_children": bool(include_children),
+                "restore": bool(restore),
+                "changed": changed,
+                "changed_count": len(changed),
+                "blocked": blocked,
+                "blocked_count": len(blocked),
+                "skipped": skipped,
+                "skipped_count": len(skipped),
+            }
+
+    def remove_work_order(
+        self,
+        work_order_id: str,
+        *,
+        reason: str = "",
+        include_children: bool = False,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        normalized = str(work_order_id or "").strip()
+        if not normalized:
+            return {"status": "invalid", "error": "work_order_id is required"}
+        self.ensure_schema()
+        with self._connect() as db:
+            rows = self._work_order_rows_for_control(db, normalized, include_children=include_children)
+            if not rows:
+                return {"status": "not_found", "work_order_id": normalized}
+            blocked: list[dict[str, Any]] = []
+            for row in rows:
+                current_status = str(row["status"] or "").strip().lower()
+                current_id = str(row["work_order_id"])
+                if current_status in RUNNING_WORK_ORDER_STATUSES and not force:
+                    blocked.append({"work_order_id": current_id, "status": current_status, "reason": "work_order_may_be_running"})
+                    continue
+                if current_status != "archived" and not force:
+                    blocked.append({"work_order_id": current_id, "status": current_status, "reason": "archive_required_before_remove"})
+            if blocked:
+                return {
+                    "status": "blocked",
+                    "work_order_id": normalized,
+                    "include_children": bool(include_children),
+                    "blocked": blocked,
+                    "blocked_count": len(blocked),
+                    "removed": [],
+                    "removed_count": 0,
+                }
+            removed: list[dict[str, Any]] = []
+            for row in rows:
+                current_id = str(row["work_order_id"])
+                current_status = str(row["status"] or "")
+                self._delete_work_order_records(db, current_id)
+                removed.append({"work_order_id": current_id, "previous_status": current_status})
+            return {
+                "status": "removed",
+                "work_order_id": normalized,
+                "include_children": bool(include_children),
+                "reason": str(reason or "").strip(),
+                "removed": removed,
+                "removed_count": len(removed),
+                "force": bool(force),
             }
 
     def read_work_order_draft(self, draft_id: str) -> dict[str, Any]:
@@ -3661,8 +3951,79 @@ class MinionTaskingRepository(TaskingRepositoryPort):
         )
         return row is not None
 
+    def _work_order_rows_for_control(self, db: sqlite3.Connection, work_order_id: str, *, include_children: bool = False) -> list[sqlite3.Row]:
+        normalized = str(work_order_id or "").strip()
+        if not normalized:
+            return []
+        rows = {
+            str(row["work_order_id"]): row
+            for row in db.execute("SELECT * FROM minion_work_orders").fetchall()
+        }
+        if normalized not in rows:
+            return []
+        if not include_children:
+            return [rows[normalized]]
+        result_ids: list[str] = []
+        seen: set[str] = set()
+        queue: list[str] = [normalized]
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            if current not in rows:
+                continue
+            result_ids.append(current)
+            for child_id in self._child_work_order_ids_from_row(rows[current], rows):
+                if child_id not in seen:
+                    queue.append(child_id)
+        return [rows[item] for item in result_ids if item in rows]
+
+    def _child_work_order_ids_from_row(self, row: sqlite3.Row, rows: dict[str, sqlite3.Row]) -> list[str]:
+        parent_id = str(row["work_order_id"] or "").strip()
+        metadata = _loads(row["metadata_json"])
+        plan_execution = dict(metadata.get("plan_execution") or {})
+        candidates: list[str] = []
+        for child_id in dict(plan_execution.get("child_work_order_ids") or {}).values():
+            text = str(child_id or "").strip()
+            if text:
+                candidates.append(text)
+        for child_id in _coerce_text_list(plan_execution.get("active_child_work_order_ids")):
+            candidates.append(child_id)
+        active_child = str(plan_execution.get("active_child_work_order_id") or "").strip()
+        if active_child:
+            candidates.append(active_child)
+        for child_id, child_row in rows.items():
+            child_metadata = _loads(child_row["metadata_json"])
+            if str(child_metadata.get("parent_work_order_id") or "").strip() == parent_id:
+                candidates.append(child_id)
+        result: list[str] = []
+        seen: set[str] = set()
+        for item in candidates:
+            text = str(item or "").strip()
+            if text and text in rows and text not in seen and text != parent_id:
+                seen.add(text)
+                result.append(text)
+        return result
+
+    def _delete_work_order_records(self, db: sqlite3.Connection, work_order_id: str) -> None:
+        normalized = str(work_order_id or "").strip()
+        if not normalized:
+            return
+        db.execute("DELETE FROM minion_work_orders_fts WHERE work_order_id = ?", (normalized,))
+        for table_name in (
+            "minion_work_order_milestones",
+            "minion_worker_checkpoints",
+            "minion_worker_ledger",
+            "minion_review_gates",
+            "minion_task_lessons",
+            "minion_system_lesson_candidates",
+        ):
+            db.execute(f"DELETE FROM {table_name} WHERE work_order_id = ?", (normalized,))
+        db.execute("DELETE FROM minion_work_orders WHERE work_order_id = ?", (normalized,))
+
     def _update_work_order_status(self, db: sqlite3.Connection, work_order_id: str, status: str) -> None:
-        ended_at = utc_now() if status in {"completed", "failed", "blocked", "killed"} else ""
+        ended_at = utc_now() if status in {"completed", "failed", "blocked", "killed", "archived"} else ""
         db.execute(
             """
             UPDATE minion_work_orders
@@ -5168,6 +5529,68 @@ def _workspace_source_name(workspace: dict[str, Any]) -> str:
         if leaf:
             return leaf
     return ""
+
+
+def _planner_revision_workspace(workspace: dict[str, Any]) -> dict[str, Any]:
+    source = dict(workspace or {})
+    resolved = dict(source)
+    derived_keys = {
+        *_RUN_WORKSPACE_KEYS,
+        *_PROFILE_SCOPED_WORKSPACE_KEYS,
+        "common_git_dir",
+        "runtime_project_path",
+        "work_order_repo_root",
+        "workspace_allocation",
+        "workspace_kind",
+        "lsp_setup",
+        "execution_env",
+        "work_order_branch",
+        "root_work_order_branch",
+        "root_merge_target",
+        "base_ref",
+        "task_project_path",
+        "target_project_path",
+        "task_repo_path",
+        "target_repo_path",
+        "module_name",
+        "parent_work_order_id",
+        "dependency_integration_baseline",
+        "dependency_outputs",
+        "plan_builder_plan_handle",
+        "plan_builder_stage",
+        "planning_depth",
+        "goal",
+        "task_id",
+    }
+    for key in derived_keys:
+        resolved.pop(key, None)
+
+    source_repo = ""
+    for key in ("origin_repo_path", "source_repo", "source_repo_path", "source_path", "clone_from", "repo_url", "remote_url"):
+        value = str(source.get(key) or "").strip()
+        if value:
+            source_repo = value
+            break
+
+    repo_path = ""
+    for key in ("origin_repo_path", "source_repo", "repo_path", "work_order_repo_root", "runtime_project_path"):
+        value = str(source.get(key) or "").strip()
+        if not value or "://" in value:
+            continue
+        path = Path(value).expanduser()
+        if path.is_dir():
+            repo_path = str(path)
+            break
+    if repo_path:
+        resolved["repo_path"] = repo_path
+    else:
+        resolved.pop("repo_path", None)
+    if source_repo:
+        resolved["source_repo"] = source_repo
+        resolved.setdefault("origin_repo_path", source_repo)
+        if not repo_path:
+            resolved["workspace_allocation"] = {"mode": "runtime_minion_repo"}
+    return resolved
 
 
 def _plan_revision_from_payload(payload: Any, ref: Any | None = None) -> int:

@@ -450,7 +450,9 @@ class StepExecutorRunnerSupervisor:
     def _executor_key_for_state(self, state: Any) -> str:
         metadata = dict(getattr(state.pack, "metadata", {}) or {})
         return (
-            str(metadata.get("parent_work_order_id") or "").strip()
+            str(metadata.get("step_executor_key") or "").strip()
+            or str(metadata.get("executor_key") or "").strip()
+            or str(metadata.get("parent_work_order_id") or "").strip()
             or str(getattr(state.pack, "work_order_id", "") or "").strip()
             or str(getattr(state, "run_id", "") or "").strip()
             or "default"

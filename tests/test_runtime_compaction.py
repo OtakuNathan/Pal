@@ -16,7 +16,7 @@ from pal.shared import LLMFinishReason, PromptAssemblyContext, RuntimeStatus
 
 
 class EchoTool:
-    name = "echo"
+    name = "op_test_echo"
     description = "Echo test arguments back as a stable result."
     args_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
     result_schema = {"type": "object", "properties": {"echo": {"type": "object"}}}
@@ -175,7 +175,22 @@ def _build_core_with_compacting_llm(*, compact_on: str, memory_candidates: list[
     register_memory_with_core(core.context, memory_service)
     scripted_llm = _CompactingLLMRuntime(compact_on=compact_on, memory_candidates=memory_candidates)
     core.context.port_registry["llm:llm"] = scripted_llm
-    core.context.execution_runtime.register_tool(EchoTool())
+    echo_tool = EchoTool()
+    core.context.execution_runtime.register_tool(echo_tool)
+    core.context.execution_runtime.register_capability(
+        CapabilityDescriptor(
+            name="echo",
+            canonical_path=echo_tool.name,
+            family="test",
+            description=echo_tool.description,
+            source="test",
+        ),
+        lambda _call: CapabilityResult(
+            status="error",
+            text="resident tool binding missing",
+            llm_text="resident tool binding missing",
+        ),
+    )
     return core, memory_service, scripted_llm
 
 
@@ -901,37 +916,13 @@ class RuntimeCompactionTests(unittest.TestCase):
         self.assertIn("Keep L3 out of this compact implementation.", source)
         self.assertIn("new turn after compact", source)
 
-    def test_prompt_after_interrupt_can_continue_from_checkpoint(self) -> None:
+    def test_prompt_merges_previous_user_context_with_next_user_message(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)
-        envelope = ChannelEnvelope(
-            event=EventEnvelope(
-                event_kind="user.message",
-                source_kind="channel",
-                payload={"text": "interrupt me after checking compact"},
-                event_id="turn-interrupt-continue",
-            ),
-            endpoint=EndpointConfig(endpoint_id="memory", channel_kind="memory", binding_key="memory"),
-            response_handle=ResponseHandle(endpoint_id="memory"),
-        )
-        continuation = TurnContinuation(
-            turn_id="turn-interrupt-continue",
-            channel_envelope=envelope,
-            program=_idle_program(),
-            correlation_id="turn-interrupt-continue",
-            control_scope_key="memory",
-        )
-        continuation.emitted_reply_texts.append("I inspected compact state before interruption.")
-
-        asyncio.run(
-            core.turn_manager.commit_l1_exit_checkpoint_async(
-                continuation,
-                kind=L1MessageKind.TURN_INTERRUPTED,
-                status="interrupted",
-                reason="dogfood interrupt",
-            )
+        memory_service.l1_store.append(
+            [L1TranscriptMessage(role="user", content="interrupt me after checking compact")]
         )
         next_event = EventEnvelope(
             event_kind="user.message",
@@ -945,13 +936,12 @@ class RuntimeCompactionTests(unittest.TestCase):
         )
         prompt_text = _request_text(request)
 
-        self.assertIn("I inspected compact state before interruption.", prompt_text)
-        self.assertIn("<turn_checkpoint kind=\"turn_interrupted\">", prompt_text)
-        self.assertIn("This is recovery context from a previous turn, not a new user request.", prompt_text)
-        self.assertIn("turn_outcome: not committed", prompt_text)
+        self.assertIn("interrupt me after checking compact", prompt_text)
+        self.assertIn("continue", prompt_text)
+        self.assertNotIn("<turn_checkpoint", prompt_text)
         self.assertLess(prompt_text.rindex("continue"), prompt_text.rindex("<runtime_reminder"))
 
-    def test_compact_after_interrupt_preserves_checkpoint_summary_for_next_turn(self) -> None:
+    def test_compact_after_interrupt_ignores_unsettled_turn_until_next_user(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         memory_service = MemoryService()
@@ -973,27 +963,14 @@ class RuntimeCompactionTests(unittest.TestCase):
             correlation_id="turn-interrupt-compact",
             control_scope_key="memory",
         )
-        continuation.tool_protocol_messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": "call_1",
-                "content": "raw tool result should stay out of compact summary",
-            }
-        )
-        continuation.emitted_reply_texts.append("Interrupt checkpoint reply before compact.")
-        asyncio.run(
-            core.turn_manager.commit_l1_exit_checkpoint_async(
-                continuation,
-                kind=L1MessageKind.TURN_INTERRUPTED,
-                status="interrupted",
-                reason="compact path dogfood",
-            )
-        )
+        scope_state = core._ensure_scope_state("memory")
+        continuation.interrupted = True
+        core.turn_manager._queue_interrupted_turn_settlement(scope_state, continuation)
+        self.assertEqual(len(scope_state.interrupted_turns_to_settle), 1)
 
         source_before_compact = memory_service.build_compaction_source_text(target_input_budget=4096)
-        self.assertIn("Interrupt checkpoint reply before compact.", source_before_compact)
-        self.assertIn("<turn_checkpoint kind=\"turn_interrupted\">", source_before_compact)
-        self.assertNotIn("raw tool result should stay out of compact summary", source_before_compact)
+        self.assertNotIn("interrupt before compact", source_before_compact)
+        self.assertNotIn("<turn_checkpoint", source_before_compact)
 
         memory_service.compact(
             MemoryCompactRequest(
@@ -1005,7 +982,7 @@ class RuntimeCompactionTests(unittest.TestCase):
                         "kind": "pal",
                         "continuity": {},
                         "summary": {
-                            "summary": "Recovered context: Interrupt checkpoint reply before compact. turn_interrupted checkpoint was committed.",
+                            "summary": "No interrupted turn checkpoint was committed.",
                             "search_text": source_before_compact,
                         },
                     }
@@ -1018,6 +995,14 @@ class RuntimeCompactionTests(unittest.TestCase):
             payload={"text": "continue after compact"},
             event_id="turn-after-compact",
         )
+        next_envelope = ChannelEnvelope(
+            event=next_event,
+            endpoint=EndpointConfig(endpoint_id="memory", channel_kind="memory", binding_key="memory"),
+            response_handle=ResponseHandle(endpoint_id="memory"),
+        )
+        asyncio.run(core._settle_interrupted_turns_for_next_user_async(next_envelope, scope_state))
+        self.assertEqual(len(scope_state.interrupted_turns_to_settle), 0)
+        self.assertEqual(len(memory_service.l1_store.items), 2)
         request = core.prompt_compiler.build_canonical_prompt(
             PromptAssemblyContext(event=next_event),
             max_output_tokens=128,
@@ -1025,9 +1010,10 @@ class RuntimeCompactionTests(unittest.TestCase):
         prompt_text = _request_text(request)
 
         self.assertIn('<compact_context kind="pal" authority="conversation_continuity">', prompt_text)
-        self.assertIn("Recovered context: Interrupt checkpoint reply before compact.", prompt_text)
+        self.assertIn("interrupt before compact", prompt_text)
         self.assertIn("continue after compact", prompt_text)
-        self.assertNotIn("raw tool result should stay out of compact summary", prompt_text)
+        self.assertNotIn("<turn_checkpoint", prompt_text)
+        self.assertLess(prompt_text.rindex("continue after compact"), prompt_text.rindex("<runtime_reminder"))
 
     def test_preflight_compact_during_tool_turn_preserves_current_tool_result(self) -> None:
         core, memory_service, scripted_llm = _build_core_with_compacting_llm(compact_on="preflight")

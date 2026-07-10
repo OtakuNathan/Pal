@@ -64,6 +64,8 @@ class SendAttachmentTests(unittest.IsolatedAsyncioTestCase):
         )
         channel_runtime.register_endpoint(endpoint)
         register_channel_with_core(core.context, channel_runtime)
+        core.publish_module_capabilities("execution")
+        core.publish_module_capabilities("channel")
         return core, channel_runtime, endpoint
 
     def _start_turn(self, core: PalCore, endpoint: _AttachmentEndpoint):

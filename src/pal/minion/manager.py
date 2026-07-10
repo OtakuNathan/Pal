@@ -9,7 +9,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 from uuid import uuid4
 
 from pal.foundation import utc_now
@@ -39,6 +39,13 @@ from pal.minion.lifecycle import ACTIVE_RUN_STATUSES as _ACTIVE_RUN_STATUSES
 from pal.minion.lifecycle import TERMINAL_RUN_STATUSES as _TERMINAL_RUN_STATUSES
 from pal.minion.lifecycle import transition_run_status
 from pal.minion.lsp_prewarm import prewarm_workspace_lsp
+from pal.minion.plan_builder import (
+    compile_final_plan_from_staged_artifacts,
+    initialize_plan_builder_stage_draft,
+    load_stage_artifact_ref,
+    validate_module_detail_artifact,
+    validate_plan_sketch_artifact,
+)
 from pal.minion.llm_broker import (
     llm_outcome_to_payload,
     llm_request_from_payload,
@@ -67,6 +74,11 @@ from pal.minion.workflow import (
     split_profile_ref,
     update_current_workflow_step,
 )
+from pal.minion.v2.orchestration import MinionV2OutboxProcessor
+from pal.minion.v2.contracts import AggregateType
+from pal.minion.v2.service import MinionV2WorkflowService
+from pal.minion.v2.workers import MinionV2SemanticWorker
+from pal.minion.v2.recovery import MinionV2Recovery
 from pal.minion.work_order import ReviewerWorkOrder, build_planner_work_order, prompt_view_for_reviewer
 from pal.shared import MinionApprovalDecision, TaskContextPack
 
@@ -78,6 +90,33 @@ _DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 _GRACEFUL_SHUTDOWN_POLL_SECONDS = 0.2
 _RUN_MEMORY_LEDGER_LIMIT = 500
 _RUNNER_TELEMETRY_EVENT_KINDS = {"phase_started", "progress"}
+_WORKFLOW_RESUMABLE_STATUSES = {"blocked", "failed", "killed", "timeout"}
+_WORKFLOW_RESUME_FALLBACK_REASONS = {
+    "not_plan_parent",
+    "not_plan_module_child",
+    "parent_not_plan_parent",
+    "parent_missing_plan_artifact",
+}
+_ARCHIVED_V1_WRITE_METHODS = {
+    "spawn",
+    "kill",
+    "send_decision",
+    "send_clarification",
+    "finalize_work_order",
+    "tick_parent_dag",
+    "submit_repair_bill",
+    "request_logical_slot",
+    "wait_logical_slot",
+    "release_logical_slot",
+    "dispatch_accepted_plan",
+    "dispatch_plan_revision",
+    "recover_work_order",
+    "resume_work_order",
+    "retry_checkpoint_review",
+    "destroy_work_order_run",
+    "pause_work_order",
+    "finish_work_order",
+}
 _KEY_LLM_ENDPOINT_PROGRESS_PHASES = {
     "llm_endpoint_attempt_failed",
     "llm_endpoint_exhausted",
@@ -185,6 +224,12 @@ class MinionManager:
     _logical_slots: dict[str, dict[str, Any]] = field(default_factory=dict)
     _logical_slot_generation: int = 0
     _logical_slot_event: asyncio.Event = field(default_factory=asyncio.Event)
+    _module_detail_scheduler_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict, init=False, repr=False)
+    v2_service: MinionV2WorkflowService = field(init=False, repr=False)
+    v2_outbox: MinionV2OutboxProcessor = field(init=False, repr=False)
+    v2_semantic_worker: MinionV2SemanticWorker = field(init=False, repr=False)
+    _v2_outbox_task: asyncio.Task[Any] | None = field(default=None, init=False, repr=False)
+    _v2_wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
 
     def __post_init__(self) -> None:
         runtime_config = effective_minion_runtime_config(self.runtime_root)
@@ -211,6 +256,19 @@ class MinionManager:
         self.serial_scheduler = SerialMilestoneScheduler(self)
         self.step_runner = ModuleStepRunner(self)
         self.step_processes = StepProcessSupervisor(self)
+        self.v2_service = MinionV2WorkflowService(self.runtime_root)
+        self.v2_semantic_worker = MinionV2SemanticWorker(
+            self.v2_service,
+            publish_human_review=self._publish_v2_human_review,
+            publish_worker_event=self._publish_v2_worker_event,
+            register_broker_run=self._register_v2_broker_run,
+            unregister_broker_run=self._unregister_v2_broker_run,
+        )
+        self.v2_outbox = MinionV2OutboxProcessor(
+            self.v2_service,
+            semantic_effects=self.v2_semantic_worker,
+            max_parallel_nodes=max(1, int(self.max_parallel_modules or 1)),
+        )
 
     @property
     def event_queue(self) -> list[dict[str, Any]]:
@@ -224,29 +282,41 @@ class MinionManager:
         state.status = transition_run_status(state.status, status)
 
     async def run(self) -> None:
-        startup_recovery = self._recover_stale_modules_on_startup()
+        startup_recovery = {"status": "archived", "reason": "V1 workflow recovery is disabled"}
+        v2_startup_recovery = await asyncio.to_thread(MinionV2Recovery(self.v2_service).recover)
         self.server, self.endpoint_info = await start_manager_server(self.runtime_root, self._handle_client)
         self.logger.info("minion manager listening: %s", self.endpoint_info)
         remove_signal_handlers = self._install_signal_handlers()
         async with self.server:
             serve_task = asyncio.create_task(self.server.serve_forever(), name="minion-manager-serve")
+            self._v2_outbox_task = asyncio.create_task(self._run_v2_outbox(), name="minion-v2-outbox")
             try:
                 try:
-                    startup_schedule = await self._schedule_ready_modules_on_startup()
+                    startup_schedule = {"status": "archived", "scheduled_count": 0}
+                    staged_schedule = {"status": "archived", "scheduled_count": 0}
                     if (
                         int(startup_recovery.get("recovered_count") or 0) > 0
                         or int(startup_schedule.get("scheduled_count") or 0) > 0
+                        or int(staged_schedule.get("scheduled_count") or 0) > 0
                     ):
                         self.logger.info(
-                            "minion manager startup recovery=%s schedule=%s",
+                            "minion manager startup recovery=%s v2_recovery=%s schedule=%s staged_schedule=%s",
                             startup_recovery,
+                            v2_startup_recovery,
                             startup_schedule,
+                            staged_schedule,
                         )
                 except Exception:
                     self.logger.exception("minion manager startup auto-resume failed")
                 await self._shutdown_event.wait()
             finally:
                 remove_signal_handlers()
+                if self._v2_outbox_task is not None:
+                    self._v2_outbox_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self._v2_outbox_task
+                    self._v2_outbox_task = None
+                await self.v2_outbox.stop_background()
                 serve_task.cancel()
                 self.server.close()
                 await self.server.wait_closed()
@@ -276,6 +346,51 @@ class MinionManager:
         if not _coerce_bool(self.auto_resume_ready_modules):
             return {"status": "skipped", "reason": "auto_resume_ready_modules_disabled", "scheduled_count": 0}
         return await self.tick_ready_plan_dags(reason="manager_startup_recovery")
+
+    def _schedule_waiting_module_details_on_startup(self) -> dict[str, Any]:
+        parent_ids = self.tasking_repository.resumable_staged_module_detail_parent_work_order_ids()
+        scheduled: list[str] = []
+        for parent_work_order_id in parent_ids:
+            snapshot = self.tasking_repository.read_work_order(parent_work_order_id)
+            if snapshot.get("status") != "ok":
+                continue
+            metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {})
+            staged = dict(metadata.get("staged_planning") or {})
+            recovered_modules: dict[str, dict[str, Any]] = {}
+            for module_id, raw in dict(staged.get("detail_modules") or {}).items():
+                if not isinstance(raw, dict):
+                    continue
+                item = dict(raw)
+                status = str(item.get("status") or "").strip().lower()
+                if status == "running":
+                    item.update(
+                        {
+                            "status": "waiting_for_slot",
+                            "run_id": "",
+                            "minion_id": "",
+                            "recovered_at": utc_now(),
+                            "recovery_reason": "manager startup recovered module-detail run without an active runner",
+                        }
+                    )
+                recovered_modules[str(module_id)] = item
+            if recovered_modules:
+                self.tasking_repository.merge_work_order_metadata(
+                    parent_work_order_id,
+                    {
+                        "staged_planning": {
+                            "detail_modules": recovered_modules,
+                            "updated_at": utc_now(),
+                        }
+                    },
+                    work_order_status="active",
+                )
+            self._schedule_waiting_module_detail_runs(parent_work_order_id, reason="manager_startup_recovery")
+            scheduled.append(parent_work_order_id)
+        return {
+            "status": "scheduled" if scheduled else "idle",
+            "scheduled_count": len(scheduled),
+            "parent_work_order_ids": scheduled,
+        }
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -312,10 +427,19 @@ class MinionManager:
             if _coerce_bool(result.get("auto_resume_ready_modules", self.auto_resume_ready_modules)):
                 result["ready_schedule"] = await self.tick_ready_plan_dags(reason="runtime_config_reload")
             return result
+        if method == "v2_wake":
+            self._v2_wake_event.set()
+            return {"ok": True, "status": "woken"}
+        if method == "v2_workflow_status":
+            return self.v2_service.workflow_status(str(params.get("workflow_id") or ""))
         if method == "list_runs":
             return {"items": [state.summary() for state in sorted(self.runs.values(), key=lambda item: item.started_at)]}
         if method == "read_run":
             return self.read_run(str(params.get("run_id") or ""))
+        if method in _ARCHIVED_V1_WRITE_METHODS:
+            raise ValueError(
+                f"Minion V1 write RPC '{method}' is archived; use the seven Minion V2 workflow capabilities"
+            )
         if method == "spawn":
             return await self.spawn(dict(params.get("task_context_pack") or {}))
         if method == "kill":
@@ -353,11 +477,12 @@ class MinionManager:
         if method == "recover_work_order":
             return self.recover_work_order(str(params.get("work_order_id") or ""), str(params.get("reason") or ""))
         if method == "resume_work_order":
-            return self.resume_work_order(
+            return await self.resume_work_order(
                 str(params.get("work_order_id") or ""),
                 module_id=str(params.get("module_id") or ""),
                 child_work_order_id=str(params.get("child_work_order_id") or ""),
                 reason=str(params.get("reason") or ""),
+                preferred_endpoint_id=str(params.get("preferred_endpoint_id") or ""),
             )
         if method == "retry_checkpoint_review":
             return await self.reviews.retry_checkpoint_review(
@@ -380,6 +505,94 @@ class MinionManager:
                 ),
             )
         raise ValueError(f"unknown minion manager method: {method}")
+
+    async def _run_v2_outbox(self) -> None:
+        while not self._shutdown_event.is_set():
+            try:
+                started = self.v2_outbox.start_available(
+                    max_concurrency=max(1, int(self.max_parallel_modules or 1)) + 8
+                )
+                if started > 0:
+                    await asyncio.sleep(0)
+                    continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.exception("minion V2 outbox tick failed")
+            self._v2_wake_event.clear()
+            try:
+                await asyncio.wait_for(self._v2_wake_event.wait(), timeout=0.25)
+            except TimeoutError:
+                pass
+
+    async def _publish_v2_human_review(self, payload: Mapping[str, Any]) -> None:
+        if payload.get("standalone_review_id"):
+            self.events.queue_event(
+                {
+                    "event_kind": "work_order_completed",
+                    "minion_id": "",
+                    "run_id": "",
+                    "work_order_id": str(payload.get("workflow_id") or ""),
+                    "minion_profile": "minion_v2.verifier",
+                    "payload": {**dict(payload), "minion_v2": True, "status": "completed"},
+                    "created_at": utc_now(),
+                }
+            )
+            return
+        self.events.queue_event(
+            {
+                "event_kind": "plan_acceptance_pending",
+                "minion_id": "",
+                "run_id": "",
+                "work_order_id": str(payload.get("workflow_id") or ""),
+                "minion_profile": "minion_v2.architecture_reviewer",
+                "payload": {**dict(payload), "minion_v2": True},
+                "created_at": utc_now(),
+            }
+        )
+
+    async def _publish_v2_worker_event(self, event: Mapping[str, Any]) -> None:
+        item = dict(event)
+        run_id = str(item.get("run_id") or "")
+        state = self.runs.get(run_id)
+        payload = dict(item.get("payload") or {})
+        if state is not None:
+            v2 = dict(state.pack.metadata.get("minion_v2") or {})
+            workflow_id = str(v2.get("workflow_id") or "")
+            workflow = self.v2_service.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id) if workflow_id else None
+            metadata = dict(payload.get("metadata") or {})
+            if workflow is not None and workflow.payload.get("control_route"):
+                metadata["control_route"] = dict(workflow.payload.get("control_route") or {})
+            if metadata:
+                payload["metadata"] = metadata
+            if str(item.get("event_kind") or "") == "approval_requested":
+                state.pending_approval = {**payload, "run_id": run_id, "minion_id": state.minion_id}
+                state.status = "approval_pending"
+            elif str(item.get("event_kind") or "") == "clarification_requested":
+                state.pending_clarification = {**payload, "run_id": run_id, "minion_id": state.minion_id}
+                state.status = "clarification_pending"
+            state.last_event = {**item, "payload": payload}
+            state.last_event_at = str(item.get("created_at") or utc_now())
+        self.events.queue_event({**item, "payload": payload})
+
+    def _register_v2_broker_run(
+        self,
+        run_id: str,
+        minion_id: str,
+        pack: TaskContextPack,
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        self.runs[run_id] = MinionRunState(
+            minion_id=minion_id,
+            run_id=run_id,
+            pack=pack,
+            process=process,
+            runner_kind="v2_process",
+            status="running",
+        )
+
+    def _unregister_v2_broker_run(self, run_id: str) -> None:
+        self.runs.pop(run_id, None)
 
     def request_shutdown(self, *, reason: str = "manager_shutdown", graceful: bool = True, timeout_seconds: float | None = None) -> dict[str, Any]:
         if not self._shutdown_started_at:
@@ -547,15 +760,21 @@ class MinionManager:
         metadata["minion_id"] = minion_id
         metadata["llm_node_slot"] = dict(slot_admission)
         pack = TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
-        pack = prepare_task_workspace(self.runtime_root, pack, run_id=run_id)
-        pack = await self._with_lsp_prewarm(pack)
-        self.tasking_repository.update_work_order_workspace(pack.work_order_id, dict(pack.workspace))
-        pack = self._with_runner_debug_log(pack)
-        debug_log = dict((pack.metadata or {}).get("debug_log") or {})
-        if bool(debug_log.get("enabled")):
-            self.tasking_repository.merge_work_order_metadata(pack.work_order_id, {"debug_log": debug_log})
-        pack = sanitize_runner_session_pack(pack)
-        pack = with_minion_sandbox_metadata(self.runtime_root, pack, run_id=run_id)
+        try:
+            pack = prepare_task_workspace(self.runtime_root, pack, run_id=run_id)
+            pack = self._with_staged_plan_builder_seed(pack)
+            pack = await self._with_lsp_prewarm(pack)
+            self.tasking_repository.update_work_order_workspace(pack.work_order_id, dict(pack.workspace))
+            self.tasking_repository.merge_work_order_metadata(pack.work_order_id, dict(pack.metadata or {}))
+            pack = self._with_runner_debug_log(pack)
+            debug_log = dict((pack.metadata or {}).get("debug_log") or {})
+            if bool(debug_log.get("enabled")):
+                self.tasking_repository.merge_work_order_metadata(pack.work_order_id, {"debug_log": debug_log})
+            pack = sanitize_runner_session_pack(pack)
+            pack = with_minion_sandbox_metadata(self.runtime_root, pack, run_id=run_id)
+        except Exception as exc:
+            self._record_spawn_failure(pack, exc, phase="workspace_preparation")
+            raise
         state = MinionRunState(minion_id=minion_id, run_id=run_id, pack=pack)
         async with self._lock:
             slot_admission = self._admit_llm_node_for_spawn(pack)
@@ -566,7 +785,13 @@ class MinionManager:
             pack = TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
             state.pack = pack
             self.runs[run_id] = state
-        await self._start_runner(state)
+        try:
+            await self._start_runner(state)
+        except Exception as exc:
+            self._transition_run_status(state, "blocked")
+            state.ended_at = utc_now()
+            self._record_spawn_failure(state.pack, exc, phase="runner_dispatch")
+            raise
         self._record_event(
             state,
             {
@@ -576,6 +801,65 @@ class MinionManager:
             },
         )
         return state.summary()
+
+    def _record_spawn_failure(self, pack: TaskContextPack, exc: Exception, *, phase: str) -> None:
+        error = f"{exc.__class__.__name__}: {exc}"
+        blocker = {
+            "reason": "spawn_failed",
+            "phase": str(phase or "spawn"),
+            "summary": "minion spawn failed before runner execution",
+            "error": error,
+            "error_type": exc.__class__.__name__,
+            "work_order_id": pack.work_order_id,
+            "minion_profile": pack.minion_profile,
+            "updated_at": utc_now(),
+        }
+        metadata = dict(pack.metadata or {})
+        updates: dict[str, Any] = {"spawn_failure": blocker}
+        workflow = dict(metadata.get("workflow") or {}) if isinstance(metadata.get("workflow"), dict) else {}
+        if workflow:
+            workflow.update({"status": "blocked", "blocker": blocker, "updated_at": utc_now()})
+            steps = [dict(item) for item in list(workflow.get("steps") or []) if isinstance(item, dict)]
+            current_step_id = str(workflow.get("current_step_id") or "")
+            if steps:
+                target_index = next(
+                    (index for index, item in enumerate(steps) if str(item.get("step_id") or "") == current_step_id),
+                    len(steps) - 1,
+                )
+                steps[target_index] = {**steps[target_index], "status": "blocked", "blocker": blocker}
+                workflow["steps"] = steps
+            updates["workflow"] = workflow
+        plan_review = dict(metadata.get("plan_review") or {}) if isinstance(metadata.get("plan_review"), dict) else {}
+        if str(plan_review.get("status") or "") == "revision_in_progress":
+            plan_review.update(
+                {
+                    "status": "revision_blocked",
+                    "next_action": "retry_revision",
+                    "blocker": blocker,
+                    "updated_at": utc_now(),
+                }
+            )
+            updates["plan_review"] = plan_review
+        self.tasking_repository.merge_work_order_metadata(pack.work_order_id, updates, work_order_status="blocked")
+        event = {
+            "event_kind": "terminal",
+            "minion_id": str(metadata.get("minion_id") or ""),
+            "run_id": str(metadata.get("run_id") or ""),
+            "work_order_id": pack.work_order_id,
+            "minion_profile": pack.minion_profile,
+            "payload": {
+                "status": "blocked",
+                "summary": "minion spawn failed before runner execution",
+                "reason": "spawn_failed",
+                "phase": str(phase or "spawn"),
+                "error": error,
+                "error_type": exc.__class__.__name__,
+                "force_ledger": True,
+            },
+            "created_at": utc_now(),
+        }
+        self._queue_event_delivery(event)
+        self.tasking_repository.record_minion_event(event)
 
     async def _maybe_spawn_pre_plan_contract_compiler(self, pack: TaskContextPack) -> dict[str, Any]:
         spec = _pre_plan_gate_spec(pack)
@@ -673,6 +957,49 @@ class MinionManager:
         workspace["lsp_setup"] = lsp_setup
         return TaskContextPack.from_dict({**pack.to_dict(), "workspace": workspace})
 
+    def _with_staged_plan_builder_seed(self, pack: TaskContextPack) -> TaskContextPack:
+        metadata = dict(pack.metadata or {})
+        staged = dict(metadata.get("staged_planning") or {})
+        stage = str(staged.get("stage") or pack.workspace.get("plan_builder_stage") or "").strip()
+        if stage not in {"architecture_sketch", "module_detail"}:
+            return pack
+        workspace = dict(pack.workspace or {})
+        workspace.setdefault("task_id", str(metadata.get("task_id") or ""))
+        workspace.setdefault("goal", str(pack.goal or pack.instruction or ""))
+        workspace.setdefault("planning_depth", str(staged.get("planning_depth") or metadata.get("planning_depth") or "sketch_only"))
+        workspace["plan_builder_stage"] = stage
+        if stage == "module_detail":
+            module_id = str(staged.get("module_id") or workspace.get("plan_builder_module_id") or "").strip()
+            if module_id:
+                workspace["plan_builder_module_id"] = module_id
+                workspace["bound_module_id"] = module_id
+        try:
+            seed = initialize_plan_builder_stage_draft(workspace, metadata)
+        except Exception as exc:
+            staged["seed_error"] = f"{exc.__class__.__name__}: {exc}"
+            metadata["staged_planning"] = staged
+            return TaskContextPack.from_dict({**pack.to_dict(), "workspace": workspace, "metadata": metadata})
+        if not seed:
+            return TaskContextPack.from_dict({**pack.to_dict(), "workspace": workspace, "metadata": metadata})
+        staged.update(seed)
+        metadata["staged_planning"] = staged
+        workspace["plan_builder_plan_handle"] = str(seed.get("plan_handle") or "")
+        workspace["planning_depth"] = str(seed.get("planning_depth") or workspace.get("planning_depth") or "sketch_only")
+        if str(seed.get("module_id") or "").strip():
+            workspace["plan_builder_module_id"] = str(seed.get("module_id") or "").strip()
+            workspace["bound_module_id"] = str(seed.get("module_id") or "").strip()
+        planner_work_order = dict(metadata.get("planner_work_order") or {})
+        planning_requirements = dict(planner_work_order.get("planning_requirements") or {})
+        planning_requirements["bound_plan_handle"] = workspace["plan_builder_plan_handle"]
+        if str(workspace.get("plan_builder_module_id") or "").strip():
+            planning_requirements["bound_module_id"] = str(workspace.get("plan_builder_module_id") or "")
+        planner_work_order["planning_requirements"] = planning_requirements
+        if planner_work_order:
+            metadata["planner_work_order"] = planner_work_order
+            if isinstance(metadata.get("architect_work_order"), dict):
+                metadata["architect_work_order"] = dict(planner_work_order)
+        return TaskContextPack.from_dict({**pack.to_dict(), "workspace": workspace, "metadata": metadata})
+
     async def kill(self, run_id: str, reason: str = "") -> dict[str, Any]:
         state = self._require_run(run_id)
         already_terminal = state.status not in _ACTIVE_RUN_STATUSES
@@ -721,21 +1048,266 @@ class MinionManager:
             return {**dict(result), "resumes": resumes, "resume_count": len(resumes)}
         return result
 
-    def resume_work_order(
+    async def resume_work_order(
         self,
         work_order_id: str = "",
         *,
         module_id: str = "",
         child_work_order_id: str = "",
         reason: str = "",
+        preferred_endpoint_id: str = "",
     ) -> dict[str, Any]:
         self._reconcile_runs()
-        return self.tasking_repository.resume_plan_module(
+        staged_resume = await self._resume_staged_planning_post_processing(
+            work_order_id,
+            reason=reason or "manager resumed staged planning post-processing",
+            preferred_endpoint_id=preferred_endpoint_id,
+        )
+        if staged_resume is not None:
+            return staged_resume
+        resumed = self.tasking_repository.resume_plan_module(
             work_order_id,
             module_id=module_id,
             child_work_order_id=child_work_order_id,
             reason=reason or "manager resumed module cursor",
         )
+        if not _should_try_workflow_resume_after_module_resume(resumed):
+            if preferred_endpoint_id and str(resumed.get("status") or "").strip().lower() not in {"invalid", "not_found", "skipped"}:
+                parent_id = str(resumed.get("parent_work_order_id") or resumed.get("work_order_id") or work_order_id).strip()
+                if parent_id:
+                    endpoint_override = self.tasking_repository.merge_work_order_metadata(
+                        parent_id,
+                        {
+                            "preferred_endpoint_id": str(preferred_endpoint_id).strip(),
+                            "preferred_endpoint_source": "resume_work_order",
+                        },
+                    )
+                    return {**dict(resumed), "endpoint_override": endpoint_override}
+            return resumed
+        workflow_resume = await self._resume_workflow_step(
+            work_order_id,
+            reason=reason or "manager resumed workflow step",
+            preferred_endpoint_id=preferred_endpoint_id,
+        )
+        if str(workflow_resume.get("status") or "") == "skipped" and str(workflow_resume.get("reason") or "") == "not_workflow":
+            return resumed
+        return {**dict(workflow_resume), "module_resume": resumed}
+
+    async def _resume_staged_planning_post_processing(
+        self,
+        work_order_id: str,
+        *,
+        reason: str,
+        preferred_endpoint_id: str = "",
+    ) -> dict[str, Any] | None:
+        target = str(work_order_id or "").strip()
+        if not target:
+            return {"status": "invalid", "error": "work_order_id is required"}
+        snapshot = self.tasking_repository.read_work_order(target)
+        if snapshot.get("status") != "ok":
+            return {"status": "not_found", "work_order_id": target}
+        work_order = dict(snapshot.get("work_order") or {})
+        metadata = dict(work_order.get("metadata") or {})
+        staged = dict(metadata.get("staged_planning") or {})
+        blocker = dict(staged.get("blocker") or {})
+        if (
+            str(staged.get("status") or "").strip().lower() != "blocked"
+            or str(blocker.get("reason") or "").strip() != "staged_planning_post_failed"
+        ):
+            return None
+        expected = [str(item).strip() for item in list(staged.get("module_ids") or []) if str(item).strip()]
+        detail_modules = {
+            str(key): dict(value)
+            for key, value in dict(staged.get("detail_modules") or {}).items()
+            if isinstance(value, dict)
+        }
+        if not expected or any(
+            str((detail_modules.get(module_id) or {}).get("status") or "").strip().lower() != "completed"
+            for module_id in expected
+        ):
+            return None
+
+        now = utc_now()
+        resume_history = [dict(item) for item in list(staged.get("resume_history") or []) if isinstance(item, dict)]
+        resume_history.append(
+            {
+                "stage": "final_plan_compile",
+                "reason": reason,
+                "previous_blocker": blocker,
+                "resumed_at": now,
+            }
+        )
+        staged.update(
+            {
+                "status": "final_compiling",
+                "blocked_stage": None,
+                "blocker": None,
+                "resume_history": resume_history,
+                "updated_at": now,
+            }
+        )
+        workflow = dict(metadata.get("workflow") or {})
+        if workflow:
+            workflow.update({"status": "final_compiling", "blocker": None, "updated_at": now})
+        updates: dict[str, Any] = {
+            "staged_planning": staged,
+            **({"workflow": workflow} if workflow else {}),
+        }
+        if preferred_endpoint_id:
+            updates.update(
+                {
+                    "preferred_endpoint_id": str(preferred_endpoint_id).strip(),
+                    "preferred_endpoint_source": "resume_work_order",
+                }
+            )
+        self.tasking_repository.merge_work_order_metadata(target, updates, work_order_status="active")
+        try:
+            compiled_plan_ref = dict(staged.get("compiled_plan_ref") or {})
+            compiled_plan_validation = dict(staged.get("compiled_plan_validation") or {})
+            if compiled_plan_ref and compiled_plan_validation:
+                await self._schedule_compiled_plan_review(target, compiled_plan_ref, compiled_plan_validation)
+                staged.update({"status": "final_plan_compiled", "updated_at": utc_now()})
+                if workflow:
+                    workflow.update({"status": "post_gate_pending", "post_gate": "plan_acceptance", "updated_at": utc_now()})
+                self.tasking_repository.merge_work_order_metadata(
+                    target,
+                    {"staged_planning": staged, **({"workflow": workflow} if workflow else {})},
+                    work_order_status="active",
+                )
+                resumed_stage = "plan_acceptance"
+            else:
+                await self._compile_and_review_staged_plan(target)
+                resumed_stage = "final_plan_compile"
+        except Exception as exc:
+            self.logger.exception("staged planning post resume failed: %s", target)
+            parent_pack = self.tasking_repository.pack_for_work_order(target)
+            await self._mark_staged_planning_blocked(
+                MinionRunState(minion_id="", run_id="", pack=parent_pack),
+                stage="final_plan_compile",
+                reason="staged_planning_post_failed",
+                summary=f"{exc.__class__.__name__}: {exc}",
+            )
+            return {
+                "status": "blocked",
+                "reason": "staged_plan_post_resume_failed",
+                "work_order_id": target,
+                "error": f"{exc.__class__.__name__}: {exc}",
+            }
+        return {
+            "status": "resumed",
+            "reason": "staged_plan_post_resume",
+            "work_order_id": target,
+            "stage": resumed_stage,
+            "detail_modules_reused": list(expected),
+        }
+
+    async def _resume_workflow_step(
+        self,
+        work_order_id: str,
+        *,
+        reason: str = "",
+        preferred_endpoint_id: str = "",
+    ) -> dict[str, Any]:
+        target = str(work_order_id or "").strip()
+        if not target:
+            return {"status": "invalid", "error": "work_order_id is required"}
+        snapshot = self.tasking_repository.read_work_order(target)
+        if snapshot.get("status") != "ok":
+            return {"status": "not_found", "work_order_id": target}
+        active_state = self._find_active_run_for_work_order(target)
+        if active_state is not None:
+            return {
+                "status": "skipped",
+                "reason": "workflow_step_already_running",
+                "work_order_id": target,
+                "run_id": active_state.run_id,
+            }
+        work_order = dict(snapshot.get("work_order") or {})
+        metadata = dict(work_order.get("metadata") or {})
+        workflow = dict(metadata.get("workflow") or {})
+        if not workflow:
+            return {"status": "skipped", "reason": "not_workflow", "work_order_id": target}
+        steps = [dict(item) for item in list(workflow.get("steps") or []) if isinstance(item, dict)]
+        step_index = _current_workflow_resume_step_index(workflow, steps)
+        if step_index < 0:
+            return {"status": "skipped", "reason": "workflow_missing_current_step", "work_order_id": target}
+        step = dict(steps[step_index])
+        profile = str(step.get("profile") or workflow.get("current_profile") or work_order.get("minion_profile") or "").strip()
+        if not profile or profile == NONE_PROFILE:
+            return {
+                "status": "skipped",
+                "reason": "workflow_step_has_no_resumable_profile",
+                "work_order_id": target,
+                "step_id": str(step.get("step_id") or ""),
+            }
+        workflow_status = str(workflow.get("status") or "").strip().lower()
+        step_status = str(step.get("status") or "").strip().lower()
+        work_order_status = str(work_order.get("status") or "").strip().lower()
+        if not ({workflow_status, step_status, work_order_status} & _WORKFLOW_RESUMABLE_STATUSES):
+            return {
+                "status": "skipped",
+                "reason": "workflow_not_blocked",
+                "work_order_id": target,
+                "workflow_status": workflow_status,
+                "step_status": step_status,
+                "work_order_status": work_order_status,
+            }
+        metadata, workflow, resume_entry = _workflow_resume_metadata(
+            metadata,
+            workflow,
+            step_index=step_index,
+            reason=reason or "manager resumed workflow step",
+            work_order_status=work_order_status,
+            preferred_endpoint_id=preferred_endpoint_id,
+        )
+        group, name = split_profile_ref(profile)
+        if _is_architect_workflow_step(profile, metadata):
+            metadata = _with_architect_workflow_resume_metadata(
+                metadata,
+                goal=str(work_order.get("goal") or work_order.get("instruction") or ""),
+                work_order_id=target,
+                reason=reason or "manager resumed workflow step",
+            )
+        metadata["workflow"] = workflow
+        metadata["prompt_view"] = None
+        pack = self.tasking_repository.pack_for_work_order(
+            target,
+            overrides={
+                "instruction": f"Resume workflow step {profile} after an interrupted or blocked attempt.",
+                "profile_group": group or "general",
+                "profile_name": name,
+                "minion_profile": profile,
+                "metadata": metadata,
+            },
+        )
+        spawned = await self.spawn(pack.to_dict())
+        event = {
+            "event_kind": "workflow_step_resumed",
+            "minion_id": str(spawned.get("minion_id") or ""),
+            "run_id": str(spawned.get("run_id") or ""),
+            "work_order_id": target,
+            "minion_profile": profile,
+            "payload": {
+                "status": "spawned",
+                "reason": reason or "manager resumed workflow step",
+                "step_id": str(resume_entry.get("step_id") or ""),
+                "profile": profile,
+                "resume": dict(resume_entry),
+                "run": dict(spawned),
+            },
+            "created_at": utc_now(),
+        }
+        if self._should_queue_event_delivery(event):
+            self._queue_event_delivery(event)
+        self.tasking_repository.record_minion_event(event)
+        return {
+            "status": "resumed",
+            "reason": "workflow_step_resume",
+            "work_order_id": target,
+            "step_id": str(resume_entry.get("step_id") or ""),
+            "minion_profile": profile,
+            "run": dict(spawned),
+        }
 
     async def destroy_work_order_run(self, work_order_id: str, reason: str = "") -> dict[str, Any]:
         normalized = str(work_order_id or "").strip()
@@ -777,6 +1349,16 @@ class MinionManager:
         state = self._find_run_for_decision(decision)
         if state is None:
             raise KeyError(f"unknown approval target: {decision.approval_id}")
+        if state.runner_kind == "v2_process":
+            sent = await self.v2_semantic_worker.send_worker_control(
+                state.run_id,
+                {"type": "decision", "decision": decision.to_dict()},
+            )
+            if not sent:
+                raise RuntimeError("V2 worker is no longer available for approval")
+            state.pending_approval = {}
+            state.status = "running"
+            return {"ok": True, "run": state.summary(), "decision": decision.to_dict()}
         await self._send_runner_control(state, {"type": "decision", "decision": decision.to_dict()})
         state.pending_approval = {}
         self._transition_run_status(state, "running")
@@ -799,6 +1381,16 @@ class MinionManager:
         response.setdefault("run_id", state.run_id)
         response.setdefault("minion_id", state.minion_id)
         response.setdefault("work_order_id", state.pack.work_order_id)
+        if state.runner_kind == "v2_process":
+            sent = await self.v2_semantic_worker.send_worker_control(
+                state.run_id,
+                {"type": "clarification", "clarification": response},
+            )
+            if not sent:
+                raise RuntimeError("V2 worker is no longer available for clarification")
+            state.pending_clarification = {}
+            state.status = "running"
+            return {"ok": True, "run": state.summary(), "clarification": response}
         await self._send_runner_control(state, {"type": "clarification", "clarification": response})
         state.pending_clarification = {}
         self._transition_run_status(state, "running")
@@ -1059,7 +1651,6 @@ class MinionManager:
             },
         }
         for key in (
-            "workflow",
             "preferred_endpoint_id",
             "preferred_endpoint_source",
             "minion_debug_log_enabled",
@@ -1095,7 +1686,31 @@ class MinionManager:
                 reason=str(params.get("reason") or ""),
                 edit_instruction=str(params.get("edit_instruction") or ""),
             )
-        spawned = await self.spawn(pack.to_dict())
+        try:
+            spawned = await self.spawn(pack.to_dict())
+        except Exception as exc:
+            failure = {
+                "status": "error",
+                "reason": "revision_spawn_failed",
+                "summary": "manager failed to spawn plan revision architect",
+                "error": f"{exc.__class__.__name__}: {exc}",
+                "error_type": exc.__class__.__name__,
+                "work_order_id": source_work_order_id,
+                "revision_work_order_id": pack.work_order_id,
+                "source_plan_ref": dict(plan_ref) if isinstance(plan_ref, dict) else plan_ref,
+            }
+            event = {
+                "event_kind": "plan_revision_spawn_failed",
+                "minion_id": "",
+                "run_id": "",
+                "work_order_id": source_work_order_id,
+                "minion_profile": pack.minion_profile,
+                "payload": {**failure, "force_ledger": True},
+                "created_at": utc_now(),
+            }
+            self._queue_event_delivery(event)
+            self.tasking_repository.record_minion_event(event)
+            return failure
         event = {
             "event_kind": "plan_revision_spawned",
             "minion_id": str(spawned.get("minion_id") or ""),
@@ -1348,6 +1963,12 @@ class MinionManager:
         return result, unresolved
 
     async def close_all(self) -> None:
+        scheduler_tasks = [task for task in self._module_detail_scheduler_tasks.values() if not task.done()]
+        for task in scheduler_tasks:
+            task.cancel()
+        if scheduler_tasks:
+            await asyncio.gather(*scheduler_tasks, return_exceptions=True)
+        self._module_detail_scheduler_tasks.clear()
         await self.step_processes.close_all()
         await self.step_executor.close_all()
         if self._llm_broker_bundle is not None:
@@ -1823,7 +2444,10 @@ class MinionManager:
             self.reviews.schedule_event_gates(state, event)
         if event_kind == "terminal":
             self.reviews.schedule_reviewer_terminal_reconciliation(state, event)
-            self._schedule_workflow_terminal_post(state, event)
+            if self._is_staged_planning_run(state):
+                self._schedule_staged_planning_terminal_post(state, event)
+            else:
+                self._schedule_workflow_terminal_post(state, event)
             self._schedule_ready_modules_after_terminal(state, event)
         if event_kind == "milestone_completed":
             self.serial_scheduler.schedule(state, event)
@@ -1961,6 +2585,596 @@ class MinionManager:
         except RuntimeError:
             return
         loop.create_task(self._handle_workflow_terminal_post_async(state, event), name=f"minion-workflow-post-{state.run_id}")
+
+    def _is_staged_planning_run(self, state: MinionRunState) -> bool:
+        metadata = self._work_order_metadata_for_state(state)
+        staged = dict(metadata.get("staged_planning") or (state.pack.metadata or {}).get("staged_planning") or {})
+        return str(staged.get("stage") or "").strip() in {"architecture_sketch", "module_detail"}
+
+    def _schedule_staged_planning_terminal_post(self, state: MinionRunState, event: dict[str, Any]) -> None:
+        if self._shutdown_event.is_set():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._handle_staged_planning_terminal_post_async(state, event), name=f"minion-staged-planning-post-{state.run_id}")
+
+    async def _handle_staged_planning_terminal_post_async(self, state: MinionRunState, event: dict[str, Any]) -> None:
+        metadata = self._work_order_metadata_for_state(state)
+        staged = dict(metadata.get("staged_planning") or {})
+        stage = str(staged.get("stage") or "").strip()
+        payload = dict(event.get("payload") or {})
+        terminal_status = str(payload.get("status") or "").strip().lower()
+        if terminal_status != "completed":
+            await self._mark_staged_planning_blocked(
+                state,
+                stage=stage,
+                reason=terminal_status or "failed",
+                summary=str(payload.get("summary") or "staged planning run did not complete"),
+            )
+            return
+        try:
+            if stage == "architecture_sketch":
+                await self._handle_architecture_sketch_completed(state, payload)
+            elif stage == "module_detail":
+                await self._handle_module_detail_completed(state, payload)
+        except Exception as exc:
+            self.logger.exception("staged planning post failed: %s", state.run_id)
+            await self._mark_staged_planning_blocked(
+                state,
+                stage=stage,
+                reason="staged_planning_post_failed",
+                summary=f"{exc.__class__.__name__}: {exc}",
+            )
+
+    async def _mark_staged_planning_blocked(self, state: MinionRunState, *, stage: str, reason: str, summary: str) -> None:
+        metadata = self._work_order_metadata_for_state(state)
+        staged = dict(metadata.get("staged_planning") or (state.pack.metadata or {}).get("staged_planning") or {})
+        parent_work_order_id = str(staged.get("parent_work_order_id") or state.pack.work_order_id).strip()
+        if not parent_work_order_id:
+            parent_work_order_id = state.pack.work_order_id
+        parent_snapshot = self.tasking_repository.read_work_order(parent_work_order_id)
+        parent_metadata = dict(((parent_snapshot.get("work_order") or {}).get("metadata") or {}) if parent_snapshot.get("status") == "ok" else metadata)
+        parent_staged = dict(parent_metadata.get("staged_planning") or {})
+        parent_staged.update(
+            {
+                "status": "blocked",
+                "blocked_stage": stage,
+                "blocker": {"reason": reason, "summary": summary, "run_id": state.run_id, "work_order_id": state.pack.work_order_id},
+                "updated_at": utc_now(),
+            }
+        )
+        workflow = dict(parent_metadata.get("workflow") or {})
+        if workflow:
+            workflow.update({"status": "blocked", "blocker": dict(parent_staged["blocker"]), "updated_at": utc_now()})
+        self.tasking_repository.merge_work_order_metadata(
+            parent_work_order_id,
+            {"staged_planning": parent_staged, **({"workflow": workflow} if workflow else {})},
+            work_order_status="blocked",
+        )
+        event_payload = {
+            "status": "blocked",
+            "stage": stage,
+            "reason": reason,
+            "summary": summary,
+            "source_work_order_id": state.pack.work_order_id,
+        }
+        blocked_event = {
+            "event_kind": "staged_planning_blocked",
+            "minion_id": state.minion_id,
+            "run_id": state.run_id,
+            "work_order_id": parent_work_order_id,
+            "minion_profile": state.pack.minion_profile,
+            "payload": event_payload,
+            "created_at": utc_now(),
+        }
+        self._queue_event_delivery(blocked_event)
+        self.tasking_repository.record_minion_event(blocked_event)
+
+    async def _handle_architecture_sketch_completed(self, state: MinionRunState, payload: dict[str, Any]) -> None:
+        artifact_ref = _stage_artifact_from_payload(payload)
+        sketch = load_stage_artifact_ref(artifact_ref)
+        validation = validate_plan_sketch_artifact(sketch)
+        parent_work_order_id = state.pack.work_order_id
+        metadata = self._work_order_metadata_for_state(state)
+        staged = dict(metadata.get("staged_planning") or {})
+        planning_depth = str(staged.get("planning_depth") or sketch.get("planning_depth") or "sketch_only").strip() or "sketch_only"
+        staged.update(
+            {
+                "status": "sketch_completed",
+                "stage": "architecture_sketch",
+                "planning_depth": planning_depth,
+                "sketch_artifact": dict(artifact_ref),
+                "sketch_validation": dict(validation),
+                "module_ids": [str(module.get("module_id") or "") for module in list(sketch.get("modules") or []) if isinstance(module, dict)],
+                "updated_at": utc_now(),
+            }
+        )
+        workflow = dict(metadata.get("workflow") or {})
+        if workflow:
+            workflow = update_current_workflow_step(
+                workflow,
+                status="completed",
+                output_artifact={"sketch_artifact": dict(artifact_ref), "sketch_validation": dict(validation)},
+                next_profile="software_engineering.architect_module_detail" if planning_depth == "module_detail" else "manager.final_plan_compiler",
+            )
+            workflow.update(
+                {
+                    "status": "detail_planning" if planning_depth == "module_detail" else "final_compiling",
+                    "blocker": None,
+                    "updated_at": utc_now(),
+                }
+            )
+        self.tasking_repository.merge_work_order_metadata(
+            parent_work_order_id,
+            {"staged_planning": staged, **({"workflow": workflow} if workflow else {})},
+            work_order_status="active",
+        )
+        if planning_depth == "module_detail":
+            await self._spawn_module_detail_runs(parent_work_order_id, sketch, artifact_ref)
+            return
+        await self._compile_and_review_staged_plan(parent_work_order_id)
+
+    async def _spawn_module_detail_runs(self, parent_work_order_id: str, sketch: dict[str, Any], sketch_ref: dict[str, Any]) -> None:
+        snapshot = self.tasking_repository.read_work_order(parent_work_order_id)
+        parent_work_order = dict(snapshot.get("work_order") or {}) if snapshot.get("status") == "ok" else {}
+        parent_metadata = dict(parent_work_order.get("metadata") or {})
+        parent_workspace = dict(parent_work_order.get("workspace") or parent_metadata.get("workspace") or {})
+        staged = dict(parent_metadata.get("staged_planning") or {})
+        detail_modules: dict[str, dict[str, Any]] = {}
+        spawned_runs: list[dict[str, Any]] = []
+        for module in [dict(item) for item in list(sketch.get("modules") or []) if isinstance(item, dict)]:
+            module_id = str(module.get("module_id") or "").strip()
+            if not module_id:
+                continue
+            work_order_id = f"wo_detail_{safe_token(parent_work_order_id)}_{safe_token(module_id)}"
+            detail_metadata = {
+                "task_id": str(parent_metadata.get("task_id") or sketch.get("task_id") or ""),
+                "task_title": str(parent_metadata.get("task_title") or parent_work_order.get("title") or ""),
+                "work_order_title": f"Detail module {module_id}",
+                "profile_family": "software_engineering",
+                "parent_work_order_id": parent_work_order_id,
+                "module_id": module_id,
+                "parent_module_id": module_id,
+                "step_executor_key": work_order_id,
+                "requirements_brief": dict(parent_metadata.get("requirements_brief") or {}),
+                "staged_planning": {
+                    "stage": "module_detail",
+                    "planning_depth": "module_detail",
+                    "parent_work_order_id": parent_work_order_id,
+                    "module_id": module_id,
+                    "plan_id": str(sketch.get("plan_id") or ""),
+                    "task_id": str(sketch.get("task_id") or parent_metadata.get("task_id") or ""),
+                    "sketch_ref": dict(sketch_ref),
+                    "sketch_artifact": dict(sketch_ref),
+                },
+                "planner_work_order": {
+                    "role": "architect",
+                    "goal": f"Fill module detail for {module_id}",
+                    "task_id": str(sketch.get("task_id") or parent_metadata.get("task_id") or ""),
+                    "work_order_id": work_order_id,
+                    "planning_requirements": {
+                        "required_stage": "module_detail",
+                        "planning_depth": "module_detail",
+                        "stage_artifact_required": "ModuleDetailArtifact",
+                        "bound_module_id": module_id,
+                        "dispatchable_plan_required": False,
+                        "stage_focus": [
+                            "Fill only the bound module's internal implementation design.",
+                            "Divide the module into coder-sized milestones that satisfy the accepted sketch contracts.",
+                            "Add module-local AC, tests, positive cases, negative cases, and evidence expectations.",
+                            "Tie every milestone back to sketch interfaces, lifecycle rules, ownership rules, state-machine rules, invariants, or first-layer gates.",
+                        ],
+                        "stage_non_goals": [
+                            "Do not change global topology, module boundaries, dependency direction, or owned_area.",
+                            "Do not redesign other modules.",
+                            "Do not implement code.",
+                        ],
+                    },
+                },
+                "milestones": [
+                    {
+                        "milestone_id": f"detail_{module_id}",
+                        "title": f"Fill module detail for {module_id}",
+                        "summary": (
+                            f"Design {module_id}'s internal milestones, AC, tests, positive/negative cases, and evidence "
+                            "so the module satisfies the accepted sketch contracts."
+                        ),
+                        "acceptance": [
+                            "Submit a valid ModuleDetailArtifact.",
+                            "Do not change module boundaries or topology.",
+                            "Every milestone maps to accepted sketch contracts, interfaces, lifecycle/state/ownership rules, invariants, or first-layer gates.",
+                            "Every milestone has concrete AC, tests, evidence expectations, and negative cases.",
+                        ],
+                    }
+                ],
+            }
+            if isinstance(parent_metadata.get("control_route"), dict):
+                detail_metadata["control_route"] = dict(parent_metadata.get("control_route") or {})
+            for key in ("preferred_endpoint_id", "preferred_endpoint_source", "prompt_observation_tag", "approval_policy"):
+                if key in parent_metadata:
+                    detail_metadata[key] = parent_metadata[key]
+            detail_workspace = {
+                **parent_workspace,
+                "task_id": str(sketch.get("task_id") or parent_metadata.get("task_id") or ""),
+                "goal": f"Fill module detail for {module_id}",
+                "planning_depth": "module_detail",
+                "plan_builder_stage": "module_detail",
+                "plan_builder_module_id": module_id,
+                "bound_module_id": module_id,
+            }
+            pack = TaskContextPack.from_dict(
+                {
+                    "work_order_id": work_order_id,
+                    "goal": f"Fill module detail for {module_id}",
+                    "instruction": (
+                        f"Fill only the bound module detail for {module_id}. "
+                        "Design module-local implementation milestones, AC, tests, positive/negative cases, and evidence that satisfy "
+                        "the accepted sketch contracts. Do not change global topology, module boundaries, dependency direction, or owned_area. "
+                        "Use staged plan builder tools and submit ModuleDetailArtifact."
+                    ),
+                    "acceptance_criteria": [
+                        "Submit a valid ModuleDetailArtifact.",
+                        "Do not change global module boundaries, owned_area, or topology.",
+                        "Tie module-local milestones and AC back to sketch interfaces, lifecycle/state/ownership rules, invariants, and first-layer gates.",
+                        "Include module-local tests, evidence expectations, positive cases, and negative cases.",
+                    ],
+                    "workspace": detail_workspace,
+                    "profile_group": "software_engineering",
+                    "profile_name": "architect_module_detail",
+                    "metadata": detail_metadata,
+                }
+            )
+            spawned = await self.spawn(pack.to_dict())
+            spawn_status = str(spawned.get("status") or "").strip().lower()
+            run_id = str(spawned.get("run_id") or "")
+            detail_modules[module_id] = {
+                "status": "running" if run_id else (spawn_status or "waiting_for_slot"),
+                "work_order_id": work_order_id,
+                "module_id": module_id,
+                "run_id": run_id,
+                "minion_id": str(spawned.get("minion_id") or ""),
+                "slot_admission": dict(spawned) if spawn_status == "waiting_for_slot" else {},
+            }
+            spawned_runs.append(dict(spawned))
+        if not detail_modules:
+            raise ValueError("module_detail planning requires at least one sketch module")
+        staged.update(
+            {
+                "status": "module_detail_running",
+                "detail_modules": detail_modules,
+                "detail_spawned_at": utc_now(),
+                "updated_at": utc_now(),
+            }
+        )
+        workflow = dict(parent_metadata.get("workflow") or {})
+        if workflow:
+            workflow.update({"status": "module_detail_running", "blocker": None, "updated_at": utc_now()})
+        self.tasking_repository.merge_work_order_metadata(
+            parent_work_order_id,
+            {"staged_planning": staged, **({"workflow": workflow} if workflow else {})},
+            work_order_status="active",
+        )
+        event = {
+            "event_kind": "module_detail_dispatched",
+            "minion_id": "",
+            "run_id": "",
+            "work_order_id": parent_work_order_id,
+            "minion_profile": "software_engineering.architect_module_detail",
+            "payload": {"status": "running", "modules": detail_modules, "runs": spawned_runs},
+            "created_at": utc_now(),
+        }
+        self._queue_event_delivery(event)
+        self.tasking_repository.record_minion_event(event)
+        if any(str(item.get("status") or "") == "waiting_for_slot" for item in detail_modules.values()):
+            self._schedule_waiting_module_detail_runs(parent_work_order_id, reason="module_detail_dispatched")
+
+    def _schedule_waiting_module_detail_runs(self, parent_work_order_id: str, *, reason: str = "") -> None:
+        normalized = str(parent_work_order_id or "").strip()
+        if not normalized or self._shutdown_event.is_set():
+            return
+        current = self._module_detail_scheduler_tasks.get(normalized)
+        if current is not None and not current.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(
+            self._run_waiting_module_detail_scheduler(normalized, reason=reason),
+            name=f"minion-module-detail-scheduler-{safe_token(normalized)}",
+        )
+        self._module_detail_scheduler_tasks[normalized] = task
+        task.add_done_callback(
+            lambda completed, work_order_id=normalized: self._forget_module_detail_scheduler_task(
+                work_order_id,
+                completed,
+            )
+        )
+
+    def _forget_module_detail_scheduler_task(self, parent_work_order_id: str, task: asyncio.Task[Any]) -> None:
+        if self._module_detail_scheduler_tasks.get(parent_work_order_id) is task:
+            self._module_detail_scheduler_tasks.pop(parent_work_order_id, None)
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            self.logger.error(
+                "module-detail scheduler failed parent=%s: %s: %s",
+                parent_work_order_id,
+                error.__class__.__name__,
+                error,
+            )
+
+    async def _run_waiting_module_detail_scheduler(self, parent_work_order_id: str, *, reason: str = "") -> None:
+        try:
+            while not self._shutdown_event.is_set():
+                wake_event = self._logical_slot_event
+                result = await self._advance_waiting_module_detail_runs(parent_work_order_id, reason=reason)
+                status = str(result.get("status") or "").strip().lower()
+                if status in {"idle", "completed", "blocked", "not_found"}:
+                    return
+                if int(result.get("started_count") or 0) > 0:
+                    continue
+                if wake_event is not self._logical_slot_event or wake_event.is_set():
+                    continue
+                await wake_event.wait()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.logger.exception("module-detail scheduler activation failed: %s", parent_work_order_id)
+            try:
+                parent_pack = self.tasking_repository.pack_for_work_order(parent_work_order_id)
+                await self._mark_staged_planning_blocked(
+                    MinionRunState(minion_id="", run_id="", pack=parent_pack),
+                    stage="module_detail",
+                    reason="module_detail_scheduler_failed",
+                    summary=f"{exc.__class__.__name__}: {exc}",
+                )
+            except Exception:
+                self.logger.exception("failed to close module-detail scheduler state: %s", parent_work_order_id)
+
+    async def _advance_waiting_module_detail_runs(self, parent_work_order_id: str, *, reason: str = "") -> dict[str, Any]:
+        snapshot = self.tasking_repository.read_work_order(parent_work_order_id)
+        if snapshot.get("status") != "ok":
+            return {"status": "not_found", "parent_work_order_id": parent_work_order_id}
+        work_order = dict(snapshot.get("work_order") or {})
+        metadata = dict(work_order.get("metadata") or {})
+        staged = dict(metadata.get("staged_planning") or {})
+        staged_status = str(staged.get("status") or "").strip().lower()
+        if staged_status != "module_detail_running":
+            return {"status": staged_status or "idle", "parent_work_order_id": parent_work_order_id}
+        detail_modules = {
+            str(key): dict(value)
+            for key, value in dict(staged.get("detail_modules") or {}).items()
+            if isinstance(value, dict)
+        }
+        waiting_ids = [
+            module_id
+            for module_id, item in detail_modules.items()
+            if str(item.get("status") or "").strip().lower() in {"pending", "waiting_for_slot"}
+            or (
+                str(item.get("status") or "").strip().lower() == "running"
+                and not str(item.get("run_id") or "").strip()
+            )
+        ]
+        if not waiting_ids:
+            return {"status": "idle", "parent_work_order_id": parent_work_order_id, "started_count": 0}
+
+        for item in detail_modules.values():
+            run_id = str(item.get("run_id") or "").strip()
+            run = self.runs.get(run_id) if run_id else None
+            if run is not None and run.status in {"blocked", "failed", "killed", "timeout"}:
+                return {
+                    "status": "blocked",
+                    "parent_work_order_id": parent_work_order_id,
+                    "failed_run_id": run_id,
+                    "failed_status": run.status,
+                    "started_count": 0,
+                }
+
+        started: list[dict[str, Any]] = []
+        for module_id in waiting_ids:
+            item = dict(detail_modules[module_id])
+            child_work_order_id = str(item.get("work_order_id") or "").strip()
+            if not child_work_order_id:
+                continue
+            active = self._find_active_run_for_work_order(child_work_order_id)
+            if active is not None:
+                spawned = active.summary()
+            else:
+                pack = self.tasking_repository.pack_for_work_order(child_work_order_id)
+                spawned = await self.spawn(pack.to_dict())
+            spawn_status = str(spawned.get("status") or "").strip().lower()
+            run_id = str(spawned.get("run_id") or "").strip()
+            if run_id:
+                item.update(
+                    {
+                        "status": "running",
+                        "run_id": run_id,
+                        "minion_id": str(spawned.get("minion_id") or ""),
+                        "started_at": utc_now(),
+                        "slot_admission": {},
+                    }
+                )
+                started.append(dict(spawned))
+            else:
+                item.update(
+                    {
+                        "status": spawn_status or "waiting_for_slot",
+                        "run_id": "",
+                        "minion_id": "",
+                        "slot_admission": dict(spawned),
+                        "waiting_since": str(item.get("waiting_since") or utc_now()),
+                    }
+                )
+            detail_modules[module_id] = item
+            self.tasking_repository.merge_work_order_metadata(
+                parent_work_order_id,
+                {
+                    "staged_planning": {
+                        "detail_modules": {module_id: item},
+                        "updated_at": utc_now(),
+                    }
+                },
+                work_order_status="active",
+            )
+            if not run_id:
+                break
+
+        remaining = [
+            module_id
+            for module_id, item in detail_modules.items()
+            if str(item.get("status") or "").strip().lower() in {"pending", "waiting_for_slot"}
+            or (
+                str(item.get("status") or "").strip().lower() == "running"
+                and not str(item.get("run_id") or "").strip()
+            )
+        ]
+        return {
+            "status": "waiting_for_slot" if remaining else "running",
+            "parent_work_order_id": parent_work_order_id,
+            "reason": reason,
+            "started_count": len(started),
+            "started": started,
+            "waiting_module_ids": remaining,
+        }
+
+    async def _handle_module_detail_completed(self, state: MinionRunState, payload: dict[str, Any]) -> None:
+        metadata = self._work_order_metadata_for_state(state)
+        staged = dict(metadata.get("staged_planning") or {})
+        parent_work_order_id = str(staged.get("parent_work_order_id") or "").strip()
+        if not parent_work_order_id:
+            raise ValueError("module_detail run is missing parent_work_order_id")
+        artifact_ref = _stage_artifact_from_payload(payload)
+        detail = load_stage_artifact_ref(artifact_ref)
+        validation = validate_module_detail_artifact(detail)
+        module_id = str(detail.get("module_id") or staged.get("module_id") or "").strip()
+        snapshot = self.tasking_repository.read_work_order(parent_work_order_id)
+        parent_metadata = dict(((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {})
+        parent_staged = dict(parent_metadata.get("staged_planning") or {})
+        detail_modules = {
+            str(key): dict(value)
+            for key, value in dict(parent_staged.get("detail_modules") or {}).items()
+            if isinstance(value, dict)
+        }
+        current = dict(detail_modules.get(module_id) or {})
+        current.update(
+            {
+                "status": "completed",
+                "work_order_id": state.pack.work_order_id,
+                "module_id": module_id,
+                "artifact": dict(artifact_ref),
+                "validation": dict(validation),
+                "completed_at": utc_now(),
+                "run_id": state.run_id,
+                "minion_id": state.minion_id,
+            }
+        )
+        detail_modules[module_id] = current
+        parent_staged.update({"detail_modules": detail_modules, "updated_at": utc_now()})
+        expected = [str(item) for item in list(parent_staged.get("module_ids") or []) if str(item).strip()]
+        completed = [module for module in expected if str((detail_modules.get(module) or {}).get("status") or "") == "completed"]
+        parent_staged["status"] = "module_detail_completed" if expected and len(completed) == len(expected) else "module_detail_running"
+        self.tasking_repository.merge_work_order_metadata(parent_work_order_id, {"staged_planning": parent_staged}, work_order_status="active")
+        if expected and len(completed) == len(expected):
+            await self._compile_and_review_staged_plan(parent_work_order_id)
+        else:
+            self._schedule_waiting_module_detail_runs(parent_work_order_id, reason="module_detail_completed")
+
+    async def _compile_and_review_staged_plan(self, parent_work_order_id: str) -> None:
+        snapshot = self.tasking_repository.read_work_order(parent_work_order_id)
+        if snapshot.get("status") != "ok":
+            raise KeyError(f"unknown work order: {parent_work_order_id}")
+        work_order = dict(snapshot.get("work_order") or {})
+        metadata = dict(work_order.get("metadata") or {})
+        staged = dict(metadata.get("staged_planning") or {})
+        sketch_ref = dict(staged.get("sketch_artifact") or {})
+        sketch = load_stage_artifact_ref(sketch_ref)
+        detail_artifacts: list[dict[str, Any]] = []
+        for item in dict(staged.get("detail_modules") or {}).values():
+            if not isinstance(item, dict) or str(item.get("status") or "") != "completed":
+                continue
+            detail_artifacts.append(load_stage_artifact_ref(item.get("artifact")))
+        plan = compile_final_plan_from_staged_artifacts(sketch, detail_artifacts)
+        submitted = self.tasking_repository.submit_plan_ref(plan, submission_notes="compiled from staged architect sketch/detail artifacts")
+        plan_ref = dict(submitted.get("plan_ref") or {})
+        plan_validation = dict(submitted.get("plan_validation") or {})
+        staged.update(
+            {
+                "status": "final_plan_compiled",
+                "blocked_stage": None,
+                "blocker": None,
+                "compiled_plan_ref": plan_ref,
+                "compiled_plan_validation": plan_validation,
+                "compiled_at": utc_now(),
+                "updated_at": utc_now(),
+            }
+        )
+        workflow = dict(metadata.get("workflow") or {})
+        if workflow:
+            workflow.update({"status": "post_gate_pending", "post_gate": "plan_acceptance", "blocker": None, "updated_at": utc_now()})
+        self.tasking_repository.merge_work_order_metadata(
+            parent_work_order_id,
+            {
+                "staged_planning": staged,
+                "plan_ref": plan_ref,
+                "plan_validation": plan_validation,
+                **({"workflow": workflow} if workflow else {}),
+            },
+            work_order_status="active",
+        )
+        event = {
+            "event_kind": "staged_plan_compiled",
+            "minion_id": "",
+            "run_id": "",
+            "work_order_id": parent_work_order_id,
+            "minion_profile": "manager.final_plan_compiler",
+            "payload": {
+                "status": "compiled",
+                "summary": "manager compiled staged architect artifacts into FinalPlanArtifact",
+                "plan_ref": plan_ref,
+                "plan_validation": plan_validation,
+            },
+            "created_at": utc_now(),
+        }
+        self._queue_event_delivery(event)
+        self.tasking_repository.record_minion_event(event)
+        await self._schedule_compiled_plan_review(parent_work_order_id, plan_ref, plan_validation)
+
+    async def _schedule_compiled_plan_review(self, work_order_id: str, plan_ref: dict[str, Any], plan_validation: dict[str, Any]) -> None:
+        pack = self.tasking_repository.pack_for_work_order(work_order_id)
+        pack = MinionProfileRegistry(runtime_root=self.runtime_root).resolve_pack(pack)
+        gate_specs = normalize_gate_policy(
+            {
+                "gates": ["plan_acceptance"],
+                "reviewer_profile": "software_engineering.reviewer",
+            }
+        )
+        if not gate_specs:
+            raise ValueError("plan_acceptance gate spec could not be constructed")
+        fake_state = MinionRunState(
+            minion_id="manager",
+            run_id=f"run_staged_compile_{safe_token(work_order_id)}",
+            pack=pack,
+            status="completed",
+        )
+        event = {
+            "event_kind": "checkpoint",
+            "minion_id": fake_state.minion_id,
+            "run_id": fake_state.run_id,
+            "work_order_id": work_order_id,
+            "minion_profile": "manager.final_plan_compiler",
+            "payload": {
+                "status": "completed",
+                "summary": "compiled staged plan is ready for plan acceptance review",
+                "plan_ref": dict(plan_ref),
+                "plan_validation": dict(plan_validation),
+            },
+            "created_at": utc_now(),
+        }
+        self.reviews._schedule_plan_review(fake_state, event, gate_specs[0])
 
     def _work_order_metadata_for_state(self, state: MinionRunState) -> dict[str, Any]:
         try:
@@ -2516,6 +3730,154 @@ def _workflow_output_artifact_from_payload(payload: dict[str, Any]) -> dict[str,
             result["workflow_next"] = dict(declared_next)
         return result
     return {"summary": str(payload.get("summary") or ""), "status": str(payload.get("status") or "")}
+
+
+def _stage_artifact_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    primary = payload.get("primary_artifact")
+    if isinstance(primary, dict) and (primary.get("path") or primary.get("relative_path") or primary.get("stage_path")):
+        return dict(primary)
+    artifact = payload.get("artifact")
+    if isinstance(artifact, dict) and (artifact.get("path") or artifact.get("relative_path") or artifact.get("stage_path")):
+        return dict(artifact)
+    artifacts = [dict(item) for item in list(payload.get("artifacts") or []) if isinstance(item, dict)]
+    for item in artifacts:
+        if item.get("path") or item.get("relative_path") or item.get("stage_path"):
+            return item
+    raise ValueError("staged planning terminal payload is missing a primary artifact")
+
+
+def _should_try_workflow_resume_after_module_resume(result: dict[str, Any]) -> bool:
+    if str(result.get("status") or "").strip().lower() != "skipped":
+        return False
+    return str(result.get("reason") or "").strip() in _WORKFLOW_RESUME_FALLBACK_REASONS
+
+
+def _current_workflow_resume_step_index(workflow: dict[str, Any], steps: list[dict[str, Any]]) -> int:
+    current_step_id = str(workflow.get("current_step_id") or "").strip()
+    if current_step_id:
+        for index, step in enumerate(steps):
+            if str(step.get("step_id") or "").strip() == current_step_id:
+                return index
+    for index in range(len(steps) - 1, -1, -1):
+        if str(steps[index].get("status") or "").strip().lower() in _WORKFLOW_RESUMABLE_STATUSES:
+            return index
+    return len(steps) - 1 if steps else -1
+
+
+def _workflow_resume_metadata(
+    metadata: dict[str, Any],
+    workflow: dict[str, Any],
+    *,
+    step_index: int,
+    reason: str,
+    work_order_status: str,
+    preferred_endpoint_id: str = "",
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    updated_metadata = dict(metadata or {})
+    updated_workflow = dict(workflow or {})
+    steps = [dict(item) for item in list(updated_workflow.get("steps") or []) if isinstance(item, dict)]
+    previous_step = dict(steps[step_index])
+    now = utc_now()
+    profile = str(previous_step.get("profile") or updated_workflow.get("current_profile") or "").strip()
+    step_id = str(previous_step.get("step_id") or f"step_{step_index}").strip()
+    resume_count = int(_coerce_int(previous_step.get("resume_count"), default=0)) + 1
+    resume_entry: dict[str, Any] = {
+        "resumed_at": now,
+        "reason": str(reason or "manager resumed workflow step"),
+        "step_id": step_id,
+        "profile": profile,
+        "attempt": resume_count,
+        "previous_workflow_status": str(updated_workflow.get("status") or ""),
+        "previous_step_status": str(previous_step.get("status") or ""),
+        "previous_work_order_status": str(work_order_status or ""),
+    }
+    for source_key in ("blocker",):
+        source = updated_workflow.get(source_key)
+        if isinstance(source, dict) and source:
+            resume_entry[source_key] = dict(source)
+    for source_key in ("output_artifact", "next_profile", "completed_at", "started_at"):
+        if source_key not in previous_step:
+            continue
+        value = previous_step.get(source_key)
+        resume_entry[f"previous_{source_key}"] = dict(value) if isinstance(value, dict) else value
+
+    resumed_step = dict(previous_step)
+    resumed_step.update(
+        {
+            "step_id": step_id,
+            "profile": profile,
+            "status": "running",
+            "started_at": now,
+            "resumed_at": now,
+            "resume_count": resume_count,
+        }
+    )
+    for stale_key in ("completed_at", "output_artifact", "next_profile"):
+        resumed_step.pop(stale_key, None)
+    steps[step_index] = resumed_step
+
+    history = [dict(item) for item in list(updated_workflow.get("resume_history") or []) if isinstance(item, dict)]
+    history.append(resume_entry)
+    updated_workflow.update(
+        {
+            "steps": steps,
+            "current_step_id": step_id,
+            "current_profile": profile,
+            "status": "running",
+            "updated_at": now,
+            "resume_history": history[-50:],
+            "blocker": None,
+        }
+    )
+    updated_metadata["workflow"] = updated_workflow
+    updated_metadata["workflow_resume"] = dict(resume_entry)
+    updated_metadata["prompt_view"] = None
+    input_artifact = resumed_step.get("input_artifact")
+    if isinstance(input_artifact, dict) and input_artifact:
+        updated_metadata["workflow_input_artifact"] = dict(input_artifact)
+    endpoint = str(preferred_endpoint_id or "").strip()
+    if endpoint:
+        updated_metadata["preferred_endpoint_id"] = endpoint
+        updated_metadata["preferred_endpoint_source"] = "resume_work_order"
+    return updated_metadata, updated_workflow, resume_entry
+
+
+def _is_architect_workflow_step(profile: str, metadata: dict[str, Any]) -> bool:
+    profile_ref = str(profile or "").strip().lower()
+    if profile_ref == "architect" or profile_ref.endswith(".architect"):
+        return True
+    planner_work_order = metadata.get("planner_work_order")
+    if isinstance(planner_work_order, dict) and str(planner_work_order.get("role") or "").strip().lower() == "architect":
+        return True
+    return isinstance(metadata.get("architect_work_order"), dict)
+
+
+def _with_architect_workflow_resume_metadata(
+    metadata: dict[str, Any],
+    *,
+    goal: str,
+    work_order_id: str,
+    reason: str,
+) -> dict[str, Any]:
+    updated = dict(metadata or {})
+    planner_work_order = dict(updated.get("planner_work_order") or updated.get("architect_work_order") or {})
+    if not planner_work_order:
+        planner_work_order = build_planner_work_order(
+            goal=goal,
+            task_id=str(updated.get("task_id") or ""),
+            work_order_id=work_order_id,
+            turn_index=0,
+            plan_revision=0,
+        )
+    planner_work_order["role"] = "architect"
+    planner_work_order["turn_index"] = int(_coerce_int(planner_work_order.get("turn_index"), default=0)) + 1
+    planner_work_order["plan_revision"] = int(_coerce_int(planner_work_order.get("plan_revision"), default=0)) + 1
+    planner_work_order["resume_reason"] = str(reason or "manager resumed workflow step")
+    planner_work_order["resumed_at"] = utc_now()
+    updated["planner_work_order"] = planner_work_order
+    if isinstance(updated.get("architect_work_order"), dict):
+        updated["architect_work_order"] = dict(planner_work_order)
+    return updated
 
 
 def _skill_refs_for_pack(pack: TaskContextPack) -> list[str]:

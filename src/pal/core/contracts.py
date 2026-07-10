@@ -24,6 +24,7 @@ class PendingControlRequest:
 class ControlScopeState:
     active_turn_id: str | None = None
     pending_requests: dict[str, PendingControlRequest] = field(default_factory=dict)
+    interrupted_turns_to_settle: deque[Any] = field(default_factory=deque)
     transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     interrupt_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     quiescing: bool = False

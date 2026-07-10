@@ -166,6 +166,76 @@ def think_panel_delivery(route: ControlRoute | None, think_level: str) -> Contro
     )
 
 
+def render_model_status_text(endpoints: list[Any] | tuple[Any, ...], active_endpoint_id: str | None) -> str:
+    active = str(active_endpoint_id or "").strip()
+    endpoint_items = list(endpoints or [])
+    if not endpoint_items:
+        return "No enabled LLM model endpoints are available."
+    lines = [
+        f"Model: {active or '-'}",
+        "Select an endpoint for new turns.",
+        "",
+        "Models:",
+    ]
+    for endpoint in endpoint_items:
+        endpoint_id = _endpoint_field(endpoint, "endpoint_id")
+        marker = ">" if endpoint_id == active else " "
+        lines.append(f"{marker} {_format_model_endpoint(endpoint)}")
+    return "\n".join(lines).rstrip()
+
+
+def build_model_panel_interaction(
+    route: ControlRoute,
+    endpoints: list[Any] | tuple[Any, ...],
+    active_endpoint_id: str | None,
+    *,
+    banner: str | None = None,
+) -> InteractionMessageSpec:
+    active = str(active_endpoint_id or "").strip()
+    endpoint_items = list(endpoints or [])
+    text = render_model_status_text(endpoint_items, active)
+    if banner:
+        text = f"{banner}\n\n{text}"
+    rows: list[tuple[InteractionButtonSpec, ...]] = []
+    for endpoint in endpoint_items:
+        endpoint_id = _endpoint_field(endpoint, "endpoint_id")
+        if not endpoint_id:
+            continue
+        label = _format_model_button_label(endpoint, active)
+        rows.append(
+            (
+                InteractionButtonSpec(
+                    label=label,
+                    action_key="control.model.set",
+                    action_args={"endpoint_id": endpoint_id},
+                ),
+            )
+        )
+    rows.append((InteractionButtonSpec(label="Back", action_key="control.panel.back"),))
+    return InteractionMessageSpec(
+        interaction_id=control_panel_interaction_id(route),
+        interaction_kind="control_panel",
+        route=route,
+        text=text,
+        buttons=tuple(rows),
+        expires_at=None,
+    )
+
+
+def model_panel_delivery(
+    route: ControlRoute | None,
+    endpoints: list[Any] | tuple[Any, ...],
+    active_endpoint_id: str | None,
+) -> ControlDelivery:
+    if route is None:
+        return delivery_for_reply(None, render_model_status_text(endpoints, active_endpoint_id))
+    return delivery_for_interaction(
+        route,
+        "interactive_update",
+        build_model_panel_interaction(route, endpoints, active_endpoint_id),
+    )
+
+
 def render_log_status_text(enabled: bool) -> str:
     status = "on" if enabled else "off"
     return (
@@ -344,3 +414,48 @@ def control_catalog_delivery(control_plane: Any, endpoint_id: str) -> ControlDel
         "control_catalog",
         payload=build_control_catalog_payload(control_plane),
     )
+
+
+def _endpoint_field(endpoint: Any, field_name: str) -> str:
+    if isinstance(endpoint, dict):
+        value = endpoint.get(field_name)
+    else:
+        value = getattr(endpoint, field_name, None)
+    return str(value or "").strip()
+
+
+def _format_model_endpoint(endpoint: Any) -> str:
+    endpoint_id = _endpoint_field(endpoint, "endpoint_id")
+    model_id = _endpoint_field(endpoint, "model_id")
+    display_name = _endpoint_field(endpoint, "display_name")
+    provider = _endpoint_field(endpoint, "provider")
+    api_mode = _endpoint_field(endpoint, "api_mode")
+    context_window = _endpoint_field(endpoint, "context_window")
+    max_output_tokens = _endpoint_field(endpoint, "max_output_tokens")
+    label = endpoint_id
+    if display_name and display_name != endpoint_id:
+        label = f"{display_name} ({endpoint_id})"
+    details: list[str] = []
+    if model_id and model_id not in {endpoint_id, display_name}:
+        details.append(f"model={model_id}")
+    if provider or api_mode:
+        details.append("/".join(item for item in (provider, api_mode) if item))
+    if context_window:
+        details.append(f"context={context_window}")
+    if max_output_tokens:
+        details.append(f"max_output={max_output_tokens}")
+    if not details:
+        return label
+    return f"{label} [{', '.join(details)}]"
+
+
+def _format_model_button_label(endpoint: Any, active_endpoint_id: str) -> str:
+    endpoint_id = _endpoint_field(endpoint, "endpoint_id")
+    display_name = _endpoint_field(endpoint, "display_name")
+    model_id = _endpoint_field(endpoint, "model_id")
+    label = display_name or model_id or endpoint_id
+    if label != endpoint_id:
+        label = f"{label} ({endpoint_id})"
+    if endpoint_id == active_endpoint_id:
+        return f"> {label}"
+    return label

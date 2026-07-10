@@ -118,7 +118,8 @@ class MemoryIntrospectionProvider:
         if not memory_candidates:
             return "No memory candidates to commit."
         runtime = getattr(self.context, "execution_runtime", None)
-        if runtime is None or "op_memory_write" not in getattr(runtime, "capabilities", {}):
+        has_capability = getattr(runtime, "has_registered_capability", None)
+        if runtime is None or not callable(has_capability) or not has_capability("op_memory_write"):
             return (
                 f"Memory candidates accepted ({len(memory_candidates)} reviewed; "
                 "0 committed; memory write unavailable)."

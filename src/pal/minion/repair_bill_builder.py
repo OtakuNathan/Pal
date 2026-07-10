@@ -166,6 +166,8 @@ REPAIR_BILL_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         },
     },
 }
+for _name, _spec in REPAIR_BILL_BUILDER_TOOL_SPECS.items():
+    _spec["aliases"] = [_name.removeprefix("op_minion_")]
 
 
 @dataclass

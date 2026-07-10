@@ -1244,6 +1244,7 @@ class BehaviorSubsystemTests(unittest.TestCase):
         core = PalCore()
         register_core_with_core(core)
         register_behavior_with_core(core.context, self.service)
+        core.publish_module_capabilities("behavior")
         register_channel_with_core(core.context, ChannelRuntime())
         memory_service = MemoryService()
         register_memory_with_core(core.context, memory_service)

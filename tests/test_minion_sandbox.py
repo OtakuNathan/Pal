@@ -62,6 +62,9 @@ class MinionSandboxTests(unittest.TestCase):
                 self.assertEqual(sandbox["secret_policy"], "host_llm_broker")
                 self.assertEqual(sandbox["scratch_dir"], str(root / "tmp_scratch" / "run_1"))
                 self.assertIn("sudo", sandbox["blacklist_commands"])
+                self.assertIn("rm", sandbox["blacklist_commands"])
+                self.assertIn("unlink", sandbox["blacklist_commands"])
+                self.assertIn("rmdir", sandbox["blacklist_commands"])
             else:
                 self.assertTrue(sandbox["enabled"])
                 self.assertEqual(sandbox["backend"], "unavailable")
@@ -200,6 +203,37 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertEqual(env["PAL_MINION_LLM_BROKER"], "1")
             self.assertIn("PYTHONPATH", env)
 
+    def test_read_only_workspace_is_mounted_read_only(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_read_only_") as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            pack = TaskContextPack(
+                work_order_id="wo_read_only",
+                goal="review",
+                workspace={
+                    "repo_path": str(repo),
+                    "workspace_policy": {"mode": "read_only_repo"},
+                },
+                metadata={"sandbox": {"enabled": True, "backend": "bwrap", "run_id": "run_read_only"}},
+            )
+
+            argv, _env = build_sandboxed_runner_invocation(
+                runtime_root=root,
+                pack=pack,
+                argv=["python", "-c", "pass"],
+                env={"PATH": "/usr/bin:/bin"},
+            )
+
+            self.assertTrue(
+                any(
+                    argv[index : index + 3] == ["--ro-bind", str(repo), str(repo)]
+                    for index in range(max(0, len(argv) - 2))
+                )
+            )
+
     def test_sandbox_scratch_prefers_temp_root_and_falls_back_when_unusable(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_scratch_") as tmp:
             root = Path(tmp)
@@ -305,9 +339,10 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("imports-ok", result.stdout)
 
-    def test_sandboxed_runner_skips_shell_parser_and_approval(self) -> None:
+    def test_sandboxed_runner_honors_explicit_approval_policy(self) -> None:
         async def scenario() -> None:
             calls: list[str] = []
+            events: list[dict] = []
             pack = TaskContextPack(
                 work_order_id="wo_sandbox_shell",
                 goal="sandbox shell",
@@ -330,11 +365,11 @@ class MinionSandboxTests(unittest.TestCase):
                     )
 
             async def write_event(event):
-                _ = event
+                events.append(event)
 
             async def read_decision(timeout):
                 _ = timeout
-                raise AssertionError("sandboxed shell should not request approval")
+                return {"decision": {"decision": "accept"}}
 
             runner = MinionRunner(
                 runtime_root=Path(tempfile.mkdtemp(prefix="pal_minion_sandbox_runner_")),
@@ -352,6 +387,7 @@ class MinionSandboxTests(unittest.TestCase):
 
             self.assertTrue(result.ok, result.text)
             self.assertEqual(calls, ["cat README.md"])
+            self.assertEqual(len([event for event in events if event["event_kind"] == "approval_requested"]), 1)
 
         asyncio.run(scenario())
 

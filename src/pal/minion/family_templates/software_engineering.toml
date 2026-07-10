@@ -6,10 +6,12 @@ default_executor_profile = "software_engineering.coder"
 dag_producer_profile = "software_engineering.architect"
 
 [metadata]
+builtin = true
 require_primary_language = true
 uses_architecture_mode = true
 producer_role = "architect"
-producer_plan_label = "architecture plan"
+producer_plan_label = "architecture sketch"
+planning_depth_policy = "explicit"
 
 [capability_groups.software_read]
 include = ["workspace_read", "code_intel", "memory_recall"]

@@ -156,6 +156,8 @@ class TurnContinuation:
     budget_failure_feedback_text: str = ""
     prompt_budget_snapshot: dict[str, Any] = field(default_factory=dict)
     l1_exit_checkpoint_committed: bool = False
+    l1_interrupted_settlement_queued: bool = False
+    l1_interrupted_settlement_committed: bool = False
 
 
 @dataclass(frozen=True)

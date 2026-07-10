@@ -177,6 +177,13 @@ class ControlPlane(ControlPlanePort):
                 route=result.route,
             )
             return _with_interaction_context(action, result)
+        if action_key == "control.model.open":
+            action = ControlAction(
+                action_kind="show_model",
+                target_scope="runtime",
+                route=result.route,
+            )
+            return _with_interaction_context(action, result)
         if action_key == "control.log.open":
             action = ControlAction(
                 action_kind="show_log",
@@ -200,6 +207,24 @@ class ControlPlane(ControlPlanePort):
                 target_scope="runtime",
                 route=result.route,
                 args={"think_level": requested},
+            )
+            return _with_interaction_context(action, result)
+        if action_key == "control.model.set":
+            requested_endpoint_id = str(result.action_args.get("endpoint_id") or "").strip()
+            if not requested_endpoint_id:
+                action = ControlAction(
+                    action_kind="invalid_command",
+                    target_scope="control",
+                    route=result.route,
+                    args={"reason": "missing model endpoint id"},
+                    notes="Model endpoint id is required.",
+                )
+                return _with_interaction_context(action, result)
+            action = ControlAction(
+                action_kind="set_model",
+                target_scope="runtime",
+                route=result.route,
+                args={"endpoint_id": requested_endpoint_id},
             )
             return _with_interaction_context(action, result)
         if action_key in {"control.log.start", "control.log.end"}:
@@ -384,6 +409,19 @@ class ControlPlane(ControlPlanePort):
         )
         self.register_command(
             ControlCommandSpec(
+                name="model",
+                handler=self._handle_model,
+                description="Show or update the active LLM model for future turns.",
+                usage="/model [endpoint_id]",
+                show_in_panel=True,
+                panel_group="builtin",
+                panel_button=True,
+                panel_label="Model",
+                interaction_action_key="control.model.open",
+            )
+        )
+        self.register_command(
+            ControlCommandSpec(
                 name="interrupt",
                 handler=self._handle_interrupt,
                 description="Interrupt the current active turn in this scope.",
@@ -503,6 +541,32 @@ class ControlPlane(ControlPlanePort):
             target_scope="runtime",
             route=invocation.route,
             args={"think_level": requested},
+        )
+
+    def _handle_model(self, invocation: ControlCommandInvocation) -> ControlAction:
+        if not invocation.argv:
+            return ControlAction(
+                action_kind="show_model",
+                target_scope="runtime",
+                route=invocation.route,
+            )
+        endpoint_id = str(invocation.argv[0] or "").strip()
+        if not endpoint_id:
+            return ControlAction(
+                action_kind="invalid_command",
+                target_scope="control",
+                route=invocation.route,
+                args={
+                    "command_name": invocation.command_name,
+                    "reason": "missing model endpoint id",
+                },
+                notes="Use /model <endpoint_id>.",
+            )
+        return ControlAction(
+            action_kind="set_model",
+            target_scope="runtime",
+            route=invocation.route,
+            args={"endpoint_id": endpoint_id},
         )
 
     def _handle_log(self, invocation: ControlCommandInvocation) -> ControlAction:

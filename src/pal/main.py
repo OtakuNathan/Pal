@@ -2,15 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 from pathlib import Path
-from typing import Any
 
-from pal.execution import CapabilityCall
 from pal.foundation.service_logging import configure_process_logging
-from pal.llm import CanonicalToolCall
 from pal.runtime_app import build_runtime_app
-from pal.runtime_app import open_runtime
 from pal.socket_client import default_socket_path, run_tty, send_message
 from pal.web_fetch import run_browser_service_cli
 
@@ -37,24 +32,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     tty_parser = subparsers.add_parser("tty", help="Open an interactive socket TTY session")
     tty_parser.add_argument("--runtime-root", type=Path, required=True)
-
-    # -- tool-call -----------------------------------------------------------
-    tool_call_parser = subparsers.add_parser(
-        "tool-call",
-        help="Simulate one canonical tool call against the execution runtime",
-    )
-    tool_call_parser.add_argument("--runtime-root", type=Path, required=True)
-    tool_call_parser.add_argument("--name", required=True)
-    tool_call_parser.add_argument("--args", default="{}")
-
-    # -- cap-call ------------------------------------------------------------
-    cap_call_parser = subparsers.add_parser(
-        "cap-call",
-        help="Invoke one capability directly against the execution runtime",
-    )
-    cap_call_parser.add_argument("--runtime-root", type=Path, required=True)
-    cap_call_parser.add_argument("--name", required=True)
-    cap_call_parser.add_argument("--args", default="{}")
 
     # -- browser-service -----------------------------------------------------
     browser_service_parser = subparsers.add_parser(
@@ -87,40 +64,6 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _parse_json_object(raw: str) -> dict[str, Any]:
-    text = str(raw or "").strip() or "{}"
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"--args must be valid JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise SystemExit("--args must decode to a JSON object")
-    return payload
-
-
-def _print_json(payload: dict[str, Any]) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
-
-
-def _canonical_tool_result_debug_payload(result) -> dict[str, Any]:
-    return {
-        "name": result.name,
-        "ok": bool(result.ok),
-        "text": str(result.text or ""),
-        "llm_text": str(result.llm_text or ""),
-        "structured": result.structured,
-    }
-
-
-def _capability_result_debug_payload(result) -> dict[str, Any]:
-    return {
-        "status": result.status,
-        "text": str(result.text or ""),
-        "llm_text": str(result.llm_text or ""),
-        "structured": result.structured,
-    }
-
-
 async def _run_async(args: argparse.Namespace) -> int:
     if args.command == "run":
         configure_process_logging(component="pal")
@@ -133,48 +76,6 @@ async def _run_async(args: argparse.Namespace) -> int:
     if args.command == "tty":
         await run_tty(default_socket_path(args.runtime_root))
         return 0
-    if args.command == "tool-call":
-        handle = open_runtime(args.runtime_root)
-        try:
-            call = CanonicalToolCall(name=str(args.name), args=_parse_json_object(args.args))
-            _print_json(
-                {
-                    "mode": "op_tool_call",
-                    "request": {"name": call.name, "args": dict(call.args)},
-                }
-            )
-            result = handle.core.context.execution_runtime.execute_tool(call)
-            _print_json(
-                {
-                    "mode": "op_tool_call",
-                    "request": {"name": call.name, "args": dict(call.args)},
-                    "result": _canonical_tool_result_debug_payload(result),
-                }
-            )
-            return 0 if result.ok else 2
-        finally:
-            await handle.stop_async()
-    if args.command == "cap-call":
-        handle = open_runtime(args.runtime_root)
-        try:
-            call = CapabilityCall(name=str(args.name), args=_parse_json_object(args.args))
-            _print_json(
-                {
-                    "mode": "capability_call",
-                    "request": {"name": call.name, "args": dict(call.args)},
-                }
-            )
-            result = handle.core.context.execution_runtime.execute(call)
-            _print_json(
-                {
-                    "mode": "capability_call",
-                    "request": {"name": call.name, "args": dict(call.args)},
-                    "result": _capability_result_debug_payload(result),
-                }
-            )
-            return 0 if str(result.status).lower() == "ok" else 2
-        finally:
-            await handle.stop_async()
     return 1
 
 

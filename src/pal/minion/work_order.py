@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from fnmatch import fnmatchcase
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -907,37 +909,15 @@ def _has_review_command_evidence(commands_run: list[dict[str, Any]]) -> bool:
     return False
 
 
-def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict[str, Any]:
-    artifact = validate_final_plan_artifact(payload)
+def work_start_topology_validation(
+    orchestration: dict[str, Any],
+    *,
+    known_module_ids: list[str] | set[str] | tuple[str, ...],
+) -> dict[str, Any]:
+    """Validate the module graph whose edges block downstream work from starting."""
+
+    orchestration = dict(orchestration or {})
     errors: list[str] = []
-    errors.extend(_plan_artifact_gate_check_ref_errors(artifact))
-    errors.extend(_plan_artifact_executor_semantic_errors(artifact))
-    module_ids: list[str] = []
-    modules_by_id: dict[str, ModulePlan] = {}
-    for module_index, module in enumerate(artifact.modules):
-        if module.module_id in modules_by_id:
-            errors.append(f"modules[{module_index}].module_id is duplicated: {module.module_id}")
-        if module.module_id:
-            modules_by_id[module.module_id] = module
-            module_ids.append(module.module_id)
-        if not module.owned_area:
-            errors.append(f"modules[{module_index}].owned_area is required")
-        if not module.responsibility:
-            errors.append(f"modules[{module_index}].responsibility is required")
-        if not module.ownership:
-            errors.append(f"modules[{module_index}].ownership is required")
-        if not module.lifecycle:
-            errors.append(f"modules[{module_index}].lifecycle is required")
-        if not module.invariants:
-            errors.append(f"modules[{module_index}].invariants is required")
-        for milestone_index, milestone in enumerate(module.internal_milestones):
-            if not milestone.task:
-                errors.append(f"modules[{module_index}].internal_milestones[{milestone_index}].task is required")
-            if not milestone.acceptance_criteria:
-                errors.append(
-                    f"modules[{module_index}].internal_milestones[{milestone_index}].acceptance_criteria is required"
-                )
-    orchestration = dict(artifact.orchestration or {})
     shape = str(orchestration.get("execution_shape") or orchestration.get("shape") or "").strip()
     if shape != "fork_join_linear":
         errors.append("orchestration.execution_shape must be fork_join_linear")
@@ -946,6 +926,14 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
     if not isinstance(raw_nodes, list) or not raw_nodes:
         errors.append("orchestration.topology.nodes is required")
         raw_nodes = []
+
+    raw_module_ids = sorted(known_module_ids) if isinstance(known_module_ids, set) else list(known_module_ids)
+    normalized_module_ids: list[str] = []
+    for item in raw_module_ids:
+        module_id = str(item or "").strip()
+        if module_id and module_id not in normalized_module_ids:
+            normalized_module_ids.append(module_id)
+    known_modules = set(normalized_module_ids)
     nodes: list[dict[str, Any]] = []
     node_ids: set[str] = set()
     module_node_ids: set[str] = set()
@@ -985,16 +973,18 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
             errors.append(f"orchestration.topology.nodes[{node_index}].kind must be prelude, module, or join")
         if not module_id:
             errors.append(f"orchestration.topology.nodes[{node_index}].module_id is required")
-        elif module_id not in modules_by_id:
+        elif module_id not in known_modules:
             errors.append(f"orchestration.topology.nodes[{node_index}].module_id is unknown: {module_id}")
         elif module_id in module_node_ids:
             errors.append(f"orchestration.topology.nodes[{node_index}].module_id is duplicated: {module_id}")
-        module_node_ids.add(module_id)
+        if module_id:
+            module_node_ids.add(module_id)
         node_payload = {"node_id": node_id, "kind": kind, "module_id": module_id, "depends_on": depends_on}
         if executor_profile:
             node_payload["executor_profile"] = executor_profile
         nodes.append(node_payload)
-    missing_modules = [module_id for module_id in module_ids if module_id not in module_node_ids]
+
+    missing_modules = [module_id for module_id in normalized_module_ids if module_id not in module_node_ids]
     if missing_modules:
         errors.append("orchestration.topology.nodes missing module_id(s): " + ", ".join(missing_modules))
     prelude_nodes = [node for node in nodes if node["kind"] == "prelude"]
@@ -1004,67 +994,30 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
         errors.append("orchestration.topology.nodes must contain at most one prelude node")
     if not module_nodes and not join_nodes:
         errors.append("orchestration.topology.nodes must contain at least one executable module or join node")
-    if len(nodes) > 1 and not join_nodes:
-        errors.append("orchestration.topology.nodes must contain a join node when more than one node is present")
-    module_kind_by_id = {str(node.get("module_id") or ""): str(node.get("kind") or "") for node in nodes}
-    owned_area_owner: dict[str, str] = {}
-    for module_index, module in enumerate(artifact.modules):
-        if module_kind_by_id.get(module.module_id) == "join":
-            continue
-        declared_write_areas: list[tuple[str, str]] = [
-            (raw_owned_area, "owned_area") for raw_owned_area in module.owned_area
-        ]
-        for milestone_index, milestone in enumerate(module.internal_milestones):
-            changed_area = _string_list(milestone.metadata.get("changed_area"))
-            declared_write_areas.extend(
-                (
-                    raw_changed_area,
-                    f"internal_milestones[{milestone_index}].metadata.changed_area",
-                )
-                for raw_changed_area in changed_area
-            )
-        for raw_owned_area, source in declared_write_areas:
-            owned_area = _normalized_owned_area_key(raw_owned_area)
-            if not owned_area:
-                continue
-            owner = owned_area_owner.get(owned_area)
-            if owner and owner != module.module_id:
-                errors.append(f"modules[{module_index}].{source} duplicates {owner}: {raw_owned_area}")
-            else:
-                owned_area_owner[owned_area] = module.module_id
     dependency_map = {str(node["node_id"]): list(node["depends_on"]) for node in nodes}
-    for node_id, deps in dependency_map.items():
-        for dep in deps:
-            if dep not in dependency_map:
-                errors.append(f"orchestration.topology.nodes[{node_id}].depends_on unknown node: {dep}")
+    for node_id, dependencies in dependency_map.items():
+        for dependency in dependencies:
+            if dependency not in dependency_map:
+                errors.append(f"orchestration.topology.nodes[{node_id}].depends_on unknown node: {dependency}")
     if errors:
-        raise ValueError("invalid dispatchable FinalPlanArtifact: " + "; ".join(errors))
-    sorted_node_ids = _topological_sort([str(node["node_id"]) for node in nodes], dependency_map)
+        raise ValueError("invalid work-start topology: " + "; ".join(errors))
+
+    try:
+        sorted_node_ids = _topological_sort([str(node["node_id"]) for node in nodes], dependency_map)
+    except ValueError as exc:
+        raise ValueError(f"invalid work-start topology: {exc}") from exc
     nodes_by_id = {str(node["node_id"]): node for node in nodes}
-    if prelude_nodes and nodes_by_id[sorted_node_ids[0]]["kind"] != "prelude":
-        raise ValueError("invalid dispatchable FinalPlanArtifact: topology must start with the prelude node when present")
-    prelude_id = str(prelude_nodes[0]["node_id"]) if prelude_nodes else ""
-    join_ids = [str(node["node_id"]) for node in join_nodes]
-    join_id = join_ids[0] if join_ids else ""
-    for node in nodes:
-        node_id = str(node["node_id"])
-        if prelude_id and node_id != prelude_id and not _has_dependency_path(node_id, prelude_id, dependency_map):
-            raise ValueError(
-                f"invalid dispatchable FinalPlanArtifact: node {node_id} must depend on the prelude node"
-            )
-        if join_ids and node_id not in set(join_ids) and not any(_has_dependency_path(join_node_id, node_id, dependency_map) for join_node_id in join_ids):
-            raise ValueError(f"invalid dispatchable FinalPlanArtifact: node {node_id} must flow to a join node")
     declared_order = topology.get("order") or topology.get("node_order") or orchestration.get("node_order")
     if isinstance(declared_order, list) and declared_order:
         declared_node_ids = [str(item).strip() for item in declared_order if str(item or "").strip()]
-        if set(declared_node_ids) != set(sorted_node_ids):
-            raise ValueError("invalid dispatchable FinalPlanArtifact: declared node_order does not match topology nodes")
+        if len(declared_node_ids) != len(sorted_node_ids) or set(declared_node_ids) != set(sorted_node_ids):
+            raise ValueError("invalid work-start topology: declared node_order does not match topology nodes")
         declared_position = {node_id: index for index, node_id in enumerate(declared_node_ids)}
-        for node_id, deps in dependency_map.items():
-            for dep in deps:
-                if declared_position[dep] > declared_position[node_id]:
+        for node_id, dependencies in dependency_map.items():
+            for dependency in dependencies:
+                if declared_position[dependency] > declared_position[node_id]:
                     raise ValueError(
-                        f"invalid dispatchable FinalPlanArtifact: declared node_order places {node_id} before dependency {dep}"
+                        f"invalid work-start topology: declared node_order places {node_id} before dependency {dependency}"
                     )
         sorted_node_ids = declared_node_ids
     normalized_nodes = [
@@ -1081,20 +1034,123 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
         }
         for node_id in sorted_node_ids
     ]
-    module_order = [str(node["module_id"]) for node in normalized_nodes]
-    groups = _validate_topology_groups(topology.get("groups") or orchestration.get("groups"), known_node_ids=set(sorted_node_ids))
-    validation = {
+    try:
+        groups = _validate_topology_groups(
+            topology.get("groups") or orchestration.get("groups"),
+            known_node_ids=set(sorted_node_ids),
+        )
+    except ValueError as exc:
+        raise ValueError(f"invalid work-start topology: {exc}") from exc
+    join_ids = [str(node["node_id"]) for node in join_nodes]
+    return {
         "status": "valid",
-        "plan_id": artifact.plan_id,
-        "task_id": artifact.task_id,
         "execution_shape": "fork_join_linear",
         "node_order": list(sorted_node_ids),
-        "module_order": module_order,
-        "prelude_node_id": prelude_id,
-        "join_node_id": join_id,
+        "module_order": [str(node["module_id"]) for node in normalized_nodes],
+        "prelude_node_id": str(prelude_nodes[0]["node_id"]) if prelude_nodes else "",
+        "join_node_id": join_ids[0] if join_ids else "",
         "join_node_ids": join_ids,
         "nodes": normalized_nodes,
         "groups": groups,
+    }
+
+
+def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict[str, Any]:
+    artifact = validate_final_plan_artifact(payload)
+    errors: list[str] = []
+    errors.extend(_plan_artifact_gate_check_ref_errors(artifact))
+    errors.extend(_plan_artifact_executor_semantic_errors(artifact))
+    module_ids: list[str] = []
+    modules_by_id: dict[str, ModulePlan] = {}
+    for module_index, module in enumerate(artifact.modules):
+        if module.module_id in modules_by_id:
+            errors.append(f"modules[{module_index}].module_id is duplicated: {module.module_id}")
+        if module.module_id:
+            modules_by_id[module.module_id] = module
+            module_ids.append(module.module_id)
+        if not module.owned_area:
+            errors.append(f"modules[{module_index}].owned_area is required")
+        if not module.responsibility:
+            errors.append(f"modules[{module_index}].responsibility is required")
+        if not module.ownership:
+            errors.append(f"modules[{module_index}].ownership is required")
+        if not module.lifecycle:
+            errors.append(f"modules[{module_index}].lifecycle is required")
+        if not module.invariants:
+            errors.append(f"modules[{module_index}].invariants is required")
+        for milestone_index, milestone in enumerate(module.internal_milestones):
+            if not milestone.task:
+                errors.append(f"modules[{module_index}].internal_milestones[{milestone_index}].task is required")
+            if not milestone.acceptance_criteria:
+                errors.append(
+                    f"modules[{module_index}].internal_milestones[{milestone_index}].acceptance_criteria is required"
+                )
+    orchestration = dict(artifact.orchestration or {})
+    topology_validation: dict[str, Any] = {}
+    try:
+        topology_validation = work_start_topology_validation(orchestration, known_module_ids=module_ids)
+    except ValueError as exc:
+        errors.append(str(exc))
+    module_kind_by_id = {
+        str(node.get("module_id") or ""): str(node.get("kind") or "")
+        for node in list(topology_validation.get("nodes") or [])
+        if isinstance(node, dict)
+    }
+    owned_area_owner: dict[str, str] = {}
+    for module_index, module in enumerate(artifact.modules):
+        try:
+            module_owned_areas = normalize_plan_write_areas(
+                module.owned_area,
+                field_name=f"modules[{module_index}].owned_area",
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+            module_owned_areas = []
+        declared_write_areas: list[tuple[str, str]] = [
+            (raw_owned_area, "owned_area") for raw_owned_area in module_owned_areas
+        ]
+        for milestone_index, milestone in enumerate(module.internal_milestones):
+            changed_area_field = f"modules[{module_index}].internal_milestones[{milestone_index}].metadata.changed_area"
+            try:
+                changed_area = normalize_plan_write_areas(
+                    milestone.metadata.get("changed_area"),
+                    field_name=changed_area_field,
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
+                changed_area = []
+            for raw_changed_area in changed_area:
+                if module_owned_areas and not any(
+                    plan_write_area_covers(raw_owned_area, raw_changed_area)
+                    for raw_owned_area in module_owned_areas
+                ):
+                    errors.append(
+                        f"{changed_area_field} is outside module owned_area: {raw_changed_area}"
+                    )
+            declared_write_areas.extend(
+                (
+                    raw_changed_area,
+                    f"internal_milestones[{milestone_index}].metadata.changed_area",
+                )
+                for raw_changed_area in changed_area
+            )
+        if module_kind_by_id.get(module.module_id) == "join":
+            continue
+        for raw_owned_area, source in declared_write_areas:
+            owned_area = _normalized_owned_area_key(raw_owned_area)
+            if not owned_area:
+                continue
+            owner = owned_area_owner.get(owned_area)
+            if owner and owner != module.module_id:
+                errors.append(f"modules[{module_index}].{source} duplicates {owner}: {raw_owned_area}")
+            else:
+                owned_area_owner[owned_area] = module.module_id
+    if errors:
+        raise ValueError("invalid dispatchable FinalPlanArtifact: " + "; ".join(errors))
+    validation = {
+        **topology_validation,
+        "plan_id": artifact.plan_id,
+        "task_id": artifact.task_id,
     }
     validation["topology_hash"] = hashlib.sha256(
         json.dumps(
@@ -1102,8 +1158,8 @@ def dispatchable_plan_validation(payload: PlanArtifact | dict[str, Any]) -> dict
                 "plan_id": artifact.plan_id,
                 "task_id": artifact.task_id,
                 "execution_shape": validation["execution_shape"],
-                "nodes": normalized_nodes,
-                "groups": groups,
+                "nodes": validation["nodes"],
+                "groups": validation["groups"],
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1203,6 +1259,68 @@ def _plan_artifact_gate_check_ref_errors(artifact: PlanArtifact) -> list[str]:
 
 def _normalized_owned_area_key(value: Any) -> str:
     return str(value or "").strip().replace("\\", "/").strip("/")
+
+
+_LOGICAL_WRITE_AREA_RE = re.compile(r"(?:domain|component|package|resource):[A-Za-z0-9._/*-]+")
+_TRAILING_WRITE_AREA_ANNOTATION_RE = re.compile(r"\s+\([^\n]*\)\s*$")
+
+
+def normalize_plan_write_areas(value: Any, *, field_name: str) -> list[str]:
+    raw_areas = _owned_area_list(value)
+    normalized: list[str] = []
+    for index, raw_area in enumerate(raw_areas):
+        area = str(raw_area or "").strip()
+        label = f"{field_name}[{index}]"
+        if not area:
+            continue
+        if any(character in area for character in ("\x00", "\n", "\r")):
+            raise ValueError(f"{label} must be one canonical write-area value")
+        if area.startswith("reference:"):
+            raise ValueError(f"{label} must not own a read-only reference path: {area}")
+        if _LOGICAL_WRITE_AREA_RE.fullmatch(area):
+            if area not in normalized:
+                normalized.append(area)
+            continue
+        if _TRAILING_WRITE_AREA_ANNOTATION_RE.search(area):
+            raise ValueError(
+                f"{label} must contain only the path; move parenthetical explanation to task, scope_guard, or ownership: {area}"
+            )
+        if "://" in area or ":" in area:
+            raise ValueError(f"{label} must be a repo-relative path or an explicit logical area: {area}")
+        if area.startswith(("/", "~")) or "\\" in area:
+            raise ValueError(f"{label} must be a canonical POSIX repo-relative path: {area}")
+        path_without_trailing_slash = area[:-1] if area.endswith("/") else area
+        parts = path_without_trailing_slash.split("/")
+        if not path_without_trailing_slash or any(
+            not part or part in {".", ".."} or part != part.strip()
+            for part in parts
+        ):
+            raise ValueError(f"{label} must be a normalized repo-relative path: {area}")
+        if len(parts) == 1 and any(character.isspace() for character in area) and not any(
+            marker in area for marker in (".", "*", "?", "[")
+        ):
+            raise ValueError(
+                f"{label} looks like a prose responsibility boundary; use component:<id> or put prose in ownership: {area}"
+            )
+        if area not in normalized:
+            normalized.append(area)
+    return normalized
+
+
+def plan_write_area_covers(owned_area: str, changed_area: str) -> bool:
+    owner = str(owned_area or "").strip()
+    changed = str(changed_area or "").strip()
+    if not owner or not changed:
+        return False
+    if _LOGICAL_WRITE_AREA_RE.fullmatch(owner) or _LOGICAL_WRITE_AREA_RE.fullmatch(changed):
+        return owner == changed
+    if owner == changed:
+        return True
+    if owner.endswith("/"):
+        return changed.startswith(owner)
+    if any(marker in owner for marker in ("*", "?", "[")):
+        return fnmatchcase(changed, owner)
+    return False
 
 
 def _plan_artifact_gate_check_refs(metadata: dict[str, Any]) -> set[str]:
@@ -1373,7 +1491,7 @@ def _topological_sort(node_ids: list[str], dependency_map: dict[str, list[str]])
                 ready.append(child)
     if len(result) != len(ordered_ids):
         remaining = [node_id for node_id in ordered_ids if node_id not in result]
-        raise ValueError("invalid dispatchable FinalPlanArtifact: topology has a cycle involving " + ", ".join(remaining))
+        raise ValueError("topology has a cycle involving " + ", ".join(remaining))
     return result
 
 
@@ -1398,17 +1516,15 @@ def _validate_topology_groups(value: Any, *, known_node_ids: set[str]) -> list[d
     for index, group in enumerate(groups):
         group_id = str(group.get("group_id") or group.get("id") or "").strip()
         if not group_id:
-            raise ValueError(f"invalid dispatchable FinalPlanArtifact: orchestration.topology.groups[{index}].group_id is required")
+            raise ValueError(f"orchestration.topology.groups[{index}].group_id is required")
         if group_id in seen:
-            raise ValueError(
-                f"invalid dispatchable FinalPlanArtifact: orchestration.topology.groups[{index}].group_id is duplicated: {group_id}"
-            )
+            raise ValueError(f"orchestration.topology.groups[{index}].group_id is duplicated: {group_id}")
         seen.add(group_id)
         node_ids = _string_list(group.get("node_ids") or group.get("nodes"))
         unknown = [node_id for node_id in node_ids if node_id not in known_node_ids]
         if unknown:
             raise ValueError(
-                f"invalid dispatchable FinalPlanArtifact: orchestration.topology.groups[{index}] unknown node_id(s): "
+                f"orchestration.topology.groups[{index}] unknown node_id(s): "
                 + ", ".join(unknown)
             )
         result.append({"group_id": group_id, "node_ids": node_ids})

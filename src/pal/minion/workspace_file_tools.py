@@ -6,22 +6,27 @@ from typing import Any
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.shared import RuntimeStatus
 
-from pal.minion.workspace_tools import _workspace_path, _workspace_root
+from pal.minion.workspace_tools import _workspace_path, _workspace_root_payload, _workspace_root_with_info
 
 
 WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_file_read": {
         "name": "op_file_read",
         "description": (
-            "Use this first when you need to inspect a UTF-8 text file under the current project repo; do not use op_exec_shell with cat/head/tail for repo file reads when this tool is visible. "
-            "Read using a repo-relative path. "
+            "Use this first when you need to inspect a UTF-8 text file under the current project repo or a declared read-only reference root; do not use op_exec_shell with cat/head/tail for repo/reference file reads when this tool is visible. "
+            "Read using a root-relative path. Use root='reference:<name>' or reference_name='<name>' for declared truth-source references; omit it for the current project repo. "
             "A successful read also caches the file for op_file_edit, op_file_write overwrite/append, "
             "and op_path_delete safety checks."
         ),
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Repo-relative file path, for example src/app.py."},
+                "path": {"type": "string", "description": "Root-relative file path, for example src/app.py."},
+                "root": {
+                    "type": "string",
+                    "description": "Optional root selector. Omit or use project for the current project repo; use reference:<name> for a declared read-only truth-source reference.",
+                },
+                "reference_name": {"type": "string", "description": "Optional declared reference root name; equivalent to root=reference:<name>."},
                 "start_line": {"type": "integer", "default": 1},
                 "limit_lines": {"type": "integer", "default": 2000},
             },
@@ -119,7 +124,9 @@ async def workspace_file_tool_result(
     turn_id: str | None = None,
 ) -> CanonicalToolResult:
     try:
-        root = _workspace_root(workspace)
+        root, root_info = _workspace_root_with_info(workspace, call.args)
+        if str(root_info.get("root_kind") or "") == "reference" and call.name != "op_file_read":
+            raise ValueError("reference roots are read-only; use op_file_read, op_tree, or op_search for reference inspection")
         relative, absolute = _workspace_file_path(root, call.args)
         tool_name, tool_args = _underlying_file_tool(call, absolute)
     except Exception as exc:
@@ -140,7 +147,7 @@ async def workspace_file_tool_result(
         budget=budget,
         turn_id=turn_id,
     )
-    return _workspace_result(call, result, relative=relative, absolute=absolute)
+    return _workspace_result(call, result, relative=relative, absolute=absolute, root=root, root_info=root_info)
 
 
 def _workspace_file_path(root: Path, args: dict[str, Any]) -> tuple[str, Path]:
@@ -194,11 +201,20 @@ def _underlying_file_tool(call: CanonicalToolCall, absolute: Path) -> tuple[str,
     raise ValueError(f"unknown scoped file tool: {call.name}")
 
 
-def _workspace_result(call: CanonicalToolCall, result: CanonicalToolResult, *, relative: str, absolute: Path) -> CanonicalToolResult:
+def _workspace_result(
+    call: CanonicalToolCall,
+    result: CanonicalToolResult,
+    *,
+    relative: str,
+    absolute: Path,
+    root: Path,
+    root_info: dict[str, Any],
+) -> CanonicalToolResult:
     structured = dict(result.structured or {})
     structured["path"] = relative
     structured["workspace_path"] = relative
     structured.setdefault("file_path", str(absolute))
+    structured.update(_workspace_root_payload(root, root_info))
     text = str(result.llm_text or result.text or "").strip()
     if result.ok and call.name == "op_path_delete":
         path_kind = str(structured.get("path_kind") or "path")

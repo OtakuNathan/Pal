@@ -490,6 +490,7 @@ class ArtifactManagerTests(unittest.IsolatedAsyncioTestCase):
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_artifact_with_core(core.context, self.manager)
+        core.publish_module_capabilities("execution")
         core.publish_module_capabilities("artifact")
         core.context.execution_runtime.register_provider_ref("core:turn_io", _TurnIO(self.scope_key))
         ref = self._register_text("refund-policy.txt", "refund terms are on page one")

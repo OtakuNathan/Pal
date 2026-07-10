@@ -103,6 +103,8 @@ def minion_plan_acceptance_delivery(payload: dict[str, Any], route: ControlRoute
 
 
 def build_minion_plan_acceptance_interaction(payload: dict[str, Any], route: ControlRoute) -> InteractionMessageSpec | None:
+    if bool(payload.get("minion_v2")):
+        return _build_minion_v2_architecture_interaction(payload, route)
     plan_ref = payload.get("plan_ref")
     if not isinstance(plan_ref, dict):
         return None
@@ -188,6 +190,96 @@ def build_minion_plan_acceptance_interaction(payload: dict[str, Any], route: Con
                             "review_gate_ref": dict(review_gate_ref),
                             "reason": "human requested edits for reviewer-passed plan from channel interaction",
                         },
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def _build_minion_v2_architecture_interaction(
+    payload: dict[str, Any],
+    route: ControlRoute,
+) -> InteractionMessageSpec | None:
+    workflow_id = str(payload.get("workflow_id") or "").strip()
+    revision_id = str(payload.get("architecture_revision_id") or "").strip()
+    manifest_sha = str(payload.get("manifest_sha") or "").strip()
+    token = str(payload.get("decision_token") or "").strip()
+    if not workflow_id or not revision_id or not manifest_sha or not token:
+        return None
+    if bool(payload.get("clarification_pending")):
+        return InteractionMessageSpec(
+            interaction_id=f"minion_v2_clarification_{revision_id}",
+            interaction_kind="minion_v2_clarification",
+            route=route,
+            text=str(payload.get("markdown") or "Architecture requirements need clarification."),
+            buttons=(
+                (
+                    InteractionButtonSpec(
+                        label="Answer",
+                        action_key="control.action.dispatch",
+                        action_args=_minion_interaction_action_payload(
+                            action_kind="minion_v2_human_decision",
+                            target_id=workflow_id,
+                            args={
+                                "workflow_id": workflow_id,
+                                "architecture_revision_id": revision_id,
+                                "manifest_sha": manifest_sha,
+                                "decision_token": token,
+                                "actor_id": str(payload.get("actor_id") or "pal"),
+                                "active_channel_id": str(payload.get("active_channel_id") or "local"),
+                                "decision": "clarify",
+                            },
+                        ),
+                    ),
+                ),
+            ),
+        )
+    markdown = str(payload.get("markdown") or "").strip()
+    text = markdown or (
+        "Minion V2 architecture review passed.\n\n"
+        f"Workflow: {workflow_id}\nRevision: {revision_id}\nManifest: {manifest_sha}"
+    )
+    common = {
+        "workflow_id": workflow_id,
+        "architecture_revision_id": revision_id,
+        "manifest_sha": manifest_sha,
+        "decision_token": token,
+        "actor_id": str(payload.get("actor_id") or "pal"),
+        "active_channel_id": str(payload.get("active_channel_id") or "local"),
+    }
+    return InteractionMessageSpec(
+        interaction_id=f"minion_v2_architecture_{revision_id}",
+        interaction_kind="minion_v2_architecture_review",
+        route=route,
+        text=text,
+        buttons=(
+            (
+                InteractionButtonSpec(
+                    label="Accept",
+                    action_key="control.action.dispatch",
+                    action_args=_minion_interaction_action_payload(
+                        action_kind="minion_v2_human_decision",
+                        target_id=workflow_id,
+                        args={**common, "decision": "accept"},
+                    ),
+                ),
+                InteractionButtonSpec(
+                    label="Edit",
+                    action_key="control.action.dispatch",
+                    action_args=_minion_interaction_action_payload(
+                        action_kind="minion_v2_human_decision",
+                        target_id=workflow_id,
+                        args={**common, "decision": "edit"},
+                    ),
+                ),
+                InteractionButtonSpec(
+                    label="Reject",
+                    action_key="control.action.dispatch",
+                    action_args=_minion_interaction_action_payload(
+                        action_kind="minion_v2_human_decision",
+                        target_id=workflow_id,
+                        args={**common, "decision": "reject"},
                     ),
                 ),
             ),

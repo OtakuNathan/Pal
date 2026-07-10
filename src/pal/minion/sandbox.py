@@ -43,6 +43,9 @@ MINION_SANDBOX_BLACKLIST_COMMANDS = (
     "ssh",
     "scp",
     "rsync",
+    "rm",
+    "unlink",
+    "rmdir",
 )
 
 _SECRET_ENV_MARKERS = (
@@ -395,10 +398,12 @@ def _build_bwrap_invocation(
     nvm_root = Path.home() / ".nvm"
     if nvm_root.exists():
         _append_bind_path(args, nvm_root, read_only=True)
+    workspace_policy = dict(pack.workspace.get("workspace_policy") or {})
+    read_only_workspace = str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo"
     for bind_path in _sandbox_git_metadata_bind_paths(sandbox):
-        _append_bind_path(args, bind_path, read_only=False)
+        _append_bind_path(args, bind_path, read_only=read_only_workspace)
     if workspace_path and workspace_path.exists():
-        _append_bind_path(args, workspace_path, read_only=False)
+        _append_bind_path(args, workspace_path, read_only=read_only_workspace)
     for command in blacklist:
         wrapper = deny_dir / command
         if not wrapper.exists():

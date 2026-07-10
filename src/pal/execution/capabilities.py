@@ -103,7 +103,7 @@ class ExecutionIntrospectionProvider(
 def inspect_execution(provider: ExecutionIntrospectionProvider) -> ExecutionSnapshot:
     runtime = provider.runtime
     return ExecutionSnapshot(
-        capability_count=len(runtime.capabilities),
+        capability_count=len(runtime.bound_action_index.actions),
         tool_count=len(runtime.tools),
     )
 

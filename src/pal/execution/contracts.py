@@ -62,12 +62,6 @@ class ToolCallBudget:
     timeout_ms: int | None = None
 
 
-@dataclass(frozen=True)
-class RegisteredCapability:
-    descriptor: CapabilityDescriptor
-    callable: CapabilityCallable
-
-
 class Tool(Protocol):
     name: str
     description: str
@@ -104,6 +98,12 @@ class ExecutionRuntimePort(Protocol):
         ...
 
     def register_tool(self, tool: Tool) -> None:
+        ...
+
+    def has_registered_capability(self, name: str) -> bool:
+        ...
+
+    def resolve_llm_tool_name(self, name: object) -> str:
         ...
 
     def execute_tool(self, call: Any, *, allow_tools: bool = True, budget: ToolCallBudget | None = None) -> Any:

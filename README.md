@@ -14,9 +14,6 @@ pal run --runtime-root /path/to/runtime
 
 # Send a message
 pal client --runtime-root /path/to/runtime --message "hello"
-
-# Invoke a capability directly
-pal tool-call --runtime-root /path/to/runtime --name <name> --args '<json>'
 ```
 
 ## How It Works

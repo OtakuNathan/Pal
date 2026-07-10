@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -39,7 +40,12 @@ from pal.core.turns import (
     TurnOutcome,
     agent_turn_program,
 )
-from pal.execution import CapabilityCall, register_with_core as register_execution_with_core
+from pal.execution import (
+    ApprovalExecutionDecorator,
+    CapabilityCall,
+    ExecutionApprovalRequest,
+    register_with_core as register_execution_with_core,
+)
 from pal.foundation import EventEnvelope, PalV2Database, utc_now
 from pal.llm import EndpointResolver, LLMEndpointRepository, LLMRuntime, LLMCredentialResolver, RuntimeSettingRepository, build_default_endpoint_invoker
 from pal.llm.contracts import (
@@ -79,6 +85,7 @@ from pal.minion.git_env import inspect_milestone_checkpoint
 from pal.minion.gates import checkpoint_gate_spec_for_pack, pack_requires_plan_artifact_validation
 from pal.minion.debug_log import minion_debug_log_enabled
 from pal.minion.llm_broker import MinionBrokerLLMRuntime
+from pal.minion.profiles import filter_minion_allowed_capabilities
 from pal.minion.scoped_execution import (
     MINION_DIRECT_WORK_TOOL_SURFACE,
     MINION_DISCOVERY_TOOL_SURFACE,
@@ -88,11 +95,7 @@ from pal.minion.scoped_execution import (
     _path_is_relative_to,
     _review_tool_evidence_ref,
 )
-from pal.minion.tool_admission import (
-    admit_minion_tool_call,
-    normalize_minion_allowed_capabilities,
-    resolve_minion_tool_call_alias,
-)
+from pal.minion.tool_admission import admit_minion_tool_call
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.minion.prompt_adapter import (
     build_minion_task_envelope as _minion_task_envelope,
@@ -565,7 +568,6 @@ class MinionRunner:
     memory_candidates: list[dict[str, Any]] = field(default_factory=list)
     shell_mutation_violations: list[dict[str, Any]] = field(default_factory=list)
     review_tool_evidence_refs: list[dict[str, Any]] = field(default_factory=list)
-    git_mutation_approved: bool = False
     web_research_usage: dict[str, int] = field(default_factory=dict)
     auto_accept_approvals: bool = False
     user_interaction: MinionUserInteractionPort | None = field(default=None, init=False, repr=False)
@@ -598,6 +600,8 @@ class MinionRunner:
                 "phase_started",
                 accepted_payload,
             )
+            if self._is_v2_invocation():
+                return await self._run_v2_invocation(bundle, prompt_observation_tag=prompt_observation_tag)
             while True:
                 await self._raise_if_cancel_requested()
                 milestone_started_payload = {
@@ -706,6 +710,35 @@ class MinionRunner:
                 await bundle.close()
             self._append_debug_log("runner_stopped", {"blocked_summary": self.blocked_summary})
 
+    async def _run_v2_invocation(
+        self,
+        bundle: MinionRuntimeBundle,
+        *,
+        prompt_observation_tag: str = "",
+    ) -> int:
+        payload = {
+            "phase": "invocation_started",
+            "summary": "Minion V2 worker invocation started",
+        }
+        if prompt_observation_tag:
+            payload["prompt_observation_tag"] = prompt_observation_tag
+        await self._emit("phase_started", payload)
+        final_text = await self._run_agent_loop(bundle)
+        await self._raise_if_cancel_requested()
+        if self.blocked_summary:
+            await self._emit("terminal", self._terminal_payload("blocked", self.blocked_summary))
+            return 0
+        await self._persist_text_deliverable_if_needed(final_text)
+        self._finalize_produced_artifacts()
+        await self._emit(
+            "terminal",
+            self._terminal_payload("completed", final_text or "Minion V2 invocation completed"),
+        )
+        return 0
+
+    def _is_v2_invocation(self) -> bool:
+        return bool(dict((self.pack.metadata or {}).get("minion_v2") or {}))
+
     async def _run_agent_loop(self, bundle: MinionRuntimeBundle, *, forced_retry_note: str = "") -> str:
         memory_l3, memory_service = self._runner_memory()
         workspace = dict(self.pack.workspace)
@@ -791,8 +824,9 @@ class MinionRunner:
                 workspace.setdefault("review_target_gate_spec", dict(review_target.get("gate_spec") or {}))
             if isinstance(review_target.get("module_contract"), dict):
                 workspace.setdefault("review_target_module_contract", dict(review_target.get("module_contract") or {}))
-        workspace.setdefault("current_milestone_index", self._current_milestone_index())
-        workspace.setdefault("current_milestone_title", self._current_milestone_title())
+        if not self._is_v2_invocation():
+            workspace.setdefault("current_milestone_index", self._current_milestone_index())
+            workspace.setdefault("current_milestone_title", self._current_milestone_title())
         execution_runtime = MinionScopedExecutionRuntime(
             bundle.execution_runtime,
             self.pack.allowed_capabilities,
@@ -834,7 +868,11 @@ class MinionRunner:
             ]
             return L1CommitPayload(turn_id=self.run_id, transcript=transcript, tool_observations=list(observations))
 
-        turn_id = f"{self.run_id}:m{self._current_milestone_index()}"
+        turn_id = (
+            f"{self.run_id}:invocation"
+            if self._is_v2_invocation()
+            else f"{self.run_id}:m{self._current_milestone_index()}"
+        )
         program = agent_turn_program(
             turn_id=turn_id,
             build_assembly_context=build_context,
@@ -867,7 +905,7 @@ class MinionRunner:
                     raise RuntimeError("minion agent loop ended without a turn outcome")
                 if not self.blocked_summary:
                     await self._emit_progress(
-                        "milestone_finalizing",
+                        "invocation_finalizing" if self._is_v2_invocation() else "milestone_finalizing",
                         round=state.llm_round_count,
                         tool_call_count=state.tool_call_count,
                     )
@@ -1029,6 +1067,11 @@ class MinionRunner:
         if not self._requires_first_tool_call():
             return ""
         _ = outcome
+        if self._is_v2_invocation():
+            return (
+                "You have not used any capability yet. This contract invocation requires executable evidence. "
+                "Use one listed capability now to inspect, research, read, write, or verify before completing."
+            )
         return (
             "You have not used any capability yet. This milestone requires executable evidence. "
             "Use one listed capability now to inspect, research, read, write, or verify the task before completing."
@@ -1224,9 +1267,10 @@ class MinionRunner:
             state.llm_round_count += 1
             return None
         if self._completion_evidence_present() or self._artifact_completion_evidence_present():
-            outcome = CanonicalLLMOutcome(text="milestone produced completion evidence")
+            outcome = CanonicalLLMOutcome(text="assignment produced completion evidence")
         else:
-            self.blocked_summary = f"minion reached explicit max_tool_rounds={max_rounds} before completing the current milestone"
+            scope = "invocation" if self._is_v2_invocation() else "milestone"
+            self.blocked_summary = f"minion reached explicit max_tool_rounds={max_rounds} before completing the current {scope}"
             outcome = CanonicalLLMOutcome(text=self.blocked_summary)
         return EffectResult(status=RuntimeStatus.OK, payload=outcome)
 
@@ -1361,11 +1405,17 @@ class MinionRunner:
             for item in [*list(self.pack.allowed_capabilities or []), *list(effective_allowed or [])]
             if str(item).strip()
         ]
-        allowed_items = normalize_minion_allowed_capabilities(allowed_items)
-        tool_call = resolve_minion_tool_call_alias(tool_call, allowed_items)
-        tool_call = self._tool_call_with_minion_defaults(tool_call)
-        admission = admit_minion_tool_call(tool_call, allowed_items, require_effective_target=True)
-        tool_call = admission.call
+        allowed_items = filter_minion_allowed_capabilities(allowed_items)
+        resolve_name = getattr(execution_runtime, "resolve_llm_tool_name", None)
+        if not callable(resolve_name):
+            resolve_name = lambda name: str(name or "").strip()
+        admission = admit_minion_tool_call(
+            tool_call,
+            allowed_items,
+            resolve_name=resolve_name,
+            require_effective_target=True,
+        )
+        tool_call = self._tool_call_with_minion_defaults(admission.call)
         target_name = admission.target_name
         if not admission.ok:
             self.blocked_summary = f"{admission.message}: {target_name}"
@@ -1380,6 +1430,17 @@ class MinionRunner:
                 call_id=tool_call.call_id,
                 llm_text=policy_error,
                 status=RuntimeStatus.ERROR,
+            )
+        policy_error = self._dedicated_shell_command_error(target_name, tool_call)
+        if policy_error:
+            return CanonicalToolResult(
+                name=tool_call.name,
+                ok=False,
+                text=policy_error,
+                structured={"reason": "use_dedicated_capability", "capability": target_name},
+                call_id=tool_call.call_id,
+                llm_text=policy_error,
+                status=RuntimeStatus.FORBIDDEN,
             )
         policy_error = self._read_only_git_command_error(target_name, tool_call)
         if policy_error:
@@ -1403,72 +1464,26 @@ class MinionRunner:
                 llm_text=policy_error,
                 status=RuntimeStatus.ERROR,
             )
-        git_mutation_approval_handled = False
-        if await self._requires_git_mutation_approval(target_name, tool_call):
-            decision = await self._request_approval(target_name, tool_call)
-            if decision != "accept":
-                self.blocked_summary = f"approval {decision or 'timeout'} for {target_name}"
-                return CanonicalToolResult(
-                    name=tool_call.name,
-                    ok=False,
-                    text=f"approval {decision or 'timeout'}",
-                    structured={"reason": "approval_not_accepted", "decision": decision or "timeout", "capability": target_name},
-                    call_id=tool_call.call_id,
-                    llm_text=f"approval {decision or 'timeout'}",
-                    status=RuntimeStatus.ERROR,
-                )
-            self.git_mutation_approved = True
-            git_mutation_approval_handled = True
-        approval_handled = git_mutation_approval_handled
-        if not approval_handled and await self._requires_approval(target_name, tool_call):
-            decision = await self._request_approval(target_name, tool_call)
-            if decision != "accept":
-                self.blocked_summary = f"approval {decision or 'timeout'} for {target_name}"
-                return CanonicalToolResult(
-                    name=tool_call.name,
-                    ok=False,
-                    text=f"approval {decision or 'timeout'}",
-                    structured={"reason": "approval_not_accepted", "decision": decision or "timeout", "capability": target_name},
-                    call_id=tool_call.call_id,
-                    llm_text=f"approval {decision or 'timeout'}",
-                    status=RuntimeStatus.ERROR,
-                )
-            approval_handled = True
-        if not approval_handled and await self._requires_web_research_approval(target_name, tool_call):
-            status = self._web_research_budget_status(target_name)
-            used = status["used"] if status else 0
-            budget = status["budget"] if status else 0
-            decision = await self._request_approval(
-                target_name,
-                tool_call,
-                approval_kind="web_research_budget",
-                title="Minion web research budget",
-                risk="medium",
-                impact="Minion used the included web research budget for this run and requested permission before another web call.",
-                metadata={
-                    "web_research_budget": budget,
-                    "web_research_used": used,
-                    "web_research_budget_key": str(status.get("key") or "") if status else "",
-                },
-            )
-            if decision != "accept":
-                self.blocked_summary = f"approval {decision or 'timeout'} for {target_name}"
-                return CanonicalToolResult(
-                    name=tool_call.name,
-                    ok=False,
-                    text=f"approval {decision or 'timeout'}",
-                    structured={"reason": "approval_not_accepted", "decision": decision or "timeout", "capability": target_name},
-                    call_id=tool_call.call_id,
-                    llm_text=f"approval {decision or 'timeout'}",
-                    status=RuntimeStatus.ERROR,
-                )
         before_snapshot = {} if self._sandboxed() else self._shell_audit_snapshot(target_name)
-        result = await execution_runtime.execute_tool_async(
+        approval_runtime = ApprovalExecutionDecorator(
+            delegate=execution_runtime,
+            classify=lambda _call: self._execution_approval_request(target_name),
+            request=lambda request, call: self._request_execution_approval(
+                request,
+                call,
+                capability_name=target_name,
+            ),
+        )
+        result = await approval_runtime.execute_tool_async(
             tool_call,
             allow_tools=allow_tools,
             budget=budget,
             turn_id=turn_id or self.run_id,
         )
+        if (result.structured or {}).get("reason") == "approval_not_accepted":
+            decision = str((result.structured or {}).get("decision") or "timeout")
+            self.blocked_summary = f"approval {decision} for {target_name}"
+            result.structured["capability"] = target_name
         self._record_web_research_usage(target_name)
         violation = self._record_shell_audit_violation(target_name, tool_call, before_snapshot)
         if violation:
@@ -1518,6 +1533,14 @@ class MinionRunner:
     def _runner_owned_git_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
         if not (_is_git_capability_name(target_name) or _is_shell_capability_name(target_name)):
             return ""
+        v2_metadata = dict((self.pack.metadata or {}).get("minion_v2") or {})
+        if v2_metadata and self.pack.minion_profile == "software_engineering.v2_coder":
+            cmd = str(_effective_tool_args(tool_call).get("cmd") or "").strip()
+            if _git_command_is_mutating(cmd):
+                return (
+                    "Minion V2 coder Git mutation is manager-owned. Do not add, commit, reset, checkout/switch, clean, "
+                    "merge, rebase, tag, or push; leave worktree changes uncommitted for QUIESCING and candidate snapshot."
+                )
         completion_policy = self._completion_policy()
         if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
             return ""
@@ -1529,6 +1552,27 @@ class MinionRunner:
             "the git capability in this minion workspace. Use `op_minion_checkpoint_commit` for milestone checkpoint "
             "commits so Pal can record structured commit evidence."
         )
+
+    def _dedicated_shell_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
+        if not _is_shell_capability_name(target_name):
+            return ""
+        cmd = str(_effective_tool_args(tool_call).get("cmd") or "").strip()
+        if _shell_invokes_command(cmd, {"rm", "unlink", "rmdir"}) or _shell_invokes_find_delete(cmd):
+            return (
+                "Shell path deletion is trapped in minion workspaces. Use op_path_delete so the resolved path is "
+                "confined to the assigned workspace."
+            )
+        if _shell_invokes_command(cmd, {"git"}):
+            if dict((self.pack.metadata or {}).get("minion_v2") or {}):
+                return (
+                    "Shell Git is trapped in Minion V2. Use op_git only for read-only status/diff/log/show; "
+                    "the manager owns candidate commits and integration."
+                )
+            return (
+                "Shell git is trapped in minion workspaces. Use op_git for scoped status/diff/log/show operations "
+                "and op_minion_checkpoint_commit for commits on the assigned worktree."
+            )
+        return ""
 
     def _read_only_git_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
         if not _is_git_capability_name(target_name):
@@ -1649,19 +1693,32 @@ class MinionRunner:
             return 0.0
         return max(0.01, interval)
 
-    async def _requires_approval(self, capability_name: str, tool_call: CanonicalToolCall) -> bool:
-        if self._sandboxed() and (_is_shell_capability_name(capability_name) or _is_git_capability_name(capability_name)):
-            return False
-        return self._user_interaction_port().should_request_approval(capability_name, self.pack.approval_policy or {})
-
-    async def _requires_web_research_approval(self, capability_name: str, tool_call: CanonicalToolCall) -> bool:
-        _ = tool_call
+    def _execution_approval_request(self, capability_name: str) -> ExecutionApprovalRequest | None:
+        if self._user_interaction_port().should_request_approval(
+            capability_name,
+            self.pack.approval_policy or {},
+        ):
+            return ExecutionApprovalRequest(
+                title="Minion high-risk operation",
+                risk="high",
+                impact="Minion requested permission before running a high-risk operation.",
+            )
         if self.auto_accept_approvals:
-            return False
+            return None
         status = self._web_research_budget_status(capability_name)
-        if not status:
-            return False
-        return int(status["used"]) >= int(status["budget"])
+        if not status or int(status["used"]) < int(status["budget"]):
+            return None
+        return ExecutionApprovalRequest(
+            title="Minion web research budget",
+            risk="medium",
+            impact="Minion used the included web research budget for this run and requested permission before another web call.",
+            approval_kind="web_research_budget",
+            metadata={
+                "web_research_budget": status["budget"],
+                "web_research_used": status["used"],
+                "web_research_budget_key": str(status.get("key") or ""),
+            },
+        )
 
     def _web_research_budget_status(self, capability_name: str) -> dict[str, Any] | None:
         canonical_name = _web_research_capability_name(capability_name)
@@ -1702,13 +1759,22 @@ class MinionRunner:
         self.web_research_usage[canonical_name] = self.web_research_usage.get(canonical_name, 0) + 1
         self.web_research_usage["total"] = self.web_research_usage.get("total", 0) + 1
 
-    async def _requires_git_mutation_approval(self, capability_name: str, tool_call: CanonicalToolCall) -> bool:
-        if not _is_git_capability_name(capability_name):
-            return False
-        if self._sandboxed() or self.git_mutation_approved:
-            return False
-        cmd = str(_effective_tool_args(tool_call).get("cmd") or "").strip()
-        return _git_command_is_mutating(cmd)
+    async def _request_execution_approval(
+        self,
+        request: ExecutionApprovalRequest,
+        tool_call: CanonicalToolCall,
+        *,
+        capability_name: str,
+    ) -> str:
+        return await self._request_approval(
+            capability_name,
+            tool_call,
+            approval_kind=request.approval_kind,
+            title=request.title,
+            risk=request.risk,
+            impact=request.impact,
+            metadata=request.metadata,
+        )
 
     async def _request_approval(
         self,
@@ -2065,9 +2131,10 @@ class MinionRunner:
         primary = dict(self._artifact_payload().get("primary_artifact") or {})
         artifact_path = str(primary.get("path") or primary.get("relative_path") or "").strip()
         saved = f" Partial output was saved to {artifact_path}." if artifact_path else ""
+        scope = "contract invocation" if self._is_v2_invocation() else "milestone"
         return (
-            f"LLM output was truncated before the minion completed the milestone "
-            f"(finish_reason={reason}). Treat this milestone as blocked.{saved} "
+            f"LLM output was truncated before the minion completed the {scope} "
+            f"(finish_reason={reason}). Treat this {scope} as blocked.{saved} "
             "For long deliverables, write the full result as an artifact/file and keep the final reply short."
         )
 
@@ -2091,13 +2158,18 @@ class MinionRunner:
         await self.write_event(event)
 
     async def _emit_progress(self, phase: str, **payload: Any) -> None:
+        scope_payload = {}
+        if not self._is_v2_invocation():
+            scope_payload = {
+                "milestone_index": self._current_milestone_index(),
+                "milestone_title": self._current_milestone_title(),
+            }
         await self._emit(
             "progress",
             {
                 "phase": phase,
                 "summary": _progress_summary(phase, payload),
-                "milestone_index": self._current_milestone_index(),
-                "milestone_title": self._current_milestone_title(),
+                **scope_payload,
                 **payload,
             },
         )
@@ -2105,7 +2177,11 @@ class MinionRunner:
     def _prompt_scaffold(self) -> dict[str, Any]:
         profile = dict(self.pack.resolved_profile or {})
         prompt_view = _prompt_view_from_pack(self.pack)
-        milestone = dict(prompt_view.get("milestone") or {}) if prompt_view else self._current_milestone()
+        milestone = (
+            {}
+            if self._is_v2_invocation()
+            else (dict(prompt_view.get("milestone") or {}) if prompt_view else self._current_milestone())
+        )
         requirements_brief = dict((self.pack.metadata or {}).get("requirements_brief") or {})
         brief_acceptance = [
             str(item).strip()
@@ -2131,6 +2207,7 @@ class MinionRunner:
             "active_gate_todo": dict((self.pack.metadata or {}).get("active_gate_todo") or {}),
             "repair_context": self._repair_context_for_compaction(),
             "requirements_brief": requirements_brief,
+            "workflow_model": "contract_v2" if self._is_v2_invocation() else "milestone_v1",
         }
 
     def _repair_context_for_compaction(self) -> dict[str, Any]:
@@ -2791,7 +2868,7 @@ def _llm_tools_for_allowed(execution_runtime: Any, allowed_capabilities: list[st
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
     effective_allowed = getattr(execution_runtime, "allowed_capabilities", None) or allowed_capabilities
-    filtered = normalize_minion_allowed_capabilities(list(effective_allowed or []))
+    filtered = filter_minion_allowed_capabilities(list(effective_allowed or []))
     tool_surface = _minion_llm_tool_surface(filtered)
     for name in tool_surface:
         canonical = str(name or "").strip()
@@ -3112,6 +3189,40 @@ def _max_output_tokens_from_context_window(context_window: int, llm_runtime: Any
 
 def _is_shell_capability_name(name: object) -> bool:
     return str(name or "").strip() in {"op_exec_shell", "run_shell", "shell"}
+
+
+def _shell_invokes_command(command: str, names: set[str]) -> bool:
+    for tokens in _shell_command_segments(command):
+        index = 0
+        while index < len(tokens) and ("=" in tokens[index] and not tokens[index].startswith(("/", "./"))):
+            index += 1
+        while index < len(tokens) and tokens[index] in {"command", "exec", "nohup"}:
+            index += 1
+        if index < len(tokens) and Path(tokens[index]).name in names:
+            return True
+    return False
+
+
+def _shell_invokes_find_delete(command: str) -> bool:
+    for tokens in _shell_command_segments(command):
+        if not tokens:
+            continue
+        if Path(tokens[0]).name == "find" and "-delete" in tokens[1:]:
+            return True
+    return False
+
+
+def _shell_command_segments(command: str) -> list[list[str]]:
+    segments = re.split(r"&&|\|\||[;|()\n]", str(command or ""))
+    parsed: list[list[str]] = []
+    for segment in segments:
+        try:
+            tokens = shlex.split(segment, posix=(os.name != "nt"))
+        except ValueError:
+            continue
+        if tokens:
+            parsed.append(tokens)
+    return parsed
 
 
 def _is_git_capability_name(name: object) -> bool:

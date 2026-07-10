@@ -11,7 +11,7 @@ import subprocess
 from typing import Any
 from uuid import uuid4
 
-from pal.execution import CapabilityResult
+from pal.execution import CapabilityDescriptor, CapabilityResult
 from pal.execution.git_tool import GIT_TOOL_CMD_DESCRIPTION, GIT_TOOL_DESCRIPTION, classify_git_command
 from pal.execution.runtime import ExecutionRuntime
 from pal.foundation import utc_now
@@ -50,9 +50,6 @@ from pal.minion.tool_admission import (
     admit_minion_tool_call,
     effective_minion_capability_name,
     effective_minion_tool_args,
-    normalize_minion_allowed_capabilities,
-    normalize_minion_capability_name,
-    resolve_minion_tool_call_alias,
 )
 from pal.minion.utils import coerce_int as _coerce_int
 from pal.minion.workspace_file_tools import WORKSPACE_FILE_TOOL_SPECS, workspace_file_tool_result
@@ -134,13 +131,18 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_tree": {
         "name": "op_tree",
         "description": (
-            "Use this first for structured directory listings under the current project repo; do not use op_exec_shell with ls/find/git ls-files "
-            "for repo listing when this tool is visible. This does not modify anything."
+            "Use this first for structured directory listings under the current project repo or a declared read-only reference root; do not use op_exec_shell with ls/find/git ls-files "
+            "for repo/reference listing when this tool is visible. This does not modify anything. Reference roots are truth-source evidence and must be selected explicitly with root='reference:<name>' or reference_name."
         ),
         "parameters_schema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Repo-relative directory path. Use '.' for the repo root; do not use '/'."},
+                "path": {"type": "string", "description": "Root-relative directory path. Use '.' for the selected root; do not use '/'."},
+                "root": {
+                    "type": "string",
+                    "description": "Optional root selector. Omit or use project for the current project repo; use reference:<name> for a declared read-only truth-source reference.",
+                },
+                "reference_name": {"type": "string", "description": "Optional declared reference root name; equivalent to root=reference:<name>."},
                 "max_depth": {"type": "integer", "default": 2},
                 "limit": {"type": "integer", "default": 200},
             },
@@ -149,14 +151,19 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_search": {
         "name": "op_search",
         "description": (
-            "Use this first for repository text search under the current project repo; do not use op_exec_shell with grep/rg/find text scans "
-            "when this tool is visible. This does not modify anything."
+            "Use this first for repository text search under the current project repo or a declared read-only reference root; do not use op_exec_shell with grep/rg/find text scans "
+            "when this tool is visible. This does not modify anything. Use declared truth-source references before guessing API constants or mapping tables."
         ),
         "parameters_schema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
-                "path": {"type": "string", "description": "Repo-relative directory path. Use '.' for the repo root; do not use '/'."},
+                "path": {"type": "string", "description": "Root-relative directory path. Use '.' for the selected root; do not use '/'."},
+                "root": {
+                    "type": "string",
+                    "description": "Optional root selector. Omit or use project for the current project repo; use reference:<name> for a declared read-only truth-source reference.",
+                },
+                "reference_name": {"type": "string", "description": "Optional declared reference root name; equivalent to root=reference:<name>."},
                 "limit": {"type": "integer", "default": 50},
             },
             "required": ["query"],
@@ -280,6 +287,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_checklist_read": {
         "name": "op_minion_checklist_read",
+        "aliases": ["checklist_read"],
         "description": (
             "Read the current milestone checklist ledger. Use this before implementation and before checkpointing. "
             "Scopes: all, requirements, acceptance, steps, repair."
@@ -294,6 +302,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_checklist_mark_done": {
         "name": "op_minion_checklist_mark_done",
+        "aliases": ["checklist_mark_done"],
         "description": (
             "Mark one current milestone checklist item done with concrete evidence. "
             "Evidence is required and should cite a source change, test command, LSP result, artifact, or explicit inspection result."
@@ -313,6 +322,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_checklist_mark_blocked": {
         "name": "op_minion_checklist_mark_blocked",
+        "aliases": ["checklist_mark_blocked"],
         "description": "Mark one current milestone checklist item blocked with the concrete reason. Blocked required items prevent checkpoint completion.",
         "parameters_schema": {
             "type": "object",
@@ -326,6 +336,7 @@ WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_checklist_summary": {
         "name": "op_minion_checklist_summary",
+        "aliases": ["checklist_summary"],
         "description": "Return checklist completion counts and checkpoint blockers for the current milestone.",
         "parameters_schema": {
             "type": "object",
@@ -598,21 +609,6 @@ def _minion_shell_dedicated_tool_guidance(allowed: set[str]) -> str:
     return f"Minion tool choice: when visible, use {hints}. {RUN_SHELL_SCOPE_HINT}"
 
 
-def _canonical_minion_capability_name(name: object) -> str:
-    return normalize_minion_capability_name(
-        name,
-        visible_names=tuple(
-            dict.fromkeys(
-                (
-                    *MINION_DIRECT_WORK_TOOL_SURFACE,
-                    *MINION_DISCOVERY_TOOL_SURFACE,
-                    *_workspace_tool_specs().keys(),
-                )
-            )
-        ),
-    )
-
-
 @dataclass
 class _HydratedMinionTool:
     name: str
@@ -622,6 +618,10 @@ class _HydratedMinionTool:
     family: str = "minion"
     tags: tuple[str, ...] = ("minion",)
     keywords: tuple[str, ...] = ()
+
+    @property
+    def aliases(self) -> tuple[str, ...]:
+        return tuple(str(item).strip() for item in list(self.spec.get("aliases") or []) if str(item).strip())
 
     @property
     def description(self) -> str:
@@ -705,13 +705,50 @@ def _tool_execution_kwargs(
     return {key: value for key, value in full.items() if key in parameters}
 
 
-class _MinionExecutionDecorator:
+class _MinionExecutionOverlay:
     def __init__(self, delegate: Any) -> None:
         self.delegate = delegate
-        self.tools: dict[str, Any] = {}
+        self.runtime = ExecutionRuntime(
+            runtime_root=getattr(delegate, "runtime_root", None),
+            sync_executor=getattr(delegate, "sync_executor", None),
+        )
 
     def register_tool(self, tool: Any) -> None:
-        self.tools[str(getattr(tool, "name", "") or "")] = tool
+        canonical_path = str(getattr(tool, "name", "") or "").strip()
+        if not canonical_path:
+            raise ValueError("minion tool canonical path is required")
+        spec = _tool_spec_payload(tool)
+        descriptor = CapabilityDescriptor(
+            name=llm_tool_name(canonical_path),
+            canonical_path=canonical_path,
+            display_name=str(spec.get("display_name") or canonical_path),
+            family=str(spec.get("family") or "minion"),
+            description=str(spec.get("description") or canonical_path),
+            source="minion:scoped",
+            aliases=tuple(str(item) for item in list(spec.get("aliases") or []) if str(item).strip()),
+            parameters_schema=dict(spec.get("parameters_schema") or {}),
+            result_schema=dict(spec.get("result_schema") or {}),
+            module_id="minion_scoped",
+        )
+        self.runtime.register_tool(tool)
+        self.runtime.register_capability(
+            descriptor,
+            lambda _call: CapabilityResult(
+                status=RuntimeStatus.ERROR,
+                text="minion scoped resident binding missing",
+                llm_text="minion scoped resident binding missing",
+            ),
+        )
+
+    def resolve_llm_tool_name(self, name: object) -> str:
+        raw = str(name or "").strip()
+        local = self.runtime.resolve_llm_tool_name(raw)
+        if local != raw or self.runtime.has_registered_capability(local):
+            return local
+        resolve = getattr(self.delegate, "resolve_llm_tool_name", None)
+        if callable(resolve):
+            return str(resolve(raw) or "").strip()
+        return raw
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
         specs: list[dict[str, Any]] = []
@@ -726,8 +763,8 @@ class _MinionExecutionDecorator:
                 if canonical:
                     seen.add(canonical)
                 specs.append(spec)
-        for tool in self.tools.values():
-            spec = _tool_spec_payload(tool)
+        for item in self.runtime.list_capability_specs():
+            spec = dict(item)
             canonical = str(spec.get("canonical_path") or spec.get("name") or "").strip()
             if canonical and canonical in seen:
                 continue
@@ -738,14 +775,14 @@ class _MinionExecutionDecorator:
 
     def get_capability_spec(self, name: str) -> dict[str, Any] | None:
         raw = str(name or "").strip()
+        local = self.runtime.get_capability_spec(raw)
+        if local is not None:
+            return dict(local)
         get_spec = getattr(self.delegate, "get_capability_spec", None)
         if callable(get_spec):
             spec = get_spec(raw)
             if spec is not None:
                 return dict(spec)
-        for tool_name, tool in self.tools.items():
-            if raw == tool_name or raw == llm_tool_name(tool_name):
-                return _tool_spec_payload(tool)
         return None
 
     async def execute_tool_async(
@@ -767,29 +804,19 @@ class _MinionExecutionDecorator:
                 llm_text=text,
                 status="finalization_only",
             )
-        tool = self.tools.get(call.name)
-        if tool is not None:
-            async_invoke = getattr(tool, "ainvoke", None)
-            if callable(async_invoke):
-                result = await async_invoke(
-                    dict(call.args or {}),
-                    runtime=self,
-                    turn_id=turn_id,
-                    tool_call=call,
-                    budget=budget,
-                    allow_tools=allow_tools,
-                )
-            else:
-                result = await asyncio.to_thread(getattr(tool, "invoke"), dict(call.args or {}))
-            return CanonicalToolResult(
-                name=call.name,
-                ok=result.status == RuntimeStatus.OK,
-                text=result.text,
-                structured=result.structured,
-                call_id=call.call_id,
-                llm_text=getattr(result, "llm_text", ""),
-                status=result.status,
+        canonical_path = self.runtime.resolve_llm_tool_name(call.name)
+        if self.runtime.compiled_capability_index.by_canonical.get(canonical_path):
+            local_call = CanonicalToolCall(name=canonical_path, args=dict(call.args or {}), call_id=call.call_id)
+            result = await self.runtime.execute_tool_async(
+                local_call,
+                allow_tools=allow_tools,
+                budget=None,
+                turn_id=turn_id,
             )
+            apply_budget = getattr(self.delegate, "_apply_tool_budget", None)
+            if callable(apply_budget):
+                return apply_budget(local_call, result, budget=budget)
+            return result
         execute = getattr(self.delegate, "execute_tool_async", None)
         if callable(execute):
             return await execute(
@@ -852,7 +879,6 @@ class MinionScopedExecutionRuntime:
     produced_artifacts: list[dict[str, Any]] = field(default_factory=list)
     memory_l3: MockL3Plugin | None = None
     _original_runtime: Any = field(default=None, init=False, repr=False)
-    _base_tools: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
     _base_adapter: _OriginalToolExecutionAdapter | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -860,16 +886,12 @@ class MinionScopedExecutionRuntime:
         if not callable(getattr(original_runtime, "execute_tool_async", None)):
             original_runtime = ExecutionRuntime()
         self._original_runtime = original_runtime
-        self.base_runtime = _MinionExecutionDecorator(original_runtime)
-        self.allowed_capabilities = normalize_minion_allowed_capabilities(
-            list(self.allowed_capabilities or []),
-            extra_visible_names=tuple(_workspace_tool_specs().keys()),
-        )
+        self.base_runtime = _MinionExecutionOverlay(original_runtime)
+        self.allowed_capabilities = filter_minion_allowed_capabilities(list(self.allowed_capabilities or []))
         if self.allowed_capabilities:
             self.allowed_capabilities = filter_minion_allowed_capabilities(
                 [*self.allowed_capabilities, *MINION_PROTOCOL_CAPABILITIES]
             )
-        self._base_tools = dict(getattr(original_runtime, "tools", {}) or {})
         self._base_adapter = _OriginalToolExecutionAdapter(self)
         self._register_hydrated_tools()
 
@@ -971,40 +993,13 @@ class MinionScopedExecutionRuntime:
                 llm_text=text,
                 status="finalization_only",
             )
-        tool = self._base_tools.get(call.name)
-        if tool is None:
-            execute = getattr(self._original_runtime, "execute_tool_async", None)
-            if callable(execute):
-                return await execute(
-                    call,
-                    **_tool_execution_kwargs(execute, allow_tools=allow_tools, budget=budget, turn_id=turn_id),
-                )
-            return await self.base_runtime.execute_tool_async(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id)
-        async_invoke = getattr(tool, "ainvoke", None)
-        if callable(async_invoke):
-            capability_result = await async_invoke(
-                dict(call.args or {}),
-                runtime=self.base_runtime,
-                turn_id=turn_id,
-                tool_call=call,
-                budget=budget,
+        execute = getattr(self._original_runtime, "execute_tool_async", None)
+        if callable(execute):
+            return await execute(
+                call,
+                **_tool_execution_kwargs(execute, allow_tools=allow_tools, budget=budget, turn_id=turn_id),
             )
-        else:
-            invoke = getattr(tool, "invoke")
-            capability_result = await asyncio.to_thread(invoke, dict(call.args or {}))
-        result = CanonicalToolResult(
-            name=call.name,
-            ok=capability_result.status == RuntimeStatus.OK,
-            text=capability_result.text,
-            structured=capability_result.structured,
-            call_id=call.call_id,
-            llm_text=getattr(capability_result, "llm_text", ""),
-            status=capability_result.status,
-        )
-        apply_budget = getattr(self.base_runtime, "_apply_tool_budget", None)
-        if callable(apply_budget):
-            return apply_budget(call, result, budget=budget)
-        return result
+        return await self.base_runtime.execute_tool_async(call, allow_tools=allow_tools, budget=budget, turn_id=turn_id)
 
     def list_capability_specs(self) -> list[dict[str, Any]]:
         allowed = set(self.allowed_capabilities)
@@ -1029,7 +1024,7 @@ class MinionScopedExecutionRuntime:
         return specs
 
     def get_capability_spec(self, name: str) -> dict[str, Any] | None:
-        name = self._resolve_minion_capability_alias(name)
+        name = self.resolve_llm_tool_name(name)
         if not self._tool_visible_for_workspace(name):
             return None
         workspace_specs = _workspace_tool_specs()
@@ -1056,11 +1051,13 @@ class MinionScopedExecutionRuntime:
         budget: Any = None,
         turn_id: str | None = None,
     ) -> CanonicalToolResult:
-        call = resolve_minion_tool_call_alias(
+        admission = admit_minion_tool_call(
             call,
             self.allowed_capabilities,
-            workspace_tool_names=tuple(_workspace_tool_specs().keys()),
+            resolve_name=self.resolve_llm_tool_name,
+            require_effective_target=False,
         )
+        call = admission.call
         if not self._tool_visible_for_workspace(call.name):
             if call.name == "op_minion_gate_contract_submit":
                 text = "gate_contract_submit is only available for source_contract pre-plan review targets"
@@ -1080,7 +1077,6 @@ class MinionScopedExecutionRuntime:
                 llm_text=text,
                 status=RuntimeStatus.INVALID,
             )
-        admission = admit_minion_tool_call(call, self.allowed_capabilities, require_effective_target=False)
         if not admission.ok:
             return admission.to_result()
         repair_guard = _repair_pre_edit_tool_guard(call, self.workspace)
@@ -1109,11 +1105,11 @@ class MinionScopedExecutionRuntime:
                 _append_unique_artifact(self.produced_artifacts, artifact)
         return result
 
-    def _resolve_minion_capability_alias(self, name: object) -> str:
-        return normalize_minion_capability_name(
-            name,
-            visible_names=[*list(self.allowed_capabilities or []), *list(_workspace_tool_specs().keys())],
-        )
+    def resolve_llm_tool_name(self, name: object) -> str:
+        resolve = getattr(self.base_runtime, "resolve_llm_tool_name", None)
+        if callable(resolve):
+            return str(resolve(name) or "").strip()
+        return str(name or "").strip()
 
     def _tool_visible_for_workspace(self, name: str) -> bool:
         canonical = str(name or "").strip()
@@ -1474,6 +1470,20 @@ async def _minion_git_result(
             status=RuntimeStatus.ERROR,
         )
     policy = classify_git_command((call.args or {}).get("cmd"))
+    if _git_command_exposes_other_refs(policy):
+        text = (
+            "Other git refs are hidden from minion workspaces. Use status, diff, log, show, or "
+            "rev-parse HEAD for evidence from the assigned worktree."
+        )
+        return CanonicalToolResult(
+            name=call.name,
+            ok=False,
+            text=text,
+            structured={"reason": "git_ref_enumeration_hidden", "classification": policy.to_dict()},
+            call_id=call.call_id,
+            llm_text=text,
+            status=RuntimeStatus.FORBIDDEN,
+        )
     workspace_policy = dict((workspace or {}).get("workspace_policy") or {})
     if str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo" and policy.is_mutation:
         text = "read_only_repo minions may use git for inspection only; submit a blocking finding or use a dedicated repair workspace for mutations"
@@ -1514,6 +1524,32 @@ async def _minion_git_result(
         budget=budget,
         turn_id=turn_id,
     )
+
+
+_GIT_OTHER_REF_OPTIONS = {
+    "--all",
+    "--alternate-refs",
+    "--branches",
+    "--exclude",
+    "--glob",
+    "--reflog",
+    "--remotes",
+    "--tags",
+}
+
+
+def _git_command_exposes_other_refs(policy: Any) -> bool:
+    if str(policy.subcommand or "") in {"branch", "show-ref"}:
+        return True
+    for raw_token in tuple(policy.tokens or ())[1:]:
+        token = str(raw_token or "").strip()
+        option = token.split("=", 1)[0]
+        if option in _GIT_OTHER_REF_OPTIONS:
+            return True
+        lowered = token.lower()
+        if lowered.startswith(("refs/heads/", "refs/remotes/", "refs/tags/", "remotes/")):
+            return True
+    return False
 
 
 def _effective_git_workspace_root(workspace: dict[str, Any]) -> Path | None:
@@ -3952,6 +3988,14 @@ def _review_tool_evidence_ref(target_name: str, tool_call: CanonicalToolCall, re
     if kind == "source":
         if "path" in args:
             ref["path"] = str(args.get("path") or "")
+        if "root" in args:
+            ref["root"] = str(args.get("root") or "")
+        if "reference_name" in args:
+            ref["reference_name"] = str(args.get("reference_name") or "")
+        if structured.get("root_kind") is not None:
+            ref["root_kind"] = structured.get("root_kind")
+        if structured.get("truth_source") is not None:
+            ref["truth_source"] = structured.get("truth_source")
         if "query" in args:
             ref["query"] = str(args.get("query") or "")
     return {key: value for key, value in ref.items() if value not in ("", None)}

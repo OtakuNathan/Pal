@@ -430,6 +430,8 @@ def _render_minion_completion_trigger(event_kind: str, payload: dict[str, Any]) 
             "- If those exact capabilities are not available in the current tool surface, use tool introspection/search to find the minion state read capability.",
             "- Do not send a final user-visible response until the manager query has completed.",
             "- Tell the user which task/work order completed, the final status, relevant artifacts, and any next action.",
+            "- If the completed work is an architect/planner stage and manager state says plan review is reviewing, post_gate_pending, or reviewer-running, report status only: the plan is generated and reviewer review is in progress; do not ask the user to accept, audit, or dispatch it yet.",
+            "- Ask the user to accept/audit a plan only after manager state has plan_review.status=acceptance_pending with a passing plan_acceptance review gate, or after a minion.plan_acceptance_pending event opens the reviewed-plan interaction.",
             "- Trust manager state over this trigger if they disagree.",
             "- Do not ask the user to poll minion status.",
             "</minion_completion_trigger>",

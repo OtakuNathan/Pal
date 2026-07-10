@@ -425,8 +425,8 @@ class ExecutionDiscoveryCapabilityMixin:
         family="discovery",
         action_name="result_page",
         description=(
-            "Read a later page of a prior tool result only when that result explicitly provides a next_page call. "
-            "Pass the original tool_call_id as result_ref."
+            "Read a page of a prior large tool result. Use anchor='head' for normal forward pages or anchor='tail' "
+            "to inspect the newest/end of log-like output. Pass the original tool_call_id as result_ref."
         ),
         aliases=("tool_result_page",),
         args_schema={
@@ -436,10 +436,23 @@ class ExecutionDiscoveryCapabilityMixin:
                     "type": "string",
                     "description": "The result_ref shown in a prior tool result; this is the original tool_call_id.",
                 },
-                "page": {"type": "integer", "minimum": 1, "description": "1-based page number to read."},
+                "page": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "1-based page number. With anchor='head', page=1 is the first page. "
+                        "With anchor='tail', page=1 is the last page and page=2 is second-to-last."
+                    ),
+                },
+                "anchor": {
+                    "type": "string",
+                    "enum": ["head", "tail"],
+                    "description": "Read from the start ('head') or end ('tail') of the paged result. Defaults to head.",
+                },
+                "tail": {"type": "boolean", "description": "Shorthand for anchor='tail'. Useful for log-like output."},
                 "page_size": {"type": "integer", "minimum": 256, "description": "Optional character page size."},
             },
-            "required": ["result_ref", "page"],
+            "required": ["result_ref"],
         },
         result_schema={
             "type": "object",
@@ -448,6 +461,10 @@ class ExecutionDiscoveryCapabilityMixin:
                 "page": {"type": "integer"},
                 "page_count": {"type": "integer"},
                 "has_more": {"type": "boolean"},
+                "has_more_before": {"type": "boolean"},
+                "has_more_after": {"type": "boolean"},
+                "anchor": {"type": "string"},
+                "anchor_page": {"type": "integer"},
             },
         },
         metadata={"canonical_path": "op_tool_result_page"},

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-import subprocess
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -116,7 +116,7 @@ class PathDeleteTool:
                 return _err(RuntimeStatus.FORBIDDEN, ERR_DIRECTORY_REQUIRES_RECURSIVE, file_path=str(resolved))
             if expected_sha256:
                 return _err(RuntimeStatus.INVALID, ERR_INVALID_SHA256, file_path=str(resolved), details="sha256 is only supported for files")
-            return self._delete_with_rm(resolved, recursive=True, path_kind="directory")
+            return self._delete_path(resolved, recursive=True, path_kind="directory")
 
         if not resolved.is_file():
             return _err(RuntimeStatus.ERROR, ERR_UNSUPPORTED_PATH, file_path=str(resolved))
@@ -141,21 +141,20 @@ class PathDeleteTool:
                 expected_sha256=expected_sha256,
             )
 
-        return self._delete_with_rm(resolved, recursive=recursive, path_kind="file", sha256=digest)
+        return self._delete_path(resolved, recursive=recursive, path_kind="file", sha256=digest)
 
     async def ainvoke(self, args: dict[str, Any], **kwargs: Any) -> CapabilityResult:
         _ = kwargs
         return self.invoke(args)
 
-    def _delete_with_rm(self, resolved: Path, *, recursive: bool, path_kind: str, sha256: str = "") -> CapabilityResult:
-        command = ["rm", "-rf" if recursive else "-f", "--", str(resolved)]
+    def _delete_path(self, resolved: Path, *, recursive: bool, path_kind: str, sha256: str = "") -> CapabilityResult:
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, check=False)
+            if path_kind == "directory":
+                shutil.rmtree(resolved)
+            else:
+                resolved.unlink()
         except OSError as exc:
             return _err(RuntimeStatus.ERROR, ERR_DELETE_FAILED, file_path=str(resolved), details=str(exc))
-        if completed.returncode != 0:
-            details = (completed.stderr or completed.stdout or "").strip()
-            return _err(RuntimeStatus.ERROR, ERR_DELETE_FAILED, file_path=str(resolved), details=details)
 
         self.cache.invalidate(resolved)
         structured: dict[str, Any] = {

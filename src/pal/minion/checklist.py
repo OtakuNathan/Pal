@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from pal.foundation import utc_now
@@ -278,6 +280,7 @@ class MilestoneChecklistLedger:
         ledger = cls.from_state(raw_state if isinstance(raw_state, dict) else {})
         if not ledger.state.get("items"):
             ledger = cls.from_sources(workspace)
+        ledger.apply_source_requirement_coverage(workspace)
         workspace["milestone_checklist"] = ledger.state
         return ledger
 
@@ -381,6 +384,32 @@ class MilestoneChecklistLedger:
         self.state["items"][item_id] = normalized
         self.state["order"].append(item_id)
 
+    def apply_source_requirement_coverage(self, workspace: dict[str, Any]) -> None:
+        coverage = _source_requirement_coverage_by_gate_ref(workspace)
+        for item in self.items(scope="requirements"):
+            item_id = str(item.get("id") or "").strip()
+            if not item_id:
+                continue
+            gate_ref = _item_gate_check_ref(item)
+            stored = self.state["items"].get(item_id)
+            if not isinstance(stored, dict):
+                continue
+            status = str(stored.get("status") or "pending").strip().lower()
+            if not gate_ref or gate_ref not in coverage:
+                if status == "covered_by_plan":
+                    _clear_plan_coverage_status(stored)
+                continue
+            if status in {"done", "blocked"}:
+                continue
+            coverage_item = coverage[gate_ref]
+            stored["status"] = "covered_by_plan"
+            metadata = dict(stored.get("metadata") or {})
+            metadata["coverage_status"] = "covered_by_plan"
+            stored["metadata"] = metadata
+            stored["evidence"] = _dedupe_evidence(
+                [*_evidence_list(stored.get("evidence")), _coverage_evidence_for_check(gate_ref, coverage_item)]
+            )
+
     def merge_repair_bill(self, repair_bill: dict[str, Any]) -> None:
         if not repair_bill:
             return
@@ -471,7 +500,7 @@ class MilestoneChecklistLedger:
             status = str(item.get("status") or "pending").strip().lower()
             item_id = str(item.get("id") or "").strip()
             text = _item_text(item)
-            if status == "done":
+            if _checklist_status_complete(status):
                 if not _evidence_list(item.get("evidence")):
                     blockers.append({"id": item_id, "reason": "done_missing_evidence", "text": text})
                 continue
@@ -503,6 +532,8 @@ class MilestoneChecklistLedger:
                 suffix = ""
                 if status == "done":
                     suffix = " (evidence recorded)" if _evidence_list(item.get("evidence")) else " (missing evidence)"
+                elif status == "covered_by_plan":
+                    suffix = " (coverage recorded)" if _evidence_list(item.get("evidence")) else " (coverage missing)"
                 elif status == "blocked" and str(item.get("blocked_reason") or "").strip():
                     suffix = f" (blocked: {str(item.get('blocked_reason')).strip()})"
                 metadata = dict(item.get("metadata") or {})
@@ -526,7 +557,7 @@ class MilestoneChecklistLedger:
         counts = {"pending": 0, "done": 0, "blocked": 0}
         for item in self.items():
             status = str(item.get("status") or "pending").strip().lower()
-            counts[status if status in counts else "pending"] += 1
+            counts[_summary_status(status)] += 1
         return {
             "counts": counts,
             "required_blockers": self.checkpoint_blockers(),
@@ -722,6 +753,130 @@ def _workspace_allows_source_requirement_checklist(workspace: dict[str, Any]) ->
     return profile.endswith(".architect") or profile == "architect"
 
 
+def _source_requirement_coverage_by_gate_ref(workspace: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    coverage_items: list[dict[str, Any]] = []
+    for value in (
+        _dict(workspace).get("plan_builder_source_acceptance_coverage"),
+        _dict(workspace).get("source_acceptance_coverage"),
+        _dict(_dict(workspace).get("prompt_view")).get("source_acceptance_coverage"),
+    ):
+        coverage_items.extend(_dict_list(value))
+    coverage_items.extend(_plan_builder_state_coverage(workspace))
+    result: dict[str, dict[str, Any]] = {}
+    for item in coverage_items:
+        ref = _gate_ref(str(item.get("ref") or item.get("gate_check_ref") or "").strip())
+        if not ref:
+            continue
+        existing = result.get(ref)
+        if existing is None:
+            result[ref] = dict(item)
+            result[ref]["ref"] = ref
+            continue
+        merged_evidence = _dedupe_evidence([*_evidence_list(existing.get("evidence")), *_evidence_list(item.get("evidence"))])
+        existing["evidence"] = merged_evidence
+    return result
+
+
+def _plan_builder_state_coverage(workspace: dict[str, Any]) -> list[dict[str, Any]]:
+    data = _dict(workspace)
+    artifact_dir = str(data.get("artifact_dir") or "").strip()
+    plan_handle = str(data.get("plan_builder_plan_handle") or "").strip()
+    if not artifact_dir or not re.fullmatch(r"plan_[A-Za-z0-9_]+", plan_handle):
+        return []
+    path = Path(artifact_dir).expanduser().resolve() / ".plan_builder" / f"{plan_handle}.json"
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(state, dict):
+        return []
+    refs: dict[str, dict[str, Any]] = {}
+
+    def visit(value: Any, path_parts: tuple[str, ...] = ()) -> None:
+        if isinstance(value, dict):
+            for ref in _gate_ref_list(value.get("gate_check_refs")):
+                item = refs.setdefault(ref, {"ref": ref, "evidence": []})
+                evidence = {"kind": "plan_builder_state", "path": ".".join(path_parts) or "plan"}
+                if evidence not in item["evidence"]:
+                    item["evidence"].append(evidence)
+            for key, nested in value.items():
+                visit(nested, (*path_parts, str(key)))
+        elif isinstance(value, list):
+            for index, nested in enumerate(value):
+                visit(nested, (*path_parts, str(index)))
+
+    visit(state)
+    return list(refs.values())
+
+
+def _item_gate_check_ref(item: dict[str, Any]) -> str:
+    metadata = _dict(item.get("metadata"))
+    return _gate_ref(str(metadata.get("gate_check_ref") or item.get("gate_check_ref") or "").strip())
+
+
+def _coverage_evidence_for_check(gate_ref: str, coverage: dict[str, Any]) -> dict[str, Any]:
+    evidence_items = _evidence_list(coverage.get("evidence"))
+    return {
+        key: value
+        for key, value in {
+            "kind": "plan_gate_coverage",
+            "gate_check_ref": gate_ref,
+            "claim": str(coverage.get("claim") or "").strip(),
+            "source_ref": str(coverage.get("source_ref") or "").strip(),
+            "evidence_count": len(evidence_items),
+        }.items()
+        if value not in ("", [], {}, None)
+    }
+
+
+def _clear_plan_coverage_status(item: dict[str, Any]) -> None:
+    item["status"] = "pending"
+    metadata = dict(item.get("metadata") or {})
+    metadata.pop("coverage_status", None)
+    if metadata:
+        item["metadata"] = metadata
+    else:
+        item.pop("metadata", None)
+    evidence = [entry for entry in _evidence_list(item.get("evidence")) if str(entry.get("kind") or "") != "plan_gate_coverage"]
+    if evidence:
+        item["evidence"] = evidence
+    else:
+        item.pop("evidence", None)
+
+
+def _gate_ref_list(value: Any) -> list[str]:
+    refs: list[str] = []
+    raw_items = value if isinstance(value, (list, tuple, set)) else ([] if value is None else [value])
+    for raw in raw_items:
+        ref = _gate_ref(str(raw or "").strip())
+        if ref and ref not in refs:
+            refs.append(ref)
+    return refs
+
+
+def _gate_ref(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith("gate:"):
+        suffix = text.split(":", 1)[1]
+        return f"gate:{int(suffix)}" if suffix.isdigit() else text
+    if text.isdigit():
+        return f"gate:{int(text)}"
+    return ""
+
+
+def _checklist_status_complete(status: str) -> bool:
+    return str(status or "").strip().lower() in {"done", "covered", "covered_by_plan"}
+
+
+def _summary_status(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if _checklist_status_complete(normalized):
+        return "done"
+    if normalized == "blocked":
+        return "blocked"
+    return "pending"
+
+
 def _merge_checklist_item(state: dict[str, Any], item: dict[str, Any]) -> None:
     normalized = _normalize_checklist_item(item)
     text = _item_text(normalized)
@@ -824,6 +979,10 @@ def _dedupe_evidence(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _dict(value: Any) -> dict[str, Any]:
     return dict(value or {}) if isinstance(value, dict) else {}
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    return [dict(item) for item in list(value or []) if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def string_list(value: Any) -> list[str]:

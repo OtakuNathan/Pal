@@ -23,17 +23,19 @@ Older design notes are historical references. These docs are the active baseline
 15. [pal_engineering_quality_gates.md](pal_engineering_quality_gates.md)
 16. [pal_reviewer_gate_plan.md](pal_reviewer_gate_plan.md)
 17. [minion_repair_bill_replay.md](minion_repair_bill_replay.md)
-18. [pal_proactive_contract.md](pal_proactive_contract.md)
-19. [pal_memory_contract.md](pal_memory_contract.md)
-20. [pal_failure_reporting_contract.md](pal_failure_reporting_contract.md)
-21. [pal_migration_map.md](pal_migration_map.md)
-22. [pal_web_search_contract.md](pal_web_search_contract.md)
-23. [pal_web_fetch_contract.md](pal_web_fetch_contract.md)
-24. [pal_tool_surface.md](pal_tool_surface.md)
-25. [pal_mcp_contract.md](pal_mcp_contract.md)
-26. [capability_forest_structure.md](capability_forest_structure.md)
-27. [turn_runtime_structure.md](turn_runtime_structure.md)
-28. [pal_approval_access_design.md](pal_approval_access_design.md)
+18. [minion_layered_architect_planning.md](minion_layered_architect_planning.md)
+19. [minion_v2_contract_orchestration.md](minion_v2_contract_orchestration.md)
+20. [pal_proactive_contract.md](pal_proactive_contract.md)
+21. [pal_memory_contract.md](pal_memory_contract.md)
+22. [pal_failure_reporting_contract.md](pal_failure_reporting_contract.md)
+23. [pal_migration_map.md](pal_migration_map.md)
+24. [pal_web_search_contract.md](pal_web_search_contract.md)
+25. [pal_web_fetch_contract.md](pal_web_fetch_contract.md)
+26. [pal_tool_surface.md](pal_tool_surface.md)
+27. [pal_mcp_contract.md](pal_mcp_contract.md)
+28. [capability_forest_structure.md](capability_forest_structure.md)
+29. [turn_runtime_structure.md](turn_runtime_structure.md)
+30. [pal_approval_access_design.md](pal_approval_access_design.md)
 
 ## Document Map
 
@@ -54,6 +56,7 @@ Older design notes are historical references. These docs are the active baseline
 - `pal_engineering_quality_gates.md`: design baseline for reviewer/verifier gates, LSP evidence, shell mutation auditing, and minion engineering-quality hardening.
 - `pal_reviewer_gate_plan.md`: historical hardening plan for strict plan and checkpoint reviewer gates; use `pal_minion_v1.md#gate-loop` as the current implementation sync point.
 - `minion_repair_bill_replay.md`: planned repair-bill replay model for propagating downstream integration failures back through the module DAG.
+- `minion_layered_architect_planning.md`: planned layered architect flow that separates global architecture sketches, per-module detail fill, and implementation milestone planning.
 - `pal_proactive_contract.md`: proactive tasks, schedules, run history, and output-channel constraints.
 - `pal_memory_contract.md`: L1/L2/L3 memory and memory lifecycle.
 - `pal_failure_reporting_contract.md`: developer escalation after self-repair failure.

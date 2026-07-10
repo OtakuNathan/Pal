@@ -20,17 +20,23 @@ class TaskingPromptFragmentProvider(PromptFragmentProvider):
                 section="task_flow",
                 title="Minion Usage",
                 content=(
-                    "Minion Usage: use Minion for professional, asynchronous, bounded work that benefits from a task ledger, "
-                    "family/profile policy, milestones, artifacts, review gates, or module-scoped execution. "
+                    "Minion Usage: use Minion V2 for professional, asynchronous, bounded work that benefits from durable "
+                    "contract planning, isolated implementation, adversarial verification, or background execution. "
                     "Do not use Minion for casual chat, simple Q&A, one-call runtime actions, memory/preference correction, "
                     "or work that needs continuous user back-and-forth.\n\n"
-                    "Default delegation path:\n"
-                    "1. Search existing durable tasks with `minion_task_search`.\n"
-                    "2. Reuse the matching `task_id`, or create one with `minion_task_create` so the profile family/domain is bound at the task layer.\n"
-                    "3. Dispatch with `minion_dispatch_workflow(task_id=...)`. Do not pass profile selectors to dispatch; the manager derives planner, reviewer, and executor roles from the task family/profile configuration.\n\n"
-                    "Pal remains the user-facing coordinator: shape requirements before dispatch, ask the user when approval or clarification is needed, inspect work-order/task facts before reporting status, and summarize completed artifacts without exposing internal management ids unless the user asks. "
-                    "For active work, inspect `minion_list`, `minion_read`, `minion_work_order_search`, and `minion_work_order_read`; do not infer progress from chat history or old logs. "
-                    "For stale or interrupted work, use work-order control tools such as `minion_recover_work_order`, `minion_resume_work_order`, then `minion_tick_parent_dag` when continuing a parent DAG."
+                    "Workflow path:\n"
+                    "1. Start normal work with `op_minion_start_workflow(operation=\"new_requirement\", ...)`. Preserve the "
+                    "user's atomic requirements, constraints, workspace, read-only references, and explicit research mode.\n"
+                    "2. The manager creates and reviews an immutable Architecture Contract, then sends the compiled review "
+                    "card to the active channel. Do not claim execution has started while it is waiting for human review.\n"
+                    "3. Accept, edit, or reject only through `op_minion_submit_human_decision`; an edit creates a new "
+                    "architecture revision. Accepted contracts compile into an execution DAG automatically.\n\n"
+                    "Use `intro_minion_workflow_status` for all progress reports. Report its single current phase, active "
+                    "worker or node, blocker, liveness, and next legal action; never infer progress from old chat, logs, "
+                    "worker-local state, milestones, cursors, or checkpoints. Use `op_minion_control_workflow` for asynchronous "
+                    "pause/cancel, `op_minion_resume_workflow` only for a deliberately paused workflow, and "
+                    "`op_minion_archive_workflow` only after it reaches a terminal state. Pal remains the user-facing "
+                    "coordinator and must not invoke manager/admin lease, tick, spawn, or outbox internals."
                 ),
                 priority=89,
                 metadata={"block_id": "minion_usage"},

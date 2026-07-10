@@ -29,6 +29,12 @@ class ToolResultPage:
     has_more: bool
     original_size: int
     page_size: int
+    anchor: str = "head"
+    anchor_page: int = 1
+    has_more_before: bool = False
+    has_more_after: bool = False
+    start_offset: int = 0
+    end_offset: int = 0
     tool_name: str = ""
     status: str = ""
     ok: bool = True
@@ -112,10 +118,18 @@ class ToolResultPagerStore:
             self._ok[normalized_ref] = bool(ok)
             return handle
 
-    def read_page(self, result_ref: str, *, page: int = 1, page_size: int | None = None) -> ToolResultPage | None:
+    def read_page(
+        self,
+        result_ref: str,
+        *,
+        page: int = 1,
+        page_size: int | None = None,
+        anchor: str = "head",
+    ) -> ToolResultPage | None:
         normalized_ref = str(result_ref or "").strip()
         if not normalized_ref:
             return None
+        normalized_anchor = _normalize_anchor(anchor)
         with self._lock:
             handle = self._handles.get(normalized_ref)
             if handle is None:
@@ -128,29 +142,43 @@ class ToolResultPagerStore:
             resolved_page_size = max(256, int(page_size or handle.page_size or DEFAULT_TOOL_RESULT_PAGE_SIZE))
             page_count = max(1, math.ceil(len(text) / resolved_page_size))
             requested_page = max(1, int(page or 1))
-            if requested_page > page_count:
+            anchor_page = requested_page
+            absolute_page = requested_page
+            if normalized_anchor == "tail":
+                absolute_page = page_count - requested_page + 1
+            if absolute_page < 1 or absolute_page > page_count:
                 return ToolResultPage(
                     result_ref=normalized_ref,
                     content="",
-                    page=requested_page,
+                    page=absolute_page,
                     page_count=page_count,
                     has_more=False,
                     original_size=len(text),
                     page_size=resolved_page_size,
+                    anchor=normalized_anchor,
+                    anchor_page=anchor_page,
+                    has_more_before=False,
+                    has_more_after=False,
                     tool_name=self._tool_names.get(normalized_ref, ""),
                     status=self._statuses.get(normalized_ref, ""),
                     ok=self._ok.get(normalized_ref, True),
                 )
-            start = (requested_page - 1) * resolved_page_size
+            start = (absolute_page - 1) * resolved_page_size
             end = min(start + resolved_page_size, len(text))
             return ToolResultPage(
                 result_ref=normalized_ref,
                 content=text[start:end],
-                page=requested_page,
+                page=absolute_page,
                 page_count=page_count,
-                has_more=requested_page < page_count,
+                has_more=absolute_page < page_count,
                 original_size=len(text),
                 page_size=resolved_page_size,
+                anchor=normalized_anchor,
+                anchor_page=anchor_page,
+                has_more_before=absolute_page > 1,
+                has_more_after=absolute_page < page_count,
+                start_offset=start,
+                end_offset=end,
                 tool_name=self._tool_names.get(normalized_ref, ""),
                 status=self._statuses.get(normalized_ref, ""),
                 ok=self._ok.get(normalized_ref, True),
@@ -216,8 +244,8 @@ class ToolResultPageTool:
     display_name: str = "Tool Result Page"
     family: str = "discovery"
     description: str = (
-        "Read a later page of a prior tool result only when that tool result explicitly provides a next_page call. "
-        "Use the original tool_call_id as result_ref."
+        "Read a page of a prior large tool result. Use anchor='head' for normal forward pages or anchor='tail' "
+        "to inspect the newest/end of log-like output. Use the original tool_call_id as result_ref."
     )
     tags: tuple[str, ...] = ("tool-result", "pager", "read")
     keywords: tuple[str, ...] = ("page", "result", "tool", "next")
@@ -233,10 +261,26 @@ class ToolResultPageTool:
                         "type": "string",
                         "description": "The result_ref shown in a prior tool result; this is the original tool_call_id.",
                     },
-                    "page": {"type": "integer", "minimum": 1, "description": "1-based page number to read."},
+                    "page": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": (
+                            "1-based page number. With anchor='head', page=1 is the first page. "
+                            "With anchor='tail', page=1 is the last page and page=2 is second-to-last."
+                        ),
+                    },
+                    "anchor": {
+                        "type": "string",
+                        "enum": ["head", "tail"],
+                        "description": "Read from the start ('head') or end ('tail') of the paged result. Defaults to head.",
+                    },
+                    "tail": {
+                        "type": "boolean",
+                        "description": "Shorthand for anchor='tail'. Useful for log-like output.",
+                    },
                     "page_size": {"type": "integer", "minimum": 256, "description": "Optional character page size."},
                 },
-                "required": ["result_ref", "page"],
+                "required": ["result_ref"],
             }
         if not self.result_schema:
             self.result_schema = {
@@ -246,6 +290,10 @@ class ToolResultPageTool:
                     "page": {"type": "integer"},
                     "page_count": {"type": "integer"},
                     "has_more": {"type": "boolean"},
+                    "has_more_before": {"type": "boolean"},
+                    "has_more_after": {"type": "boolean"},
+                    "anchor": {"type": "string"},
+                    "anchor_page": {"type": "integer"},
                     "original_size": {"type": "integer"},
                     "page_size": {"type": "integer"},
                 },
@@ -255,17 +303,25 @@ class ToolResultPageTool:
         result_ref = str(args.get("result_ref") or "").strip()
         page = _positive_int(args.get("page"), default=1)
         page_size = _positive_int(args.get("page_size"), default=0)
+        anchor = "tail" if _truthy(args.get("tail")) else _normalize_anchor(str(args.get("anchor") or "head"))
         if not result_ref:
             return _expired_page_result(result_ref=result_ref, reason="missing_result_ref")
         page_result = self.runtime.read_tool_result_page(
             result_ref=result_ref,
             page=page or 1,
             page_size=page_size or None,
+            anchor=anchor,
         )
         if page_result is None:
             return _expired_page_result(result_ref=result_ref, reason="not_found_or_expired")
-        if page_result.page > page_result.page_count:
-            text = f"tool result page {page_result.page} is out of range; last page is {page_result.page_count}."
+        if page_result.page < 1 or page_result.page > page_result.page_count:
+            if page_result.anchor == "tail":
+                text = (
+                    f"tool result tail page {page_result.anchor_page} is out of range; "
+                    f"oldest tail page is {page_result.page_count}."
+                )
+            else:
+                text = f"tool result page {page_result.anchor_page} is out of range; last page is {page_result.page_count}."
             return CapabilityResult(
                 status=RuntimeStatus.INVALID,
                 text=text,
@@ -275,6 +331,8 @@ class ToolResultPageTool:
                     "result_ref": result_ref,
                     "page": page_result.page,
                     "page_count": page_result.page_count,
+                    "anchor": page_result.anchor,
+                    "anchor_page": page_result.anchor_page,
                 },
             )
         llm_text = render_tool_result_page_for_llm(page_result, tag="tool_result_page")
@@ -287,6 +345,12 @@ class ToolResultPageTool:
                 "page": page_result.page,
                 "page_count": page_result.page_count,
                 "has_more": page_result.has_more,
+                "has_more_before": page_result.has_more_before,
+                "has_more_after": page_result.has_more_after,
+                "anchor": page_result.anchor,
+                "anchor_page": page_result.anchor_page,
+                "start_offset": page_result.start_offset,
+                "end_offset": page_result.end_offset,
                 "original_size": page_result.original_size,
                 "page_size": page_result.page_size,
             },
@@ -300,18 +364,44 @@ class ToolResultPageTool:
 def render_tool_result_page_for_llm(page: ToolResultPage, *, tag: str = "tool_result") -> str:
     attrs = {
         "result_ref": page.result_ref,
+        "anchor": page.anchor,
         "page": str(page.page),
+        "anchor_page": str(page.anchor_page),
         "page_count": str(page.page_count),
         "has_more": "true" if page.has_more else "false",
+        "has_more_before": "true" if page.has_more_before else "false",
+        "has_more_after": "true" if page.has_more_after else "false",
     }
     if page.status:
         attrs["status"] = page.status
     open_tag = f"<{tag} " + " ".join(f'{key}="{escape(value, quote=True)}"' for key, value in attrs.items()) + ">"
     parts = [open_tag, page.content.rstrip()]
-    if page.has_more:
-        parts.append(
-            f"next_page: {llm_tool_name('op_tool_result_page')}(result_ref={json.dumps(page.result_ref)}, page={page.page + 1})"
-        )
+    if page.anchor == "tail":
+        if page.anchor_page > 1 and page.has_more_after:
+            parts.append(
+                "newer_page: "
+                f"{llm_tool_name('op_tool_result_page')}(result_ref={json.dumps(page.result_ref)}, "
+                f"anchor=\"tail\", page={page.anchor_page - 1})"
+            )
+        if page.has_more_before:
+            parts.append(
+                "older_page: "
+                f"{llm_tool_name('op_tool_result_page')}(result_ref={json.dumps(page.result_ref)}, "
+                f"anchor=\"tail\", page={page.anchor_page + 1})"
+            )
+    else:
+        if page.page > 1:
+            parts.append(
+                f"previous_page: {llm_tool_name('op_tool_result_page')}(result_ref={json.dumps(page.result_ref)}, page={page.page - 1})"
+            )
+        if page.has_more_after:
+            parts.append(
+                f"next_page: {llm_tool_name('op_tool_result_page')}(result_ref={json.dumps(page.result_ref)}, page={page.page + 1})"
+            )
+        if page.page_count > 1 and page.page != page.page_count:
+            parts.append(
+                f"tail_page: {llm_tool_name('op_tool_result_page')}(result_ref={json.dumps(page.result_ref)}, anchor=\"tail\")"
+            )
     parts.append(f"</{tag}>")
     return "\n".join(part for part in parts if part).strip()
 
@@ -336,6 +426,21 @@ def _positive_int(value: object, *, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "tail"}
+    return bool(value)
+
+
+def _normalize_anchor(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"tail", "end", "last", "bottom"}:
+        return "tail"
+    return "head"
 
 
 def _safe_file_name(value: str) -> str:

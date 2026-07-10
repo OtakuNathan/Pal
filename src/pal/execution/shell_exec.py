@@ -107,7 +107,7 @@ class _TrackedShellProcess:
 
 @dataclass
 class ShellExecTool:
-    name: str = "shell_exec"
+    name: str = "op_exec_shell"
     display_name: str = "Shell Exec"
     family: str = "system"
     description: str = SHELL_EXEC_DESCRIPTION

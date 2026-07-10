@@ -56,6 +56,7 @@ _RUNNER_PRESERVED_METADATA_KEYS = {
     "source_plan_artifact",
     "source_plan_ref",
     "spawn_bonus_skill_refs",
+    "step_executor_key",
     "supporting_artifacts",
     "task_id",
     "task_title",

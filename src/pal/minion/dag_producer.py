@@ -94,7 +94,7 @@ def build_generic_single_node_plan_artifact(
         "modules": [
             {
                 "module_id": "main",
-                "owned_area": [f"task://{resolved_task_id}/main"],
+                "owned_area": [f"domain:{resolved_task_id}/main"],
                 "responsibility": "Execute the prepared acceptance scope as one bounded deliverable.",
                 "ownership": [
                     "The main node owns the single deliverable and task-local artifacts for this work order.",

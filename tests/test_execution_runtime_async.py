@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pal.core import PalCore as _PalCoreBootstrap
-from pal.execution.contracts import CapabilityResult
+from pal.execution.contracts import CapabilityDescriptor, CapabilityResult
 from pal.execution.runtime import ExecutionRuntime
 from pal.llm.contracts import CanonicalToolCall
 from pal.shared import RuntimeStatus
@@ -34,6 +34,16 @@ class ExecutionRuntimeAsyncTests(unittest.TestCase):
         async def run() -> None:
             runtime = ExecutionRuntime(sync_executor_max_workers=1)
             runtime.register_tool(SlowSyncTool())
+            runtime.register_capability(
+                CapabilityDescriptor(
+                    name="slow_sync",
+                    canonical_path="slow_sync",
+                    family="test",
+                    description="slow sync test tool",
+                    source="test",
+                ),
+                lambda _call: CapabilityResult(status=RuntimeStatus.ERROR, text="wrong binder", llm_text="wrong binder"),
+            )
             try:
                 task = asyncio.create_task(runtime.execute_tool_async(CanonicalToolCall(name="slow_sync", args={})))
                 await asyncio.sleep(0.02)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -11,11 +12,15 @@ from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.minion.plan_store import coerce_plan_ref, plan_revision_from_payload, resolve_plan_ref_path
 from pal.minion.work_order import (
     PlanArtifact,
+    _normalized_owned_area_key,
     dispatchable_plan_validation,
     new_work_id,
+    normalize_plan_write_areas,
+    plan_write_area_covers,
     planner_requirements,
     validate_dispatchable_plan_artifact,
     validate_final_plan_artifact,
+    work_start_topology_validation,
 )
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
@@ -48,6 +53,67 @@ PLAN_BUILDER_INITIAL_CAPABILITIES: tuple[str, ...] = (
 )
 
 
+def _plan_write_area_schema(field_name: str) -> dict[str, Any]:
+    if field_name == "owned_area":
+        description = (
+            "Canonical module write boundaries only: repo-relative file paths, directories ending in '/', globs, or "
+            "explicit logical areas such as domain:<id> or component:<id>. Do not append explanations to a path; "
+            "put those in ownership or scope_guard."
+        )
+    else:
+        description = (
+            "Canonical repo-relative paths expected to change in this milestone. Every value must be covered by the "
+            "module owned_area. Do not append symbols, actions, or parenthetical explanations; put those in task or scope_guard."
+        )
+    return {
+        "type": "array",
+        "description": description,
+        "items": {"type": "string", "description": description},
+    }
+
+
+PLAN_BUILDER_SKETCH_CAPABILITIES: tuple[str, ...] = (
+    "op_minion_plan_read",
+    "op_minion_plan_get",
+    "op_minion_plan_validate",
+    "op_minion_plan_checkout",
+    "op_minion_plan_add_gate_check",
+    "op_minion_plan_update_gate_check",
+    "op_minion_plan_delete_gate_check",
+    "op_minion_plan_add_constraints_batch",
+    "op_minion_plan_add_constraint",
+    "op_minion_plan_update_constraint",
+    "op_minion_plan_delete_constraint",
+    "op_minion_plan_add_design_decision",
+    "op_minion_plan_update_design_decision",
+    "op_minion_plan_delete_design_decision",
+    "op_minion_plan_add_sketch_module_outline",
+    "op_minion_plan_add_sketch_module_outlines_batch",
+    "op_minion_plan_add_module_interface",
+    "op_minion_plan_add_module_acceptance_criteria_batch",
+    "op_minion_plan_add_module_acceptance_criterion",
+    "op_minion_plan_update_module",
+    "op_minion_plan_delete_module",
+    "op_minion_plan_merge_sketch_modules",
+    "op_minion_plan_submit_sketch",
+)
+
+
+PLAN_BUILDER_MODULE_DETAIL_CAPABILITIES: tuple[str, ...] = (
+    *PLAN_BUILDER_READ_CAPABILITIES,
+    "op_minion_plan_add_module_interface",
+    "op_minion_plan_add_milestone_outline",
+    "op_minion_plan_add_acceptance_criteria_batch",
+    "op_minion_plan_add_acceptance_criterion",
+    "op_minion_plan_update_milestone",
+    "op_minion_plan_delete_milestone",
+    "op_minion_plan_update_acceptance_criterion",
+    "op_minion_plan_delete_acceptance_criterion",
+    "op_minion_plan_replace_milestone_acceptance_criteria",
+    "op_minion_plan_validate_and_submit_for_review",
+)
+
+
 PLAN_BUILDER_WRITE_CAPABILITIES: tuple[str, ...] = (
     "op_minion_plan_begin",
     "op_minion_plan_checkout",
@@ -65,6 +131,8 @@ PLAN_BUILDER_WRITE_CAPABILITIES: tuple[str, ...] = (
     "op_minion_plan_add_module_outlines_batch",
     "op_minion_plan_begin_module",
     "op_minion_plan_add_module_interface",
+    "op_minion_plan_add_module_acceptance_criteria_batch",
+    "op_minion_plan_add_module_acceptance_criterion",
     "op_minion_plan_add_milestone_outline",
     "op_minion_plan_begin_milestone",
     "op_minion_plan_add_acceptance_criteria_batch",
@@ -85,6 +153,16 @@ PLAN_BUILDER_WRITE_CAPABILITIES: tuple[str, ...] = (
     "op_minion_plan_validate_and_submit_for_review",
     "op_minion_plan_submit_for_review",
     "op_minion_plan_finalize",
+)
+
+
+PLAN_BUILDER_REVISION_CAPABILITIES: tuple[str, ...] = (
+    *PLAN_BUILDER_READ_CAPABILITIES,
+    *(
+        capability
+        for capability in PLAN_BUILDER_WRITE_CAPABILITIES
+        if capability not in {"op_minion_plan_begin", "op_minion_plan_finalize"}
+    ),
 )
 
 
@@ -162,10 +240,23 @@ def plan_builder_alias(
 
 
 def plan_builder_tool_specs() -> dict[str, dict[str, Any]]:
-    return {
+    specs = {
         **PLAN_BUILDER_TOOL_SPECS,
         **{name: spec.tool_spec() for name, spec in PLAN_BUILDER_ALIASES.items()},
     }
+    for name, raw_spec in list(specs.items()):
+        spec = dict(raw_spec)
+        call_alias = name.removeprefix("op_minion_")
+        spec["aliases"] = list(
+            dict.fromkeys(
+                [
+                    *[str(item).strip() for item in list(spec.get("aliases") or []) if str(item).strip()],
+                    call_alias,
+                ]
+            )
+        )
+        specs[name] = spec
+    return specs
 
 
 def plan_builder_capabilities() -> tuple[str, ...]:
@@ -285,7 +376,8 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "name": "op_minion_plan_validate_and_submit_for_review",
         "description": (
             "Validate the current draft and freeze the reviewed draft snapshot for the plan_acceptance gate in one call. "
-            "Use this as the normal final planner action after all modules and milestones are closed."
+            "Use this as the normal final planner action after all required stage nodes are closed. For a checked-out "
+            "revision, pass only plan_handle; use plan_update_plan for intentional top-level edits."
         ),
         "parameters_schema": {
             "type": "object",
@@ -457,7 +549,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "name": "op_minion_plan_add_constraint",
         "description": (
             "Record a spec-derived constraint before planning modules. Mark hard/chosen contracts explicitly so "
-            "milestones and acceptance criteria can trace to them."
+            "downstream work and acceptance criteria can trace to them."
         ),
         "parameters_schema": {
             "type": "object",
@@ -472,7 +564,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 },
                 "source_ref": {"type": "string"},
                 "rationale": {"type": "string"},
-                "global_only": {"type": "boolean", "description": "True only when no module/milestone can own the constraint."},
+                "global_only": {"type": "boolean", "description": "True only when no module or stage-local work item can own the constraint."},
                 "gate_check_refs": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -564,7 +656,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_plan_delete_design_decision": {
         "name": "op_minion_plan_delete_design_decision",
-        "description": "Delete one unreferenced architecture/design decision by handle. Deletion is rejected while modules or milestones still reference it.",
+        "description": "Delete one unreferenced architecture/design decision by handle. Deletion is rejected while plan nodes still reference it.",
         "parameters_schema": {
             "type": "object",
             "properties": {"decision_handle": {"type": "string"}},
@@ -587,14 +679,25 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                     "description": "Stable, human-readable module name. Pal stores this as the module_id.",
                 },
                 "kind": {"type": "string", "enum": ["prelude", "module", "join"], "default": "module"},
-                "depends_on_module_handles": {"type": "array", "items": {"type": "string"}},
+                "depends_on_module_handles": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Scheduling/start blockers, not general interaction links. Use only for modules whose accepted "
+                        "contract, setup, or implementation is required before this module can start. Do not use for "
+                        "stubbed interfaces, declaration-only type relationships, runtime callbacks, or final integration-only checks."
+                    ),
+                },
                 "depends_on_module_names": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Stable module_name values this module depends on. Prefer this when possible.",
+                    "description": (
+                        "Stable module_name values that block this module from starting. Prefer this when possible. "
+                        "This is a scheduling/start dependency, not a general consumed-interface or runtime interaction relationship."
+                    ),
                 },
                 "responsibility": {"type": "string"},
-                "owned_area": {"type": "array", "items": {"type": "string"}},
+                "owned_area": _plan_write_area_schema("owned_area"),
                 "ownership": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -776,14 +879,18 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                                 "description": "Stable, human-readable module name. Prefer snake_case names.",
                             },
                             "kind": {"type": "string", "enum": ["prelude", "module", "join"], "default": "module"},
-                            "depends_on_module_handles": {"type": "array", "items": {"type": "string"}},
+                            "depends_on_module_handles": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Scheduling/start blockers; do not use for stubbed, declaration-only, or integration-only relationships.",
+                            },
                             "depends_on_module_names": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "Stable module_name values this module depends on. Prefer this when possible.",
+                                "description": "Stable module_name values that block this module from starting. Prefer this when possible.",
                             },
                             "responsibility": {"type": "string"},
-                            "owned_area": {"type": "array", "items": {"type": "string"}},
+                            "owned_area": _plan_write_area_schema("owned_area"),
                             "ownership": {"type": "array", "items": {"type": "string"}},
                             "lifecycle": {"type": "array", "items": {"type": "string"}},
                             "invariants": {"type": "array", "items": {"type": "string"}},
@@ -848,7 +955,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                     "description": "Stable module_name values this module depends on. Prefer this when possible.",
                 },
                 "responsibility": {"type": "string"},
-                "owned_area": {"type": "array", "items": {"type": "string"}},
+                "owned_area": _plan_write_area_schema("owned_area"),
                 "ownership": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -918,6 +1025,90 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
+    "op_minion_plan_add_module_acceptance_criteria_batch": {
+        "name": "op_minion_plan_add_module_acceptance_criteria_batch",
+        "description": (
+            "Append several module-level acceptance criteria to a sketch module. Use this for architecture-stage "
+            "checks about module responsibility, public/consumed interfaces, topology handoff, ownership, lifecycle, "
+            "state rules, invariants, source requirement coverage, and end-to-end readiness. These criteria are "
+            "module-boundary obligations, not an internal implementation breakdown."
+        ),
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "module_handle": {"type": "string"},
+                "module_name": {"type": "string", "description": "Stable module_name for the target module."},
+                "plan_handle": {"type": "string", "description": "Required when module_name is used and more than one draft may exist."},
+                "criteria": {
+                    "type": "array",
+                    "description": (
+                        "Module-level acceptance criteria. Objects are preferred; string shorthand is accepted. "
+                        "Use evidence_expectation for the proof shape and negative_cases for boundary/error examples when relevant."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "criterion": {"type": "string"},
+                            "evidence_expectation": {"type": "string"},
+                            "linked_constraint_handles": {"type": "array", "items": {"type": "string"}},
+                            "gate_check_refs": {"type": "array", "items": {"type": "string"}},
+                            "source_ref": {"type": "string"},
+                            "source_refs": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Reference/source locations that justify this criterion, preferably with line numbers from op_file_read.",
+                            },
+                            "reference_refs": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Alias for source_refs when citing declared read-only reference roots.",
+                            },
+                            "negative_cases": {"type": "array", "items": {"type": "string"}},
+                            "quantifier": {"type": "string"},
+                        },
+                        "required": ["criterion"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["criteria"],
+            "additionalProperties": False,
+        },
+    },
+    "op_minion_plan_add_module_acceptance_criterion": {
+        "name": "op_minion_plan_add_module_acceptance_criterion",
+        "description": (
+            "Append one module-level acceptance criterion to a sketch module. Use this for a module-boundary "
+            "contract or first-layer review check; use the batch form when adding more than one."
+        ),
+        "parameters_schema": {
+            "type": "object",
+            "properties": {
+                "module_handle": {"type": "string"},
+                "module_name": {"type": "string", "description": "Stable module_name for the target module."},
+                "plan_handle": {"type": "string", "description": "Required when module_name is used and more than one draft may exist."},
+                "criterion": {"type": "string"},
+                "evidence_expectation": {"type": "string"},
+                "linked_constraint_handles": {"type": "array", "items": {"type": "string"}},
+                "gate_check_refs": {"type": "array", "items": {"type": "string"}},
+                "source_ref": {"type": "string"},
+                "source_refs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Reference/source locations that justify this criterion, preferably with line numbers from op_file_read.",
+                },
+                "reference_refs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Alias for source_refs when citing declared read-only reference roots.",
+                },
+                "negative_cases": {"type": "array", "items": {"type": "string"}},
+                "quantifier": {"type": "string"},
+            },
+            "required": ["criterion"],
+            "additionalProperties": False,
+        },
+    },
     "op_minion_plan_add_milestone_outline": {
         "name": "op_minion_plan_add_milestone_outline",
         "description": (
@@ -933,7 +1124,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "title": {"type": "string"},
                 "task": {"type": "string"},
                 "scope_guard": {"type": "string"},
-                "changed_area": {"type": "array", "items": {"type": "string"}},
+                "changed_area": _plan_write_area_schema("changed_area"),
                 "constraint_handles": {"type": "array", "items": {"type": "string"}},
                 "decision_handles": {"type": "array", "items": {"type": "string"}},
                 "gate_check_refs": {"type": "array", "items": {"type": "string"}},
@@ -973,7 +1164,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "title": {"type": "string"},
                 "task": {"type": "string"},
                 "scope_guard": {"type": "string"},
-                "changed_area": {"type": "array", "items": {"type": "string"}},
+                "changed_area": _plan_write_area_schema("changed_area"),
                 "constraint_handles": {"type": "array", "items": {"type": "string"}},
                 "decision_handles": {"type": "array", "items": {"type": "string"}},
                 "gate_check_refs": {"type": "array", "items": {"type": "string"}},
@@ -1075,12 +1266,18 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_plan_update_plan": {
         "name": "op_minion_plan_update_plan",
-        "description": "Update top-level draft metadata only. Use node-specific tools for modules, milestones, and acceptance criteria.",
+        "description": (
+            "Update top-level draft fields only. In revision mode, use this tool for every intentional change to "
+            "summary, system tests, risks, or metadata; submit tools only freeze the edited draft. Use node-specific "
+            "tools for modules, milestones, and acceptance criteria."
+        ),
         "parameters_schema": {
             "type": "object",
             "properties": {
                 "plan_handle": {"type": "string"},
                 "summary": {"type": "string"},
+                "system_test_plan": {"type": "array", "items": {"type": "object"}},
+                "risks": {"type": "array", "items": {"type": "object"}},
                 "languages": {"type": "array", "items": {"type": "string"}},
                 "source_refs": {"type": "array", "items": {"type": "string"}},
                 "workflow_next": {
@@ -1094,7 +1291,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_plan_update_module": {
         "name": "op_minion_plan_update_module",
-        "description": "Update only a module's own metadata and dependency fields. Use milestone/AC tools for child nodes.",
+        "description": "Update only a module's own metadata, dependency fields, and module-level quality criteria. Use stage-specific tools for child nodes.",
         "parameters_schema": {
             "type": "object",
             "properties": {
@@ -1105,7 +1302,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "depends_on_module_handles": {"type": "array", "items": {"type": "string"}},
                 "depends_on_module_names": {"type": "array", "items": {"type": "string"}},
                 "responsibility": {"type": "string"},
-                "owned_area": {"type": "array", "items": {"type": "string"}},
+                "owned_area": _plan_write_area_schema("owned_area"),
                 "ownership": {"type": "array", "items": {"type": "string"}},
                 "lifecycle": {"type": "array", "items": {"type": "string"}},
                 "invariants": {"type": "array", "items": {"type": "string"}},
@@ -1143,7 +1340,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "name": "op_minion_plan_merge_modules",
         "description": (
             "Merge one source module into a target module in the editable plan draft. Use this for plan-review fixes "
-            "that say two modules should become one. Pal moves milestones, merges owned_area/interfaces/refs/languages, "
+            "that say two modules should become one. Pal moves child work items, merges owned_area/interfaces/refs/languages, "
             "rewrites dependencies from source to target, deletes the source module, and keeps the draft editable."
         ),
         "parameters_schema": {
@@ -1151,7 +1348,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "properties": {
                 "target_module_handle": {"type": "string"},
                 "source_module_handle": {"type": "string"},
-                "insert_milestones_at": {"type": "integer", "description": "Optional zero-based insertion index in target."},
+                "insert_milestones_at": {"type": "integer", "description": "Optional zero-based insertion index for source child work items in target."},
             },
             "required": ["target_module_handle", "source_module_handle"],
             "additionalProperties": False,
@@ -1167,7 +1364,7 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                 "title": {"type": "string"},
                 "task": {"type": "string"},
                 "scope_guard": {"type": "string"},
-                "changed_area": {"type": "array", "items": {"type": "string"}},
+                "changed_area": _plan_write_area_schema("changed_area"),
                 "constraint_handles": {"type": "array", "items": {"type": "string"}},
                 "decision_handles": {"type": "array", "items": {"type": "string"}},
                 "gate_check_refs": {"type": "array", "items": {"type": "string"}},
@@ -1279,7 +1476,8 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "name": "op_minion_plan_submit_for_review",
         "description": (
             "Freeze the current draft snapshot for the plan_acceptance gate. This writes a reviewed draft artifact, "
-            "not the final accepted plan entity."
+            "not the final accepted plan entity. For a checked-out revision, pass only plan_handle; submit arguments "
+            "must not silently replace top-level plan content."
         ),
         "parameters_schema": {
             "type": "object",
@@ -1298,7 +1496,8 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "name": "op_minion_plan_finalize",
         "description": (
             "Compile the structured draft into the normal primary plan.json FinalPlanArtifact and register it for the "
-            "existing plan_acceptance gate. Call this only after every module and milestone is closed."
+            "existing plan_acceptance gate. Call this only after every module and milestone is closed. For a checked-out "
+            "revision, pass only plan_handle."
         ),
         "parameters_schema": {
             "type": "object",
@@ -1316,6 +1515,162 @@ PLAN_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
 }
 
 
+def _apply_sketch_start_blocker_schema(properties: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(properties)
+    updated.pop("depends_on_module_handles", None)
+    updated.pop("depends_on_module_names", None)
+    updated["work_start_blocked_by_module_handles"] = {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "Module handles that block this module from starting because their accepted contract, setup, or implementation "
+            "must exist first. Do not use for stubbed interfaces, opaque/declaration-only type relationships, runtime callbacks, "
+            "or final integration/test-only relationships."
+        ),
+    }
+    updated["work_start_blocked_by_module_names"] = {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": (
+            "Stable module_name values that block this module from starting. Prefer this over handles when adding modules in "
+            "dependency order. This is a work-start scheduling blocker, not a general interface, data-shape, or runtime interaction link."
+        ),
+    }
+    return updated
+
+
+def _map_sketch_module_outline_args(args: dict[str, Any]) -> dict[str, Any]:
+    raw = dict(args or {})
+    mapped = {
+        key: value
+        for key, value in raw.items()
+        if key
+        not in {
+            "milestones",
+            "work_start_blocked_by_module_handles",
+            "work_start_blocked_by_module_names",
+        }
+    }
+    blocker_handles = _string_list(raw.get("work_start_blocked_by_module_handles"))
+    blocker_names = _string_list(raw.get("work_start_blocked_by_module_names"))
+    if blocker_handles:
+        mapped["depends_on_module_handles"] = blocker_handles
+    if blocker_names:
+        mapped["depends_on_module_names"] = blocker_names
+    return mapped
+
+
+def _map_sketch_module_outlines_batch_args(args: dict[str, Any]) -> dict[str, Any]:
+    raw = dict(args or {})
+    return {
+        **{key: value for key, value in raw.items() if key != "modules"},
+        "modules": [
+            _map_sketch_module_outline_args(dict(module or {}))
+            for module in list(raw.get("modules") or [])
+            if isinstance(module, dict)
+        ],
+    }
+
+
+def _sketch_module_outline_schema() -> dict[str, Any]:
+    schema = deepcopy(PLAN_BUILDER_TOOL_SPECS["op_minion_plan_add_module_outline"]["parameters_schema"])
+    properties = dict(schema.get("properties") or {})
+    properties.pop("milestones", None)
+    properties = _apply_sketch_start_blocker_schema(properties)
+    schema["properties"] = properties
+    schema["required"] = [item for item in list(schema.get("required") or []) if item != "milestones"]
+    return schema
+
+
+def _sketch_module_outlines_batch_schema() -> dict[str, Any]:
+    schema = deepcopy(PLAN_BUILDER_TOOL_SPECS["op_minion_plan_add_module_outlines_batch"]["parameters_schema"])
+    modules = dict(dict(schema.get("properties") or {}).get("modules") or {})
+    module_items = dict(modules.get("items") or {})
+    module_properties = dict(module_items.get("properties") or {})
+    module_properties.pop("milestones", None)
+    module_properties = _apply_sketch_start_blocker_schema(module_properties)
+    module_items["properties"] = module_properties
+    module_items["required"] = [item for item in list(module_items.get("required") or []) if item != "milestones"]
+    modules["items"] = module_items
+    properties = dict(schema.get("properties") or {})
+    properties["modules"] = modules
+    schema["properties"] = properties
+    return schema
+
+
+def _merge_sketch_modules_schema() -> dict[str, Any]:
+    schema = deepcopy(PLAN_BUILDER_TOOL_SPECS["op_minion_plan_merge_modules"]["parameters_schema"])
+    properties = dict(schema.get("properties") or {})
+    properties.pop("insert_milestones_at", None)
+    schema["properties"] = properties
+    return schema
+
+
+register_plan_builder_alias(
+    PlanBuilderAliasSpec(
+        name="op_minion_plan_add_sketch_module_outline",
+        core_tool="op_minion_plan_add_module_outline",
+        domain="architecture_sketch",
+        description=(
+            "Create one closed sketch module from a compact outline: module metadata, topology dependencies, "
+            "interfaces, ownership, lifecycle, invariants, risk/delivery surfaces, and module-level quality criteria. "
+            "Topology inputs are work-start blockers only; express stubbed interfaces, declaration-only data contracts, "
+            "runtime callbacks, and final integration relationships through interfaces and AC instead. Use this only for "
+            "first-stage architecture structure; module internals are handled by the later detail stage."
+        ),
+        parameters_schema=_sketch_module_outline_schema(),
+        map_args=_map_sketch_module_outline_args,
+    )
+)
+
+
+register_plan_builder_alias(
+    PlanBuilderAliasSpec(
+        name="op_minion_plan_add_sketch_module_outlines_batch",
+        core_tool="op_minion_plan_add_module_outlines_batch",
+        domain="architecture_sketch",
+        description=(
+            "Add and close multiple sketch module outlines in one transaction. Each module carries only architecture-level "
+            "shape: responsibility, owned area, work-start blockers, interfaces, ownership, lifecycle, invariants, and "
+            "module-level quality criteria. Order modules so true start blockers appear before blocked modules. Do not encode "
+            "stubbed interfaces, declaration-only data contracts, runtime callbacks, or final integration relationships as start blockers."
+        ),
+        parameters_schema=_sketch_module_outlines_batch_schema(),
+        map_args=_map_sketch_module_outlines_batch_args,
+    )
+)
+
+
+register_plan_builder_alias(
+    PlanBuilderAliasSpec(
+        name="op_minion_plan_merge_sketch_modules",
+        core_tool="op_minion_plan_merge_modules",
+        domain="architecture_sketch",
+        description=(
+            "Merge one source sketch module into a target sketch module during review repair. Use this when the "
+            "architecture has two module boundaries that should be one boundary."
+        ),
+        parameters_schema=_merge_sketch_modules_schema(),
+        map_args=lambda args: dict(args or {}),
+    )
+)
+
+
+register_plan_builder_alias(
+    PlanBuilderAliasSpec(
+        name="op_minion_plan_submit_sketch",
+        core_tool="op_minion_plan_validate_and_submit_for_review",
+        domain="architecture_sketch",
+        description=(
+            "Validate the architecture sketch and freeze the PlanSketchArtifact for review. Call this after modules, "
+            "interfaces, work-start blocker topology, module-level acceptance criteria, and end-to-end gates are complete."
+        ),
+        parameters_schema=deepcopy(PLAN_BUILDER_TOOL_SPECS["op_minion_plan_validate_and_submit_for_review"]["parameters_schema"]),
+        map_args=lambda args: dict(args or {}),
+    )
+)
+
+
 def _plan_validate_result(payload: dict[str, Any], *, plan_handle: str, valid_text: str, invalid_prefix: str) -> dict[str, Any]:
     try:
         validation = dispatchable_plan_validation(payload)
@@ -1329,6 +1684,52 @@ def _plan_validate_result(payload: dict[str, Any], *, plan_handle: str, valid_te
         "text": valid_text,
         "structured": {"plan_handle": plan_handle, "plan_validation": validation},
     }
+
+
+PLAN_BUILDER_TOOL_HANDLERS: dict[str, str] = {
+    "op_minion_plan_read": "_plan_read",
+    "op_minion_plan_find": "_plan_find",
+    "op_minion_plan_get": "_plan_get",
+    "op_minion_plan_validate": "_validate",
+    "op_minion_plan_validate_and_submit_for_review": "_submit_for_review",
+    "op_minion_plan_begin": "_plan_begin",
+    "op_minion_plan_checkout": "_plan_checkout",
+    "op_minion_plan_add_gate_check": "_add_gate_check",
+    "op_minion_plan_update_gate_check": "_update_gate_check",
+    "op_minion_plan_delete_gate_check": "_delete_gate_check",
+    "op_minion_plan_add_constraints_batch": "_add_constraints_batch",
+    "op_minion_plan_add_constraint": "_add_constraint",
+    "op_minion_plan_update_constraint": "_update_constraint",
+    "op_minion_plan_delete_constraint": "_delete_constraint",
+    "op_minion_plan_add_design_decision": "_add_design_decision",
+    "op_minion_plan_update_design_decision": "_update_design_decision",
+    "op_minion_plan_delete_design_decision": "_delete_design_decision",
+    "op_minion_plan_add_module_outline": "_add_module_outline",
+    "op_minion_plan_add_module_outlines_batch": "_add_module_outlines_batch",
+    "op_minion_plan_begin_module": "_begin_module",
+    "op_minion_plan_add_module_interface": "_add_module_interface",
+    "op_minion_plan_add_module_acceptance_criteria_batch": "_add_module_acceptance_criteria_batch",
+    "op_minion_plan_add_module_acceptance_criterion": "_add_module_acceptance_criterion",
+    "op_minion_plan_add_milestone_outline": "_add_milestone_outline",
+    "op_minion_plan_begin_milestone": "_begin_milestone",
+    "op_minion_plan_add_acceptance_criteria_batch": "_add_acceptance_criteria_batch",
+    "op_minion_plan_add_acceptance_criterion": "_add_acceptance_criterion",
+    "op_minion_plan_end_milestone": "_end_milestone",
+    "op_minion_plan_end_module": "_end_module",
+    "op_minion_plan_update_plan": "_update_plan",
+    "op_minion_plan_update_module": "_update_module",
+    "op_minion_plan_delete_module": "_delete_module",
+    "op_minion_plan_merge_modules": "_merge_modules",
+    "op_minion_plan_update_milestone": "_update_milestone",
+    "op_minion_plan_delete_milestone": "_delete_milestone",
+    "op_minion_plan_move_milestone": "_move_milestone",
+    "op_minion_plan_update_acceptance_criterion": "_update_acceptance_criterion",
+    "op_minion_plan_delete_acceptance_criterion": "_delete_acceptance_criterion",
+    "op_minion_plan_replace_milestone_acceptance_criteria": "_replace_milestone_acceptance_criteria",
+    "op_minion_plan_apply_revision_item": "_apply_revision_item",
+    "op_minion_plan_submit_for_review": "_submit_for_review",
+    "op_minion_plan_finalize": "_finalize",
+}
 
 
 @dataclass
@@ -1363,7 +1764,9 @@ class PlanBuilderRuntime:
             )
 
     def _execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        alias = PLAN_BUILDER_ALIASES.get(str(name or "").strip())
+        name = str(name or "").strip()
+        args = self._apply_stage_binders(name, dict(args or {}))
+        alias = PLAN_BUILDER_ALIASES.get(name)
         if alias is not None:
             mapped_args = alias.map_args(dict(args or {}))
             if not isinstance(mapped_args, dict):
@@ -1377,87 +1780,24 @@ class PlanBuilderRuntime:
             }
             result["structured"] = structured
             return result
-        if name == "op_minion_plan_read":
-            return self._plan_read(args)
-        if name == "op_minion_plan_find":
-            return self._plan_find(args)
-        if name == "op_minion_plan_get":
-            return self._plan_get(args)
-        if name == "op_minion_plan_validate":
-            return self._validate(args)
-        if name == "op_minion_plan_validate_and_submit_for_review":
-            return self._submit_for_review(args)
-        if name == "op_minion_plan_begin":
-            return self._plan_begin(args)
-        if name == "op_minion_plan_checkout":
-            return self._plan_checkout(args)
-        if name == "op_minion_plan_add_gate_check":
-            return self._add_gate_check(args)
-        if name == "op_minion_plan_update_gate_check":
-            return self._update_gate_check(args)
-        if name == "op_minion_plan_delete_gate_check":
-            return self._delete_gate_check(args)
-        if name == "op_minion_plan_add_constraints_batch":
-            return self._add_constraints_batch(args)
-        if name == "op_minion_plan_add_constraint":
-            return self._add_constraint(args)
-        if name == "op_minion_plan_update_constraint":
-            return self._update_constraint(args)
-        if name == "op_minion_plan_delete_constraint":
-            return self._delete_constraint(args)
-        if name == "op_minion_plan_add_design_decision":
-            return self._add_design_decision(args)
-        if name == "op_minion_plan_update_design_decision":
-            return self._update_design_decision(args)
-        if name == "op_minion_plan_delete_design_decision":
-            return self._delete_design_decision(args)
-        if name == "op_minion_plan_add_module_outline":
-            return self._add_module_outline(args)
-        if name == "op_minion_plan_add_module_outlines_batch":
-            return self._add_module_outlines_batch(args)
-        if name == "op_minion_plan_begin_module":
-            return self._begin_module(args)
-        if name == "op_minion_plan_add_module_interface":
-            return self._add_module_interface(args)
-        if name == "op_minion_plan_add_milestone_outline":
-            return self._add_milestone_outline(args)
-        if name == "op_minion_plan_begin_milestone":
-            return self._begin_milestone(args)
-        if name == "op_minion_plan_add_acceptance_criteria_batch":
-            return self._add_acceptance_criteria_batch(args)
-        if name == "op_minion_plan_add_acceptance_criterion":
-            return self._add_acceptance_criterion(args)
-        if name == "op_minion_plan_end_milestone":
-            return self._end_milestone(args)
-        if name == "op_minion_plan_end_module":
-            return self._end_module(args)
-        if name == "op_minion_plan_update_plan":
-            return self._update_plan(args)
-        if name == "op_minion_plan_update_module":
-            return self._update_module(args)
-        if name == "op_minion_plan_delete_module":
-            return self._delete_module(args)
-        if name == "op_minion_plan_merge_modules":
-            return self._merge_modules(args)
-        if name == "op_minion_plan_update_milestone":
-            return self._update_milestone(args)
-        if name == "op_minion_plan_delete_milestone":
-            return self._delete_milestone(args)
-        if name == "op_minion_plan_move_milestone":
-            return self._move_milestone(args)
-        if name == "op_minion_plan_update_acceptance_criterion":
-            return self._update_acceptance_criterion(args)
-        if name == "op_minion_plan_delete_acceptance_criterion":
-            return self._delete_acceptance_criterion(args)
-        if name == "op_minion_plan_replace_milestone_acceptance_criteria":
-            return self._replace_milestone_acceptance_criteria(args)
-        if name == "op_minion_plan_apply_revision_item":
-            return self._apply_revision_item(args)
-        if name == "op_minion_plan_submit_for_review":
-            return self._submit_for_review(args)
-        if name == "op_minion_plan_finalize":
-            return self._finalize(args)
+        handler_name = PLAN_BUILDER_TOOL_HANDLERS.get(name)
+        if handler_name:
+            handler = getattr(self, handler_name)
+            return handler(args)
         raise ValueError(f"unknown plan builder tool: {name}")
+
+    def _apply_stage_binders(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        stage = _plan_builder_stage_from_workspace(self.workspace)
+        if stage not in {"architecture_sketch", "module_detail"}:
+            return args
+        plan_handle = _text(self.workspace.get("plan_builder_plan_handle"))
+        if plan_handle and _plan_tool_accepts_arg(name, "plan_handle") and not _text(args.get("plan_handle")):
+            args["plan_handle"] = plan_handle
+        if stage == "module_detail":
+            module_id = _text(self.workspace.get("plan_builder_module_id") or self.workspace.get("bound_module_id"))
+            if module_id and _plan_tool_accepts_arg(name, "module_name") and not _text(args.get("module_name")) and not _text(args.get("module_handle")):
+                args["module_name"] = module_id
+        return args
 
     def _plan_read(self, args: dict[str, Any]) -> dict[str, Any]:
         _reject_unknown_args(args, {"plan_handle", "plan_ref", "detail"})
@@ -1510,6 +1850,41 @@ class PlanBuilderRuntime:
     def _validate(self, args: dict[str, Any]) -> dict[str, Any]:
         _reject_unknown_args(args, {"plan_handle", "plan_ref"})
         state = self._state_from_ref_or_handle(args)
+        stage = _plan_builder_stage(state, self.workspace)
+        if stage == "architecture_sketch":
+            try:
+                artifact = self._compile_sketch_artifact(state, {})
+                validation = validate_plan_sketch_artifact(artifact)
+            except ValueError as exc:
+                message = str(exc) or exc.__class__.__name__
+                return {
+                    "text": f"Plan sketch is invalid: {message}",
+                    "structured": {
+                        "plan_handle": state["plan_handle"],
+                        "plan_validation": {"status": "invalid", "errors": [message]},
+                    },
+                }
+            return {
+                "text": "Plan sketch is valid.",
+                "structured": {"plan_handle": state["plan_handle"], "plan_validation": validation},
+            }
+        if stage == "module_detail":
+            try:
+                artifact = self._compile_module_detail_artifact(state, {})
+                validation = validate_module_detail_artifact(artifact)
+            except ValueError as exc:
+                message = str(exc) or exc.__class__.__name__
+                return {
+                    "text": f"Module detail is invalid: {message}",
+                    "structured": {
+                        "plan_handle": state["plan_handle"],
+                        "plan_validation": {"status": "invalid", "errors": [message]},
+                    },
+                }
+            return {
+                "text": "Module detail is valid.",
+                "structured": {"plan_handle": state["plan_handle"], "plan_validation": validation},
+            }
         if _text(state.get("lifecycle")).lower() in {"submitted", "finalized"} and isinstance(state.get("source_plan_ref"), dict):
             source_payload = state.get("_source_plan_payload")
             if isinstance(source_payload, dict):
@@ -1571,6 +1946,8 @@ class PlanBuilderRuntime:
             "constraints": [],
             "design_decisions": [],
             "modules": [],
+            "system_test_plan": [],
+            "risks": [],
             "closed": False,
             "lifecycle": "editing",
             "plan_revision": _coerce_int(self.workspace.get("planner_plan_revision"), default=0),
@@ -1931,9 +2308,11 @@ class PlanBuilderRuntime:
         )
         plan_handle = _required(args, "plan_handle")
         milestones = _dict_list(args.get("milestones"))
-        if not milestones:
+        state_for_stage = self._load_state(plan_handle)
+        sketch_stage = _plan_builder_stage(state_for_stage, self.workspace) == "architecture_sketch"
+        if not milestones and not sketch_stage:
             raise ValueError("milestones must contain at least one milestone outline")
-        before = self._load_state(plan_handle)
+        before = state_for_stage
         milestone_handles: list[str] = []
         acceptance_handles: list[str] = []
         module_handle = ""
@@ -2109,7 +2488,7 @@ class PlanBuilderRuntime:
             "kind": kind,
             "depends_on_module_handles": dependencies,
             "responsibility": _required(args, "responsibility"),
-            "owned_area": _string_list(args.get("owned_area")),
+            "owned_area": normalize_plan_write_areas(args.get("owned_area"), field_name="owned_area"),
             "ownership": _string_list(args.get("ownership")),
             "lifecycle": _string_list(args.get("lifecycle")),
             "invariants": _string_list(args.get("invariants")),
@@ -2128,7 +2507,7 @@ class PlanBuilderRuntime:
             "closed": False,
         }
         if not item["owned_area"]:
-            raise ValueError("owned_area must contain at least one path, package, component, or responsibility boundary")
+            raise ValueError("owned_area must contain at least one canonical repo-relative path or explicit logical area")
         if not item["ownership"]:
             raise ValueError("ownership must contain at least one module ownership bullet")
         if not item["lifecycle"]:
@@ -2195,6 +2574,98 @@ class PlanBuilderRuntime:
             "text": f"Module interface added: {item['name']}",
             "structured": {"module_handle": module["handle"], "module_name": module.get("module_id"), "plan_handle": state["plan_handle"]},
         }
+
+    def _add_module_acceptance_criteria_batch(self, args: dict[str, Any]) -> dict[str, Any]:
+        _reject_unknown_args(args, {"module_handle", "module_name", "plan_handle", "criteria"})
+        criteria = _module_acceptance_criteria_list(args.get("criteria"))
+        if not criteria:
+            raise ValueError("criteria must contain at least one module-level acceptance criterion")
+        state, module = self._load_module_from_args(args)
+        _assert_editable_plan(state)
+        added: list[str] = []
+        added_indexes: list[int] = []
+        linked_constraints: list[str] = []
+        linked_gates: list[str] = []
+        for raw in criteria:
+            constraint_handles = _known_handles(
+                state,
+                _string_list(raw.get("linked_constraint_handles")),
+                expected_prefix="constraint",
+            )
+            gate_check_refs = _known_gate_check_refs(state, raw.get("gate_check_refs"))
+            criterion = _required(raw, "criterion")
+            existing = _string_list(module.get("module_quality_criteria"))
+            if criterion not in existing:
+                existing.append(criterion)
+                added.append(criterion)
+                added_indexes.append(len(existing) - 1)
+            module["module_quality_criteria"] = existing
+            detail = _module_acceptance_criterion_detail(
+                raw,
+                constraint_handles=constraint_handles,
+                gate_check_refs=gate_check_refs,
+            )
+            if detail:
+                existing_details = _dict_list(module.get("module_quality_criteria_details"))
+                if detail not in existing_details:
+                    existing_details.append(detail)
+                    module["module_quality_criteria_details"] = existing_details
+            linked_constraints.extend(constraint_handles)
+            linked_gates.extend(gate_check_refs)
+        if linked_constraints:
+            module["constraint_handles"] = _dedupe_strings([*_string_list(module.get("constraint_handles")), *linked_constraints])
+        if linked_gates:
+            module["gate_check_refs"] = _dedupe_strings([*_string_list(module.get("gate_check_refs")), *linked_gates])
+        self._save_state(state)
+        return {
+            "text": f"Module-level acceptance criteria added: {len(added)} for {module.get('module_id')}.",
+            "structured": {
+                "plan_handle": state["plan_handle"],
+                "module_handle": module["handle"],
+                "module_name": module.get("module_id"),
+                "module_acceptance_indexes": added_indexes,
+                "module_quality_criteria": _string_list(module.get("module_quality_criteria")),
+                "module_quality_criteria_details": _dict_list(module.get("module_quality_criteria_details")),
+            },
+        }
+
+    def _add_module_acceptance_criterion(self, args: dict[str, Any]) -> dict[str, Any]:
+        _reject_unknown_args(
+            args,
+            {
+                "module_handle",
+                "module_name",
+                "plan_handle",
+                "criterion",
+                "evidence_expectation",
+                "linked_constraint_handles",
+                "gate_check_refs",
+                "source_ref",
+                "source_refs",
+                "reference_refs",
+                "negative_cases",
+                "quantifier",
+            },
+        )
+        payload = {
+            "module_handle": args.get("module_handle"),
+            "module_name": args.get("module_name"),
+            "plan_handle": args.get("plan_handle"),
+            "criteria": [
+                {
+                    "criterion": args.get("criterion"),
+                    "evidence_expectation": args.get("evidence_expectation"),
+                    "linked_constraint_handles": args.get("linked_constraint_handles"),
+                    "gate_check_refs": args.get("gate_check_refs"),
+                    "source_ref": args.get("source_ref"),
+                    "source_refs": args.get("source_refs"),
+                    "reference_refs": args.get("reference_refs"),
+                    "negative_cases": args.get("negative_cases"),
+                    "quantifier": args.get("quantifier"),
+                }
+            ],
+        }
+        return self._add_module_acceptance_criteria_batch({key: value for key, value in payload.items() if value is not None})
 
     def _add_milestone_outline(self, args: dict[str, Any]) -> dict[str, Any]:
         _reject_unknown_args(
@@ -2289,7 +2760,10 @@ class PlanBuilderRuntime:
             },
         )
         state, module = self._load_module_from_args(args)
-        _assert_open_module(module)
+        if _plan_builder_stage(state, self.workspace) == "module_detail":
+            _assert_bound_module_detail(state, module)
+        else:
+            _assert_open_module(module)
         if _open_milestone(module):
             raise ValueError("close the open milestone before beginning another milestone")
         handle = self._next_handle(state, "milestone", "milestone")
@@ -2300,7 +2774,7 @@ class PlanBuilderRuntime:
             "title": _required(args, "title"),
             "task": _required(args, "task"),
             "scope_guard": _text(args.get("scope_guard")),
-            "changed_area": _string_list(args.get("changed_area")),
+            "changed_area": normalize_plan_write_areas(args.get("changed_area"), field_name="changed_area"),
             "constraint_handles": _known_handles(state, _string_list(args.get("constraint_handles")), expected_prefix="constraint"),
             "decision_handles": _known_handles(state, _string_list(args.get("decision_handles")), expected_prefix="decision"),
             "gate_check_refs": _known_gate_check_refs(state, args.get("gate_check_refs")),
@@ -2416,7 +2890,7 @@ class PlanBuilderRuntime:
         _assert_open_module(module)
         if _open_milestone(module):
             raise ValueError("close the open milestone before closing the module")
-        if not module["internal_milestones"]:
+        if not module["internal_milestones"] and _plan_builder_stage(state, self.workspace) != "architecture_sketch":
             raise ValueError("module must have at least one milestone before closing")
         module["closed"] = True
         self._save_state(state)
@@ -2437,11 +2911,18 @@ class PlanBuilderRuntime:
         }
 
     def _update_plan(self, args: dict[str, Any]) -> dict[str, Any]:
-        _reject_unknown_args(args, {"plan_handle", "summary", "languages", "source_refs", "workflow_next"})
+        _reject_unknown_args(
+            args,
+            {"plan_handle", "summary", "system_test_plan", "risks", "languages", "source_refs", "workflow_next"},
+        )
         state = self._load_state(_required(args, "plan_handle"))
         _assert_editable_plan(state)
         if "summary" in args:
             state["summary"] = _text(args.get("summary"))
+        if "system_test_plan" in args:
+            state["system_test_plan"] = _dict_list(args.get("system_test_plan"))
+        if "risks" in args:
+            state["risks"] = _dict_list(args.get("risks"))
         if "languages" in args:
             state["languages"] = _normalize_language_ids(args.get("languages"))
         if "source_refs" in args:
@@ -2499,9 +2980,9 @@ class PlanBuilderRuntime:
         if "responsibility" in args:
             module["responsibility"] = _required(args, "responsibility")
         if "owned_area" in args:
-            owned_area = _string_list(args.get("owned_area"))
+            owned_area = normalize_plan_write_areas(args.get("owned_area"), field_name="owned_area")
             if not owned_area:
-                raise ValueError("owned_area must contain at least one path, package, component, or responsibility boundary")
+                raise ValueError("owned_area must contain at least one canonical repo-relative path or explicit logical area")
             module["owned_area"] = owned_area
         if "ownership" in args:
             ownership = _string_list(args.get("ownership"))
@@ -2672,7 +3153,7 @@ class PlanBuilderRuntime:
         if "scope_guard" in args:
             milestone["scope_guard"] = _text(args.get("scope_guard"))
         if "changed_area" in args:
-            milestone["changed_area"] = _string_list(args.get("changed_area"))
+            milestone["changed_area"] = normalize_plan_write_areas(args.get("changed_area"), field_name="changed_area")
         if "constraint_handles" in args:
             milestone["constraint_handles"] = _known_handles(state, _string_list(args.get("constraint_handles")), expected_prefix="constraint")
         if "decision_handles" in args:
@@ -2828,7 +3309,7 @@ class PlanBuilderRuntime:
             raise ValueError(
                 f"{item.get('id')} requires replacement fields before apply; pass replacement to merge with suggested_args={json.dumps(suggested, ensure_ascii=False, sort_keys=True)}"
             )
-        suggested_tool = _canonical_plan_builder_tool_name(item.get("suggested_tool"))
+        suggested_tool = _text(item.get("suggested_tool"))
         if suggested_tool not in _APPLY_REVISION_ALLOWED_TOOLS:
             raise ValueError(f"{item.get('id')} has no safe suggested_tool for automatic apply: {item.get('suggested_tool') or ''}")
         tool_args = dict(item.get("suggested_args") or {})
@@ -2864,11 +3345,17 @@ class PlanBuilderRuntime:
         _reject_unknown_args(args, {"plan_handle", "summary", "system_test_plan", "risks", "assumptions"})
         state = self._load_state(_required(args, "plan_handle"))
         _assert_editable_plan(state)
+        _reject_revision_submit_overrides(state, args)
+        stage = _plan_builder_stage(state, self.workspace)
         if _open_module(state):
             raise ValueError("close all modules before submitting the plan draft for review")
         revision_errors = _revision_checklist_submit_errors(state)
         if revision_errors:
             raise ValueError("plan revision checklist is not satisfied: " + "; ".join(revision_errors))
+        if stage == "architecture_sketch":
+            return self._submit_sketch_artifact(state, args)
+        if stage == "module_detail":
+            return self._submit_module_detail_artifact(state, args)
         artifact = self._compile_artifact(state, args)
         validation = dispatchable_plan_validation(artifact)
         plan_revision = _coerce_int(state.get("plan_revision"), default=_coerce_int(self.workspace.get("planner_plan_revision"), default=0))
@@ -2932,10 +3419,110 @@ class PlanBuilderRuntime:
             },
         }
 
+    def _submit_sketch_artifact(self, state: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+        artifact = self._compile_sketch_artifact(state, args)
+        validation = validate_plan_sketch_artifact(artifact)
+        plan_revision = _coerce_int(state.get("plan_revision"), default=_coerce_int(self.workspace.get("planner_plan_revision"), default=0))
+        content = _stage_artifact_json(artifact, plan_revision=plan_revision, lifecycle="submitted")
+        artifact_meta = _write_minion_artifact(
+            self.workspace,
+            {
+                "relative_path": "plan.sketch.json",
+                "title": "Plan sketch",
+                "role": "primary",
+                "mime_type": "application/json",
+                "overwrite": True,
+                "content": content,
+            },
+        )
+        _append_unique_artifact(self.produced_artifacts, artifact_meta)
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        state["lifecycle"] = "submitted"
+        state["submitted_artifact"] = dict(artifact_meta)
+        state["submitted_artifact_sha256"] = digest
+        state["submitted_at_revision"] = plan_revision
+        self._save_state(state)
+        sketch_ref = {
+            "ref_kind": "plan_sketch",
+            "path": str(artifact_meta.get("path") or ""),
+            "sha256": digest,
+            "plan_id": artifact["plan_id"],
+            "sketch_id": artifact["sketch_id"],
+            "task_id": artifact["task_id"],
+            "plan_revision": plan_revision,
+            "plan_handle": state["plan_handle"],
+            "artifact_dir": str(self.workspace.get("artifact_dir") or ""),
+            "relative_path": "plan.sketch.json",
+        }
+        return {
+            "text": "Plan sketch submitted. Manager will validate the architecture skeleton before detail planning.",
+            "structured": {
+                "plan_handle": state["plan_handle"],
+                "sketch_ref": sketch_ref,
+                "artifact": artifact_meta,
+                "plan_id": artifact["plan_id"],
+                "task_id": artifact["task_id"],
+                "plan_revision": plan_revision,
+                "plan_validation": validation,
+            },
+        }
+
+    def _submit_module_detail_artifact(self, state: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+        artifact = self._compile_module_detail_artifact(state, args)
+        validation = validate_module_detail_artifact(artifact)
+        plan_revision = _coerce_int(state.get("plan_revision"), default=_coerce_int(self.workspace.get("planner_plan_revision"), default=0))
+        module_id = _safe_id(artifact.get("module_id"), default_prefix="module")
+        relative_path = f"module_detail.{module_id}.json"
+        content = _stage_artifact_json(artifact, plan_revision=plan_revision, lifecycle="submitted")
+        artifact_meta = _write_minion_artifact(
+            self.workspace,
+            {
+                "relative_path": relative_path,
+                "title": f"Module detail {module_id}",
+                "role": "primary",
+                "mime_type": "application/json",
+                "overwrite": True,
+                "content": content,
+            },
+        )
+        _append_unique_artifact(self.produced_artifacts, artifact_meta)
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        state["lifecycle"] = "submitted"
+        state["submitted_artifact"] = dict(artifact_meta)
+        state["submitted_artifact_sha256"] = digest
+        state["submitted_at_revision"] = plan_revision
+        self._save_state(state)
+        detail_ref = {
+            "ref_kind": "module_detail",
+            "path": str(artifact_meta.get("path") or ""),
+            "sha256": digest,
+            "plan_id": artifact["plan_id"],
+            "task_id": artifact["task_id"],
+            "module_id": artifact["module_id"],
+            "plan_revision": plan_revision,
+            "plan_handle": state["plan_handle"],
+            "artifact_dir": str(self.workspace.get("artifact_dir") or ""),
+            "relative_path": relative_path,
+        }
+        return {
+            "text": f"Module detail submitted for {artifact['module_id']}.",
+            "structured": {
+                "plan_handle": state["plan_handle"],
+                "module_detail_ref": detail_ref,
+                "artifact": artifact_meta,
+                "plan_id": artifact["plan_id"],
+                "task_id": artifact["task_id"],
+                "module_id": artifact["module_id"],
+                "plan_revision": plan_revision,
+                "plan_validation": validation,
+            },
+        }
+
     def _finalize(self, args: dict[str, Any]) -> dict[str, Any]:
         _reject_unknown_args(args, {"plan_handle", "summary", "system_test_plan", "risks", "assumptions"})
         state = self._load_state(_required(args, "plan_handle"))
         _assert_open_plan(state)
+        _reject_revision_submit_overrides(state, args)
         if _open_module(state):
             raise ValueError("close all modules before finalizing the plan")
         artifact = self._compile_artifact(state, args)
@@ -2971,6 +3558,108 @@ class PlanBuilderRuntime:
             },
         }
 
+    def _compile_sketch_artifact(self, state: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+        task_id = _text(state.get("task_id") or self.workspace.get("task_id"))
+        if not task_id:
+            raise ValueError("task_id is required in planner workspace before submitting sketch")
+        modules = list(state.get("modules") or [])
+        if not modules:
+            raise ValueError("sketch must contain at least one module")
+        if any(not bool(module.get("closed")) for module in modules):
+            raise ValueError("all sketch modules must be closed before submitting")
+        if not _string_list(state.get("languages")):
+            raise ValueError("metadata.languages must contain at least one canonical implementation language id")
+        self._validate_module_boundary_contracts(state)
+        self._validate_module_interfaces(state)
+        self._validate_design_decisions(state)
+        self._validate_constraint_coverage(state)
+        self._validate_gate_contract(state)
+        metadata = {
+            "languages": _normalize_language_ids(state.get("languages")),
+            "source_refs": _string_list(state.get("source_refs")),
+            "constraints": [_strip_handles(item) for item in state.get("constraints") or []],
+            "design_decisions": [_strip_handles(item) for item in state.get("design_decisions") or []],
+            "plan_builder": {
+                "version": 1,
+                "plan_handle": state["plan_handle"],
+                "stage": "architecture_sketch",
+                "lifecycle": _text(state.get("lifecycle") or "editing"),
+            },
+            "plan_revision": _coerce_int(state.get("plan_revision"), default=0),
+        }
+        workflow_next = _workflow_next_payload(state.get("workflow_next"))
+        if workflow_next:
+            metadata["workflow_next"] = workflow_next
+        gate_contract = _compiled_gate_contract(state)
+        if gate_contract:
+            metadata["gate_contract"] = gate_contract
+        source_acceptance_coverage = _gate_check_coverage_projection(state)
+        if source_acceptance_coverage:
+            metadata["source_acceptance_coverage"] = source_acceptance_coverage
+        return {
+            "type": "PlanSketchArtifact",
+            "plan_id": _text(state.get("plan_id") or new_work_id("plan")),
+            "sketch_id": _text(state.get("sketch_id") or f"{state.get('plan_id') or 'plan'}_sketch"),
+            "task_id": task_id,
+            "planning_depth": _text(state.get("planning_depth") or self.workspace.get("planning_depth") or "sketch_only"),
+            "summary": _text(args.get("summary") or state.get("summary") or state.get("goal") or "Architecture sketch."),
+            "modules": [self._sketch_module_payload(state, module) for module in modules],
+            "cross_module_contracts": self._cross_module_contracts(state),
+            "topology": self._compile_topology(state),
+            "reference_map": _dict_list(state.get("reference_map")),
+            "system_test_plan": _dict_list(args.get("system_test_plan")),
+            "risks": _dict_list(args.get("risks")),
+            "metadata": metadata,
+        }
+
+    def _sketch_module_payload(self, state: dict[str, Any], module: dict[str, Any]) -> dict[str, Any]:
+        payload = self._module_payload(state, module)
+        payload.pop("internal_milestones", None)
+        metadata = dict(payload.get("metadata") or {})
+        metadata["module_quality_criteria"] = _string_list(module.get("module_quality_criteria"))
+        metadata["risk_surfaces"] = _string_list(module.get("risk_surfaces"))
+        metadata["delivery_surfaces"] = _string_list(module.get("delivery_surfaces"))
+        payload["metadata"] = {key: value for key, value in metadata.items() if value not in ("", [], {})}
+        return payload
+
+    def _compile_module_detail_artifact(self, state: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
+        task_id = _text(state.get("task_id") or self.workspace.get("task_id"))
+        if not task_id:
+            raise ValueError("task_id is required in planner workspace before submitting module detail")
+        module = _bound_module_detail_module(state)
+        if any(_open_milestone(item) for item in [module]):
+            raise ValueError("all module detail milestones must be closed before submitting")
+        if not list(module.get("internal_milestones") or []):
+            raise ValueError("module detail must contain at least one milestone")
+        for milestone in _dict_list(module.get("internal_milestones")):
+            _validate_acceptance_consistency(milestone)
+        payload = self._module_payload(state, module)
+        return {
+            "type": "ModuleDetailArtifact",
+            "plan_id": _text(state.get("plan_id") or new_work_id("plan")),
+            "task_id": task_id,
+            "module_id": _text(module.get("module_id")),
+            "summary": _text(args.get("summary") or module.get("responsibility") or "Module detail."),
+            "sketch_ref": dict(state.get("sketch_ref") or {}),
+            "module": payload,
+            "milestones": list(payload.get("internal_milestones") or []),
+            "test_strategy": dict(payload.get("test_plan") or {}),
+            "positive_cases": _string_list(state.get("positive_cases")),
+            "negative_cases": _string_list(state.get("negative_cases")),
+            "evidence_expectations": _string_list(state.get("evidence_expectations")),
+            "sketch_revision_request": dict(state.get("sketch_revision_request") or {}),
+            "metadata": {
+                "plan_builder": {
+                    "version": 1,
+                    "plan_handle": state["plan_handle"],
+                    "stage": "module_detail",
+                    "lifecycle": _text(state.get("lifecycle") or "editing"),
+                },
+                "plan_revision": _coerce_int(state.get("plan_revision"), default=0),
+                "bound_module_id": _text(state.get("bound_module_id")),
+            },
+        }
+
     def _compile_artifact(self, state: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
         task_id = _text(state.get("task_id") or self.workspace.get("task_id"))
         if not task_id:
@@ -2988,8 +3677,6 @@ class PlanBuilderRuntime:
         kinds = [_text(module.get("kind")).lower() for module in modules]
         if kinds.count("prelude") > 1:
             raise ValueError("plan must contain at most one prelude module")
-        if kinds.count("join") != 1:
-            raise ValueError("plan must contain exactly one join module")
         if "module" not in kinds:
             raise ValueError("plan must contain at least one implementation module")
         if not _string_list(state.get("languages")):
@@ -3002,50 +3689,81 @@ class PlanBuilderRuntime:
         self._validate_gate_contract(state)
         module_payloads = [self._module_payload(state, module) for module in modules]
         topology = self._compile_topology(state)
-        assumptions = _string_list(args.get("assumptions"))
-        risks = _dict_list(args.get("risks"))
+        is_revision = isinstance(state.get("source_plan_ref"), dict)
+        assumptions = [] if is_revision else _string_list(args.get("assumptions"))
+        risks = _dict_list(state.get("risks")) if is_revision else _dict_list(args.get("risks"))
         if assumptions:
             risks = [*risks, *({"kind": "assumption", "summary": item} for item in assumptions)]
-        metadata = {
-            "languages": _normalize_language_ids(state.get("languages")),
-            "source_refs": _string_list(state.get("source_refs")),
-            "constraints": [_strip_handles(item) for item in state.get("constraints") or []],
-            "design_decisions": [_strip_handles(item) for item in state.get("design_decisions") or []],
-            "plan_builder": {
-                "version": 1,
-                "plan_handle": state["plan_handle"],
-                "lifecycle": _text(state.get("lifecycle") or "editing"),
-            },
-            "plan_revision": _coerce_int(state.get("plan_revision"), default=0),
+        source_artifact = dict(state.get("_revision_source_artifact") or {}) if is_revision else {}
+        source_metadata = dict(source_artifact.get("metadata") or {}) if isinstance(source_artifact.get("metadata"), dict) else {}
+        metadata = deepcopy(source_metadata)
+        metadata.update(
+            {
+                "languages": _normalize_language_ids(state.get("languages")),
+                "source_refs": _string_list(state.get("source_refs")),
+                "constraints": [_strip_handles(item) for item in state.get("constraints") or []],
+                "design_decisions": [_strip_handles(item) for item in state.get("design_decisions") or []],
+                "plan_revision": _coerce_int(state.get("plan_revision"), default=0),
+            }
+        )
+        source_plan_builder = dict(source_metadata.get("plan_builder") or {}) if isinstance(source_metadata.get("plan_builder"), dict) else {}
+        metadata["plan_builder"] = {
+            **source_plan_builder,
+            "version": 1,
+            "plan_handle": state["plan_handle"],
+            "lifecycle": _text(state.get("lifecycle") or "editing"),
         }
         workflow_next = _workflow_next_payload(state.get("workflow_next"))
         if workflow_next:
             metadata["workflow_next"] = workflow_next
+        else:
+            metadata.pop("workflow_next", None)
         gate_contract = _compiled_gate_contract(state)
         if gate_contract:
             metadata["gate_contract"] = gate_contract
+        else:
+            metadata.pop("gate_contract", None)
         source_acceptance_coverage = _gate_check_coverage_projection(state)
-        if source_acceptance_coverage:
+        coverage_unchanged = (
+            is_revision
+            and _text(state.get("_revision_gate_coverage_digest"))
+            == _json_value_digest(source_acceptance_coverage)
+        )
+        if source_acceptance_coverage and not coverage_unchanged:
             metadata["source_acceptance_coverage"] = source_acceptance_coverage
+        elif not source_acceptance_coverage:
+            metadata.pop("source_acceptance_coverage", None)
         if isinstance(state.get("source_plan_ref"), dict):
             metadata["revision_of"] = dict(state.get("source_plan_ref") or {})
-        return {
+        orchestration = deepcopy(dict(state.get("orchestration") or {}))
+        orchestration.setdefault("execution_shape", "fork_join_linear")
+        orchestration["topology"] = topology
+        orchestration.setdefault("coordination", "Pal manager dispatches closed module milestones through the validated plan topology.")
+        orchestration.setdefault("checkpoint_policy", "Each coder milestone produces a structured checkpoint for review before the next step.")
+        orchestration.setdefault("fallback_behavior", "If a gate fails, route reviewer findings into the repair/revision loop before continuing.")
+        cross_module_contracts = [
+            *self._cross_module_contracts(state),
+            *[deepcopy(item) for item in _dict_list(state.get("_revision_cross_module_contracts"))],
+        ]
+        artifact = {
             "plan_id": _text(state.get("plan_id") or new_work_id("plan")),
             "task_id": task_id,
-            "summary": _text(args.get("summary") or state.get("summary") or state.get("goal") or "Dispatchable plan."),
+            "summary": _text(state.get("summary") if is_revision else args.get("summary") or state.get("summary") or state.get("goal") or "Dispatchable plan."),
             "modules": module_payloads,
-            "cross_module_contracts": self._cross_module_contracts(state),
-            "orchestration": {
-                "execution_shape": "fork_join_linear",
-                "topology": topology,
-                "coordination": "Pal manager dispatches closed module milestones through the validated plan topology.",
-                "checkpoint_policy": "Each coder milestone produces a structured checkpoint for review before the next step.",
-                "fallback_behavior": "If a gate fails, route reviewer findings into the repair/revision loop before continuing.",
-            },
-            "system_test_plan": _dict_list(args.get("system_test_plan")) or [{"level": "system", "evidence": "Run the full feature workflow or explain why dogfood is not possible."}],
+            "cross_module_contracts": cross_module_contracts,
+            "orchestration": orchestration,
+            "system_test_plan": (
+                _dict_list(state.get("system_test_plan"))
+                if is_revision
+                else _dict_list(args.get("system_test_plan"))
+                or [{"level": "system", "evidence": "Run the full feature workflow or explain why dogfood is not possible."}]
+            ),
             "risks": risks,
             "metadata": metadata,
         }
+        if source_artifact:
+            return _merge_revision_artifact(source_artifact, artifact)
+        return artifact
 
     def _module_payload(self, state: dict[str, Any], module: dict[str, Any]) -> dict[str, Any]:
         metadata = {
@@ -3061,6 +3779,9 @@ class PlanBuilderRuntime:
         module_quality_criteria = _string_list(module.get("module_quality_criteria"))
         if module_quality_criteria:
             metadata["module_quality_criteria"] = module_quality_criteria
+        module_quality_criteria_details = _module_quality_criteria_details_payload(state, module)
+        if module_quality_criteria_details:
+            metadata["module_quality_criteria_details"] = module_quality_criteria_details
         risk_surfaces = _string_list(module.get("risk_surfaces"))
         if risk_surfaces:
             metadata["risk_surfaces"] = risk_surfaces
@@ -3124,7 +3845,7 @@ class PlanBuilderRuntime:
             "title": _text(milestone.get("title")),
             "task": _text(milestone.get("task")),
             "acceptance_criteria": [_text(item.get("criterion")) for item in acceptance_items],
-            "skill_refs": [],
+            "skill_refs": _string_list(milestone.get("skill_refs")),
             "test_plan": test_plan,
             "metadata": {key: value for key, value in metadata.items() if value not in ("", [], {})},
         }
@@ -3204,30 +3925,7 @@ class PlanBuilderRuntime:
         }
 
     def _cross_module_contracts(self, state: dict[str, Any]) -> list[dict[str, Any]]:
-        contracts: list[dict[str, Any]] = []
-        for item in list(state.get("constraints") or []):
-            if _text(item.get("strength")) in {"hard_contract", "chosen_contract"}:
-                contracts.append(
-                    {
-                        "contract_id": _text(item.get("id")),
-                        "kind": _text(item.get("kind")),
-                        "strength": _text(item.get("strength")),
-                        "statement": _text(item.get("statement")),
-                        "source_ref": _text(item.get("source_ref")),
-                    }
-                )
-        for item in list(state.get("design_decisions") or []):
-            if _text(item.get("strength")) in {"hard_contract", "chosen_contract"}:
-                contracts.append(
-                    {
-                        "contract_id": _text(item.get("id")),
-                        "kind": "design_decision",
-                        "strength": _text(item.get("strength")),
-                        "statement": _text(item.get("decision")),
-                        "rationale": _text(item.get("rationale")),
-                    }
-                )
-        return contracts
+        return _cross_module_contracts_from_state(state)
 
     def _validate_constraint_coverage(self, state: dict[str, Any]) -> None:
         referenced: set[str] = set()
@@ -3540,6 +4238,7 @@ class PlanBuilderRuntime:
         path = self._state_path(_text(state.get("plan_handle")))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        self.workspace["plan_builder_source_acceptance_coverage"] = _gate_check_coverage_projection(state)
 
     def _iter_states(self) -> list[dict[str, Any]]:
         root = self._state_root()
@@ -3580,6 +4279,519 @@ def plan_builder_tool_result(
     produced_artifacts: list[dict[str, Any]],
 ) -> CanonicalToolResult:
     return PlanBuilderRuntime(workspace=workspace, produced_artifacts=produced_artifacts).execute(call)
+
+
+def initialize_plan_builder_stage_draft(workspace: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    stage_meta = dict((metadata or {}).get("staged_planning") or {})
+    stage = _text(stage_meta.get("stage") or workspace.get("plan_builder_stage"))
+    if stage not in {"architecture_sketch", "module_detail"}:
+        return {}
+    runtime = PlanBuilderRuntime(workspace=dict(workspace), produced_artifacts=[])
+    task_id = _text(metadata.get("task_id") or workspace.get("task_id") or stage_meta.get("task_id"))
+    plan_id = _safe_id(stage_meta.get("plan_id") or metadata.get("plan_id") or f"plan_{task_id or 'staged'}", default_prefix="plan")
+    planning_depth = _text(stage_meta.get("planning_depth") or metadata.get("planning_depth") or workspace.get("planning_depth") or "sketch_only")
+    if stage == "architecture_sketch":
+        plan_handle = _text(stage_meta.get("plan_handle")) or (plan_id if plan_id.startswith("plan_") else f"plan_{plan_id}")
+        state_path = runtime._state_path(plan_handle)
+        if state_path.exists():
+            return {"plan_handle": plan_handle, "plan_id": plan_id, "planning_depth": planning_depth, "stage": stage}
+        gate_contract = _gate_contract_from_workspace(workspace)
+        state = {
+            "plan_handle": plan_handle,
+            "plan_id": plan_id,
+            "sketch_id": f"{plan_id}_sketch",
+            "task_id": task_id,
+            "goal": _text(metadata.get("planning_goal") or metadata.get("goal") or stage_meta.get("goal") or workspace.get("goal")),
+            "summary": _text(metadata.get("task_title") or stage_meta.get("summary") or metadata.get("goal") or "Architecture sketch"),
+            "languages": _normalize_language_ids(workspace.get("languages") or [workspace.get("primary_language")]),
+            "source_refs": _string_list(stage_meta.get("source_refs")),
+            "workflow_next": _workflow_next_payload(stage_meta.get("workflow_next")),
+            "gate_contract": gate_contract,
+            "locked_gate_check_refs": [f"gate:{int(check.get('index') or 0)}" for check in _gate_checks({"gate_contract": gate_contract})],
+            "constraints": [],
+            "design_decisions": [],
+            "modules": [],
+            "closed": False,
+            "lifecycle": "editing",
+            "plan_revision": _coerce_int(stage_meta.get("plan_revision"), default=0),
+            "planning_depth": planning_depth,
+            "plan_builder_stage": "architecture_sketch",
+            "handle_counters": {"constraint": 0, "decision": 0, "module": 0, "milestone": 0, "ac": 0},
+        }
+        runtime._save_state(state)
+        return {"plan_handle": plan_handle, "plan_id": plan_id, "planning_depth": planning_depth, "stage": stage}
+
+    sketch = _load_stage_artifact(stage_meta.get("sketch_artifact") or stage_meta.get("sketch_ref") or workspace.get("sketch_ref"))
+    validate_plan_sketch_artifact(sketch)
+    module_id = _explicit_module_id(stage_meta.get("module_id") or workspace.get("plan_builder_module_id") or workspace.get("bound_module_id"))
+    plan_handle = _text(stage_meta.get("plan_handle")) or f"{plan_id}_{_safe_id(module_id, default_prefix='module')}"
+    if not plan_handle.startswith("plan_"):
+        plan_handle = f"plan_{plan_handle}"
+    state_path = runtime._state_path(plan_handle)
+    if state_path.exists():
+        return {"plan_handle": plan_handle, "plan_id": plan_id, "planning_depth": planning_depth, "stage": stage, "module_id": module_id}
+    state = _state_from_sketch_payload(
+        sketch,
+        plan_handle=plan_handle,
+        bound_module_id=module_id,
+        sketch_ref=dict(stage_meta.get("sketch_ref") or stage_meta.get("sketch_artifact") or {}),
+    )
+    state["plan_builder_stage"] = "module_detail"
+    state["planning_depth"] = planning_depth
+    state["plan_revision"] = _coerce_int(stage_meta.get("plan_revision"), default=_coerce_int(state.get("plan_revision"), default=0))
+    _bound_module_detail_module(state)
+    runtime._save_state(state)
+    return {"plan_handle": plan_handle, "plan_id": state.get("plan_id"), "planning_depth": planning_depth, "stage": stage, "module_id": module_id}
+
+
+def validate_plan_sketch_artifact(payload: dict[str, Any]) -> dict[str, Any]:
+    data = dict(payload or {})
+    raw_type = _text(data.get("type") or data.get("output_type"))
+    if raw_type and raw_type != "PlanSketchArtifact":
+        raise ValueError(f"expected PlanSketchArtifact, got {raw_type}")
+    errors: list[str] = []
+    modules = _dict_list(data.get("modules"))
+    if not _text(data.get("task_id")):
+        errors.append("task_id is required")
+    if not modules:
+        errors.append("modules is required")
+    module_ids: set[str] = {
+        _text(module.get("module_id"))
+        for module in modules
+        if _text(module.get("module_id"))
+    }
+    duplicate_ids: set[str] = set()
+    seen_ids: set[str] = set()
+    for module in modules:
+        module_id = _text(module.get("module_id"))
+        if not module_id:
+            continue
+        if module_id in seen_ids:
+            duplicate_ids.add(module_id)
+        seen_ids.add(module_id)
+    owned_area_owner: dict[str, str] = {}
+    for index, module in enumerate(modules):
+        module_id = _text(module.get("module_id"))
+        if not module_id:
+            errors.append(f"modules[{index}].module_id is required")
+            module_id = f"module_{index}"
+        if module_id in duplicate_ids:
+            errors.append(f"modules[{index}].module_id is duplicated: {module_id}")
+        for key in ("owned_area", "responsibility", "ownership", "lifecycle", "invariants"):
+            value = module.get(key)
+            if key == "responsibility":
+                if not _text(value):
+                    errors.append(f"modules[{index}].{key} is required")
+            elif not _string_list(value):
+                errors.append(f"modules[{index}].{key} is required")
+        try:
+            module_owned_areas = normalize_plan_write_areas(
+                module.get("owned_area"),
+                field_name=f"modules[{index}].owned_area",
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+            module_owned_areas = []
+        for raw_area in module_owned_areas:
+            normalized = _normalized_owned_area_key(raw_area)
+            owner = owned_area_owner.get(normalized)
+            if owner and owner != module_id:
+                errors.append(f"modules[{index}].owned_area duplicates {owner}: {raw_area}")
+            else:
+                owned_area_owner[normalized] = module_id
+        for interface in [*_dict_list(module.get("provided_interfaces")), *_dict_list(module.get("consumed_interfaces"))]:
+            for key in ("name", "shape", "lifecycle", "ownership", "error_behavior", "compatibility"):
+                if not _text(interface.get(key)):
+                    errors.append(f"module {module_id} interface {interface.get('name') or '-'} missing {key}")
+        for interface in _dict_list(module.get("consumed_interfaces")):
+            producer = _text(interface.get("producer"))
+            if producer and producer not in module_ids and producer.lower() not in {"external", "reference", "reference_only", "external_reference"}:
+                errors.append(f"module {module_id} consumed interface {interface.get('name') or '-'} has unknown producer {producer}")
+    topology_validation: dict[str, Any] = {}
+    try:
+        topology_validation = work_start_topology_validation(
+            {"execution_shape": "fork_join_linear", "topology": dict(data.get("topology") or {})},
+            known_module_ids=module_ids,
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+    gate_contract = _compiled_stage_gate_contract(data)
+    coverage = _dict_list(dict(data.get("metadata") or {}).get("source_acceptance_coverage"))
+    covered_refs = {
+        _text(item.get("ref"))
+        for item in coverage
+        if _dict_list(item.get("evidence"))
+    }
+    for check in _dict_list(gate_contract.get("checks")):
+        ref = _text(check.get("ref") or f"gate:{int(check.get('index') or 0)}")
+        if _gate_priority(check.get("priority")) == "hard" and _gate_check_kind(check.get("kind")) in {"semantic", "hybrid"} and ref not in covered_refs:
+            errors.append(f"{ref} is not covered by sketch evidence: {check.get('claim')}")
+    if errors:
+        raise ValueError("invalid PlanSketchArtifact: " + "; ".join(errors))
+    return {
+        "status": "valid",
+        "artifact_type": "PlanSketchArtifact",
+        "plan_id": _text(data.get("plan_id")),
+        "task_id": _text(data.get("task_id")),
+        "module_count": len(modules),
+        "planning_depth": _text(data.get("planning_depth") or "sketch_only"),
+        "node_order": list(topology_validation.get("node_order") or []),
+        "module_order": list(topology_validation.get("module_order") or []),
+    }
+
+
+def validate_module_detail_artifact(payload: dict[str, Any]) -> dict[str, Any]:
+    data = dict(payload or {})
+    raw_type = _text(data.get("type") or data.get("output_type"))
+    if raw_type and raw_type != "ModuleDetailArtifact":
+        raise ValueError(f"expected ModuleDetailArtifact, got {raw_type}")
+    errors: list[str] = []
+    module_id = _text(data.get("module_id"))
+    module = dict(data.get("module") or {})
+    if not module_id:
+        errors.append("module_id is required")
+    if _text(module.get("module_id")) and _text(module.get("module_id")) != module_id:
+        errors.append("module.module_id must match module_id")
+    try:
+        module_owned_areas = normalize_plan_write_areas(
+            module.get("owned_area"),
+            field_name="module.owned_area",
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+        module_owned_areas = []
+    if not module_owned_areas:
+        errors.append("module.owned_area is required")
+    module_milestones = _dict_list(module.get("internal_milestones"))
+    milestones = module_milestones or _dict_list(data.get("milestones"))
+    if not module_milestones:
+        errors.append("module.internal_milestones is required")
+    if not milestones:
+        errors.append("milestones is required")
+    has_negative = False
+    has_evidence = False
+    for index, milestone in enumerate(milestones):
+        if not _text(milestone.get("task") or milestone.get("title")):
+            errors.append(f"milestones[{index}].task is required")
+        if not _string_list(milestone.get("acceptance_criteria")):
+            errors.append(f"milestones[{index}].acceptance_criteria is required")
+        metadata = dict(milestone.get("metadata") or {})
+        changed_area_field = f"milestones[{index}].metadata.changed_area"
+        try:
+            changed_areas = normalize_plan_write_areas(
+                metadata.get("changed_area"),
+                field_name=changed_area_field,
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+            changed_areas = []
+        for changed_area in changed_areas:
+            if module_owned_areas and not any(
+                plan_write_area_covers(owned_area, changed_area)
+                for owned_area in module_owned_areas
+            ):
+                errors.append(f"{changed_area_field} is outside module.owned_area: {changed_area}")
+        checklist = _dict_list(metadata.get("acceptance_checklist"))
+        for item in checklist:
+            if _string_list(item.get("negative_cases")):
+                has_negative = True
+            if _text(item.get("evidence_expectation")):
+                has_evidence = True
+        if _string_list(metadata.get("checkpoint_admission_evidence")):
+            has_evidence = True
+    for interface in [*_dict_list(module.get("provided_interfaces")), *_dict_list(module.get("consumed_interfaces"))]:
+        for key in ("name", "shape", "lifecycle", "ownership", "error_behavior", "compatibility"):
+            if not _text(interface.get(key)):
+                errors.append(f"interface {interface.get('name') or '-'} missing {key}")
+    if not has_negative and not _string_list(data.get("negative_cases")):
+        errors.append("negative_cases or milestone acceptance negative_cases are required")
+    if not has_evidence and not _string_list(data.get("evidence_expectations")):
+        errors.append("evidence expectations are required")
+    if errors:
+        raise ValueError("invalid ModuleDetailArtifact: " + "; ".join(errors))
+    return {
+        "status": "valid",
+        "artifact_type": "ModuleDetailArtifact",
+        "plan_id": _text(data.get("plan_id")),
+        "task_id": _text(data.get("task_id")),
+        "module_id": module_id,
+        "milestone_count": len(milestones),
+    }
+
+
+def compile_final_plan_from_staged_artifacts(
+    sketch_artifact: dict[str, Any],
+    module_detail_artifacts: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
+    *,
+    workflow_next: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    sketch = dict(sketch_artifact or {})
+    validate_plan_sketch_artifact(sketch)
+    detail_by_module: dict[str, dict[str, Any]] = {}
+    for detail in [dict(item) for item in list(module_detail_artifacts or []) if isinstance(item, dict)]:
+        validate_module_detail_artifact(detail)
+        detail_by_module[_text(detail.get("module_id"))] = detail
+    modules: list[dict[str, Any]] = []
+    for sketch_module in _dict_list(sketch.get("modules")):
+        module_id = _text(sketch_module.get("module_id"))
+        detail = detail_by_module.get(module_id)
+        if detail:
+            module = dict(detail.get("module") or {})
+            module.setdefault("module_id", module_id)
+            module.setdefault("owned_area", _string_list(sketch_module.get("owned_area")))
+            module.setdefault("responsibility", _text(sketch_module.get("responsibility")))
+            module.setdefault("ownership", _string_list(sketch_module.get("ownership")))
+            module.setdefault("lifecycle", _string_list(sketch_module.get("lifecycle")))
+            module.setdefault("invariants", _string_list(sketch_module.get("invariants")))
+            modules.append(module)
+            continue
+        modules.append(_synthetic_module_from_sketch(sketch_module))
+    metadata = dict(sketch.get("metadata") or {})
+    metadata["plan_revision"] = _coerce_int(metadata.get("plan_revision"), default=0)
+    metadata["staged_planning"] = {
+        "source_artifact": "PlanSketchArtifact",
+        "planning_depth": _text(sketch.get("planning_depth") or "sketch_only"),
+        "module_detail_count": len(detail_by_module),
+    }
+    next_payload = _workflow_next_payload(workflow_next or metadata.get("workflow_next") or {"profile": "software_engineering.coder", "artifact_type": "implementation_plan", "adapter": "accepted_plan"})
+    if next_payload:
+        metadata["workflow_next"] = next_payload
+    final_plan = {
+        "type": "FinalPlanArtifact",
+        "plan_id": _text(sketch.get("plan_id") or new_work_id("plan")),
+        "task_id": _text(sketch.get("task_id")),
+        "summary": _text(sketch.get("summary") or "Compiled implementation plan."),
+        "modules": modules,
+        "cross_module_contracts": _dict_list(sketch.get("cross_module_contracts")),
+        "orchestration": {
+            "execution_shape": "fork_join_linear",
+            "topology": dict(sketch.get("topology") or {}),
+            "coordination": "Pal manager dispatches modules from the staged architect plan.",
+            "checkpoint_policy": "Each coder milestone produces a checkpoint before downstream work continues.",
+            "fallback_behavior": "Gate failures route to repair or plan revision before continuing.",
+        },
+        "system_test_plan": _dict_list(sketch.get("system_test_plan")) or [{"level": "system", "evidence": "Run or explain the smallest faithful end-to-end verification path."}],
+        "risks": _dict_list(sketch.get("risks")),
+        "metadata": metadata,
+    }
+    validate_dispatchable_plan_artifact(final_plan)
+    return final_plan
+
+
+def _synthetic_module_from_sketch(sketch_module: dict[str, Any]) -> dict[str, Any]:
+    module = dict(sketch_module or {})
+    module_id = _text(module.get("module_id")) or "implementation"
+    criteria = _string_list(dict(module.get("metadata") or {}).get("module_quality_criteria")) or [
+        f"{module_id} satisfies its module responsibility and declared interfaces.",
+    ]
+    acceptance_checklist = [
+        {
+            "id": _public_id("AC", index + 1),
+            "criterion": criterion,
+            "evidence_expectation": "Focused implementation evidence and reviewer checks prove this module contract.",
+            "negative_cases": ["Invalid, empty, missing, or incompatible inputs are rejected or handled according to the module contract."],
+        }
+        for index, criterion in enumerate(criteria)
+    ]
+    module["internal_milestones"] = [
+        {
+            "milestone_id": f"{module_id}_m1",
+            "title": f"Implement {module_id}",
+            "task": _text(module.get("responsibility") or f"Implement {module_id} according to the architecture sketch."),
+            "acceptance_criteria": criteria,
+            "skill_refs": [],
+            "test_plan": {"required": ["Run focused tests or checks for the module contract."]},
+            "metadata": {
+                "changed_area": _string_list(module.get("owned_area")),
+                "acceptance_checklist": acceptance_checklist,
+                "checkpoint_admission_evidence": ["Focused tests/checks or a concrete blocker prove the milestone boundary."],
+            },
+        }
+    ]
+    return module
+
+
+def load_stage_artifact_ref(ref: Any) -> dict[str, Any]:
+    return _load_stage_artifact(ref)
+
+
+def _plan_builder_stage(state: dict[str, Any], workspace: dict[str, Any]) -> str:
+    return _text(state.get("plan_builder_stage") or _plan_builder_stage_from_workspace(workspace))
+
+
+def _plan_builder_stage_from_workspace(workspace: dict[str, Any]) -> str:
+    return _text(workspace.get("plan_builder_stage") or workspace.get("planning_stage")).strip().lower()
+
+
+def _plan_tool_accepts_arg(tool_name: str, arg_name: str) -> bool:
+    normalized = str(tool_name or "").strip()
+    spec = PLAN_BUILDER_TOOL_SPECS.get(normalized)
+    if spec is None and normalized in PLAN_BUILDER_ALIASES:
+        spec = PLAN_BUILDER_ALIASES[normalized].tool_spec()
+    schema = dict((spec or {}).get("parameters_schema") or {})
+    return arg_name in dict(schema.get("properties") or {})
+
+
+def _assert_bound_module_detail(state: dict[str, Any], module: dict[str, Any]) -> None:
+    wanted = _text(state.get("bound_module_id"))
+    if not wanted:
+        raise ValueError("module_detail stage is missing bound_module_id")
+    if _text(module.get("module_id")) != wanted:
+        raise ValueError(f"module_detail stage is bound to {wanted}, not {module.get('module_id') or module.get('handle')}")
+
+
+def _bound_module_detail_module(state: dict[str, Any]) -> dict[str, Any]:
+    wanted = _text(state.get("bound_module_id"))
+    if not wanted:
+        raise ValueError("module_detail stage is missing bound_module_id")
+    return _find_module_by_id(state, wanted)
+
+
+def _stage_artifact_json(artifact: dict[str, Any], *, plan_revision: int, lifecycle: str) -> str:
+    payload = dict(artifact)
+    payload["plan_revision"] = max(0, int(plan_revision or 0))
+    metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
+    metadata["plan_revision"] = payload["plan_revision"]
+    plan_builder = dict(metadata.get("plan_builder") or {}) if isinstance(metadata.get("plan_builder"), dict) else {}
+    if lifecycle:
+        plan_builder["lifecycle"] = lifecycle
+    if plan_builder:
+        metadata["plan_builder"] = plan_builder
+    payload["metadata"] = metadata
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+
+
+def _load_stage_artifact(ref: Any) -> dict[str, Any]:
+    if isinstance(ref, dict) and isinstance(ref.get("artifact"), dict):
+        ref = ref.get("artifact")
+    if isinstance(ref, dict) and isinstance(ref.get("payload"), dict):
+        return dict(ref.get("payload") or {})
+    path_text = ""
+    if isinstance(ref, dict):
+        path_text = _text(ref.get("path") or ref.get("stage_path"))
+        if not path_text:
+            artifact_dir = _text(ref.get("artifact_dir"))
+            relative_path = _text(ref.get("relative_path"))
+            if artifact_dir and relative_path:
+                path_text = str(Path(artifact_dir).expanduser() / relative_path)
+    elif isinstance(ref, str):
+        path_text = _text(ref)
+    if not path_text:
+        raise ValueError("stage artifact path is required")
+    path = Path(path_text).expanduser()
+    content = path.read_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    if isinstance(ref, dict):
+        expected = _text(ref.get("sha256"))
+        if expected and expected != digest:
+            raise ValueError(f"stage artifact sha256 mismatch for {path}")
+    payload = json.loads(content.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("stage artifact JSON must be an object")
+    return payload
+
+
+def _state_from_sketch_payload(
+    payload: dict[str, Any],
+    *,
+    plan_handle: str,
+    bound_module_id: str,
+    sketch_ref: dict[str, Any],
+) -> dict[str, Any]:
+    sketch = dict(payload or {})
+    metadata = dict(sketch.get("metadata") or {}) if isinstance(sketch.get("metadata"), dict) else {}
+    constraints = _state_constraints_from_metadata(metadata, plan_handle)
+    constraint_by_public = {_text(item.get("id")): _text(item.get("handle")) for item in constraints}
+    decisions = _state_decisions_from_metadata(metadata, plan_handle, constraints)
+    gate_contract = _normalize_gate_contract(metadata.get("gate_contract"))
+    modules: list[dict[str, Any]] = []
+    for index, raw_module in enumerate(_dict_list(sketch.get("modules")), start=1):
+        module_handle = f"module_{plan_handle}_{index}"
+        module_metadata = dict(raw_module.get("metadata") or {})
+        modules.append(
+            {
+                "handle": module_handle,
+                "module_id": _text(raw_module.get("module_id")),
+                "kind": _text(module_metadata.get("module_kind") or "module"),
+                "depends_on_module_handles": [],
+                "responsibility": _text(raw_module.get("responsibility")),
+                "owned_area": _string_list(raw_module.get("owned_area")),
+                "ownership": _string_list(raw_module.get("ownership")),
+                "lifecycle": _string_list(raw_module.get("lifecycle")),
+                "invariants": _string_list(raw_module.get("invariants")),
+                "scope_guard": _text(module_metadata.get("scope_guard")),
+                "constraint_handles": [],
+                "decision_handles": [],
+                    "gate_check_refs": _gate_check_ref_list(module_metadata.get("gate_check_refs")),
+                    "languages": _normalize_language_ids(module_metadata.get("languages")),
+                    "executor_profile": _text(module_metadata.get("executor_profile")),
+                    "module_quality_criteria": _string_list(module_metadata.get("module_quality_criteria")),
+                    "module_quality_criteria_details": _state_module_quality_criteria_details(
+                        module_metadata.get("module_quality_criteria_details"),
+                        constraint_by_public,
+                    ),
+                    "risk_surfaces": _string_list(module_metadata.get("risk_surfaces")),
+                    "delivery_surfaces": _string_list(module_metadata.get("delivery_surfaces")),
+                "provided_interfaces": [
+                    _state_interface(item, module_handle=module_handle, direction="provided", index=interface_index)
+                    for interface_index, item in enumerate(_dict_list(raw_module.get("provided_interfaces")), start=1)
+                ],
+                "consumed_interfaces": [
+                    _state_interface(item, module_handle=module_handle, direction="consumed", index=interface_index)
+                    for interface_index, item in enumerate(_dict_list(raw_module.get("consumed_interfaces")), start=1)
+                ],
+                "internal_milestones": [],
+                "closed": True,
+            }
+        )
+    module_by_id = {_text(module.get("module_id")): module for module in modules}
+    node_modules = {
+        _text(node.get("node_id")): _text(node.get("module_id"))
+        for node in _dict_list(dict(sketch.get("topology") or {}).get("nodes"))
+    }
+    for node in _dict_list(dict(sketch.get("topology") or {}).get("nodes")):
+        module = module_by_id.get(_text(node.get("module_id")))
+        if not module:
+            continue
+        dependencies: list[str] = []
+        for dep_node_id in _string_list(node.get("depends_on")):
+            dep_module = module_by_id.get(node_modules.get(dep_node_id, ""))
+            if dep_module:
+                dependencies.append(_text(dep_module.get("handle")))
+        module["depends_on_module_handles"] = _dedupe_strings(dependencies)
+    return {
+        "plan_handle": plan_handle,
+        "plan_id": _text(sketch.get("plan_id")),
+        "task_id": _text(sketch.get("task_id")),
+        "goal": _text(sketch.get("summary")),
+        "summary": _text(sketch.get("summary")),
+        "languages": _normalize_language_ids(metadata.get("languages")),
+        "source_refs": _string_list(metadata.get("source_refs")),
+        "workflow_next": _workflow_next_payload(metadata.get("workflow_next")),
+        "gate_contract": gate_contract,
+        "constraints": constraints,
+        "design_decisions": decisions,
+        "modules": modules,
+        "closed": False,
+        "lifecycle": "editing",
+        "plan_revision": _coerce_int(sketch.get("plan_revision") or metadata.get("plan_revision"), default=0),
+        "plan_builder_stage": "module_detail",
+        "planning_depth": _text(sketch.get("planning_depth") or "module_detail"),
+        "bound_module_id": _explicit_module_id(bound_module_id),
+        "sketch_ref": dict(sketch_ref or {}),
+        "handle_counters": {
+            "constraint": len(constraints),
+            "decision": len(decisions),
+            "module": len(modules),
+            "milestone": 0,
+            "ac": 0,
+        },
+    }
+
+
+def _compiled_stage_gate_contract(payload: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
+    return _normalize_gate_contract(metadata.get("gate_contract"))
 
 
 def _plan_review_markdown(artifact: dict[str, Any], validation: dict[str, Any], *, plan_revision: int) -> str:
@@ -3634,6 +4846,7 @@ def _plan_review_markdown(artifact: dict[str, Any], validation: dict[str, Any], 
         _append_plan_review_list(lines, "Lifecycle", _string_list(module.get("lifecycle")), indent="")
         _append_plan_review_list(lines, "Invariants", _string_list(module.get("invariants")), indent="")
         _append_plan_review_list(lines, "Quality criteria", _string_list(module_metadata.get("module_quality_criteria")), indent="")
+        _append_plan_review_quality_details(lines, _dict_list(module_metadata.get("module_quality_criteria_details")))
         _append_plan_review_list(lines, "Risk surfaces", _string_list(module_metadata.get("risk_surfaces")), indent="")
         _append_plan_review_list(lines, "Delivery surfaces", _string_list(module_metadata.get("delivery_surfaces")), indent="")
         provided = _dict_list(module.get("provided_interfaces"))
@@ -3735,6 +4948,27 @@ def _append_plan_review_list(lines: list[str], label: str, items: list[str], *, 
     lines.append(f"{indent}- {label}:")
     for item in items:
         lines.append(f"{indent}  - {item}")
+
+
+def _append_plan_review_quality_details(lines: list[str], details: list[dict[str, Any]]) -> None:
+    if not details:
+        return
+    lines.append("- Quality detail refs:")
+    for detail in details:
+        criterion = _text(detail.get("criterion")) or "criterion"
+        lines.append(f"  - {criterion}")
+        source_refs = _string_list(detail.get("source_refs"))
+        if source_refs:
+            lines.append("    - Source refs: " + ", ".join(f"`{item}`" for item in source_refs))
+        gate_refs = _gate_check_ref_list(detail.get("gate_check_refs"))
+        if gate_refs:
+            lines.append("    - Gate refs: " + ", ".join(f"`{item}`" for item in gate_refs))
+        constraint_refs = _string_list(detail.get("constraint_refs") or detail.get("linked_constraint_refs"))
+        if constraint_refs:
+            lines.append("    - Constraint refs: " + ", ".join(f"`{item}`" for item in constraint_refs))
+        evidence = _text(detail.get("evidence_expectation"))
+        if evidence:
+            lines.append(f"    - Evidence: {evidence}")
 
 
 def _plan_review_dependency_labels(value: Any, module_by_node_id: dict[str, str]) -> list[str]:
@@ -3884,6 +5118,99 @@ def _final_plan_json(artifact: dict[str, Any], *, plan_revision: int, lifecycle:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
 
 
+def _reject_revision_submit_overrides(state: dict[str, Any], args: dict[str, Any]) -> None:
+    if not isinstance(state.get("source_plan_ref"), dict):
+        return
+    overrides = [key for key in ("summary", "system_test_plan", "risks", "assumptions") if key in args]
+    if overrides:
+        raise ValueError(
+            "revision submit only freezes the checked-out draft; update intentional top-level changes with "
+            f"plan_update_plan first and submit only plan_handle (unexpected submit fields: {', '.join(overrides)})"
+        )
+
+
+def _json_value_digest(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _cross_module_contracts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
+    contracts: list[dict[str, Any]] = []
+    for item in list(state.get("constraints") or []):
+        if _text(item.get("strength")) in {"hard_contract", "chosen_contract"}:
+            contracts.append(
+                {
+                    "contract_id": _text(item.get("id")),
+                    "kind": _text(item.get("kind")),
+                    "strength": _text(item.get("strength")),
+                    "statement": _text(item.get("statement")),
+                    "source_ref": _text(item.get("source_ref")),
+                }
+            )
+    for item in list(state.get("design_decisions") or []):
+        if _text(item.get("strength")) in {"hard_contract", "chosen_contract"}:
+            contracts.append(
+                {
+                    "contract_id": _text(item.get("id")),
+                    "kind": "design_decision",
+                    "strength": _text(item.get("strength")),
+                    "statement": _text(item.get("decision")),
+                    "rationale": _text(item.get("rationale")),
+                }
+            )
+    return contracts
+
+
+_REVISION_KEYED_LIST_FIELDS: dict[str, str] = {
+    "modules": "module_id",
+    "internal_milestones": "milestone_id",
+    "provided_interfaces": "name",
+    "consumed_interfaces": "name",
+    "cross_module_contracts": "contract_id",
+    "constraints": "id",
+    "design_decisions": "id",
+    "acceptance_checklist": "id",
+    "implementation_checklist": "id",
+    "nodes": "node_id",
+}
+
+
+def _merge_revision_artifact(source: dict[str, Any], compiled: dict[str, Any]) -> dict[str, Any]:
+    merged = _merge_revision_value(source, compiled)
+    return dict(merged) if isinstance(merged, dict) else deepcopy(compiled)
+
+
+def _merge_revision_value(source: Any, compiled: Any, *, field_name: str = "") -> Any:
+    if isinstance(source, dict) and isinstance(compiled, dict):
+        merged = deepcopy(source)
+        for key, value in compiled.items():
+            merged[key] = _merge_revision_value(source.get(key), value, field_name=str(key))
+        return merged
+    if isinstance(source, list) and isinstance(compiled, list):
+        identity_key = _REVISION_KEYED_LIST_FIELDS.get(field_name)
+        if not identity_key:
+            return deepcopy(compiled)
+        source_by_id = {
+            _text(item.get(identity_key)): item
+            for item in source
+            if isinstance(item, dict) and _text(item.get(identity_key))
+        }
+        merged_items: list[Any] = []
+        for item in compiled:
+            if not isinstance(item, dict):
+                merged_items.append(deepcopy(item))
+                continue
+            identity = _text(item.get(identity_key))
+            baseline = source_by_id.get(identity)
+            merged_items.append(
+                _merge_revision_value(baseline, item)
+                if isinstance(baseline, dict)
+                else deepcopy(item)
+            )
+        return merged_items
+    return deepcopy(compiled)
+
+
 def _state_from_plan_payload(
     payload: dict[str, Any],
     *,
@@ -3958,6 +5285,7 @@ def _state_from_plan_payload(
                     "gate_check_refs": _gate_check_ref_list(milestone_metadata.get("gate_check_refs")),
                     "languages": _normalize_language_ids(milestone_metadata.get("languages")),
                     "tests_required": _string_list((milestone.test_plan or {}).get("required")),
+                    "skill_refs": list(milestone.skill_refs),
                     "public_api_added": _text(milestone_metadata.get("public_api_added")),
                     "checkpoint_admission_evidence": _string_list(milestone_metadata.get("checkpoint_admission_evidence"))
                     or _string_list((milestone.test_plan or {}).get("checkpoint_admission")),
@@ -3982,14 +5310,18 @@ def _state_from_plan_payload(
                 "invariants": list(module.invariants),
                 "scope_guard": _text(module_metadata.get("scope_guard")),
                 "constraint_handles": _handles_from_public_refs(module_metadata.get("constraint_refs"), constraint_by_public),
-                "decision_handles": _handles_from_public_refs(module_metadata.get("decision_refs"), decision_by_public),
-                "gate_check_refs": _gate_check_ref_list(module_metadata.get("gate_check_refs")),
-                "languages": _normalize_language_ids(module_metadata.get("languages")),
-                "executor_profile": _text(module_metadata.get("executor_profile") or executor_by_module_id.get(module.module_id)),
-                "module_quality_criteria": _string_list(module_metadata.get("module_quality_criteria"))
-                or _string_list((module.test_plan or {}).get("module_quality")),
-                "risk_surfaces": _string_list(module_metadata.get("risk_surfaces")),
-                "delivery_surfaces": _string_list(module_metadata.get("delivery_surfaces")),
+                    "decision_handles": _handles_from_public_refs(module_metadata.get("decision_refs"), decision_by_public),
+                    "gate_check_refs": _gate_check_ref_list(module_metadata.get("gate_check_refs")),
+                    "languages": _normalize_language_ids(module_metadata.get("languages")),
+                    "executor_profile": _text(module_metadata.get("executor_profile") or executor_by_module_id.get(module.module_id)),
+                    "module_quality_criteria": _string_list(module_metadata.get("module_quality_criteria"))
+                    or _string_list((module.test_plan or {}).get("module_quality")),
+                    "module_quality_criteria_details": _state_module_quality_criteria_details(
+                        module_metadata.get("module_quality_criteria_details"),
+                        constraint_by_public,
+                    ),
+                    "risk_surfaces": _string_list(module_metadata.get("risk_surfaces")),
+                    "delivery_surfaces": _string_list(module_metadata.get("delivery_surfaces")),
                 "provided_interfaces": [_state_interface(item, module_handle=module_handle, direction="provided", index=index) for index, item in enumerate(module.provided_interfaces, start=1)],
                 "consumed_interfaces": [_state_interface(item, module_handle=module_handle, direction="consumed", index=index) for index, item in enumerate(module.consumed_interfaces, start=1)],
                 "internal_milestones": milestones,
@@ -4009,6 +5341,9 @@ def _state_from_plan_payload(
         "constraints": constraints,
         "design_decisions": decisions,
         "modules": modules,
+        "system_test_plan": [deepcopy(item) for item in _dict_list(payload.get("system_test_plan"))],
+        "risks": [deepcopy(item) for item in _dict_list(payload.get("risks"))],
+        "orchestration": deepcopy(dict(payload.get("orchestration") or {})),
         "closed": False,
         "lifecycle": _text(plan_builder.get("lifecycle") or "editing"),
         "plan_revision": max(0, int(plan_revision or 0)),
@@ -4022,6 +5357,18 @@ def _state_from_plan_payload(
     }
     if source_plan_ref:
         state["source_plan_ref"] = dict(source_plan_ref)
+        state["_revision_source_artifact"] = deepcopy(payload)
+        known_contract_ids = {
+            _text(item.get("contract_id"))
+            for item in _cross_module_contracts_from_state(state)
+            if _text(item.get("contract_id"))
+        }
+        state["_revision_cross_module_contracts"] = [
+            deepcopy(item)
+            for item in _dict_list(payload.get("cross_module_contracts"))
+            if _text(item.get("contract_id")) not in known_contract_ids
+        ]
+        state["_revision_gate_coverage_digest"] = _json_value_digest(_gate_check_coverage_projection(state))
     return state
 
 
@@ -4115,29 +5462,6 @@ def _revision_item_by_id(state: dict[str, Any], item_id: str) -> dict[str, Any]:
     raise ValueError(f"unknown plan revision checklist item_id: {requested}")
 
 
-def _canonical_plan_builder_tool_name(value: Any) -> str:
-    raw = _text(value)
-    if not raw:
-        return ""
-    if raw in PLAN_BUILDER_TOOL_SPECS:
-        return raw
-    if raw in PLAN_BUILDER_ALIASES:
-        return raw
-    candidates: list[str] = []
-    if raw.startswith("plan_"):
-        candidates.append(f"op_minion_{raw}")
-    if raw.startswith("minion_plan_"):
-        candidates.append(f"op_{raw}")
-    candidates.append(raw if raw.startswith("op_") else f"op_minion_plan_{raw}")
-    for candidate in candidates:
-        if candidate in PLAN_BUILDER_TOOL_SPECS or candidate in PLAN_BUILDER_ALIASES:
-            return candidate
-    for candidate in PLAN_BUILDER_TOOL_SPECS:
-        if candidate.replace("op_minion_", "") == raw or candidate.endswith(raw):
-            return candidate
-    return raw
-
-
 def _mark_revision_item_resolved(
     item: dict[str, Any],
     *,
@@ -4151,7 +5475,7 @@ def _mark_revision_item_resolved(
         "evidence": _text(evidence)[:700],
     }
     if tool:
-        resolution["tool"] = _canonical_plan_builder_tool_name(tool)
+        resolution["tool"] = _text(tool)
     if applied_args:
         resolution["applied_args"] = dict(applied_args)
     item["resolution"] = {key: value for key, value in resolution.items() if value not in ("", [], {}, None)}
@@ -4220,7 +5544,7 @@ def _revision_checklist_llm_text(checklist: list[dict[str, Any]]) -> str:
         reject_reason = _text(item.get("reject_reason"))
         target = _text(item.get("target_handle"))
         target_path = _text(item.get("target_path") or dict(item.get("target_node") or {}).get("path"))
-        suggested_tool = _canonical_plan_builder_tool_name(item.get("suggested_tool"))
+        suggested_tool = _text(item.get("suggested_tool"))
         suggested_args = dict(item.get("suggested_args") or {}) if isinstance(item.get("suggested_args"), dict) else {}
         resolution = dict(item.get("resolution") or {}) if isinstance(item.get("resolution"), dict) else {}
         route = " -> ".join(_string_list(item.get("suggested_tool_route")))
@@ -4402,7 +5726,11 @@ def _plan_snapshot(state: dict[str, Any], *, full: bool) -> dict[str, Any]:
         "handle_tree": handle_tree,
     }
     if full:
-        result["state"] = state
+        result["state"] = {
+            key: value
+            for key, value in state.items()
+            if not str(key).startswith("_revision_")
+        }
     return result
 
 
@@ -5354,6 +6682,156 @@ def _acceptance_criteria_list(value: Any) -> list[dict[str, Any]]:
             item["criterion"] = criterion
         result.append(_acceptance_criterion_defaults(item))
     return result
+
+
+def _module_acceptance_criteria_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list | tuple):
+        return []
+    result: list[dict[str, Any]] = []
+    for raw in value:
+        if isinstance(raw, str):
+            criterion = _text(raw)
+            if criterion:
+                result.append({"criterion": criterion})
+            continue
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        criterion = _text(
+            item.get("criterion")
+            or item.get("description")
+            or item.get("summary")
+            or item.get("text")
+            or item.get("acceptance")
+        )
+        if criterion:
+            item["criterion"] = criterion
+            result.append(item)
+    return result
+
+
+def _module_acceptance_criterion_text(
+    raw: dict[str, Any],
+    *,
+    constraint_handles: list[str],
+    gate_check_refs: list[str],
+) -> str:
+    criterion = _required(raw, "criterion")
+    details: list[str] = []
+    evidence = _text(raw.get("evidence_expectation"))
+    if evidence:
+        details.append(f"Evidence: {evidence}")
+    negative_cases = _string_list(raw.get("negative_cases"))
+    if negative_cases:
+        details.append("Negative/boundary cases: " + "; ".join(negative_cases))
+    quantifier = _text(raw.get("quantifier"))
+    if quantifier:
+        details.append(f"Quantifier: {quantifier}")
+    if constraint_handles:
+        details.append("Constraint handles: " + ", ".join(constraint_handles))
+    if gate_check_refs:
+        details.append("Gate refs: " + ", ".join(gate_check_refs))
+    if not details:
+        return criterion
+    return f"{criterion} | {' | '.join(details)}"
+
+
+def _module_acceptance_criterion_detail(
+    raw: dict[str, Any],
+    *,
+    constraint_handles: list[str],
+    gate_check_refs: list[str],
+) -> dict[str, Any]:
+    criterion = _required(raw, "criterion")
+    detail: dict[str, Any] = {"criterion": criterion}
+    evidence = _text(raw.get("evidence_expectation") or raw.get("evidence") or raw.get("done_when"))
+    if evidence:
+        detail["evidence_expectation"] = evidence
+    negative_cases = _string_list(raw.get("negative_cases"))
+    if negative_cases:
+        detail["negative_cases"] = negative_cases
+    quantifier = _text(raw.get("quantifier"))
+    if quantifier:
+        detail["quantifier"] = quantifier
+    if constraint_handles:
+        detail["linked_constraint_handles"] = list(constraint_handles)
+    if gate_check_refs:
+        detail["gate_check_refs"] = list(gate_check_refs)
+    source_refs = _acceptance_source_refs(raw)
+    if source_refs:
+        detail["source_refs"] = source_refs
+    return detail if len(detail) > 1 else {}
+
+
+def _module_quality_criteria_details_payload(state: dict[str, Any], module: dict[str, Any]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for raw in _dict_list(module.get("module_quality_criteria_details")):
+        criterion = _text(raw.get("criterion"))
+        if not criterion:
+            continue
+        item: dict[str, Any] = {"criterion": criterion}
+        evidence = _text(raw.get("evidence_expectation") or raw.get("evidence") or raw.get("done_when"))
+        if evidence:
+            item["evidence_expectation"] = evidence
+        negative_cases = _string_list(raw.get("negative_cases"))
+        if negative_cases:
+            item["negative_cases"] = negative_cases
+        quantifier = _text(raw.get("quantifier"))
+        if quantifier:
+            item["quantifier"] = quantifier
+        constraint_refs = _public_refs(state, raw.get("linked_constraint_handles")) or _string_list(raw.get("constraint_refs"))
+        if constraint_refs:
+            item["constraint_refs"] = constraint_refs
+        gate_check_refs = _gate_check_public_refs(raw.get("gate_check_refs"))
+        if gate_check_refs:
+            item["gate_check_refs"] = gate_check_refs
+        source_refs = _acceptance_source_refs(raw)
+        if source_refs:
+            item["source_refs"] = source_refs
+        result.append(item)
+    return result
+
+
+def _state_module_quality_criteria_details(value: Any, constraint_by_public: dict[str, str]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for raw in _dict_list(value):
+        criterion = _text(raw.get("criterion"))
+        if not criterion:
+            continue
+        item: dict[str, Any] = {"criterion": criterion}
+        evidence = _text(raw.get("evidence_expectation") or raw.get("evidence") or raw.get("done_when"))
+        if evidence:
+            item["evidence_expectation"] = evidence
+        negative_cases = _string_list(raw.get("negative_cases"))
+        if negative_cases:
+            item["negative_cases"] = negative_cases
+        quantifier = _text(raw.get("quantifier"))
+        if quantifier:
+            item["quantifier"] = quantifier
+        constraint_handles = _string_list(raw.get("linked_constraint_handles")) or _handles_from_public_refs(
+            raw.get("constraint_refs") or raw.get("linked_constraint_refs"),
+            constraint_by_public,
+        )
+        if constraint_handles:
+            item["linked_constraint_handles"] = constraint_handles
+        gate_check_refs = _gate_check_ref_list(raw.get("gate_check_refs"))
+        if gate_check_refs:
+            item["gate_check_refs"] = gate_check_refs
+        source_refs = _acceptance_source_refs(raw)
+        if source_refs:
+            item["source_refs"] = source_refs
+        result.append(item)
+    return result
+
+
+def _acceptance_source_refs(raw: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    refs.extend(_string_list(raw.get("source_refs")))
+    refs.extend(_string_list(raw.get("reference_refs")))
+    source_ref = _text(raw.get("source_ref"))
+    if source_ref:
+        refs.append(source_ref)
+    return _dedupe_strings(refs)
 
 
 def _acceptance_criterion_defaults(item: dict[str, Any]) -> dict[str, Any]:

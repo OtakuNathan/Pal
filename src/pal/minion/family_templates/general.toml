@@ -5,5 +5,8 @@ domain_keywords = ["general", "generic", "task"]
 default_executor_profile = "general.generic"
 dag_producer_profile = ""
 
+[metadata]
+builtin = true
+
 [capability_groups.general_report]
 include = ["core_minion_read", "minion_artifacts", "minion_memory_candidates"]

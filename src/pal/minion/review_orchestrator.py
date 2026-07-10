@@ -814,6 +814,7 @@ class ReviewOrchestrator:
                 published_plan = self.repository.submit_plan_ref(
                     dict(loaded_draft.get("plan_artifact") or {}),
                     submission_notes=f"published from reviewed draft {reviewed_plan_ref.get('sha256') or ''}",
+                    replace_unaccepted_revision=True,
                 )
                 plan_ref = dict(published_plan.get("plan_ref") or plan_ref)
             review_artifact_ref = _review_artifact_ref_from_plan_refs(

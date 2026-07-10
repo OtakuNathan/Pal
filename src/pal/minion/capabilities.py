@@ -51,6 +51,7 @@ from pal.minion.skills import (
 )
 from pal.minion.source import MinionControlEventHandler, MinionEventSource
 from pal.minion.validation import MinionWorkOrderValidationError
+from pal.minion.v2.capabilities import MinionV2PublicProvider
 from pal.minion.workflow import (
     append_workflow_step,
     split_profile_ref,
@@ -190,6 +191,7 @@ class MinionIntrospection(Protocol):
         "op_minion_task_create",
         "op_minion_dispatch_workflow",
         "op_minion_accept_reviewed_plan",
+        "op_minion_request_reviewed_plan_revision",
         "intro_minion_profile_list",
         "intro_minion_profile_read",
         "intro_minion_plan_search",
@@ -202,6 +204,8 @@ class MinionIntrospection(Protocol):
         "op_minion_recover_work_order",
         "op_minion_resume_work_order",
         "op_minion_destroy_work_order_run",
+        "op_minion_archive_work_order",
+        "op_minion_remove_work_order",
         "op_minion_submit_repair_bill",
     ),
     priority=90,
@@ -220,9 +224,13 @@ class MinionIntrospection(Protocol):
         "and intro_minion_work_order_search/read; do not infer progress or current worker from chat. If the user says to recover stale "
         "running_module state, use op_minion_recover_work_order. If a module is blocked by provider failure, timeout, or interruption "
         "and should continue from its existing milestone cursor, use op_minion_resume_work_order and then op_minion_tick_parent_dag. "
+        "If the user requests changes to a reviewer-passed plan, use op_minion_request_reviewed_plan_revision with the exact edit "
+        "instruction; do not depend on an earlier channel button still being available. "
         "If the user says to replace or destroy a run, resolve the active run "
         "and work order, call op_minion_destroy_work_order_run, then use the work-order control path when appropriate. "
-        "A task may have a parent work order plus one active module child; inspect the work-order fact snapshot before finalizing."
+        "A task may have a parent work order plus one active module child; inspect the work-order fact snapshot before finalizing. "
+        "If the user wants old or useless work orders hidden from lists, use op_minion_archive_work_order; use "
+        "op_minion_remove_work_order only for deliberate hard deletion, normally after archiving."
     ),
     activation_terms=(
         "minion",
@@ -238,8 +246,20 @@ class MinionIntrospection(Protocol):
         "resume",
         "finalize",
         "merge",
+        "archive",
+        "edit plan",
+        "revise plan",
+        "remove",
+        "delete",
+        "cleanup",
+        "clean up",
+        "清理",
+        "归档",
+        "删除",
         "换掉",
         "继续",
+        "修改计划",
+        "修订计划",
         "进度",
         "在干嘛",
         "合并",
@@ -252,10 +272,13 @@ class MinionIntrospection(Protocol):
         "op_minion_kill",
         "op_minion_configure",
         "op_minion_destroy_work_order_run",
+        "op_minion_archive_work_order",
+        "op_minion_remove_work_order",
         "op_minion_recover_work_order",
         "op_minion_resume_work_order",
         "op_minion_tick_parent_dag",
         "op_minion_accept_reviewed_plan",
+        "op_minion_request_reviewed_plan_revision",
         "op_minion_finalize",
         "op_minion_submit_repair_bill",
     ),
@@ -437,10 +460,17 @@ class MinionManagerProvider:
         scope="minion_task",
         action_name="read",
         description="Read a minion task fact snapshot",
-        args_schema={"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]},
+        args_schema={
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}, "include_archived": {"type": "boolean", "default": False}},
+            "required": ["task_id"],
+        },
     )
     def read_task(self, call: IntrospectionCall) -> IntrospectionResult:
-        payload = self._repository().read_task(str(call.args.get("task_id") or ""))
+        payload = self._repository().read_task(
+            str(call.args.get("task_id") or ""),
+            include_archived=bool(call.args.get("include_archived")),
+        )
         return _introspection_from_rpc("Minion task", payload)
 
     @capability_action(
@@ -450,12 +480,24 @@ class MinionManagerProvider:
         description="Search minion work orders by natural language",
         args_schema={
             "type": "object",
-            "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer"},
+                "include_archived": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "When false, archived work orders are hidden from search results.",
+                },
+            },
             "required": ["query"],
         },
     )
     def search_work_orders(self, call: IntrospectionCall) -> IntrospectionResult:
-        payload = self._repository().search_work_orders(str(call.args.get("query") or ""), limit=int(call.args.get("limit") or 10))
+        payload = self._repository().search_work_orders(
+            str(call.args.get("query") or ""),
+            limit=int(call.args.get("limit") or 10),
+            include_archived=bool(call.args.get("include_archived")),
+        )
         return IntrospectionResult(
             status=RuntimeStatus.OK,
             text="minion work order search",
@@ -519,13 +561,20 @@ class MinionManagerProvider:
     @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="minion", action_name="profile_list", description="List minion profiles")
     def list_profiles(self, call: IntrospectionCall) -> IntrospectionResult:
         _ = call
-        profiles = [_profile_summary_payload(profile.to_dict()) for profile in self._profile_registry().list_profiles()]
+        profile_registry = self._profile_registry()
+        profiles = [_profile_summary_payload(profile.to_dict()) for profile in profile_registry.list_profiles()]
+        families = [_family_summary_payload(family.to_dict()) for family in profile_registry.family_registry().list_families()]
         payload = {
             "profiles": profiles,
             "count": len(profiles),
+            "families": families,
+            "family_count": len(families),
             "runtime_profile_dir": str(Path(self.runtime_root) / "plugins" / "minion" / "profiles"),
             "runtime_profile_pattern": "runtime_root/plugins/minion/profiles/**/*.toml",
+            "runtime_family_dir": str(Path(self.runtime_root) / "plugins" / "minion" / "families"),
+            "runtime_family_pattern": "runtime_root/plugins/minion/families/*.toml",
             "profile_source_order": ["builtin package TOML", "runtime TOML", "mounted provider declarations"],
+            "family_source_order": ["builtin package TOML", "runtime TOML", "mounted provider declarations"],
             "usage": "Use intro_minion_task_search/op_minion_task_create before op_minion_dispatch_workflow. Dispatch uses task.profile_family; it does not take profile selectors.",
         }
         return IntrospectionResult(
@@ -787,20 +836,29 @@ class MinionManagerProvider:
             "intent, task_id, source acceptance ledger, and workspace facts here. Search/create a Minion task first; task.profile_family "
             "selects how the DAG is interpreted. Dispatch does not accept profile selectors. The manager either runs the family DAG "
             "producer or uses the generic single-node DAG producer, then consumes the resulting DAG mechanically. Do not call lower-level "
-            "plan/spawn capabilities. When the user provides numbered requirements, keep them as numbered atomic source items in "
-            "requirements_brief; dispatch mechanically compiles those items into immutable source gate checklist entries. The family DAG "
-            "producer must cover those source items through plan gate_check_refs; downstream executors/reviewers consume only module and milestone acceptance. "
-            "Do not summarize, merge, weaken, or expand source items before dispatch. "
-            "architecture_mode only affects families whose manifest enables architecture planning: auto conservatively chooses micro/full from workspace "
-            "kind, goal scope, repo scan hints, and explicit user hints. micro asks the producer for a small canonical plan, normally "
-            "one implementation module plus a final verification join, with a prelude only when real shared setup/contracts are needed. "
-            "full asks for a complete multi-module plan. If micro scope is unsafe, the producer must escalate instead of weakening contracts. "
+            "plan/spawn capabilities. The goal should describe the final deliverable the whole workflow must complete; the initial "
+            "architect/DAG-producer step only plans modules and does not implement code. Put source-of-truth scope in "
+            "requirements_brief, especially requirements_brief.source_acceptance. Do not put source_acceptance inside workspace. "
+            "When the user provides numbered requirements, keep them as numbered atomic source items in requirements_brief; dispatch "
+            "mechanically compiles those items into immutable source gate checklist entries. The family DAG producer must cover those "
+            "source items through plan gate_check_refs; downstream executors/reviewers consume only module and milestone acceptance. "
+            "Do not summarize, merge, weaken, or expand source items before dispatch. For large full-scope work, include a source "
+            "item or constraint asking the architect to keep the DAG coarse: modules, dependencies, acceptance criteria, and test "
+            "strategy, not every mapping row or API wrapper. "
+            "Reference paths are different from the target repo: put read-only truth-source material such as ABI headers, patches, "
+            "specs, or docs in requirements_brief.references with names. Minion read tools can inspect those roots with "
+            "root='reference:<name>', but they are never mutation targets. "
+            "planning_depth is explicit for software workflows: sketch_only produces the architecture skeleton and module_detail adds "
+            "a second per-module planning pass before final DAG compilation. The manager does not infer task size; the caller chooses "
+            "how much architect detail to request. "
             "interaction_mode controls user confirmation: interactive asks for plan acceptance and disables module auto-advance; "
             "auto_after_plan asks for plan acceptance, then auto-advances modules when gates pass; autonomous auto-accepts reviewed "
             "plans and asks only for failures, permissions, destructive/high-risk actions, or missing user-owned facts. "
             "workspace.kind is new_project or existing_repo. Families whose manifest requires primary_language must provide it for new_project; "
             "other artifact/profile tasks may omit it. Existing repos should "
-            "include repo_path or cwd; manager records origin_repo_path and prepares durable minion worktrees under runtime data."
+            "include repo_path or cwd; do not use root in new calls. Treat repo_path/cwd as the target repository source; manager "
+            "records origin_repo_path and prepares durable minion worktrees under runtime data for writable execution. Do not put "
+            "read-only reference material in repo_path."
         ),
         aliases=(
             "dispatch minion",
@@ -827,36 +885,99 @@ class MinionManagerProvider:
                     "type": "object",
                     "description": (
                         "Optional source acceptance ledger prepared by Pal's main agent. Use this for source scope, acceptance criteria, "
-                        "constraints, resolved user preferences, and already-answered questions. If the user wrote a numbered requirement "
-                        "list, preserve each item as an atomic source item; dispatch compiles it into source gate_contract entries for "
-                        "architect coverage. Downstream coder/reviewer work consumes the accepted plan's module and milestone AC."
+                        "constraints, references, resolved user preferences, and already-answered questions. Prefer source_acceptance as "
+                        "a list of atomic source-of-truth items. If the user wrote a numbered requirement list, preserve each item as "
+                        "an atomic source item; dispatch compiles it into source gate_contract entries for architect coverage. Downstream "
+                        "coder/reviewer work consumes the accepted plan's module and milestone AC. Put non-goals and DAG granularity "
+                        "constraints here, not in workspace."
                     ),
+                    "properties": {
+                        "source_acceptance": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Atomic source-of-truth acceptance items the architect must cover via gate_check_refs.",
+                        },
+                        "constraints": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Planning and implementation constraints, including non-goals and DAG granularity limits.",
+                        },
+                        "references": {
+                            "type": "array",
+                            "items": {
+                                "oneOf": [
+                                    {"type": "string"},
+                                    {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {
+                                                "type": "string",
+                                                "description": "Stable short handle used by minion tools, e.g. ohos_abi_headers.",
+                                            },
+                                            "path": {
+                                                "type": "string",
+                                                "description": "Local read-only truth-source path. May be a directory, file, or glob such as /repo/*.patch.",
+                                            },
+                                            "include": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                                "description": "Optional path globs relative to path when path is a directory.",
+                                            },
+                                            "description": {"type": "string"},
+                                            "truth_source": {
+                                                "type": "boolean",
+                                                "default": True,
+                                                "description": "True when this reference is authoritative evidence the architect/coder must inspect before inventing constants or mappings.",
+                                            },
+                                            "required": {"type": "boolean", "default": True},
+                                        },
+                                        "required": ["path"],
+                                    },
+                                ]
+                            },
+                            "description": (
+                                "User-provided read-only reference paths, patches, docs, or external materials relevant to the task. "
+                                "These are not target repos and must not be mutated. Manager exposes normalized local references as "
+                                "workspace.reference_paths so minion read tools can select them with root='reference:<name>'."
+                            ),
+                        },
+                    },
                 },
                 "workspace": {
                     "type": "object",
                     "description": (
                         "Intent-level workspace facts. Use kind=new_project with primary_language when the family requires language metadata, or "
                         "kind=existing_repo with repo_path/cwd for repo changes. Non-software artifact/profile tasks may use "
-                        "kind=new_project without primary_language. Do not provide runtime worktree paths; "
-                        "manager allocates them under runtime_root/data/minion/repos."
+                        "kind=new_project without primary_language. For existing repos, repo_path or cwd is required for reliable "
+                        "repo inspection; do not use root in new calls. Do not put source_acceptance here. Do not provide runtime "
+                        "worktree paths; manager allocates them under runtime_root/data/minion/repos. Do not put reference-only "
+                        "truth-source paths here; use requirements_brief.references or workspace.reference_paths."
                     ),
                     "properties": {
                         "kind": {"type": "string", "enum": ["new_project", "existing_repo"]},
                         "repo_path": {"type": "string"},
                         "cwd": {"type": "string"},
+                        "reference_paths": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": (
+                                "Advanced: declared read-only truth-source roots. Prefer requirements_brief.references for user-provided "
+                                "reference paths; manager normalizes both into workspace.reference_paths."
+                            ),
+                        },
                         "project_name": {"type": "string"},
                         "primary_language": {"type": "string"},
                         "languages": {"type": "array", "items": {"type": "string"}},
                     },
                 },
-                "architecture_mode": {
+                "planning_depth": {
                     "type": "string",
-                    "enum": ["auto", "micro", "full"],
-                    "default": "auto",
+                    "enum": ["sketch_only", "module_detail"],
+                    "default": "sketch_only",
                     "description": (
-                        "For families whose manifest enables architecture planning, auto lets manager choose micro/full conservatively. "
-                        "micro still uses the family producer and must produce a canonical plan with acceptance criteria and test strategy. "
-                        "full uses the family producer for a complete multi-module plan. Ignored as none for families without architecture planning."
+                        "Explicit staged planning depth for software workflows. sketch_only produces the architecture skeleton and lets "
+                        "manager compile a light DAG. module_detail runs a second architect stage for each sketch module before final DAG compilation. "
+                        "Pal does not infer this value from task size; the caller owns the choice."
                     ),
                 },
                 "interaction_mode": {
@@ -930,8 +1051,9 @@ class MinionManagerProvider:
                 "module_id": _spawn_result_value(result, "module_id"),
                 "module_ids": _spawn_result_string_list(result, "module_ids"),
                 "workspace_summary": workflow_payload["workspace_summary"],
-                "architecture_mode": workflow_payload["architecture_mode"],
-                "requested_architecture_mode": workflow_payload["requested_architecture_mode"],
+                "planning_depth": workflow_payload["planning_depth"],
+                "architecture_mode": workflow_payload.get("architecture_mode", "staged"),
+                "requested_architecture_mode": workflow_payload.get("requested_architecture_mode", "staged"),
                 "interaction_mode": workflow_payload["interaction_mode"],
                 "initial_profile": workflow_payload["initial_profile"],
                 "profile_family": workflow_payload["profile_family"],
@@ -1399,6 +1521,154 @@ class MinionManagerProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         family="minion",
+        action_name="request_reviewed_plan_revision",
+        description=(
+            "Request edits to a reviewer-passed minion plan and dispatch the dedicated plan revision architect. Use after the "
+            "user asks to change a plan whose work order has plan_review.status=acceptance_pending, or to retry a previous revision "
+            "spawn that failed before execution. Pass the exact user edit "
+            "instruction and the work_order_id; Pal reads the current plan_ref and review_gate_ref from manager-owned work-order "
+            "state, so this remains available when the original channel interaction has expired."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "work_order_id": {
+                    "type": "string",
+                    "description": "Work order holding the reviewer-passed plan in plan_review.status=acceptance_pending.",
+                },
+                "edit_instruction": {
+                    "type": "string",
+                    "description": "Exact user-requested plan changes for the revision architect; must not be empty.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Optional audit summary. Defaults to a human plan edit request.",
+                },
+                "actor": {
+                    "type": "string",
+                    "description": "Optional audit actor. Defaults to human.",
+                },
+            },
+            "required": ["work_order_id", "edit_instruction"],
+        },
+    )
+    def request_reviewed_plan_revision(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            args = dict(call.args or {})
+            work_order_id = str(args.get("work_order_id") or "").strip()
+            if not work_order_id:
+                raise MinionWorkOrderValidationError("work_order_id is required", field="work_order_id")
+            edit_instruction = str(args.get("edit_instruction") or "").strip()
+            if not edit_instruction:
+                raise MinionWorkOrderValidationError("edit_instruction is required", field="edit_instruction")
+
+            repository = self._repository()
+            snapshot = repository.read_work_order(work_order_id)
+            if snapshot.get("status") != "ok":
+                raise MinionWorkOrderValidationError(f"unknown work_order_id: {work_order_id}", field="work_order_id")
+            work_order = dict(snapshot.get("work_order") or {})
+            metadata = dict(work_order.get("metadata") or {})
+            plan_review = dict(metadata.get("plan_review") or {})
+            review_status = str(plan_review.get("status") or "").strip()
+            review_next_action = str(plan_review.get("next_action") or "").strip()
+            retryable_edit = review_status == "edit_requested" and review_next_action in {"revise_plan", "retry_revision"}
+            if review_status != "acceptance_pending" and not retryable_edit:
+                raise MinionWorkOrderValidationError(
+                    "reviewed plan revision requires plan_review.status=acceptance_pending or a failed edit request ready to retry; "
+                    f"current status is {review_status or 'missing'} and next_action is {review_next_action or 'missing'}",
+                    field="plan_review.status",
+                )
+            plan_ref = plan_review.get("plan_ref")
+            if not isinstance(plan_ref, dict) or not plan_ref:
+                raise MinionWorkOrderValidationError(
+                    "reviewed plan revision requires work_order.metadata.plan_review.plan_ref",
+                    field="plan_ref",
+                )
+            review_gate_ref = (
+                dict(plan_review.get("review_gate_ref") or {})
+                if isinstance(plan_review.get("review_gate_ref"), dict)
+                else {}
+            )
+            source_work_order_id = str(plan_review.get("source_work_order_id") or "").strip() or work_order_id
+            reason = str(args.get("reason") or "user requested edits to reviewed minion plan").strip()
+            human_decision = {
+                "action_kind": "minion_plan_edit",
+                "actor": str(args.get("actor") or "human").strip() or "human",
+                "reason": reason,
+                "edit_instruction": edit_instruction,
+                "source": "capability",
+            }
+            review_state = {
+                **plan_review,
+                "status": "edit_requested",
+                "plan_ref": dict(plan_ref),
+                "review_gate_ref": review_gate_ref,
+                "updated_at": utc_now(),
+                "next_action": "revise_plan",
+                "human_decision": human_decision,
+                "edit_instruction": edit_instruction,
+            }
+
+            self._ensure_manager_started()
+            revision = self.client.request_sync(
+                "dispatch_plan_revision",
+                {
+                    "work_order_id": source_work_order_id,
+                    "plan_ref": dict(plan_ref),
+                    "reason": reason,
+                    "edit_instruction": edit_instruction,
+                },
+            )
+            review_state["revision_dispatch"] = dict(revision)
+            review_state["next_action"] = (
+                "wait_for_revision" if str(revision.get("status") or "") == "spawned" else "revise_plan"
+            )
+            repository.merge_work_order_metadata(source_work_order_id, {"plan_review": review_state})
+            if source_work_order_id != work_order_id:
+                repository.merge_work_order_metadata(
+                    work_order_id,
+                    {"plan_review": {**review_state, "source_work_order_id": source_work_order_id}},
+                )
+            repository.record_minion_event(
+                {
+                    "event_kind": "plan_edit_requested",
+                    "work_order_id": source_work_order_id,
+                    "minion_id": "",
+                    "run_id": "",
+                    "minion_profile": "control",
+                    "payload": {
+                        "status": "edit_requested",
+                        "summary": "user requested edits to reviewed minion plan",
+                        "plan_ref": dict(plan_ref),
+                        "review_gate_ref": review_gate_ref,
+                        "edit_instruction": edit_instruction,
+                        "revision_dispatch": dict(revision),
+                        "next_action": review_state["next_action"],
+                    },
+                }
+            )
+            return _capability_from_rpc(
+                "minion reviewed plan revision requested",
+                {
+                    "status": str(revision.get("status") or "edit_requested"),
+                    "work_order_id": work_order_id,
+                    "source_work_order_id": source_work_order_id,
+                    "plan_ref": dict(plan_ref),
+                    "review_gate_ref": review_gate_ref,
+                    "edit_instruction": edit_instruction,
+                    "revision": dict(revision),
+                    "next_action": review_state["next_action"],
+                },
+            )
+        except MinionWorkOrderValidationError as exc:
+            return _capability_invalid("minion reviewed plan revision invalid", exc)
+        except Exception as exc:
+            return _capability_error("minion reviewed plan revision failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
+        family="minion",
         action_name="submit_repair_bill",
         description=(
             "Submit a structured repair bill for a parent plan work order. The bill must reference existing module ids; "
@@ -1472,9 +1742,10 @@ class MinionManagerProvider:
         family="minion",
         action_name="resume_work_order",
         description=(
-            "Resume a blocked minion parent/module cursor without submitting a repair bill. Use this for provider failures, "
-            "timeouts, interrupted runners, or stale blocked child runs when the existing child work order should continue "
-            "from its next incomplete milestone. For semantic module defects or contract defects, submit a repair bill instead."
+            "Resume a blocked minion work order without submitting a repair bill. Use this for provider failures, "
+            "timeouts, interrupted runners, stale blocked child runs, or an initial workflow/architect step that blocked before "
+            "a DAG was accepted. The manager first tries the accepted-plan module cursor path; when that is not applicable it "
+            "re-dispatches the current workflow step. For semantic module defects or contract defects, submit a repair bill instead."
         ),
         args_schema={
             "type": "object",
@@ -1486,6 +1757,13 @@ class MinionManagerProvider:
                 "module_id": {"type": "string"},
                 "child_work_order_id": {"type": "string"},
                 "reason": {"type": "string"},
+                "preferred_endpoint_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional enabled LLM endpoint_id to use for the resumed attempt. Useful when the previous attempt blocked "
+                        "because of provider output limits or model-specific failures."
+                    ),
+                },
             },
             "required": ["work_order_id"],
         },
@@ -1500,6 +1778,7 @@ class MinionManagerProvider:
                     "module_id": str(call.args.get("module_id") or ""),
                     "child_work_order_id": str(call.args.get("child_work_order_id") or ""),
                     "reason": str(call.args.get("reason") or ""),
+                    "preferred_endpoint_id": str(call.args.get("preferred_endpoint_id") or ""),
                 },
             )
             return _capability_from_rpc("minion work order resumed", result)
@@ -1536,6 +1815,90 @@ class MinionManagerProvider:
         namespace=OPERATION_NAMESPACE,
         scope="minion",
         family="minion",
+        action_name="archive_work_order",
+        description=(
+            "Archive or restore a minion work order in the tasking database. Archived work orders are hidden from work-order search "
+            "unless include_archived=true, but their records remain readable by id. This does not stop active runners; use "
+            "destroy_work_order_run first for actively running work."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "work_order_id": {"type": "string"},
+                "reason": {"type": "string"},
+                "include_children": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Also archive/restore child module work orders referenced by the parent DAG.",
+                },
+                "restore": {"type": "boolean", "default": False, "description": "Restore archived work orders to their previous status."},
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Allow archiving/restoring statuses that look active. Prefer destroy_work_order_run first.",
+                },
+            },
+            "required": ["work_order_id"],
+        },
+    )
+    def archive_work_order(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            result = self._repository().archive_work_order(
+                str(call.args.get("work_order_id") or ""),
+                reason=str(call.args.get("reason") or ""),
+                include_children=bool(call.args.get("include_children")),
+                restore=bool(call.args.get("restore")),
+                force=bool(call.args.get("force")),
+            )
+            return _capability_from_rpc("minion work order archive updated", result)
+        except Exception as exc:
+            return _capability_error("minion work order archive failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
+        family="minion",
+        action_name="remove_work_order",
+        description=(
+            "Hard-delete a minion work order from the tasking database. By default the work order must already be archived. "
+            "This removes directly associated milestones, checkpoints, ledger rows, review gates, and lesson candidates; it does not "
+            "delete runtime repos or plan revision files. Use sparingly, and stop active runs first."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "work_order_id": {"type": "string"},
+                "reason": {"type": "string"},
+                "include_children": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Also remove child module work orders referenced by the parent DAG.",
+                },
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Allow removing non-archived or active-looking work orders. Prefer archive_work_order first.",
+                },
+            },
+            "required": ["work_order_id"],
+        },
+    )
+    def remove_work_order(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            result = self._repository().remove_work_order(
+                str(call.args.get("work_order_id") or ""),
+                reason=str(call.args.get("reason") or ""),
+                include_children=bool(call.args.get("include_children")),
+                force=bool(call.args.get("force")),
+            )
+            return _capability_from_rpc("minion work order removed", result)
+        except Exception as exc:
+            return _capability_error("minion work order remove failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
+        family="minion",
         action_name="pause_work_order",
         description="Pause a minion parent work order at its current milestone cursor",
         args_schema={
@@ -1556,6 +1919,8 @@ class MinionManagerProvider:
             return _capability_error("minion work order pause failed", exc)
 
     async def handle_control_action_async(self, action: ControlAction) -> Any:
+        if action.action_kind == "minion_v2_human_decision":
+            return await self._handle_v2_human_decision_async(action)
         if action.action_kind == "minion_lesson_decision":
             return await self._handle_lesson_decision_async(action)
         if action.action_kind in {"minion_question_select", "minion_question_nav", "minion_question_submit"}:
@@ -1586,6 +1951,39 @@ class MinionManagerProvider:
                 return "Minion approval recorded; remaining approvals for this run will be accepted."
             return f"Minion approval {decision or 'decision'} recorded."
         return str(result.get("error") or "Minion approval decision failed.")
+
+    async def _handle_v2_human_decision_async(self, action: ControlAction) -> str:
+        decision = str(action.args.get("decision") or "").strip().lower()
+        if decision == "edit" and not str(action.args.get("edit_instruction") or "").strip():
+            return (
+                "Reply with the exact architecture edit instruction. Pal can submit it with "
+                "op_minion_submit_human_decision using this card's decision_token."
+            )
+        if decision == "clarify" and not str(action.args.get("clarification_response") or "").strip():
+            return (
+                "Reply with the requested clarification. Pal must submit it with "
+                "op_minion_submit_human_decision(decision=\"clarify\", "
+                f"decision_token=\"{str(action.args.get('decision_token') or '')}\", clarification_response=...)."
+            )
+        from pal.minion.v2.service import MinionV2WorkflowService
+
+        service = MinionV2WorkflowService(self.runtime_root)
+        try:
+            result = await _to_thread(
+                service.submit_human_decision,
+                {
+                    "decision_token": str(action.args.get("decision_token") or ""),
+                    "decision": decision,
+                    "edit_instruction": str(action.args.get("edit_instruction") or ""),
+                    "clarification_response": str(action.args.get("clarification_response") or ""),
+                    "actor": str(action.args.get("actor_id") or "pal"),
+                    "source_channel": str(action.args.get("active_channel_id") or "local"),
+                },
+            )
+        except Exception as exc:
+            return f"Minion V2 architecture decision was not applied: {exc}"
+        self.wake_v2()
+        return f"Minion V2 architecture decision accepted ({result.get('state') or decision})."
 
     async def _handle_plan_accept_override_async(self, action: ControlAction) -> str:
         plan_ref = action.args.get("plan_ref")
@@ -1903,7 +2301,8 @@ class MinionManagerProvider:
         if self.context is None:
             return ""
         runtime = getattr(self.context, "execution_runtime", None)
-        if runtime is None or "op_memory_write" not in getattr(runtime, "capabilities", {}):
+        has_capability = getattr(runtime, "has_registered_capability", None)
+        if runtime is None or not callable(has_capability) or not has_capability("op_memory_write"):
             return ""
         committed = 0
         for lesson in task_lessons:
@@ -2009,6 +2408,10 @@ class MinionManagerProvider:
             except Exception:
                 time.sleep(0.2)
         raise RuntimeError("minion manager failed to start")
+
+    def wake_v2(self) -> None:
+        self._ensure_manager_started()
+        self.client.request_sync("v2_wake")
 
     def _stop_manager(self, *, force: bool = False) -> None:
         self._stop_event_subscription()
@@ -2437,6 +2840,11 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
     _ = service
     resolved_root = Path(runtime_root or context.execution_runtime.runtime_root or Path.cwd() / ".pal-minion")
     provider = MinionManagerProvider(runtime_root=resolved_root, context=context)
+    public_provider = MinionV2PublicProvider(
+        runtime_root=resolved_root,
+        context=context,
+        wake_manager=provider.wake_v2,
+    )
     provider.event_notify = lambda: getattr(context.port_registry.get("core:core"), "notify_ready", lambda: None)()
     event_provider = _LegacyTaskingEventProvider(service) if hasattr(service, "minion_mailbox") else provider
     source = MinionEventSource(provider=event_provider)
@@ -2446,7 +2854,7 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
         module_id="minion",
         tier=MODULE_TIER_DETACHABLE,
         detachable=True,
-        introspection_provider=provider,
+        introspection_provider=public_provider,
         prompt_fragment_providers=[prompt_provider],
         supports_lifecycle_capabilities=True,
         event_sources=[source],
@@ -2473,8 +2881,9 @@ def register_with_core(context: MainContext, service: object | None = None, *, r
             "minion_dag_tick": provider.handle_control_action_async,
             "minion_plan_pause": provider.handle_control_action_async,
             "minion_plan_finish": provider.handle_control_action_async,
+            "minion_v2_human_decision": provider.handle_control_action_async,
         },
-        ports={"minion": provider},
+        ports={"minion": provider, "minion_v2": public_provider},
         shutdown_sync=provider._stop_manager,
     )
     context.register_module(handle)
@@ -2762,6 +3171,19 @@ def _profile_summary_payload(profile: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _family_summary_payload(family: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(family.get("metadata") or {})
+    return {
+        "family_id": str(family.get("family_id") or "general").strip() or "general",
+        "display_name": str(family.get("display_name") or family.get("family_id") or "general").strip() or "general",
+        "default_executor_profile": str(family.get("default_executor_profile") or "").strip(),
+        "dag_producer_profile": str(family.get("dag_producer_profile") or "").strip(),
+        "uses_architecture_mode": bool(metadata.get("uses_architecture_mode")),
+        "require_primary_language": bool(metadata.get("require_primary_language")),
+        "source_path": str(metadata.get("source_path") or "").strip(),
+    }
+
+
 def _first_summary_sentence(text: str, *, limit: int = 180) -> str:
     compact = " ".join(str(text or "").strip().split())
     if not compact:
@@ -2841,17 +3263,14 @@ def _workflow_entry_pack_from_args(
             "requirements_review mode has been removed; Pal must prepare source acceptance scope before dispatch_workflow",
             field="requirements_review",
         )
-    requested_architecture_mode = str(args.get("architecture_mode") or "auto").strip().lower() or "auto"
-    if requested_architecture_mode not in {"auto", "micro", "full"}:
+    planning_depth = str(args.get("planning_depth") or "sketch_only").strip().lower() or "sketch_only"
+    if planning_depth not in {"sketch_only", "module_detail"}:
         raise MinionWorkOrderValidationError(
-            "architecture_mode must be auto, micro, or full",
-            field="architecture_mode",
+            "planning_depth must be sketch_only or module_detail",
+            field="planning_depth",
         )
-    architecture_mode = (
-        _resolve_architecture_mode(requested_architecture_mode, goal=goal, workspace=workspace)
-        if family_producer and uses_architecture_mode
-        else "none"
-    )
+    requested_architecture_mode = str(args.get("architecture_mode") or "staged").strip().lower() or "staged"
+    architecture_mode = "staged" if family_producer and uses_architecture_mode else "none"
     interaction_mode = str(args.get("interaction_mode") or "auto_after_plan").strip().lower() or "auto_after_plan"
     if interaction_mode not in {"interactive", "auto_after_plan", "autonomous"}:
         raise MinionWorkOrderValidationError(
@@ -2876,6 +3295,7 @@ def _workflow_entry_pack_from_args(
             profile_family=profile_family,
             requested_architecture_mode=requested_architecture_mode,
             architecture_mode=architecture_mode,
+            planning_depth=planning_depth,
             interaction_mode=interaction_mode,
             task_id=task_id,
             work_order_id=work_order_id,
@@ -2892,6 +3312,7 @@ def _workflow_entry_pack_from_args(
         "entrypoint": "op_minion_dispatch_workflow",
         "requested_architecture_mode": requested_architecture_mode,
         "architecture_mode": architecture_mode,
+        "planning_depth": planning_depth,
         "interaction_mode": interaction_mode,
         "auto_advance_modules": interaction_mode != "interactive",
         "auto_accept_on_review_pass": interaction_mode == "autonomous",
@@ -2914,6 +3335,7 @@ def _workflow_entry_pack_from_args(
         "requirements_brief": requirements_brief,
         "architecture_mode": architecture_mode,
         "requested_architecture_mode": requested_architecture_mode,
+        "planning_depth": planning_depth,
         "interaction_mode": interaction_mode,
         "profile_family": profile_family,
         "initial_profile": initial_profile,
@@ -2931,16 +3353,24 @@ def _workflow_entry_pack_from_args(
         architecture_mode=architecture_mode,
         requested_architecture_mode=requested_architecture_mode,
         uses_architecture_mode=uses_architecture_mode,
+        planning_depth=planning_depth,
     )
     architect_milestone = {
-        "milestone_id": "produce_architecture" if producer_role == "architect" else "produce_dag_plan",
-        "title": f"Produce reviewed {producer_plan_label}",
-        "summary": f"Inspect the workspace as needed and submit a dispatchable {producer_plan_label} draft for plan acceptance review.",
+        "milestone_id": "produce_architecture_sketch" if producer_role == "architect" else "produce_dag_sketch",
+        "title": f"Produce {producer_plan_label}",
+        "summary": (
+            "Inspect the workspace and references as needed, then submit a staged PlanSketchArtifact that fixes the "
+            "top-level topology, module interaction contracts, lifecycle/state/ownership model, first-layer gates, "
+            "and end-to-end flow checks."
+        ),
         "acceptance": [
-            f"{producer_role.replace('_', ' ').title()} submits a canonical dispatchable plan draft.",
-            "Plan includes acceptance criteria, module contracts, and test strategy.",
+            f"{producer_role.replace('_', ' ').title()} submits a valid PlanSketchArtifact.",
+            "Sketch includes module boundaries, topology, node interaction contracts, requirement coverage, and reference evidence.",
+            "Sketch defines ownership, object/resource lifecycle, module state machines, and invariants for each module.",
+            "Sketch includes first-layer module/cross-module gates and at least one end-to-end flow gate/AC for cross-module handoff.",
+            "Sketch stops at module boundaries, interaction contracts, and first-layer review obligations.",
             (
-                "Architecture mode constraints are either satisfied or escalated with a concrete reason."
+                "Planning depth constraints are either satisfied or escalated with a concrete reason."
                 if uses_architecture_mode
                 else "Family planning constraints are either satisfied or escalated with a concrete reason."
             ),
@@ -2956,6 +3386,13 @@ def _workflow_entry_pack_from_args(
             "planner_work_order": planner_work_order,
             "architect_work_order": planner_work_order,
             "plan_review": plan_review,
+            "staged_planning": {
+                "stage": "architecture_sketch",
+                "planning_depth": planning_depth,
+                "plan_id": f"plan_{task_id}",
+                "task_id": task_id,
+                "goal": goal,
+            },
             "milestones": [architect_milestone],
         }
     )
@@ -2971,13 +3408,22 @@ def _workflow_entry_pack_from_args(
                 architecture_mode=architecture_mode,
                 requested_architecture_mode=requested_architecture_mode,
                 uses_architecture_mode=uses_architecture_mode,
+                planning_depth=planning_depth,
             ),
             "acceptance_criteria": [
-                "Submit a dispatchable plan draft through the plan builder tools.",
-                "Include module acceptance criteria and test strategy in the plan.",
+                "Submit a valid PlanSketchArtifact through the staged plan builder tools.",
+                "Include module boundaries, topology, node interaction contracts, ownership/lifecycle/state-machine/invariants, interfaces, and requirement coverage.",
+                "Include first-layer gates/AC and end-to-end flow gates/AC for cross-module handoff.",
+                "Leave module-local implementation breakdown, tests, positive/negative cases, and detailed evidence to module_detail.",
                 f"Do not implement production work in the {producer_role} run.",
             ],
-            "workspace": workspace,
+            "workspace": {
+                **workspace,
+                "task_id": task_id,
+                "goal": goal,
+                "planning_depth": planning_depth,
+                "plan_builder_stage": "architecture_sketch",
+            },
             "profile_group": initial_group or profile_family,
             "profile_name": initial_name,
             "metadata": metadata,
@@ -2987,6 +3433,7 @@ def _workflow_entry_pack_from_args(
         "workflow_id": workflow_id,
         "requested_architecture_mode": requested_architecture_mode,
         "architecture_mode": architecture_mode,
+        "planning_depth": planning_depth,
         "interaction_mode": interaction_mode,
         "initial_profile": initial_profile,
         "profile_family": profile_family,
@@ -3013,6 +3460,7 @@ def _generic_dag_workflow_entry_pack(
     profile_family: str,
     requested_architecture_mode: str,
     architecture_mode: str,
+    planning_depth: str,
     interaction_mode: str,
     task_id: str,
     work_order_id: str,
@@ -3041,6 +3489,7 @@ def _generic_dag_workflow_entry_pack(
         "entrypoint": "op_minion_dispatch_workflow",
         "requested_architecture_mode": requested_architecture_mode,
         "architecture_mode": architecture_mode,
+        "planning_depth": planning_depth,
         "interaction_mode": interaction_mode,
         "auto_advance_modules": interaction_mode != "interactive",
         "auto_accept_on_review_pass": interaction_mode == "autonomous",
@@ -3073,6 +3522,7 @@ def _generic_dag_workflow_entry_pack(
         "requirements_brief": requirements_brief,
         "architecture_mode": architecture_mode,
         "requested_architecture_mode": requested_architecture_mode,
+        "planning_depth": planning_depth,
         "interaction_mode": interaction_mode,
         "profile_family": profile_family,
         "dag_producer": {
@@ -3105,6 +3555,7 @@ def _generic_dag_workflow_entry_pack(
         "workflow_id": workflow_id,
         "requested_architecture_mode": requested_architecture_mode,
         "architecture_mode": architecture_mode,
+        "planning_depth": planning_depth,
         "interaction_mode": interaction_mode,
         "initial_profile": executor.executor_profile,
         "profile_family": profile_family,
@@ -3118,7 +3569,13 @@ def _normalize_workflow_workspace(workspace: dict[str, Any], *, require_primary_
     normalized = dict(workspace or {})
     kind = str(normalized.get("kind") or normalized.get("workspace_kind") or normalized.get("type") or "").strip().lower()
     cwd = str(normalized.get("cwd") or normalized.get("working_dir") or normalized.get("working_directory") or "").strip()
-    repo_path = str(normalized.get("repo_path") or "").strip()
+    repo_path = str(
+        normalized.get("repo_path")
+        or normalized.get("root")
+        or normalized.get("workspace_root")
+        or normalized.get("project_root")
+        or ""
+    ).strip()
     if not repo_path and cwd and kind in {"existing_repo", "local_repo", "repo", "git_repo", "repository", ""}:
         repo_path = cwd
     if not kind:
@@ -3244,12 +3701,41 @@ def _apply_family_producer_requirements(
     architecture_mode: str,
     requested_architecture_mode: str,
     uses_architecture_mode: bool,
+    planning_depth: str,
 ) -> None:
-    requirements = dict(planner_work_order.get("planning_requirements") or {})
+    base_requirements = dict(planner_work_order.get("planning_requirements") or {})
+    requirements = {
+        "required_stage": "architecture_sketch",
+        "stage_artifact_required": "PlanSketchArtifact",
+        "stage_focus": [
+            "Produce the top-level architecture sketch, not module-local implementation detail.",
+            "Define topology nodes, dependency/dataflow direction, and node-to-node interaction contracts.",
+            "Define module ownership, object/resource lifecycle, state machines, and invariants.",
+            "Create first-layer gates and acceptance criteria for topology, contracts, lifecycle, ownership, state, and invariants.",
+            "Create end-to-end flow gates/AC that traverse the relevant modules and prove cross-module handoff.",
+        ],
+        "stage_non_goals": [
+            "Do not split module internals into implementation steps in the sketch stage.",
+            "Do not write module-local implementation checklists, positive/negative case detail, or detailed evidence.",
+            "Do not implement code.",
+        ],
+        "module_detail_contract": (
+            "If planning_depth is module_detail, the second stage fills each module's internal implementation plan, AC, tests, "
+            "positive/negative cases, and evidence against this accepted sketch."
+        ),
+        **base_requirements,
+    }
     requirements["profile_family"] = profile_family
     requirements["producer_profile"] = producer_profile
     requirements["producer_role"] = producer_role
-    requirements["dispatchable_plan_required"] = True
+    requirements["dispatchable_plan_required"] = False
+    requirements["staged_plan_required"] = True
+    requirements["planning_depth"] = planning_depth
+    requirements["stage_artifact_required"] = "PlanSketchArtifact"
+    requirements["require_internal_milestones"] = False
+    requirements["require_orchestration"] = False
+    requirements["require_topology_nodes"] = True
+    requirements["required_stage"] = "architecture_sketch"
     planner_work_order["planning_requirements"] = requirements
     planner_work_order["profile_family"] = profile_family
     planner_work_order["producer_profile"] = producer_profile
@@ -3258,6 +3744,7 @@ def _apply_family_producer_requirements(
             planner_work_order,
             architecture_mode=architecture_mode,
             requested_architecture_mode=requested_architecture_mode,
+            planning_depth=planning_depth,
         )
         return
     requirements["requested_architecture_mode"] = requested_architecture_mode
@@ -3275,28 +3762,17 @@ def _apply_architecture_mode_requirements(
     *,
     architecture_mode: str,
     requested_architecture_mode: str,
+    planning_depth: str,
 ) -> None:
     requirements = dict(planner_work_order.get("planning_requirements") or {})
     requirements["requested_architecture_mode"] = requested_architecture_mode
     requirements["architecture_mode"] = architecture_mode
+    requirements["planning_depth"] = planning_depth
     requirements["coder_requires_accepted_plan"] = True
     requirements["module_slug_policy"] = "Use short module ids such as implementation, parser, runtime, tests, final_verification; do not add a module_ prefix."
-    if architecture_mode == "micro":
-        requirements["micro_plan"] = True
-        requirements["preferred_implementation_modules"] = 1
-        requirements["max_implementation_modules"] = 2
-        requirements["prelude_policy"] = (
-            "For narrow micro changes, do not create a prelude/setup_contracts/contracts/baseline/setup module. A no-prelude topology "
-            "is valid. Use a prelude only when it must produce real shared importable contracts, stubs, DTOs, facades, generated files, "
-            "or setup artifacts before multiple independent implementation modules can start."
-        )
-        requirements["escalation_allowed"] = True
-        requirements["escalation_contract"] = (
-            "If the task cannot be planned safely as a small architecture plan, submit an architect escalation instead of weakening "
-            "contracts; manager will rerun full planning."
-        )
-    else:
-        requirements["micro_plan"] = False
+    requirements["micro_plan"] = False
+    requirements["sketch_stage"] = True
+    requirements["module_detail_stage"] = planning_depth == "module_detail"
     planner_work_order["planning_requirements"] = requirements
     planner_work_order["architecture_mode"] = architecture_mode
     planner_work_order["requested_architecture_mode"] = requested_architecture_mode
@@ -3309,6 +3785,7 @@ def _family_producer_workflow_instruction(
     architecture_mode: str,
     requested_architecture_mode: str,
     uses_architecture_mode: bool,
+    planning_depth: str,
 ) -> str:
     role = str(producer_role or "dag_producer").replace("_", " ")
     if not uses_architecture_mode:
@@ -3319,14 +3796,21 @@ def _family_producer_workflow_instruction(
             "If the family scope is unsafe or under-specified, report escalation_required with a concrete reason instead of dispatching "
             "an under-specified plan."
         )
+    sketch_label = producer_plan_label
+    if not sketch_label.strip().lower().endswith("sketch"):
+        sketch_label = f"{sketch_label} sketch"
     return (
-        f"Produce a {architecture_mode} canonical {producer_plan_label} for this workflow. "
-        f"The requested architecture_mode is {requested_architecture_mode}. "
-        f"Use {role} plan builder tools only; do not implement code. The plan must include acceptance criteria, module contracts, "
-        "test strategy, and dispatchable fork_join_linear topology. In micro mode for narrow changes, use no prelude: produce one "
-        "implementation module plus final_verification. Do not create baseline/setup/contracts/prelude modules unless a real shared "
-        "code or config artifact must be produced before multiple independent modules can start. If micro scope is unsafe, report escalation_required "
-        "with a concrete reason instead of dispatching an under-specified plan."
+        f"Produce a staged {sketch_label} for this workflow. "
+        f"The explicit planning_depth is {planning_depth}; architecture_mode is {architecture_mode} "
+        f"(requested {requested_architecture_mode}). "
+        f"Use {role} staged plan builder tools only; do not implement code. "
+        "Submit a PlanSketchArtifact with the top-level topology, node interaction contracts, module ownership, "
+        "object/resource lifecycle, module state machines, invariants, interfaces, requirement coverage, reference evidence, "
+        "first-layer gates/AC, and end-to-end flow gates/AC. Treat topology edges as work-start blockers only: use them "
+        "when a module cannot start without another module's accepted contract/setup/implementation. Do not use topology "
+        "edges for stubbed interfaces, opaque/declaration-only type references, runtime callbacks, or final integration-only "
+        "relationships; capture those as interfaces plus module/end-to-end AC. Do not create module-local implementation detail "
+        "in the sketch stage."
     )
 
 
@@ -3338,6 +3822,7 @@ def _manager_requirements_brief_from_args(*, goal: str, workspace: dict[str, Any
         brief.setdefault("goal", str(goal or "").strip())
         brief.setdefault("workspace", _workflow_workspace_summary(workspace))
         _attach_requirements_checklist(goal=goal, requirements_brief=brief)
+        _attach_reference_paths(workspace=workspace, requirements_brief=brief)
         return brief
     if isinstance(supplied, str) and supplied.strip():
         brief = {
@@ -3347,8 +3832,11 @@ def _manager_requirements_brief_from_args(*, goal: str, workspace: dict[str, Any
             "workspace": _workflow_workspace_summary(workspace),
         }
         _attach_requirements_checklist(goal=goal, requirements_brief=brief)
+        _attach_reference_paths(workspace=workspace, requirements_brief=brief)
         return brief
-    return _manager_requirements_brief(goal=goal, workspace=workspace)
+    brief = _manager_requirements_brief(goal=goal, workspace=workspace)
+    _attach_reference_paths(workspace=workspace, requirements_brief=brief)
+    return brief
 
 
 def _manager_requirements_brief(*, goal: str, workspace: dict[str, Any]) -> dict[str, Any]:
@@ -3363,6 +3851,152 @@ def _manager_requirements_brief(*, goal: str, workspace: dict[str, Any]) -> dict
     }
     _attach_requirements_checklist(goal=goal, requirements_brief=brief)
     return brief
+
+
+def _attach_reference_paths(*, workspace: dict[str, Any], requirements_brief: dict[str, Any]) -> None:
+    refs: list[dict[str, Any]] = []
+    for raw in list(workspace.get("reference_paths") or []):
+        item = _normalize_workflow_reference_path(raw, index=len(refs) + 1)
+        if item:
+            refs.append(item)
+    for raw in list(requirements_brief.get("reference_paths") or []):
+        item = _normalize_workflow_reference_path(raw, index=len(refs) + 1)
+        if item:
+            refs.append(item)
+    for raw in list(requirements_brief.get("references") or []):
+        item = _normalize_workflow_reference_path(raw, index=len(refs) + 1)
+        if item:
+            refs.append(item)
+    refs = _dedupe_workflow_reference_paths(refs)
+    if not refs:
+        return
+    workspace["reference_paths"] = refs
+    requirements_brief["reference_paths"] = refs
+    requirements_brief["workspace"] = _workflow_workspace_summary(workspace)
+
+
+def _normalize_workflow_reference_path(raw: Any, *, index: int) -> dict[str, Any]:
+    if isinstance(raw, str):
+        payload: dict[str, Any] = {"path": raw}
+    elif isinstance(raw, dict):
+        payload = dict(raw)
+    else:
+        return {}
+    raw_path = str(
+        payload.get("path")
+        or payload.get("root")
+        or payload.get("base_path")
+        or payload.get("glob")
+        or payload.get("pattern")
+        or ""
+    ).strip()
+    if not raw_path or _looks_like_external_reference(raw_path):
+        return {}
+    root_path, include = _workflow_reference_root_and_include(raw_path)
+    extra_include = _workflow_string_list(payload.get("include") or payload.get("includes"))
+    if extra_include:
+        include = extra_include
+    root = Path(root_path).expanduser()
+    name = _safe_workflow_reference_name(str(payload.get("name") or payload.get("id") or "")) or _safe_workflow_reference_name(root.name)
+    if not name:
+        name = f"reference_{index}"
+    item: dict[str, Any] = {
+        "name": name,
+        "path": str(root),
+        "mode": "read_only",
+        "truth_source": _workflow_bool(payload.get("truth_source"), default=True),
+    }
+    if include:
+        item["include"] = include
+    for key in ("description", "role", "required"):
+        if key in payload:
+            item[key] = payload.get(key)
+    return item
+
+
+def _workflow_reference_root_and_include(raw_path: str) -> tuple[str, list[str]]:
+    path = str(raw_path or "").strip()
+    if not _has_workflow_glob(path):
+        expanded = Path(path).expanduser()
+        if expanded.exists() and expanded.is_file():
+            return str(expanded.parent), [expanded.name]
+        return path, []
+    normalized = path.replace("\\", "/")
+    parts = normalized.split("/")
+    prefix: list[str] = []
+    suffix: list[str] = []
+    glob_seen = False
+    for part in parts:
+        if not glob_seen and not _has_workflow_glob(part):
+            prefix.append(part)
+            continue
+        glob_seen = True
+        suffix.append(part)
+    return "/".join(prefix) or ".", ["/".join(suffix) if suffix else "*"]
+
+
+def _dedupe_workflow_reference_paths(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    used_names: set[str] = set()
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for ref in refs:
+        path = str(ref.get("path") or "").strip()
+        if not path:
+            continue
+        include = tuple(str(item) for item in list(ref.get("include") or []))
+        key = (path, include)
+        if key in seen:
+            continue
+        seen.add(key)
+        item = dict(ref)
+        base_name = _safe_workflow_reference_name(str(item.get("name") or "")) or "reference"
+        name = base_name
+        suffix = 2
+        while name in used_names:
+            name = f"{base_name}_{suffix}"
+            suffix += 1
+        used_names.add(name)
+        item["name"] = name
+        result.append(item)
+    return result
+
+
+def _looks_like_external_reference(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return "://" in text and not text.startswith("file://")
+
+
+def _has_workflow_glob(value: str) -> bool:
+    return any(char in value for char in "*?[")
+
+
+def _safe_workflow_reference_name(value: str) -> str:
+    text = str(value or "").strip().lower()
+    safe = [char if char.isalnum() else "_" for char in text]
+    return "_".join("".join(safe).split("_")).strip("_")[:80]
+
+
+def _workflow_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        raw = [value]
+    elif isinstance(value, (list, tuple, set)):
+        raw = list(value)
+    else:
+        raw = []
+    result: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text:
+            result.append(text)
+    return result
+
+
+def _workflow_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on", "required", "source_of_truth", "truth_source"}
 
 
 def _attach_requirements_checklist(*, goal: str, requirements_brief: dict[str, Any]) -> None:
@@ -3398,7 +4032,7 @@ def _workspace_has_gate_contract(workspace: dict[str, Any]) -> bool:
 
 
 def _workflow_workspace_summary(workspace: dict[str, Any]) -> dict[str, Any]:
-    return {
+    summary = {
         "kind": str(workspace.get("kind") or ""),
         "project_name": str(workspace.get("project_name") or ""),
         "repo_path": str(workspace.get("repo_path") or ""),
@@ -3407,6 +4041,24 @@ def _workflow_workspace_summary(workspace: dict[str, Any]) -> dict[str, Any]:
         "languages": list(workspace.get("languages") or []),
         "workspace_allocation": dict(workspace.get("workspace_allocation") or {}),
     }
+    references = [dict(item) for item in list(workspace.get("reference_paths") or []) if isinstance(item, dict)]
+    if references:
+        summary["reference_paths"] = [
+            {
+                key: value
+                for key, value in {
+                    "name": item.get("name"),
+                    "path": item.get("path"),
+                    "include": item.get("include"),
+                    "truth_source": item.get("truth_source", True),
+                    "mode": item.get("mode", "read_only"),
+                    "description": item.get("description"),
+                }.items()
+                if value not in ("", None, [])
+            }
+            for item in references
+        ]
+    return summary
 
 
 def _coerce_bool(value: Any) -> bool:

@@ -79,7 +79,7 @@ Pal 可以使用 AI 快速落地实现，但不能把“能生成很多代码”
 - Channel: 是否把 interaction realization 留给 provider，而不是写进 core/manager？
 - Memory: 是否避免把 channel/conversation route 当作 memory identity？
 - Tests: 是否有 focused test？跨模块时是否有 architecture/integration test？
-- Dogfood: 是否用真实 runtime、socket client、cap-call 或等价路径验证？
+- Dogfood: 是否通过真实运行中的 runtime、socket client 或 manager socket 验证？
 - Rollback: 是否可以 disable provider/plugin/endpoint 或 revert 单个 commit？
 
 ## AI Contributor Rule
@@ -110,7 +110,7 @@ Pal 的 runtime 改动默认需要 dogfood。
 
 - `pal run --runtime-root <runtime>`
 - `pal client --runtime-root <runtime> --message "..."`
-- `pal cap-call --runtime-root <runtime> --name <capability>`
+- manager socket/client（Minion 调度与运行状态）
 - provider reload / rescan / attach / detach
 - service log 中没有重复 crash 或 event-loop lifecycle error
 

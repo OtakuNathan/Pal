@@ -14,6 +14,7 @@ from pal.minion.work_order import (
     PlanArtifact,
     dispatchable_plan_validation,
     validate_dispatchable_plan_artifact,
+    validate_final_plan_artifact,
 )
 
 
@@ -29,6 +30,12 @@ class MinionPlanStore:
         return self.owner.runtime_root
 
     def load_dispatchable_plan_ref(self, plan_ref: Any) -> dict[str, Any]:
+        return self._load_plan_ref(plan_ref, require_dispatchable=True)
+
+    def load_revisable_plan_ref(self, plan_ref: Any) -> dict[str, Any]:
+        return self._load_plan_ref(plan_ref, require_dispatchable=False)
+
+    def _load_plan_ref(self, plan_ref: Any, *, require_dispatchable: bool) -> dict[str, Any]:
         ref = coerce_plan_ref(plan_ref)
         path = resolve_plan_ref_path(ref, runtime_root=self.runtime_root)
         content = path.read_bytes()
@@ -40,8 +47,13 @@ class MinionPlanStore:
             payload = json.loads(content.decode("utf-8"))
         except Exception as exc:
             raise ValueError(f"plan_ref is not valid JSON: {path}") from exc
-        artifact = validate_dispatchable_plan_artifact(payload)
-        validation = dispatchable_plan_validation(artifact)
+        artifact = validate_final_plan_artifact(payload)
+        try:
+            validation = dispatchable_plan_validation(artifact)
+        except ValueError as exc:
+            if require_dispatchable:
+                raise
+            validation = {"status": "invalid", "error": str(exc)}
         plan_revision = plan_revision_from_payload(payload, ref)
         payload_metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
         normalized_ref = {
@@ -154,7 +166,7 @@ class MinionPlanStore:
         review_gate_ref: Any = None,
         human_override: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        source = self.load_dispatchable_plan_ref(plan_ref)
+        source = self.load_revisable_plan_ref(plan_ref)
         source_ref = dict(source.get("plan_ref") or {})
         source_revision = plan_revision_from_payload(source.get("plan_artifact"), source_ref)
         if not isinstance(revised_plan_artifact, dict):
@@ -198,6 +210,7 @@ class MinionPlanStore:
         plan_artifact: dict[str, Any] | PlanArtifact,
         *,
         submission_notes: str = "",
+        replace_unaccepted_revision: bool = False,
     ) -> dict[str, Any]:
         artifact = validate_dispatchable_plan_artifact(plan_artifact)
         plan_revision = plan_revision_from_payload(plan_artifact)
@@ -212,11 +225,26 @@ class MinionPlanStore:
         plan_dir.mkdir(parents=True, exist_ok=True)
         path = plan_dir / f"plan.v{plan_revision}.json"
         encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        replaced = False
         if path.exists():
             existing_digest = hashlib.sha256(path.read_bytes()).hexdigest()
             new_digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
             if existing_digest != new_digest:
-                raise ValueError(f"plan revision already exists with different content: {path}")
+                if not replace_unaccepted_revision:
+                    raise ValueError(f"plan revision already exists with different content: {path}")
+                acceptance_marker = plan_dir / f"accepted.v{plan_revision}.json"
+                if acceptance_marker.exists():
+                    raise ValueError(f"accepted plan revision cannot be replaced: {path}")
+                temporary_path = plan_dir / f".{path.name}.{uuid4().hex}.tmp"
+                try:
+                    with temporary_path.open("x", encoding="utf-8") as handle:
+                        handle.write(encoded)
+                    if acceptance_marker.exists():
+                        raise ValueError(f"accepted plan revision cannot be replaced: {path}")
+                    temporary_path.replace(path)
+                    replaced = True
+                finally:
+                    temporary_path.unlink(missing_ok=True)
         else:
             with path.open("x", encoding="utf-8") as handle:
                 handle.write(encoded)
@@ -234,6 +262,7 @@ class MinionPlanStore:
             "plan_artifact": payload,
             "plan_validation": validation,
             "plan_revision": plan_revision,
+            "replaced_unaccepted_revision": replaced,
         }
 
     def accept_plan_ref(

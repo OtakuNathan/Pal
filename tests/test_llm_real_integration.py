@@ -815,7 +815,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                             "It will fail. Then obey the system rule for failed tool calls."
                         ),
                         acceptance_criteria=["memory_recall is called after the failed shell"],
-                        allowed_capabilities=["shell", "op_memory_recall"],
+                        allowed_capabilities=["op_exec_shell", "op_memory_recall"],
                         continuity={"current_milestone": {"milestone_index": 0, "milestone_id": "m0", "title": "Recall after failure"}},
                         metadata={"max_tool_rounds": 4, "max_output_tokens": 1000},
                         resolved_profile={
@@ -938,7 +938,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                         "After the tool result succeeds, stop with a concise milestone summary."
                     ),
                     acceptance_criteria=["status.txt contains MINION_MANAGER_GLM_OK"],
-                    allowed_capabilities=["shell"],
+                    allowed_capabilities=["op_exec_shell"],
                     approval_policy={"high_risk_capabilities": [], "decision_timeout_seconds": 1},
                     continuity={
                         "current_milestone": {
@@ -1138,7 +1138,7 @@ class RealLLMIntegrationTests(unittest.TestCase):
                         goal=str(plan.get("goal") or "Create the marker file."),
                         instruction=coder_instruction,
                         acceptance_criteria=["status.txt contains MINION_TEAM_OK"],
-                        allowed_capabilities=["shell", "checkpoint_commit"],
+                        allowed_capabilities=["op_exec_shell", "op_minion_checkpoint_commit"],
                         approval_policy={"high_risk_capabilities": [], "decision_timeout_seconds": 1},
                         continuity={"current_milestone": {"milestone_index": 0, "milestone_id": "code", "title": "Create marker file"}},
                         metadata={"max_tool_rounds": 6, "max_output_tokens": 900},

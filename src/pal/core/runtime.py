@@ -146,12 +146,7 @@ class TurnManager:
             if isinstance(continuation, TurnContinuation):
                 continuation.interrupted = True
                 continuation.interrupt_reason = reason
-                await self.commit_l1_exit_checkpoint_async(
-                    continuation,
-                    kind=L1MessageKind.TURN_INTERRUPTED,
-                    status="interrupted",
-                    reason=reason,
-                )
+                self._queue_interrupted_turn_settlement(scope_state, continuation)
             output_port = self.context.port_registry.get("agent_io:output") or self.context.port_registry.get("channel:channel")
             if output_port is not None and isinstance(continuation, TurnContinuation):
                 abort_result = output_port.abort_stream(continuation.channel_envelope.response_handle, reason=reason)
@@ -178,8 +173,25 @@ class TurnManager:
         if isinstance(continuation, TurnContinuation):
             continuation.interrupted = True
             continuation.interrupt_reason = reason
+            if reason == "interrupted":
+                scope_key = continuation.control_scope_key or self.state.turn_scopes.get(turn_id) or ""
+                if scope_key:
+                    self._queue_interrupted_turn_settlement(self._ensure_scope_state(scope_key), continuation)
         self.guard.clear(turn_id)
         self._mark_turn_exited(turn_id)
+
+    @staticmethod
+    def _queue_interrupted_turn_settlement(scope_state: Any, continuation: TurnContinuation) -> None:
+        event = getattr(getattr(continuation, "channel_envelope", None), "event", None)
+        if str(getattr(event, "event_kind", "") or "") != EventKind.USER_MESSAGE:
+            return
+        if continuation.l1_interrupted_settlement_queued or continuation.l1_interrupted_settlement_committed:
+            return
+        queue = getattr(scope_state, "interrupted_turns_to_settle", None)
+        if queue is None:
+            return
+        queue.append(continuation)
+        continuation.l1_interrupted_settlement_queued = True
 
     async def commit_l1_exit_checkpoint_async(
         self,
@@ -236,6 +248,75 @@ class TurnManager:
                     "exit_status": status,
                 }
             )
+
+    async def commit_l1_interrupted_settlement_async(self, continuation: TurnContinuation) -> None:
+        if continuation.l1_interrupted_settlement_committed:
+            return
+        transcript = self._build_l1_interrupted_settlement_transcript(continuation)
+        continuation.l1_interrupted_settlement_committed = True
+        if not transcript:
+            return
+        memory_service = self.context.port_registry.get("memory:memory")
+        if memory_service is None:
+            return
+        try:
+            request = MemoryCommitRequest(
+                turn_id=continuation.turn_id,
+                transcript=transcript,
+                metadata={"exit_status": "interrupted_settlement"},
+            )
+            async_method = getattr(memory_service, "acommit_l1", None)
+            if callable(async_method):
+                result = async_method(request)
+                if inspect.isawaitable(result):
+                    result = await result
+            else:
+                sync_method = getattr(memory_service, "commit_l1")
+                result = await asyncio.to_thread(sync_method, request)
+        except Exception as exc:
+            self.state.diagnostics.append(
+                {
+                    "kind": "memory.interrupted_settlement.failed",
+                    "turn_id": continuation.turn_id,
+                    "error": f"{exc.__class__.__name__}: {exc}",
+                }
+            )
+            return
+        if getattr(result, "status", RuntimeStatus.OK) != RuntimeStatus.OK:
+            self.state.diagnostics.append(
+                {
+                    "kind": "memory.interrupted_settlement.retry",
+                    "turn_id": continuation.turn_id,
+                    "status": getattr(result, "status", ""),
+                }
+            )
+
+    def _build_l1_interrupted_settlement_transcript(
+        self,
+        continuation: TurnContinuation,
+    ) -> list[L1TranscriptMessage]:
+        transcript: list[L1TranscriptMessage] = []
+        user_text = extract_text_from_payload(continuation.channel_envelope.event.payload).strip()
+        if user_text:
+            transcript.append(L1TranscriptMessage(role="user", content=user_text, kind=L1MessageKind.USER_REQUEST))
+
+        protocol_assistant_contents: list[str] = []
+        if self._persist_tool_protocol_to_l1(continuation):
+            safe_protocol = self._safe_tool_protocol_messages(continuation.tool_protocol_messages)
+            protocol_transcript, protocol_assistant_contents = l1_tool_protocol_transcript(
+                safe_protocol,
+                truncate_tool_result=self._truncate_tool_result_for_l1,
+            )
+            transcript.extend(protocol_transcript)
+
+        for text in continuation.emitted_reply_texts:
+            rendered = str(text or "").strip()
+            if not rendered:
+                continue
+            if rendered in protocol_assistant_contents:
+                continue
+            transcript.append(L1TranscriptMessage(role="assistant", content=rendered, kind=L1MessageKind.ASSISTANT_REPLY))
+        return transcript
 
     def _build_l1_exit_checkpoint_transcript(
         self,
@@ -333,6 +414,40 @@ class TurnManager:
             )
             return [], []
         return l1_tool_protocol_transcript(messages, truncate_tool_result=self._truncate_tool_result_for_l1)
+
+    @staticmethod
+    def _safe_tool_protocol_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        safe_messages: list[dict[str, Any]] = []
+        index = 0
+        raw_messages = [message for message in list(messages or []) if isinstance(message, dict)]
+        while index < len(raw_messages):
+            message = raw_messages[index]
+            role = str(message.get("role", "") or "").strip()
+            if role != "assistant" or not message.get("tool_calls"):
+                index += 1
+                continue
+            tool_call_ids = TurnManager._extract_tool_protocol_call_ids(message.get("tool_calls"))
+            if not tool_call_ids:
+                index += 1
+                continue
+            pending_ids = set(tool_call_ids)
+            batch: list[dict[str, Any]] = [message]
+            cursor = index + 1
+            while cursor < len(raw_messages) and pending_ids:
+                candidate = raw_messages[cursor]
+                candidate_role = str(candidate.get("role", "") or "").strip()
+                candidate_tool_call_id = str(candidate.get("tool_call_id") or "").strip()
+                if candidate_role != "tool" or candidate_tool_call_id not in pending_ids:
+                    break
+                batch.append(candidate)
+                pending_ids.remove(candidate_tool_call_id)
+                cursor += 1
+            if not pending_ids:
+                safe_messages.extend(batch)
+                index = cursor
+                continue
+            index = cursor
+        return safe_messages
 
     @staticmethod
     def _persist_tool_protocol_to_l1(continuation: TurnContinuation) -> bool:
@@ -800,6 +915,22 @@ class PalCore:
         if channel_runtime is not None:
             channel_runtime.queue_status(channel_envelope, kind, payload=dict(payload or {}))
 
+    async def _settle_interrupted_turns_for_next_user_async(
+        self,
+        channel_envelope: ChannelEnvelope,
+        scope_state: Any,
+    ) -> None:
+        event = getattr(channel_envelope, "event", None)
+        if str(getattr(event, "event_kind", "") or "") != EventKind.USER_MESSAGE:
+            return
+        queue = getattr(scope_state, "interrupted_turns_to_settle", None)
+        if queue is None:
+            return
+        while queue:
+            continuation = queue.popleft()
+            if isinstance(continuation, TurnContinuation):
+                await self.turn_manager.commit_l1_interrupted_settlement_async(continuation)
+
     def _start_channel_turn_task_locked(
         self,
         channel_envelope: ChannelEnvelope,
@@ -834,6 +965,7 @@ class PalCore:
                 scope_state = self._ensure_scope_state(control_scope_key)
                 if scope_state.quiescing:
                     continue
+                await self._settle_interrupted_turns_for_next_user_async(next_envelope, scope_state)
                 self._start_channel_turn_task_locked(
                     next_envelope,
                     control_scope_key,
@@ -858,6 +990,7 @@ class PalCore:
                 self.state.pending_channel_turns.append(channel_envelope)
                 should_queue = True
             else:
+                await self._settle_interrupted_turns_for_next_user_async(channel_envelope, scope_state)
                 self._start_channel_turn_task_locked(channel_envelope, control_scope_key, scope_state)
         if should_reject:
             await self._reply_to_route_async(
@@ -886,6 +1019,7 @@ class PalCore:
         scope_state = self._ensure_scope_state(control_scope_key)
         if scope_state.quiescing:
             raise RuntimeError("scope is quiescing")
+        await self._settle_interrupted_turns_for_next_user_async(channel_envelope, scope_state)
         # The hot path is: start turn -> interpret yielded effects -> resume
         # until the generator returns a TurnOutcome.
         continuation = self.turn_manager.start(channel_envelope)
@@ -976,6 +1110,12 @@ class PalCore:
                 return
             if action.action_kind == "set_think":
                 await self._handle_set_think_async(action)
+                return
+            if action.action_kind == "show_model":
+                await self._handle_show_model_async(action)
+                return
+            if action.action_kind == "set_model":
+                await self._handle_set_model_async(action)
                 return
             if action.action_kind == "show_log":
                 await self._handle_show_log_async(action)
@@ -1109,6 +1249,50 @@ class PalCore:
             f"Think level updated to {requested}. This applies to new turns only.",
         )
 
+    async def _handle_show_model_async(self, action: ControlAction) -> None:
+        llm_runtime = self.context.require_port("llm:llm")
+        self._refresh_llm_runtime_settings(llm_runtime)
+        endpoints = self._llm_model_endpoints(llm_runtime)
+        active_endpoint_id = self._effective_llm_endpoint_id(llm_runtime, endpoints)
+        await self._deliver_control_delivery_async(
+            control_interactions.model_panel_delivery(action.route, endpoints, active_endpoint_id)
+        )
+
+    async def _handle_set_model_async(self, action: ControlAction) -> None:
+        requested = str(action.args.get("endpoint_id") or "").strip()
+        if not requested:
+            await self._complete_action_reply_async(action, "Use /model <endpoint_id>.")
+            return
+        llm_runtime = self.context.require_port("llm:llm")
+        self._refresh_llm_runtime_settings(llm_runtime)
+        endpoints = self._llm_model_endpoints(llm_runtime)
+        endpoint = next(
+            (item for item in endpoints if self._llm_endpoint_field(item, "endpoint_id") == requested),
+            None,
+        )
+        if endpoint is None:
+            known = ", ".join(self._llm_endpoint_field(item, "endpoint_id") for item in endpoints)
+            message = f"Unknown enabled model endpoint: {requested}."
+            if known:
+                message = f"{message}\nAvailable endpoints: {known}"
+            await self._complete_action_reply_async(action, message)
+            return
+        set_active_endpoint = getattr(llm_runtime, "set_active_endpoint", None)
+        if callable(set_active_endpoint):
+            set_active_endpoint(requested)
+        else:
+            settings_repository = getattr(llm_runtime, "settings_repository", None)
+            set_active_setting = getattr(settings_repository, "set_active_llm_endpoint_id", None)
+            if not callable(set_active_setting):
+                await self._complete_action_reply_async(action, "Model switching is unavailable.")
+                return
+            set_active_setting(requested)
+        self._refresh_llm_runtime_settings(llm_runtime)
+        await self._complete_action_reply_async(
+            action,
+            f"Model updated to {self._llm_model_label(endpoint)}. This applies to new turns only.",
+        )
+
     async def _handle_refresh_llm_endpoint_async(self, action: ControlAction) -> None:
         llm_runtime = self.context.require_port("llm:llm")
         refresh = getattr(llm_runtime, "refresh_llm_endpoints", None)
@@ -1138,6 +1322,57 @@ class PalCore:
         if removed:
             lines.append(f"Removed/disabled: {', '.join(str(item) for item in removed)}")
         await self._complete_action_reply_async(action, "\n".join(lines))
+
+    @staticmethod
+    def _refresh_llm_runtime_settings(llm_runtime: Any) -> None:
+        refresh = getattr(llm_runtime, "refresh_runtime_settings", None)
+        if callable(refresh):
+            refresh()
+
+    @staticmethod
+    def _llm_model_endpoints(llm_runtime: Any) -> list[Any]:
+        resolver = getattr(llm_runtime, "endpoint_resolver", None)
+        enabled = getattr(resolver, "enabled", None)
+        if callable(enabled):
+            endpoints = list(enabled())
+        else:
+            endpoints = list(getattr(resolver, "endpoints", ()) or [])
+        return [endpoint for endpoint in endpoints if PalCore._llm_endpoint_field(endpoint, "endpoint_id")]
+
+    @staticmethod
+    def _effective_llm_endpoint_id(llm_runtime: Any, endpoints: list[Any]) -> str:
+        active = str(getattr(llm_runtime, "active_endpoint_id", "") or "").strip()
+        if active:
+            return active
+        primary = getattr(getattr(llm_runtime, "endpoint_resolver", None), "primary", None)
+        if callable(primary):
+            endpoint = primary()
+            endpoint_id = PalCore._llm_endpoint_field(endpoint, "endpoint_id")
+            if endpoint_id:
+                return endpoint_id
+        if endpoints:
+            return PalCore._llm_endpoint_field(endpoints[0], "endpoint_id")
+        return ""
+
+    @staticmethod
+    def _llm_endpoint_field(endpoint: Any, field_name: str) -> str:
+        if endpoint is None:
+            return ""
+        if isinstance(endpoint, dict):
+            value = endpoint.get(field_name)
+        else:
+            value = getattr(endpoint, field_name, None)
+        return str(value or "").strip()
+
+    @staticmethod
+    def _llm_model_label(endpoint: Any) -> str:
+        endpoint_id = PalCore._llm_endpoint_field(endpoint, "endpoint_id")
+        display_name = PalCore._llm_endpoint_field(endpoint, "display_name")
+        model_id = PalCore._llm_endpoint_field(endpoint, "model_id")
+        label = display_name or model_id or endpoint_id
+        if endpoint_id and label != endpoint_id:
+            return f"{label} ({endpoint_id})"
+        return label or endpoint_id
 
     async def _handle_refresh_tool_surface_async(self, action: ControlAction) -> None:
         refresh = getattr(self.tool_surface, "reload_config", None)
@@ -1578,12 +1813,6 @@ class PalCore:
                     return outcome
                 current = await self._execute_turn_effect_async(continuation, yielded)
         except asyncio.CancelledError:
-            await self.turn_manager.commit_l1_exit_checkpoint_async(
-                continuation,
-                kind=L1MessageKind.TURN_INTERRUPTED,
-                status="interrupted",
-                reason=continuation.interrupt_reason or "interrupted",
-            )
             raise
         except Exception as exc:
             await self.turn_manager.commit_l1_exit_checkpoint_async(

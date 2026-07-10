@@ -5,12 +5,11 @@ from pal.execution.contracts import (
     CapabilityResult,
     ExecutionRuntimePort,
     Plugin,
-    RegisteredCapability,
     Tool,
     ToolCallBudget,
 )
-
 __all__ = [
+    "ApprovalExecutionDecorator",
     "CapabilityCall",
     "CapabilityCallable",
     "CapabilityDescriptor",
@@ -19,6 +18,7 @@ __all__ = [
     "ExecutionIntrospectionProvider",
     "ExecutionSnapshot",
     "ExecutionRuntime",
+    "ExecutionApprovalRequest",
     "ExecutionRuntimePort",
     "FileEditTool",
     "FileReadTool",
@@ -28,7 +28,6 @@ __all__ = [
     "GitTool",
     "PathDeleteTool",
     "Plugin",
-    "RegisteredCapability",
     "ShellExecTool",
     "ToolCallTool",
     "ToolReadTool",
@@ -44,6 +43,13 @@ __all__ = [
 
 
 def __getattr__(name: str):
+    if name in {"ApprovalExecutionDecorator", "ExecutionApprovalRequest"}:
+        from pal.execution.approval import ApprovalExecutionDecorator, ExecutionApprovalRequest
+
+        return {
+            "ApprovalExecutionDecorator": ApprovalExecutionDecorator,
+            "ExecutionApprovalRequest": ExecutionApprovalRequest,
+        }[name]
     if name == "ExecutionRuntime":
         from pal.execution.runtime import ExecutionRuntime
 

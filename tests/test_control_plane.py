@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from unittest.mock import patch
 
@@ -67,20 +67,87 @@ class _StubEndpoint(ChannelEndpointQueueBase):
 @dataclass
 class _FakeSettingsRepository:
     think_level: str = DEFAULT_THINK_LEVEL
+    active_llm_endpoint_id: str | None = "stub"
 
     def set_think_level(self, think_level: str) -> None:
         self.think_level = str(think_level)
+
+    def get_active_llm_endpoint_id(self) -> str | None:
+        return self.active_llm_endpoint_id
+
+    def set_active_llm_endpoint_id(self, endpoint_id: str) -> None:
+        self.active_llm_endpoint_id = str(endpoint_id).strip()
+
+
+@dataclass(frozen=True)
+class _FakeLLMEndpoint:
+    endpoint_id: str
+    model_id: str
+    display_name: str = ""
+    provider: str = "test"
+    api_mode: str = "openai_chat"
+    context_window: int | None = 1000
+    max_output_tokens: int | None = 256
+    priority: int = 0
+
+
+@dataclass
+class _FakeEndpointResolver:
+    endpoints: tuple[_FakeLLMEndpoint, ...] = (
+        _FakeLLMEndpoint(endpoint_id="stub", model_id="stub-model", display_name="Stub LLM"),
+        _FakeLLMEndpoint(endpoint_id="backup", model_id="backup-model", display_name="Backup LLM"),
+    )
+
+    def enabled(
+        self,
+        *,
+        preferred_endpoint_id: str | None = None,
+        fallback_endpoint_id: str | None = None,
+        include_remaining: bool = True,
+    ) -> list[_FakeLLMEndpoint]:
+        preferred = str(preferred_endpoint_id or "").strip()
+        fallback = str(fallback_endpoint_id or "").strip()
+        if not preferred and not fallback:
+            return list(self.endpoints) if include_remaining else list(self.endpoints[:1])
+        ordered: list[_FakeLLMEndpoint] = []
+        seen: set[str] = set()
+        for endpoint_id in (preferred, fallback):
+            if not endpoint_id or endpoint_id in seen:
+                continue
+            match = next((item for item in self.endpoints if item.endpoint_id == endpoint_id), None)
+            if match is None:
+                continue
+            ordered.append(match)
+            seen.add(endpoint_id)
+        if include_remaining:
+            ordered.extend(item for item in self.endpoints if item.endpoint_id not in seen)
+        return ordered
+
+    def primary(self, *, preferred_endpoint_id: str | None = None, fallback_endpoint_id: str | None = None) -> _FakeLLMEndpoint | None:
+        enabled = self.enabled(preferred_endpoint_id=preferred_endpoint_id, fallback_endpoint_id=fallback_endpoint_id)
+        return enabled[0] if enabled else None
 
 
 @dataclass
 class _FakeLLMRuntime:
     settings_repository: _FakeSettingsRepository
     think_level: str = DEFAULT_THINK_LEVEL
+    endpoint_resolver: _FakeEndpointResolver = field(default_factory=_FakeEndpointResolver)
+    active_endpoint_id: str | None = "stub"
     refresh_payload: dict[str, object] | None = None
     refresh_calls: int = 0
 
     def refresh_runtime_settings(self) -> None:
         self.think_level = self.settings_repository.think_level
+        configured_active = self.settings_repository.get_active_llm_endpoint_id()
+        endpoint_ids = {endpoint.endpoint_id for endpoint in self.endpoint_resolver.endpoints}
+        self.active_endpoint_id = configured_active if configured_active in endpoint_ids else None
+
+    def set_active_endpoint(self, endpoint_id: str) -> str:
+        normalized = str(endpoint_id).strip()
+        self.settings_repository.set_active_llm_endpoint_id(normalized)
+        self.active_endpoint_id = normalized or None
+        return normalized
 
     def refresh_llm_endpoints(self) -> dict[str, object]:
         self.refresh_calls += 1
@@ -156,6 +223,7 @@ class ControlPlaneTests(unittest.TestCase):
 
         self.assertIn("/control", rendered)
         self.assertIn("/think [off|minimal|low|balanced|deep|xhigh]", rendered)
+        self.assertIn("/model [endpoint_id]", rendered)
         self.assertIn("/log [start|end]", rendered)
         self.assertIn("/ping", rendered)
 
@@ -187,6 +255,37 @@ class ControlPlaneTests(unittest.TestCase):
         assert action is not None
         self.assertEqual(action.action_kind, "set_think")
         self.assertEqual(action.args["think_level"], "deep")
+
+    def test_model_without_argument_shows_current_model(self) -> None:
+        plane = ControlPlane()
+        action = plane.parse_event(
+            ControlEvent(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "/model"},
+            )
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.action_kind, "show_model")
+        self.assertEqual(action.target_scope, "runtime")
+
+    def test_model_argument_sets_endpoint_id(self) -> None:
+        plane = ControlPlane()
+        action = plane.parse_event(
+            ControlEvent(
+                event_kind=EventKind.SLASH_COMMAND,
+                source_kind=SourceKind.CHANNEL,
+                payload={"text": "/model glm-5.2"},
+            )
+        )
+
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.action_kind, "set_model")
+        self.assertEqual(action.target_scope, "runtime")
+        self.assertEqual(action.args["endpoint_id"], "glm-5.2")
 
     def test_log_without_argument_shows_current_status(self) -> None:
         plane = ControlPlane()
@@ -425,6 +524,42 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertEqual(start_action.args["interaction_origin"], "button")
         self.assertEqual(end_action.action_kind, "set_log")
         self.assertFalse(end_action.args["prompt_log_enabled"])
+
+    def test_model_interactions_generate_typed_actions(self) -> None:
+        plane = ControlPlane()
+        route = ControlRoute(
+            endpoint_id="telegram_main",
+            channel_kind="telegram",
+            reply_target={"chat_id": "42"},
+            control_scope_key="telegram:telegram_main:42:root",
+        )
+
+        open_action = plane.handle_interaction(
+            InteractionResult(
+                interaction_id="ctl_panel_1",
+                interaction_kind="control_panel",
+                action_key="control.model.open",
+                route=route,
+            )
+        )
+        set_action = plane.handle_interaction(
+            InteractionResult(
+                interaction_id="ctl_panel_1",
+                interaction_kind="control_panel",
+                action_key="control.model.set",
+                action_args={"endpoint_id": "glm-5.2"},
+                route=route,
+            )
+        )
+
+        self.assertIsNotNone(open_action)
+        self.assertIsNotNone(set_action)
+        assert open_action is not None and set_action is not None
+        self.assertEqual(open_action.action_kind, "show_model")
+        self.assertEqual(open_action.args["interaction_origin"], "button")
+        self.assertEqual(set_action.action_kind, "set_model")
+        self.assertEqual(set_action.args["endpoint_id"], "glm-5.2")
+        self.assertEqual(set_action.args["interaction_origin"], "button")
 
     def test_unknown_interaction_action_normalizes_to_invalid_command(self) -> None:
         plane = ControlPlane()
@@ -720,6 +855,68 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Primary endpoint for future turns: new", self.endpoint.outbox[-1].text)
         self.assertIn("Removed/disabled: old", self.endpoint.outbox[-1].text)
 
+    async def test_show_model_lists_enabled_endpoints_and_marks_current(self) -> None:
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="show_model",
+                target_scope="runtime",
+                route=self.route,
+            )
+        )
+
+        statuses = list(self.endpoint.status_outbox)
+        self.assertGreaterEqual(len(statuses), 2)
+        self.assertEqual(statuses[-2].kind, "interactive_update")
+        spec = statuses[-2].payload["spec"]
+        self.assertIn("Model: stub", spec.text)
+        self.assertIn("> Stub LLM (stub)", spec.text)
+        self.assertIn("  Backup LLM (backup)", spec.text)
+        flattened = [button for row in spec.buttons for button in row]
+        self.assertTrue(
+            any(
+                button.label == "> Stub LLM (stub)"
+                and button.action_key == "control.model.set"
+                and button.action_args == {"endpoint_id": "stub"}
+                for button in flattened
+            )
+        )
+        self.assertTrue(
+            any(
+                button.label == "Backup LLM (backup)"
+                and button.action_key == "control.model.set"
+                and button.action_args == {"endpoint_id": "backup"}
+                for button in flattened
+            )
+        )
+
+    async def test_set_model_updates_active_endpoint_for_future_turns(self) -> None:
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="set_model",
+                target_scope="runtime",
+                args={"endpoint_id": "backup"},
+                route=self.route,
+            )
+        )
+
+        self.assertEqual(self.settings_repository.get_active_llm_endpoint_id(), "backup")
+        self.assertEqual(self.llm_runtime.active_endpoint_id, "backup")
+        self.assertIn("Model updated to Backup LLM (backup).", self.endpoint.outbox[-1].text)
+
+    async def test_set_model_rejects_unknown_endpoint(self) -> None:
+        await self.core.handle_control_action_async(
+            ControlAction(
+                action_kind="set_model",
+                target_scope="runtime",
+                args={"endpoint_id": "missing"},
+                route=self.route,
+            )
+        )
+
+        self.assertEqual(self.settings_repository.get_active_llm_endpoint_id(), "stub")
+        self.assertIn("Unknown enabled model endpoint: missing.", self.endpoint.outbox[-1].text)
+        self.assertIn("Available endpoints: stub, backup", self.endpoint.outbox[-1].text)
+
     async def test_refresh_tool_surface_control_action_updates_runtime_directly(self) -> None:
         calls = []
 
@@ -933,6 +1130,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queued[0].kind, "control_catalog")
         commands = list(queued[0].payload.get("commands") or [])
         self.assertTrue(any(item.get("command") == "control" for item in commands))
+        self.assertTrue(any(item.get("command") == "model" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_llm_endpoint" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_tool_surface" for item in commands))
 
@@ -981,6 +1179,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         catalog_statuses = [item for item in self.endpoint.sent_statuses if item[0] == "control_catalog"]
         self.assertTrue(catalog_statuses)
         commands = list(catalog_statuses[-1][1].get("commands") or [])
+        self.assertTrue(any(item.get("command") == "model" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_llm_endpoint" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_tool_surface" for item in commands))
 
@@ -998,6 +1197,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         catalog_statuses = [item for item in replacement.sent_statuses if item[0] == "control_catalog"]
         self.assertTrue(catalog_statuses)
         commands = list(catalog_statuses[-1][1].get("commands") or [])
+        self.assertTrue(any(item.get("command") == "model" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_llm_endpoint" for item in commands))
         self.assertTrue(any(item.get("command") == "refresh_tool_surface" for item in commands))
 
@@ -1179,6 +1379,7 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         flattened = [button for row in spec.buttons for button in row]
 
         self.assertTrue(any(button.label == "Think" and button.action_key == "control.think.open" for button in flattened))
+        self.assertTrue(any(button.label == "Model" and button.action_key == "control.model.open" for button in flattened))
         self.assertTrue(any(button.label == "Log" and button.action_key == "control.log.open" for button in flattened))
         self.assertTrue(any(button.label == "Compact" and button.action_key == "control.compact.run" for button in flattened))
         self.assertTrue(any(button.label == "Interrupt" and button.action_key == "control.interrupt.run" for button in flattened))
@@ -1260,6 +1461,22 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
                     "tool_call_id": "call_1",
                     "content": "shell result before interrupt",
                 },
+                {
+                    "role": "assistant",
+                    "content": "starting an incomplete tool batch",
+                    "tool_calls": [
+                        {
+                            "id": "call_incomplete",
+                            "type": "function",
+                            "function": {"name": "shell", "arguments": "{\"cmd\": \"sleep 10\"}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "orphan_call",
+                    "content": "orphan tool result should not be committed",
+                },
             ]
         )
         continuation.tool_observations.append(
@@ -1272,20 +1489,30 @@ class PalControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(interrupted)
         self.assertTrue(continuation.interrupted)
         self.assertTrue(self.endpoint._stream_sessions[id(response_handle)]["closed"])
+        self.assertEqual(self.memory_service.l1_store.items, [])
+        self.assertEqual(len(scope_state.interrupted_turns_to_settle), 1)
+        next_envelope = self._make_channel_envelope(turn_id="turn-after-interrupt", request_id="req-after", text="continue")
+        await self.core._settle_interrupted_turns_for_next_user_async(next_envelope, scope_state)
+        self.assertEqual(len(scope_state.interrupted_turns_to_settle), 0)
+        self.assertTrue(continuation.l1_interrupted_settlement_committed)
         self.assertEqual(len(self.memory_service.l1_store.items), 1)
-        checkpoint = self.memory_service.l1_store.items[-1]
-        kinds = [item.kind for item in checkpoint]
-        self.assertIn(L1MessageKind.USER_REQUEST, kinds)
-        self.assertIn(L1MessageKind.ASSISTANT_TOOL_CALL, kinds)
-        self.assertIn(L1MessageKind.TOOL_RESULT, kinds)
-        self.assertIn(L1MessageKind.ASSISTANT_REPLY, kinds)
-        self.assertIn(L1MessageKind.TURN_INTERRUPTED, kinds)
-        protocol_roles = [item.role for item in checkpoint if item.kind in {L1MessageKind.ASSISTANT_TOOL_CALL, L1MessageKind.TOOL_RESULT}]
-        self.assertEqual(protocol_roles, ["assistant", "tool"])
-        summary = next(item.content for item in checkpoint if item.kind == L1MessageKind.TURN_INTERRUPTED)
-        self.assertIn("This is recovery context", summary)
-        self.assertIn("shell", summary)
-        self.assertIn("turn_outcome: not committed", summary)
+        transcript = self.memory_service.l1_store.items[-1]
+        self.assertEqual([message.role for message in transcript], ["user", "assistant", "tool", "assistant"])
+        self.assertEqual([message.kind for message in transcript], [
+            L1MessageKind.USER_REQUEST,
+            L1MessageKind.ASSISTANT_TOOL_CALL,
+            L1MessageKind.TOOL_RESULT,
+            L1MessageKind.ASSISTANT_REPLY,
+        ])
+        self.assertEqual(transcript[0].content, "hello")
+        self.assertEqual(transcript[1].tool_calls[0]["id"], "call_1")
+        self.assertEqual(transcript[2].tool_call_id, "call_1")
+        self.assertIn("shell result before interrupt", transcript[2].content)
+        committed_text = "\n".join(message.content for message in transcript)
+        self.assertIn("I found a runtime clue before interruption.", committed_text)
+        self.assertNotIn("turn_checkpoint", committed_text)
+        self.assertNotIn("call_incomplete", json.dumps([message.tool_calls for message in transcript], ensure_ascii=False))
+        self.assertNotIn("orphan tool result", committed_text)
         with self.assertRaises(asyncio.CancelledError):
             await task
 

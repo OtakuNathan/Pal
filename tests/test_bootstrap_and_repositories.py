@@ -53,7 +53,7 @@ from pal.memory import HashingEmbedder, L3CommitRequest, L3CorrectRequest, L3Pro
 from pal.plugins.l3 import SQLiteVecL3Plugin
 from pal.plugins import PluginBundleRepository
 from pal.proactive import ProactiveDefinition, ProactiveRepository
-from pal.shared import LLMFinishReason, LLMStreamEventKind, llm_tool_name
+from pal.shared import LLMFinishReason, LLMStreamEventKind, SINGLETON_TARGET, llm_tool_name
 from pal.stream_events import NormalizedLLMStreamEvent
 from pal.wizard import WizardService
 from pal.web_fetch import DEFAULT_WEB_FETCH_USER_AGENT, BrowserServiceManager, WebFetchProviderRepository, plain_http_fetch
@@ -275,6 +275,17 @@ class PalV2BootstrapTests(unittest.TestCase):
             (profile_root / "software_engineering" / "writer.toml").read_text(encoding="utf-8"),
         )
 
+    def test_wizard_provision_runtime_seeds_editable_minion_family_templates(self) -> None:
+        family_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "families"
+
+        self.assertTrue((family_root / "general.toml").is_file())
+        self.assertTrue((family_root / "software_engineering.toml").is_file())
+        self.assertTrue((family_root / "lifestyle.toml").is_file())
+        software = tomllib.loads((family_root / "software_engineering.toml").read_text(encoding="utf-8"))
+        self.assertEqual(software["family_id"], "software_engineering")
+        self.assertTrue(software["metadata"]["builtin"])
+        self.assertEqual(software["dag_producer_profile"], "software_engineering.architect")
+
     def test_wizard_minion_profile_template_seed_preserves_user_edits(self) -> None:
         profile_path = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles" / "software_engineering" / "writer.toml"
         profile_path.write_text('profile_id = "writer"\ndisplay_name = "Custom Runtime Writer"\n', encoding="utf-8")
@@ -306,10 +317,54 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.wizard.provision_minion_profile_templates(self.registration)
 
         updated = profile_path.read_text(encoding="utf-8")
-        self.assertIn("software_engineering.review_worker", updated)
+        self.assertIn("Architect Sketch Minion", updated)
+        self.assertIn("minion_plan_builder_sketch", updated)
+        self.assertIn('primary_artifact = "plan.sketch.json"', updated)
+        self.assertIn('default_next_profile = "none"', updated)
         backups = list((profile_root.parent / "profile_backups").glob("*/software_engineering/architect.toml"))
         self.assertEqual(len(backups), 1)
         self.assertIn("Old Runtime Architect Seed", backups[0].read_text(encoding="utf-8"))
+
+    def test_wizard_minion_family_template_seed_preserves_user_edits(self) -> None:
+        family_path = self.registration.runtime.runtime_root / "plugins" / "minion" / "families" / "software_engineering.toml"
+        family_path.write_text(
+            "\n".join(
+                [
+                    'family_id = "software_engineering"',
+                    'display_name = "Custom Software Family"',
+                    'default_executor_profile = "custom.coder"',
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        self.wizard.provision_minion_family_templates(self.registration)
+
+        self.assertIn("Custom Software Family", family_path.read_text(encoding="utf-8"))
+
+    def test_wizard_minion_family_template_seed_refreshes_builtin_copies(self) -> None:
+        family_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "families"
+        family_path = family_root / "software_engineering.toml"
+        family_path.write_text(
+            "\n".join(
+                [
+                    'family_id = "software_engineering"',
+                    'display_name = "Old Software Family Seed"',
+                    "[metadata]",
+                    "builtin = true",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        self.wizard.provision_minion_family_templates(self.registration)
+
+        updated = family_path.read_text(encoding="utf-8")
+        self.assertIn('dag_producer_profile = "software_engineering.architect"', updated)
+        backups = list((family_root.parent / "family_backups").glob("*/software_engineering.toml"))
+        self.assertEqual(len(backups), 1)
+        self.assertIn("Old Software Family Seed", backups[0].read_text(encoding="utf-8"))
 
     def test_identity_repository_bootstraps_singletons(self) -> None:
         repository = IdentityRepository()
@@ -2279,16 +2334,14 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(minion_record["source"], "first_party")
         self.assertTrue(minion_record["attached"])
         self.assertIsNotNone(handle.core.context.module_registry.get("minion"))
-        self.assertIn("minion_show", handle.core.context.capability_registry.descriptors)
-        self.assertIn("minion_dispatch_workflow", handle.core.context.capability_registry.descriptors)
-        observed = handle.core.context.execution_runtime.execute(CapabilityCall(name="minion_show"))
-        self.assertEqual(observed.status, "ok")
-        self.assertTrue(observed.structured["manager_running"])
+        self.assertIn("minion_start_workflow", handle.core.context.capability_registry.descriptors)
+        self.assertIn("minion_workflow_status", handle.core.context.capability_registry.descriptors)
+        self.assertNotIn("minion_dispatch_workflow", handle.core.context.capability_registry.descriptors)
         search = handle.core.context.execution_runtime.execute(
-            CapabilityCall(name="op_tool_search", args={"query": "dispatch minion"})
+            CapabilityCall(name="op_tool_search", args={"query": "start minion workflow"})
         )
-        minion_hit = self._find_search_hit_by_canonical(handle.core, search, "minion_dispatch_workflow")
-        self.assertEqual(minion_hit["name"], "minion_dispatch_workflow")
+        minion_hit = self._find_search_hit_by_canonical(handle.core, search, "minion_start_workflow")
+        self.assertEqual(minion_hit["name"], "minion_start_workflow")
         self.assertNotIn("module_id", minion_hit)
         self.assertIn("required_params", minion_hit)
 
@@ -2302,12 +2355,13 @@ class PalV2BootstrapTests(unittest.TestCase):
                 registration=provisioned.registration,
                 database=provisioned.database,
             )
-            self.assertIn("minion_dispatch_workflow", handle.core.context.capability_registry.descriptors)
+            self.assertIn("minion_start_workflow", handle.core.context.capability_registry.descriptors)
+            self.assertNotIn("minion_dispatch_workflow", handle.core.context.capability_registry.descriptors)
             search = handle.core.context.execution_runtime.execute(
                 CapabilityCall(name="op_tool_search", args={"query": "minion"})
             )
-            minion_hit = self._find_search_hit_by_canonical(handle.core, search, "minion_dispatch_workflow")
-            self.assertEqual(minion_hit["name"], "minion_dispatch_workflow")
+            minion_hit = self._find_search_hit_by_canonical(handle.core, search, "minion_start_workflow")
+            self.assertEqual(minion_hit["name"], "minion_start_workflow")
             self.assertNotIn("module_id", minion_hit)
             self.assertIn("required_params", minion_hit)
         finally:
@@ -2529,7 +2583,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         expectations = {
             "lsp": ("pal.lsp", "lsp_show"),
             "mcp": ("pal.mcp", "mcp_show"),
-            "minion": ("pal.minion", "minion_show"),
+            "minion": ("pal.minion", "minion_start_workflow"),
             "sqlite_vec_l3": ("pal.plugins.l3", "memory_provider_show::sqlite_vec_l3"),
             "web_fetch": ("pal.web_fetch", "web_fetch_show"),
             "web_search": ("pal.web_search", "web_search_show"),
@@ -2590,7 +2644,7 @@ class PalV2BootstrapTests(unittest.TestCase):
             detached = handle.core.detach_module("minion")
 
             self.assertEqual(detached, "ok")
-            self.assertNotIn("minion_show", cap_registry.descriptors)
+            self.assertNotIn("minion_start_workflow", cap_registry.descriptors)
             self.assertNotIn("minion.manager", handle.core.context.event_source_registry.sources)
             self.assertNotIn("minion.prompt.default", handle.core.context.prompt_fragment_registry.providers)
             self.assertNotIn("minion", handle.core.context.event_handler_registry.by_module)
@@ -2604,7 +2658,7 @@ class PalV2BootstrapTests(unittest.TestCase):
 
             self.assertEqual(reattached, "ok")
             self.assertNotIn(probe_name, sys.modules)
-            self.assertIn("minion_show", cap_registry.descriptors)
+            self.assertIn("minion_start_workflow", cap_registry.descriptors)
             new_handle = handle.core.context.module_registry.require("minion")
             new_source = handle.core.context.event_source_registry.sources["minion.manager"]
             new_prompt = handle.core.context.prompt_fragment_registry.providers["minion.prompt.default"]
@@ -3894,7 +3948,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(handle.core.context.module_registry.get("llm"))
         self.assertIsNotNone(handle.core.context.module_registry.get("memory"))
         self.assertIsNotNone(handle.core.context.module_registry.get("identity"))
-        self.assertIsNotNone(handle.core.context.execution_runtime.capabilities.get("channel_list"))
+        execution_runtime = handle.core.context.execution_runtime
+        channel_list_path = execution_runtime.resolve_llm_tool_name("channel_list")
+        self.assertIsNotNone(execution_runtime.bound_action_index.get(channel_list_path, SINGLETON_TARGET))
 
     def test_compose_runtime_registers_seeded_socket_endpoint(self) -> None:
         self.wizard.seed_defaults(self.registration)
@@ -5189,6 +5245,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
                 "commands": [
                     {"command": "control", "description": "Show the control panel and command help."},
                     {"command": "think", "description": "Show or update the think level for future turns."},
+                    {"command": "model", "description": "Show or update the active LLM model for future turns."},
                     {
                         "command": "refresh_llm_endpoint",
                         "description": "Refresh LLM endpoint topology from the local database for future turns.",
@@ -5203,6 +5260,7 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
         command_actions = [payload for kind, payload in self.fake_bot.actions if kind == "commands"]
         self.assertTrue(command_actions)
         published_commands = [item["command"] for item in command_actions[-1]["commands"]]
+        self.assertIn("model", published_commands)
         self.assertIn("refresh_llm_endpoint", published_commands)
         self.assertTrue(any(kind == "menu_button" for kind, _ in self.fake_bot.actions))
 

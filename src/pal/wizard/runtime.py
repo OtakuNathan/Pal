@@ -68,6 +68,18 @@ def _is_managed_minion_profile_seed(target_path: Path, source_path: Path) -> boo
     return str(target_payload.get("profile_group") or "") == str(source_payload.get("profile_group") or "")
 
 
+def _is_managed_minion_family_seed(target_path: Path, source_path: Path) -> bool:
+    try:
+        target_payload = tomllib.loads(target_path.read_text(encoding="utf-8"))
+        source_payload = tomllib.loads(source_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    metadata = target_payload.get("metadata")
+    if not isinstance(metadata, dict) or metadata.get("builtin") is not True:
+        return False
+    return str(target_payload.get("family_id") or "") == str(source_payload.get("family_id") or "")
+
+
 def default_channel_endpoints(runtime_root: Path) -> tuple[dict[str, object], ...]:
     return (
         {
@@ -205,6 +217,7 @@ class WizardService(WizardServicePort):
         self.register(registration)
         self.provision_builtin_plugins(registration)
         self.provision_minion_profile_templates(registration)
+        self.provision_minion_family_templates(registration)
         return registration
 
     def create_database(
@@ -281,6 +294,31 @@ class WizardService(WizardServicePort):
                     if backup_root is None:
                         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
                         backup_root = target_root.parent / "profile_backups" / stamp
+                    backup_path = backup_root / relative_path
+                    backup_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(target_path, backup_path)
+                shutil.copy2(source_path, target_path)
+
+    def provision_minion_family_templates(self, registration: PalRegistration) -> None:
+        """Seed editable minion family manifests into the runtime home."""
+
+        source = resources.files("pal.minion").joinpath("family_templates")
+        target_root = registration.runtime.runtime_root / "plugins" / "minion" / "families"
+        target_root.mkdir(parents=True, exist_ok=True)
+        backup_root: Path | None = None
+        with resources.as_file(source) as source_root:
+            for source_path in sorted(Path(source_root).glob("*.toml")):
+                relative_path = source_path.relative_to(source_root)
+                target_path = target_root / relative_path
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                if target_path.exists():
+                    if not _is_managed_minion_family_seed(target_path, source_path):
+                        continue
+                    if target_path.read_bytes() == source_path.read_bytes():
+                        continue
+                    if backup_root is None:
+                        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                        backup_root = target_root.parent / "family_backups" / stamp
                     backup_path = backup_root / relative_path
                     backup_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(target_path, backup_path)

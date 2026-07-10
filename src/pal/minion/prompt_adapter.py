@@ -362,6 +362,24 @@ class GenericPromptViewRenderer(PromptViewRenderer):
         view = context.prompt_view
         lines = [*self._goal_lines(context)]
         planning = _dict(view.get("planning_requirements"))
+        staged_artifact = _first_markdown_text(planning, "stage_artifact_required")
+        staged_required = bool(planning.get("staged_plan_required")) or staged_artifact in {"PlanSketchArtifact", "ModuleDetailArtifact"}
+        if staged_required:
+            staged_planning = {
+                key: planning.get(key)
+                for key in (
+                    "required_stage",
+                    "stage_artifact_required",
+                    "bound_module_id",
+                    "stage_focus",
+                    "stage_non_goals",
+                    "module_detail_contract",
+                )
+                if planning.get(key) not in (None, "", [], {})
+            }
+            rendered_stage = _render_markdown_mapping(staged_planning, limit=8)
+            if rendered_stage:
+                lines.extend(["## Staged Planning Requirements", rendered_stage])
         if planning:
             lines.extend(["## Planning Requirements", _render_markdown_mapping(planning)])
         milestone = _dict(view.get("milestone"))
@@ -369,15 +387,34 @@ class GenericPromptViewRenderer(PromptViewRenderer):
         if task:
             lines.extend(["## Current Step", task])
         if context.role == "planner":
-            lines.extend(
-                [
-                    "## Question Policy",
-                    (
-                        "Prefer a dispatchable plan with explicit conservative assumptions over ask_user_question when missing "
-                        "details are normal implementation choices. Ask only for genuinely user-owned blockers."
-                    ),
-                ]
-            )
+            if staged_required:
+                lines.extend(
+                    [
+                        "## Topology Policy",
+                        (
+                            "For staged planning, topology dependencies mean work-start blockers: a module may not start until "
+                            "the blocked-by module has an accepted contract, setup, or implementation. Do not encode stubbed "
+                            "interfaces, declaration-only type relationships, runtime callbacks, or final integration-only "
+                            "relationships as topology dependencies; record those through interfaces and acceptance criteria."
+                        ),
+                        "## Question Policy",
+                        (
+                            "Prefer the required staged planning artifact with explicit conservative assumptions over ask_user_question "
+                            "when missing details are normal design choices. Ask only for genuinely user-owned blockers. Do not expand "
+                            "the stage into a dispatchable FinalPlanArtifact unless the current stage explicitly requires it."
+                        ),
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        "## Question Policy",
+                        (
+                            "Prefer a dispatchable plan with explicit conservative assumptions over ask_user_question when missing "
+                            "details are normal implementation choices. Ask only for genuinely user-owned blockers."
+                        ),
+                    ]
+                )
         lines.extend(self._completion_lines())
         return _join_markdown_sections(lines)
 
@@ -881,6 +918,11 @@ def _render_skill_manual_context(value: Any) -> str:
 
 def _render_minion_operating_rules(scaffold: dict[str, Any]) -> str:
     completion_policy = scaffold.get("completion_policy") or {}
+    allowed = set(_string_list(scaffold.get("allowed_capabilities")))
+    requires_git_commit = (
+        isinstance(completion_policy, dict)
+        and str(completion_policy.get("evidence") or "").strip().lower() == "git_commit"
+    ) or "op_minion_checkpoint_commit" in allowed or "checkpoint_commit" in allowed
     testing_guidance = ""
     if isinstance(completion_policy, dict) and bool(completion_policy.get("requires_developer_tests")):
         testing_guidance = (
@@ -890,28 +932,68 @@ def _render_minion_operating_rules(scaffold: dict[str, Any]) -> str:
         )
     artifact_completion_guidance = ""
     if isinstance(completion_policy, dict) and bool(completion_policy.get("allow_artifact_evidence")):
-        artifact_completion_guidance = (
-            "This milestone may complete with artifact evidence when it is verification-only and there are no source, "
-            "test, doc, or config changes to commit. In that case, write a verification report artifact with the "
-            "commands/checks run and finish with a concise summary; do not call `op_minion_checkpoint_commit` solely "
-            "to create an empty checkpoint commit.\n"
+        if requires_git_commit:
+            artifact_completion_guidance = (
+                "This assignment may complete with artifact evidence when it is verification-only and there are no source, "
+                "test, doc, or config changes to commit. In that case, write a verification report artifact with the "
+                "commands/checks run and finish with a concise summary; do not call `op_minion_checkpoint_commit` solely "
+                "to create an empty checkpoint commit.\n"
+            )
+        else:
+            artifact_completion_guidance = (
+                "This assignment may complete with artifact evidence when it is verification-only. In that case, write "
+                "a verification report artifact with the commands/checks run and finish with a concise summary.\n"
+            )
+    git_completion_guidance = ""
+    generated_artifact_guidance = ""
+    if requires_git_commit:
+        git_completion_guidance = (
+            "When completion policy requires git_commit, do not run git add, git commit, or other checkpoint git mutation commands through shell or the git wrapper. "
+            "After implementing and verifying the milestone, call `op_minion_checkpoint_commit` to create the structured checkpoint commit in the minion workspace branch.\n"
         )
-    return (
+        generated_artifact_guidance = (
+            "Do not create or rely on committing generated build/cache artifacts such as __pycache__, .pytest_cache, .o, .obj, .a, .so, .dylib, .dll, .exe, class files, coverage output, build directories, .minion/artifacts reports, or legacy minion_outputs reports.\n"
+        )
+    scope_line = (
         "Your context is the current scoped milestone and the tools made available by Pal.\n"
+        if requires_git_commit
+        else "Your context is the current scoped assignment and the tools made available by Pal.\n"
+    )
+    hidden_work_line = (
         "Treat the prompt work view as the complete scoped assignment; do not infer or implement hidden modules or later milestones.\n"
+        if requires_git_commit
+        else "Treat the prompt work view as the complete scoped assignment; do not infer or implement hidden follow-up work.\n"
+    )
+    report_line = (
         "Use only the tools exposed to this run. Report by milestone, never by percentage or ETA.\n"
+        if requires_git_commit
+        else "Use only the tools exposed to this run. Report against the scoped assignment, never by percentage or ETA.\n"
+    )
+    evidence_line = (
         "If capability evidence is required, use a relevant listed capability before completing the milestone.\n"
+        if requires_git_commit
+        else "If capability evidence is required, use a relevant listed capability before completing the assignment.\n"
+    )
+    completion_line = (
+        "When the current milestone is complete, stop with a concise milestone summary. Pal will ask the user before absorbing minion memory candidates."
+        if requires_git_commit
+        else "When the scoped assignment is complete, stop with a concise summary. Pal will ask the user before absorbing minion memory candidates."
+    )
+    return (
+        f"{scope_line}"
+        f"{hidden_work_line}"
+        f"{report_line}"
+        f"{evidence_line}"
         f"{testing_guidance}"
         f"{artifact_completion_guidance}"
         "If completion evidence cannot be produced, report blocked instead of completed.\n"
-        "When completion policy requires git_commit, do not run git add, git commit, or other checkpoint git mutation commands through shell or the git wrapper. "
-        "After implementing and verifying the milestone, call `op_minion_checkpoint_commit` to create the structured checkpoint commit in the minion workspace branch.\n"
-        "Do not create or rely on committing generated build/cache artifacts such as __pycache__, .pytest_cache, .o, .obj, .a, .so, .dylib, .dll, .exe, class files, coverage output, build directories, .minion/artifacts reports, or legacy minion_outputs reports.\n"
+        f"{git_completion_guidance}"
+        f"{generated_artifact_guidance}"
         "When artifact tools are available, write planner/reviewer deliverables and any long structured output to workspace.artifact_dir with artifact tools; keep the final chat summary short and point to the artifact.\n"
         "Use `op_minion_artifact_write` for one complete coherent file. Use `op_minion_artifact_edit` append for long deliverables split into coherent sections, or replace only when rewriting the complete artifact. Do not rely on final chat text for long plans or reports.\n"
         "When `op_minion_memory_candidate_write` is available and the run teaches something genuinely reusable, write a concise memory candidate there instead of asking Pal to remember it directly.\n"
         "If a tool/capability call fails because of an obvious schema, argument, path, or local input mistake, correct the call directly.\n"
-        "When the current milestone is complete, stop with a concise milestone summary. Pal will ask the user before absorbing minion memory candidates."
+        f"{completion_line}"
     )
 
 
@@ -1084,10 +1166,15 @@ def _prompt_safe_workspace(workspace: dict[str, Any]) -> dict[str, str]:
 
 def _render_minion_runtime_reminder(scaffold: dict[str, Any]) -> str:
     allowed = {str(item).strip() for item in list((scaffold or {}).get("allowed_capabilities") or []) if str(item).strip()}
+    v2 = str((scaffold or {}).get("workflow_model") or "") == "contract_v2"
     lines = [
         "Minion runtime reminder:",
         "- Treat this reminder as behavior-routing guidance for choosing the right capability. The system prompt and capability policy still define the principles and priority order.",
-        "- Work only on the current scoped milestone and available tools; do not start hidden or later work.",
+        (
+            "- Work only on the bound contract invocation and available tools; do not invent architecture, acceptance, or hidden follow-up work."
+            if v2
+            else "- Work only on the current scoped milestone and available tools; do not start hidden or later work."
+        ),
         "- Choose the smallest available capability that matches the immediate intent, then reassess after seeing its result.",
         "- Do not guess unavailable capability names; if the right capability is absent, use the closest safe path or report the limitation.",
     ]
