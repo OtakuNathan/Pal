@@ -110,6 +110,29 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         self.assertEqual(result, {"status": "already_running", "active_worker_id": "inv-live"})
 
+    def test_architecture_enqueue_does_not_reclaim_a_live_stage(self) -> None:
+        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker._effect_snapshot = lambda _effect: SimpleNamespace(
+            workflow_id="wf-live",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch-live",
+            state="PLANNING_RUNNING",
+        )
+        worker._profile_for_role = lambda *_args: "software_engineering.v2_contract_planner"
+        worker.repository.read_snapshot = lambda *_args: SimpleNamespace(state="ACTIVE")
+        worker.repository.read_lease = lambda _key: {
+            "owner_id": "inv-live",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
+        }
+
+        result = asyncio.run(
+            worker._run_architecture_stage(
+                {"effect_id": "eff-duplicate", "payload": {"stage": "planning"}}
+            )
+        )
+
+        self.assertEqual(result, {"status": "already_running", "active_worker_id": "inv-live"})
+
     def test_requirements_stage_uses_artifact_only_workspace(self) -> None:
         worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
         revision = SimpleNamespace(

@@ -1192,6 +1192,10 @@ class MinionV2SemanticWorker:
             return {"status": "superseded"}
         invocation_id = f"inv_{str(effect['effect_id']).removeprefix('eff_')}"
         lease_resource = f"architecture:{revision.aggregate_id}:{stage}"
+        if revision.state == running_state:
+            active_lease = self.repository.read_lease(lease_resource)
+            if active_lease and str(active_lease.get("owner_id") or "") and _lease_is_live(active_lease):
+                return {"status": "already_running", "active_worker_id": str(active_lease["owner_id"])}
         lease = self.repository.claim_lease(
             lease_resource,
             invocation_id,
@@ -1315,6 +1319,10 @@ class MinionV2SemanticWorker:
         manifest_ref = _ref_from_mapping(revision.payload.get("architecture_manifest_ref"))
         invocation_id = f"inv_{str(effect['effect_id']).removeprefix('eff_')}"
         lease_resource = f"architecture:{revision.aggregate_id}:review"
+        if revision.state == "REVIEWING":
+            active_lease = self.repository.read_lease(lease_resource)
+            if active_lease and str(active_lease.get("owner_id") or "") and _lease_is_live(active_lease):
+                return {"status": "already_running", "active_worker_id": str(active_lease["owner_id"])}
         lease = self.repository.claim_lease(
             lease_resource,
             invocation_id,
