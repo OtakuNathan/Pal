@@ -563,6 +563,11 @@ def seed_contract_builder_draft(workspace: Mapping[str, Any], payload: Mapping[s
     runtime = ContractBuilderRuntime(dict(workspace), [])
     runtime._require_stage("contract")
     candidate = deepcopy(dict(payload))
+    for field_name in ("global_constraints", "design_decisions", "gate_checks", "cross_unit_contracts"):
+        candidate[field_name] = _collapse_seed_items_by_id(
+            list(candidate.get(field_name) or []),
+            field_name=field_name,
+        )
     runtime._validate_contract(candidate)
     runtime._save(
         {
@@ -576,6 +581,22 @@ def seed_contract_builder_draft(workspace: Mapping[str, Any], payload: Mapping[s
 
 def _contract_counts(payload: Mapping[str, Any]) -> dict[str, int]:
     return {field: len(list(payload.get(field) or [])) for field in ("global_constraints", "design_decisions", "gate_checks", "units", "cross_unit_contracts")}
+
+
+def _collapse_seed_items_by_id(items: list[Any], *, field_name: str) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    positions: dict[str, int] = {}
+    for raw in items:
+        item = dict(raw or {})
+        item_id = str(item.get("id") or "").strip()
+        if not item_id:
+            raise ValueError(f"{field_name} item requires a stable id")
+        if item_id in positions:
+            result[positions[item_id]] = item
+        else:
+            positions[item_id] = len(result)
+            result.append(item)
+    return result
 
 
 def _validate_architecture_review(payload: Mapping[str, Any]) -> None:

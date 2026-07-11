@@ -379,6 +379,33 @@ class ContractBuilderTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("duplicate global_constraints id: C-1", result.text)
 
+    def test_revision_seed_collapses_legacy_duplicate_ids_using_latest_value(self) -> None:
+        base = {
+            "global_constraints": [
+                {"id": "C-1", "constraint": "Header-only delivery."},
+                {"id": "C-1", "constraint": "Create the production implementation."},
+            ],
+            "design_decisions": [],
+            "gate_checks": [],
+            "units": [_unit("implementation")],
+            "cross_unit_contracts": [],
+            "topology": {"depends_on": {"implementation": []}},
+            "integration_contract": {"depends_on": ["implementation"]},
+            "assumption_ledger": {"assumptions": []},
+            "risk_ledger": {"risks": []},
+        }
+        self.workspace["contract_builder_stage"] = "contract"
+
+        seed_contract_builder_draft(self.workspace, base)
+        submitted = self.call("contract", "op_minion_contract_submit_sketch")
+
+        self.assertTrue(submitted.ok, submitted.text)
+        payload = json.loads(Path(self.produced[-1]["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(
+            payload["global_constraints"],
+            [{"id": "C-1", "constraint": "Create the production implementation."}],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
