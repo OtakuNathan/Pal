@@ -66,6 +66,35 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
+    def test_evidence_publish_requires_all_requirements_to_be_linked(self) -> None:
+        requirements = self.service.publish_requirements(
+            {
+                "requirements": [
+                    {"requirement_id": "R-1", "statement": "First", "strength": "hard"},
+                    {"requirement_id": "R-2", "statement": "Second", "strength": "hard"},
+                ]
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "requirements lack supporting evidence: R-2"):
+            self.service.publish_evidence_catalog(
+                {
+                    "evidence": [
+                        {
+                            "evidence_id": "E-1",
+                            "source_kind": "local",
+                            "location": "reference.patch:1-2",
+                            "line_start": 1,
+                            "line_end": 2,
+                            "summary": "Only the first requirement is linked.",
+                            "supports_requirement_ids": ["R-1"],
+                        }
+                    ]
+                },
+                requirements_ref=requirements,
+                research_mode=ResearchMode.LOCAL_ONLY,
+            )
+
     def _publish_contract(self):
         requirements = self.service.publish_requirements(
             {

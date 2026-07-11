@@ -132,6 +132,7 @@ def prepare_v2_role_workspace(runtime_root: Path, pack: MinionInvocationPack, *,
     workspace = dict(pack.workspace or {})
     source = str(workspace.get("repo_path") or workspace.get("cwd") or "").strip()
     target = Path(runtime_root) / "data" / "minion" / "v2" / "role-workspaces" / _safe_component(run_id)
+    invocation_dir = Path(runtime_root) / "data" / "minion" / "v2" / "invocations" / _safe_component(pack.invocation_id)
     if source:
         source_path = Path(source).expanduser().resolve()
         if not source_path.is_dir():
@@ -153,12 +154,22 @@ def prepare_v2_role_workspace(runtime_root: Path, pack: MinionInvocationPack, *,
                 shutil.copytree(source_path, target)
     else:
         target.mkdir(parents=True, exist_ok=True)
+    writable_dirs = {
+        "run_dir": invocation_dir,
+        "artifact_dir": invocation_dir / "artifacts",
+        "artifact_stage_dir": invocation_dir / "artifact-stage",
+        "log_dir": invocation_dir / "logs",
+        "review_scratch_dir": invocation_dir / "review-scratch",
+    }
+    for path in writable_dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
     workspace.update(
         {
             "kind": "existing_repo",
             "repo_path": str(target),
             "v2_role_workspace": True,
             "workspace_capability_injection": False,
+            **{key: str(path) for key, path in writable_dirs.items()},
         }
     )
     return MinionInvocationPack.from_dict({**pack.to_dict(), "workspace": workspace})

@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
-from pal.minion.v2.architecture import ComplexityBudgetPolicy, validate_requirements_artifact, validate_unit_contract
+from pal.minion.v2.architecture import (
+    EVIDENCE_SOURCE_KINDS,
+    ComplexityBudgetPolicy,
+    validate_requirements_artifact,
+    validate_unit_contract,
+)
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
 
@@ -18,6 +23,7 @@ REQUIREMENTS_BUILDER_CAPABILITIES = (
 )
 
 EVIDENCE_BUILDER_CAPABILITIES = (
+    "op_minion_evidence_add_batch",
     "op_minion_evidence_replace_batch",
     "op_minion_evidence_validate",
     "op_minion_evidence_submit",
@@ -31,6 +37,7 @@ CONTRACT_SKETCH_BUILDER_CAPABILITIES = (
     "op_minion_contract_add_constraints_batch",
     "op_minion_contract_add_design_decisions_batch",
     "op_minion_contract_add_unit_outlines_batch",
+    "op_minion_contract_replace_unit_outlines_batch",
     "op_minion_contract_add_unit_acceptance_batch",
     "op_minion_contract_add_cross_unit_contracts_batch",
     "op_minion_contract_set_integration",
@@ -80,6 +87,11 @@ CONTRACT_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": "Replace the Evidence Catalog transactionally. Every local item needs a line range or content SHA.",
         "parameters_schema": _batch_schema("evidence"),
     },
+    "op_minion_evidence_add_batch": {
+        "name": "op_minion_evidence_add_batch",
+        "description": "Append one inspected source cluster to the Evidence Catalog transactionally. Persist evidence as research proceeds instead of retaining the complete catalog in context. Evidence IDs must remain unique; every local item needs a line range or content SHA.",
+        "parameters_schema": _batch_schema("evidence"),
+    },
     "op_minion_evidence_validate": {"name": "op_minion_evidence_validate", "description": "Validate the bound evidence draft.", "parameters_schema": {"type": "object", "additionalProperties": False}},
     "op_minion_evidence_submit": {"name": "op_minion_evidence_submit", "description": "Validate and freeze evidence_catalog.json. This is the only valid research completion path.", "parameters_schema": {"type": "object", "additionalProperties": False}},
     "op_minion_contract_read": {"name": "op_minion_contract_read", "description": "Read the normalized bound Contract Sketch draft.", "parameters_schema": {"type": "object", "additionalProperties": False}},
@@ -95,6 +107,11 @@ CONTRACT_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_contract_add_unit_outlines_batch": {
         "name": "op_minion_contract_add_unit_outlines_batch",
         "description": "Add complete Unit Contracts transactionally: boundaries, directional provided/consumed interfaces, ownership, lifecycle/state, invariants, requirement/evidence refs, complexity, and work-start blockers. owned_area must contain canonical target-owned paths/logical areas; declared read-only truth sources belong in reference_only_paths. Shared concrete files need one owner. Milestones and implementation steps are forbidden.",
+        "parameters_schema": _batch_schema("units"),
+    },
+    "op_minion_contract_replace_unit_outlines_batch": {
+        "name": "op_minion_contract_replace_unit_outlines_batch",
+        "description": "Replace complete existing Unit Contracts by unit_id in a preseeded revision draft. Use only for units named by the bound finding; every unit must remain complete and valid. Unknown unit IDs are rejected so unrelated topology cannot be invented through this repair tool.",
         "parameters_schema": _batch_schema("units"),
     },
     "op_minion_contract_add_unit_acceptance_batch": {
@@ -129,7 +146,31 @@ CONTRACT_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": "Submit the typed architecture verdict after claim-driven tracing from requirements/evidence to unit and cross-unit contracts. The reviewer cannot modify the contract or replace a targeted trace with a competing design.",
         "parameters_schema": {
             "type": "object",
-            "properties": {"verdict": {"type": "string", "enum": ["PASS", "FAIL"]}, "findings": {"type": "array", "items": {"type": "object"}}},
+            "properties": {
+                "verdict": {"type": "string", "enum": ["PASS", "FAIL"]},
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "finding_kind": {
+                                "type": "string",
+                                "enum": [
+                                    "requirements_defect",
+                                    "evidence_gap",
+                                    "contract_defect",
+                                    "architecture_defect",
+                                ],
+                            },
+                            "summary": {"type": "string", "minLength": 1},
+                            "refs": {"type": "array", "items": {"type": "string"}},
+                            "severity": {"type": "string", "enum": ["error", "warning"]},
+                        },
+                        "required": ["finding_kind", "summary"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
             "required": ["verdict", "findings"],
             "additionalProperties": False,
         },
@@ -179,9 +220,10 @@ class ContractBuilderRuntime:
         self.stage = str(workspace.get("contract_builder_stage") or "").strip()
         if self.stage not in {"requirements", "evidence", "contract", "architecture_review"}:
             raise ValueError("contract_builder_stage is not bound")
-        root = Path(str(workspace.get("artifact_stage_dir") or workspace.get("artifact_dir") or ""))
-        if not str(root):
+        root_text = str(workspace.get("artifact_stage_dir") or workspace.get("artifact_dir") or "").strip()
+        if not root_text:
             raise ValueError("contract builder requires artifact_stage_dir")
+        root = Path(root_text)
         self.path = root / ".contract_builder" / f"{self.stage}.json"
 
     def execute(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -217,10 +259,34 @@ class ContractBuilderRuntime:
             self._validate_evidence(state["payload"])
             self._save(state)
             return {"message": "evidence draft replaced", "count": len(evidence)}
+        if name == "op_minion_evidence_add_batch":
+            self._require_stage("evidence")
+            evidence = list(dict(state.get("payload") or {}).get("evidence") or [])
+            existing_ids = {str(item.get("evidence_id") or "") for item in evidence}
+            additions = []
+            for raw in list(args.get("evidence") or []):
+                item = dict(raw or {})
+                evidence_id = str(item.get("evidence_id") or "").strip()
+                if not evidence_id:
+                    evidence_id = f"E-{len(evidence) + len(additions) + 1}"
+                    item["evidence_id"] = evidence_id
+                if evidence_id in existing_ids:
+                    raise ValueError(f"duplicate evidence_id: {evidence_id}")
+                existing_ids.add(evidence_id)
+                additions.append(item)
+            candidate = {"evidence": [*evidence, *additions]}
+            self._validate_evidence(candidate)
+            state["payload"] = candidate
+            self._save(state)
+            return {
+                "message": "evidence batch appended",
+                "added_count": len(additions),
+                "total_count": len(candidate["evidence"]),
+            }
         if name in {"op_minion_evidence_validate", "op_minion_evidence_submit"}:
             self._require_stage("evidence")
             payload = dict(state.get("payload") or {})
-            self._validate_evidence(payload)
+            self._validate_evidence(payload, require_complete=True)
             return self._validated_or_submitted(name.endswith("submit"), state, payload, "evidence_catalog.json")
         if name == "op_minion_contract_read":
             self._require_stage("contract")
@@ -239,8 +305,7 @@ class ContractBuilderRuntime:
         if name == "op_minion_architecture_review_submit":
             self._require_stage("architecture_review")
             payload = {"verdict": str(args.get("verdict") or ""), "findings": list(args.get("findings") or [])}
-            if payload["verdict"] not in {"PASS", "FAIL"}:
-                raise ValueError("review verdict must be PASS or FAIL")
+            _validate_architecture_review(payload)
             return self._submit(state, payload, "architecture_review.json")
         raise ValueError(f"unsupported contract builder capability: {name}")
 
@@ -271,6 +336,22 @@ class ContractBuilderRuntime:
                 validate_unit_contract(item, complexity_policy=ComplexityBudgetPolicy())
                 existing_ids.add(unit_id)
             payload["units"] = [*list(payload.get("units") or []), *additions]
+        elif name == "op_minion_contract_replace_unit_outlines_batch":
+            units = [dict(item or {}) for item in list(payload.get("units") or [])]
+            positions = {str(item.get("unit_id") or ""): index for index, item in enumerate(units)}
+            replacements = [dict(item or {}) for item in list(args.get("units") or [])]
+            replaced_ids: set[str] = set()
+            for item in replacements:
+                unit_id = str(item.get("unit_id") or "").strip()
+                if not unit_id or unit_id not in positions:
+                    raise ValueError(f"cannot replace unknown unit_id: {unit_id or '<empty>'}")
+                if unit_id in replaced_ids:
+                    raise ValueError(f"duplicate replacement unit_id: {unit_id}")
+                _reject_implementation_fields(item)
+                validate_unit_contract(item, complexity_policy=ComplexityBudgetPolicy())
+                units[positions[unit_id]] = item
+                replaced_ids.add(unit_id)
+            payload["units"] = units
         elif name == "op_minion_contract_add_unit_acceptance_batch":
             unit_id = str(args.get("unit_id") or "")
             unit = next((item for item in list(payload.get("units") or []) if str(item.get("unit_id") or "") == unit_id), None)
@@ -336,9 +417,10 @@ class ContractBuilderRuntime:
         if self.stage != expected:
             raise ValueError(f"capability requires {expected} stage, got {self.stage}")
 
-    @staticmethod
-    def _validate_evidence(payload: Mapping[str, Any]) -> None:
+    def _validate_evidence(self, payload: Mapping[str, Any], *, require_complete: bool = False) -> None:
         seen: set[str] = set()
+        supported_requirement_ids: set[str] = set()
+        bound_requirement_ids = self._bound_requirement_ids()
         for raw in list(payload.get("evidence") or []):
             item = dict(raw or {})
             evidence_id = str(item.get("evidence_id") or "").strip()
@@ -347,9 +429,44 @@ class ContractBuilderRuntime:
             if not str(item.get("location") or "").strip() or not str(item.get("summary") or "").strip():
                 raise ValueError(f"evidence {evidence_id} requires location and summary")
             source_kind = str(item.get("source_kind") or "local")
+            if source_kind not in EVIDENCE_SOURCE_KINDS:
+                raise ValueError(f"invalid evidence source_kind: {source_kind}")
             if source_kind == "local" and not item.get("content_sha256") and not (item.get("line_start") and item.get("line_end")):
                 raise ValueError(f"local evidence {evidence_id} requires line range or content_sha256")
+            requirement_ids = {
+                str(value).strip()
+                for value in list(item.get("supports_requirement_ids") or [])
+                if str(value).strip()
+            }
+            if not requirement_ids:
+                raise ValueError(f"evidence {evidence_id} must support at least one requirement")
+            unknown_ids = requirement_ids - bound_requirement_ids if bound_requirement_ids else set()
+            if unknown_ids:
+                raise ValueError(
+                    f"evidence {evidence_id} references unknown requirements: " + ", ".join(sorted(unknown_ids))
+                )
+            supported_requirement_ids.update(requirement_ids)
             seen.add(evidence_id)
+        if require_complete and bound_requirement_ids:
+            missing_ids = bound_requirement_ids - supported_requirement_ids
+            if missing_ids:
+                raise ValueError("requirements lack supporting evidence: " + ", ".join(sorted(missing_ids)))
+
+    def _bound_requirement_ids(self) -> set[str]:
+        for raw in list(self.workspace.get("reference_paths") or []):
+            reference = dict(raw or {})
+            if str(reference.get("name") or "") != "requirements":
+                continue
+            path = Path(str(reference.get("path") or ""))
+            if not path.is_file():
+                return set()
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return {
+                str(item.get("requirement_id") or "").strip()
+                for item in list(dict(payload or {}).get("requirements") or [])
+                if str(item.get("requirement_id") or "").strip()
+            }
+        return set()
 
     @staticmethod
     def _validate_contract(payload: Mapping[str, Any]) -> None:
@@ -397,8 +514,47 @@ def _empty_contract() -> dict[str, Any]:
     }
 
 
+def seed_contract_builder_draft(workspace: Mapping[str, Any], payload: Mapping[str, Any]) -> None:
+    runtime = ContractBuilderRuntime(dict(workspace), [])
+    runtime._require_stage("contract")
+    candidate = deepcopy(dict(payload))
+    runtime._validate_contract(candidate)
+    runtime._save(
+        {
+            "schema_version": "1",
+            "stage": "contract",
+            "lifecycle": "editing",
+            "payload": candidate,
+        }
+    )
+
+
 def _contract_counts(payload: Mapping[str, Any]) -> dict[str, int]:
     return {field: len(list(payload.get(field) or [])) for field in ("global_constraints", "design_decisions", "gate_checks", "units", "cross_unit_contracts")}
+
+
+def _validate_architecture_review(payload: Mapping[str, Any]) -> None:
+    verdict = str(payload.get("verdict") or "")
+    findings = list(payload.get("findings") or [])
+    if verdict not in {"PASS", "FAIL"}:
+        raise ValueError("review verdict must be PASS or FAIL")
+    if verdict == "PASS" and findings:
+        raise ValueError("PASS architecture review cannot contain findings")
+    if verdict == "FAIL" and not findings:
+        raise ValueError("FAIL architecture review requires typed findings")
+    allowed_kinds = {"requirements_defect", "evidence_gap", "contract_defect", "architecture_defect"}
+    allowed_severities = {"error", "warning"}
+    for index, raw in enumerate(findings):
+        finding = dict(raw or {})
+        kind = str(finding.get("finding_kind") or "")
+        summary = str(finding.get("summary") or "").strip()
+        severity = str(finding.get("severity") or "error")
+        if kind not in allowed_kinds:
+            raise ValueError(f"finding {index} has invalid finding_kind: {kind or '<empty>'}")
+        if not summary:
+            raise ValueError(f"finding {index} requires a non-empty summary")
+        if severity not in allowed_severities:
+            raise ValueError(f"finding {index} has invalid severity: {severity}")
 
 
 def _reject_implementation_fields(value: Any) -> None:

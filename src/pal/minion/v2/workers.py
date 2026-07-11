@@ -42,6 +42,7 @@ from pal.minion.v2.contract_builder import (
     EVIDENCE_BUILDER_CAPABILITIES,
     REQUIREMENTS_BUILDER_CAPABILITIES,
     is_contract_builder_capability,
+    seed_contract_builder_draft,
 )
 from pal.minion.v2.execution import (
     CandidateSnapshotService,
@@ -1182,6 +1183,8 @@ class MinionV2SemanticWorker:
         }[stage]
         revision = self._effect_snapshot(effect)
         profile = self._profile_for_role(revision.workflow_id, role)
+        if self._architecture_worker_suppressed(revision, running_state=running_state, start_action=start_action):
+            return {"status": "superseded"}
         invocation_id = f"inv_{str(effect['effect_id']).removeprefix('eff_')}"
         lease_resource = f"architecture:{revision.aggregate_id}:{stage}"
         lease = self.repository.claim_lease(
@@ -1234,6 +1237,36 @@ class MinionV2SemanticWorker:
                     {"evidence": list(request.get("approved_evidence") or [])},
                 )
                 return {"provider_request_id": invocation_id, "result_artifact_ref": result_ref.to_dict()}
+            if stage == "planning":
+                try:
+                    self.service.architecture.validate_evidence_coverage(
+                        requirements_ref=_ref_from_mapping(revision.payload.get("requirements_ref")),
+                        evidence_ref=_ref_from_mapping(revision.payload.get("evidence_catalog_ref")),
+                    )
+                except (TypeError, ValueError) as exc:
+                    finding_ref = self.service.artifacts.put_json(
+                        {
+                            "finding_kind": ArchitectureFindingKind.EVIDENCE_GAP.value,
+                            "summary": str(exc),
+                            "requirements_ref": revision.payload.get("requirements_ref"),
+                            "evidence_catalog_ref": revision.payload.get("evidence_catalog_ref"),
+                        },
+                        artifact_type="ArchitectureFindingArtifact",
+                    )
+                    current = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id)
+                    self.repository.dispatch(
+                        ActionEnvelope(
+                            action_type="EVIDENCE_GAP",
+                            workflow_id=revision.workflow_id,
+                            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                            aggregate_id=revision.aggregate_id,
+                            actor="minion-v2-planning-preflight",
+                            expected_version=current.version,
+                            idempotency_key=f"planning-evidence-gap:{revision.aggregate_id}:{finding_ref.sha256}",
+                            payload={"finding_artifact_ref": finding_ref.to_dict()},
+                        )
+                    )
+                    return {"result_artifact_ref": finding_ref.to_dict()}
             prompt, reference_refs = self._architecture_stage_prompt(stage, revision)
             terminal, prompt_ref, terminal_ref = await self._run_profile(
                 effect=effect,
@@ -1268,6 +1301,12 @@ class MinionV2SemanticWorker:
 
     async def _run_architecture_review(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         revision = self._effect_snapshot(effect)
+        if self._architecture_worker_suppressed(
+            revision,
+            running_state="REVIEWING",
+            start_action="START_ARCHITECTURE_REVIEW",
+        ):
+            return {"status": "superseded"}
         manifest_ref = _ref_from_mapping(revision.payload.get("architecture_manifest_ref"))
         invocation_id = f"inv_{str(effect['effect_id']).removeprefix('eff_')}"
         lease_resource = f"architecture:{revision.aggregate_id}:review"
@@ -1322,10 +1361,16 @@ class MinionV2SemanticWorker:
                 self._dispatch_architecture_review_result(revision, mechanical, review_ref)
                 return {"result_artifact_ref": review_ref.to_dict()}
             prompt = (
-                "Review the bound ArchitectureContractArtifact by tracing only its requirements, evidence, contracts, topology, "
+                "Review the bound ArchitectureContractArtifact and its attached fragments by tracing only its requirements, evidence, contracts, topology, "
                 "ownership, lifecycle, state, invariants, complexity, and integration claims. The manager's mechanical validation "
                 "already passed. Find semantic omissions or contradictions; do not redesign it."
             )
+            manifest = self.service.artifacts.read_json(manifest_ref)
+            review_refs = {"architecture_manifest": manifest_ref}
+            for relation, digest in architecture_manifest_child_refs(manifest):
+                artifact = self.service.repository.read_artifact_record(digest)
+                if artifact is not None:
+                    review_refs[relation] = ArtifactRef.from_mapping(artifact)
             terminal, prompt_ref, terminal_ref = await self._run_profile(
                 effect=effect,
                 snapshot=revision,
@@ -1335,7 +1380,7 @@ class MinionV2SemanticWorker:
                 profile=self._profile_for_role(revision.workflow_id, "architecture_reviewer"),
                 role_override="architecture_reviewer",
                 instruction=prompt,
-                reference_refs={"architecture_manifest": manifest_ref},
+                reference_refs=review_refs,
             )
             raw = _primary_json_output(terminal)
             semantic = _parse_architecture_review(raw)
@@ -1468,6 +1513,10 @@ class MinionV2SemanticWorker:
         finding_value = revision.payload.get("finding_artifact_ref") or revision.payload.get("replan_finding_ref")
         if finding_value:
             refs["revision_finding"] = _ref_from_mapping(finding_value)
+        if stage == "research" and revision.payload.get("evidence_catalog_ref") and (
+            finding_value or revision.payload.get("edit_instruction_ref")
+        ):
+            refs["base_evidence_catalog"] = _ref_from_mapping(revision.payload.get("evidence_catalog_ref"))
         if stage == "requirements":
             instruction = (
                 "Normalize the WorkflowRequestArtifact into stable atomic requirements. Preserve source scope and non-goals. "
@@ -1660,6 +1709,11 @@ class MinionV2SemanticWorker:
             for key in ("artifact_dir", "artifact_stage_dir", "log_dir", "review_scratch_dir"):
                 Path(str(bound_workspace[key])).mkdir(parents=True, exist_ok=True)
             pack = MinionInvocationPack.from_dict({**pack.to_dict(), "workspace": bound_workspace})
+        if role == "planner" and "base_architecture_manifest" in bound_reference_refs:
+            seed_contract_builder_draft(
+                pack.workspace,
+                self._base_contract_builder_payload(bound_reference_refs),
+            )
         pack = sanitize_runner_session_pack(pack)
         pack = with_minion_sandbox_metadata(self.service.runtime_root, pack, run_id=run_id)
         prompt_ref = self.service.artifacts.put_json(
@@ -2020,6 +2074,47 @@ class MinionV2SemanticWorker:
         if snapshot is None:
             raise ValueError("semantic effect aggregate no longer exists")
         return snapshot
+
+    def _base_contract_builder_payload(self, refs: Mapping[str, ArtifactRef]) -> dict[str, Any]:
+        def read(name: str) -> Any:
+            ref = refs.get(name)
+            if ref is None:
+                raise ValueError(f"base architecture revision is missing {name}")
+            return self.service.artifacts.read_json(ref)
+
+        def numbered(prefix: str) -> list[dict[str, Any]]:
+            names = sorted(
+                (name for name in refs if name.startswith(prefix)),
+                key=lambda name: int(name.removeprefix(prefix)),
+            )
+            return [dict(read(name)) for name in names]
+
+        return {
+            "global_constraints": read("base_global_constraints"),
+            "design_decisions": read("base_design_decisions"),
+            "gate_checks": read("base_gate_checks"),
+            "units": numbered("base_unit_contract_"),
+            "cross_unit_contracts": numbered("base_cross_unit_contract_"),
+            "topology": read("base_topology"),
+            "integration_contract": read("base_integration_contract"),
+            "assumption_ledger": read("base_assumption_ledger"),
+            "risk_ledger": read("base_risk_ledger"),
+        }
+
+    def _architecture_worker_suppressed(
+        self,
+        revision: AggregateSnapshot,
+        *,
+        running_state: str,
+        start_action: str,
+    ) -> bool:
+        workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, revision.workflow_id)
+        if workflow is None:
+            return True
+        if workflow.state in {"PAUSE_REQUESTED", "PAUSED", "CANCEL_REQUESTED", "CANCELLED"}:
+            return True
+        legal = self.repository.engine.legal_actions(AggregateType.ARCHITECTURE_REVISION, revision.state)
+        return revision.state != running_state and start_action not in legal
 
     def _write_node_journal(
         self,

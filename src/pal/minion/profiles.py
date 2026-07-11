@@ -27,6 +27,7 @@ _PROFILE_RUNTIME_METADATA_KEYS = frozenset(
         "llm_round_timeout_seconds",
         "manager_turn_timeout_seconds",
         "max_output_tokens",
+        "max_tool_rounds",
         "temperature",
         "timeout_seconds",
     }

@@ -109,6 +109,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker.repository.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=3)
         worker.repository.release_lease = lambda *_args, **_kwargs: None
         worker.repository.engine.legal_actions = lambda *_args: ()
+        worker.repository.read_snapshot = lambda *_args: SimpleNamespace(state="ACTIVE")
         dispatched: list[str] = []
 
         def capture_dispatch(action):
@@ -134,6 +135,34 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 )
             )
         self.assertEqual(dispatched, ["REBIND_REQUIREMENTS"])
+
+    def test_paused_architecture_stage_does_not_restart_worker(self) -> None:
+        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        revision = SimpleNamespace(
+            workflow_id="wf-paused-stage",
+            aggregate_id="arch-paused-stage",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            state="PAUSED",
+            version=4,
+            payload={},
+        )
+        workflow = SimpleNamespace(state="PAUSED")
+        worker._effect_snapshot = lambda _effect: revision
+        worker._profile_for_role = lambda *_args: "software_engineering.v2_researcher"
+        worker.repository.read_snapshot = lambda *_args: workflow
+        worker.repository.claim_lease = lambda *_args, **_kwargs: self.fail("paused effect claimed a lease")
+
+        result = asyncio.run(
+            worker._run_architecture_stage(
+                {
+                    "effect_id": "eff-paused-stage",
+                    "effect_key": "event:0",
+                    "payload": {"stage": "research"},
+                }
+            )
+        )
+
+        self.assertEqual(result, {"status": "superseded"})
 
     def test_nonblocking_requirements_assumptions_do_not_request_human_clarification(self) -> None:
         worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
@@ -175,6 +204,36 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         self.assertEqual(result.artifact_type, "RequirementsArtifact")
         self.assertEqual(dispatched, ["REQUIREMENTS_COMPLETED"])
+
+    def test_research_revision_handoff_includes_base_evidence_catalog(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        worker = MinionV2SemanticWorker(service)
+        request_ref = service.artifacts.put_json({"goal": "research"}, artifact_type="WorkflowRequestArtifact")
+        requirements_ref = service.artifacts.put_json({"requirements": []}, artifact_type="RequirementsArtifact")
+        evidence_ref = service.artifacts.put_json({"evidence": []}, artifact_type="EvidenceCatalogArtifact")
+        finding_ref = service.artifacts.put_json(
+            {"finding_kind": "evidence_gap", "summary": "link requirements"},
+            artifact_type="ArchitectureFindingArtifact",
+        )
+        workflow = SimpleNamespace(payload={"request_ref": request_ref.to_dict()})
+        revision = SimpleNamespace(
+            workflow_id="wf-research-revision",
+            payload={
+                "request_ref": request_ref.to_dict(),
+                "requirements_ref": requirements_ref.to_dict(),
+                "evidence_catalog_ref": evidence_ref.to_dict(),
+                "finding_artifact_ref": finding_ref.to_dict(),
+                "research_mode": "local_only",
+            },
+        )
+        worker.repository.read_snapshot = lambda *_args: workflow
+
+        with patch("pal.minion.v2.workers.workflow_request_from_snapshot", return_value={"references": []}):
+            instruction, refs = worker._architecture_stage_prompt("research", revision)
+
+        self.assertEqual(refs["base_evidence_catalog"].sha256, evidence_ref.sha256)
+        self.assertEqual(refs["revision_finding"].sha256, finding_ref.sha256)
+        self.assertIn("retain every unaffected base evidence entry", instruction)
 
     def test_profile_worker_preserves_scheduler_lease_owner_id(self) -> None:
         worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))

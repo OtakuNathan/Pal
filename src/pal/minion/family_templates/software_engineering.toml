@@ -33,7 +33,7 @@ unknown = "strict"
 
 [policies.llm]
 temperature = 0.05
-llm_round_timeout_seconds = 3000
+llm_round_timeout_seconds = 900
 
 [policies.verification]
 require_warning_clean = true

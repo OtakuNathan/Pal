@@ -6,9 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pal.minion.v2.adapters import ArtifactBundleAdapter, provision_artifact_workspaces
+from pal.minion.v2.adapters import ArtifactBundleAdapter, prepare_v2_role_workspace, provision_artifact_workspaces
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.repository import MinionV2Repository
+from pal.shared import MinionInvocationPack
 
 
 class ArtifactBundleAdapterTests(unittest.TestCase):
@@ -91,6 +92,26 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
                 dependency_output_hashes={},
                 environment_fingerprint="test",
             )
+
+    def test_role_workspace_binds_writable_invocation_directories(self) -> None:
+        source = self.root / "source"
+        source.mkdir()
+        (source / "input.txt").write_text("truth", encoding="utf-8")
+        pack = MinionInvocationPack(
+            invocation_id="inv-role-workspace",
+            goal="research",
+            workspace={"repo_path": str(source)},
+        )
+
+        prepared = prepare_v2_role_workspace(self.root, pack, run_id="run-role-workspace")
+
+        role_workspace = Path(prepared.workspace["repo_path"])
+        self.assertEqual((role_workspace / "input.txt").read_text(encoding="utf-8"), "truth")
+        self.assertTrue(role_workspace.is_relative_to(self.root / "data" / "minion" / "v2" / "role-workspaces"))
+        for key in ("run_dir", "artifact_dir", "artifact_stage_dir", "log_dir", "review_scratch_dir"):
+            path = Path(prepared.workspace[key])
+            self.assertTrue(path.is_dir(), key)
+            self.assertTrue(path.is_relative_to(self.root / "data" / "minion" / "v2" / "invocations" / "inv-role-workspace"))
 
 
 if __name__ == "__main__":

@@ -18,7 +18,9 @@ For a revision, use the finding as a strict research allowlist: reuse approved b
 the identified gap. If evidence remains unavailable, report the gap instead of upgrading an inference into a fact.
 """
 output_contract_fragment = """
-Build the bound catalog with evidence_replace_batch, validate it, then call evidence_submit.
+Read the requirements first. After inspecting each coherent source cluster, immediately persist its verified entries with evidence_add_batch;
+do not retain the complete catalog only in conversation context. Use evidence_replace_batch only when a revision explicitly requires rebuilding
+the whole catalog. When coverage is sufficient, validate once and call evidence_submit.
 Pal writes canonical evidence_catalog.json; do not call generic artifact or file-write tools.
 {"evidence":[{"evidence_id":"E-1","source_kind":"local|external","location":"path:line-line","line_start":1,"line_end":2,"summary":"...","supports_requirement_ids":["R-1"],"content_sha256":""}]}.
 Keep the final reply short.

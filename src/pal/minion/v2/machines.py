@@ -319,6 +319,7 @@ def _architecture_transitions() -> list[TransitionSpec]:
         _spec(kind, S.RESEARCH_RUNNING, "RESEARCH_COMPLETED", S.PLANNING_QUEUED, guard=_required("evidence_catalog_ref"), effects=_effect("enqueue_architecture_stage", stage="planning")),
         _spec(kind, S.PLANNING_QUEUED, "START_PLANNING", S.PLANNING_RUNNING, guard=_lease_guard),
         _spec(kind, S.PLANNING_RUNNING, "REBIND_PLANNING", S.PLANNING_RUNNING, guard=_lease_guard),
+        _spec(kind, S.PLANNING_RUNNING, "EVIDENCE_GAP", S.RESEARCH_QUEUED, guard=_required("finding_artifact_ref"), effects=_effect("enqueue_architecture_stage", stage="research")),
         _spec(kind, S.PLANNING_RUNNING, "PLANNING_COMPLETED", S.REVIEW_QUEUED, guard=_required("architecture_manifest_ref"), effects=_effect("enqueue_architecture_review")),
         _spec(kind, S.REVIEW_QUEUED, "START_ARCHITECTURE_REVIEW", S.REVIEWING, guard=_lease_guard),
         _spec(kind, S.REVIEWING, "REBIND_ARCHITECTURE_REVIEW", S.REVIEWING, guard=_lease_guard),

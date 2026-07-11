@@ -126,6 +126,7 @@ class MinionV2OutboxProcessor:
             snapshot = self._effect_snapshot(effect)
             if snapshot.state in {"PAUSED", "CANCEL_REQUESTED", "CANCELLED", "STALE"}:
                 self.repository.complete_outbox_effect(effect_id, worker_id=self.worker_id)
+                self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
                 return "completed"
             retry_status = self.repository.retry_outbox_effect(
                 effect_id,
@@ -135,6 +136,7 @@ class MinionV2OutboxProcessor:
             )
             if retry_status == "failed":
                 self._triage_failed_effect(effect, exc)
+            self._reconcile_control_requests(str(effect.get("workflow_id") or ""))
             return "failed"
         finally:
             heartbeat.cancel()
@@ -587,12 +589,17 @@ class MinionV2OutboxProcessor:
             if item.aggregate_type != AggregateType.WORKFLOW
             and item.state not in {"ACCEPTED", "REJECTED", "COMPLETED", "CANCELLED", "STALE"}
         ]
-        action_type = {
+        default_action_type = {
             "propagate_pause": "REQUEST_PAUSE",
             "propagate_resume": "RESUME",
             "propagate_cancel": "REQUEST_CANCEL",
         }[effect_type]
         for child in active:
+            action_type = (
+                "RESOLVE_TRIAGE"
+                if effect_type == "propagate_resume" and child.state == "TRIAGE_REQUIRED"
+                else default_action_type
+            )
             if action_type not in self.repository.engine.legal_actions(child.aggregate_type, child.state):
                 continue
             self.repository.dispatch(

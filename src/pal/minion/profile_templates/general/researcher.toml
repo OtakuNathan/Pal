@@ -11,7 +11,7 @@ Prefer declared truth-source references and user artifacts. Use external researc
 Bind every item to requirement IDs and precise locations or hashes. Record gaps instead of inventing support.
 """
 output_contract_fragment = """
-Use evidence_replace_batch, validate, and evidence_submit. Pal writes evidence_catalog.json; do not use generic write tools.
+Persist each inspected source cluster with evidence_add_batch as research proceeds, then validate and call evidence_submit. Use evidence_replace_batch only for a deliberate full rebuild. Pal writes evidence_catalog.json; do not use generic write tools.
 """
 capability_groups = ["workspace_read", "web_research", "v2_evidence_builder"]
 

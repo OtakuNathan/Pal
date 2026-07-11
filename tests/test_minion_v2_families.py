@@ -52,6 +52,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertEqual(set(binding["adapters"].values()), {"artifact_bundle.v2"})
         self.assertEqual(set(binding["profile_hashes"]), set(binding["roles"]))
         self.assertEqual(binding["policies"]["llm"]["temperature"], 0.05)
+        self.assertEqual(binding["policies"]["llm"]["llm_round_timeout_seconds"], 900)
 
     def test_general_family_is_a_complete_data_driven_contract_dag(self) -> None:
         ref = MinionV2Catalog(self.root, self.store).publish_family_binding("general")

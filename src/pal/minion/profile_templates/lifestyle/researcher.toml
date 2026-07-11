@@ -12,7 +12,7 @@ or nutrition guidance. Bind each item to stable requirement IDs and exact source
 invent measurements, or turn evidence into a plan.
 """
 output_contract_fragment = """
-Use evidence_replace_batch, validate, and evidence_submit. Pal writes evidence_catalog.json. Do not use generic artifact or file-write tools.
+Persist each inspected source cluster with evidence_add_batch as research proceeds, then validate and call evidence_submit. Use evidence_replace_batch only for a deliberate full rebuild. Pal writes evidence_catalog.json. Do not use generic artifact or file-write tools.
 """
 capability_groups = ["workspace_read", "web_research", "v2_evidence_builder"]
 

@@ -16,6 +16,11 @@ class ResearchMode(StrEnum):
     EXTERNAL_ALLOWED = "external_allowed"
 
 
+EVIDENCE_SOURCE_KINDS = frozenset(
+    {"local", "external", "approved", "user_supplied", "input_artifact", "verification", "review"}
+)
+
+
 class RequirementStrength(StrEnum):
     HARD = "hard"
     SOFT = "soft"
@@ -129,6 +134,8 @@ class ArchitectureArtifactService:
         provenance: Mapping[str, Any] | None = None,
     ) -> ArtifactRef:
         normalized = validate_evidence_catalog(payload, research_mode=research_mode)
+        requirements = validate_requirements_artifact(self.artifacts.read_json(requirements_ref))
+        _validate_evidence_requirement_coverage(requirements, normalized)
         normalized["requirements_ref"] = requirements_ref.to_dict()
         return self.artifacts.put_json(
             normalized,
@@ -136,6 +143,20 @@ class ArchitectureArtifactService:
             provenance=provenance,
             child_refs=((requirements_ref.sha256, "requirements"),),
         )
+
+    def validate_evidence_coverage(
+        self,
+        *,
+        requirements_ref: ArtifactRef | Mapping[str, Any],
+        evidence_ref: ArtifactRef | Mapping[str, Any],
+    ) -> None:
+        requirements = validate_requirements_artifact(self.artifacts.read_json(requirements_ref))
+        evidence_payload = dict(self.artifacts.read_json(evidence_ref))
+        evidence = validate_evidence_catalog(
+            evidence_payload,
+            research_mode=ResearchMode(str(evidence_payload.get("research_mode") or "local_only")),
+        )
+        _validate_evidence_requirement_coverage(requirements, evidence)
 
     def publish_unit_contract(
         self,
@@ -421,7 +442,7 @@ def validate_evidence_catalog(payload: Mapping[str, Any], *, research_mode: Rese
         if evidence_id in seen:
             raise ValueError(f"duplicate evidence id: {evidence_id}")
         source_kind = str(item.get("source_kind") or "local").strip()
-        if source_kind not in {"local", "external", "approved", "user_supplied", "input_artifact", "verification", "review"}:
+        if source_kind not in EVIDENCE_SOURCE_KINDS:
             raise ValueError(f"invalid evidence source_kind: {source_kind}")
         if research_mode == ResearchMode.LOCAL_ONLY and source_kind == "external":
             raise ValueError("research_mode=local_only cannot publish external evidence")
@@ -436,6 +457,9 @@ def validate_evidence_catalog(payload: Mapping[str, Any], *, research_mode: Rese
             raise ValueError("evidence line_end must not precede line_start")
         if source_kind == "local" and line_start is None and not content_sha:
             raise ValueError("local evidence requires a precise line range or content_sha256")
+        supports_requirement_ids = _text_list(item.get("supports_requirement_ids"))
+        if not supports_requirement_ids:
+            raise ValueError(f"evidence {evidence_id} must support at least one requirement")
         seen.add(evidence_id)
         normalized.append(
             {
@@ -445,7 +469,7 @@ def validate_evidence_catalog(payload: Mapping[str, Any], *, research_mode: Rese
                 "line_start": line_start,
                 "line_end": line_end,
                 "summary": summary,
-                "supports_requirement_ids": _text_list(item.get("supports_requirement_ids")),
+                "supports_requirement_ids": supports_requirement_ids,
                 "content_sha256": content_sha,
             }
         )
@@ -455,6 +479,24 @@ def validate_evidence_catalog(payload: Mapping[str, Any], *, research_mode: Rese
     ):
         raise ValueError("research_mode=none may carry approved input evidence but cannot publish newly gathered evidence")
     return {"schema_version": "1", "research_mode": research_mode.value, "evidence": normalized}
+
+
+def _validate_evidence_requirement_coverage(
+    requirements: Mapping[str, Any],
+    evidence: Mapping[str, Any],
+) -> None:
+    requirement_ids = {str(item["requirement_id"]) for item in list(requirements.get("requirements") or [])}
+    supported_ids = {
+        requirement_id
+        for item in list(evidence.get("evidence") or [])
+        for requirement_id in list(item.get("supports_requirement_ids") or [])
+    }
+    unknown_ids = supported_ids - requirement_ids
+    if unknown_ids:
+        raise ValueError("evidence references unknown requirements: " + ", ".join(sorted(unknown_ids)))
+    missing_ids = requirement_ids - supported_ids
+    if missing_ids:
+        raise ValueError("requirements lack supporting evidence: " + ", ".join(sorted(missing_ids)))
 
 
 def validate_unit_contract(
