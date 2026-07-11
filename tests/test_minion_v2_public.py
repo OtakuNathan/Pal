@@ -5,6 +5,7 @@ import contextlib
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -92,6 +93,22 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker._profile_for_role = stop_after_profile
         with self.assertRaisesRegex(RuntimeError, "profile-resolved-after-snapshot"):
             asyncio.run(worker._run_architecture_stage({"payload": {"stage": "requirements"}}))
+
+    def test_resume_does_not_reclaim_a_live_architecture_stage(self) -> None:
+        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        worker._effect_snapshot = lambda _effect: SimpleNamespace(
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch-live",
+            state="PLANNING_RUNNING",
+        )
+        worker.repository.read_lease = lambda _key: {
+            "owner_id": "inv-live",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat(),
+        }
+
+        result = asyncio.run(worker._resume_aggregate({"payload": {}}))
+
+        self.assertEqual(result, {"status": "already_running", "active_worker_id": "inv-live"})
 
     def test_requirements_stage_uses_artifact_only_workspace(self) -> None:
         worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))

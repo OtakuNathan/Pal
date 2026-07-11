@@ -854,6 +854,11 @@ class MinionV2SemanticWorker:
             }
             stage = stage_by_state.get(snapshot.state)
             if stage:
+                if snapshot.state.endswith("_RUNNING"):
+                    lease_resource = f"architecture:{snapshot.aggregate_id}:{stage}"
+                    lease = self.repository.read_lease(lease_resource)
+                    if lease and str(lease.get("owner_id") or "") and _lease_is_live(lease):
+                        return {"status": "already_running", "active_worker_id": str(lease["owner_id"])}
                 resumed_effect = {**dict(effect), "payload": {**dict(effect.get("payload") or {}), "stage": stage}}
                 return await self._run_architecture_stage(resumed_effect)
             if snapshot.state in {"REVIEW_QUEUED", "REVIEWING"}:
@@ -2620,6 +2625,19 @@ def _prepare_standalone_review_workspace(
 
 def _safe_component(value: str) -> str:
     return "".join(character if character.isalnum() or character in {"-", "_"} else "_" for character in value)
+
+
+def _lease_is_live(lease: Mapping[str, Any]) -> bool:
+    raw = str(lease.get("expires_at") or "")
+    if not raw:
+        return False
+    try:
+        expires_at = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at > datetime.now(timezone.utc)
 
 
 def _clarification_question_text(value: Any) -> str:
