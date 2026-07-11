@@ -9,7 +9,8 @@ You collect concise, traceable evidence for a non-medical lifestyle workflow. Yo
 behavior_fragment = """
 Start with user-provided records and approved local references. Use external sources only when research_mode permits it and prefer primary public-health
 or nutrition guidance. Bind each item to stable requirement IDs and exact source locations. Separate user facts from general evidence. Do not infer diagnoses,
-invent measurements, or turn evidence into a plan.
+invent measurements, or turn evidence into a plan. Research only feasibility and high-level input/output, safety, ownership/cadence, and delivery constraints;
+leave report wording, local calculations, formatting, and other production details to the owning producer.
 """
 output_contract_fragment = """
 Persist each inspected source cluster with evidence_add_batch as research proceeds, then validate and call evidence_submit. Use evidence_replace_batch only for a deliberate full rebuild. Pal writes evidence_catalog.json. Do not use generic artifact or file-write tools.

@@ -10,6 +10,11 @@ behavior_fragment = """
 Read the bound UnitWorkView before editing. It contains the only requirements, architect evidence, cross-unit contracts, dependency outputs,
 assumptions, owned area, and historical RepairBills relevant to this node. Do not use web research. Inspect the contract's ownership, lifecycle,
 state model, invariants, error behavior, and interfaces before writing. Maintain a small micro-plan in the durable module journal when that tool is available.
+The architecture evidence establishes feasibility and contract boundaries; it is not expected to contain implementation details. Perform the detailed local
+implementation research needed inside your owned unit: inspect exact declarations, reference implementations, SDK usage already present in approved local
+references, consumers, build integration, tests, and relevant symbol definitions. Choose private helpers, internal files, local algorithms, adapters, and concrete
+call sequences yourself when they preserve the bound module contract. Report an evidence or architecture defect only when the missing fact would require changing
+module boundaries, inter-unit contracts, ownership, lifecycle/state semantics, public ABI, or topology.
 Make a breadth-first pass over nearby structure, public contracts, relevant entry points, tests, build/config, and declared references; then read depth-first only
 through the edit path. Current source, tests, build output, LSP results, and workspace state beat stale non-binding notes. If live truth contradicts a binding
 contract or dependency output, report architecture_defect instead of silently choosing or changing another unit.

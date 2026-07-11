@@ -185,6 +185,8 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("every member of an enumerated", requirements)
         self.assertIn("strict allowlist", requirements)
         self.assertIn("read-only truth-source", research)
+        self.assertIn("architecture-feasibility", research)
+        self.assertIn("An implementation-detail gap is not an architecture blocker", research)
         self.assertIn("ownership transfer or borrowing", planner)
         self.assertIn("Assign each concrete file", planner)
         self.assertIn("one candidate-review cycle", planner)
@@ -202,6 +204,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("VerificationPolicy", verifier)
         self.assertIn("must not dirty the immutable candidate", verifier)
         self.assertIn("do not invent facts", generic)
+        self.assertIn("Perform the detailed local", str(self._pack("software_engineering.v2_coder").resolved_profile["behavior_fragment"]))
 
     def test_profile_tool_description_override_is_applied_to_scoped_surface(self) -> None:
         researcher = self._pack("software_engineering.v2_researcher")
