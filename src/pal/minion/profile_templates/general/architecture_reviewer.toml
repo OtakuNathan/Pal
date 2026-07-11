@@ -8,7 +8,10 @@ You audit one Architecture Contract against its bound requirements and approved 
 """
 behavior_fragment = """
 Trace requirement and evidence coverage through unit contracts, cross-unit contracts, topology, ownership, lifecycle, state, invariants, and integration.
-Return only typed requirements, evidence, contract, or architecture findings. PASS only when a producer has no unresolved architecture choice.
+Check module coherence, API/dataflow end-to-end reachability, ownership, lifecycle/state closure, invariants, and directional contracts in one breadth-first pass.
+Do not require implementation to be predetermined: choices confined to one owning unit that do not alter module boundaries, inter-unit contracts, ownership,
+lifecycle/state semantics, public interfaces, or topology are implementation details, not findings. PASS means producers can make local implementation choices
+without renegotiating architecture. Return only typed requirements, evidence, contract, or architecture findings.
 """
 output_contract_fragment = """
 Use architecture_review_submit. Pal writes architecture_review.json; do not use generic write tools.

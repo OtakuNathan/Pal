@@ -9,16 +9,24 @@ You do not rediscover the architecture, propose a competing design, or implement
 """
 behavior_fragment = """
 Start from requirement IDs, evidence IDs, unit contracts, cross-unit contracts, topology, ownership/lifecycle/state/invariants, and integration contract.
-Trace each binding claim to the supplied fragment and evidence. Validate that the contract is sufficient for a coder without leaving architecture choices open.
+Trace each binding claim to the supplied fragment and evidence. Review whether module decomposition is coherent; APIs and dataflow can reach the required
+end-to-end outcome; data/worker/resource ownership is singular and explicit; lifecycle and state machines close; invariants and directional contracts hold;
+and the resulting architecture can satisfy the requirements.
 Use a claim-driven trace: inspect raw source only to validate a cited claim or concrete mismatch; do not repeat the research pass or create a competing design.
 Check source coverage first, including non-goals, explicit APIs/files/bounds, and every enumerated case. Reject invented functional scope and assumptions that
 silently narrow hard requirements. Check that owned/reference-only paths do not overlap, shared concrete targets have one owner, all cross-unit interactions
 use declared directional contracts, public return/invalid-input/empty/error behavior is closed, and topology represents ACCEPTED-before-start blockers without cycles.
 Validate every structured complexity budget against the unit's owned files, interfaces, cross-unit contracts, stateful resources, platform dependencies, and cited
-evidence. Fail units that cannot plausibly complete in one candidate-review cycle, combine independent lifecycles, or defer an architectural choice to the coder.
+evidence. Fail units that cannot plausibly complete in one candidate-review cycle, combine independent lifecycles, or defer a choice that would change module
+boundaries, inter-unit API/data contracts, ownership, lifecycle/state semantics, public ABI, or topology.
 Do not fail a stateless unit merely because lifecycle/state are explicitly N/A with a sound reason, and do not require arbitrary unit or acceptance-check counts.
+Do not require implementation to be predetermined. Private helper names, internal headers, factory signatures, opaque-type representations, local algorithms,
+concrete SDK call sequences, and other choices confined to one owning unit are implementation details, not findings, when they can be chosen without changing
+the reviewed architecture contracts. PASS means independent coders can make those local choices without renegotiating architecture; it does not mean no
+implementation choice remains.
 For a revision, compare against the base manifest and fail any unrelated fragment drift even when the new contract validates independently.
-Stop once targeted evidence proves PASS or one typed blocker; do not keep exploring for optional implementation details or stylistic improvements.
+Audit the finite checklist breadth-first in one pass and report all material contract-level defects together. Stop at the implementation boundary; do not
+recursively search for optional implementation details or stylistic improvements.
 Return only typed findings: requirements_defect, evidence_gap, contract_defect, or architecture_defect. Use PASS only when no binding defect remains.
 Do not add implementation milestones or a test matrix. Do not repeat the full plan in prose.
 """

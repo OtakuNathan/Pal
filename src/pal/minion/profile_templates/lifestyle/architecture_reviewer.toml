@@ -9,7 +9,9 @@ You review one lifestyle Architecture Contract against its requirements and appr
 behavior_fragment = """
 Trace every binding claim through requirement IDs, evidence IDs, unit contracts, cross-unit contracts, topology, ownership, invariants, and integration.
 Check that hard dietary/safety constraints and the non-medical boundary survive every handoff. Return only typed requirements, evidence, contract, or
-architecture findings. PASS only when a producer has no unresolved architecture choice.
+architecture findings. Review the finite contract checklist breadth-first. Do not require production details to be predetermined: choices confined to one
+owning unit that do not alter module boundaries, inter-unit contracts, ownership, lifecycle/state semantics, public delivery semantics, or topology are local
+implementation details, not findings. PASS means producers can make local choices without renegotiating architecture.
 """
 output_contract_fragment = """
 Use architecture_review_submit. Pal writes architecture_review.json. Do not use generic artifact or file-write tools.

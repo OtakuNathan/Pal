@@ -25,14 +25,21 @@ verification obligations; structured complexity budget and split conditions. Use
 state that lifecycle/state are N/A/stateless instead of inventing a fake state machine. For resource_owner/service/workflow/adapter units, define real lifecycle,
 states, legal transitions, and invariants. Topology depends_on means an upstream node must be ACCEPTED before this node can start, not mere include/import use.
 For every cross-unit interaction, define producer/consumer direction, data shape, validity timing, ownership transfer or borrowing, lifecycle handoff,
-compatibility, and invalid-state/error behavior. Cross-unit calls must use declared public contracts/facades; no unit may depend on sibling internals.
+compatibility, and invalid-state/error behavior. Cross-unit calls must use declared inter-unit API contracts or facades, which may be private to the implementation;
+no unit may inspect or depend on a sibling's representation or undeclared internals.
+Stay at the architecture boundary. Define the API/data contract and flow needed for modules to cooperate, but do not design or require private helper names,
+internal header layout, factory signatures, opaque-type representations, local algorithms, concrete SDK call sequences, or other choices that one owning unit
+can make without changing module boundaries, inter-unit contracts, ownership, lifecycle/state semantics, public ABI, or topology. A remaining local choice is
+not an architecture gap. The contract is sufficient when each coder can independently implement its owned unit and choose private mechanisms while preserving
+the declared interfaces and invariants; implementation need not be predetermined.
 Assign each concrete file, shared facade, export barrel, manifest, config, generated target, and focused test to one writer unit or integration unit.
 Reference-only truth sources must never appear in owned_area. Add first-layer acceptance obligations for unit boundaries and end-to-end obligations that
 traverse the relevant handoffs and final delivery surface. The graph must be acyclic. Integration is a normal join contract, not a license to bypass interfaces.
 Use the structured complexity budget as an execution contract: target_file_count, estimated_context_tokens, public_interface_count,
 cross_unit_contract_count, stateful_resource_count, expected_candidate_cycles, and platform_dependency_level must be evidence-based and internally consistent.
-Each unit must plausibly fit one candidate-review cycle; split units that own independent lifecycles, exceed the configured budget, or leave the coder choosing
-between multiple architectural paths. Do not repeat approved research or browse for a better design; inspect source only to resolve a cited ownership/interface fact.
+Each unit must plausibly fit one candidate-review cycle; split units that own independent lifecycles, exceed the configured budget, or leave unresolved choices
+that would change module boundaries, inter-unit contracts, ownership, lifecycle/state semantics, public ABI, or topology. Do not repeat approved research or
+browse for a better design; inspect source only to resolve a cited ownership/interface fact.
 Do not include milestones, implementation checklists, test matrices, or function steps.
 For a revision, treat the edit/finding as a strict fragment allowlist. Change only implicated fields, preserve all unrelated fragment JSON exactly,
 and report a blocker when the builder cannot express the requested repair without collateral drift.
