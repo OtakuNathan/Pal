@@ -8,25 +8,24 @@ from pal.foundation import utc_now
 from pal.memory.compact import SUMMARY_ENTRY_ID, SUMMARY_TITLE, normalize_l1_message_kind, normalize_l1_transcript
 from pal.memory.contracts import L1MessageKind, L1TranscriptMessage, L2Entry, MemoryCompactRequest, MemoryCompactResult
 
-COMPACTION_SCHEMA_MINION_V1 = "pal.compaction.minion.v1"
+COMPACTION_SCHEMA_MINION_V2 = "pal.compaction.minion.v2"
 
 MINION_COMPACT_MIN_PRIOR_USER_INPUT_BUDGET = 4096
 
 _MINION_MANAGEMENT_LINE_RE = re.compile(
     r"""^\s*(?:[-*]\s*)?(?:["']?)"""
-    r"(?:work_order_id|run_id|minion_id|ledger_id|checkpoint_id|correlation_id|task_id|module_id)"
+    r"(?:workflow_id|invocation_id|run_id|minion_id|correlation_id|task_id|unit_id)"
     r"""(?:["']?)\s*[:=]""",
     re.IGNORECASE,
 )
 _MINION_MANAGEMENT_KEYS = frozenset({
-    "work_order_id",
+    "workflow_id",
+    "invocation_id",
     "run_id",
     "minion_id",
-    "ledger_id",
-    "checkpoint_id",
     "correlation_id",
     "task_id",
-    "module_id",
+    "unit_id",
 })
 
 
@@ -45,9 +44,9 @@ def build_minion_prior_user_inputs_source_text(
         '<compact_source kind="minion" mode="prior_completed_user_inputs">',
         "## Source Rules",
         "- This source is mechanically assembled from committed minion turns before the current active turn.",
-        "- It contains only prior user/task inputs. Assistant replies, tool results, checklist state, ledger state, checkpoint state, and current turn state are excluded.",
+        "- It contains only prior user/task inputs. Assistant replies, tool results, aggregate state, worker journal state, and current turn state are excluded.",
         "- Treat these prior inputs as already handled or superseded unless current source-of-truth artifacts say otherwise.",
-        "- Continue from the current active milestone turn; current user message and current tool protocol are not compacted here.",
+        "- Continue from the current active role invocation; current user message and current tool protocol are not compacted here.",
         "",
         "## Prior Completed User Inputs",
     ]
@@ -75,18 +74,18 @@ def build_minion_prior_user_inputs_compaction_payload(
     has_inputs = bool(user_inputs)
     summary_text = (
         "Minion run memory was compacted mechanically: prior user inputs are retained as already-handled history. "
-        "Continue from the current active milestone turn."
+        "Continue from the current active role invocation."
         if has_inputs
         else "Minion run memory was compacted mechanically: no prior user inputs were retained. "
-        "Continue from the current active milestone turn."
+        "Continue from the current active role invocation."
     )
     continuity: dict[str, Any] = {
         "history_rule": (
-            "Prior user inputs are background only: treat them as already handled or superseded unless checklist, "
-            "ledger, checkpoint, workspace, or the current turn says otherwise."
+            "Prior user inputs are background only: treat them as already handled or superseded unless canonical "
+            "artifacts, aggregate state, workspace, or the current invocation says otherwise."
         ),
         "current_turn_rule": (
-            "The current active milestone user message and tool protocol are authoritative and are intentionally "
+            "The current active role invocation user message and tool protocol are authoritative and are intentionally "
             "not compacted."
         ),
     }
@@ -96,7 +95,7 @@ def build_minion_prior_user_inputs_compaction_payload(
         continuity["retired_prior_user_input_count"] = dropped_count
     search_text = "\n\n".join(user_inputs).strip()
     return {
-        "schema": COMPACTION_SCHEMA_MINION_V1,
+        "schema": COMPACTION_SCHEMA_MINION_V2,
         "kind": "minion",
         "continuity": continuity,
         "summary": {
@@ -158,7 +157,7 @@ def compact_minion_memory_service(memory_service: Any, request: MemoryCompactReq
 def coerce_minion_compaction_summary_entry(raw: Any, *, fallback_summary: str) -> L2Entry:
     payload = raw if isinstance(raw, dict) else {}
     schema = str(payload.get("schema") or "").strip()
-    if schema != COMPACTION_SCHEMA_MINION_V1 and not fallback_summary:
+    if schema != COMPACTION_SCHEMA_MINION_V2 and not fallback_summary:
         raise ValueError("minion structured compaction payload missing recognized schema")
     summary_payload = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     continuity = payload.get("continuity") if isinstance(payload.get("continuity"), dict) else {}
@@ -167,7 +166,7 @@ def coerce_minion_compaction_summary_entry(raw: Any, *, fallback_summary: str) -
         raise ValueError("minion compact summary is empty")
     search_text = str(summary_payload.get("search_text") or "").strip() or summary_text
     summary_payload_blob = {
-        "schema": COMPACTION_SCHEMA_MINION_V1,
+        "schema": COMPACTION_SCHEMA_MINION_V2,
         "kind": "minion",
         "continuity": dict(continuity),
         "summary": {
@@ -191,7 +190,7 @@ def coerce_minion_compaction_summary_entry(raw: Any, *, fallback_summary: str) -
 
 
 def is_minion_compaction_payload(payload: object) -> bool:
-    return isinstance(payload, dict) and str(payload.get("schema") or "").strip() == COMPACTION_SCHEMA_MINION_V1
+    return isinstance(payload, dict) and str(payload.get("schema") or "").strip() == COMPACTION_SCHEMA_MINION_V2
 
 
 def render_minion_compact_context_for_llm(*, summary: str, payload: dict[str, object]) -> str:
@@ -201,7 +200,7 @@ def render_minion_compact_context_for_llm(*, summary: str, payload: dict[str, ob
         "## Minion Task Continuity Reference",
         "",
         "This compact context is a continuity reference only, not source of truth.",
-        "Verify against the work order, plan artifact, current milestone, checkpoint/ledger, and workspace before acting.",
+        "Verify against the canonical workflow artifacts, current aggregate, worker journal, and workspace before acting.",
         "",
     ]
     rendered = _render_minion_continuity(dict(continuity))
@@ -313,15 +312,6 @@ def _render_minion_continuity(continuity: dict[str, object]) -> str:
         ("History Rule", "history_rule"),
         ("Current Turn Rule", "current_turn_rule"),
         ("Retired Prior User Input Count", "retired_prior_user_input_count"),
-        ("Task Goal", "task_goal"),
-        ("Current Milestone Hint", "current_milestone_hint"),
-        ("Claimed Completed", "claimed_completed"),
-        ("Claimed Pending", "claimed_pending"),
-        ("Implementation Decisions", "implementation_decisions"),
-        ("Verification Hints", "verification_hints"),
-        ("Review Or Repair Hints", "review_or_repair_hints"),
-        ("Must Verify Against", "must_verify_against"),
-        ("Next Action Hint", "next_action_hint"),
     )
     return _render_compact_sections(fields=fields, continuity=continuity)
 

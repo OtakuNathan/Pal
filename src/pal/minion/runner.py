@@ -59,7 +59,6 @@ from pal.llm.contracts import (
 from pal.llm.request_hooks import DEFAULT_LLM_REQUEST_HOOKS
 from pal.llm.secret_store import EncryptedFileSecretStore
 from pal.lsp import build_lsp_plugin
-from pal.minion.contracts import SERIAL_MILESTONE_MODES
 from pal.memory import (
     CompactionProfile,
     L1MessageKind,
@@ -80,9 +79,6 @@ from pal.minion.compact import (
     is_minion_compaction_payload,
     render_minion_compact_context_for_llm,
 )
-from pal.minion.execution_strategy import execution_strategy_from_pack
-from pal.minion.git_env import inspect_milestone_checkpoint
-from pal.minion.gates import checkpoint_gate_spec_for_pack, pack_requires_plan_artifact_validation
 from pal.minion.debug_log import minion_debug_log_enabled
 from pal.minion.llm_broker import MinionBrokerLLMRuntime
 from pal.minion.profiles import filter_minion_allowed_capabilities
@@ -105,15 +101,9 @@ from pal.minion.prompt_adapter import (
     prompt_view_from_pack as _prompt_view_from_pack,
 )
 from pal.minion.sandbox import minion_sandbox_is_enabled
-from pal.minion.turns import apply_minion_turn_to_pack
 from pal.minion.user_interaction import (
     MinionUserInteractionPort,
     ask_user_question_summary as _ask_user_question_summary,
-)
-from pal.minion.work_order import (
-    dispatchable_plan_validation,
-    validate_dispatchable_plan_artifact,
-    build_planner_work_order,
 )
 from pal.plugins.l3 import MockL3Plugin, SQLiteVecL3Plugin, register_with_core as register_l3_with_core
 from pal.shared import (
@@ -126,7 +116,7 @@ from pal.shared import (
     ResponseHandle,
     RuntimeStatus,
     SourceKind,
-    TaskContextPack,
+    MinionInvocationPack,
     default_tool_result_text,
     llm_tool_name,
     replace_internal_tool_names,
@@ -557,7 +547,7 @@ class MinionAgentLoopState:
 @dataclass
 class MinionRunner:
     runtime_root: Path
-    pack: TaskContextPack
+    pack: MinionInvocationPack
     minion_id: str
     run_id: str
     write_event: EventWriter
@@ -600,93 +590,7 @@ class MinionRunner:
                 "phase_started",
                 accepted_payload,
             )
-            if self._is_v2_invocation():
-                return await self._run_v2_invocation(bundle, prompt_observation_tag=prompt_observation_tag)
-            while True:
-                await self._raise_if_cancel_requested()
-                milestone_started_payload = {
-                    "phase": "milestone_started",
-                    "summary": self._current_milestone_title(),
-                    "milestone_index": self._current_milestone_index(),
-                    "milestone_id": str(self._current_milestone().get("milestone_id") or ""),
-                    "current_milestone": self._current_milestone(),
-                }
-                if prompt_observation_tag:
-                    milestone_started_payload["prompt_observation_tag"] = prompt_observation_tag
-                await self._emit(
-                    "phase_started",
-                    milestone_started_payload,
-                )
-                final_text = await self._run_agent_loop(bundle)
-                await self._raise_if_cancel_requested()
-                clarification_round = 0
-                while not self.blocked_summary:
-                    ask_user_question = _extract_ask_user_question_payload(final_text)
-                    if not ask_user_question:
-                        break
-                    if clarification_round >= self._max_clarification_rounds():
-                        self.blocked_summary = "planner asked too many clarification rounds"
-                        break
-                    clarification = await self._request_clarification(ask_user_question)
-                    if not clarification:
-                        self.blocked_summary = _ask_user_question_summary(ask_user_question)
-                        break
-                    self._apply_clarification_response(clarification)
-                    clarification_round += 1
-                    await self._emit_progress("clarification_applied", round=clarification_round)
-                    final_text = await self._run_agent_loop(bundle)
-                    await self._raise_if_cancel_requested()
-                if self.blocked_summary:
-                    blocked_checkpoint = {
-                        "status": "blocked",
-                        "milestone_index": self._current_milestone_index(),
-                        "summary": self.blocked_summary,
-                        **self._artifact_payload(),
-                    }
-                    terminal_payload = self._terminal_payload("blocked", self.blocked_summary)
-                    await self._emit("checkpoint", blocked_checkpoint)
-                    await self._emit("terminal", terminal_payload)
-                    return 0
-                checkpoint_payload = await self._complete_current_milestone(final_text)
-                planner_repair_attempt = 0
-                while self._should_retry_planner_artifact(checkpoint_payload, planner_repair_attempt):
-                    planner_repair_attempt += 1
-                    retry_note = self._planner_artifact_repair_note(checkpoint_payload, planner_repair_attempt)
-                    await self._emit_progress(
-                        "planner_artifact_repair_retry",
-                        repair_attempt=planner_repair_attempt,
-                        retry_limit=self._planner_artifact_repair_retry_limit(),
-                        plan_validation=dict(checkpoint_payload.get("plan_validation") or {}),
-                    )
-                    final_text = await self._run_agent_loop(bundle, forced_retry_note=retry_note)
-                    await self._raise_if_cancel_requested()
-                    checkpoint_payload = await self._complete_current_milestone(final_text)
-                if checkpoint_payload.get("status") not in {"completed", "claimed"}:
-                    await self._emit("checkpoint", checkpoint_payload)
-                    await self._emit("terminal", self._terminal_payload("blocked", checkpoint_payload.get("summary") or "milestone blocked"))
-                    return 0
-                current_index = self._current_milestone_index()
-                await self._emit("checkpoint", checkpoint_payload)
-                if checkpoint_payload.get("status") == "completed":
-                    await self._emit("milestone_completed", self._milestone_completed_payload(final_text, checkpoint_payload))
-                next_status, next_turn = await self._await_next_serial_module_turn(current_index)
-                await self._raise_if_cancel_requested()
-                if next_status == "next" and next_turn is not None:
-                    self._apply_next_milestone_turn(next_turn, checkpoint_payload=checkpoint_payload)
-                    continue
-                if next_status == "repair" and next_turn is not None:
-                    self._apply_next_milestone_turn(next_turn, checkpoint_payload={})
-                    continue
-                if next_status == "timeout":
-                    summary = "manager did not acknowledge milestone checkpoint before continuation timeout"
-                    await self._emit("terminal", self._terminal_payload("blocked", summary))
-                    return 0
-                if next_status == "blocked":
-                    summary = str((next_turn or {}).get("summary") or "manager blocked serial milestone continuation")
-                    await self._emit("terminal", self._terminal_payload("blocked", summary))
-                    return 0
-                await self._emit("terminal", self._terminal_payload("completed", final_text or "minion completed current milestone"))
-                return 0
+            return await self._run_v2_invocation(bundle, prompt_observation_tag=prompt_observation_tag)
         except _MinionCooperativeCancel as cancel:
             with contextlib.suppress(Exception):
                 await self._emit("terminal", self._cancel_terminal_payload(cancel.payload))
@@ -736,9 +640,6 @@ class MinionRunner:
         )
         return 0
 
-    def _is_v2_invocation(self) -> bool:
-        return bool(dict((self.pack.metadata or {}).get("minion_v2") or {}))
-
     async def _run_agent_loop(self, bundle: MinionRuntimeBundle, *, forced_retry_note: str = "") -> str:
         memory_l3, memory_service = self._runner_memory()
         workspace = dict(self.pack.workspace)
@@ -746,93 +647,25 @@ class MinionRunner:
         workspace.setdefault("run_id", self.run_id)
         workspace.setdefault("minion_id", self.minion_id)
         workspace.setdefault("minion_profile", self.pack.minion_profile)
-        workspace.setdefault("work_order_id", self.pack.work_order_id)
+        workspace.setdefault("invocation_id", self.pack.invocation_id)
         workspace.setdefault("goal", self.pack.instruction or self.pack.goal)
         if isinstance(self.pack.metadata, dict):
-            workspace.setdefault("task_id", str(self.pack.metadata.get("task_id") or ""))
-            for key in (
-                "parent_work_order_id",
-                "parent_module_id",
-                "parent_module_name",
-                "module_id",
-                "module_name",
-            ):
-                value = str(self.pack.metadata.get(key) or "").strip()
-                if value:
-                    workspace.setdefault(key, value)
-            if isinstance(self.pack.metadata.get("repair_context"), dict):
-                workspace.setdefault("repair_context", dict(self.pack.metadata.get("repair_context") or {}))
             if isinstance(self.pack.metadata.get("requirements_brief"), dict):
                 workspace.setdefault("requirements_brief", dict(self.pack.metadata.get("requirements_brief") or {}))
-            if isinstance(self.pack.metadata.get("prompt_view"), dict):
-                workspace.setdefault("prompt_view", dict(self.pack.metadata.get("prompt_view") or {}))
-            if isinstance(self.pack.metadata.get("coder_work_order"), dict):
-                coder_work_order = dict(self.pack.metadata.get("coder_work_order") or {})
-                workspace.setdefault("coder_work_order", coder_work_order)
-                order_metadata = coder_work_order.get("metadata")
-                if isinstance(order_metadata, dict) and isinstance(order_metadata.get("module_dependency_context"), list):
-                    workspace.setdefault(
-                        "module_dependency_context",
-                        [dict(item) for item in list(order_metadata.get("module_dependency_context") or []) if isinstance(item, dict)],
-                    )
-            if isinstance(self.pack.metadata.get("source_plan_ref"), dict):
-                workspace.setdefault("source_plan_ref", dict(self.pack.metadata.get("source_plan_ref") or {}))
-            if isinstance(self.pack.metadata.get("review_gate_ref"), dict):
-                workspace.setdefault("review_gate_ref", dict(self.pack.metadata.get("review_gate_ref") or {}))
-            if isinstance(self.pack.metadata.get("plan_revision_checklist"), list):
-                workspace.setdefault(
-                    "plan_revision_checklist",
-                    [dict(item) for item in list(self.pack.metadata.get("plan_revision_checklist") or []) if isinstance(item, dict)],
-                )
-            if isinstance(self.pack.metadata.get("planner_work_order"), dict):
-                workspace.setdefault("planner_work_order", dict(self.pack.metadata.get("planner_work_order") or {}))
-            expected_plan_revision = _expected_planner_plan_revision(self.pack)
-            if expected_plan_revision >= 0:
-                workspace.setdefault("planner_plan_revision", expected_plan_revision)
         workspace.setdefault("review_tool_evidence_refs", self.review_tool_evidence_refs)
         workspace.setdefault("shell_mutation_violations", self.shell_mutation_violations)
-        current_repair_attempt = self._current_repair_attempt_payload()
-        if current_repair_attempt:
-            workspace.setdefault("current_repair_attempt", current_repair_attempt)
-        checkpoint_repair = (self.pack.metadata or {}).get("checkpoint_repair")
-        if isinstance(checkpoint_repair, dict):
-            workspace.setdefault("checkpoint_repair", dict(checkpoint_repair))
-        active_gate_todo = (self.pack.metadata or {}).get("active_gate_todo")
-        if isinstance(active_gate_todo, dict):
-            workspace.setdefault("active_gate_todo", dict(active_gate_todo))
-        if isinstance((self.pack.metadata or {}).get("review_target"), dict):
-            review_target = dict((self.pack.metadata["review_target"] or {}))
-            workspace.setdefault("review_target_run_id", str(review_target.get("run_id") or ""))
-            workspace.setdefault("review_target_checkpoint_id", str(review_target.get("checkpoint_id") or ""))
-            workspace.setdefault("review_target_commit_sha", str(review_target.get("commit_sha") or ""))
-            workspace.setdefault("review_target_gate_kind", str(review_target.get("gate_kind") or ""))
-            if isinstance(review_target.get("acceptance_criteria"), list):
-                workspace.setdefault(
-                    "review_target_acceptance_criteria",
-                    [str(item) for item in list(review_target.get("acceptance_criteria") or []) if str(item or "").strip()],
-                )
-            if isinstance(review_target.get("acceptance_checklist"), list):
-                workspace.setdefault(
-                    "review_target_acceptance_checklist",
-                    [dict(item) for item in list(review_target.get("acceptance_checklist") or []) if isinstance(item, dict)],
-                )
-            if isinstance(review_target.get("checkpoint_git"), dict):
-                workspace.setdefault("review_target_checkpoint_git", dict(review_target.get("checkpoint_git") or {}))
-            if isinstance(review_target.get("source_contract"), dict):
-                workspace.setdefault("review_target_source_contract", dict(review_target.get("source_contract") or {}))
-            if isinstance(review_target.get("gate_spec"), dict):
-                workspace.setdefault("review_target_gate_spec", dict(review_target.get("gate_spec") or {}))
-            if isinstance(review_target.get("module_contract"), dict):
-                workspace.setdefault("review_target_module_contract", dict(review_target.get("module_contract") or {}))
-        if not self._is_v2_invocation():
-            workspace.setdefault("current_milestone_index", self._current_milestone_index())
-            workspace.setdefault("current_milestone_title", self._current_milestone_title())
         execution_runtime = MinionScopedExecutionRuntime(
             bundle.execution_runtime,
             self.pack.allowed_capabilities,
             workspace,
             produced_artifacts=self.produced_artifacts,
             memory_l3=memory_l3,
+            capability_description_overrides={
+                str(key): str(value)
+                for key, value in dict(
+                    dict(self.pack.resolved_profile or {}).get("capability_description_overrides") or {}
+                ).items()
+            },
         )
         channel_envelope = _minion_task_envelope(self.pack, minion_id=self.minion_id, run_id=self.run_id)
         state = MinionAgentLoopState(
@@ -868,11 +701,7 @@ class MinionRunner:
             ]
             return L1CommitPayload(turn_id=self.run_id, transcript=transcript, tool_observations=list(observations))
 
-        turn_id = (
-            f"{self.run_id}:invocation"
-            if self._is_v2_invocation()
-            else f"{self.run_id}:m{self._current_milestone_index()}"
-        )
+        turn_id = f"{self.run_id}:invocation"
         program = agent_turn_program(
             turn_id=turn_id,
             build_assembly_context=build_context,
@@ -905,7 +734,7 @@ class MinionRunner:
                     raise RuntimeError("minion agent loop ended without a turn outcome")
                 if not self.blocked_summary:
                     await self._emit_progress(
-                        "invocation_finalizing" if self._is_v2_invocation() else "milestone_finalizing",
+                        "invocation_finalizing",
                         round=state.llm_round_count,
                         tool_call_count=state.tool_call_count,
                     )
@@ -935,43 +764,6 @@ class MinionRunner:
         self._memory_l3 = memory_l3
         self._memory_service = memory_service
         return memory_l3, memory_service
-
-    async def _await_next_serial_module_turn(self, completed_milestone_index: int) -> tuple[str, dict[str, Any] | None]:
-        metadata = dict(self.pack.metadata or {})
-        module_execution = dict(metadata.get("module_execution") or {})
-        is_serial = str(module_execution.get("mode") or "") in SERIAL_MILESTONE_MODES
-        review_required = self._requires_checkpoint_review_gate()
-        if not is_serial and not review_required:
-            return "not_serial", None
-        if is_serial and not bool(module_execution.get("auto_advance")):
-            return "complete", None
-        timeout = self._manager_turn_timeout_seconds()
-        message = await self._read_manager_control(timeout)
-        if not message:
-            return "timeout", None
-        message_type = str(message.get("type") or "").strip()
-        if message_type in {"cancel_requested", "cancel"}:
-            self._remember_cancel_request(dict(message.get("payload") or message))
-            return "cancel", dict(message.get("payload") or message)
-        if message_type == "next_turn" and isinstance(message.get("turn"), dict):
-            turn = dict(message.get("turn") or {})
-            current = dict(turn.get("current_milestone") or {})
-            next_index = _coerce_int(current.get("milestone_index"), default=completed_milestone_index)
-            if next_index <= completed_milestone_index:
-                return "blocked", {"summary": "manager sent a stale milestone turn"}
-            return "next", turn
-        if message_type == "repair_turn" and isinstance(message.get("turn"), dict):
-            turn = dict(message.get("turn") or {})
-            current = dict(turn.get("current_milestone") or {})
-            repair_index = _coerce_int(current.get("milestone_index"), default=completed_milestone_index)
-            if repair_index != completed_milestone_index:
-                return "blocked", {"summary": "manager sent repair for a different milestone"}
-            return "repair", turn
-        if message_type == "complete":
-            return "complete", dict(message.get("completion") or {})
-        if message_type == "blocked":
-            return "blocked", dict(message.get("payload") or {})
-        return "timeout", None
 
     async def _read_manager_control(self, timeout: float | None = None) -> dict[str, Any] | None:
         if self._pending_control_messages:
@@ -1016,38 +808,6 @@ class MinionRunner:
         }
         return dict(self._cancel_requested)
 
-    def _manager_turn_timeout_seconds(self) -> float:
-        raw = (self.pack.metadata or {}).get("manager_turn_timeout_seconds")
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            value = _DEFAULT_MANAGER_TURN_TIMEOUT_SECONDS
-        return max(0.1, min(_MAX_MANAGER_TURN_TIMEOUT_SECONDS, value))
-
-    def _apply_next_milestone_turn(self, turn: dict[str, Any], *, checkpoint_payload: dict[str, Any]) -> None:
-        self.produced_artifacts.clear()
-        self.blocked_summary = ""
-        self.pack = apply_minion_turn_to_pack(self.pack, turn, checkpoint_payload=checkpoint_payload)
-
-    def _milestone_completed_payload(self, final_text: str, checkpoint_payload: dict[str, Any]) -> dict[str, Any]:
-        payload = self._terminal_payload("completed", final_text or "minion completed current milestone")
-        for key in (
-            "task_id",
-            "module_id",
-            "milestone_index",
-            "milestone_id",
-            "commit_sha",
-            "git_commit",
-            "evidence",
-            "plan_ref",
-            "plan_validation",
-        ):
-            if key in checkpoint_payload:
-                payload[key] = checkpoint_payload[key]
-        payload.setdefault("milestone_index", self._current_milestone_index())
-        payload.setdefault("milestone_id", str(self._current_milestone().get("milestone_id") or ""))
-        return payload
-
     def _build_minion_retry_note(self, outcome: Any, observations: list[Any], retry_count: int) -> str:
         if self.blocked_summary:
             return ""
@@ -1056,10 +816,6 @@ class MinionRunner:
         tools_available = bool(self.pack.allowed_capabilities)
         if not tools_available:
             return ""
-        if observations and self._needs_git_completion_retry():
-            if retry_count >= self._git_completion_retry_limit():
-                return ""
-            return self._git_completion_retry_note()
         if retry_count > 0:
             return ""
         if observations:
@@ -1067,91 +823,9 @@ class MinionRunner:
         if not self._requires_first_tool_call():
             return ""
         _ = outcome
-        if self._is_v2_invocation():
-            return (
-                "You have not used any capability yet. This contract invocation requires executable evidence. "
-                "Use one listed capability now to inspect, research, read, write, or verify before completing."
-            )
         return (
-            "You have not used any capability yet. This milestone requires executable evidence. "
-            "Use one listed capability now to inspect, research, read, write, or verify the task before completing."
-        )
-
-    def _needs_git_completion_retry(self) -> bool:
-        completion_policy = self._completion_policy()
-        if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
-            return False
-        metadata = self.pack.metadata if isinstance(self.pack.metadata, dict) else {}
-        if bool(metadata.get("allow_text_only_completion") or completion_policy.get("allow_artifact_evidence")):
-            return False
-        return not self._completion_evidence_present()
-
-    def _git_completion_retry_limit(self) -> int:
-        metadata = self.pack.metadata if isinstance(self.pack.metadata, dict) else {}
-        raw = metadata.get("git_completion_retry_limit")
-        return max(1, min(5, _coerce_int(raw, default=3)))
-
-    def _git_completion_retry_note(self) -> str:
-        checkpoint = inspect_milestone_checkpoint(
-            Path(str((self.pack.workspace or {}).get("repo_path") or ".")),
-            base_sha=str((self.pack.workspace or {}).get("base_sha") or ""),
-        )
-        status = str(checkpoint.get("status") or "").strip()
-        if status == "uncommitted_changes":
-            return (
-                "The milestone has uncommitted workspace changes and is not complete until a structured checkpoint "
-                "commit exists. Do not answer with final text. If implementation and verification are complete, call "
-                "`op_minion_checkpoint_commit` now. Do not use op_exec_shell git add/commit; Pal needs the structured result "
-                "from `op_minion_checkpoint_commit` for manager reporting."
-            )
-        return (
-            "The milestone is not complete yet: no minion checkpoint commit exists. Use the listed file/workspace "
-            "capabilities to make and verify the required change, then call `op_minion_checkpoint_commit` to create "
-            "the milestone checkpoint commit. Do not stop with a report-only response. If completion is truly "
-            "impossible, report a concrete blocker that explains which required input, permission, file, or contract "
-            "is missing."
-        )
-
-    def _should_retry_planner_artifact(self, checkpoint_payload: dict[str, Any], repair_attempt: int) -> bool:
-        if not self._requires_planner_plan_artifact_validation():
-            return False
-        if repair_attempt >= self._planner_artifact_repair_retry_limit():
-            return False
-        if str(checkpoint_payload.get("status") or "").strip().lower() != "blocked":
-            return False
-        if checkpoint_payload.get("ask_user_question"):
-            return False
-        allowed = {str(item) for item in self.pack.allowed_capabilities}
-        if not {
-            "op_minion_artifact_write",
-            "op_minion_plan_finalize",
-            "op_minion_plan_validate_and_submit_for_review",
-        }.intersection(allowed):
-            return False
-        validation = dict(checkpoint_payload.get("plan_validation") or {})
-        validation_status = str(validation.get("status") or "").strip().lower()
-        return validation_status in {"invalid", "draft"}
-
-    def _planner_artifact_repair_retry_limit(self) -> int:
-        metadata = self.pack.metadata if isinstance(self.pack.metadata, dict) else {}
-        raw = metadata.get("planner_artifact_repair_retry_limit")
-        return max(0, min(5, _coerce_int(raw, default=2)))
-
-    def _planner_artifact_repair_note(self, checkpoint_payload: dict[str, Any], repair_attempt: int) -> str:
-        validation = dict(checkpoint_payload.get("plan_validation") or {})
-        errors = [str(item) for item in list(validation.get("errors") or []) if str(item).strip()]
-        error_text = "\n".join(f"- {item}" for item in errors) or f"- {checkpoint_payload.get('summary') or 'plan validation failed'}"
-        return (
-            f"Planner repair attempt {repair_attempt}/{self._planner_artifact_repair_retry_limit()}.\n"
-            "The previous planner output is not dispatchable. Do not finish with chat text and do not ask the user "
-            "unless the missing information is truly not discoverable from the task context.\n\n"
-            "Validation errors:\n"
-            f"{error_text}\n\n"
-            "Repair by using the plan builder tools on the current draft: use `plan_read`, `plan_find`, and node-specific "
-            "`plan_update_*`/`plan_delete_*`/`plan_replace_*` tools when a local repair is possible. Rebuild with "
-            "`plan_begin` only if no editable draft exists. Close every milestone and module, then call "
-            "`plan_validate_and_submit_for_review`. Use `plan_validate` separately only while debugging a local draft. "
-            "Do not hand-write JSON."
+            "You have not used any capability yet. This contract invocation requires executable evidence. "
+            "Use one listed capability now to inspect, research, read, write, or verify before completing."
         )
 
     def _build_minion_turn_executor(
@@ -1200,7 +874,7 @@ class MinionRunner:
                 messages=list(prompt.messages),
                 max_output_tokens=prompt.max_output_tokens,
                 model_hint=prompt.model_hint,
-                temperature=prompt.temperature,
+                temperature=_minion_temperature(self.pack, fallback=prompt.temperature),
                 tools=list(prompt.tools),
                 metadata={**dict(prompt.metadata), **_minion_llm_request_metadata(self.pack, self.run_id)},
             )
@@ -1269,8 +943,7 @@ class MinionRunner:
         if self._completion_evidence_present() or self._artifact_completion_evidence_present():
             outcome = CanonicalLLMOutcome(text="assignment produced completion evidence")
         else:
-            scope = "invocation" if self._is_v2_invocation() else "milestone"
-            self.blocked_summary = f"minion reached explicit max_tool_rounds={max_rounds} before completing the current {scope}"
+            self.blocked_summary = f"minion reached explicit max_tool_rounds={max_rounds} before completing the current invocation"
             outcome = CanonicalLLMOutcome(text=self.blocked_summary)
         return EffectResult(status=RuntimeStatus.OK, payload=outcome)
 
@@ -1352,7 +1025,7 @@ class MinionRunner:
         return True
 
     def _render_minion_memory_context(self, state: MinionAgentLoopState) -> str:
-        pack = state.memory_service.build_pack(MemoryPackRequest(turn_kind="minion", work_order_id=self.pack.work_order_id))
+        pack = state.memory_service.build_pack(MemoryPackRequest(turn_kind="minion", work_order_id=self.pack.invocation_id))
         parts: list[str] = []
         summary_text = self._render_minion_current_summary(pack.current_summary)
         if summary_text:
@@ -1426,7 +1099,7 @@ class MinionRunner:
                 name=tool_call.name,
                 ok=False,
                 text=policy_error,
-                structured={"reason": "use_checkpoint_commit_capability", "capability": target_name},
+                structured={"reason": "manager_owned_candidate_snapshot", "capability": target_name},
                 call_id=tool_call.call_id,
                 llm_text=policy_error,
                 status=RuntimeStatus.ERROR,
@@ -1495,7 +1168,10 @@ class MinionRunner:
         return minion_sandbox_is_enabled(self.pack) or os.environ.get("PAL_MINION_SANDBOXED") == "1"
 
     def _tool_call_with_minion_defaults(self, tool_call: CanonicalToolCall) -> CanonicalToolCall:
-        if not _is_shell_capability_name(_effective_capability_name(tool_call)):
+        target_name = _effective_capability_name(tool_call)
+        if str(target_name).startswith("op_lsp_"):
+            return self._tool_call_with_lsp_workspace(tool_call)
+        if not _is_shell_capability_name(target_name):
             return tool_call
         effective_args = _effective_tool_args(tool_call)
         cwd = str(effective_args.get("cwd") or "").strip()
@@ -1509,6 +1185,28 @@ class MinionRunner:
             effective_args["cwd"] = default_cwd
         else:
             return tool_call
+        if tool_call.name == "op_tool_call":
+            args = dict(tool_call.args or {})
+            args["args"] = effective_args
+            return CanonicalToolCall(name=tool_call.name, args=args, call_id=tool_call.call_id)
+        return CanonicalToolCall(name=tool_call.name, args=effective_args, call_id=tool_call.call_id)
+
+    def _tool_call_with_lsp_workspace(self, tool_call: CanonicalToolCall) -> CanonicalToolCall:
+        effective_args = _effective_tool_args(tool_call)
+        workspace = dict(self.pack.workspace or {})
+        repo_path = str(
+            workspace.get("repo_path")
+            or workspace.get("workspace_path")
+            or workspace.get("task_repo_path")
+            or workspace.get("target_repo_path")
+            or ""
+        ).strip()
+        if repo_path:
+            effective_args.setdefault("workspace_root", repo_path)
+        for key in ("primary_language", "languages", "lsp_setup"):
+            value = workspace.get(key)
+            if value not in (None, "", [], {}) and key not in effective_args:
+                effective_args[key] = value
         if tool_call.name == "op_tool_call":
             args = dict(tool_call.args or {})
             args["args"] = effective_args
@@ -1533,24 +1231,12 @@ class MinionRunner:
     def _runner_owned_git_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
         if not (_is_git_capability_name(target_name) or _is_shell_capability_name(target_name)):
             return ""
-        v2_metadata = dict((self.pack.metadata or {}).get("minion_v2") or {})
-        if v2_metadata and self.pack.minion_profile == "software_engineering.v2_coder":
-            cmd = str(_effective_tool_args(tool_call).get("cmd") or "").strip()
-            if _git_command_is_mutating(cmd):
-                return (
-                    "Minion V2 coder Git mutation is manager-owned. Do not add, commit, reset, checkout/switch, clean, "
-                    "merge, rebase, tag, or push; leave worktree changes uncommitted for QUIESCING and candidate snapshot."
-                )
-        completion_policy = self._completion_policy()
-        if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
-            return ""
         cmd = str(_effective_tool_args(tool_call).get("cmd") or "").strip()
         if not _git_command_is_mutating(cmd):
             return ""
         return (
-            "Do not run git add, git commit, git reset, checkout/switch, clean, merge, rebase, tag, or push through "
-            "the git capability in this minion workspace. Use `op_minion_checkpoint_commit` for milestone checkpoint "
-            "commits so Pal can record structured commit evidence."
+            "Git mutation is manager-owned. Do not add, commit, reset, checkout/switch, clean, merge, rebase, tag, "
+            "or push; leave workspace changes for QUIESCING and the execution adapter's candidate snapshot."
         )
 
     def _dedicated_shell_command_error(self, target_name: str, tool_call: CanonicalToolCall) -> str:
@@ -1563,14 +1249,9 @@ class MinionRunner:
                 "confined to the assigned workspace."
             )
         if _shell_invokes_command(cmd, {"git"}):
-            if dict((self.pack.metadata or {}).get("minion_v2") or {}):
-                return (
-                    "Shell Git is trapped in Minion V2. Use op_git only for read-only status/diff/log/show; "
-                    "the manager owns candidate commits and integration."
-                )
             return (
-                "Shell git is trapped in minion workspaces. Use op_git for scoped status/diff/log/show operations "
-                "and op_minion_checkpoint_commit for commits on the assigned worktree."
+                "Shell Git is trapped. Use op_git only for read-only status/diff/log/show; the manager owns "
+                "candidate snapshots and integration."
             )
         return ""
 
@@ -1647,7 +1328,7 @@ class MinionRunner:
             "repo_path": repo_path,
             "before": before_snapshot,
             "after": after_snapshot,
-            "summary": "op_exec_shell changed an audited workspace; reviewer must rerun from a clean workspace before closing the milestone.",
+            "summary": "op_exec_shell changed an audited workspace; reviewer must rerun from a clean workspace before closing the invocation.",
         }
         self.shell_mutation_violations.append(violation)
         self._append_debug_log("shell_mutation_violation", violation)
@@ -1800,12 +1481,6 @@ class MinionRunner:
         self.auto_accept_approvals = self._user_interaction_port().auto_accept_approvals
         return decision
 
-    async def _request_clarification(self, ask_user_question: dict[str, Any]) -> dict[str, Any]:
-        return await self._user_interaction_port().request_clarification(
-            ask_user_question,
-            approval_policy=self.pack.approval_policy or {},
-        )
-
     def _user_interaction_port(self) -> MinionUserInteractionPort:
         if self.user_interaction is None:
             self.user_interaction = MinionUserInteractionPort(
@@ -1813,198 +1488,16 @@ class MinionRunner:
                 read_response=self._read_manager_control,
                 run_id=self.run_id,
                 minion_id=self.minion_id,
-                work_order_id=self.pack.work_order_id,
+                invocation_id=self.pack.invocation_id,
                 auto_accept_approvals=self.auto_accept_approvals,
             )
         return self.user_interaction
 
-    def _apply_clarification_response(self, clarification: dict[str, Any]) -> None:
-        answers = [dict(item) for item in list(clarification.get("answers") or []) if isinstance(item, dict)]
-        if not answers:
-            return
-        metadata = dict(self.pack.metadata or {})
-        existing_answers = [dict(item) for item in list(metadata.get("clarification_answers") or []) if isinstance(item, dict)]
-        existing_answers.extend(answers)
-        metadata["clarification_answers"] = existing_answers[-50:]
-        planner_work_order = dict(metadata.get("planner_work_order") or {})
-        if not planner_work_order:
-            planner_work_order = build_planner_work_order(
-                goal=self.pack.goal or self.pack.instruction,
-                task_id=str(metadata.get("task_id") or ""),
-                work_order_id=self.pack.work_order_id,
-            )
-        planner_work_order["turn_index"] = int(_coerce_int(planner_work_order.get("turn_index"), default=0)) + 1
-        planner_work_order["plan_revision"] = int(_coerce_int(planner_work_order.get("plan_revision"), default=0)) + 1
-        planner_work_order["clarifications"] = existing_answers[-50:]
-        metadata["planner_work_order"] = planner_work_order
-        metadata.pop("prompt_view", None)
-        self.pack = TaskContextPack.from_dict({**self.pack.to_dict(), "metadata": metadata})
-
-    def _max_clarification_rounds(self) -> int:
-        raw = (self.pack.approval_policy or {}).get("max_clarification_rounds")
-        return max(1, min(5, _coerce_int(raw, default=3)))
-
-    async def _inspect_current_milestone_checkpoint(self) -> dict[str, Any]:
-        repo_path = str((self.pack.workspace or {}).get("repo_path") or "").strip()
-        if not repo_path:
-            return {"status": "error", "error": "current project repo is missing"}
-        return inspect_milestone_checkpoint(
-            Path(repo_path),
-            base_sha=str((self.pack.workspace or {}).get("base_sha") or ""),
-        )
-
-    async def _complete_current_milestone(self, final_text: str) -> dict[str, Any]:
-        completion_policy = self._completion_policy()
-        evidence = str(completion_policy.get("evidence") or "text_deliverable").strip().lower()
-        prompt_view = _prompt_view_from_pack(self.pack)
-        module = dict(prompt_view.get("module") or {}) if prompt_view else {}
-        ask_user_question = _extract_ask_user_question_payload(final_text)
-        base_payload = {
-            "checkpoint_id": f"chk_{uuid4().hex[:16]}",
-            "task_id": str((self.pack.metadata or {}).get("task_id") or prompt_view.get("task_id") or ""),
-            "module_id": str(module.get("module_id") or ""),
-            "milestone_index": self._current_milestone_index(),
-            "milestone_id": str(self._current_milestone().get("milestone_id") or ""),
-            "acceptance_criteria": _current_acceptance_criteria(self.pack, self._current_milestone()),
-            "summary": self._short_summary(final_text or "minion completed current milestone"),
-            "shell_mutation_violations": list(self.shell_mutation_violations),
-        }
-        if self._requires_checkpoint_review_gate():
-            repair_attempt = self._current_repair_attempt_payload()
-            if repair_attempt:
-                base_payload["repair_attempt"] = repair_attempt
-                base_payload["expected_review_gate_kind"] = "repair_verification"
-            else:
-                base_payload["expected_review_gate_kind"] = "checkpoint_verification"
-        if ask_user_question:
-            self._finalize_produced_artifacts()
-            return {
-                **base_payload,
-                "status": "blocked",
-                "summary": _ask_user_question_summary(ask_user_question),
-                "ask_user_question": ask_user_question,
-                **self._artifact_payload(),
-            }
-        if evidence == "git_commit":
-            await self._persist_text_deliverable_if_needed(final_text)
-            self._finalize_produced_artifacts()
-            checkpoint = await self._inspect_current_milestone_checkpoint()
-            checkpoint_status = "claimed" if self._requires_checkpoint_review_gate() else "completed"
-            if checkpoint.get("status") == "committed":
-                reuse_block = self._repair_reused_failed_checkpoint_payload(base_payload, checkpoint)
-                if reuse_block:
-                    return reuse_block
-                return {
-                    **base_payload,
-                    "status": checkpoint_status,
-                    "commit_sha": str(checkpoint.get("commit_sha") or ""),
-                    "git_commit": checkpoint,
-                    "evidence": "git_commit",
-                    "shell_mutation_violations": list(self.shell_mutation_violations),
-                    **self._artifact_payload(),
-                }
-            if checkpoint.get("status") == "no_changes" and self._artifact_completion_evidence_present():
-                return {
-                    **base_payload,
-                    "status": checkpoint_status,
-                    "commit_sha": str(checkpoint.get("commit_sha") or ""),
-                    "git_commit": checkpoint,
-                    "evidence": "git_commit",
-                    "shell_mutation_violations": list(self.shell_mutation_violations),
-                    **self._artifact_payload(),
-                }
-            blocked_summary = str(
-                checkpoint.get("error")
-                or checkpoint.get("summary")
-                or f"milestone checkpoint is not committed: {checkpoint.get('status')}"
-            )
-            return {
-                **base_payload,
-                "status": "blocked",
-                "summary": blocked_summary,
-                "git_commit": checkpoint,
-                "shell_mutation_violations": list(self.shell_mutation_violations),
-                **self._artifact_payload(),
-            }
-        await self._persist_text_deliverable_if_needed(final_text)
-        self._finalize_produced_artifacts()
-        if not str(final_text or "").strip() and not self.produced_artifacts:
-            return {
-                **base_payload,
-                "status": "blocked",
-                "summary": "milestone produced no text deliverable",
-                "evidence": evidence or "text_deliverable",
-                **self._artifact_payload(),
-            }
-        planner_payload = self._planner_plan_artifact_completion_payload()
-        if planner_payload.get("status") == "blocked":
-            return {**base_payload, **planner_payload, **self._artifact_payload()}
-        return {
-            **base_payload,
-            "status": "completed",
-            "evidence": evidence or "text_deliverable",
-            **self._artifact_payload(),
-            **planner_payload,
-        }
-
-    def _repair_reused_failed_checkpoint_payload(self, base_payload: dict[str, Any], checkpoint: dict[str, Any]) -> dict[str, Any]:
-        repair_attempt = self._current_repair_attempt_payload()
-        failed_commit_sha = str(repair_attempt.get("failed_commit_sha") or "").strip()
-        commit_sha = str(checkpoint.get("commit_sha") or "").strip()
-        if not failed_commit_sha or not commit_sha or commit_sha != failed_commit_sha:
-            return {}
-        return {
-            **base_payload,
-            "status": "blocked",
-            "reason": "repair_reused_failed_checkpoint",
-            "summary": (
-                "repair did not create a new checkpoint commit; the previous failed checkpoint commit "
-                f"{failed_commit_sha} cannot be resubmitted"
-            ),
-            "commit_sha": commit_sha,
-            "git_commit": checkpoint,
-            "repair_attempt": repair_attempt,
-            "shell_mutation_violations": list(self.shell_mutation_violations),
-            **self._artifact_payload(),
-        }
-
     def _completion_evidence_present(self) -> bool:
-        completion_policy = self._completion_policy()
-        if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
-            return False
-        repo_path = str((self.pack.workspace or {}).get("repo_path") or "").strip()
-        if not repo_path:
-            return False
-        repo = Path(repo_path)
-        if not (repo / ".git").exists():
-            return False
-        checkpoint = inspect_milestone_checkpoint(
-            repo,
-            base_sha=str((self.pack.workspace or {}).get("base_sha") or ""),
-        )
-        return checkpoint.get("status") == "committed"
-
-    def _requires_checkpoint_review_gate(self) -> bool:
-        return checkpoint_gate_spec_for_pack(self.pack) is not None
-
-    def _current_repair_attempt_payload(self) -> dict[str, Any]:
-        metadata = dict(self.pack.metadata or {})
-        module_execution = dict(metadata.get("module_execution") or {})
-        last = dict(module_execution.get("last_repair_attempt") or {})
-        if not last:
-            return {}
-        if _coerce_int(last.get("milestone_index"), default=-1) != self._current_milestone_index():
-            return {}
-        return dict(last)
+        return bool(self.produced_artifacts)
 
     def _artifact_completion_evidence_present(self) -> bool:
-        if not self.produced_artifacts:
-            return False
-        completion_policy = self._completion_policy()
-        if str(completion_policy.get("evidence") or "").strip().lower() != "git_commit":
-            return False
-        metadata = self.pack.metadata if isinstance(self.pack.metadata, dict) else {}
-        return bool(metadata.get("allow_text_only_completion") or completion_policy.get("allow_artifact_evidence"))
+        return bool(self.produced_artifacts)
 
     def _completion_evidence_fallback_text(self, error_text: str) -> str:
         summary = str(error_text or "LLM final report generation failed").strip()
@@ -2030,7 +1523,7 @@ class MinionRunner:
         if not str((self.pack.workspace or {}).get("artifact_dir") or "").strip():
             return
         suffix = ".partial" if partial else ""
-        title = self._current_milestone_title()
+        title = str(self.pack.instruction or self.pack.goal or "Minion invocation result")
         reviewer_json = "" if partial else self._reviewer_json_deliverable(text)
         if reviewer_json:
             artifact = _write_minion_artifact(
@@ -2048,7 +1541,7 @@ class MinionRunner:
         header_lines = [
             f"# {title}",
             "",
-            f"- work_order_id: {self.pack.work_order_id}",
+            f"- invocation_id: {self.pack.invocation_id}",
             f"- minion_id: {self.minion_id}",
             f"- run_id: {self.run_id}",
         ]
@@ -2077,7 +1570,7 @@ class MinionRunner:
     def _default_text_artifact_path(self, *, suffix: str = "", partial: bool = False) -> str:
         if self._is_reviewer_profile() and not partial:
             return "review_report.md"
-        return f"milestone_{self._current_milestone_index()}_{self._safe_path_part(self.pack.minion_profile)}{suffix}.md"
+        return f"invocation_{self._safe_path_part(self.pack.minion_profile)}{suffix}.md"
 
     def _default_text_artifact_title(self, title: str, *, partial: bool = False) -> str:
         if partial:
@@ -2086,28 +1579,13 @@ class MinionRunner:
             return "Review report"
         return title
 
-    def _execution_contract(self) -> dict[str, Any]:
-        return self._policy_from_workspace_or_profile("execution_contract")
-
     def _is_reviewer_profile(self) -> bool:
-        metadata = dict(self.pack.metadata or {})
-        execution_contract = self._execution_contract()
-        artifact_role = str(
-            execution_contract.get("artifact_role")
-            or execution_contract.get("module_role")
-            or execution_contract.get("role")
-            or ""
-        ).strip().lower()
         output_policy = self._policy_from_workspace_or_profile("output_policy")
         primary_artifact = str(output_policy.get("primary_artifact") or "").strip().lower()
         output_types = {str(item or "").strip() for item in list(output_policy.get("allowed_output_types") or [])}
         return (
-            artifact_role in {"reviewer", "review", "review_report"}
-            or primary_artifact == "review_report"
-            or "ReviewReport" in output_types
-            or isinstance(metadata.get("reviewer_work_order"), dict)
-            or isinstance(metadata.get("review_gate_ref"), dict)
-            or isinstance(metadata.get("review_target"), dict)
+            "review" in primary_artifact
+            or any("Review" in item or "Verification" in item for item in output_types)
         )
 
     def _reviewer_json_deliverable(self, text: str) -> str:
@@ -2131,7 +1609,7 @@ class MinionRunner:
         primary = dict(self._artifact_payload().get("primary_artifact") or {})
         artifact_path = str(primary.get("path") or primary.get("relative_path") or "").strip()
         saved = f" Partial output was saved to {artifact_path}." if artifact_path else ""
-        scope = "contract invocation" if self._is_v2_invocation() else "milestone"
+        scope = "contract invocation"
         return (
             f"LLM output was truncated before the minion completed the {scope} "
             f"(finish_reason={reason}). Treat this {scope} as blocked.{saved} "
@@ -2149,7 +1627,7 @@ class MinionRunner:
             "event_kind": event_kind,
             "minion_id": self.minion_id,
             "run_id": self.run_id,
-            "work_order_id": self.pack.work_order_id,
+            "invocation_id": self.pack.invocation_id,
             "minion_profile": self.pack.minion_profile,
             "payload": dict(payload),
             "created_at": utc_now(),
@@ -2158,18 +1636,11 @@ class MinionRunner:
         await self.write_event(event)
 
     async def _emit_progress(self, phase: str, **payload: Any) -> None:
-        scope_payload = {}
-        if not self._is_v2_invocation():
-            scope_payload = {
-                "milestone_index": self._current_milestone_index(),
-                "milestone_title": self._current_milestone_title(),
-            }
         await self._emit(
             "progress",
             {
                 "phase": phase,
                 "summary": _progress_summary(phase, payload),
-                **scope_payload,
                 **payload,
             },
         )
@@ -2177,26 +1648,22 @@ class MinionRunner:
     def _prompt_scaffold(self) -> dict[str, Any]:
         profile = dict(self.pack.resolved_profile or {})
         prompt_view = _prompt_view_from_pack(self.pack)
-        milestone = (
-            {}
-            if self._is_v2_invocation()
-            else (dict(prompt_view.get("milestone") or {}) if prompt_view else self._current_milestone())
-        )
+        unit_scope = dict(prompt_view.get("unit") or {}) if prompt_view else {}
         requirements_brief = dict((self.pack.metadata or {}).get("requirements_brief") or {})
         brief_acceptance = [
             str(item).strip()
             for item in list(requirements_brief.get("acceptance_criteria") or [])
             if str(item or "").strip()
         ]
-        acceptance = brief_acceptance or list(milestone.get("acceptance_criteria") or self.pack.acceptance_criteria)
-        instruction = str(milestone.get("task") or self.pack.instruction or self.pack.goal)
+        acceptance = brief_acceptance or list(self.pack.acceptance_criteria)
+        instruction = str(self.pack.instruction or self.pack.goal)
         return {
             "identity": str(profile.get("identity_fragment") or ""),
             "behavior": str(profile.get("behavior_fragment") or ""),
             "instruction": instruction,
             "acceptance_criteria": acceptance,
             "continuity": dict(self.pack.continuity),
-            "current_milestone": milestone,
+            "unit_scope": unit_scope,
             "allowed_capabilities": list(self.pack.allowed_capabilities),
             "skill_manual_context": list((self.pack.metadata or {}).get("skill_manual_context") or []),
             "output_contract": str(profile.get("output_contract_fragment") or ""),
@@ -2204,28 +1671,9 @@ class MinionRunner:
             "completion_policy": self._completion_policy(),
             "execution_strategy": self._execution_strategy(),
             "prompt_view": prompt_view,
-            "active_gate_todo": dict((self.pack.metadata or {}).get("active_gate_todo") or {}),
-            "repair_context": self._repair_context_for_compaction(),
             "requirements_brief": requirements_brief,
-            "workflow_model": "contract_v2" if self._is_v2_invocation() else "milestone_v1",
+            "workflow_model": "contract_v2",
         }
-
-    def _repair_context_for_compaction(self) -> dict[str, Any]:
-        metadata = dict(self.pack.metadata or {})
-        result: dict[str, Any] = {}
-        current = self._current_repair_attempt_payload()
-        if current:
-            result["current_repair_attempt"] = current
-        checkpoint_repair = metadata.get("checkpoint_repair")
-        if isinstance(checkpoint_repair, dict):
-            result["checkpoint_repair"] = dict(checkpoint_repair)
-        active_gate_todo = metadata.get("active_gate_todo")
-        if isinstance(active_gate_todo, dict):
-            result["active_gate_todo"] = dict(active_gate_todo)
-        repair_context = metadata.get("repair_context")
-        if isinstance(repair_context, dict):
-            result["repair_bill"] = dict(repair_context)
-        return result
 
     def _workspace_policy(self) -> dict[str, Any]:
         workspace_policy = self.pack.workspace.get("workspace_policy")
@@ -2246,19 +1694,7 @@ class MinionRunner:
         return {}
 
     def _execution_strategy(self) -> dict[str, Any]:
-        execution_strategy = self.pack.workspace.get("execution_strategy")
-        if isinstance(execution_strategy, dict):
-            return dict(execution_strategy)
-        profile = dict(self.pack.resolved_profile or {})
-        if isinstance(profile.get("effective_execution_strategy"), dict):
-            return dict(profile.get("effective_execution_strategy") or {})
-        return execution_strategy_from_pack(
-            self.pack,
-            workspace_policy=self._workspace_policy(),
-            completion_policy=self._completion_policy(),
-            gate_policy=self._policy_from_workspace_or_profile("gate_policy"),
-            output_policy=self._policy_from_workspace_or_profile("output_policy"),
-        )
+        return {}
 
     def _policy_from_workspace_or_profile(self, key: str) -> dict[str, Any]:
         value = self.pack.workspace.get(key)
@@ -2271,22 +1707,6 @@ class MinionRunner:
         if isinstance(profile.get(key), dict):
             return dict(profile.get(key) or {})
         return {}
-
-    def _current_milestone(self) -> dict[str, Any]:
-        prompt_view = _prompt_view_from_pack(self.pack)
-        milestone = dict(prompt_view.get("milestone") or {}) if prompt_view else {}
-        if milestone:
-            return milestone
-        return dict((self.pack.continuity or {}).get("current_milestone") or {})
-
-    def _current_milestone_index(self) -> int:
-        try:
-            return int(self._current_milestone().get("milestone_index") or 0)
-        except (TypeError, ValueError):
-            return 0
-
-    def _current_milestone_title(self) -> str:
-        return str(self._current_milestone().get("title") or self.pack.instruction or self.pack.goal or "Complete milestone")
 
     def _terminal_payload(self, status: str, summary: Any) -> dict[str, Any]:
         resolved_status = str(status or "").strip() or "completed"
@@ -2305,11 +1725,6 @@ class MinionRunner:
             **experience_payload,
             **self._artifact_payload(),
         }
-        if resolved_status == "completed" and self._defer_experience_until_module_complete():
-            payload["task_lessons"] = []
-            payload["system_lessons"] = []
-            payload["memory_candidates"] = []
-            payload["deferred_experience"] = experience_payload
         if ask_user_question:
             payload["status"] = "blocked"
             payload["summary"] = _ask_user_question_summary(ask_user_question)
@@ -2320,19 +1735,11 @@ class MinionRunner:
         payload = self._terminal_payload("killed", cancel.get("summary") or cancel.get("reason") or "minion cancellation requested")
         payload["reason"] = str(cancel.get("reason") or "cooperative_cancel_requested")
         payload["cooperative_cancel"] = True
-        for key in ("parent_work_order_id", "child_work_order_id", "module_id", "bill_id"):
+        for key in ("workflow_id", "invocation_id", "unit_id", "repair_bill_ref"):
             value = str(cancel.get(key) or "").strip()
             if value:
                 payload[key] = value
         return payload
-
-    def _defer_experience_until_module_complete(self) -> bool:
-        metadata = dict(self.pack.metadata or {})
-        module_execution = dict(metadata.get("module_execution") or {})
-        return bool(
-            metadata.get("defer_experience_until_module_complete")
-            or module_execution.get("defer_experience_until_module_complete")
-        )
 
     def _finalize_produced_artifacts(self) -> None:
         if not self.produced_artifacts:
@@ -2478,192 +1885,6 @@ class MinionRunner:
             payload["primary_artifact"] = dict(primary)
         return payload
 
-    def _planner_plan_artifact_completion_payload(self) -> dict[str, Any]:
-        if not self._requires_planner_plan_artifact_validation():
-            return {}
-        artifact = self._select_planner_json_artifact()
-        if not artifact:
-            return {
-                "status": "blocked",
-                "summary": "planner milestone did not submit a primary plan draft artifact",
-                "plan_validation": {"status": "invalid", "errors": ["primary submitted plan draft artifact is required"]},
-            }
-        path = self._artifact_file_path(artifact)
-        if path is None:
-            return {
-                "status": "blocked",
-                "summary": "planner plan artifact has no readable path",
-                "plan_validation": {"status": "invalid", "errors": ["plan artifact path is required"]},
-            }
-        try:
-            content = path.read_bytes()
-            digest = hashlib.sha256(content).hexdigest()
-            payload = json.loads(content.decode("utf-8"))
-        except Exception as exc:
-            return {
-                "status": "blocked",
-                "summary": f"planner plan artifact is not readable JSON: {exc}",
-                "plan_validation": {"status": "invalid", "errors": [str(exc)]},
-            }
-        if not isinstance(payload, dict):
-            return {
-                "status": "blocked",
-                "summary": "planner plan artifact must be a JSON object",
-                "plan_validation": {"status": "invalid", "errors": ["plan artifact must be an object"]},
-            }
-        metadata = dict(self.pack.metadata or {})
-        planner_work_order = dict(metadata.get("planner_work_order") or {})
-        expected_task_id = str(
-            metadata.get("expected_plan_task_id")
-            or (
-                planner_work_order.get("task_id")
-                if isinstance(planner_work_order.get("revision_source"), dict)
-                else ""
-            )
-            or metadata.get("task_id")
-            or ""
-        ).strip()
-        declared_task_id = str(payload.get("task_id") or "").strip()
-        if expected_task_id:
-            if declared_task_id and declared_task_id != expected_task_id:
-                return {
-                    "status": "blocked",
-                    "summary": "planner plan artifact task_id does not match manager task identity",
-                    "plan_validation": {"status": "invalid", "errors": ["task_id does not match manager task identity"]},
-                }
-            payload["task_id"] = expected_task_id
-        output_type = str(payload.get("type") or payload.get("output_type") or "").strip()
-        payload_metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
-        plan_builder_metadata = dict(payload_metadata.get("plan_builder") or {}) if isinstance(payload_metadata.get("plan_builder"), dict) else {}
-        plan_revision = _coerce_int(payload.get("plan_revision"), default=-1)
-        if plan_revision < 0:
-            plan_revision = _coerce_int(payload_metadata.get("plan_revision"), default=0)
-        expected_plan_revision = _expected_planner_plan_revision(self.pack)
-        if expected_plan_revision >= 0 and plan_revision != expected_plan_revision:
-            return {
-                "status": "blocked",
-                "summary": f"planner plan artifact plan_revision must be {expected_plan_revision}",
-                "plan_validation": {
-                    "status": "invalid",
-                    "errors": [f"plan_revision must be {expected_plan_revision}, got {plan_revision}"],
-                },
-            }
-        plan_ref = {
-            "path": str(path),
-            "sha256": digest,
-            "artifact_role": str(artifact.get("role") or ""),
-            "relative_path": str(artifact.get("relative_path") or ""),
-            "plan_revision": plan_revision,
-        }
-        plan_handle = str(plan_builder_metadata.get("plan_handle") or "").strip()
-        if plan_handle:
-            plan_ref["plan_handle"] = plan_handle
-        lifecycle = str(plan_builder_metadata.get("lifecycle") or "").strip()
-        if lifecycle == "submitted" or str(artifact.get("relative_path") or "").endswith(".draft.json"):
-            plan_ref["ref_kind"] = "plan_draft"
-            artifact_dir = str((self.pack.workspace or {}).get("artifact_dir") or "").strip()
-            if artifact_dir:
-                plan_ref["artifact_dir"] = artifact_dir
-        if output_type == "AskUserQuestion":
-            return {
-                "status": "blocked",
-                "summary": _ask_user_question_summary(payload),
-                "ask_user_question": payload,
-                "plan_ref": plan_ref,
-                "plan_validation": {"status": "ask_user_question"},
-            }
-        if output_type == "PlanDraft":
-            return {
-                "status": "blocked",
-                "summary": "planner produced PlanDraft; a dispatchable FinalPlanArtifact is required before implementation",
-                "plan_ref": plan_ref,
-                "plan_validation": {"status": "draft"},
-            }
-        try:
-            artifact_payload = validate_dispatchable_plan_artifact(payload)
-            validation = dispatchable_plan_validation(artifact_payload)
-        except Exception as exc:
-            return {
-                "status": "blocked",
-                "summary": f"planner FinalPlanArtifact failed dispatch validation: {exc}",
-                "plan_ref": plan_ref,
-                "plan_validation": {"status": "invalid", "errors": [str(exc)]},
-            }
-        payload, digest = self._persist_normalized_planner_plan_artifact(
-            path,
-            payload=payload,
-            artifact=artifact_payload,
-            plan_revision=plan_revision,
-        )
-        plan_ref.update(
-            {
-                "plan_id": artifact_payload.plan_id,
-                "task_id": artifact_payload.task_id,
-                "sha256": digest,
-                "plan_revision": plan_revision,
-            }
-        )
-        return {
-            "plan_ref": plan_ref,
-            **({"plan_draft_ref": dict(plan_ref)} if plan_ref.get("ref_kind") == "plan_draft" else {}),
-            "plan_validation": validation,
-        }
-
-    def _persist_normalized_planner_plan_artifact(
-        self,
-        path: Path,
-        *,
-        payload: dict[str, Any],
-        artifact: Any,
-        plan_revision: int,
-    ) -> tuple[dict[str, Any], str]:
-        normalized = dict(payload)
-        normalized["type"] = "FinalPlanArtifact"
-        normalized["plan_id"] = artifact.plan_id
-        normalized["task_id"] = artifact.task_id
-        normalized["plan_revision"] = max(0, int(plan_revision or 0))
-        metadata = dict(normalized.get("metadata") or {}) if isinstance(normalized.get("metadata"), dict) else {}
-        metadata.setdefault("plan_revision", normalized["plan_revision"])
-        normalized["metadata"] = metadata
-
-        current_digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        encoded = json.dumps(normalized, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
-        next_digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-        if next_digest != current_digest:
-            path.write_text(encoded, encoding="utf-8")
-            current_digest = next_digest
-
-        size_bytes = path.stat().st_size
-        for existing in self.produced_artifacts:
-            existing_path = str(existing.get("path") or "").strip()
-            if existing_path and Path(existing_path) == path:
-                existing["sha256"] = current_digest
-                existing["size_bytes"] = size_bytes
-        return normalized, current_digest
-
-    def _requires_planner_plan_artifact_validation(self) -> bool:
-        return pack_requires_plan_artifact_validation(self.pack)
-
-    def _select_planner_json_artifact(self) -> dict[str, Any]:
-        candidates = [(index, dict(item)) for index, item in enumerate(self.produced_artifacts)]
-        candidates.sort(key=lambda indexed: (0 if str(indexed[1].get("role") or "") == "primary" else 1, -indexed[0]))
-        for _index, artifact in candidates:
-            relative_path = str(artifact.get("relative_path") or artifact.get("path") or "").strip().lower()
-            mime_type = str(artifact.get("mime_type") or "").strip().lower()
-            if relative_path.endswith("plan.json") or mime_type == "application/json":
-                return artifact
-        return {}
-
-    def _artifact_file_path(self, artifact: dict[str, Any]) -> Path | None:
-        raw_path = str(artifact.get("path") or "").strip()
-        if raw_path:
-            return Path(raw_path)
-        relative_path = str(artifact.get("relative_path") or "").strip()
-        artifact_dir = str((self.pack.workspace or {}).get("artifact_dir") or "").strip()
-        if relative_path and artifact_dir:
-            return Path(artifact_dir) / relative_path
-        return None
-
     def _record_produced_artifact(self, artifact: dict[str, Any]) -> None:
         path = str(artifact.get("path") or "").strip()
         relative_path = str(artifact.get("relative_path") or "").strip()
@@ -2693,7 +1914,7 @@ class MinionRunner:
         record = {
             "created_at": utc_now(),
             "section": str(section or "debug"),
-            "work_order_id": self.pack.work_order_id,
+            "invocation_id": self.pack.invocation_id,
             "minion_profile": self.pack.minion_profile,
             "minion_id": self.minion_id,
             "run_id": self.run_id,
@@ -2724,7 +1945,7 @@ class MinionRunner:
 
     def _prompt_debug_context(self, *, round: int | None = None) -> dict[str, Any]:
         context: dict[str, Any] = {
-            "work_order_id": self.pack.work_order_id,
+            "invocation_id": self.pack.invocation_id,
             "minion_profile": self.pack.minion_profile,
             "minion_id": self.minion_id,
             "run_id": self.run_id,
@@ -2821,12 +2042,12 @@ def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> Minion
     return MinionRuntimeBundle(llm_runtime=llm_runtime, execution_runtime=core.context.execution_runtime, close_async=close)
 
 
-def _minion_prompt_context(pack: TaskContextPack, *, event: EventEnvelope | None = None, metadata: dict[str, Any]) -> PromptAssemblyContext:
+def _minion_prompt_context(pack: MinionInvocationPack, *, event: EventEnvelope | None = None, metadata: dict[str, Any]) -> PromptAssemblyContext:
     return PromptAssemblyContext(
         event=event,
         core_mode="minion",
         turn_kind="minion",
-        work_order_id=pack.work_order_id,
+        work_order_id=pack.invocation_id,
         metadata=dict(metadata),
     )
 
@@ -2910,24 +2131,6 @@ def _minion_llm_tool_surface(allowed_capabilities: list[str]) -> list[str]:
     return ordered
 
 
-def _expected_planner_plan_revision(pack: TaskContextPack) -> int:
-    metadata = dict(pack.metadata or {})
-    planner_work_order = dict(metadata.get("planner_work_order") or {})
-    if not isinstance(planner_work_order.get("revision_source"), dict):
-        return -1
-    if "plan_revision" not in planner_work_order:
-        return -1
-    return _coerce_int(planner_work_order.get("plan_revision"), default=-1)
-
-
-def _current_acceptance_criteria(pack: TaskContextPack, milestone: dict[str, Any]) -> list[str]:
-    for key in ("acceptance_criteria", "acceptance"):
-        value = milestone.get(key)
-        if isinstance(value, list):
-            return [str(item).strip() for item in value if str(item or "").strip()]
-    return [str(item).strip() for item in list(pack.acceptance_criteria or []) if str(item or "").strip()]
-
-
 def _tool_result_with_shell_mutation_violation(result: CanonicalToolResult, violation: dict[str, Any]) -> CanonicalToolResult:
     structured = dict(result.structured or {})
     existing = [dict(item) for item in list(structured.get("shell_mutation_violations") or []) if isinstance(item, dict)]
@@ -3008,7 +2211,7 @@ def _progress_summary(phase: str, payload: dict[str, Any]) -> str:
         return f"Tool completed: {payload.get('target_name') or payload.get('tool_name')} ({status})"
     if phase_name == "tool_call_failed":
         return f"Tool failed: {payload.get('target_name') or payload.get('tool_name')}"
-    if phase_name == "milestone_finalizing":
+    if phase_name == "invocation_finalizing":
         return "Milestone finalizing"
     return phase_name.replace("_", " ")
 
@@ -3044,7 +2247,7 @@ def _optional_positive_float(value: Any) -> float | None:
     return parsed if parsed > 0 else None
 
 
-def _resolve_minion_max_output_tokens(llm_runtime: Any, pack: TaskContextPack) -> int:
+def _resolve_minion_max_output_tokens(llm_runtime: Any, pack: MinionInvocationPack) -> int:
     metadata = pack.metadata if isinstance(pack.metadata, dict) else {}
     explicit = _optional_positive_int(metadata.get("max_output_tokens"))
     if explicit is not None:
@@ -3073,7 +2276,7 @@ def _resolve_minion_max_output_tokens(llm_runtime: Any, pack: TaskContextPack) -
     return _optional_positive_int(getattr(config, "fallback_max_output_tokens", None)) or 4096
 
 
-def _minion_llm_request_metadata(pack: TaskContextPack, run_id: str) -> dict[str, Any]:
+def _minion_llm_request_metadata(pack: MinionInvocationPack, run_id: str) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "endpoint_fallback_policy": "none",
         "response_mode_hint": "operational",
@@ -3095,7 +2298,7 @@ def _minion_llm_request_metadata(pack: TaskContextPack, run_id: str) -> dict[str
     return metadata
 
 
-def _minion_turn_settings_snapshot(pack: TaskContextPack) -> dict[str, Any]:
+def _minion_turn_settings_snapshot(pack: MinionInvocationPack) -> dict[str, Any]:
     snapshot: dict[str, Any] = {
         "prompt_log_enabled": bool((pack.metadata or {}).get("prompt_log_enabled")),
     }
@@ -3105,13 +2308,13 @@ def _minion_turn_settings_snapshot(pack: TaskContextPack) -> dict[str, Any]:
     return snapshot
 
 
-def _prompt_observation_tag_from_pack(pack: TaskContextPack) -> str:
+def _prompt_observation_tag_from_pack(pack: MinionInvocationPack) -> str:
     metadata = pack.metadata if isinstance(pack.metadata, dict) else {}
     tag = str(metadata.get("prompt_observation_tag") or "").strip()
     return tag
 
 
-def _minion_llm_request_timeout_seconds(pack: TaskContextPack) -> float | None:
+def _minion_llm_request_timeout_seconds(pack: MinionInvocationPack) -> float | None:
     pack_metadata = pack.metadata if isinstance(pack.metadata, dict) else {}
     explicit = _optional_positive_float(pack_metadata.get("timeout_seconds"))
     if explicit is not None:
@@ -3119,13 +2322,27 @@ def _minion_llm_request_timeout_seconds(pack: TaskContextPack) -> float | None:
     return _optional_positive_float(pack_metadata.get("llm_round_timeout_seconds"))
 
 
-def _preferred_endpoint_id_from_pack(pack: TaskContextPack) -> str | None:
+def _minion_temperature(pack: MinionInvocationPack, *, fallback: float | None = None) -> float | None:
+    metadata = pack.metadata if isinstance(pack.metadata, dict) else {}
+    raw = metadata.get("temperature")
+    if raw is None:
+        return fallback
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return fallback
+    if 0.0 <= value <= 2.0:
+        return value
+    return fallback
+
+
+def _preferred_endpoint_id_from_pack(pack: MinionInvocationPack) -> str | None:
     metadata = pack.metadata if isinstance(pack.metadata, dict) else {}
     value = str(metadata.get("preferred_endpoint_id") or "").strip()
     return value or None
 
 
-def _preferred_endpoint_source_from_pack(pack: TaskContextPack) -> str | None:
+def _preferred_endpoint_source_from_pack(pack: MinionInvocationPack) -> str | None:
     metadata = pack.metadata if isinstance(pack.metadata, dict) else {}
     value = str(metadata.get("preferred_endpoint_source") or "").strip()
     return value or None
@@ -3547,10 +2764,8 @@ def _extract_ask_user_question_payload(text: str) -> dict[str, Any]:
     payload = {
         "type": "ask_user_question",
         "task_id": str(loaded.get("task_id") or ""),
-        "work_order_id": str(loaded.get("work_order_id") or ""),
-        "turn_index": loaded.get("turn_index", 0),
-        "plan_revision": loaded.get("plan_revision", 0),
-        "plan_draft_id": str(loaded.get("plan_draft_id") or ""),
+        "workflow_id": str(loaded.get("workflow_id") or ""),
+        "invocation_id": str(loaded.get("invocation_id") or ""),
         "questions": questions[:3],
     }
     return payload

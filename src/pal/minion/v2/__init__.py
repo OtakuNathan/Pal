@@ -5,6 +5,7 @@ from pal.minion.v2.contracts import (
     AggregateType,
     DomainEvent,
     EffectDraft,
+    TaskState,
     TransitionError,
     TransitionOutcome,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "ContentAddressedArtifactStore",
     "DomainEvent",
     "EffectDraft",
+    "TaskState",
     "MinionV2Repository",
     "TransitionEngine",
     "TransitionError",

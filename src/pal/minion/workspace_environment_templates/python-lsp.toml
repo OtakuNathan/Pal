@@ -1,6 +1,0 @@
-preparer_id = "python-lsp"
-kind = "lsp"
-language_ids = ["python"]
-required_lsp_server_ids = ["pyright"]
-server_ids = ["pyright"]
-skipped = ["python uses the pyright sidecar; no repo config required"]

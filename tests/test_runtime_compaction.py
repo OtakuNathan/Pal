@@ -367,26 +367,16 @@ class RuntimeCompactionTests(unittest.TestCase):
                 profile=CompactionProfile.MINION,
                 metadata={
                     "structured_compaction": {
-                        "schema": "pal.compaction.minion.v1",
+                        "schema": "pal.compaction.minion.v2",
                         "kind": "minion",
                         "continuity": {
-                            "task_goal": "Implement a three-milestone changelog package.",
-                            "claimed_completed": ["Milestone 1 appears implemented."],
-                            "claimed_pending": ["Verify milestone 2 acceptance criteria."],
-                            "must_verify_against": [
-                                "work_order",
-                                "plan_artifact",
-                                "current_milestone",
-                                "checkpoint_ledger",
-                                "runtime_ledger",
-                                "git_status",
-                                "current_files",
-                            ],
-                            "next_action_hint": "Reconcile compact state before editing.",
+                            "prior_completed_user_inputs": ["Create a changelog package."],
+                            "history_rule": "Prior input is background only.",
+                            "current_turn_rule": "Current invocation and canonical artifacts are authoritative.",
                         },
                         "summary": {
                             "summary": "Minion was midway through a changelog task.",
-                            "search_text": "minion changelog milestone checkpoint ledger",
+                            "search_text": "minion changelog package",
                         },
                     }
                 },
@@ -399,9 +389,9 @@ class RuntimeCompactionTests(unittest.TestCase):
         prompt_text = summary.rendered
         self.assertIn('<compact_context kind="minion" authority="reference_only">', prompt_text)
         self.assertIn("continuity reference only", prompt_text)
-        self.assertIn("Verify against the work order, plan artifact, current milestone, checkpoint/ledger, and workspace before acting.", prompt_text)
-        self.assertIn("### Must Verify Against", prompt_text)
-        self.assertIn("- git_status", prompt_text)
+        self.assertIn("Verify against the canonical workflow artifacts, current aggregate, worker journal, and workspace before acting.", prompt_text)
+        self.assertIn("### Prior Completed User Inputs", prompt_text)
+        self.assertIn("- Create a changelog package.", prompt_text)
 
     def test_compaction_rejects_invalid_payload_without_mutating_memory(self) -> None:
         service = MemoryService()
@@ -527,11 +517,10 @@ class RuntimeCompactionTests(unittest.TestCase):
                 profile=CompactionProfile.MINION,
                 metadata={
                     "structured_compaction": {
-                        "schema": "pal.compaction.minion.v1",
+                        "schema": "pal.compaction.minion.v2",
                         "kind": "minion",
                         "continuity": {
-                            "task_goal": "Continue a minion task safely.",
-                            "must_verify_against": ["work_order", "current_files"],
+                            "prior_completed_user_inputs": ["Continue the task safely."],
                         },
                         "summary": {
                             "summary": "A minion compact payload was produced mechanically.",
@@ -551,7 +540,7 @@ class RuntimeCompactionTests(unittest.TestCase):
         )
 
         summary = result.projected_entries[0]
-        self.assertEqual(summary.payload["schema"], "pal.compaction.minion.v1")
+        self.assertEqual(summary.payload["schema"], "pal.compaction.minion.v2")
         self.assertEqual(summary.payload["kind"], "minion")
         self.assertNotIn("memory_candidates", summary.payload)
         self.assertIn('<compact_context kind="minion" authority="reference_only">', summary.rendered)
@@ -564,7 +553,7 @@ class RuntimeCompactionTests(unittest.TestCase):
         memory_service = MemoryService()
         memory_service.l1_store.append([L1TranscriptMessage(role="user", content="minion prior state")])
         memory_service.build_compaction_payload = lambda **kwargs: {
-            "schema": "pal.compaction.minion.v1",
+            "schema": "pal.compaction.minion.v2",
             "kind": "minion",
             "continuity": {"prior_completed_user_inputs": ["minion prior state"]},
             "summary": {
@@ -603,7 +592,9 @@ class RuntimeCompactionTests(unittest.TestCase):
         )
 
         self.assertEqual(scripted_llm.compaction_profiles, [])
-        self.assertIn("Mechanical minion compact summary.", memory_service.l1_store.items[0][0].content)
+        compacted = memory_service.l1_store.items[0][0].content
+        self.assertIn('<compact_context kind="minion" authority="reference_only">', compacted)
+        self.assertIn("canonical workflow artifacts", compacted)
 
     def test_manual_compaction_uses_structured_compaction_path(self) -> None:
         core = PalCore()

@@ -26,44 +26,44 @@ class IntegrationService:
         merged: list[dict[str, Any]] = []
         seen: set[str] = set()
         for candidate in ordered_candidates:
-            candidate_sha = str(candidate.get("candidate_sha") or "")
+            candidate_digest = str(candidate.get("candidate_digest") or "")
             node_run_id = str(candidate.get("node_run_id") or "")
-            if not candidate_sha or not node_run_id:
-                raise ValueError("integration candidate requires node_run_id and candidate_sha")
-            if candidate_sha in seen or _is_ancestor(integration_worktree, candidate_sha, "HEAD"):
+            if not candidate_digest or not node_run_id:
+                raise ValueError("integration candidate requires node_run_id and candidate_digest")
+            if candidate_digest in seen or _is_ancestor(integration_worktree, candidate_digest, "HEAD"):
                 continue
             try:
-                _git(integration_worktree, "cherry-pick", candidate_sha)
+                _git(integration_worktree, "cherry-pick", candidate_digest)
             except subprocess.CalledProcessError as exc:
                 _git_no_check(integration_worktree, "cherry-pick", "--abort")
                 raise IntegrationOwnershipDefect(
                     f"candidate {node_run_id} conflicted during deterministic integration"
                 ) from exc
-            seen.add(candidate_sha)
-            merged.append({"node_run_id": node_run_id, "candidate_sha": candidate_sha})
+            seen.add(candidate_digest)
+            merged.append({"node_run_id": node_run_id, "candidate_digest": candidate_digest})
         integration_sha = _git(integration_worktree, "rev-parse", "HEAD").strip()
         payload = {
             "schema_version": "1",
             "architecture_manifest_sha": architecture_manifest_sha,
-            "integration_candidate_sha": integration_sha,
+            "integration_candidate_digest": integration_sha,
             "merged_candidates": merged,
         }
         ref = self.artifacts.put_json(payload, artifact_type="IntegrationCandidateArtifact")
         return ref, integration_sha
 
-    def publish_final_branch(
+    def publish_final_deliverable(
         self,
         *,
         repository: Path,
-        integration_candidate_sha: str,
+        integration_candidate_digest: str,
         branch_name: str,
         verification_ref: ArtifactRef,
     ) -> ArtifactRef:
         if not branch_name.strip() or branch_name.startswith("-"):
             raise ValueError("invalid final branch name")
-        _git(repository, "branch", "-f", branch_name, integration_candidate_sha)
+        _git(repository, "branch", "-f", branch_name, integration_candidate_digest)
         resolved_sha = _git(repository, "rev-parse", branch_name).strip()
-        if resolved_sha != integration_candidate_sha:
+        if resolved_sha != integration_candidate_digest:
             raise RuntimeError("published branch does not resolve to accepted integration candidate")
         return self.artifacts.put_json(
             {

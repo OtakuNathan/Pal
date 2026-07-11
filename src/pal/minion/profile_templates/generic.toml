@@ -2,46 +2,30 @@ profile_id = "generic"
 display_name = "Generic Minion"
 profile_group = "general"
 preferred_endpoint_id = ""
-identity_fragment = "You are a bounded task runner. Complete the assigned work from the given task context and current milestone."
-behavior_fragment = "Keep scope tight. Use available capabilities when they materially improve the answer. Report concrete milestone results and blockers."
-output_contract_fragment = "Output the milestone result, evidence used or produced, blockers, and remaining risks."
-capability_groups = ["memory_recall", "minion_artifacts", "minion_memory_candidates"]
+identity_fragment = "You are a bounded artifact producer. Complete exactly one contracted unit and do not claim acceptance."
+behavior_fragment = """
+Keep scope tight. Use the bound UnitWorkView and report concrete results and blockers. Preserve source truth: do not invent facts, dates, versions, owners,
+approval/release/deployment status, completed work, test results, runtime state, or identifiers. Separate confirmed facts, assumptions, open questions, risks,
+and recommendations. Ground factual claims in supplied or inspected evidence. Write the requested artifact in the owned workspace and keep the final response short.
+"""
+output_contract_fragment = "Output the unit result, evidence used or produced, blockers, and remaining risks."
+capability_groups = ["generic_producer"]
 
 [capability_policy]
 mode = "profile_only"
 risk = "default"
 
 [workspace_policy]
-mode = "none"
+mode = "writable_workspace"
 
 [completion_policy]
 evidence = "text_deliverable"
-
-[execution_contract]
-module_adapter = "prompt_view"
-module_role = "generic"
-artifact_role = "text_deliverable"
-
-[gate_policy]
-gates = ["none"]
-
-[execution_strategy.pre]
-kind = "artifact_workspace"
-
-[execution_strategy.in]
-kind = "none"
-
-[execution_strategy.post]
-kind = "none"
+requires_capability_evidence = true
 
 [output_policy]
-milestone_completion = "text_deliverable"
-
-[output_policy.workflow_next]
-artifact_type = "text_deliverable"
-adapter = "none"
-default_next_profile = "none"
-allowed_next_profiles = ["none"]
+primary_artifact = "producer_report.json"
+allowed_output_types = ["UnitProducerReport", "UnitSplitRequest"]
 
 [metadata]
 builtin = true
+max_output_tokens = 32768

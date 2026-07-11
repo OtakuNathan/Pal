@@ -9,8 +9,8 @@ from pal.foundation.persistence import utc_now
 
 
 @dataclass(frozen=True)
-class TaskContextPack:
-    work_order_id: str
+class MinionInvocationPack:
+    invocation_id: str
     goal: str = ""
     schema_version: int = 1
     pack_id: str = field(default_factory=lambda: f"tcp_{uuid4().hex[:16]}")
@@ -41,7 +41,7 @@ class TaskContextPack:
         return {
             "schema_version": int(self.schema_version),
             "pack_id": self.pack_id,
-            "work_order_id": self.work_order_id,
+            "invocation_id": self.invocation_id,
             "goal": self.goal,
             "instruction": self.instruction,
             "acceptance_criteria": list(self.acceptance_criteria),
@@ -60,17 +60,17 @@ class TaskContextPack:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "TaskContextPack":
+    def from_dict(cls, payload: dict[str, Any]) -> "MinionInvocationPack":
         if not isinstance(payload, dict):
-            raise ValueError("TaskContextPack payload must be an object")
-        work_order_id = str(payload.get("work_order_id") or "").strip()
-        if not work_order_id:
-            raise ValueError("TaskContextPack.work_order_id is required")
+            raise ValueError("MinionInvocationPack payload must be an object")
+        invocation_id = str(payload.get("invocation_id") or "").strip()
+        if not invocation_id:
+            raise ValueError("MinionInvocationPack.invocation_id is required")
         allowed_capabilities = _string_list(payload.get("allowed_capabilities"))
         return cls(
             schema_version=int(payload.get("schema_version") or 1),
             pack_id=str(payload.get("pack_id") or f"tcp_{uuid4().hex[:16]}"),
-            work_order_id=work_order_id,
+            invocation_id=invocation_id,
             goal=str(payload.get("goal") or ""),
             instruction=str(payload.get("instruction") or payload.get("goal") or ""),
             acceptance_criteria=_string_list(payload.get("acceptance_criteria")),
@@ -92,91 +92,12 @@ class TaskContextPack:
         return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)
 
     @classmethod
-    def from_json(cls, raw: str) -> "TaskContextPack":
+    def from_json(cls, raw: str) -> "MinionInvocationPack":
         try:
             payload = json.loads(str(raw or "{}"))
         except json.JSONDecodeError as exc:
-            raise ValueError(f"TaskContextPack JSON is invalid: {exc}") from exc
+            raise ValueError(f"MinionInvocationPack JSON is invalid: {exc}") from exc
         return cls.from_dict(payload)
-
-
-@dataclass(frozen=True)
-class MinionProgressEvent:
-    work_order_id: str
-    summary: str
-    minion_id: str = ""
-    run_id: str = ""
-    phase: str = ""
-
-
-@dataclass(frozen=True)
-class CheckpointEvent:
-    work_order_id: str
-    summary: str
-    milestone_index: int = 0
-    status: str = "partial"
-    minion_id: str = ""
-    run_id: str = ""
-
-
-@dataclass(frozen=True)
-class MinionTerminalEvent:
-    work_order_id: str
-    status: str
-    summary: str = ""
-    minion_id: str = ""
-    run_id: str = ""
-
-
-@dataclass(frozen=True)
-class MinionApprovalRequest:
-    approval_id: str
-    minion_id: str
-    run_id: str
-    work_order_id: str
-    title: str
-    requested_action: str
-    risk: str = "high"
-    impact: str = ""
-    target: str = ""
-    args_summary: dict[str, Any] = field(default_factory=dict)
-    created_at: str = field(default_factory=utc_now)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "approval_id": self.approval_id,
-            "minion_id": self.minion_id,
-            "run_id": self.run_id,
-            "work_order_id": self.work_order_id,
-            "title": self.title,
-            "requested_action": self.requested_action,
-            "risk": self.risk,
-            "impact": self.impact,
-            "target": self.target,
-            "args_summary": dict(self.args_summary),
-            "created_at": self.created_at,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "MinionApprovalRequest":
-        if not isinstance(payload, dict):
-            raise ValueError("MinionApprovalRequest payload must be an object")
-        approval_id = str(payload.get("approval_id") or "").strip()
-        if not approval_id:
-            raise ValueError("approval_id is required")
-        return cls(
-            approval_id=approval_id,
-            minion_id=str(payload.get("minion_id") or ""),
-            run_id=str(payload.get("run_id") or ""),
-            work_order_id=str(payload.get("work_order_id") or ""),
-            title=str(payload.get("title") or "Minion approval request"),
-            requested_action=str(payload.get("requested_action") or ""),
-            risk=str(payload.get("risk") or "high"),
-            impact=str(payload.get("impact") or ""),
-            target=str(payload.get("target") or ""),
-            args_summary=_dict(payload.get("args_summary")),
-            created_at=str(payload.get("created_at") or utc_now()),
-        )
 
 
 @dataclass(frozen=True)
@@ -213,72 +134,6 @@ class MinionApprovalDecision:
             run_id=str(payload.get("run_id") or ""),
             decided_at=str(payload.get("decided_at") or utc_now()),
         )
-
-
-@dataclass(frozen=True)
-class MinionEvent:
-    event_kind: str
-    minion_id: str
-    run_id: str
-    work_order_id: str
-    payload: dict[str, Any] = field(default_factory=dict)
-    created_at: str = field(default_factory=utc_now)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "event_kind": self.event_kind,
-            "minion_id": self.minion_id,
-            "run_id": self.run_id,
-            "work_order_id": self.work_order_id,
-            "payload": dict(self.payload),
-            "created_at": self.created_at,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "MinionEvent":
-        if not isinstance(payload, dict):
-            raise ValueError("MinionEvent payload must be an object")
-        event_kind = str(payload.get("event_kind") or "").strip()
-        if not event_kind:
-            raise ValueError("MinionEvent.event_kind is required")
-        return cls(
-            event_kind=event_kind,
-            minion_id=str(payload.get("minion_id") or ""),
-            run_id=str(payload.get("run_id") or ""),
-            work_order_id=str(payload.get("work_order_id") or ""),
-            payload=_dict(payload.get("payload")),
-            created_at=str(payload.get("created_at") or utc_now()),
-        )
-
-
-@dataclass(frozen=True)
-class MinionRun:
-    minion_id: str
-    run_id: str
-    work_order_id: str
-    status: str
-    instruction: str = ""
-    pid: int | None = None
-    started_at: str = field(default_factory=utc_now)
-    ended_at: str = ""
-    last_error: str = ""
-    last_event: dict[str, Any] = field(default_factory=dict)
-    pending_approval: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "minion_id": self.minion_id,
-            "run_id": self.run_id,
-            "work_order_id": self.work_order_id,
-            "status": self.status,
-            "instruction": self.instruction,
-            "pid": self.pid,
-            "started_at": self.started_at,
-            "ended_at": self.ended_at,
-            "last_error": self.last_error,
-            "last_event": dict(self.last_event),
-            "pending_approval": dict(self.pending_approval),
-        }
 
 
 @dataclass(frozen=True)

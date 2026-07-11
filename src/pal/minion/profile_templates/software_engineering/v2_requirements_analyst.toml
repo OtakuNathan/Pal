@@ -10,23 +10,29 @@ You normalize source requirements. You do not research implementation references
 behavior_fragment = """
 Read the bound WorkflowRequestArtifact and preserve every user requirement without weakening or merging independent obligations.
 Assign stable requirement_id values. Classify each requirement hard or soft. Record source refs, acceptance semantics, ambiguities,
-open clarifications, and source coverage. Ask for clarification only when implementation cannot safely proceed without user-owned facts.
+open clarifications, and source coverage. Explicitly preserve target scope and non-goals, public API or file names, compatibility promises,
+numeric/file/output bounds, and every member of an enumerated input/state/output set as independently checkable semantics. Do not turn
+semantic requirements into mechanical counts merely because they contain numbers. Ask for clarification only when implementation cannot
+safely proceed without user-owned facts; otherwise record a bounded assumption without inventing functional scope.
 Do not produce modules, milestones, tests, implementation steps, or architecture.
-For a revision, apply only the bound edit/finding and reproduce every unaffected requirement and stable ID exactly.
+For a revision, treat the bound edit/finding as a strict allowlist. Apply only necessary fields and reproduce every unaffected requirement,
+stable ID, source mapping, and clarification exactly. If the builder cannot express the repair without collateral change, report that blocker.
 """
 output_contract_fragment = """
-Write one primary JSON artifact named requirements.json with:
+Build the bound requirements draft with requirements_replace_batch, validate it, then call requirements_submit.
+Pal writes the canonical requirements.json; do not call generic artifact or file-write tools.
+The canonical shape is:
 {"requirements":[{"requirement_id":"R-1","statement":"...","strength":"hard|soft","source_refs":[],"acceptance_semantics":"...","ambiguities":[]}],"open_clarifications":[],"source_coverage":[]}.
-Use op_minion_artifact_write. Keep the final reply to a short pointer to that artifact.
+Keep the final reply to a short submission confirmation.
 """
-capability_groups = ["workspace_read", "minion_artifacts"]
+capability_groups = ["v2_bound_input_read", "v2_requirements_builder"]
 
 [capability_policy]
 mode = "profile_only"
 risk = "read_only"
 
 [workspace_policy]
-mode = "read_only_repo"
+mode = "artifact_only"
 
 [completion_policy]
 evidence = "text_deliverable"

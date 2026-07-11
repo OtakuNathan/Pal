@@ -6,22 +6,19 @@ from pathlib import Path
 import tomllib
 from typing import Any, Protocol
 
-from pal.minion.execution_strategy import merge_execution_strategy, normalize_execution_strategy
 from pal.minion.families import MinionFamilyProvider, MinionFamilyRegistry
 from pal.minion.utils import dedupe_strings as _dedupe
 from pal.minion.utils import dict_from as _dict
 from pal.minion.utils import string_list as _string_list
-from pal.minion.plan_builder import (
-    PLAN_BUILDER_CAPABILITIES,
-    PLAN_BUILDER_INITIAL_CAPABILITIES,
-    PLAN_BUILDER_MODULE_DETAIL_CAPABILITIES,
-    PLAN_BUILDER_READ_CAPABILITIES,
-    PLAN_BUILDER_REVISION_CAPABILITIES,
-    PLAN_BUILDER_SKETCH_CAPABILITIES,
-    is_plan_builder_capability,
+from pal.minion.v2.contract_builder import (
+    ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
+    CONTRACT_BUILDER_CAPABILITIES,
+    CONTRACT_SKETCH_BUILDER_CAPABILITIES,
+    EVIDENCE_BUILDER_CAPABILITIES,
+    REQUIREMENTS_BUILDER_CAPABILITIES,
+    is_contract_builder_capability,
 )
-from pal.minion.repair_bill_builder import REPAIR_BILL_BUILDER_CAPABILITIES
-from pal.shared import TaskContextPack
+from pal.shared import MinionInvocationPack
 
 
 _PROFILE_RUNTIME_METADATA_KEYS = frozenset(
@@ -30,6 +27,7 @@ _PROFILE_RUNTIME_METADATA_KEYS = frozenset(
         "llm_round_timeout_seconds",
         "manager_turn_timeout_seconds",
         "max_output_tokens",
+        "temperature",
         "timeout_seconds",
     }
 )
@@ -46,18 +44,14 @@ class MinionProfile:
     capability_groups: tuple[str, ...] = ()
     default_allowed_capabilities: tuple[str, ...] = ()
     skill_refs: tuple[str, ...] = ()
-    # Legacy constructor compatibility. New profile templates should use skill_refs.
     default_allowed_skills: tuple[str, ...] = ()
     default_approval_policy: dict[str, Any] = field(default_factory=dict)
-    checkpoint_policy: dict[str, Any] = field(default_factory=dict)
     workspace_policy: dict[str, Any] = field(default_factory=dict)
     workspace_environment_policy: dict[str, Any] = field(default_factory=dict)
     completion_policy: dict[str, Any] = field(default_factory=dict)
     capability_policy: dict[str, Any] = field(default_factory=dict)
-    gate_policy: dict[str, Any] = field(default_factory=dict)
+    capability_description_overrides: dict[str, str] = field(default_factory=dict)
     output_policy: dict[str, Any] = field(default_factory=dict)
-    execution_contract: dict[str, Any] = field(default_factory=dict)
-    execution_strategy: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -80,15 +74,12 @@ class MinionProfile:
             "skill_refs": list(self.skill_refs or self.default_allowed_skills),
             "default_approval_policy": dict(self.default_approval_policy),
             "approval_policy": dict(self.default_approval_policy),
-            "checkpoint_policy": dict(self.checkpoint_policy),
             "workspace_policy": dict(self.workspace_policy),
             "workspace_environment_policy": dict(self.workspace_environment_policy),
             "completion_policy": dict(self.completion_policy),
             "capability_policy": dict(self.capability_policy),
-            "gate_policy": dict(self.gate_policy),
+            "capability_description_overrides": dict(self.capability_description_overrides),
             "output_policy": dict(self.output_policy),
-            "execution_contract": dict(self.execution_contract),
-            "execution_strategy": dict(self.execution_strategy),
             "metadata": dict(self.metadata),
         }
 
@@ -128,15 +119,16 @@ class MinionProfile:
             skill_refs=skill_refs,
             default_allowed_skills=skill_refs,
             default_approval_policy=_dict(payload.get("default_approval_policy") or payload.get("approval_policy")),
-            checkpoint_policy=_dict(payload.get("checkpoint_policy")),
             workspace_policy=_dict(payload.get("workspace_policy")),
             workspace_environment_policy=_dict(payload.get("workspace_environment_policy") or payload.get("workspace_environment")),
             completion_policy=_dict(payload.get("completion_policy")),
             capability_policy=_dict(payload.get("capability_policy")),
-            gate_policy=_dict(payload.get("gate_policy")),
+            capability_description_overrides={
+                str(key).strip(): str(value).strip()
+                for key, value in _dict(payload.get("capability_description_overrides")).items()
+                if str(key).strip() and str(value).strip()
+            },
             output_policy=_dict(payload.get("output_policy")),
-            execution_contract=_dict(payload.get("execution_contract")),
-            execution_strategy=_dict(payload.get("execution_strategy") or payload.get("execution_policy")),
             metadata=metadata,
         )
 
@@ -147,7 +139,7 @@ class MinionProfileProvider(Protocol):
 
 
 class MinionProfileCapabilityProvider(Protocol):
-    def capabilities_for_minion_profile(self, profile: MinionProfile, pack: TaskContextPack) -> list[str]:
+    def capabilities_for_minion_profile(self, profile: MinionProfile, pack: MinionInvocationPack) -> list[str]:
         ...
 
 
@@ -199,12 +191,12 @@ class MinionProfileRegistry:
 
     def resolve_pack(
         self,
-        pack: TaskContextPack,
+        pack: MinionInvocationPack,
         *,
         requested_profile: str = "",
         requested_profile_group: str = "",
         requested_profile_name: str = "",
-    ) -> TaskContextPack:
+    ) -> MinionInvocationPack:
         if requested_profile_group or requested_profile_name:
             profile = self.get_ref(requested_profile_group or pack.profile_group, requested_profile_name or pack.profile_name)
             profile_id = canonical_profile_id(requested_profile_group or pack.profile_group, requested_profile_name or pack.profile_name)
@@ -233,9 +225,6 @@ class MinionProfileRegistry:
         allowed_skills = _dedupe(list(pack.allowed_skills) or list(profile.skill_refs or profile.default_allowed_skills))
         approval_policy = dict(profile.default_approval_policy)
         approval_policy.update(dict(pack.approval_policy))
-        checkpoint_policy = dict(profile.checkpoint_policy)
-        if isinstance(pack.workspace.get("checkpoint_policy"), dict):
-            checkpoint_policy.update(dict(pack.workspace.get("checkpoint_policy") or {}))
         workspace_policy = dict(profile.workspace_policy)
         if isinstance(pack.workspace.get("workspace_policy"), dict):
             workspace_policy.update(dict(pack.workspace.get("workspace_policy") or {}))
@@ -248,31 +237,10 @@ class MinionProfileRegistry:
         completion_policy = dict(profile.completion_policy)
         if isinstance(pack.workspace.get("completion_policy"), dict):
             completion_policy.update(dict(pack.workspace.get("completion_policy") or {}))
-        gate_policy = dict(profile.gate_policy)
-        if isinstance(pack.workspace.get("gate_policy"), dict):
-            gate_policy.update(dict(pack.workspace.get("gate_policy") or {}))
         output_policy = dict(profile.output_policy)
         if isinstance(pack.workspace.get("output_policy"), dict):
             output_policy.update(dict(pack.workspace.get("output_policy") or {}))
-        execution_contract = dict(profile.execution_contract)
-        if isinstance(pack.workspace.get("execution_contract"), dict):
-            execution_contract.update(dict(pack.workspace.get("execution_contract") or {}))
-        if isinstance(pack.metadata.get("execution_contract"), dict):
-            execution_contract.update(dict(pack.metadata.get("execution_contract") or {}))
-        execution_strategy = merge_execution_strategy(
-            profile.execution_strategy,
-            _dict(pack.workspace.get("execution_strategy") or pack.workspace.get("execution_policy")),
-        )
-        execution_strategy = normalize_execution_strategy(
-            execution_strategy,
-            workspace_policy=workspace_policy,
-            completion_policy=completion_policy,
-            gate_policy=gate_policy,
-            output_policy=output_policy,
-        )
         hook_capabilities = self._hook_capabilities(profile, pack)
-        if _is_planner_revision_pack(profile, pack):
-            hook_capabilities = _dedupe([*hook_capabilities, *PLAN_BUILDER_CAPABILITIES])
         if hook_capabilities:
             allowed_capabilities = _dedupe([*allowed_capabilities, *hook_capabilities])
         allowed_capabilities = filter_minion_allowed_capabilities(
@@ -282,32 +250,20 @@ class MinionProfileRegistry:
         resolved_profile = profile.to_dict()
         resolved_profile["effective_skill_refs"] = list(allowed_skills)
         resolved_profile["effective_approval_policy"] = dict(approval_policy)
-        resolved_profile["effective_checkpoint_policy"] = dict(checkpoint_policy)
         resolved_profile["effective_workspace_policy"] = dict(workspace_policy)
         resolved_profile["effective_workspace_environment_policy"] = dict(workspace_environment_policy)
         resolved_profile["effective_completion_policy"] = dict(completion_policy)
         resolved_profile["effective_capability_policy"] = dict(capability_policy)
-        resolved_profile["effective_gate_policy"] = dict(gate_policy)
         resolved_profile["effective_output_policy"] = dict(output_policy)
-        resolved_profile["effective_execution_contract"] = dict(execution_contract)
-        resolved_profile["effective_execution_strategy"] = dict(execution_strategy)
         workspace = dict(pack.workspace)
-        if checkpoint_policy:
-            workspace["checkpoint_policy"] = dict(checkpoint_policy)
         if workspace_policy:
             workspace["workspace_policy"] = dict(workspace_policy)
         if workspace_environment_policy:
             workspace["workspace_environment_policy"] = dict(workspace_environment_policy)
         if completion_policy:
             workspace["completion_policy"] = dict(completion_policy)
-        if gate_policy:
-            workspace["gate_policy"] = dict(gate_policy)
         if output_policy:
             workspace["output_policy"] = dict(output_policy)
-        if execution_contract:
-            workspace["execution_contract"] = dict(execution_contract)
-        if execution_strategy:
-            workspace["execution_strategy"] = dict(execution_strategy)
         metadata = dict(pack.metadata)
         for key in _PROFILE_RUNTIME_METADATA_KEYS:
             if key not in metadata and key in profile.metadata:
@@ -318,7 +274,7 @@ class MinionProfileRegistry:
         elif profile.preferred_endpoint_id:
             metadata["preferred_endpoint_id"] = profile.preferred_endpoint_id
             metadata["preferred_endpoint_source"] = "profile"
-        return TaskContextPack.from_dict(
+        return MinionInvocationPack.from_dict(
             {
                 **pack.to_dict(),
                 "profile_group": profile.profile_group,
@@ -333,7 +289,7 @@ class MinionProfileRegistry:
             }
         )
 
-    def _hook_capabilities(self, profile: MinionProfile, pack: TaskContextPack) -> list[str]:
+    def _hook_capabilities(self, profile: MinionProfile, pack: MinionInvocationPack) -> list[str]:
         result: list[str] = []
         for provider in self.capability_providers:
             hook = getattr(provider, "capabilities_for_minion_profile", None)
@@ -378,19 +334,19 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "tool_discovery": ("op_tool_search", "op_tool_read"),
     "capability_call": ("op_tool_call",),
     "minion_artifacts": ("op_minion_artifact_write", "op_minion_artifact_edit"),
-    "minion_plan_builder": PLAN_BUILDER_INITIAL_CAPABILITIES,
-    "minion_plan_builder_initial": PLAN_BUILDER_INITIAL_CAPABILITIES,
-    "minion_plan_builder_sketch": PLAN_BUILDER_SKETCH_CAPABILITIES,
-    "minion_plan_builder_module_detail": PLAN_BUILDER_MODULE_DETAIL_CAPABILITIES,
-    "minion_plan_builder_revision": PLAN_BUILDER_REVISION_CAPABILITIES,
-    "minion_plan_builder_full": PLAN_BUILDER_CAPABILITIES,
-    "minion_plan_reader": PLAN_BUILDER_READ_CAPABILITIES,
-    "minion_repair_bill_builder": REPAIR_BILL_BUILDER_CAPABILITIES,
-    "minion_review_gate": ("op_minion_review_gate_submit", "op_minion_review_checkpoint", "op_minion_gate_contract_submit"),
+    "v2_requirements_builder": REQUIREMENTS_BUILDER_CAPABILITIES,
+    "v2_bound_input_read": ("op_minion_input_read",),
+    "v2_evidence_builder": EVIDENCE_BUILDER_CAPABILITIES,
+    "v2_contract_sketch_builder": CONTRACT_SKETCH_BUILDER_CAPABILITIES,
+    "v2_architecture_review_builder": ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
-    "minion_checklist_read": ("op_minion_checklist_read", "op_minion_checklist_summary"),
     "memory_recall": ("op_memory_recall",),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
+    "workspace_write": (
+        "op_file_edit",
+        "op_file_write",
+        "op_path_delete",
+    ),
     "web_research": ("op_web_search", "op_web_read"),
     "code_intel": (
         "op_lsp_status",
@@ -414,38 +370,8 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
         "op_path_delete",
         "op_git",
         "op_exec_shell",
-        "op_minion_checkpoint_commit",
-    ),
-    "minion_checklist": (
-        "op_minion_checklist_read",
-        "op_minion_checklist_mark_done",
-        "op_minion_checklist_mark_blocked",
-        "op_minion_checklist_summary",
     ),
 }
-
-
-SOURCE_CONTRACT_REVIEWER_CAPABILITIES: tuple[str, ...] = (
-    "op_tree",
-    "op_search",
-    "op_file_read",
-    "op_minion_artifact_write",
-    "op_minion_artifact_edit",
-    "op_minion_gate_contract_submit",
-    "op_minion_memory_candidate_write",
-)
-
-
-PLAN_REVIEWER_CAPABILITIES: tuple[str, ...] = (
-    "op_tree",
-    "op_search",
-    "op_file_read",
-    "op_minion_artifact_write",
-    "op_minion_artifact_edit",
-    *PLAN_BUILDER_READ_CAPABILITIES,
-    "op_minion_review_gate_submit",
-    "op_minion_memory_candidate_write",
-)
 
 
 DEFAULT_MINION_DENIED_CAPABILITIES = frozenset(
@@ -457,10 +383,6 @@ DEFAULT_MINION_DENIED_CAPABILITIES = frozenset(
         "op_memory_update",
         "op_memory_delete",
         "op_memory_refresh_indexes",
-        "op_minion_draft_work_order",
-        "op_minion_finalize",
-        "op_minion_kill",
-        "op_minion_promote_work_order_draft",
         "op_plugin_mgmt_disable",
         "op_plugin_mgmt_enable",
         "op_plugin_mgmt_rescan",
@@ -497,17 +419,9 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
     {
         "op_minion_artifact_write",
         "op_minion_artifact_edit",
-        "op_minion_checkpoint_commit",
-        "op_minion_checklist_read",
-        "op_minion_checklist_mark_done",
-        "op_minion_checklist_mark_blocked",
-        "op_minion_checklist_summary",
-        "op_minion_gate_contract_submit",
-        "op_minion_review_gate_submit",
-        "op_minion_review_checkpoint",
+        "op_minion_input_read",
         "op_minion_memory_candidate_write",
-        *PLAN_BUILDER_CAPABILITIES,
-        *REPAIR_BILL_BUILDER_CAPABILITIES,
+        *CONTRACT_BUILDER_CAPABILITIES,
     }
 )
 
@@ -544,7 +458,7 @@ def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] 
     denied = DEFAULT_MINION_DENIED_CAPABILITIES | frozenset(extra_denied)
     if capability in denied:
         return True
-    if capability in MINION_INTERNAL_ALLOWED_CAPABILITIES or is_plan_builder_capability(capability):
+    if capability in MINION_INTERNAL_ALLOWED_CAPABILITIES or is_contract_builder_capability(capability):
         return False
     if str(policy.get("risk") or "").strip().lower() == "read_only" and capability == "op_exec_shell":
         return True
@@ -553,37 +467,6 @@ def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] 
         return True
     fragments = (*DEFAULT_MINION_DENIED_FRAGMENTS, *tuple(_string_list(policy.get("deny_fragments"))))
     return any(fragment and fragment in capability for fragment in fragments)
-
-
-def _is_planner_revision_pack(profile: MinionProfile, pack: TaskContextPack) -> bool:
-    execution_contract = dict(profile.execution_contract or {})
-    role = str(
-        execution_contract.get("module_role")
-        or execution_contract.get("artifact_role")
-        or execution_contract.get("role")
-        or ""
-    ).strip().lower()
-    if role not in {"architect", "plan_artifact"}:
-        return False
-    metadata = dict(pack.metadata or {})
-    workspace = dict(pack.workspace or {})
-    if isinstance(workspace.get("source_plan_ref"), dict) or isinstance(workspace.get("review_target_plan_ref"), dict):
-        return True
-    if isinstance(metadata.get("source_plan_ref"), dict) or isinstance(metadata.get("review_target_plan_ref"), dict):
-        return True
-    if isinstance(metadata.get("revision_source"), dict) and metadata.get("revision_source"):
-        return True
-    planner_work_order = metadata.get("planner_work_order")
-    if isinstance(planner_work_order, dict) and _safe_int(planner_work_order.get("plan_revision")) > 0:
-        return True
-    return False
-
-
-def _safe_int(value: Any) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return 0
 
 
 def load_builtin_minion_profiles() -> tuple[MinionProfile, ...]:

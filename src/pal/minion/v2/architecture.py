@@ -21,7 +21,7 @@ class RequirementStrength(StrEnum):
     SOFT = "soft"
 
 
-class ModuleBehaviorKind(StrEnum):
+class UnitBehaviorKind(StrEnum):
     STATELESS = "stateless"
     RESOURCE_OWNER = "resource_owner"
     SERVICE = "service"
@@ -41,7 +41,7 @@ class ComplexityBudgetPolicy:
     target_file_count: int = 12
     estimated_context_tokens: int = 65536
     public_interface_count: int = 16
-    cross_module_contract_count: int = 12
+    cross_unit_contract_count: int = 12
     stateful_resource_count: int = 2
     expected_candidate_cycles: int = 3
     platform_dependency_level: int = 3
@@ -52,7 +52,7 @@ class ComplexityBudgetPolicy:
             "target_file_count",
             "estimated_context_tokens",
             "public_interface_count",
-            "cross_module_contract_count",
+            "cross_unit_contract_count",
             "stateful_resource_count",
             "expected_candidate_cycles",
             "platform_dependency_level",
@@ -137,16 +137,16 @@ class ArchitectureArtifactService:
             child_refs=((requirements_ref.sha256, "requirements"),),
         )
 
-    def publish_module_contract(
+    def publish_unit_contract(
         self,
         payload: Mapping[str, Any],
         *,
         provenance: Mapping[str, Any] | None = None,
     ) -> ArtifactRef:
-        normalized = validate_module_contract(payload, complexity_policy=self.complexity_policy)
+        normalized = validate_unit_contract(payload, complexity_policy=self.complexity_policy)
         return self.artifacts.put_json(
             normalized,
-            artifact_type="ModuleContractArtifact",
+            artifact_type="UnitContractArtifact",
             provenance=provenance,
         )
 
@@ -457,7 +457,7 @@ def validate_evidence_catalog(payload: Mapping[str, Any], *, research_mode: Rese
     return {"schema_version": "1", "research_mode": research_mode.value, "evidence": normalized}
 
 
-def validate_module_contract(
+def validate_unit_contract(
     payload: Mapping[str, Any],
     *,
     complexity_policy: ComplexityBudgetPolicy,
@@ -472,21 +472,21 @@ def validate_module_contract(
     }
     present = sorted(forbidden & set(payload))
     if present:
-        raise ValueError(f"module contract contains implementation-level fields: {', '.join(present)}")
-    module_id = str(payload.get("module_id") or "").strip()
+        raise ValueError(f"unit contract contains implementation-level fields: {', '.join(present)}")
+    unit_id = str(payload.get("unit_id") or "").strip()
     responsibility = str(payload.get("responsibility") or "").strip()
-    behavior_kind = str(payload.get("module_behavior_kind") or "").strip().lower()
-    if not module_id or not responsibility:
-        raise ValueError("module contract needs module_id and responsibility")
-    if behavior_kind not in {item.value for item in ModuleBehaviorKind}:
-        raise ValueError(f"invalid module_behavior_kind: {behavior_kind or '<empty>'}")
+    behavior_kind = str(payload.get("unit_behavior_kind") or "").strip().lower()
+    if not unit_id or not responsibility:
+        raise ValueError("unit contract needs unit_id and responsibility")
+    if behavior_kind not in {item.value for item in UnitBehaviorKind}:
+        raise ValueError(f"invalid unit_behavior_kind: {behavior_kind or '<empty>'}")
     owned_area = _text_list(payload.get("owned_area"))
     if not owned_area:
-        raise ValueError("module contract needs at least one owned_area path")
+        raise ValueError("unit contract needs at least one owned_area path")
     state_model = payload.get("state_model")
     lifecycle = payload.get("lifecycle")
     invariants = list(payload.get("invariants") or [])
-    if behavior_kind == ModuleBehaviorKind.STATELESS:
+    if behavior_kind == UnitBehaviorKind.STATELESS:
         state_text = str(state_model or "").strip().lower()
         if state_text not in {"stateless", "n/a", "none"}:
             raise ValueError("stateless module must declare state_model=stateless")
@@ -497,7 +497,7 @@ def validate_module_contract(
             raise ValueError("stateful module needs explicit invariants")
     budget = dict(payload.get("complexity_budget") or {})
     if not budget:
-        raise ValueError("module contract needs a structured complexity_budget")
+        raise ValueError("unit contract needs a structured complexity_budget")
     violations = complexity_policy.violations(budget)
     split_conditions = _text_list(payload.get("split_conditions"))
     waiver_ref = payload.get("complexity_waiver_ref")
@@ -507,8 +507,8 @@ def validate_module_contract(
     normalized.update(
         {
             "schema_version": "1",
-            "module_id": module_id,
-            "module_behavior_kind": behavior_kind,
+            "unit_id": unit_id,
+            "unit_behavior_kind": behavior_kind,
             "responsibility": responsibility,
             "owned_area": owned_area,
             "reference_only_paths": _text_list(payload.get("reference_only_paths")),
@@ -538,24 +538,25 @@ def validate_architecture_manifest(payload: Mapping[str, Any]) -> dict[str, Any]
         "evidence_catalog_ref",
         "global_constraints_ref",
         "design_decisions_ref",
+        "gate_checks_ref",
         "topology_ref",
         "integration_contract_ref",
         "assumption_ledger_ref",
         "risk_ledger_ref",
     )
     missing = [field for field in required_single if not _is_artifact_ref(payload.get(field))]
-    module_refs = list(payload.get("module_contract_refs") or [])
-    cross_refs = list(payload.get("cross_module_contract_refs") or [])
+    module_refs = list(payload.get("unit_contract_refs") or [])
+    cross_refs = list(payload.get("cross_unit_contract_refs") or [])
     if not module_refs or any(not _is_artifact_ref(item) for item in module_refs):
-        missing.append("module_contract_refs")
+        missing.append("unit_contract_refs")
     if any(not _is_artifact_ref(item) for item in cross_refs):
-        missing.append("cross_module_contract_refs")
+        missing.append("cross_unit_contract_refs")
     if missing:
         raise ValueError("architecture manifest missing valid artifact refs: " + ", ".join(sorted(set(missing))))
     normalized = dict(payload)
     normalized["schema_version"] = "1"
-    normalized["module_contract_refs"] = [dict(item) for item in module_refs]
-    normalized["cross_module_contract_refs"] = [dict(item) for item in cross_refs]
+    normalized["unit_contract_refs"] = [dict(item) for item in module_refs]
+    normalized["cross_unit_contract_refs"] = [dict(item) for item in cross_refs]
     for field in required_single:
         normalized[field] = dict(payload[field])
     return normalized
@@ -599,12 +600,12 @@ def review_architecture_contract(
         findings.append(ArchitectureFinding(ArchitectureFindingKind.EVIDENCE_GAP, str(exc)))
         evidence = {"evidence": []}
     modules: list[dict[str, Any]] = []
-    for raw_module in list(fragments.get("module_contract") or []):
+    for raw_module in list(fragments.get("unit_contract") or []):
         try:
-            modules.append(validate_module_contract(raw_module, complexity_policy=complexity_policy))
+            modules.append(validate_unit_contract(raw_module, complexity_policy=complexity_policy))
         except ValueError as exc:
-            module_id = str(dict(raw_module or {}).get("module_id") or "unknown")
-            findings.append(ArchitectureFinding(ArchitectureFindingKind.CONTRACT_DEFECT, str(exc), (module_id,)))
+            unit_id = str(dict(raw_module or {}).get("unit_id") or "unknown")
+            findings.append(ArchitectureFinding(ArchitectureFindingKind.CONTRACT_DEFECT, str(exc), (unit_id,)))
     requirement_ids = {str(item["requirement_id"]) for item in requirements["requirements"]}
     hard_requirement_ids = {
         str(item["requirement_id"])
@@ -623,7 +624,7 @@ def review_architecture_contract(
         findings.append(
             ArchitectureFinding(
                 ArchitectureFindingKind.CONTRACT_DEFECT,
-                "module contracts reference unknown requirements",
+                "unit contracts reference unknown requirements",
                 tuple(sorted(unknown_requirement_refs)),
             )
         )
@@ -632,7 +633,7 @@ def review_architecture_contract(
         findings.append(
             ArchitectureFinding(
                 ArchitectureFindingKind.CONTRACT_DEFECT,
-                "requirements are not owned by any module contract",
+                "requirements are not owned by any unit contract",
                 tuple(sorted(missing_coverage)),
             )
         )
@@ -652,13 +653,13 @@ def review_architecture_contract(
         findings.append(
             ArchitectureFinding(
                 ArchitectureFindingKind.EVIDENCE_GAP,
-                "module contracts reference unknown evidence",
+                "unit contracts reference unknown evidence",
                 tuple(sorted(unknown_evidence_refs)),
             )
         )
     topology = dict(fragments.get("topology") or {})
-    module_ids = {str(module["module_id"]) for module in modules}
-    topology_findings = _validate_topology(topology, module_ids)
+    unit_ids = {str(module["unit_id"]) for module in modules}
+    topology_findings = _validate_topology(topology, unit_ids)
     findings.extend(topology_findings)
     verdict = "PASS" if not findings else "FAIL"
     return ArchitectureReviewResult(verdict=verdict, findings=tuple(findings))
@@ -666,7 +667,7 @@ def review_architecture_contract(
 
 def compile_architecture_markdown(manifest: Mapping[str, Any], fragments: Mapping[str, Any]) -> str:
     requirements = list(dict(fragments.get("requirements") or {}).get("requirements") or [])
-    modules = list(fragments.get("module_contract") or [])
+    modules = list(fragments.get("unit_contract") or [])
     topology = dict(fragments.get("topology") or {})
     assumptions = dict(fragments.get("assumption_ledger") or {})
     risks = dict(fragments.get("risk_ledger") or {})
@@ -676,15 +677,15 @@ def compile_architecture_markdown(manifest: Mapping[str, Any], fragments: Mappin
     lines.extend(["", "## Module Topology", ""])
     dependency_map = dict(topology.get("depends_on") or {})
     for module in modules:
-        module_id = str(module.get("module_id") or "")
-        dependencies = ", ".join(str(item) for item in list(dependency_map.get(module_id) or [])) or "none"
+        unit_id = str(module.get("unit_id") or "")
+        dependencies = ", ".join(str(item) for item in list(dependency_map.get(unit_id) or [])) or "none"
         lines.extend(
             [
-                f"### {module_id}",
+                f"### {unit_id}",
                 "",
                 str(module.get("responsibility") or ""),
                 "",
-                f"- Behavior: `{module.get('module_behavior_kind', '')}`",
+                f"- Behavior: `{module.get('unit_behavior_kind', '')}`",
                 f"- Starts after: {dependencies}",
                 f"- Owns: {', '.join(_text_list(module.get('owned_area'))) or 'none'}",
                 f"- Requirements: {', '.join(_text_list(module.get('requirement_ids'))) or 'none'}",
@@ -704,21 +705,21 @@ def compile_architecture_markdown(manifest: Mapping[str, Any], fragments: Mappin
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _validate_topology(topology: Mapping[str, Any], module_ids: set[str]) -> tuple[ArchitectureFinding, ...]:
+def _validate_topology(topology: Mapping[str, Any], unit_ids: set[str]) -> tuple[ArchitectureFinding, ...]:
     depends_on = {
-        str(module_id): _text_list(dependencies)
-        for module_id, dependencies in dict(topology.get("depends_on") or {}).items()
+        str(unit_id): _text_list(dependencies)
+        for unit_id, dependencies in dict(topology.get("depends_on") or {}).items()
     }
     findings: list[ArchitectureFinding] = []
-    if set(depends_on) != module_ids:
+    if set(depends_on) != unit_ids:
         findings.append(
             ArchitectureFinding(
                 ArchitectureFindingKind.ARCHITECTURE_DEFECT,
-                "topology node set does not match module contracts",
-                tuple(sorted(set(depends_on) ^ module_ids)),
+                "topology node set does not match unit contracts",
+                tuple(sorted(set(depends_on) ^ unit_ids)),
             )
         )
-    unknown = {dependency for dependencies in depends_on.values() for dependency in dependencies if dependency not in module_ids}
+    unknown = {dependency for dependencies in depends_on.values() for dependency in dependencies if dependency not in unit_ids}
     if unknown:
         findings.append(
             ArchitectureFinding(
@@ -727,14 +728,14 @@ def _validate_topology(topology: Mapping[str, Any], module_ids: set[str]) -> tup
                 tuple(sorted(unknown)),
             )
         )
-    indegree = {module_id: 0 for module_id in module_ids}
-    dependents = {module_id: [] for module_id in module_ids}
-    for module_id, dependencies in depends_on.items():
+    indegree = {unit_id: 0 for unit_id in unit_ids}
+    dependents = {unit_id: [] for unit_id in unit_ids}
+    for unit_id, dependencies in depends_on.items():
         for dependency in dependencies:
-            if module_id in indegree and dependency in dependents:
-                indegree[module_id] += 1
-                dependents[dependency].append(module_id)
-    ready = sorted(module_id for module_id, count in indegree.items() if count == 0)
+            if unit_id in indegree and dependency in dependents:
+                indegree[unit_id] += 1
+                dependents[dependency].append(unit_id)
+    ready = sorted(unit_id for unit_id, count in indegree.items() if count == 0)
     visited = 0
     while ready:
         current = ready.pop(0)
@@ -744,8 +745,8 @@ def _validate_topology(topology: Mapping[str, Any], module_ids: set[str]) -> tup
             if indegree[dependent] == 0:
                 ready.append(dependent)
                 ready.sort()
-    if visited != len(module_ids):
-        cycle_nodes = tuple(sorted(module_id for module_id, count in indegree.items() if count > 0))
+    if visited != len(unit_ids):
+        cycle_nodes = tuple(sorted(unit_id for unit_id, count in indegree.items() if count > 0))
         findings.append(ArchitectureFinding(ArchitectureFindingKind.ARCHITECTURE_DEFECT, "topology contains a cycle", cycle_nodes))
     return tuple(findings)
 

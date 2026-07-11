@@ -16,10 +16,10 @@ from pal.minion.v2.execution import (
     CandidateSnapshotService,
     DagScheduler,
     ExecutionCompiler,
-    ModuleRunJournal,
-    ModuleWorkViewBuilder,
+    NodeRunJournal,
+    UnitWorkViewBuilder,
     NodeQuiescer,
-    WorktreeLockRegistry,
+    WorkspaceLockRegistry,
     provision_verification_worktree,
     terminate_process_group,
 )
@@ -39,7 +39,7 @@ class _StoppedProcessController:
         _ = worker_id, timeout_seconds
         return True
 
-    def has_live_processes_for_worktree(self, worktree: Path) -> bool:
+    def has_live_processes_for_workspace(self, worktree: Path) -> bool:
         _ = worktree
         return False
 
@@ -49,18 +49,18 @@ def _budget() -> dict[str, int]:
         "target_file_count": 2,
         "estimated_context_tokens": 8000,
         "public_interface_count": 2,
-        "cross_module_contract_count": 1,
+        "cross_unit_contract_count": 1,
         "stateful_resource_count": 0,
         "expected_candidate_cycles": 2,
         "platform_dependency_level": 1,
     }
 
 
-def _contract(module_id: str, requirement_id: str, evidence_id: str, owned_area: str) -> dict:
+def _contract(unit_id: str, requirement_id: str, evidence_id: str, owned_area: str) -> dict:
     return {
-        "module_id": module_id,
-        "module_behavior_kind": "stateless",
-        "responsibility": f"Implement {module_id}.",
+        "unit_id": unit_id,
+        "unit_behavior_kind": "stateless",
+        "responsibility": f"Implement {unit_id}.",
         "owned_area": [owned_area],
         "reference_only_paths": ["references/**"],
         "provided_interfaces": [],
@@ -68,7 +68,7 @@ def _contract(module_id: str, requirement_id: str, evidence_id: str, owned_area:
         "ownership": {},
         "lifecycle": "N/A",
         "state_model": "stateless",
-        "invariants": [f"{module_id} remains deterministic"],
+        "invariants": [f"{unit_id} remains deterministic"],
         "error_behavior": [],
         "compatibility": [],
         "dependency_constraints": [],
@@ -131,13 +131,14 @@ class MinionV2ExecutionTests(unittest.TestCase):
             requirements_ref=requirements,
             research_mode=ResearchMode.LOCAL_ONLY,
         )
-        module_a = self.architecture.publish_module_contract(_contract("a", "R-A", "E-A", "src/a/**"))
-        module_b = self.architecture.publish_module_contract(_contract("b", "R-B", "E-B", "src/b/**"))
+        module_a = self.architecture.publish_unit_contract(_contract("a", "R-A", "E-A", "src/a/**"))
+        module_b = self.architecture.publish_unit_contract(_contract("b", "R-B", "E-B", "src/b/**"))
         constraints = self.architecture.publish_fragment([], artifact_type="GlobalConstraintsArtifact")
         decisions = self.architecture.publish_fragment([], artifact_type="DesignDecisionsArtifact")
+        gates = self.architecture.publish_fragment([], artifact_type="ArchitectureGateChecksArtifact")
         cross = self.architecture.publish_fragment(
             {"contract_id": "X", "provider": "a", "consumer": "b"},
-            artifact_type="CrossModuleContractArtifact",
+            artifact_type="CrossUnitContractArtifact",
         )
         topology = self.architecture.publish_fragment(
             {"depends_on": {"a": [], "b": ["a"]}},
@@ -155,8 +156,9 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 "evidence_catalog_ref": evidence.to_dict(),
                 "global_constraints_ref": constraints.to_dict(),
                 "design_decisions_ref": decisions.to_dict(),
-                "module_contract_refs": [module_a.to_dict(), module_b.to_dict()],
-                "cross_module_contract_refs": [cross.to_dict()],
+                "gate_checks_ref": gates.to_dict(),
+                "unit_contract_refs": [module_a.to_dict(), module_b.to_dict()],
+                "cross_unit_contract_refs": [cross.to_dict()],
                 "topology_ref": topology.to_dict(),
                 "integration_contract_ref": integration.to_dict(),
                 "assumption_ledger_ref": assumptions.to_dict(),
@@ -172,10 +174,10 @@ class MinionV2ExecutionTests(unittest.TestCase):
             manifest_ref=manifest,
         )
         scheduler = DagScheduler(self.repository)
-        self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1", max_new_nodes=3), (compilation.module_node_ids["a"],))
-        self._accept_node(compilation.module_node_ids["a"])
-        self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1", max_new_nodes=3), (compilation.module_node_ids["b"],))
-        self._accept_node(compilation.module_node_ids["b"])
+        self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1", max_new_nodes=3), (compilation.unit_node_ids["a"],))
+        self._accept_node(compilation.unit_node_ids["a"])
+        self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1", max_new_nodes=3), (compilation.unit_node_ids["b"],))
+        self._accept_node(compilation.unit_node_ids["b"])
         self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1", max_new_nodes=3), (compilation.integration_node_id,))
 
     def test_scheduler_queues_independent_nodes_in_the_same_tick(self) -> None:
@@ -200,7 +202,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             max_new_nodes=2,
         )
 
-        self.assertEqual(set(queued), set(compilation.module_node_ids.values()))
+        self.assertEqual(set(queued), set(compilation.unit_node_ids.values()))
 
     def test_replan_reuses_only_exactly_matching_accepted_candidates(self) -> None:
         manifest = self._manifest()
@@ -211,9 +213,9 @@ class MinionV2ExecutionTests(unittest.TestCase):
         )
         scheduler = DagScheduler(self.repository)
         scheduler.schedule_ready_nodes(workflow_id="wf_reuse", epoch_id=first.epoch_id, max_new_nodes=2)
-        self._accept_node(first.module_node_ids["a"])
+        self._accept_node(first.unit_node_ids["a"])
         scheduler.schedule_ready_nodes(workflow_id="wf_reuse", epoch_id=first.epoch_id, max_new_nodes=2)
-        self._accept_node(first.module_node_ids["b"])
+        self._accept_node(first.unit_node_ids["b"])
 
         second = ExecutionCompiler(self.repository, self.architecture).compile_epoch(
             workflow_id="wf_reuse",
@@ -221,15 +223,15 @@ class MinionV2ExecutionTests(unittest.TestCase):
             manifest_ref=manifest,
             reuse_from_epoch_id=first.epoch_id,
         )
-        first_a = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, first.module_node_ids["a"])
-        second_a = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, second.module_node_ids["a"])
+        first_a = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, first.unit_node_ids["a"])
+        second_a = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, second.unit_node_ids["a"])
         self.assertEqual(first_a.payload["epoch_base_tree_sha"], second_a.payload["epoch_base_tree_sha"])
         self.assertEqual(first_a.payload["environment_fingerprint"], second_a.payload["environment_fingerprint"])
-        for module_id in ("a", "b"):
-            source = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, first.module_node_ids[module_id])
-            reused = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, second.module_node_ids[module_id])
+        for unit_id in ("a", "b"):
+            source = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, first.unit_node_ids[unit_id])
+            reused = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, second.unit_node_ids[unit_id])
             self.assertEqual(reused.state, "ACCEPTED")
-            self.assertEqual(reused.payload["candidate_sha"], source.payload["candidate_sha"])
+            self.assertEqual(reused.payload["candidate_digest"], source.payload["candidate_digest"])
             self.assertEqual(reused.payload["reused_from_epoch_id"], first.epoch_id)
 
         changed_payload = self.store.read_json(manifest)
@@ -246,19 +248,19 @@ class MinionV2ExecutionTests(unittest.TestCase):
             reuse_from_epoch_id=first.epoch_id,
         )
         self.assertEqual(
-            self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, third.module_node_ids["a"]).state,
+            self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, third.unit_node_ids["a"]).state,
             "BLOCKED_BY_DEPS",
         )
 
-    def test_module_work_view_preserves_architect_evidence(self) -> None:
+    def test_unit_work_view_preserves_architect_evidence(self) -> None:
         manifest = self._manifest()
         compilation = ExecutionCompiler(self.repository, self.architecture).compile_epoch(
             workflow_id="wf_view",
             epoch_id="epoch_view",
             manifest_ref=manifest,
         )
-        node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.module_node_ids["a"])
-        view_ref = ModuleWorkViewBuilder(self.architecture).build(node, dependency_outputs={})
+        node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.unit_node_ids["a"])
+        view_ref = UnitWorkViewBuilder(self.architecture).build(node, dependency_outputs={})
         view = self.store.read_json(view_ref)
         self.assertEqual([item["evidence_id"] for item in view["evidence"]], ["E-A"])
         self.assertEqual([item["requirement_id"] for item in view["requirements"]], ["R-A"])
@@ -270,8 +272,8 @@ class MinionV2ExecutionTests(unittest.TestCase):
             epoch_id="epoch_review_tree",
             manifest_ref=manifest,
         )
-        node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.module_node_ids["a"])
-        candidate_worktree = Path(str(node.payload["worktree_path"]))
+        node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.unit_node_ids["a"])
+        candidate_worktree = Path(str(node.payload["workspace_path"]))
         (candidate_worktree / "src" / "a").mkdir(parents=True, exist_ok=True)
         (candidate_worktree / "src" / "a" / "candidate.txt").write_text("candidate\n", encoding="utf-8")
         subprocess.run(["git", "add", "-A"], cwd=candidate_worktree, check=True)
@@ -280,13 +282,13 @@ class MinionV2ExecutionTests(unittest.TestCase):
             cwd=candidate_worktree,
             check=True,
         )
-        candidate_sha = subprocess.check_output(
+        candidate_digest = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=candidate_worktree, text=True
         ).strip()
         review_worktree, scratch = provision_verification_worktree(
             self.runtime_root,
             node=node,
-            candidate_sha=candidate_sha,
+            candidate_digest=candidate_digest,
         )
         (review_worktree / "review-only.txt").write_text("probe\n", encoding="utf-8")
         (scratch / "adversarial_test.py").write_text("assert True\n", encoding="utf-8")
@@ -294,19 +296,19 @@ class MinionV2ExecutionTests(unittest.TestCase):
         same_worktree, _ = provision_verification_worktree(
             self.runtime_root,
             node=node,
-            candidate_sha=candidate_sha,
+            candidate_digest=candidate_digest,
         )
         self.assertEqual(same_worktree, review_worktree)
         self.assertFalse((review_worktree / "review-only.txt").exists())
 
     def test_journal_is_mutable_but_lease_fenced(self) -> None:
         lease = self.repository.claim_lease("node:journal", "worker_journal", ttl_seconds=60)
-        journal = ModuleRunJournal(
+        journal = NodeRunJournal(
             current_micro_plan=("write failing test", "implement"),
             files_inspected=("src/a/api.h",),
             last_safe_point="test written",
         )
-        generation = self.repository.update_module_journal(
+        generation = self.repository.update_node_journal(
             node_run_id="node_journal",
             workflow_id="wf_journal",
             lease_resource_key=lease.resource_key,
@@ -317,7 +319,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
         )
         self.assertEqual(generation, 1)
         with self.assertRaises(AggregateVersionConflict):
-            self.repository.update_module_journal(
+            self.repository.update_node_journal(
                 node_run_id="node_journal",
                 workflow_id="wf_journal",
                 lease_resource_key=lease.resource_key,
@@ -328,7 +330,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             )
         self.repository.release_lease(lease.resource_key, lease.owner_id, lease.fencing_token)
         with self.assertRaises(StaleFencingToken):
-            self.repository.update_module_journal(
+            self.repository.update_node_journal(
                 node_run_id="node_journal",
                 workflow_id="wf_journal",
                 lease_resource_key=lease.resource_key,
@@ -351,7 +353,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
         base_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=worktree, text=True).strip()
         (worktree / "src" / "a.txt").write_text("candidate\n", encoding="utf-8")
 
-        contract = self.store.put_json({"module_id": "candidate"}, artifact_type="ModuleContractArtifact")
+        contract = self.store.put_json({"unit_id": "candidate"}, artifact_type="UnitContractArtifact")
         self.repository.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
@@ -362,7 +364,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 expected_version=0,
                 idempotency_key="node-candidate:create",
                 payload={
-                    "module_contract_ref": contract.to_dict(),
+                    "unit_contract_ref": contract.to_dict(),
                     "epoch_id": "epoch_candidate",
                     "environment_fingerprint": "env-hash",
                 },
@@ -370,7 +372,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
         )
 
         lease = self.repository.claim_lease("worktree:node_candidate", "worker_candidate", ttl_seconds=60)
-        locks = WorktreeLockRegistry()
+        locks = WorkspaceLockRegistry()
         controller = _StoppedProcessController()
         quiesced = NodeQuiescer(self.repository, controller, locks).quiesce(
             node_run_id="node_candidate",
@@ -380,22 +382,22 @@ class MinionV2ExecutionTests(unittest.TestCase):
             worktree=worktree,
         )
         self.assertTrue(locks.is_held("node_candidate"))
-        candidate_ref, candidate_sha = CandidateSnapshotService(self.repository, self.store, locks).create_candidate(
+        candidate_ref, candidate_digest = CandidateSnapshotService(self.repository, self.store, locks).create_candidate(
             node_run_id="node_candidate",
             worker_id=lease.owner_id,
             lease_resource_key=lease.resource_key,
             fencing_token=lease.fencing_token,
             worktree=worktree,
-            expected_worktree_fingerprint=quiesced.worktree_fingerprint,
+            expected_workspace_fingerprint=quiesced.workspace_fingerprint,
             owned_area=["src/**"],
             reference_only_paths=["references/**"],
             base_sha=base_sha,
-            module_contract_hash=contract.sha256,
+            unit_contract_hash=contract.sha256,
             dependency_output_hashes={},
             environment_fingerprint="env-hash",
         )
         self.assertFalse(locks.is_held("node_candidate"))
-        self.assertEqual(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=worktree, text=True).strip(), candidate_sha)
+        self.assertEqual(subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=worktree, text=True).strip(), candidate_digest)
         self.assertEqual(self.store.read_json(candidate_ref)["changed_paths"], ["src/a.txt"])
         message = subprocess.check_output(["git", "log", "-1", "--format=%B"], cwd=worktree, text=True)
         self.assertIn("Pal-Candidate-Key:", message)
@@ -411,7 +413,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
         subprocess.run(["git", "commit", "-qm", "base"], cwd=worktree, check=True)
         base_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=worktree, text=True).strip()
         (worktree / "outside.txt").write_text("not owned\n", encoding="utf-8")
-        contract = self.store.put_json({"module_id": "reject"}, artifact_type="ModuleContractArtifact")
+        contract = self.store.put_json({"unit_id": "reject"}, artifact_type="UnitContractArtifact")
         self.repository.dispatch(
             ActionEnvelope(
                 action_type="CREATE_NODE_RUN",
@@ -422,14 +424,14 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 expected_version=0,
                 idempotency_key="node-reject-candidate:create",
                 payload={
-                    "module_contract_ref": contract.to_dict(),
+                    "unit_contract_ref": contract.to_dict(),
                     "epoch_id": "epoch_reject",
                     "environment_fingerprint": "env-hash",
                 },
             )
         )
         lease = self.repository.claim_lease("worktree:node_reject_candidate", "worker_reject", ttl_seconds=60)
-        locks = WorktreeLockRegistry()
+        locks = WorkspaceLockRegistry()
         service = CandidateSnapshotService(self.repository, self.store, locks)
 
         def snapshot(*, contract_hash: str) -> None:
@@ -450,11 +452,11 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 lease_resource_key=lease.resource_key,
                 fencing_token=lease.fencing_token,
                 worktree=worktree,
-                expected_worktree_fingerprint=quiesced.worktree_fingerprint,
+                expected_workspace_fingerprint=quiesced.workspace_fingerprint,
                 owned_area=["src/**"],
                 reference_only_paths=["references/**"],
                 base_sha=base_sha,
-                module_contract_hash=contract_hash,
+                unit_contract_hash=contract_hash,
                 dependency_output_hashes={},
                 environment_fingerprint="env-hash",
             )
@@ -469,11 +471,11 @@ class MinionV2ExecutionTests(unittest.TestCase):
     def _accept_node(self, node_id: str) -> None:
         dummy = self.store.put_json({"node_id": node_id}, artifact_type="TestArtifact")
         initial = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
-        worktree = Path(str(initial.payload["worktree_path"]))
-        module_id = str(initial.payload.get("module_id") or "module")
-        candidate_path = worktree / "src" / module_id / "candidate.txt"
+        worktree = Path(str(initial.payload["workspace_path"]))
+        unit_id = str(initial.payload.get("unit_id") or "module")
+        candidate_path = worktree / "src" / unit_id / "candidate.txt"
         candidate_path.parent.mkdir(parents=True, exist_ok=True)
-        candidate_path.write_text(f"candidate for {module_id}\n", encoding="utf-8")
+        candidate_path.write_text(f"candidate for {unit_id}\n", encoding="utf-8")
         subprocess.run(["git", "add", str(candidate_path.relative_to(worktree))], cwd=worktree, check=True)
         subprocess.run(
             [
@@ -489,25 +491,25 @@ class MinionV2ExecutionTests(unittest.TestCase):
             cwd=worktree,
             check=True,
         )
-        candidate_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=worktree, text=True).strip()
+        candidate_digest = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=worktree, text=True).strip()
         sequence = [
-            ("START_CODING", {"fencing_token": 1}),
+            ("START_PRODUCING", {"fencing_token": 1}),
             ("SUBMIT_CANDIDATE", {"fencing_token": 1}),
             (
                 "QUIESCE_COMPLETED",
                 {
                     "fencing_token": 1,
                     "process_group_reaped": True,
-                    "exclusive_worktree_lock": True,
-                    "worktree_fingerprint": "tree",
+                    "exclusive_workspace_lock": True,
+                    "workspace_fingerprint": "tree",
                 },
             ),
             (
                 "CANDIDATE_SNAPSHOTTED",
                 {
                     "candidate_ref": dummy.to_dict(),
-                    "candidate_sha": candidate_sha,
-                    "worktree_fingerprint": "tree",
+                    "candidate_digest": candidate_digest,
+                    "workspace_fingerprint": "tree",
                 },
             ),
             ("START_REVIEW", {"fencing_token": 2}),

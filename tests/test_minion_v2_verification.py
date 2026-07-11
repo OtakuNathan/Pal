@@ -9,6 +9,8 @@ from pathlib import Path
 from pal.minion.v2 import ActionEnvelope, AggregateType, ContentAddressedArtifactStore, MinionV2Repository
 from pal.minion.v2.contracts import AggregateSnapshot
 from pal.minion.v2.integration import IntegrationOwnershipDefect, IntegrationService
+from pal.minion.v2.orchestration import MinionV2OutboxProcessor
+from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.verification import (
     DefectKind,
     DefectPropagationService,
@@ -50,7 +52,7 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_repair_bill_has_stable_fingerprint_and_regression_obligation(self) -> None:
         node = self._reviewing_node("node_repair")
-        candidate = self.store.put_json({"candidate_sha": "c1"}, artifact_type="ModuleCandidateArtifact")
+        candidate = self.store.put_json({"candidate_digest": "c1"}, artifact_type="CandidateSnapshotArtifact")
         output = self.store.put_bytes(b"failure", artifact_type="VerificationStdoutArtifact")
         case_result = VerificationCaseRunner(self.store).run(
             VerificationCaseSpec(
@@ -70,7 +72,7 @@ class MinionV2VerificationTests(unittest.TestCase):
         self.assertEqual(status, VerificationStatus.FAIL)
         repair_ref, fingerprint = self.verification.publish_repair_bill(
             node=node,
-            candidate_sha="c1",
+            candidate_digest="c1",
             verification_ref=report_ref,
             defect_kind=DefectKind.MODULE,
             severity="high",
@@ -80,10 +82,18 @@ class MinionV2VerificationTests(unittest.TestCase):
             expected={"returncode": 0},
             actual={"returncode": 7},
             suggested_repair_boundary=["src/module/**"],
+            finding_section="invariant",
+            finding_summary="Invariant can be broken",
+            failure_reason="case_fail exits 7",
+            affected_refs=["src/module/core.py:42"],
+            finding_id="F-1",
         )
         repair = self.store.read_json(repair_ref)
         self.assertEqual(repair["finding_fingerprint"], fingerprint)
         self.assertIn("regression_test_obligation", repair)
+        self.assertEqual(repair["finding_section"], "invariant")
+        self.assertEqual(repair["finding_id"], "F-1")
+        self.assertEqual(repair["affected_refs"], ["src/module/core.py:42"])
         self.assertEqual(
             fingerprint,
             finding_fingerprint(
@@ -125,7 +135,7 @@ class MinionV2VerificationTests(unittest.TestCase):
 
     def test_candidate_reuse_fingerprint_requires_all_inputs(self) -> None:
         values = {
-            "module_contract_hash": "1",
+            "unit_contract_hash": "1",
             "relevant_requirements_hash": "2",
             "relevant_evidence_hash": "3",
             "global_constraint_hash": "4",
@@ -174,6 +184,33 @@ class MinionV2VerificationTests(unittest.TestCase):
                 )
                 self.assertEqual(result.snapshot.state, expected_state)
 
+    def test_accepted_unit_publishes_reviewable_memory_candidate(self) -> None:
+        node = self._reviewing_node("node_memory")
+        verification_ref = self.store.put_json({"status": "PASS"}, artifact_type="VerificationArtifact")
+        accepted = self.verification.submit_verdict(
+            node=node,
+            verification_ref=verification_ref,
+            status=VerificationStatus.PASS,
+            actor="verifier",
+        ).snapshot
+        service = MinionV2WorkflowService(self.runtime_root)
+        processor = MinionV2OutboxProcessor(service)
+
+        result = processor._publish_accepted_memory_candidate(
+            {
+                "effect_key": "accepted-memory",
+                "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                "aggregate_id": accepted.aggregate_id,
+            }
+        )
+
+        updated = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, accepted.aggregate_id)
+        memory_ref = updated.payload["memory_candidate_ref"]
+        memory = self.store.read_json(memory_ref)
+        self.assertEqual(memory["review_status"], "pending_human_review")
+        self.assertEqual(memory["verification_artifact_ref"]["sha256"], verification_ref.sha256)
+        self.assertEqual(result["result_artifact_ref"]["sha256"], memory_ref["sha256"])
+
     def test_dependency_defect_reopens_upstream_and_stales_accepted_downstream(self) -> None:
         verification_ref = self.store.put_json({"status": "pass"}, artifact_type="VerificationArtifact")
         repair_ref = self.store.put_json({"finding": "dependency"}, artifact_type="RepairBillArtifact")
@@ -215,12 +252,12 @@ class MinionV2VerificationTests(unittest.TestCase):
         *,
         dependency_node_ids: tuple[str, ...] = (),
     ) -> AggregateSnapshot:
-        artifact = self.store.put_json({"contract": node_id}, artifact_type="ModuleContractArtifact")
+        artifact = self.store.put_json({"contract": node_id}, artifact_type="UnitContractArtifact")
         actions = [
             (
                 "CREATE_NODE_RUN",
                 {
-                    "module_contract_ref": artifact.to_dict(),
+                    "unit_contract_ref": artifact.to_dict(),
                     "epoch_id": "epoch",
                     "dependency_node_ids": list(dependency_node_ids),
                 },
@@ -229,13 +266,13 @@ class MinionV2VerificationTests(unittest.TestCase):
                 "DEPENDENCIES_ACCEPTED",
                 {"accepted_dependency_node_ids": list(dependency_node_ids), "epoch_frozen": False},
             ),
-            ("START_CODING", {"fencing_token": 1}),
+            ("START_PRODUCING", {"fencing_token": 1}),
             ("SUBMIT_CANDIDATE", {"fencing_token": 1}),
             (
                 "QUIESCE_COMPLETED",
-                {"fencing_token": 1, "process_group_reaped": True, "exclusive_worktree_lock": True, "worktree_fingerprint": "tree"},
+                {"fencing_token": 1, "process_group_reaped": True, "exclusive_workspace_lock": True, "workspace_fingerprint": "tree"},
             ),
-            ("CANDIDATE_SNAPSHOTTED", {"candidate_ref": artifact.to_dict(), "candidate_sha": "c1", "worktree_fingerprint": "tree"}),
+            ("CANDIDATE_SNAPSHOTTED", {"candidate_ref": artifact.to_dict(), "candidate_digest": "c1", "workspace_fingerprint": "tree"}),
             ("START_REVIEW", {"fencing_token": 2}),
         ]
         for action_type, payload in actions:
@@ -280,8 +317,8 @@ class MinionV2IntegrationTests(unittest.TestCase):
         ref, integration_sha = IntegrationService(self.store).integrate_candidates(
             integration_worktree=self.repo,
             ordered_candidates=[
-                {"node_run_id": "a", "candidate_sha": sha_a},
-                {"node_run_id": "b", "candidate_sha": sha_b},
+                {"node_run_id": "a", "candidate_digest": sha_a},
+                {"node_run_id": "b", "candidate_digest": sha_b},
             ],
             architecture_manifest_sha="manifest",
         )
@@ -299,8 +336,8 @@ class MinionV2IntegrationTests(unittest.TestCase):
             IntegrationService(self.store).integrate_candidates(
                 integration_worktree=self.repo,
                 ordered_candidates=[
-                    {"node_run_id": "a", "candidate_sha": sha_a},
-                    {"node_run_id": "b", "candidate_sha": sha_b},
+                    {"node_run_id": "a", "candidate_digest": sha_a},
+                    {"node_run_id": "b", "candidate_digest": sha_b},
                 ],
                 architecture_manifest_sha="manifest",
             )

@@ -8,14 +8,14 @@ from pathlib import Path
 from typing import Any
 
 from pal.minion.runner import MinionRunner
-from pal.shared import TaskContextPack
+from pal.shared import MinionInvocationPack
 
 
 async def _run(runtime_root: Path, pack_path: Path, minion_id: str, run_id: str) -> int:
     payload = json.loads(pack_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("worker pack must be a JSON object")
-    pack = TaskContextPack.from_dict(payload)
+    pack = MinionInvocationPack.from_dict(payload)
 
     async def write_event(event: dict[str, Any]) -> None:
         print(json.dumps({"kind": "event", "event": event}, ensure_ascii=False), flush=True)

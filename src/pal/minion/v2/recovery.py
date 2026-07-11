@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from pal.minion.v2.contracts import ActionEnvelope, AggregateType
-from pal.minion.v2.execution import worktree_has_live_processes
+from pal.minion.v2.execution import workspace_has_live_processes
 from pal.minion.v2.service import MinionV2WorkflowService
 
 
@@ -26,9 +26,9 @@ class MinionV2Recovery:
         for lease in self.repository.expired_leases():
             metadata = dict(lease.get("metadata") or {})
             process_group = int(metadata.get("process_group_id") or 0)
-            worktree = Path(str(metadata.get("worktree_path") or "")) if metadata.get("worktree_path") else None
+            worktree = Path(str(metadata.get("workspace_path") or "")) if metadata.get("workspace_path") else None
             reaped = self._kill_and_reap(process_group)
-            clean_worktree = worktree is None or not worktree_has_live_processes(worktree)
+            clean_worktree = worktree is None or not workspace_has_live_processes(worktree)
             if reaped and clean_worktree:
                 if self.repository.clear_expired_lease(
                     str(lease["resource_key"]),

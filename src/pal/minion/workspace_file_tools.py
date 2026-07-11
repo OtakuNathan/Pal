@@ -6,7 +6,13 @@ from typing import Any
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
 from pal.shared import RuntimeStatus
 
-from pal.minion.workspace_tools import _workspace_path, _workspace_root_payload, _workspace_root_with_info
+from pal.minion.workspace_tools import (
+    _normalized_reference_paths,
+    _workspace_path,
+    _workspace_path_allowed_by_reference,
+    _workspace_root_payload,
+    _workspace_root_with_info,
+)
 
 
 WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
@@ -128,6 +134,8 @@ async def workspace_file_tool_result(
         if str(root_info.get("root_kind") or "") == "reference" and call.name != "op_file_read":
             raise ValueError("reference roots are read-only; use op_file_read, op_tree, or op_search for reference inspection")
         relative, absolute = _workspace_file_path(root, call.args)
+        if not _workspace_path_allowed_by_reference(absolute, root, root_info):
+            raise ValueError("path is outside the declared immutable input include set")
         tool_name, tool_args = _underlying_file_tool(call, absolute)
     except Exception as exc:
         message = str(exc) or exc.__class__.__name__
@@ -148,6 +156,68 @@ async def workspace_file_tool_result(
         turn_id=turn_id,
     )
     return _workspace_result(call, result, relative=relative, absolute=absolute, root=root, root_info=root_info)
+
+
+async def bound_input_tool_result(
+    call: CanonicalToolCall,
+    workspace: dict[str, Any],
+    base_runtime: Any,
+    *,
+    allow_tools: bool = True,
+    budget: Any = None,
+    turn_id: str | None = None,
+) -> CanonicalToolResult:
+    name = str(call.args.get("name") or "").strip()
+    references = _normalized_reference_paths(workspace)
+    reference = next((item for item in references if name in {str(item.get("name") or ""), str(item.get("id") or "")}), None)
+    if reference is None:
+        available = ", ".join(str(item.get("name") or "") for item in references)
+        return _bound_input_error(call, f"unknown bound input: {name}; available: {available or '(none)'}")
+    includes = [str(item) for item in list(reference.get("include") or []) if str(item).strip()]
+    relative = str(call.args.get("path") or "").strip()
+    if not relative:
+        if len(includes) != 1:
+            return _bound_input_error(call, "path is required when the bound input is a directory or contains multiple files")
+        relative = includes[0]
+    delegated = CanonicalToolCall(
+        name="op_file_read",
+        args={
+            "reference_name": name,
+            "path": relative,
+            "start_line": call.args.get("start_line") or 1,
+            "limit_lines": call.args.get("limit_lines") or 2000,
+        },
+        call_id=call.call_id,
+    )
+    result = await workspace_file_tool_result(
+        delegated,
+        workspace,
+        base_runtime,
+        allow_tools=allow_tools,
+        budget=budget,
+        turn_id=turn_id,
+    )
+    return CanonicalToolResult(
+        name=call.name,
+        ok=result.ok,
+        text=result.text,
+        structured={**dict(result.structured or {}), "input_name": name},
+        call_id=call.call_id,
+        llm_text=result.llm_text,
+        status=result.status,
+    )
+
+
+def _bound_input_error(call: CanonicalToolCall, message: str) -> CanonicalToolResult:
+    return CanonicalToolResult(
+        name=call.name,
+        ok=False,
+        text=message,
+        structured={"error": message, "error_type": "BoundInputError"},
+        call_id=call.call_id,
+        llm_text=message,
+        status=RuntimeStatus.ERROR,
+    )
 
 
 def _workspace_file_path(root: Path, args: dict[str, Any]) -> tuple[str, Path]:

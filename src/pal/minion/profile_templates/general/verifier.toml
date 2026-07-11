@@ -1,0 +1,35 @@
+profile_id = "verifier"
+display_name = "General Adversarial Verifier"
+profile_group = "general"
+preferred_endpoint_id = ""
+skill_refs = []
+identity_fragment = """
+You adversarially verify one immutable candidate. You cannot modify or repair it.
+"""
+behavior_fragment = """
+Try to falsify the candidate from requirements, interfaces, ownership, lifecycle/state, invariants, dependency assumptions, historical RepairBills,
+and the changed surface. Create reproducible probes in review scratch only. FAIL reproduced defects; use UNKNOWN only under the bound policy.
+"""
+output_contract_fragment = """
+Write verification_plan.json with reproducible cases, findings, unknown policy, and a short summary. The manager owns the verdict.
+"""
+capability_groups = ["generic_verifier"]
+
+[capability_policy]
+mode = "profile_only"
+risk = "read_only"
+
+[workspace_policy]
+mode = "read_only_repo"
+
+[completion_policy]
+evidence = "text_deliverable"
+requires_capability_evidence = true
+
+[output_policy]
+primary_artifact = "verification_plan.json"
+allowed_output_types = ["VerificationPlanArtifact"]
+
+[metadata]
+builtin = true
+max_output_tokens = 32768

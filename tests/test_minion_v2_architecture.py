@@ -11,11 +11,11 @@ from pal.minion.v2.architecture import (
     ComplexityBudgetPolicy,
     HumanReviewCard,
     ResearchMode,
-    validate_module_contract,
+    validate_unit_contract,
 )
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.workers import apply_v2_research_capability_policy
-from pal.shared import TaskContextPack
+from pal.shared import MinionInvocationPack
 
 
 def _complexity_budget(**overrides: int) -> dict[str, int]:
@@ -23,7 +23,7 @@ def _complexity_budget(**overrides: int) -> dict[str, int]:
         "target_file_count": 4,
         "estimated_context_tokens": 12000,
         "public_interface_count": 4,
-        "cross_module_contract_count": 1,
+        "cross_unit_contract_count": 1,
         "stateful_resource_count": 0,
         "expected_candidate_cycles": 2,
         "platform_dependency_level": 1,
@@ -32,10 +32,10 @@ def _complexity_budget(**overrides: int) -> dict[str, int]:
     return result
 
 
-def _module_contract() -> dict:
+def _unit_contract() -> dict:
     return {
-        "module_id": "foundation",
-        "module_behavior_kind": "stateless",
+        "unit_id": "foundation",
+        "unit_behavior_kind": "stateless",
         "responsibility": "Define the stable value types used by consumers.",
         "owned_area": ["src/foundation/**"],
         "reference_only_paths": ["references/**"],
@@ -96,12 +96,13 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             requirements_ref=requirements,
             research_mode=ResearchMode.LOCAL_ONLY,
         )
-        module = self.service.publish_module_contract(_module_contract())
+        module = self.service.publish_unit_contract(_unit_contract())
         constraints = self.service.publish_fragment([], artifact_type="GlobalConstraintsArtifact")
         decisions = self.service.publish_fragment([], artifact_type="DesignDecisionsArtifact")
+        gates = self.service.publish_fragment([], artifact_type="ArchitectureGateChecksArtifact")
         cross = self.service.publish_fragment(
             {"contract_id": "X-1", "provider": "foundation", "consumer": "integration"},
-            artifact_type="CrossModuleContractArtifact",
+            artifact_type="CrossUnitContractArtifact",
         )
         topology = self.service.publish_fragment(
             {"depends_on": {"foundation": []}},
@@ -122,8 +123,9 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                 "evidence_catalog_ref": evidence.to_dict(),
                 "global_constraints_ref": constraints.to_dict(),
                 "design_decisions_ref": decisions.to_dict(),
-                "module_contract_refs": [module.to_dict()],
-                "cross_module_contract_refs": [cross.to_dict()],
+                "gate_checks_ref": gates.to_dict(),
+                "unit_contract_refs": [module.to_dict()],
+                "cross_unit_contract_refs": [cross.to_dict()],
                 "topology_ref": topology.to_dict(),
                 "integration_contract_ref": integration.to_dict(),
                 "assumption_ledger_ref": assumptions.to_dict(),
@@ -133,24 +135,24 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         return requirements, evidence, manifest
 
     def test_stateless_module_does_not_need_a_fake_state_machine(self) -> None:
-        validated = validate_module_contract(_module_contract(), complexity_policy=ComplexityBudgetPolicy())
+        validated = validate_unit_contract(_unit_contract(), complexity_policy=ComplexityBudgetPolicy())
         self.assertEqual(validated["state_model"], "stateless")
-        stateful = {**_module_contract(), "module_behavior_kind": "resource_owner", "state_model": "", "lifecycle": ""}
+        stateful = {**_unit_contract(), "unit_behavior_kind": "resource_owner", "state_model": "", "lifecycle": ""}
         with self.assertRaisesRegex(ValueError, "explicit lifecycle"):
-            validate_module_contract(stateful, complexity_policy=ComplexityBudgetPolicy())
+            validate_unit_contract(stateful, complexity_policy=ComplexityBudgetPolicy())
 
-    def test_module_contract_rejects_milestones_and_unbounded_complexity(self) -> None:
+    def test_unit_contract_rejects_milestones_and_unbounded_complexity(self) -> None:
         with self.assertRaisesRegex(ValueError, "implementation-level"):
-            validate_module_contract(
-                {**_module_contract(), "milestones": [{"title": "write it"}]},
+            validate_unit_contract(
+                {**_unit_contract(), "milestones": [{"title": "write it"}]},
                 complexity_policy=ComplexityBudgetPolicy(),
             )
         too_large = {
-            **_module_contract(),
+            **_unit_contract(),
             "complexity_budget": _complexity_budget(target_file_count=40),
         }
         with self.assertRaisesRegex(ValueError, "without split_conditions"):
-            validate_module_contract(too_large, complexity_policy=ComplexityBudgetPolicy())
+            validate_unit_contract(too_large, complexity_policy=ComplexityBudgetPolicy())
 
     def test_manifest_review_checks_evidence_coverage_and_topology(self) -> None:
         _requirements, _evidence, manifest = self._publish_contract()
@@ -321,8 +323,8 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             )
 
     def test_local_research_policy_removes_web_capabilities(self) -> None:
-        pack = TaskContextPack(
-            work_order_id="research",
+        pack = MinionInvocationPack(
+            invocation_id="research",
             profile_group="software_engineering",
             profile_name="v2_researcher",
             minion_profile="software_engineering.v2_researcher",

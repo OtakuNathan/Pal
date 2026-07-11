@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from pal.minion.v2.architecture import ArchitectureArtifactService, ResearchMode
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
+from pal.minion.v2.catalog import MinionV2Catalog
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
 from pal.minion.v2.repository import MinionV2Repository
 
@@ -28,14 +29,161 @@ class MinionV2WorkflowService:
     repository: MinionV2Repository = field(init=False)
     artifacts: ContentAddressedArtifactStore = field(init=False)
     architecture: ArchitectureArtifactService = field(init=False)
+    catalog: MinionV2Catalog = field(init=False)
 
     def __post_init__(self) -> None:
         self.repository = MinionV2Repository(Path(self.runtime_root))
         self.artifacts = ContentAddressedArtifactStore(Path(self.runtime_root), self.repository)
         self.architecture = ArchitectureArtifactService(self.artifacts, self.repository)
+        self.catalog = MinionV2Catalog(Path(self.runtime_root), self.artifacts)
+
+    def create_task(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        data = dict(request)
+        task_id = str(data.get("task_id") or f"task_{uuid4().hex}").strip()
+        title = str(data.get("title") or "").strip()
+        objective = str(data.get("objective") or data.get("goal") or "").strip()
+        family_id = str(data.get("family_id") or data.get("profile_family") or "").strip()
+        workspace = _normalize_workspace(data.get("workspace"))
+        if not title or not objective or not family_id or not workspace:
+            raise ValueError("task requires title, objective, family_id, and workspace")
+        self.catalog.validate_family_exists(family_id)
+        revision_ref = self._publish_task_revision(
+            task_id=task_id,
+            revision=1,
+            title=title,
+            objective=objective,
+            family_id=family_id,
+            workspace=workspace,
+            references=_normalize_references(data.get("references")),
+            policies=dict(data.get("policies") or {}),
+            actor=str(data.get("actor") or "pal"),
+        )
+        result = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_TASK",
+                workflow_id="",
+                aggregate_type=AggregateType.TASK,
+                aggregate_id=task_id,
+                actor=str(data.get("actor") or "pal"),
+                source_channel=str(data.get("source_channel") or "local"),
+                expected_version=0,
+                idempotency_key=f"create-task:{task_id}",
+                payload={
+                    "title": title,
+                    "objective": objective,
+                    "family_id": family_id,
+                    "workspace_key": _workspace_key(workspace),
+                    "task_revision": 1,
+                    "task_revision_ref": revision_ref.to_dict(),
+                    "owner": str(data.get("actor") or "pal"),
+                },
+            )
+        )
+        return {
+            "status": "created",
+            "task_id": task_id,
+            "state": result.snapshot.state,
+            "task_revision_ref": revision_ref.to_dict(),
+        }
+
+    def search_tasks(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        data = dict(request)
+        tasks = self.repository.search_tasks(
+            query=str(data.get("query") or ""),
+            task_id=str(data.get("task_id") or ""),
+            family_id=str(data.get("family_id") or ""),
+            include_archived=bool(data.get("include_archived")),
+            limit=int(data.get("limit") or 20),
+        )
+        return {"status": "ok", "tasks": list(tasks), "count": len(tasks)}
+
+    def update_task(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        data = dict(request)
+        task_id = str(data.get("task_id") or "").strip()
+        task = self.repository.read_snapshot(AggregateType.TASK, task_id)
+        if task is None or task.state != "ACTIVE":
+            raise ValueError(f"active task not found: {task_id}")
+        if data.get("family_id") and str(data["family_id"]) != str(task.payload.get("family_id") or ""):
+            raise ValueError("task family_id is immutable")
+        previous_ref = dict(task.payload.get("task_revision_ref") or {})
+        previous = dict(self.artifacts.read_json(previous_ref))
+        title = str(data.get("title") or previous.get("title") or "").strip()
+        objective = str(data.get("objective") or previous.get("objective") or "").strip()
+        workspace = _normalize_workspace(data.get("workspace") or previous.get("workspace"))
+        references = (
+            _normalize_references(data["references"])
+            if "references" in data
+            else _normalize_references(previous.get("references"))
+        )
+        policies = dict(data["policies"]) if "policies" in data else dict(previous.get("policies") or {})
+        revision = int(previous.get("revision") or task.payload.get("task_revision") or 1) + 1
+        revision_ref = self._publish_task_revision(
+            task_id=task_id,
+            revision=revision,
+            title=title,
+            objective=objective,
+            family_id=str(task.payload.get("family_id") or ""),
+            workspace=workspace,
+            references=references,
+            policies=policies,
+            actor=str(data.get("actor") or "pal"),
+            parent_ref=previous_ref,
+        )
+        result = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="UPDATE_TASK_CONTEXT",
+                workflow_id="",
+                aggregate_type=AggregateType.TASK,
+                aggregate_id=task_id,
+                actor=str(data.get("actor") or "pal"),
+                source_channel=str(data.get("source_channel") or "local"),
+                expected_version=task.version,
+                idempotency_key=f"update-task:{task_id}:{revision_ref.sha256}",
+                payload={
+                    "title": title,
+                    "objective": objective,
+                    "workspace_key": _workspace_key(workspace),
+                    "task_revision": revision,
+                    "task_revision_ref": revision_ref.to_dict(),
+                },
+            )
+        )
+        return {"status": "updated", "task_id": task_id, "state": result.snapshot.state, "task_revision_ref": revision_ref.to_dict()}
+
+    def archive_task(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        data = dict(request)
+        task_id = str(data.get("task_id") or "").strip()
+        task = self.repository.read_snapshot(AggregateType.TASK, task_id)
+        if task is None or task.state != "ACTIVE":
+            raise ValueError(f"active task not found: {task_id}")
+        if self.repository.has_nonterminal_workflows_for_task(task_id):
+            raise ValueError("task has nonterminal workflows")
+        result = self.repository.dispatch(
+            ActionEnvelope(
+                action_type="ARCHIVE_TASK",
+                workflow_id="",
+                aggregate_type=AggregateType.TASK,
+                aggregate_id=task_id,
+                actor=str(data.get("actor") or "pal"),
+                source_channel=str(data.get("source_channel") or "local"),
+                expected_version=task.version,
+                idempotency_key=f"archive-task:{task_id}",
+                payload={"archive_reason": str(data.get("reason") or "")},
+            )
+        )
+        return {"status": "archived", "task_id": task_id, "state": result.snapshot.state}
 
     def start_workflow(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
+        task_id = str(data.get("task_id") or "").strip()
+        task = self.repository.read_snapshot(AggregateType.TASK, task_id)
+        if task is None or task.state != "ACTIVE":
+            raise ValueError("start_workflow requires an active task_id")
+        if data.get("workspace"):
+            raise ValueError("workflow workspace is owned by Task; update the Task instead")
+        task_revision_ref = dict(task.payload.get("task_revision_ref") or {})
+        task_revision = dict(self.artifacts.read_json(task_revision_ref))
+        family_binding_ref = self.catalog.publish_family_binding(str(task.payload.get("family_id") or ""))
         operation = str(data.get("operation") or "new_requirement").strip().lower()
         if operation not in ROUTER_OPERATIONS:
             raise ValueError(f"unsupported artifact router operation: {operation}")
@@ -54,13 +202,18 @@ class MinionV2WorkflowService:
         request_payload = {
             "schema_version": "1",
             "workflow_id": workflow_id,
+            "task_id": task_id,
+            "task_revision_ref": task_revision_ref,
+            "family_binding_ref": family_binding_ref.to_dict(),
             "operation": operation,
             "goal": goal,
             "requirements": data.get("requirements") or [],
             "constraints": data.get("constraints") or [],
             "approved_evidence": list(data.get("approved_evidence") or []),
-            "workspace": dict(data.get("workspace") or {}),
-            "references": list(data.get("references") or []),
+            "workspace": _normalize_workspace(task_revision.get("workspace")),
+            "references": _normalize_references(
+                [*list(task_revision.get("references") or []), *list(data.get("references") or [])]
+            ),
             "research_mode": research_mode.value,
             "input_artifact_ref": artifact_ref,
             "actor": actor,
@@ -71,7 +224,11 @@ class MinionV2WorkflowService:
             request_payload,
             artifact_type="WorkflowRequestArtifact",
             provenance={"actor": actor, "source_channel": source_channel},
-            child_refs=((str(artifact_ref["sha256"]), "input"),) if artifact_ref else (),
+            child_refs=(
+                (str(task_revision_ref["sha256"]), "task_revision"),
+                (family_binding_ref.sha256, "family_binding"),
+                *(((str(artifact_ref["sha256"]), "input"),) if artifact_ref else ()),
+            ),
         )
         result = self.repository.dispatch(
             ActionEnvelope(
@@ -85,6 +242,9 @@ class MinionV2WorkflowService:
                 idempotency_key=f"create-workflow:{workflow_id}",
                 payload={
                     "request_ref": request_ref.to_dict(),
+                    "task_id": task_id,
+                    "task_revision_ref": task_revision_ref,
+                    "family_binding_ref": family_binding_ref.to_dict(),
                     "operation": operation,
                     "research_mode": research_mode.value,
                     "owner": actor,
@@ -97,10 +257,45 @@ class MinionV2WorkflowService:
         return {
             "status": "created",
             "workflow_id": workflow_id,
+            "task_id": task_id,
             "state": result.snapshot.state,
             "request_ref": request_ref.to_dict(),
             "next_action": "manager_outbox_tick",
         }
+
+    def _publish_task_revision(
+        self,
+        *,
+        task_id: str,
+        revision: int,
+        title: str,
+        objective: str,
+        family_id: str,
+        workspace: Mapping[str, Any],
+        references: list[Any],
+        policies: Mapping[str, Any],
+        actor: str,
+        parent_ref: Mapping[str, Any] | None = None,
+    ) -> ArtifactRef:
+        child_refs = ()
+        if parent_ref and parent_ref.get("sha256"):
+            child_refs = ((str(parent_ref["sha256"]), "previous_revision"),)
+        return self.artifacts.put_json(
+            {
+                "schema_version": "1",
+                "task_id": task_id,
+                "revision": int(revision),
+                "title": title,
+                "objective": objective,
+                "family_id": family_id,
+                "workspace": dict(workspace),
+                "references": list(references),
+                "policies": dict(policies),
+            },
+            artifact_type="TaskRevisionArtifact",
+            provenance={"actor": actor, "task_id": task_id},
+            child_refs=child_refs,
+        )
 
     def submit_artifact(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
@@ -201,26 +396,56 @@ class MinionV2WorkflowService:
         source_channel: str,
     ) -> dict[str, Any]:
         workflow = self._workflow_snapshot(workflow_id)
-        if workflow.state != "PAUSED":
-            return {
-                "status": "not_resumable",
-                "workflow_id": workflow_id,
-                "state": workflow.state,
-                "next_legal_actions": list(self.repository.engine.legal_actions(AggregateType.WORKFLOW, workflow.state)),
-            }
-        result = self.repository.dispatch(
-            ActionEnvelope(
-                action_type="RESUME",
-                workflow_id=workflow_id,
-                aggregate_type=AggregateType.WORKFLOW,
-                aggregate_id=workflow_id,
-                actor=actor,
-                source_channel=source_channel,
-                expected_version=workflow.version,
-                idempotency_key=f"resume:{workflow_id}:{workflow.version}",
+        if workflow.state == "PAUSED":
+            result = self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="RESUME",
+                    workflow_id=workflow_id,
+                    aggregate_type=AggregateType.WORKFLOW,
+                    aggregate_id=workflow_id,
+                    actor=actor,
+                    source_channel=source_channel,
+                    expected_version=workflow.version,
+                    idempotency_key=f"resume:{workflow_id}:{workflow.version}",
+                )
             )
-        )
-        return {"status": "resumed", "workflow_id": workflow_id, "state": result.snapshot.state}
+            return {"status": "resumed", "workflow_id": workflow_id, "state": result.snapshot.state}
+        triaged = [
+            item
+            for item in self.repository.list_workflow_snapshots(workflow_id)
+            if item.aggregate_type != AggregateType.WORKFLOW
+            and item.state == "TRIAGE_REQUIRED"
+            and "RESOLVE_TRIAGE" in self.repository.engine.legal_actions(item.aggregate_type, item.state)
+        ]
+        if triaged:
+            resumed = []
+            for item in triaged:
+                result = self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="RESOLVE_TRIAGE",
+                        workflow_id=workflow_id,
+                        aggregate_type=item.aggregate_type,
+                        aggregate_id=item.aggregate_id,
+                        actor=actor,
+                        source_channel=source_channel,
+                        expected_version=item.version,
+                        idempotency_key=f"resolve-triage:{item.aggregate_id}:{item.version}",
+                    )
+                )
+                resumed.append(
+                    {
+                        "aggregate_type": result.snapshot.aggregate_type.value,
+                        "aggregate_id": result.snapshot.aggregate_id,
+                        "state": result.snapshot.state,
+                    }
+                )
+            return {"status": "triage_resolved", "workflow_id": workflow_id, "state": workflow.state, "resumed": resumed}
+        return {
+            "status": "not_resumable",
+            "workflow_id": workflow_id,
+            "state": workflow.state,
+            "next_legal_actions": list(self.repository.engine.legal_actions(AggregateType.WORKFLOW, workflow.state)),
+        }
 
     def submit_human_decision(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
@@ -344,7 +569,7 @@ class MinionV2WorkflowService:
         if record is None or not record.get("durable"):
             raise ValueError("external artifact is not durable")
         if str(record.get("artifact_type") or "") != "ArchitectureContractArtifact":
-            raise ValueError("V2 accepts ArchitectureContractArtifact only; V1 FinalPlan is not supported")
+            raise ValueError("execute_trusted accepts ArchitectureContractArtifact only; legacy plan formats are not supported")
         if str(record.get("schema_version") or "") != "1":
             raise ValueError("unsupported ArchitectureContractArtifact schema version")
         if trusted_required and not bool(dict(record.get("metadata") or {}).get("trusted_internal_source")):
@@ -361,13 +586,62 @@ def workflow_request_from_snapshot(
     request_ref = dict(workflow.payload.get("request_ref") or {})
     if not request_ref:
         raise ValueError("workflow has no request artifact")
-    return dict(service.artifacts.read_json(request_ref))
+    request = dict(service.artifacts.read_json(request_ref))
+    request["workspace"] = _normalize_workspace(request.get("workspace"))
+    request["references"] = _normalize_references(request.get("references"))
+    return request
+
+
+def _normalize_workspace(value: Any) -> dict[str, Any]:
+    workspace = dict(value or {}) if isinstance(value, Mapping) else {}
+    if not str(workspace.get("repo_path") or "").strip():
+        alias = str(workspace.get("repo_root") or workspace.get("root") or workspace.get("path") or "").strip()
+        if alias:
+            workspace["repo_path"] = str(Path(_file_uri_path(alias)).expanduser())
+    elif workspace.get("repo_path"):
+        workspace["repo_path"] = str(Path(_file_uri_path(str(workspace["repo_path"]))).expanduser())
+    if workspace.get("repo_path") and not workspace.get("kind"):
+        workspace["kind"] = "existing_repo"
+    return workspace
+
+
+def _normalize_references(value: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(list(value or []), start=1):
+        item = dict(raw) if isinstance(raw, Mapping) else {"path": str(raw)}
+        path = str(item.get("path") or item.get("root") or item.get("uri") or "").strip()
+        if not path:
+            continue
+        normalized = str(Path(_file_uri_path(path)).expanduser())
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        item["path"] = normalized
+        item.setdefault("name", Path(normalized.rstrip("/")).name or f"reference_{index}")
+        if not item.get("description") and item.get("note"):
+            item["description"] = str(item["note"])
+        result.append(item)
+    return result
+
+
+def _file_uri_path(value: str) -> str:
+    text = str(value or "").strip()
+    return text.removeprefix("file://") if text.startswith("file://") else text
 
 
 def _artifact_ref_mapping(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping) and value.get("sha256"):
         return dict(value)
     return {}
+
+
+def _workspace_key(workspace: Mapping[str, Any]) -> str:
+    for key in ("repo_path", "project_name", "root", "path"):
+        value = str(workspace.get(key) or "").strip()
+        if value:
+            return value
+    return str(workspace.get("kind") or "workspace")
 
 
 def _artifact_ref_from_record(record: Mapping[str, Any]) -> ArtifactRef:

@@ -13,7 +13,7 @@ from typing import Any
 
 from pal.foundation.log_paths import pal_log_root
 from pal.foundation.sidecar import python_subprocess_env
-from pal.shared import RUN_SHELL_SCOPE_HINT, TaskContextPack, format_dedicated_tool_route_hints
+from pal.shared import RUN_SHELL_SCOPE_HINT, MinionInvocationPack, format_dedicated_tool_route_hints
 
 
 PAL_MINION_SANDBOX_SCRATCH_ROOT_ENV = "PAL_MINION_SANDBOX_SCRATCH_ROOT"
@@ -92,19 +92,19 @@ def sandbox_supported_backend() -> str:
     return ""
 
 
-def with_minion_sandbox_metadata(runtime_root: Path, pack: TaskContextPack, *, run_id: str) -> TaskContextPack:
+def with_minion_sandbox_metadata(runtime_root: Path, pack: MinionInvocationPack, *, run_id: str) -> MinionInvocationPack:
     metadata = dict(pack.metadata or {})
     sandbox_config = dict(metadata.get("sandbox") or {})
     if _falsey(sandbox_config.get("enabled")) or _falsey(os.environ.get("PAL_MINION_SANDBOX")):
         metadata["sandbox"] = {"enabled": False, "backend": "disabled"}
-        return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
+        return MinionInvocationPack.from_dict({**pack.to_dict(), "metadata": metadata})
     backend = str(sandbox_config.get("backend") or os.environ.get("PAL_MINION_SANDBOX_BACKEND") or sandbox_supported_backend()).strip()
     if not backend:
         metadata["sandbox"] = {"enabled": True, "backend": "unavailable", "reason": "no supported minion sandbox backend found"}
-        return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
+        return MinionInvocationPack.from_dict({**pack.to_dict(), "metadata": metadata})
     if backend != "bwrap":
         metadata["sandbox"] = {"enabled": True, "backend": "unavailable", "reason": f"unsupported minion sandbox backend: {backend}"}
-        return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
+        return MinionInvocationPack.from_dict({**pack.to_dict(), "metadata": metadata})
     workspace_path = _workspace_path_from_pack(pack)
     scratch_dir = minion_sandbox_scratch_dir(runtime_root, run_id)
     deny_dir = Path(runtime_root) / "data" / "minion" / "sandbox" / "deny-bin"
@@ -123,11 +123,11 @@ def with_minion_sandbox_metadata(runtime_root: Path, pack: TaskContextPack, *, r
         ),
         git_metadata_bind_paths=_git_worktree_metadata_bind_paths(workspace_path),
     ).to_metadata()
-    return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
+    return MinionInvocationPack.from_dict({**pack.to_dict(), "metadata": metadata})
 
 
-def minion_sandbox_is_enabled(pack: TaskContextPack | dict[str, Any] | None) -> bool:
-    metadata = dict(pack.metadata or {}) if isinstance(pack, TaskContextPack) else dict((pack or {}).get("metadata") or {})
+def minion_sandbox_is_enabled(pack: MinionInvocationPack | dict[str, Any] | None) -> bool:
+    metadata = dict(pack.metadata or {}) if isinstance(pack, MinionInvocationPack) else dict((pack or {}).get("metadata") or {})
     sandbox = dict(metadata.get("sandbox") or {})
     return bool(sandbox.get("enabled"))
 
@@ -143,7 +143,7 @@ def minion_sandbox_scratch_dir(runtime_root: Path, run_id: str) -> Path:
 def build_sandboxed_runner_invocation(
     *,
     runtime_root: Path,
-    pack: TaskContextPack,
+    pack: MinionInvocationPack,
     argv: list[str],
     env: dict[str, str] | None = None,
 ) -> tuple[list[str], dict[str, str]]:
@@ -226,7 +226,7 @@ def scrub_minion_sandbox_env(
     *,
     runtime_root: Path,
     run_id: str,
-    pack: TaskContextPack | None = None,
+    pack: MinionInvocationPack | None = None,
     scratch_dir: str | Path | None = None,
 ) -> dict[str, str]:
     result: dict[str, str] = {}
@@ -259,7 +259,7 @@ def scrub_minion_sandbox_env(
     return result
 
 
-def _apply_workspace_execution_env(env: dict[str, str], pack: TaskContextPack) -> None:
+def _apply_workspace_execution_env(env: dict[str, str], pack: MinionInvocationPack) -> None:
     execution_env = dict((pack.workspace or {}).get("execution_env") or {})
     vars_payload = execution_env.get("vars")
     if isinstance(vars_payload, dict):
@@ -348,7 +348,7 @@ def _prune_sandbox_run_dirs(root: Path, *, keep_run_id: str) -> None:
 def _build_bwrap_invocation(
     *,
     runtime_root: Path,
-    pack: TaskContextPack,
+    pack: MinionInvocationPack,
     sandbox: dict[str, Any],
     argv: list[str],
 ) -> list[str]:
@@ -542,12 +542,12 @@ def _command_targets(command: str) -> tuple[Path, ...]:
     return tuple(Path(prefix) / command for prefix in ("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin"))
 
 
-def _sandbox_cwd(pack: TaskContextPack) -> str:
+def _sandbox_cwd(pack: MinionInvocationPack) -> str:
     path = _workspace_path_from_pack(pack)
     return str(path) if path else "/tmp"
 
 
-def _workspace_path_from_pack(pack: TaskContextPack) -> Path | None:
+def _workspace_path_from_pack(pack: MinionInvocationPack) -> Path | None:
     workspace = dict(pack.workspace or {})
     for key in ("repo_path", "task_repo_path", "target_repo_path", "run_dir"):
         value = str(workspace.get(key) or "").strip()

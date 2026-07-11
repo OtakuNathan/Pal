@@ -116,6 +116,7 @@ class WebScreenshotToolTests(unittest.TestCase):
         service = _FakeScreenshotService(self.root)
         core = PalCore()
         register_execution_with_core(core.context)
+        core.publish_module_capabilities("execution")
         runtime = core.context.execution_runtime
         register_web_fetch_with_core(core.context, service)
         core.publish_module_capabilities("web_fetch")

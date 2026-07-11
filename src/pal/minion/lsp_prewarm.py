@@ -139,7 +139,7 @@ def _log_prewarm_result(*, plan: LspPrewarmPlan, status: str, ok_count: int, res
 
 
 def _workspace_root(workspace: dict[str, Any]) -> Path | None:
-    for key in ("review_scratch_repo_path", "repo_path", "task_repo_path", "target_repo_path"):
+    for key in ("review_scratch_path", "workspace_path", "repo_path", "task_repo_path", "target_repo_path"):
         value = str((workspace or {}).get(key) or "").strip()
         if not value:
             continue

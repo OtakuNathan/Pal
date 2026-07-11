@@ -15,7 +15,7 @@ class MinionUserInteractionPort:
     read_response: InteractionReader
     run_id: str
     minion_id: str
-    work_order_id: str
+    invocation_id: str
     auto_accept_approvals: bool = False
 
     def should_request_approval(self, capability_name: str, approval_policy: dict[str, Any]) -> bool:
@@ -72,7 +72,7 @@ class MinionUserInteractionPort:
             "clarification_id": clarification_id,
             "run_id": self.run_id,
             "minion_id": self.minion_id,
-            "work_order_id": self.work_order_id,
+            "invocation_id": self.invocation_id,
             "status": "pending",
         }
         if not clarification_questions_are_interactive(payload.get("questions")):

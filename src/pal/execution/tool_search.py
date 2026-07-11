@@ -119,10 +119,12 @@ def _required_params(spec: dict[str, object]) -> list[str]:
 
 
 def _compact_capability_hit(runtime: object, spec: dict[str, object]) -> dict[str, object]:
-    _ = runtime
     canonical = str(spec.get("canonical_path") or spec.get("name") or "").strip()
+    projected = llm_tool_name(canonical)
+    resolver = getattr(runtime, "resolve_llm_tool_name", None)
+    name = projected if callable(resolver) and str(resolver(projected) or "") == canonical else canonical
     return {
-        "name": llm_tool_name(canonical),
+        "name": name,
         "description": _compact_description(spec.get("description")),
         "required_params": _required_params(spec),
     }

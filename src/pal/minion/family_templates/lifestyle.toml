@@ -2,14 +2,51 @@ family_id = "lifestyle"
 display_name = "Lifestyle"
 domain = "Nutrition, diet, meal planning, training, recovery, sleep, and personal health coaching tasks."
 domain_keywords = ["nutrition", "diet", "meal", "training", "fitness", "weight", "sleep", "recovery", "health"]
-default_executor_profile = ""
-dag_producer_profile = ""
+workflow_template = "contract_dag.v2"
+
+[roles]
+requirements = "lifestyle.requirements_analyst"
+research = "lifestyle.researcher"
+planner = "lifestyle.contract_planner"
+architecture_reviewer = "lifestyle.architecture_reviewer"
+producer = "lifestyle.nutrition_checkin_producer"
+repair = "lifestyle.nutrition_checkin_producer"
+verifier = "lifestyle.verifier"
+
+[builders]
+requirements = "requirements.v2"
+evidence = "evidence_catalog.v2"
+contract = "contract_sketch.v2"
+verification = "verification.v2"
+
+[adapters]
+workspace = "artifact_bundle.v2"
+candidate = "artifact_bundle.v2"
+verification = "artifact_bundle.v2"
+integration = "artifact_bundle.v2"
+publisher = "artifact_bundle.v2"
+
+[policies]
+research_default = "local_only"
+unknown = "strict"
+health_boundary = "non_medical"
+
+[policies.llm]
+temperature = 0.05
+llm_round_timeout_seconds = 3000
+
+[policies.verification]
+require_focused_tests = true
+require_historical_regressions = true
+require_public_surface_dogfood = true
+unknown_policy = "strict"
+case_timeout_seconds = 300
 
 [metadata]
 builtin = true
 
-[capability_groups.lifestyle_report]
-include = ["core_minion_read", "minion_artifacts", "minion_memory_candidates"]
+[capability_groups.lifestyle_producer]
+include = ["workspace_read", "workspace_write", "verification_shell", "minion_artifacts"]
 
-[capability_groups.lifestyle_research]
-include = ["lifestyle_report", "web_research", "memory_recall"]
+[capability_groups.lifestyle_verifier]
+include = ["workspace_read", "verification_shell", "minion_artifacts"]

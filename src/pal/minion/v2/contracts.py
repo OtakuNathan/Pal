@@ -9,11 +9,17 @@ from pal.foundation import utc_now
 
 
 class AggregateType(StrEnum):
+    TASK = "task"
     WORKFLOW = "workflow"
     ARCHITECTURE_REVISION = "architecture_revision"
     EXECUTION_EPOCH = "execution_epoch"
     DAG_NODE_RUN = "dag_node_run"
     STANDALONE_REVIEW = "standalone_review"
+
+
+class TaskState(StrEnum):
+    ACTIVE = "ACTIVE"
+    ARCHIVED = "ARCHIVED"
 
 
 class WorkflowState(StrEnum):
@@ -66,7 +72,7 @@ class ExecutionEpochState(StrEnum):
 class DagNodeRunState(StrEnum):
     BLOCKED_BY_DEPS = "BLOCKED_BY_DEPS"
     QUEUED = "QUEUED"
-    CODING = "CODING"
+    PRODUCING = "PRODUCING"
     QUIESCING = "QUIESCING"
     SNAPSHOTTING = "SNAPSHOTTING"
     REVIEW_QUEUED = "REVIEW_QUEUED"
@@ -114,10 +120,11 @@ class ActionEnvelope:
     def __post_init__(self) -> None:
         required = {
             "action_type": self.action_type,
-            "workflow_id": self.workflow_id,
             "aggregate_id": self.aggregate_id,
             "actor": self.actor,
         }
+        if self.aggregate_type != AggregateType.TASK:
+            required["workflow_id"] = self.workflow_id
         missing = [name for name, value in required.items() if not str(value or "").strip()]
         if missing:
             raise ValueError(f"action envelope missing required fields: {', '.join(missing)}")

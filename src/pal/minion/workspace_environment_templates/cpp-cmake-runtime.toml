@@ -1,9 +1,0 @@
-preparer_id = "cpp-cmake-runtime"
-kind = "runtime"
-language_ids = ["c", "cpp", "objc", "objcpp"]
-repo_markers = ["CMakeLists.txt"]
-
-[env.vars]
-CMAKE_EXPORT_COMPILE_COMMANDS = "ON"
-CTEST_OUTPUT_ON_FAILURE = "1"
-CMAKE_BUILD_PARALLEL_LEVEL = "${cpu_count_max_8}"

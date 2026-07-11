@@ -4,6 +4,7 @@ AGENTS.md
 .agents/
 .claude/
 .codex/
+.pal-minion/
 .idea/
 .venv/
 .venv312/

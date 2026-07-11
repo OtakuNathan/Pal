@@ -265,14 +265,14 @@ class PalV2BootstrapTests(unittest.TestCase):
         profile_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles"
 
         self.assertTrue((profile_root / "generic.toml").is_file())
+        self.assertTrue((profile_root / "general" / "contract_planner.toml").is_file())
         self.assertFalse((profile_root / "software_engineering" / "planner.toml").is_file())
-        self.assertTrue((profile_root / "software_engineering" / "coder.toml").is_file())
-        self.assertTrue((profile_root / "software_engineering" / "reviewer.toml").is_file())
-        self.assertTrue((profile_root / "software_engineering" / "review_worker.toml").is_file())
-        self.assertTrue((profile_root / "software_engineering" / "writer.toml").is_file())
+        self.assertTrue((profile_root / "software_engineering" / "v2_coder.toml").is_file())
+        self.assertTrue((profile_root / "software_engineering" / "v2_verifier.toml").is_file())
+        self.assertTrue((profile_root / "lifestyle" / "nutrition_checkin_producer.toml").is_file())
         self.assertIn(
-            'profile_id = "writer"',
-            (profile_root / "software_engineering" / "writer.toml").read_text(encoding="utf-8"),
+            'profile_id = "nutrition_checkin_producer"',
+            (profile_root / "lifestyle" / "nutrition_checkin_producer.toml").read_text(encoding="utf-8"),
         )
 
     def test_wizard_provision_runtime_seeds_editable_minion_family_templates(self) -> None:
@@ -284,27 +284,28 @@ class PalV2BootstrapTests(unittest.TestCase):
         software = tomllib.loads((family_root / "software_engineering.toml").read_text(encoding="utf-8"))
         self.assertEqual(software["family_id"], "software_engineering")
         self.assertTrue(software["metadata"]["builtin"])
-        self.assertEqual(software["dag_producer_profile"], "software_engineering.architect")
+        self.assertEqual(software["workflow_template"], "contract_dag.v2")
+        self.assertEqual(software["roles"]["planner"], "software_engineering.v2_contract_planner")
 
     def test_wizard_minion_profile_template_seed_preserves_user_edits(self) -> None:
-        profile_path = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles" / "software_engineering" / "writer.toml"
-        profile_path.write_text('profile_id = "writer"\ndisplay_name = "Custom Runtime Writer"\n', encoding="utf-8")
+        profile_path = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles" / "software_engineering" / "v2_coder.toml"
+        profile_path.write_text('profile_id = "v2_coder"\ndisplay_name = "Custom Runtime Producer"\n', encoding="utf-8")
 
         self.wizard.provision_minion_profile_templates(self.registration)
 
         self.assertEqual(
             profile_path.read_text(encoding="utf-8"),
-            'profile_id = "writer"\ndisplay_name = "Custom Runtime Writer"\n',
+            'profile_id = "v2_coder"\ndisplay_name = "Custom Runtime Producer"\n',
         )
 
     def test_wizard_minion_profile_template_seed_refreshes_builtin_copies(self) -> None:
         profile_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles"
-        profile_path = profile_root / "software_engineering" / "architect.toml"
+        profile_path = profile_root / "software_engineering" / "v2_contract_planner.toml"
         profile_path.write_text(
             "\n".join(
                 [
-                    'profile_id = "architect"',
-                    'display_name = "Old Runtime Architect Seed"',
+                    'profile_id = "v2_contract_planner"',
+                    'display_name = "Old Runtime Contract Planner Seed"',
                     'profile_group = "software_engineering"',
                     "[metadata]",
                     "builtin = true",
@@ -317,13 +318,12 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.wizard.provision_minion_profile_templates(self.registration)
 
         updated = profile_path.read_text(encoding="utf-8")
-        self.assertIn("Architect Sketch Minion", updated)
-        self.assertIn("minion_plan_builder_sketch", updated)
-        self.assertIn('primary_artifact = "plan.sketch.json"', updated)
-        self.assertIn('default_next_profile = "none"', updated)
-        backups = list((profile_root.parent / "profile_backups").glob("*/software_engineering/architect.toml"))
+        self.assertIn("V2 Contract Planner", updated)
+        self.assertIn("v2_contract_sketch_builder", updated)
+        self.assertIn('primary_artifact = "architecture_bundle.json"', updated)
+        backups = list((profile_root.parent / "profile_backups").glob("*/software_engineering/v2_contract_planner.toml"))
         self.assertEqual(len(backups), 1)
-        self.assertIn("Old Runtime Architect Seed", backups[0].read_text(encoding="utf-8"))
+        self.assertIn("Old Runtime Contract Planner Seed", backups[0].read_text(encoding="utf-8"))
 
     def test_wizard_minion_family_template_seed_preserves_user_edits(self) -> None:
         family_path = self.registration.runtime.runtime_root / "plugins" / "minion" / "families" / "software_engineering.toml"
@@ -332,7 +332,7 @@ class PalV2BootstrapTests(unittest.TestCase):
                 [
                     'family_id = "software_engineering"',
                     'display_name = "Custom Software Family"',
-                    'default_executor_profile = "custom.coder"',
+                    'workflow_template = "custom.v1"',
                 ]
             ),
             encoding="utf-8",
@@ -361,7 +361,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.wizard.provision_minion_family_templates(self.registration)
 
         updated = family_path.read_text(encoding="utf-8")
-        self.assertIn('dag_producer_profile = "software_engineering.architect"', updated)
+        self.assertIn('workflow_template = "contract_dag.v2"', updated)
         backups = list((family_root.parent / "family_backups").glob("*/software_engineering.toml"))
         self.assertEqual(len(backups), 1)
         self.assertIn("Old Software Family Seed", backups[0].read_text(encoding="utf-8"))
@@ -2637,8 +2637,9 @@ class PalV2BootstrapTests(unittest.TestCase):
         try:
             old_handle = handle.core.context.module_registry.require("minion")
             old_provider = old_handle.introspection_provider
+            old_manager = old_handle.ports["minion"]
+            old_pid = int(old_manager._require_manager()["manager_pid"])
             old_source = handle.core.context.event_source_registry.sources["minion.manager"]
-            old_prompt = handle.core.context.prompt_fragment_registry.providers["minion.prompt.default"]
             old_handler = handle.core.context.event_handler_registry.by_module["minion"][0][1]
 
             detached = handle.core.detach_module("minion")
@@ -2646,8 +2647,8 @@ class PalV2BootstrapTests(unittest.TestCase):
             self.assertEqual(detached, "ok")
             self.assertNotIn("minion_start_workflow", cap_registry.descriptors)
             self.assertNotIn("minion.manager", handle.core.context.event_source_registry.sources)
-            self.assertNotIn("minion.prompt.default", handle.core.context.prompt_fragment_registry.providers)
             self.assertNotIn("minion", handle.core.context.event_handler_registry.by_module)
+            self.assertFalse(old_manager.client.socket_path.exists())
             record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == "minion")
             self.assertFalse(record["attached"])
 
@@ -2660,12 +2661,13 @@ class PalV2BootstrapTests(unittest.TestCase):
             self.assertNotIn(probe_name, sys.modules)
             self.assertIn("minion_start_workflow", cap_registry.descriptors)
             new_handle = handle.core.context.module_registry.require("minion")
+            new_manager = new_handle.ports["minion"]
+            new_pid = int(new_manager._require_manager()["manager_pid"])
             new_source = handle.core.context.event_source_registry.sources["minion.manager"]
-            new_prompt = handle.core.context.prompt_fragment_registry.providers["minion.prompt.default"]
             new_handler = handle.core.context.event_handler_registry.by_module["minion"][0][1]
             self.assertIsNot(new_handle.introspection_provider, old_provider)
+            self.assertNotEqual(new_pid, old_pid)
             self.assertIsNot(new_source, old_source)
-            self.assertIsNot(new_prompt, old_prompt)
             self.assertIsNot(new_handler, old_handler)
             record = next(item for item in handle.plugin_host.list_plugins() if item["plugin_id"] == "minion")
             self.assertTrue(record["attached"])
@@ -5186,7 +5188,8 @@ class PalV2TelegramEndpointTests(unittest.IsolatedAsyncioTestCase):
             self.endpoint.queue_reply("first", response_handle=handle)
             self.endpoint.queue_reply("second", response_handle=handle)
             self.endpoint.flush_outbox()
-            await asyncio.sleep(0.12)
+            pending = next(iter(self.endpoint._send_chains.values()))
+            await asyncio.wait_for(asyncio.shield(pending), timeout=2.0)
 
         sent_texts = [str(payload.get("text") or "").strip() for kind, payload in self.fake_bot.actions if kind == "message"]
         self.assertEqual(sent_texts[-2:], ["first", "second"])

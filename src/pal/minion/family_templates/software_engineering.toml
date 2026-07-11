@@ -2,8 +2,51 @@ family_id = "software_engineering"
 display_name = "Software Engineering"
 domain = "Software design, implementation, code review, repository maintenance, tests, and build verification."
 domain_keywords = ["code", "software", "repo", "test", "build", "review", "bug", "implementation"]
-default_executor_profile = "software_engineering.coder"
-dag_producer_profile = "software_engineering.architect"
+workflow_template = "contract_dag.v2"
+
+[roles]
+requirements = "software_engineering.v2_requirements_analyst"
+research = "software_engineering.v2_researcher"
+planner = "software_engineering.v2_contract_planner"
+architecture_reviewer = "software_engineering.v2_architecture_reviewer"
+producer = "software_engineering.v2_coder"
+repair = "software_engineering.v2_coder"
+verifier = "software_engineering.v2_verifier"
+reviewer = "software_engineering.v2_reviewer"
+
+[builders]
+requirements = "requirements.v2"
+evidence = "evidence_catalog.v2"
+contract = "contract_sketch.v2"
+verification = "verification.v2"
+
+[adapters]
+workspace = "software_git.v2"
+candidate = "software_git.v2"
+verification = "software_git.v2"
+integration = "software_git.v2"
+publisher = "software_git.v2"
+
+[policies]
+research_default = "local_only"
+unknown = "strict"
+
+[policies.llm]
+temperature = 0.05
+llm_round_timeout_seconds = 3000
+
+[policies.verification]
+require_warning_clean = true
+require_focused_tests = true
+require_public_surface_dogfood = true
+require_historical_regressions = true
+lsp_policy = "when_available"
+unknown_policy = "strict"
+case_timeout_seconds = 300
+
+[policies.workspace]
+prepare = true
+prewarm_lsp = true
 
 [metadata]
 builtin = true
@@ -13,11 +56,11 @@ producer_role = "architect"
 producer_plan_label = "architecture sketch"
 planning_depth_policy = "explicit"
 
-[capability_groups.software_read]
+[capability_groups.software_producer]
+include = ["workspace_read", "workspace_write", "code_intel", "verification_shell", "minion_artifacts"]
+
+[capability_groups.software_verifier]
+include = ["workspace_read", "code_intel", "verification_shell", "minion_artifacts"]
+
+[capability_groups.software_research]
 include = ["workspace_read", "code_intel", "memory_recall"]
-
-[capability_groups.software_code_work]
-include = ["software_read", "code_work", "minion_checklist", "minion_artifacts", "minion_memory_candidates"]
-
-[capability_groups.software_review]
-include = ["software_read", "verification_shell", "minion_review_gate", "minion_artifacts", "minion_memory_candidates"]

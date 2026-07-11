@@ -45,8 +45,11 @@ class MinionFamilyManifest:
     display_name: str = ""
     domain: str = ""
     domain_keywords: tuple[str, ...] = ()
-    default_executor_profile: str = ""
-    dag_producer_profile: str = ""
+    workflow_template: str = "contract_dag.v2"
+    roles: dict[str, str] = field(default_factory=dict)
+    builders: dict[str, str] = field(default_factory=dict)
+    adapters: dict[str, str] = field(default_factory=dict)
+    policies: dict[str, Any] = field(default_factory=dict)
     capability_groups: dict[str, MinionCapabilityGroup] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -68,8 +71,11 @@ class MinionFamilyManifest:
             display_name=str(payload.get("display_name") or family_id).strip(),
             domain=str(payload.get("domain") or "").strip(),
             domain_keywords=tuple(_string_list(payload.get("domain_keywords") or payload.get("keywords"))),
-            default_executor_profile=str(payload.get("default_executor_profile") or "").strip().replace("/", "."),
-            dag_producer_profile=str(payload.get("dag_producer_profile") or "").strip().replace("/", "."),
+            workflow_template=str(payload.get("workflow_template") or "contract_dag.v2").strip(),
+            roles={str(key): str(value).strip().replace("/", ".") for key, value in _dict(payload.get("roles")).items()},
+            builders={str(key): str(value).strip() for key, value in _dict(payload.get("builders")).items()},
+            adapters={str(key): str(value).strip() for key, value in _dict(payload.get("adapters")).items()},
+            policies=_dict(payload.get("policies")),
             capability_groups=groups,
             metadata=_dict(payload.get("metadata")),
         )
@@ -80,8 +86,11 @@ class MinionFamilyManifest:
             "display_name": self.display_name,
             "domain": self.domain,
             "domain_keywords": list(self.domain_keywords),
-            "default_executor_profile": self.default_executor_profile,
-            "dag_producer_profile": self.dag_producer_profile,
+            "workflow_template": self.workflow_template,
+            "roles": dict(self.roles),
+            "builders": dict(self.builders),
+            "adapters": dict(self.adapters),
+            "policies": dict(self.policies),
             "capability_groups": {key: value.to_dict() for key, value in self.capability_groups.items()},
             "metadata": dict(self.metadata),
         }

@@ -457,110 +457,16 @@ Run the workflow.
         finally:
             handle.shutdown_sync()
 
-    def test_minion_module_declares_internal_minion_development_skill(self) -> None:
+    def test_minion_module_does_not_declare_legacy_development_skills(self) -> None:
         core = PalCore()
         register_core_with_core(core)
         register_execution_with_core(core.context)
         register_skill_with_core(core.context, self.service)
         core.publish_module_capabilities("skill")
-
-        self.assertIsNone(self.skill_repository.get_skill("pal.minion.development"))
-
         handle = register_minion_with_core(core.context, runtime_root=self.root)
         core.publish_module_capabilities("minion")
-        skill = self.skill_repository.get_skill("pal.minion.development")
         try:
-            self.assertIsNotNone(skill)
-            assert skill is not None
-            self.assertEqual(skill.module_id, "minion")
-            self.assertTrue(skill.active)
-            self.assertIn("op_minion_dispatch_workflow", skill.manual_text)
-            self.assertIn("workflow_next", skill.manual_text)
-            self.assertIn("resource slots", skill.manual_text)
-            self.assertIn("op_minion_submit_repair_bill", skill.manual_text)
-            self.assertIn("workspace environment", skill.manual_text)
-            self.assertIn("<runtime_root>/plugins/minion/workspace_environment/<preparer_id>.toml", skill.manual_text)
-            self.assertIn("WorkspaceEnvironmentPreparer", skill.manual_text)
-            self.assertIn("workspace_environment.py", skill.manual_text)
-            self.assertIn("GateDefinition", skill.manual_text)
-            self.assertIn("GateChecklistEntry", skill.manual_text)
-            self.assertIn("[gate_policy]", skill.manual_text)
-            self.assertIn("Implementation Workflow", skill.manual_text)
-            self.assertIn("src/pal/minion/gates.py", skill.manual_text)
-            self.assertIn("scripts/build_package.sh", skill.manual_text)
-            self.assertIn("GateStrategy", skill.manual_text)
-            self.assertIn("repair/todo ledger projection", skill.manual_text)
-            self.assertIn("active todo/repair ledger", skill.manual_text)
-            self.assertIn("reverse-propagation mechanism", skill.manual_text)
-            self.assertIn("amended obligations for the existing DAG", skill.manual_text)
-            self.assertIn("module-name indexed", skill.manual_text)
-            self.assertIn("shape-compatible with the existing plan/module schema", skill.manual_text)
-            self.assertIn("Use existing `module_name` values", skill.manual_text)
-            self.assertIn("Keep patch shape isomorphic to plan shape", skill.manual_text)
-            self.assertIn("normal DAG, slot, workspace, and gate logic", skill.manual_text)
-            self.assertIn("src/pal/minion/manager.py", skill.source_refs)
-            self.assertIn("src/pal/minion/step_runner.py", skill.source_refs)
-            self.assertIn("op_minion_review_gate_submit", skill.capability_refs)
-            self.assertIn("op_minion_submit_repair_bill", skill.capability_refs)
-            self.assertTrue(skill.metadata["may_require_code_changes"])
-
-            search = SkillSearchTool(service=self.service).invoke({"query": "add minion workflow scheduler repair bill gate policy", "top_k": 5})
-            self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.minion.development")
-            self.assertTrue(search.structured["hits"][0]["injectable"])
-
-            injected = SkillInjectTool(service=self.service).invoke({"skill_id": "pal.minion.development"})
-            self.assertEqual(injected.status, "ok")
-            self.assertIn("Pal Minion Development", injected.structured["title"])
-            self.assertIn("normalize_gate_policy", injected.structured["manual_text"])
-
-            core.detach_module("minion")
             self.assertIsNone(self.skill_repository.get_skill("pal.minion.development"))
-        finally:
-            handle.shutdown_sync()
-
-    def test_minion_module_declares_internal_minion_profile_development_skill(self) -> None:
-        core = PalCore()
-        register_core_with_core(core)
-        register_execution_with_core(core.context)
-        register_skill_with_core(core.context, self.service)
-        core.publish_module_capabilities("skill")
-
-        self.assertIsNone(self.skill_repository.get_skill("pal.minion.profile.development"))
-
-        handle = register_minion_with_core(core.context, runtime_root=self.root)
-        core.publish_module_capabilities("minion")
-        skill = self.skill_repository.get_skill("pal.minion.profile.development")
-        try:
-            self.assertIsNotNone(skill)
-            assert skill is not None
-            self.assertEqual(skill.module_id, "minion")
-            self.assertTrue(skill.active)
-            self.assertIn("Pal Minion Profile Development", skill.title)
-            self.assertIn("profile TOML", skill.manual_text)
-            self.assertIn("runtime_root/plugins/minion/profiles", skill.manual_text)
-            self.assertIn("capability_groups", skill.manual_text)
-            self.assertIn("[workspace_policy]", skill.manual_text)
-            self.assertIn("[capability_policy]", skill.manual_text)
-            self.assertIn("[gate_policy]", skill.manual_text)
-            self.assertIn("[output_policy]", skill.manual_text)
-            self.assertIn("workflow_next", skill.manual_text)
-            self.assertIn("gates = [\"none\"]", skill.manual_text)
-            self.assertIn("intro_minion_profile_list", skill.capability_refs)
-            self.assertIn("op_minion_dispatch_workflow", skill.capability_refs)
-            self.assertEqual(skill.metadata["extension_boundary"], "minion.profiles")
-
-            search = SkillSearchTool(service=self.service).invoke(
-                {"query": "create new minion profile toml workflow_next capability_groups workspace_policy", "top_k": 5}
-            )
-            self.assertEqual(search.structured["hits"][0]["skill_id"], "pal.minion.profile.development")
-            self.assertTrue(search.structured["hits"][0]["injectable"])
-
-            injected = SkillInjectTool(service=self.service).invoke({"skill_id": "pal.minion.profile.development"})
-            self.assertEqual(injected.status, "ok")
-            self.assertIn("Pal Minion Profile Development", injected.structured["title"])
-            self.assertIn("Profile TOML Shape", injected.structured["manual_text"])
-
-            core.detach_module("minion")
             self.assertIsNone(self.skill_repository.get_skill("pal.minion.profile.development"))
         finally:
             handle.shutdown_sync()
@@ -642,29 +548,13 @@ Run the workflow.
                     BehaviorAdviceRequest(scenario="create a new minion profile toml with workflow_next and capability_groups", top_k=5)
                 )
             )
-
-            minion = next(candidate for candidate in minion_advice.candidates if candidate.affordance_id == "declared.skill.pal_minion_development")
-            profile = next(
-                candidate for candidate in profile_advice.candidates if candidate.affordance_id == "declared.skill.pal_minion_profile_development"
-            )
-            self.assertEqual(minion.skill_refs, ("pal.minion.development",))
-            self.assertEqual(profile.skill_refs, ("pal.minion.profile.development",))
-            self.assertEqual(minion.visibility_mode, "discoverable")
-            self.assertEqual(profile.visibility_mode, "discoverable")
-            self.assertFalse(minion.metadata["resident"])
-            self.assertFalse(profile.metadata["resident"])
-            self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_minion_development"))
-            self.assertIsNone(self.behavior_repository.get_affordance("declared.skill.pal_minion_profile_development"))
-
-            core.detach_module("minion")
-            after = asyncio.run(
-                behavior_service.advise_async(BehaviorAdviceRequest(scenario="add minion workflow scheduler repair bill with GateDefinition", top_k=5))
-            )
-            self.assertNotIn("declared.skill.pal_minion_development", {candidate.affordance_id for candidate in after.candidates})
+            affordances = {candidate.affordance_id for candidate in [*minion_advice.candidates, *profile_advice.candidates]}
+            self.assertNotIn("declared.skill.pal_minion_development", affordances)
+            self.assertNotIn("declared.skill.pal_minion_profile_development", affordances)
         finally:
             handle.shutdown_sync()
 
-    def test_internal_development_skill_routes_are_not_pruned_by_minion_dispatch(self) -> None:
+    def test_non_minion_development_skill_routes_remain_discoverable(self) -> None:
         core = PalCore()
         behavior_service = BehaviorService(repository=self.behavior_repository)
         register_core_with_core(core)
@@ -672,8 +562,7 @@ Run the workflow.
         register_skill_with_core(core.context, self.service)
         register_behavior_with_core(core.context, behavior_service)
         lsp_handle = build_lsp_plugin(runtime_root=self.root).register_with_core(core.context)
-        minion_handle = register_minion_with_core(core.context, runtime_root=self.root)
-        for module_id in ("execution", "skill", "behavior", "lsp", "minion"):
+        for module_id in ("execution", "skill", "behavior", "lsp"):
             core.publish_module_capabilities(module_id)
         try:
             plugin_advice = asyncio.run(
@@ -696,17 +585,6 @@ Run the workflow.
                     BehaviorAdviceRequest(scenario="给 Pal 加一个新语言 LSP template 和 language server config", top_k=5)
                 )
             )
-            minion_advice = asyncio.run(
-                behavior_service.advise_async(
-                    BehaviorAdviceRequest(scenario="给 minion 加一个协程 runner 调度和修复账单 replay", top_k=5)
-                )
-            )
-            profile_advice = asyncio.run(
-                behavior_service.advise_async(
-                    BehaviorAdviceRequest(scenario="给 minion 构建一个新的 profile 模板，带 workflow_next 和 capability_groups", top_k=5)
-                )
-            )
-
             self.assertEqual(plugin_advice.candidates[0].affordance_id, "declared.skill.pal_plugin_development")
             self.assertEqual(plugin_advice.candidates[0].skill_refs, ("pal.plugin.development",))
             self.assertEqual(llm_advice.candidates[0].affordance_id, "declared.skill.pal_llm_adapter_endpoint_development")
@@ -715,12 +593,7 @@ Run the workflow.
             self.assertEqual(channel_advice.candidates[0].skill_refs, ("pal.channel.provider.development",))
             self.assertEqual(lsp_advice.candidates[0].affordance_id, "declared.skill.pal_lsp_template_development")
             self.assertEqual(lsp_advice.candidates[0].skill_refs, ("pal.lsp.template.development",))
-            self.assertEqual(minion_advice.candidates[0].affordance_id, "declared.skill.pal_minion_development")
-            self.assertEqual(minion_advice.candidates[0].skill_refs, ("pal.minion.development",))
-            self.assertEqual(profile_advice.candidates[0].affordance_id, "declared.skill.pal_minion_profile_development")
-            self.assertEqual(profile_advice.candidates[0].skill_refs, ("pal.minion.profile.development",))
         finally:
-            minion_handle.shutdown_sync()
             lsp_handle.shutdown_sync()
 
     def test_skill_prompt_stays_registered_but_skill_tools_are_not_resident_llm_tools(self) -> None:

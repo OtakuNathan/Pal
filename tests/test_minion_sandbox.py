@@ -23,7 +23,7 @@ from pal.minion.llm_broker import (
     preflight_request_from_payload,
     preflight_request_to_payload,
 )
-from pal.minion.runner import MinionRunner, MinionRuntimeBundle
+from pal.minion.runner import MinionRunner, MinionRuntimeBundle, _minion_temperature
 from pal.minion.sandbox import (
     build_sandboxed_runner_invocation,
     ensure_sandbox_files,
@@ -32,7 +32,7 @@ from pal.minion.sandbox import (
     scrub_minion_sandbox_env,
     with_minion_sandbox_metadata,
 )
-from pal.shared import RuntimeStatus, TaskContextPack
+from pal.shared import RuntimeStatus, MinionInvocationPack
 
 
 def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -43,12 +43,18 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 class MinionSandboxTests(unittest.TestCase):
+    def test_minion_temperature_accepts_low_deterministic_profile_value(self) -> None:
+        pack = MinionInvocationPack(invocation_id="temperature", goal="g", metadata={"temperature": 0.05})
+        self.assertEqual(_minion_temperature(pack, fallback=0.7), 0.05)
+        invalid = MinionInvocationPack(invocation_id="temperature-invalid", goal="g", metadata={"temperature": 3})
+        self.assertEqual(_minion_temperature(invalid, fallback=0.7), 0.7)
+
     def test_sandbox_metadata_defaults_to_available_backend_or_unavailable_marker(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_meta_") as tmp:
             root = Path(tmp)
             repo = root / "repo"
             repo.mkdir()
-            pack = TaskContextPack(work_order_id="wo", goal="g", workspace={"repo_path": str(repo)})
+            pack = MinionInvocationPack(invocation_id="wo", goal="g", workspace={"repo_path": str(repo)})
 
             with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")}):
                 updated = with_minion_sandbox_metadata(root, pack, run_id="run_1")
@@ -71,8 +77,8 @@ class MinionSandboxTests(unittest.TestCase):
 
     def test_sandbox_metadata_rejects_unwired_backend(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_backend_") as tmp:
-            pack = TaskContextPack(
-                work_order_id="wo",
+            pack = MinionInvocationPack(
+                invocation_id="wo",
                 goal="g",
                 metadata={"sandbox": {"backend": "docker"}},
             )
@@ -127,8 +133,8 @@ class MinionSandboxTests(unittest.TestCase):
             repo = root / "repo"
             src = repo / "src"
             src.mkdir(parents=True)
-            pack = TaskContextPack(
-                work_order_id="wo",
+            pack = MinionInvocationPack(
+                invocation_id="wo",
                 goal="g",
                 workspace={
                     "repo_path": str(repo),
@@ -181,8 +187,8 @@ class MinionSandboxTests(unittest.TestCase):
             root = Path(tmp)
             repo = root / "repo"
             repo.mkdir()
-            pack = TaskContextPack(
-                work_order_id="wo",
+            pack = MinionInvocationPack(
+                invocation_id="wo",
                 goal="g",
                 workspace={"repo_path": str(repo)},
                 metadata={"sandbox": {"enabled": True, "backend": "bwrap", "run_id": "run_inv"}},
@@ -192,7 +198,7 @@ class MinionSandboxTests(unittest.TestCase):
                 argv, env = build_sandboxed_runner_invocation(
                     runtime_root=root,
                     pack=pack,
-                    argv=["python", "-m", "pal.minion.step_executor_main"],
+                    argv=["python", "-m", "pal.minion.v2.worker_main"],
                     env={"PATH": "/usr/bin", "OPENAI_API_KEY": "secret"},
                 )
 
@@ -210,8 +216,8 @@ class MinionSandboxTests(unittest.TestCase):
             root = Path(tmp)
             repo = root / "repo"
             repo.mkdir()
-            pack = TaskContextPack(
-                work_order_id="wo_read_only",
+            pack = MinionInvocationPack(
+                invocation_id="wo_read_only",
                 goal="review",
                 workspace={
                     "repo_path": str(repo),
@@ -298,7 +304,7 @@ class MinionSandboxTests(unittest.TestCase):
             with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "tmp_scratch")}):
                 pack = with_minion_sandbox_metadata(
                     runtime_root,
-                    TaskContextPack(work_order_id="wo", goal="g", workspace={"repo_path": str(workspace)}),
+                    MinionInvocationPack(invocation_id="wo", goal="g", workspace={"repo_path": str(workspace)}),
                     run_id="run_git_worktree",
                 )
 
@@ -320,8 +326,8 @@ class MinionSandboxTests(unittest.TestCase):
             root = Path(tmp)
             repo = root / "repo"
             repo.mkdir()
-            pack = TaskContextPack(
-                work_order_id="wo",
+            pack = MinionInvocationPack(
+                invocation_id="wo",
                 goal="g",
                 workspace={"repo_path": str(repo)},
                 metadata={"sandbox": {"enabled": True, "backend": "bwrap", "run_id": "run_import"}},
@@ -343,8 +349,8 @@ class MinionSandboxTests(unittest.TestCase):
         async def scenario() -> None:
             calls: list[str] = []
             events: list[dict] = []
-            pack = TaskContextPack(
-                work_order_id="wo_sandbox_shell",
+            pack = MinionInvocationPack(
+                invocation_id="wo_sandbox_shell",
                 goal="sandbox shell",
                 allowed_capabilities=["op_exec_shell", "op_file_read"],
                 approval_policy={"high_risk_capabilities": ["op_exec_shell"]},
@@ -390,6 +396,46 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertEqual(len([event for event in events if event["event_kind"] == "approval_requested"]), 1)
 
         asyncio.run(scenario())
+
+    def test_runner_binds_lsp_calls_to_isolated_workspace(self) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="pal_minion_lsp_workspace_"))
+        runner = MinionRunner(
+            runtime_root=workspace.parent,
+            pack=MinionInvocationPack(
+                invocation_id="inv_lsp",
+                goal="inspect code",
+                workspace={
+                    "repo_path": str(workspace),
+                    "primary_language": "cpp",
+                    "languages": ["c", "cpp"],
+                    "lsp_setup": {"languages": ["cpp"], "servers": ["clangd"]},
+                },
+            ),
+            minion_id="m_lsp",
+            run_id="r_lsp",
+            write_event=lambda _event: None,  # type: ignore[arg-type]
+            read_decision=lambda _timeout: None,  # type: ignore[arg-type]
+        )
+
+        direct = runner._tool_call_with_minion_defaults(
+            CanonicalToolCall(name="op_lsp_definition", args={"file": "src/main.cpp", "line": 1, "character": 2})
+        )
+        nested = runner._tool_call_with_minion_defaults(
+            CanonicalToolCall(
+                name="op_tool_call",
+                args={
+                    "name": "op_lsp_diagnostics",
+                    "args": {"file": "src/main.cpp"},
+                },
+            )
+        )
+
+        self.assertEqual(direct.args["workspace_root"], str(workspace))
+        self.assertEqual(direct.args["primary_language"], "cpp")
+        self.assertEqual(direct.args["lsp_setup"]["servers"], ["clangd"])
+        nested_args = dict(nested.args["args"])
+        self.assertEqual(nested_args["workspace_root"], str(workspace))
+        self.assertEqual(nested_args["languages"], ["c", "cpp"])
 
 
 class MinionLLMBrokerSerializationTests(unittest.TestCase):
@@ -460,7 +506,7 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
         async def scenario() -> None:
             with tempfile.TemporaryDirectory(prefix="pal_minion_broker_manager_") as tmp:
                 manager = MinionManager(runtime_root=Path(tmp))
-                pack = TaskContextPack(work_order_id="wo_broker", goal="g")
+                pack = MinionInvocationPack(invocation_id="wo_broker", goal="g")
                 manager.runs["run_broker"] = MinionRunState(minion_id="m", run_id="run_broker", pack=pack, status="running")
 
                 class FakeRuntime:
@@ -518,11 +564,11 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
         async def scenario() -> None:
             with tempfile.TemporaryDirectory(prefix="pal_minion_broker_events_") as tmp:
                 manager = MinionManager(runtime_root=Path(tmp))
-                pack = TaskContextPack(work_order_id="wo_broker_events", goal="g")
+                pack = MinionInvocationPack(invocation_id="wo_broker_events", goal="g")
                 state = MinionRunState(minion_id="m", run_id="run_broker_events", pack=pack, status="running")
                 manager.runs[state.run_id] = state
                 recorded: list[dict[str, object]] = []
-                manager.tasking_repository.record_minion_event = lambda event: recorded.append(dict(event))  # type: ignore[method-assign]
+                manager.events.queue_event = lambda event: recorded.append(dict(event))  # type: ignore[method-assign]
 
                 class Settings:
                     def get_think_level(self):
@@ -587,13 +633,19 @@ class MinionLLMBrokerSerializationTests(unittest.TestCase):
                         ),
                     }
                 )
+                await asyncio.sleep(0)
 
                 self.assertEqual(generated["outcome"]["text"], "ok:working")
-                phases = [event["payload"]["phase"] for event in recorded if event.get("event_kind") == "progress"]
+                endpoint_events = [
+                    event
+                    for event in recorded
+                    if event.get("event_kind") == "progress"
+                    and str(event["payload"].get("phase") or "").startswith("llm_endpoint_")
+                ]
+                phases = [event["payload"]["phase"] for event in endpoint_events]
                 self.assertIn("llm_endpoint_attempt_failed", phases)
                 self.assertIn("llm_endpoint_exhausted", phases)
                 self.assertIn("llm_endpoint_fallback_succeeded", phases)
-                self.assertTrue(all(event["payload"].get("force_ledger") for event in recorded))
 
         asyncio.run(scenario())
 

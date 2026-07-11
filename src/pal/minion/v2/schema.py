@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 2
+MINION_V2_SCHEMA_VERSION = 4
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -28,6 +28,21 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS minion_v2_snapshots_workflow
         ON minion_v2_aggregate_snapshots(workflow_id, aggregate_type, updated_at);
+
+        CREATE TABLE IF NOT EXISTS minion_v2_task_projection (
+            task_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL,
+            title TEXT NOT NULL,
+            objective TEXT NOT NULL,
+            family_id TEXT NOT NULL,
+            workspace_key TEXT NOT NULL DEFAULT '',
+            task_revision_sha TEXT NOT NULL,
+            owner TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS minion_v2_task_search
+        ON minion_v2_task_projection(state, family_id, updated_at);
 
         CREATE TABLE IF NOT EXISTS minion_v2_domain_events (
             event_id TEXT PRIMARY KEY,
@@ -180,7 +195,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             PRIMARY KEY(invocation_id, turn_index)
         );
 
-        CREATE TABLE IF NOT EXISTS minion_v2_module_journals (
+        CREATE TABLE IF NOT EXISTS minion_v2_node_journals (
             node_run_id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             lease_resource_key TEXT NOT NULL,
@@ -210,12 +225,12 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             node_run_id TEXT PRIMARY KEY,
             workflow_id TEXT NOT NULL,
             epoch_id TEXT NOT NULL DEFAULT '',
-            module_id TEXT NOT NULL DEFAULT '',
-            node_kind TEXT NOT NULL DEFAULT 'module',
+            unit_id TEXT NOT NULL DEFAULT '',
+            node_kind TEXT NOT NULL DEFAULT 'unit',
             state TEXT NOT NULL,
             dependency_node_ids_json TEXT NOT NULL DEFAULT '[]',
             active_worker_id TEXT NOT NULL DEFAULT '',
-            candidate_sha TEXT NOT NULL DEFAULT '',
+            candidate_digest TEXT NOT NULL DEFAULT '',
             blocker_json TEXT NOT NULL DEFAULT '{}',
             updated_at TEXT NOT NULL
         );

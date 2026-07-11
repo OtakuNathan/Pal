@@ -26,6 +26,7 @@ from pal.minion.v2.contracts import (
     WorkflowState,
     ExecutionEpochState,
     StandaloneReviewState,
+    TaskState,
 )
 from pal.minion.v2.recovery import MinionV2Recovery
 from pal.minion.v2.service import MinionV2WorkflowService
@@ -73,6 +74,24 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 self.action("MARK_COMPLETED", AggregateType.WORKFLOW, "wf_test", expected_version=1),
             )
 
+    def test_task_family_is_bound_and_task_archival_is_terminal(self) -> None:
+        created = self.engine.transition(
+            None,
+            self.action(
+                "CREATE_TASK",
+                AggregateType.TASK,
+                "task_test",
+                payload={"family_id": "software_engineering", "task_revision_ref": {"sha256": "a"}},
+            ),
+        ).snapshot
+        self.assertEqual(created.state, TaskState.ACTIVE)
+        archived = self.engine.transition(
+            created,
+            self.action("ARCHIVE_TASK", AggregateType.TASK, "task_test", expected_version=1),
+        ).snapshot
+        self.assertEqual(archived.state, TaskState.ARCHIVED)
+        self.assertEqual(self.engine.legal_actions(AggregateType.TASK, archived.state), ())
+
     def test_expected_version_is_checked_before_reducer(self) -> None:
         created = self.engine.transition(
             None,
@@ -83,6 +102,36 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 created,
                 self.action("START_WORKFLOW", AggregateType.WORKFLOW, "wf_test", expected_version=0),
             )
+
+    def test_worker_invocation_terminal_status_is_persisted_under_fencing(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="pal_v2_worker_status_"))
+        self.addCleanup(shutil.rmtree, root, True)
+        repository = MinionV2Repository(root)
+        store = ContentAddressedArtifactStore(root, repository)
+        prompt_ref = store.put_json({"prompt": "bounded"}, artifact_type="WorkerPromptPackArtifact")
+        lease = repository.claim_lease("architecture:arch-status:requirements", "inv-status", ttl_seconds=60)
+        repository.record_worker_invocation(
+            invocation_id="inv-status",
+            workflow_id="wf-status",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch-status",
+            lease_resource_key=lease.resource_key,
+            fencing_token=lease.fencing_token,
+            role="requirements",
+            prompt_pack_ref=prompt_ref.to_dict(),
+        )
+
+        repository.finish_worker_invocation(
+            invocation_id="inv-status",
+            fencing_token=lease.fencing_token,
+            status="completed",
+        )
+
+        with repository._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM minion_v2_worker_invocations WHERE invocation_id = 'inv-status'"
+            ).fetchone()
+        self.assertEqual(row["status"], "completed")
 
     def test_architecture_typed_findings_route_to_owning_stage(self) -> None:
         snapshot = AggregateSnapshot(
@@ -121,7 +170,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             aggregate_type=AggregateType.DAG_NODE_RUN,
             aggregate_id="node_1",
             workflow_id="wf_test",
-            state=DagNodeRunState.CODING,
+            state=DagNodeRunState.PRODUCING,
             version=3,
             payload={},
             created_at="2026-01-01T00:00:00+00:00",
@@ -145,7 +194,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                     "QUIESCE_COMPLETED",
                     AggregateType.DAG_NODE_RUN,
                     "node_1",
-                    payload={"fencing_token": 4, "worktree_fingerprint": "abc"},
+                    payload={"fencing_token": 4, "workspace_fingerprint": "abc"},
                     expected_version=4,
                 ),
             )
@@ -158,8 +207,8 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 payload={
                     "fencing_token": 4,
                     "process_group_reaped": True,
-                    "exclusive_worktree_lock": True,
-                    "worktree_fingerprint": "abc",
+                    "exclusive_workspace_lock": True,
+                    "workspace_fingerprint": "abc",
                 },
                 expected_version=4,
             ),
@@ -174,8 +223,8 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                     "node_1",
                     payload={
                         "candidate_ref": "artifact:candidate",
-                        "candidate_sha": "deadbeef",
-                        "worktree_fingerprint": "changed",
+                        "candidate_digest": "deadbeef",
+                        "workspace_fingerprint": "changed",
                     },
                     expected_version=5,
                 ),
@@ -212,8 +261,8 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                     payload={
                         "fencing_token": 7,
                         "process_group_reaped": True,
-                        "exclusive_worktree_lock": True,
-                        "worktree_fingerprint": "late",
+                        "exclusive_workspace_lock": True,
+                        "workspace_fingerprint": "late",
                     },
                     expected_version=5,
                 ),
@@ -226,7 +275,12 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             workflow_id="wf_test",
             state=ArchitectureRevisionState.RESEARCH_RUNNING,
             version=4,
-            payload={},
+            payload={
+                "blocker": {"kind": "old_failure"},
+                "active_worker_id": "inv_old",
+                "fencing_token": 4,
+                "lease_resource_key": "architecture:arch_1:research",
+            },
             created_at="2026-01-01T00:00:00+00:00",
             updated_at="2026-01-01T00:00:00+00:00",
         )
@@ -243,9 +297,14 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             self.action("RESUME", AggregateType.ARCHITECTURE_REVISION, "arch_1", expected_version=6),
         ).snapshot
         self.assertEqual(resumed.state, ArchitectureRevisionState.RESEARCH_QUEUED)
+        self.assertNotIn("blocker", resumed.payload)
+        self.assertNotIn("active_worker_id", resumed.payload)
+        self.assertNotIn("fencing_token", resumed.payload)
+        self.assertNotIn("lease_resource_key", resumed.payload)
 
     def test_transition_table_uses_only_declared_aggregate_states(self) -> None:
         declared = {
+            AggregateType.TASK: {str(item) for item in TaskState},
             AggregateType.WORKFLOW: {str(item) for item in WorkflowState},
             AggregateType.ARCHITECTURE_REVISION: {str(item) for item in ArchitectureRevisionState},
             AggregateType.EXECUTION_EPOCH: {str(item) for item in ExecutionEpochState},
@@ -256,12 +315,17 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             if source_state is not None:
                 self.assertIn(str(source_state), declared[aggregate_type])
         terminal_expectations = {
+            (AggregateType.TASK, str(TaskState.ARCHIVED)): (),
             (AggregateType.WORKFLOW, str(WorkflowState.COMPLETED)): ("ARCHIVE",),
             (AggregateType.WORKFLOW, str(WorkflowState.REJECTED)): ("ARCHIVE",),
             (AggregateType.WORKFLOW, str(WorkflowState.CANCELLED)): ("ARCHIVE",),
             (AggregateType.ARCHITECTURE_REVISION, str(ArchitectureRevisionState.ACCEPTED)): (),
             (AggregateType.EXECUTION_EPOCH, str(ExecutionEpochState.COMPLETED)): (),
-            (AggregateType.DAG_NODE_RUN, str(DagNodeRunState.ACCEPTED)): ("MARK_STALE", "REOPEN_DEPENDENCY"),
+            (AggregateType.DAG_NODE_RUN, str(DagNodeRunState.ACCEPTED)): (
+                "MARK_STALE",
+                "MEMORY_CANDIDATE_PUBLISHED",
+                "REOPEN_DEPENDENCY",
+            ),
             (AggregateType.STANDALONE_REVIEW, str(StandaloneReviewState.COMPLETED)): (),
         }
         for (aggregate_type, state), expected in terminal_expectations.items():

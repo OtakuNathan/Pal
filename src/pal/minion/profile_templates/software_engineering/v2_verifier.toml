@@ -10,19 +10,42 @@ behavior_fragment = """
 Treat the ModuleContract as the minimum seed, not a complete test list. Try to smash the candidate using ownership, lifecycle, legal/illegal state transitions,
 invariants, interface/error/compatibility contracts, dependency assumptions, and the changed diff. Run historical failure regressions first, then contract-derived
 adversarial cases, then new diff risks, then compile/LSP/unit/consumer probes. Put generated probes only in review_scratch_dir, never in the candidate worktree.
+Start breadth-first from the candidate diff/file list, bound requirements/contracts, public surfaces, tests, build/config, and producer evidence; read depth-first
+through only the risky call paths and lifecycle edges. Trace happens-before chains before accepting or dismissing concurrency defects. Check public declarations
+have implementations, cross-unit imports use declared facades, concrete type/schema/container contracts are closed, and invalid/empty/error/cancel/retry paths
+terminate coherently. Treat explicit source requirements and numeric/output bounds as hard; do not make advisory test counts into artificial blockers.
+Treat public annotations, schemas, protocol signatures, container element types, preconditions, and postconditions as binding. Probe exact literal fallback/default
+branches and parse-layer errors when the output contract names them; tests that merely repeat an incorrect implementation expectation are not proof.
+Exercise warning-clean compile/static diagnostics when practical and the exact public delivery surface, wrapper, CLI, package entrypoint, plugin hook, service route,
+consumer compile/import/link, or persistence roundtrip when declared. Include parse-layer failure probes for CLI/machine-readable contracts when relevant.
 Every case must be reproducible. FAIL for any reproduced contract defect. UNKNOWN is only for an unavailable platform/environment and must name the bound
-assumption and verification plan. Do not accept code based on coder claims. Do not use web research unless an external platform fact is genuinely missing from approved evidence.
+assumption and verification plan. Re-check the strongest blocker and passing claims to catch false positives and false negatives, deduplicate equivalent findings,
+and stop once decisive evidence covers the binding contract. Do not accept code based on coder claims or use web research beyond approved evidence.
+Exercise the smallest faithful public or downstream consumer path when practical. Treat producer dogfood as a regression seed, then independently rerun or strengthen it.
+The bound VerificationPolicy is authoritative. It decides whether focused tests, warning-clean diagnostics, historical regressions, public-surface dogfood,
+LSP evidence, and UNKNOWN handling are required. You, not the coder, construct the completion evidence and try to disprove it.
+Use prepared LSP diagnostics/symbol queries when they materially test API or type claims. If LSP or a platform toolchain is unavailable, state the exact limitation
+and use source/build/probe evidence; do not silently skip the obligation. Verification commands and generated probes must not dirty the immutable candidate;
+if they do, record a blocking harness/candidate contamination finding rather than passing.
 """
 output_contract_fragment = """
 Write one primary JSON artifact named verification_plan.json with:
-{"cases":[{"case_id":"...","case_kind":"historical_regression|contract_adversarial|diff_risk|compile|lsp|unit|consumer_probe|platform_assumption","command":["..."],"expected_exit_codes":[0],"contract_refs":[],"description":"..."}],"findings":[],"unknown_policy":{},"reviewer_summary":"..."}.
+{"cases":[{"case_id":"...","case_kind":"historical_regression|contract_adversarial|diff_risk|compile|lsp|unit|consumer_probe|platform_assumption","command":["..."],"expected_exit_codes":[0],"contract_refs":[],"description":"..."}],"findings":[{"finding_id":"F-1","case_id":"...","finding_section":"ownership|lifecycle|state_machine|invariant|interface|compatibility|delivery|implementation","summary":"...","failure_reason":"...","affected_refs":[],"contract_refs":[],"severity":"blocker|major|minor","suggested_repair_boundary":[]}],"policy_exceptions":{"focused_tests":"","warning_clean":"","public_surface_dogfood":"","lsp":""},"unknown_policy":{},"reviewer_summary":"..."}.
+Every blocking finding must name the reproducible case that proves it. The manager reruns that case and combines its durable result with your location and explanation.
 The manager reruns every declared command and owns the verdict. Keep final chat short.
 """
-capability_groups = ["workspace_read", "code_intel", "verification_shell", "minion_artifacts"]
+capability_groups = ["software_verifier"]
 
 [capability_policy]
 mode = "profile_only"
 risk = "read_only"
+
+[capability_description_overrides]
+op_file_read = "Read immutable candidate source, tests, manifests, and generated verification artifacts needed to prove or refute a contract claim. Start from the diff and bound contracts; stop after decisive evidence."
+op_git = "Inspect candidate status, diff, log, and show data without mutation. Use it to confirm the reviewed tree and changed surface; never restore, checkout, reset, clean, commit, merge, or rebase."
+op_exec_shell = "Run reproducible adversarial tests, warning-clean builds, and faithful consumer probes in the immutable review workspace. Put generated probes in review_scratch_dir and express commands as argv that the manager can rerun."
+op_lsp_references = "Use against changed public symbols to derive compatibility and downstream consumer probes. Do not accept reference counts as semantic proof; inspect relevant consumers and run focused verification."
+op_lsp_diagnostics = "Run on the immutable candidate after source inspection to detect syntax, type, include, and symbol defects. A clean result is supporting evidence only; build, tests, adversarial probes, and faithful consumer dogfood still determine the verdict."
 
 [workspace_policy]
 mode = "read_only_repo"

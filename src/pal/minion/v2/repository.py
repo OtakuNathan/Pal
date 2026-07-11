@@ -180,8 +180,10 @@ class MinionV2Repository:
                     action.created_at,
                 ),
             )
+            self._update_task_projection_locked(connection, outcome.snapshot)
             self._update_node_projection_locked(connection, outcome.snapshot)
-            self._rebuild_workflow_projection_locked(connection, action.workflow_id, events[-1].event_id if events else "")
+            if action.aggregate_type != AggregateType.TASK:
+                self._rebuild_workflow_projection_locked(connection, action.workflow_id, events[-1].event_id if events else "")
             return result
 
     def read_snapshot(self, aggregate_type: AggregateType, aggregate_id: str) -> AggregateSnapshot | None:
@@ -228,6 +230,57 @@ class MinionV2Repository:
                     "metrics_json": "metrics",
                 },
             )
+
+    def search_tasks(
+        self,
+        *,
+        query: str = "",
+        task_id: str = "",
+        family_id: str = "",
+        include_archived: bool = False,
+        limit: int = 20,
+    ) -> tuple[dict[str, Any], ...]:
+        self.ensure_schema()
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if task_id:
+            clauses.append("task_id = ?")
+            parameters.append(str(task_id))
+        if family_id:
+            clauses.append("family_id = ?")
+            parameters.append(str(family_id))
+        if not include_archived:
+            clauses.append("state != 'ARCHIVED'")
+        text = str(query or "").strip().lower()
+        if text:
+            clauses.append("(lower(title) LIKE ? OR lower(objective) LIKE ? OR lower(workspace_key) LIKE ?)")
+            pattern = f"%{text}%"
+            parameters.extend((pattern, pattern, pattern))
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        parameters.append(max(1, min(int(limit), 100)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM minion_v2_task_projection"
+                + where
+                + " ORDER BY updated_at DESC, task_id LIMIT ?",
+                tuple(parameters),
+            ).fetchall()
+            return tuple(dict(row) for row in rows)
+
+    def has_nonterminal_workflows_for_task(self, task_id: str) -> bool:
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM minion_v2_aggregate_snapshots
+                WHERE aggregate_type = ?
+                  AND json_extract(payload_json, '$.task_id') = ?
+                  AND state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED')
+                LIMIT 1
+                """,
+                (AggregateType.WORKFLOW.value, str(task_id)),
+            ).fetchone()
+            return row is not None
 
     def claim_outbox(self, worker_id: str, *, limit: int = 20, lease_seconds: int = 60) -> tuple[dict[str, Any], ...]:
         self.ensure_schema()
@@ -324,7 +377,7 @@ class MinionV2Repository:
                 """
                 UPDATE minion_v2_outbox
                 SET status = 'completed', provider_request_id = ?, result_artifact_ref_json = ?,
-                    locked_by = '', locked_until = '', updated_at = ?
+                    locked_by = '', locked_until = '', last_error = '', updated_at = ?
                 WHERE effect_id = ?
                 """,
                 (str(provider_request_id), _json(result_ref), now, str(effect_id)),
@@ -845,7 +898,31 @@ class MinionV2Repository:
                 "",
             )
 
-    def update_module_journal(
+    def finish_worker_invocation(self, *, invocation_id: str, fencing_token: int, status: str) -> None:
+        normalized = str(status or "").strip().lower()
+        if normalized not in {"completed", "failed", "cancelled"}:
+            raise ValueError(f"invalid worker invocation terminal status: {status}")
+        self.ensure_schema()
+        with self._transaction() as connection:
+            invocation = connection.execute(
+                "SELECT * FROM minion_v2_worker_invocations WHERE invocation_id = ?",
+                (str(invocation_id),),
+            ).fetchone()
+            if invocation is None:
+                raise KeyError(f"unknown worker invocation: {invocation_id}")
+            self._assert_lease_locked(
+                connection,
+                str(invocation["lease_resource_key"]),
+                str(invocation_id),
+                int(fencing_token),
+            )
+            connection.execute(
+                "UPDATE minion_v2_worker_invocations SET status = ?, updated_at = ? WHERE invocation_id = ?",
+                (normalized, utc_now(), str(invocation_id)),
+            )
+            self._rebuild_workflow_projection_locked(connection, str(invocation["workflow_id"]), "")
+
+    def update_node_journal(
         self,
         *,
         node_run_id: str,
@@ -860,7 +937,7 @@ class MinionV2Repository:
         with self._transaction() as connection:
             self._assert_lease_locked(connection, lease_resource_key, owner_id, fencing_token)
             row = connection.execute(
-                "SELECT generation FROM minion_v2_module_journals WHERE node_run_id = ?",
+                "SELECT generation FROM minion_v2_node_journals WHERE node_run_id = ?",
                 (node_run_id,),
             ).fetchone()
             current_generation = int(row["generation"]) if row is not None else 0
@@ -871,7 +948,7 @@ class MinionV2Repository:
             next_generation = current_generation + 1
             connection.execute(
                 """
-                INSERT INTO minion_v2_module_journals(
+                INSERT INTO minion_v2_node_journals(
                     node_run_id, workflow_id, lease_resource_key, fencing_token,
                     generation, journal_json, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -894,11 +971,11 @@ class MinionV2Repository:
             )
             return next_generation
 
-    def read_module_journal(self, node_run_id: str) -> dict[str, Any] | None:
+    def read_node_journal(self, node_run_id: str) -> dict[str, Any] | None:
         self.ensure_schema()
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM minion_v2_module_journals WHERE node_run_id = ?",
+                "SELECT * FROM minion_v2_node_journals WHERE node_run_id = ?",
                 (str(node_run_id),),
             ).fetchone()
             if row is None:
@@ -1031,14 +1108,14 @@ class MinionV2Repository:
         connection.execute(
             """
             INSERT INTO minion_v2_node_projection(
-                node_run_id, workflow_id, epoch_id, module_id, node_kind, state,
-                dependency_node_ids_json, active_worker_id, candidate_sha, blocker_json, updated_at
+                node_run_id, workflow_id, epoch_id, unit_id, node_kind, state,
+                dependency_node_ids_json, active_worker_id, candidate_digest, blocker_json, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(node_run_id) DO UPDATE SET
                 state = excluded.state,
                 dependency_node_ids_json = excluded.dependency_node_ids_json,
                 active_worker_id = excluded.active_worker_id,
-                candidate_sha = excluded.candidate_sha,
+                candidate_digest = excluded.candidate_digest,
                 blocker_json = excluded.blocker_json,
                 updated_at = excluded.updated_at
             """,
@@ -1046,13 +1123,46 @@ class MinionV2Repository:
                 snapshot.aggregate_id,
                 snapshot.workflow_id,
                 str(payload.get("epoch_id") or ""),
-                str(payload.get("module_id") or ""),
-                str(payload.get("node_kind") or "module"),
+                str(payload.get("unit_id") or ""),
+                str(payload.get("node_kind") or "unit"),
                 snapshot.state,
                 _json(list(payload.get("dependency_node_ids") or [])),
                 str(payload.get("active_worker_id") or ""),
-                str(payload.get("candidate_sha") or ""),
+                str(payload.get("candidate_digest") or ""),
                 _json(dict(payload.get("blocker") or {})),
+                snapshot.updated_at,
+            ),
+        )
+
+    def _update_task_projection_locked(self, connection: sqlite3.Connection, snapshot: AggregateSnapshot) -> None:
+        if snapshot.aggregate_type != AggregateType.TASK:
+            return
+        payload = dict(snapshot.payload)
+        revision_ref = dict(payload.get("task_revision_ref") or {})
+        connection.execute(
+            """
+            INSERT INTO minion_v2_task_projection(
+                task_id, state, title, objective, family_id, workspace_key,
+                task_revision_sha, owner, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id) DO UPDATE SET
+                state = excluded.state,
+                title = excluded.title,
+                objective = excluded.objective,
+                workspace_key = excluded.workspace_key,
+                task_revision_sha = excluded.task_revision_sha,
+                owner = excluded.owner,
+                updated_at = excluded.updated_at
+            """,
+            (
+                snapshot.aggregate_id,
+                snapshot.state,
+                str(payload.get("title") or ""),
+                str(payload.get("objective") or ""),
+                str(payload.get("family_id") or ""),
+                str(payload.get("workspace_key") or ""),
+                str(revision_ref.get("sha256") or ""),
+                str(payload.get("owner") or ""),
                 snapshot.updated_at,
             ),
         )

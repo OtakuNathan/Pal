@@ -64,11 +64,11 @@ from pal.plugins import PluginHost, register_with_core as register_plugins_with_
 from pal.plugins.l3 import MockL3Plugin, register_with_core as register_l3_with_core
 from pal.proactive import ProactiveDefinition, ProactiveManager, ProactiveRepository, ProactiveRunner, ProactiveTriggerEvent, build_proactive_trigger_input, register_with_core as register_proactive_with_core
 from pal.proactive.scheduling import compute_next_proactive_run_at_utc, utc_now_dt
-from pal.shared import EventKind, LLMStreamEventKind, MinionProgressEvent, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, capability_action, capability_node, default_tool_result_text
+from pal.shared import EventKind, LLMStreamEventKind, OPERATION_NAMESPACE, PromptAssemblyContext, RuntimeStatus, SINGLETON_TARGET, capability_action, capability_node, default_tool_result_text
 from pal.shared.prompt_dates import today_for_timezone
 from pal.stream_events import NormalizedLLMStreamEvent
 from pal.wizard import WizardService
-from pal.minion import TaskingService, register_with_core as register_minion_with_core
+from pal.minion import register_with_core as register_minion_with_core
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -394,7 +394,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.llm": ("LLMIntrospectionProvider", "register_with_core", "inspect_llm"),
             "pal.memory": ("MemoryIntrospectionProvider", "register_with_core", "inspect_memory"),
             "pal.execution": ("ExecutionIntrospectionProvider", "register_with_core", "inspect_execution"),
-            "pal.minion": ("TaskingIntrospectionProvider", "register_with_core", "inspect_tasking"),
+            "pal.minion": ("MinionV2WorkflowService", "register_with_core", "inspect_minion"),
             "pal.proactive": ("ProactiveIntrospectionProvider", "register_with_core", "inspect_proactive"),
             "pal.web_search": ("WebSearchIntrospectionProvider", "register_with_core", "inspect_web_search"),
             "pal.web_fetch": ("WebFetchIntrospectionProvider", "register_with_core", "inspect_web_fetch"),
@@ -404,7 +404,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             "pal.bootstrap": ("inspect_bootstrap",),
             "pal.wizard": ("inspect_wizard",),
             "pal.plugins.l3": ("register_with_core",),
-            "pal.minion": ("inspect_minion", "inspect_tasking"),
         }
         for module_name, symbols in exports.items():
             module = importlib.import_module(module_name)
@@ -442,8 +441,8 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
     def test_minion_does_not_depend_on_user_facing_channel_modules(self) -> None:
         for relative_path in (
-            "src/pal/minion/contracts.py",
-            "src/pal/minion/runtime.py",
+            "src/pal/minion/v2/contracts.py",
+            "src/pal/minion/v2/service.py",
         ):
             self._assert_no_forbidden_imports(
                 ROOT / relative_path,
@@ -581,7 +580,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core = PalCore()
         register_core_with_core(core)
         register_execution_with_core(core.context)
-        register_minion_with_core(core.context, TaskingService())
+        register_minion_with_core(core.context)
 
         core.publish_module_capabilities("core")
         core.publish_module_capabilities("execution")
@@ -1294,8 +1293,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             register_core_with_core(core)
             proactive_manager = ProactiveManager()
             proactive_manager.register(ProactiveDefinition(proactive_id="digest", goal="Summarize updates"))
-            tasking_service = TaskingService()
-            tasking_service.build_context_pack(work_order_id="wo-1", goal="Ship prompt registry")
             memory_service = MemoryService(l3_selector=L3ProviderSelector(resolver=core.context.execution_runtime.l3_plugin_registry.require))
             memory_service.l1_store.append(
                 [
@@ -1320,7 +1317,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
 
             register_identity_with_core(core.context, identity_service)
             register_control_with_core(core.context, ControlPlane())
-            register_minion_with_core(core.context, tasking_service)
+            register_minion_with_core(core.context)
             register_proactive_with_core(core.context, proactive_manager)
             register_memory_with_core(core.context, memory_service)
 
@@ -1335,7 +1332,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "system_map",
                     "source_of_truth",
                     "prompt_context_policy",
-                    "task_flow",
                     "operating_rules",
                     "operating_guidance",
                     "priority",
@@ -1373,7 +1369,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                     "prompt_context_policy",
                     "operating_rules",
                     "priority",
-                    "task_flow",
                     "mutation_policy",
                     "memory_guide",
                     "knowledge_storage_boundary",
@@ -1398,10 +1393,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertIn("<prompt_context_policy>", prompt.messages[0]["content"])
             self.assertIn("<operating_rules>", prompt.messages[0]["content"])
             self.assertIn("<priority>", prompt.messages[0]["content"])
-            self.assertIn("<task_flow>", prompt.messages[0]["content"])
-            self.assertIn("Minion Usage", prompt.messages[0]["content"])
-            self.assertIn("minion_start_workflow", prompt.messages[0]["content"])
-            self.assertIn("minion_workflow_status", prompt.messages[0]["content"])
+            self.assertNotIn("<task_flow>", prompt.messages[0]["content"])
             self.assertNotIn("minion_task_search", prompt.messages[0]["content"])
             self.assertNotIn("minion_dispatch_workflow", prompt.messages[0]["content"])
             self.assertNotIn("<tool_efficiency>", prompt.messages[0]["content"])
@@ -1428,7 +1420,6 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             self.assertLess(prompt.messages[0]["content"].index("<source_of_truth>"), prompt.messages[0]["content"].index("<prompt_context_policy>"))
             self.assertLess(prompt.messages[0]["content"].index("<prompt_context_policy>"), prompt.messages[0]["content"].index("<operating_rules>"))
             self.assertLess(prompt.messages[0]["content"].index("<operating_rules>"), prompt.messages[0]["content"].index("<priority>"))
-            self.assertLess(prompt.messages[0]["content"].index("<priority>"), prompt.messages[0]["content"].index("<task_flow>"))
             self.assertLess(prompt.messages[0]["content"].index("<mutation_policy>"), prompt.messages[0]["content"].index("<memory_guide>"))
             self.assertNotIn("<runtime_overlay>", prompt.messages[0]["content"])
             self.assertNotIn("<memory_projection>", prompt.messages[0]["content"])
@@ -1723,11 +1714,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core = PalCore()
         channel_runtime = ChannelRuntime()
         proactive_manager = ProactiveManager()
-        tasking_service = TaskingService()
 
         register_channel_with_core(core.context, channel_runtime)
         register_proactive_with_core(core.context, proactive_manager)
-        register_minion_with_core(core.context, tasking_service)
+        register_minion_with_core(core.context)
         register_control_with_core(core.context, ControlPlane())
 
         channel_runtime.emit(
@@ -1742,8 +1732,9 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
             )
         )
         proactive_manager.enqueue_trigger(ProactiveTriggerEvent(proactive_id="svc-1", trigger_kind="manual"))
-        tasking_service.enqueue_minion_progress(
-            MinionProgressEvent(work_order_id="wo-1", summary="started")
+        minion_provider = core.context.port_registry["minion:minion"]
+        minion_provider._buffer_event(
+            {"event_kind": "terminal", "work_order_id": "wf-1", "payload": {"summary": "completed"}}
         )
 
         processed = core.run_until_idle()
@@ -1751,7 +1742,7 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         processed_kinds = [item.event_kind for item in processed]
         self.assertIn("slash_command", processed_kinds)
         self.assertIn("proactive.trigger", processed_kinds)
-        self.assertIn("minion.progress", processed_kinds)
+        self.assertIn("minion.terminal", processed_kinds)
         self.assertIn("control.action", processed_kinds)
 
     def test_foundation_modules_do_not_publish_lifecycle_capabilities(self) -> None:
@@ -1813,25 +1804,21 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
     def test_detachable_module_detach_withdraws_capabilities_and_reattach_restores_them(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_lifecycle_test_") as tmp:
             core = PalCore()
-            tasking_service = TaskingService()
-            register_minion_with_core(core.context, tasking_service, runtime_root=Path(tmp))
+            register_minion_with_core(core.context, runtime_root=Path(tmp))
             core.publish_module_capabilities("minion")
             try:
                 self.assertIn("minion_workflow_status", core.context.capability_registry.descriptors)
                 self.assertIn("minion.manager", core.context.event_source_registry.sources)
-                self.assertIn("minion.prompt.default", core.context.prompt_fragment_registry.providers)
 
                 detached = core.detach_module("minion")
                 self.assertEqual(detached, "ok")
                 self.assertNotIn("minion_workflow_status", core.context.capability_registry.descriptors)
                 self.assertNotIn("minion.manager", core.context.event_source_registry.sources)
-                self.assertNotIn("minion.prompt.default", core.context.prompt_fragment_registry.providers)
 
                 reattached = core.reattach_module("minion")
                 self.assertEqual(reattached, "ok")
                 self.assertIn("minion_workflow_status", core.context.capability_registry.descriptors)
                 self.assertIn("minion.manager", core.context.event_source_registry.sources)
-                self.assertIn("minion.prompt.default", core.context.prompt_fragment_registry.providers)
                 observed = core.context.execution_runtime.execute(
                     CapabilityCall(name="minion_workflow_status", args={"workflow_id": "wf_missing"})
                 )

@@ -1,0 +1,38 @@
+profile_id = "contract_planner"
+display_name = "Lifestyle Contract Planner"
+profile_group = "lifestyle"
+preferred_endpoint_id = ""
+skill_refs = []
+identity_fragment = """
+You turn approved lifestyle requirements and evidence into a small executable unit DAG. You do not produce the final check-in.
+"""
+behavior_fragment = """
+Define bounded units, artifact ownership, provided and consumed data contracts, lifecycle/state only where real state exists, invariants, error behavior,
+requirement/evidence bindings, verification obligations, and an acyclic start-blocking topology. Keep personalized-input normalization separate from report
+assembly when useful. Add an integration contract for the final artifact and preserve the non-medical boundary. Do not add milestones, implementation
+checklists, test matrices, or function-level steps.
+"""
+output_contract_fragment = """
+Use only Contract Sketch Builder batch tools, validate, and contract_submit_sketch. Pal writes architecture_bundle.json.
+"""
+capability_groups = ["workspace_read", "v2_contract_sketch_builder"]
+
+[capability_policy]
+mode = "profile_only"
+risk = "read_only"
+
+[workspace_policy]
+mode = "read_only_repo"
+
+[completion_policy]
+evidence = "text_deliverable"
+requires_capability_evidence = true
+
+[output_policy]
+requires_plan_artifact = false
+primary_artifact = "architecture_bundle.json"
+allowed_output_types = ["ArchitecturePlanningStageOutput"]
+
+[metadata]
+builtin = true
+max_output_tokens = 32768

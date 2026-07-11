@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from pal.execution.contracts import CapabilityCall, CapabilityDescriptor, CapabilityResult
+from pal.shared.tool_aliases import llm_tool_name
 
 
 INTROSPECTION_NAMESPACE = "introspection"
@@ -194,17 +195,18 @@ class CompiledCapabilityIndex:
         if descriptor.name not in canonical_bucket:
             canonical_bucket.append(descriptor.name)
         explicit_aliases = _descriptor_explicit_routing_aliases(descriptor)
-        derived_alias = _descriptor_instance_base_alias(descriptor)
-        derived_aliases: tuple[str, ...] = ()
+        derived_aliases: list[str] = []
         for alias in explicit_aliases:
             self._register_alias_record(alias, descriptor.name, derived=False)
-        if derived_alias and not self.by_canonical.get(derived_alias):
+        for derived_alias in _descriptor_derived_routing_aliases(descriptor):
+            if self.by_canonical.get(derived_alias):
+                continue
             explicit_target = self._alias_target(self.explicit_alias_records.get(derived_alias, []))
             if explicit_target in {None, canonical_path}:
                 self._register_alias_record(derived_alias, descriptor.name, derived=True)
-                derived_aliases = (derived_alias,)
+                derived_aliases.append(derived_alias)
         self.record_explicit_aliases[descriptor.name] = explicit_aliases
-        self.record_derived_aliases[descriptor.name] = derived_aliases
+        self.record_derived_aliases[descriptor.name] = tuple(derived_aliases)
         self.record_aliases[descriptor.name] = (*explicit_aliases, *derived_aliases)
 
     def unregister_many(self, record_ids: list[str]) -> None:
@@ -330,12 +332,16 @@ def _descriptor_explicit_routing_aliases(descriptor: CapabilityDescriptor) -> tu
     )
 
 
-def _descriptor_instance_base_alias(descriptor: CapabilityDescriptor) -> str:
+def _descriptor_derived_routing_aliases(descriptor: CapabilityDescriptor) -> tuple[str, ...]:
+    canonical_path = str(descriptor.canonical_path or descriptor.name).strip()
+    candidates = [llm_tool_name(canonical_path)]
     if not descriptor.target_id or descriptor.target_id == SINGLETON_TARGET:
-        return ""
+        return tuple(alias for alias in dict.fromkeys(candidates) if alias and alias != canonical_path)
     descriptor_name = str(descriptor.name or "").strip()
     instance_base_name, separator, _ = descriptor_name.rpartition("::")
-    return instance_base_name if separator else ""
+    if separator:
+        candidates.append(instance_base_name)
+    return tuple(alias for alias in dict.fromkeys(candidates) if alias and alias != canonical_path)
 
 
 def capability_node(

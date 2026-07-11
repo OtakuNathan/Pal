@@ -73,17 +73,7 @@ from pal.shared.tool_aliases import (
     replace_internal_tool_names,
     replace_internal_tool_names_in_value,
 )
-from pal.shared.messages import (
-    CheckpointEvent,
-    MinionApprovalDecision,
-    MinionApprovalRequest,
-    MinionEvent,
-    MinionProgressEvent,
-    MinionRun,
-    MinionTerminalEvent,
-    ProactiveTriggerEvent,
-    TaskContextPack,
-)
+from pal.shared.messages import MinionApprovalDecision, MinionInvocationPack, ProactiveTriggerEvent
 from pal.shared.payloads import extract_text_from_payload
 
 __all__ = [
@@ -93,7 +83,6 @@ __all__ = [
     "CapabilityActionBlueprint",
     "CapabilityForestRegistry",
     "CapabilityNodeBlueprint",
-    "CheckpointEvent",
     "ChannelAdapter",
     "ChannelDeliveryError",
     "ChannelEnvelope",
@@ -116,11 +105,6 @@ __all__ = [
     "LLMStreamEventKind",
     "MountedSubtreeHandle",
     "MinionApprovalDecision",
-    "MinionApprovalRequest",
-    "MinionEvent",
-    "MinionProgressEvent",
-    "MinionRun",
-    "MinionTerminalEvent",
     "OPERATION_NAMESPACE",
     "IntrospectionPort",
     "IntrospectionResult",
@@ -148,7 +132,7 @@ __all__ = [
     "capability_node",
     "dedicated_tool_route_hints",
     "standard_descriptors",
-    "TaskContextPack",
+    "MinionInvocationPack",
     "append_tool_protocol_messages",
     "assistant_tool_message",
     "extract_text_from_payload",

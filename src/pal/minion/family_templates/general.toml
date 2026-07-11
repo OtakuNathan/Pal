@@ -2,11 +2,45 @@ family_id = "general"
 display_name = "General"
 domain = "Generic bounded task execution when no registered domain family fits."
 domain_keywords = ["general", "generic", "task"]
-default_executor_profile = "general.generic"
-dag_producer_profile = ""
+workflow_template = "contract_dag.v2"
+
+[roles]
+requirements = "general.requirements_analyst"
+research = "general.researcher"
+planner = "general.contract_planner"
+architecture_reviewer = "general.architecture_reviewer"
+producer = "generic"
+repair = "generic"
+verifier = "general.verifier"
+
+[builders]
+requirements = "requirements.v2"
+evidence = "evidence_catalog.v2"
+contract = "contract_sketch.v2"
+verification = "verification.v2"
+
+[adapters]
+workspace = "artifact_bundle.v2"
+candidate = "artifact_bundle.v2"
+verification = "artifact_bundle.v2"
+integration = "artifact_bundle.v2"
+publisher = "artifact_bundle.v2"
+
+[policies.llm]
+temperature = 0.05
+llm_round_timeout_seconds = 3000
+
+[policies.verification]
+require_focused_tests = true
+require_historical_regressions = true
+unknown_policy = "strict"
+case_timeout_seconds = 300
 
 [metadata]
 builtin = true
 
-[capability_groups.general_report]
-include = ["core_minion_read", "minion_artifacts", "minion_memory_candidates"]
+[capability_groups.generic_producer]
+include = ["workspace_read", "workspace_write", "verification_shell", "minion_artifacts"]
+
+[capability_groups.generic_verifier]
+include = ["workspace_read", "verification_shell", "minion_artifacts"]

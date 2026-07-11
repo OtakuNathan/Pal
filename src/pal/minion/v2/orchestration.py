@@ -29,6 +29,7 @@ MECHANICAL_EFFECT_TYPES = frozenset({
     "create_architecture_revision",
     "schedule_ready_nodes",
     "notify_node_accepted",
+    "publish_accepted_memory_candidate",
     "queue_integration_node",
     "propagate_pause",
     "propagate_resume",
@@ -172,6 +173,8 @@ class MinionV2OutboxProcessor:
             return {}
         if effect_type == "notify_node_accepted":
             return self._node_accepted(effect)
+        if effect_type == "publish_accepted_memory_candidate":
+            return self._publish_accepted_memory_candidate(effect)
         if effect_type in {"propagate_pause", "propagate_resume", "propagate_cancel"}:
             return self._propagate_workflow_control(effect_type, effect)
         if effect_type in {"pause_epoch_nodes", "resume_epoch_nodes", "cancel_epoch_nodes"}:
@@ -200,7 +203,7 @@ class MinionV2OutboxProcessor:
                     actor="minion-v2-manager",
                     expected_version=workflow.version,
                     idempotency_key=f"effect:{effect['effect_key']}:workflow-complete",
-                    payload={"result_artifact_ref": epoch.payload.get("published_branch_ref")},
+                    payload={"result_artifact_ref": epoch.payload.get("published_deliverable_ref")},
                 )
             )
             return {}
@@ -261,7 +264,7 @@ class MinionV2OutboxProcessor:
             return {}
         if epoch.state == "FINALIZING":
             return await self.semantic_effects.execute_semantic_effect(
-                {**dict(effect), "effect_type": "publish_final_branch"}
+                {**dict(effect), "effect_type": "publish_final_deliverable"}
             )
         if epoch.state == "STARTING":
             nodes = [
@@ -510,6 +513,70 @@ class MinionV2OutboxProcessor:
             max_new_nodes=self.max_parallel_nodes,
         )
         return {}
+
+    def _publish_accepted_memory_candidate(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
+        node = self._effect_snapshot(effect)
+        if node.state != "ACCEPTED" or str(node.payload.get("node_kind") or "") == "integration":
+            return {}
+        if node.payload.get("memory_candidate_ref"):
+            return {"result_artifact_ref": dict(node.payload["memory_candidate_ref"])}
+        epoch_id = str(node.payload.get("epoch_id") or "")
+        memory_candidate_ref = self.service.artifacts.put_json(
+            {
+                "schema_version": "1",
+                "candidate_kind": "accepted_unit_learning",
+                "review_status": "pending_human_review",
+                "workflow_id": node.workflow_id,
+                "epoch_id": epoch_id,
+                "node_run_id": node.aggregate_id,
+                "unit_id": str(node.payload.get("unit_id") or ""),
+                "unit_contract_ref": dict(node.payload.get("unit_contract_ref") or {}),
+                "candidate_ref": dict(node.payload.get("candidate_ref") or {}),
+                "verification_artifact_ref": dict(node.payload.get("verification_artifact_ref") or {}),
+                "historical_repair_bill_refs": [
+                    dict(item)
+                    for item in list(node.payload.get("historical_repair_bill_refs") or [])
+                    if isinstance(item, Mapping)
+                ],
+                "architecture_manifest_ref": dict(node.payload.get("architecture_manifest_ref") or {}),
+                "publication_rule": "Pal or the user must review this candidate before long-term memory publication.",
+                "validity_rule": "Publish only while this node remains ACCEPTED in the active execution epoch; STALE or superseded nodes invalidate the candidate.",
+            },
+            artifact_type="AcceptedModuleMemoryCandidateArtifact",
+            child_refs=tuple(
+                [
+                    (str(ref.get("sha256")), relation)
+                    for relation, ref in (
+                        ("unit_contract", dict(node.payload.get("unit_contract_ref") or {})),
+                        ("candidate", dict(node.payload.get("candidate_ref") or {})),
+                        ("verification", dict(node.payload.get("verification_artifact_ref") or {})),
+                        ("architecture_manifest", dict(node.payload.get("architecture_manifest_ref") or {})),
+                    )
+                    if ref.get("sha256")
+                ]
+                + [
+                    (str(ref.get("sha256")), "repair_bill")
+                    for ref in list(node.payload.get("historical_repair_bill_refs") or [])
+                    if isinstance(ref, Mapping) and ref.get("sha256")
+                ]
+            ),
+            provenance={"workflow_id": node.workflow_id, "node_run_id": node.aggregate_id},
+        )
+        current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
+        if current is not None and not current.payload.get("memory_candidate_ref"):
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="MEMORY_CANDIDATE_PUBLISHED",
+                    workflow_id=node.workflow_id,
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=node.aggregate_id,
+                    actor="minion-v2-outbox",
+                    expected_version=current.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:memory-candidate",
+                    payload={"memory_candidate_ref": memory_candidate_ref.to_dict()},
+                )
+            )
+        return {"result_artifact_ref": memory_candidate_ref.to_dict()}
 
     def _propagate_workflow_control(self, effect_type: str, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         workflow = self._effect_snapshot(effect)

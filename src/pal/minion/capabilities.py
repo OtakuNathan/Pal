@@ -1,80 +1,34 @@
 from __future__ import annotations
 
-import contextlib
 import asyncio
-import json
+import contextlib
+import os
+import signal
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
-from pal.behavior.decorators import affordance
-from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.control import ControlAction
-from pal.minion.interactions import (
-    minion_question_answers,
-    minion_question_ready,
-    minion_question_resolve_delivery,
-    minion_question_session,
-    minion_question_session_with_selection,
-    minion_question_update_delivery,
-)
-from pal.execution.contracts import CapabilityCall, CapabilityResult
-from pal.foundation import BoundedTTLBuffer, utc_now
-from pal.foundation.service_logging import current_service_log_sink_description
+from pal.core.module_registry import MODULE_TIER_DETACHABLE, ModuleHandle
 from pal.foundation.sidecar import pack_sidecar_message, read_sidecar_message
-from pal.memory.candidates import l3_commit_args_from_memory_candidate
-from pal.minion.capability_args import (
-    normalize_top_level_review_gate_args,
-    validate_draft_work_order_args,
-    validate_promote_work_order_args,
-)
-from pal.minion.checklist import build_requirements_checklist, requirements_checklist_to_gate_contract
-from pal.minion.config import effective_minion_runtime_config, merge_minion_runtime_config
-from pal.minion.dag_producer import (
-    build_generic_single_node_plan_artifact,
-    dag_producer_profile_for_family,
-    resolve_default_executor_profile,
-)
-from pal.minion.ipc import MinionManagerClient, minion_port_path, open_manager_connection, python_subprocess_env
-from pal.minion.profiles import MinionProfileRegistry
-from pal.minion.prompt import TaskingPromptFragmentProvider
-from pal.minion.repository import MinionTaskingRepository
-from pal.minion.skills import (
-    PAL_MINION_DEVELOPMENT_SKILL_ID,
-    PAL_MINION_PROFILE_DEVELOPMENT_SKILL_ID,
-    minion_declared_skills,
+from pal.minion.ipc import (
+    MinionManagerClient,
+    minion_port_path,
+    open_manager_connection,
+    python_subprocess_env,
 )
 from pal.minion.source import MinionControlEventHandler, MinionEventSource
-from pal.minion.validation import MinionWorkOrderValidationError
 from pal.minion.v2.capabilities import MinionV2PublicProvider
-from pal.minion.workflow import (
-    append_workflow_step,
-    split_profile_ref,
-)
-from pal.minion.work_order import build_planner_work_order, new_work_id, prompt_view_from_metadata
-from pal.shared import (
-    INTROSPECTION_NAMESPACE,
-    OPERATION_NAMESPACE,
-    EventKind,
-    IntrospectionCall,
-    IntrospectionResult,
-    RuntimeStatus,
-    TaskContextPack,
-    capability_action,
-    capability_node,
-)
-from pal.shared.result_rendering import render_titled_structured_for_llm
+from pal.minion.v2.service import MinionV2WorkflowService
+from pal.shared import EventKind
 
 if TYPE_CHECKING:
     from pal.core.main_context import MainContext
-
-
-MINION_OBSERVATION_TTL_SECONDS = 6 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -87,2269 +41,59 @@ class MinionSnapshot:
     pending_event_count: int = 0
 
 
-class MinionIntrospection(Protocol):
-    def show(self, call: IntrospectionCall) -> IntrospectionResult:
-        ...
-
-
-@capability_node(
-    namespace=INTROSPECTION_NAMESPACE,
-    scope="module",
-    kind="module",
-    source="builtin:minion",
-    target_kind="module",
-)
-@capability_node(
-    namespace=INTROSPECTION_NAMESPACE,
-    scope="minion",
-    kind="module",
-    source="builtin:minion",
-    target_kind="module",
-)
-@capability_node(
-    namespace=INTROSPECTION_NAMESPACE,
-    scope="minion_task",
-    path_module_id="minion_task",
-    kind="module",
-    source="builtin:minion",
-    target_kind="task",
-)
-@capability_node(
-    namespace=INTROSPECTION_NAMESPACE,
-    scope="minion_work_order",
-    path_module_id="minion_work_order",
-    kind="module",
-    source="builtin:minion",
-    target_kind="work_order",
-)
-@capability_node(
-    namespace=INTROSPECTION_NAMESPACE,
-    scope="minion_work_order_draft",
-    path_module_id="minion_work_order_draft",
-    kind="module",
-    source="builtin:minion",
-    target_kind="work_order_draft",
-)
-@capability_node(
-    namespace=OPERATION_NAMESPACE,
-    scope="minion_task",
-    path_module_id="minion_task",
-    kind="module",
-    source="builtin:minion",
-    target_kind="task",
-)
-@capability_node(
-    namespace=OPERATION_NAMESPACE,
-    scope="minion",
-    kind="module",
-    source="builtin:minion",
-    target_kind="module",
-)
-@affordance(
-    affordance_id="declared.minion.delegate_professional_work",
-    title="Delegate professional work to Minion",
-    scenario_text=(
-        "Use Minion for professional, asynchronous, module-scoped work that can be captured as SPEC, work order, "
-        "and milestones. Good fits include code implementation, repository research, test repair, module review, "
-        "long-running investigation, and task handoff where user-personal immediate judgment is weak."
-    ),
-    prompt_hint=(
-        "Consider Minion when the task is professional, async-friendly, and can be bounded by SPEC/work order/milestones. "
-        "Pal remains responsible for user interaction, fact checks, progress reporting, and confirmation. "
-        "Before dispatch, search existing tasks with intro_minion_task_search; reuse a matching task_id or create one with "
-        "op_minion_task_create so profile_family is bound once at the long-lived task layer. Then dispatch with "
-        "op_minion_dispatch_workflow(task_id=...). Pal owns requirements shaping, and the manager owns internal profile "
-        "dispatch, plan review, plan acceptance control, and module dispatch. Use intro_minion_profile_list/read only when "
-        "the user asks about available profiles or requests a specific profile. "
-        "Do not use Minion for casual chat, simple Q&A, one-call capabilities, "
-        "memory/preference correction, or tasks needing continuous user interaction."
-    ),
-    activation_terms=(
-        "minion",
-        "delegate",
-        "asynchronous",
-        "async",
-        "professional",
-        "module",
-        "module-scoped",
-        "spec",
-        "work order",
-        "milestone",
-        "research",
-        "implementation",
-        "test repair",
-        "long-running",
-        "handoff",
-        "planner",
-        "profile",
-        "role",
-        "draft",
-    ),
-    capability_refs=(
-        "intro_minion_task_search",
-        "intro_minion_task_read",
-        "op_minion_task_create",
-        "op_minion_dispatch_workflow",
-        "op_minion_accept_reviewed_plan",
-        "op_minion_request_reviewed_plan_revision",
-        "intro_minion_profile_list",
-        "intro_minion_profile_read",
-        "intro_minion_plan_search",
-        "intro_minion_plan_read",
-        "intro_minion_list",
-        "intro_minion_read",
-        "op_minion_configure",
-        "intro_minion_work_order_search",
-        "intro_minion_work_order_read",
-        "op_minion_recover_work_order",
-        "op_minion_resume_work_order",
-        "op_minion_destroy_work_order_run",
-        "op_minion_archive_work_order",
-        "op_minion_remove_work_order",
-        "op_minion_submit_repair_bill",
-    ),
-    priority=90,
-    activation_threshold=0.35,
-    metadata={"route_family": "minion", "resident": False},
-)
-@affordance(
-    affordance_id="declared.minion.natural_language_takeover",
-    title="Control or inspect active Minion work",
-    scenario_text=(
-        "Use this when the user asks what a minion is doing, asks progress, says to replace it, continue a task, "
-        "kill a worker, or finalize completed minion work."
-    ),
-    prompt_hint=(
-        "For minion progress/control requests, inspect minion and work-order facts first. Use intro_minion_list/read "
-        "and intro_minion_work_order_search/read; do not infer progress or current worker from chat. If the user says to recover stale "
-        "running_module state, use op_minion_recover_work_order. If a module is blocked by provider failure, timeout, or interruption "
-        "and should continue from its existing milestone cursor, use op_minion_resume_work_order and then op_minion_tick_parent_dag. "
-        "If the user requests changes to a reviewer-passed plan, use op_minion_request_reviewed_plan_revision with the exact edit "
-        "instruction; do not depend on an earlier channel button still being available. "
-        "If the user says to replace or destroy a run, resolve the active run "
-        "and work order, call op_minion_destroy_work_order_run, then use the work-order control path when appropriate. "
-        "A task may have a parent work order plus one active module child; inspect the work-order fact snapshot before finalizing. "
-        "If the user wants old or useless work orders hidden from lists, use op_minion_archive_work_order; use "
-        "op_minion_remove_work_order only for deliberate hard deletion, normally after archiving."
-    ),
-    activation_terms=(
-        "minion",
-        "worker",
-        "work order",
-        "progress",
-        "doing",
-        "status",
-        "replace",
-        "swap",
-        "kill",
-        "continue",
-        "resume",
-        "finalize",
-        "merge",
-        "archive",
-        "edit plan",
-        "revise plan",
-        "remove",
-        "delete",
-        "cleanup",
-        "clean up",
-        "清理",
-        "归档",
-        "删除",
-        "换掉",
-        "继续",
-        "修改计划",
-        "修订计划",
-        "进度",
-        "在干嘛",
-        "合并",
-    ),
-    capability_refs=(
-        "intro_minion_list",
-        "intro_minion_read",
-        "intro_minion_work_order_search",
-        "intro_minion_work_order_read",
-        "op_minion_kill",
-        "op_minion_configure",
-        "op_minion_destroy_work_order_run",
-        "op_minion_archive_work_order",
-        "op_minion_remove_work_order",
-        "op_minion_recover_work_order",
-        "op_minion_resume_work_order",
-        "op_minion_tick_parent_dag",
-        "op_minion_accept_reviewed_plan",
-        "op_minion_request_reviewed_plan_revision",
-        "op_minion_finalize",
-        "op_minion_submit_repair_bill",
-    ),
-    priority=95,
-    activation_threshold=0.3,
-    metadata={"route_family": "minion", "resident": False},
-)
-@affordance(
-    affordance_id="declared.skill.pal_minion_profile_development",
-    title="Pal minion profile development skill",
-    scenario_text=(
-        "The user wants to create, repair, review, or explain a Minion profile TOML file, profile capability groups, "
-        "workspace policy, gate policy, output policy, workflow_next, or runtime profile override."
-    ),
-    prompt_hint=(
-        "If this route is selected, inject skill `pal.minion.profile.development` before creating or changing Minion "
-        "profile TOML, capability_groups, workspace_policy, capability_policy, gate_policy, output_policy, or workflow_next."
-    ),
-    activation_terms=(
-        "new minion profile",
-        "create minion profile",
-        "build minion profile",
-        "minion profile toml",
-        "profile_group",
-        "profile_id",
-        "capability_groups",
-        "capability_policy",
-        "workspace_policy",
-        "workspace_environment",
-        "output_policy",
-        "workflow_next",
-        "profile_only",
-        "inherit_filtered",
-        "runtime profile",
-        "plugins/minion/profiles",
-        "构建 profile",
-        "新 profile",
-        "profile 模板",
-        "profile toml",
-    ),
-    skill_refs=(PAL_MINION_PROFILE_DEVELOPMENT_SKILL_ID,),
-    priority=45,
-    activation_threshold=0.2,
-    metadata={"skill_trigger": True, "resident": False, "extension_boundary": "minion.profiles"},
-)
-@affordance(
-    affordance_id="declared.skill.pal_minion_development",
-    title="Pal minion development skill",
-    scenario_text=(
-        "The user wants to add, repair, organize, or explain Minion workflow dispatch, profiles, scheduler/concurrency, "
-        "step executor behavior, runner coroutine isolation, workspace environment setup, repair bill replay, gate policy, reviewer gates, or gate ledgers."
-    ),
-    prompt_hint=(
-        "If this route is selected, inject skill `pal.minion.development` before changing Minion workflow, profiles, "
-        "scheduler/resource slots, step executor behavior, runner coroutine isolation, workspace environment setup, repair bill replay, gate definitions, "
-        "profile gate_policy wiring, reviewer strategy behavior, or repair ledger projection."
-    ),
-    activation_terms=(
-        "minion development",
-        "minion workflow",
-        "dispatch_workflow",
-        "workflow_next",
-        "minion profile",
-        "minion scheduler",
-        "resource slot",
-        "step executor",
-        "runner coroutine",
-        "repair bill",
-        "repair replay",
-        "workspace environment",
-        "minion gate",
-        "gate policy",
-        "gate definition",
-        "GateDefinition",
-        "GateChecklistEntry",
-        "GateSpec",
-        "checkpoint_quality",
-        "plan_acceptance",
-        "reviewer gate",
-        "repair loop",
-        "gate ledger",
-        "active_gate_todo",
-        "acceptance checklist",
-        "minion gate policy",
-        "reviewer repair",
-        "门禁",
-        "gate 策略",
-        "reviewer gate",
-        "检查清单",
-        "minion 调度",
-        "step executor",
-        "runner 协程",
-        "修复账单",
-    ),
-    skill_refs=(PAL_MINION_DEVELOPMENT_SKILL_ID,),
-    priority=40,
-    activation_threshold=0.2,
-    metadata={"skill_trigger": True, "resident": False, "extension_boundary": "minion"},
-)
 @dataclass
 class MinionManagerProvider:
     runtime_root: Path
     context: MainContext | None = None
-    mounted: bool = True
-    degraded: bool = False
-    process: subprocess.Popen | None = None
-    last_error: str = ""
+    process: subprocess.Popen[bytes] | None = None
     last_health: dict[str, Any] = field(default_factory=dict)
-    _buffered_events: list[dict[str, Any]] = field(default_factory=list)
-    _buffer_lock: threading.Lock = field(default_factory=threading.Lock)
-    _seen_event_keys: set[str] = field(default_factory=set)
-    _event_subscription_stop: threading.Event = field(default_factory=threading.Event)
-    _event_subscription_thread: threading.Thread | None = None
-    _event_subscription_active: bool = False
-    event_notify: Any | None = None
-    recent_observations: BoundedTTLBuffer[dict[str, Any]] = field(
-        default_factory=lambda: BoundedTTLBuffer(capacity=10, ttl_seconds=MINION_OBSERVATION_TTL_SECONDS)
-    )
-    client: MinionManagerClient = field(init=False)
+    last_error: str = ""
+    event_notify: Callable[[], None] | None = None
+    _buffered_events: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    _seen_event_keys: set[str] = field(default_factory=set, init=False, repr=False)
+    _buffer_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _event_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+    _event_stop: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
+    _lifecycle_lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    _attached: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.client = MinionManagerClient(runtime_root=self.runtime_root)
+        self.runtime_root = Path(self.runtime_root)
+        self.client = MinionManagerClient(self.runtime_root)
+        self._lifecycle_client = MinionManagerClient(self.runtime_root, request_timeout_seconds=5.0)
 
-    def declared_skills(self):
-        return minion_declared_skills(module_id="minion")
+    def attach_manager(self) -> dict[str, Any]:
+        with self._lifecycle_lock:
+            if self._attached:
+                return self._require_manager()
+            try:
+                health = self._start_manager()
+                self._attached = True
+                self.last_health = health
+                self.last_error = ""
+                self._start_event_subscription()
+                self.client.request_sync("v2_wake")
+                return health
+            except Exception as exc:
+                self.last_error = f"{exc.__class__.__name__}: {exc}"
+                self._attached = False
+                self._stop_manager_locked()
+                raise
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="module", action_name="show", description="Show minion manager status")
-    def show(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        if self.mounted:
-            self._refresh_health_snapshot()
-        payload = self._status_payload()
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="minion manager status",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Minion manager status", payload),
-        )
+    def detach_manager(self) -> None:
+        with self._lifecycle_lock:
+            if not self._attached and self.process is None and self._event_thread is None:
+                return
+            self._attached = False
+            try:
+                self._stop_manager_locked()
+            except Exception:
+                self._attached = self._manager_is_responding()
+                raise
 
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="minion", action_name="list", description="List minion runs")
-    def list_runs(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        result = self._request_or_error("list_runs")
-        return _introspection_from_rpc("Minion runs", result)
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="minion",
-        action_name="read",
-        description="Read one minion run",
-        args_schema={"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"]},
-    )
-    def read_run(self, call: IntrospectionCall) -> IntrospectionResult:
-        result = self._request_or_error("read_run", {"run_id": str(call.args.get("run_id") or "")})
-        return _introspection_from_rpc("Minion run", result)
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="minion_task",
-        action_name="search",
-        description="Search minion tasks by natural language",
-        args_schema={
-            "type": "object",
-            "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
-            "required": ["query"],
-        },
-    )
-    def search_tasks(self, call: IntrospectionCall) -> IntrospectionResult:
-        payload = self._repository().search_tasks(str(call.args.get("query") or ""), limit=int(call.args.get("limit") or 10))
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="minion task search",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Minion task search", payload),
-        )
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="minion_task",
-        action_name="read",
-        description="Read a minion task fact snapshot",
-        args_schema={
-            "type": "object",
-            "properties": {"task_id": {"type": "string"}, "include_archived": {"type": "boolean", "default": False}},
-            "required": ["task_id"],
-        },
-    )
-    def read_task(self, call: IntrospectionCall) -> IntrospectionResult:
-        payload = self._repository().read_task(
-            str(call.args.get("task_id") or ""),
-            include_archived=bool(call.args.get("include_archived")),
-        )
-        return _introspection_from_rpc("Minion task", payload)
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="minion_work_order",
-        action_name="search",
-        description="Search minion work orders by natural language",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "integer"},
-                "include_archived": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "When false, archived work orders are hidden from search results.",
-                },
-            },
-            "required": ["query"],
-        },
-    )
-    def search_work_orders(self, call: IntrospectionCall) -> IntrospectionResult:
-        payload = self._repository().search_work_orders(
-            str(call.args.get("query") or ""),
-            limit=int(call.args.get("limit") or 10),
-            include_archived=bool(call.args.get("include_archived")),
-        )
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="minion work order search",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Minion work order search", payload),
-        )
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="minion_work_order_draft",
-        action_name="search",
-        description="Search minion work order drafts by natural language",
-        args_schema={
-            "type": "object",
-            "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}},
-            "required": ["query"],
-        },
-    )
-    def search_work_order_drafts(self, call: IntrospectionCall) -> IntrospectionResult:
-        payload = self._repository().search_work_order_drafts(str(call.args.get("query") or ""), limit=int(call.args.get("limit") or 10))
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="minion work order draft search",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Minion work order draft search", payload),
-        )
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="minion_work_order_draft",
-        action_name="read",
-        description="Read a minion work order draft and its candidate work order packet",
-        args_schema={
-            "type": "object",
-            "properties": {"draft_id": {"type": "string"}},
-            "required": ["draft_id"],
-        },
-    )
-    def read_work_order_draft(self, call: IntrospectionCall) -> IntrospectionResult:
-        payload = self._repository().read_work_order_draft(str(call.args.get("draft_id") or ""))
-        return _introspection_from_rpc("Minion work order draft", payload)
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="minion_work_order",
-        action_name="read",
-        description="Read a minion work order fact snapshot including milestones and current worker",
-        args_schema={
-            "type": "object",
-            "properties": {"work_order_id": {"type": "string"}},
-            "required": ["work_order_id"],
-        },
-    )
-    def read_work_order(self, call: IntrospectionCall) -> IntrospectionResult:
-        payload = self._repository().read_work_order(
-            str(call.args.get("work_order_id") or ""),
-            active_runs=self._active_runs_snapshot(),
-        )
-        return _introspection_from_rpc("Minion work order", payload)
-
-    @capability_action(namespace=INTROSPECTION_NAMESPACE, scope="minion", action_name="profile_list", description="List minion profiles")
-    def list_profiles(self, call: IntrospectionCall) -> IntrospectionResult:
-        _ = call
-        profile_registry = self._profile_registry()
-        profiles = [_profile_summary_payload(profile.to_dict()) for profile in profile_registry.list_profiles()]
-        families = [_family_summary_payload(family.to_dict()) for family in profile_registry.family_registry().list_families()]
-        payload = {
-            "profiles": profiles,
-            "count": len(profiles),
-            "families": families,
-            "family_count": len(families),
-            "runtime_profile_dir": str(Path(self.runtime_root) / "plugins" / "minion" / "profiles"),
-            "runtime_profile_pattern": "runtime_root/plugins/minion/profiles/**/*.toml",
-            "runtime_family_dir": str(Path(self.runtime_root) / "plugins" / "minion" / "families"),
-            "runtime_family_pattern": "runtime_root/plugins/minion/families/*.toml",
-            "profile_source_order": ["builtin package TOML", "runtime TOML", "mounted provider declarations"],
-            "family_source_order": ["builtin package TOML", "runtime TOML", "mounted provider declarations"],
-            "usage": "Use intro_minion_task_search/op_minion_task_create before op_minion_dispatch_workflow. Dispatch uses task.profile_family; it does not take profile selectors.",
-        }
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="minion profiles",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Minion profiles", payload),
-        )
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="minion",
-        action_name="profile_read",
-        description="Read one minion profile",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "profile_group": {"type": "string"},
-                "profile_name": {"type": "string"},
-                "profile_id": {"type": "string", "description": "Legacy/internal canonical lookup string; prefer profile_group/profile_name."},
-            },
-        },
-    )
-    def read_profile(self, call: IntrospectionCall) -> IntrospectionResult:
-        profile_group = str(call.args.get("profile_group") or "").strip()
-        profile_name = str(call.args.get("profile_name") or "").strip()
-        profile_id = str(call.args.get("profile_id") or "").strip()
-        profile = (
-            self._profile_registry().get_ref(profile_group, profile_name)
-            if profile_group or profile_name
-            else self._profile_registry().get(profile_id)
-        )
-        if profile is None:
-            payload = {"profile_group": profile_group, "profile_name": profile_name, "profile_id": profile_id, "error": "unknown minion profile"}
-            return IntrospectionResult(
-                status=RuntimeStatus.NOT_FOUND,
-                text="minion profile not found",
-                structured=payload,
-                llm_text=render_titled_structured_for_llm("Minion profile not found", payload),
-            )
-        payload = profile.to_dict()
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="minion profile",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Minion profile", payload),
-        )
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="minion",
-        action_name="plan_search",
-        description="Search first-class minion plan refs by task, plan, module, or summary text",
-        args_schema={
-            "type": "object",
-            "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "default": 10}},
-        },
-    )
-    def search_plans(self, call: IntrospectionCall) -> IntrospectionResult:
-        payload = self._repository().search_plan_refs(
-            str(call.args.get("query") or ""),
-            limit=int(call.args.get("limit") or 10),
-        )
-        return _introspection_from_rpc("Minion plans", payload)
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="minion",
-        action_name="plan_read",
-        description="Read and validate a first-class minion plan_ref",
-        args_schema={"type": "object", "properties": {"plan_ref": {"type": "object"}}, "required": ["plan_ref"]},
-    )
-    def read_plan(self, call: IntrospectionCall) -> IntrospectionResult:
-        try:
-            payload = self._repository().read_plan_ref(call.args.get("plan_ref"))
-            return _introspection_from_rpc("Minion plan", payload)
-        except Exception as exc:
-            payload = {"status": "invalid", "error": f"{exc.__class__.__name__}: {exc}"}
-            return IntrospectionResult(
-                status=RuntimeStatus.INVALID,
-                text="minion plan invalid",
-                structured=payload,
-                llm_text=render_titled_structured_for_llm("Minion plan invalid", payload),
-            )
-
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="minion", family="minion", action_name="attach", description="Attach minion manager")
-    def attach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
-        _ = call
-        self.mounted = True
-        self.degraded = False
-        try:
-            self._ensure_manager_started()
-        except Exception as exc:
-            self.degraded = True
-            self.last_error = f"{exc.__class__.__name__}: {exc}"
-            payload = self._status_payload()
-            return IntrospectionResult(
-                status=RuntimeStatus.ERROR,
-                text="minion manager attach failed",
-                structured=payload,
-                llm_text=render_titled_structured_for_llm("Minion manager attach failed", payload),
-            )
-        payload = self._status_payload()
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="minion manager attached",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Minion manager attached", payload),
-        )
-
-    @capability_action(namespace=OPERATION_NAMESPACE, scope="minion", family="minion", action_name="detach", description="Detach minion manager")
-    def detach(self, call: IntrospectionCall | None = None) -> IntrospectionResult:
-        _ = call
-        self._stop_manager(force=True)
-        self.mounted = False
-        self.degraded = False
-        payload = self._status_payload()
-        return IntrospectionResult(
-            status=RuntimeStatus.OK,
-            text="minion manager detached",
-            structured=payload,
-            llm_text=render_titled_structured_for_llm("Minion manager detached", payload),
-        )
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="configure",
-        description=(
-            "Configure Minion manager runtime behavior. The execution backend is fixed to step_process: manager keeps DAG/slot/ledger "
-            "state and a separate step executor process hosts runner coroutines. Configuration is persisted in Minion's own runtime "
-            "database under data/minion/minion.sqlite3. If the "
-            "manager is currently running, live-reloadable values such as max_parallel_llm_nodes and auto_resume_ready_modules "
-            "are flushed into manager memory immediately when apply_now=true."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "max_parallel_llm_nodes": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Global LLM execution-node slot limit. Architect/build plus its plan review share one node slot; "
-                        "a DAG module coder plus its gate reviewer share one node slot."
-                    ),
-                },
-                "max_parallel_modules": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Deprecated alias for max_parallel_llm_nodes.",
-                },
-                "auto_resume_ready_modules": {
-                    "type": "boolean",
-                    "description": "Whether manager auto-starts ready modules after dependency completion.",
-                },
-                "apply_now": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": "Flush live-reloadable values into a running manager immediately.",
-                },
-            },
-        },
-    )
-    def configure(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            args = dict(call.args or {})
-            patch = {
-                key: args[key]
-                for key in ("max_parallel_llm_nodes", "max_parallel_modules", "auto_resume_ready_modules")
-                if key in args
-            }
-            config = merge_minion_runtime_config(self.runtime_root, patch) if patch else effective_minion_runtime_config(self.runtime_root)
-            apply_now = bool(args.get("apply_now", True))
-            owned_process_running = self.process is not None and self.process.poll() is None
-            probe_client = MinionManagerClient(runtime_root=self.runtime_root, request_timeout_seconds=2.0)
-            live_health: dict[str, Any] = {}
-            with contextlib.suppress(Exception):
-                live_health = probe_client.health_sync()
-            live_manager_running = bool(live_health.get("ok"))
-            manager_running = bool(owned_process_running or live_manager_running)
-            active_runs = self._has_active_runs_sync() if manager_running else False
-            applied_now = False
-            live_reload: dict[str, Any] = {}
-            if apply_now and manager_running:
-                with contextlib.suppress(Exception):
-                    live_reload = probe_client.reload_runtime_config_sync()
-                if live_reload:
-                    applied_now = bool(live_reload.get("ok"))
-            payload = {
-                "status": "ok",
-                "config": config,
-                "applied_now": applied_now,
-                "manager_running": manager_running,
-                "live_manager_running": live_manager_running,
-                "owned_process_running": owned_process_running,
-                "active_runs": active_runs,
-                "live_reload": live_reload,
-            }
-            return _capability_from_rpc("minion manager configured", payload)
-        except ValueError as exc:
-            return _capability_invalid("minion manager configuration invalid", MinionWorkOrderValidationError(str(exc), field="minion_config"))
-        except Exception as exc:
-            return _capability_error("minion manager configuration failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="flush_runtime_config",
-        description=(
-            "Flush persisted Minion runtime configuration from Minion's own database into the live manager memory ledger. "
-            "Use after changing max_parallel_llm_nodes (or legacy max_parallel_modules) or auto_resume_ready_modules when the manager is already running. "
-            "This capability does not modify configuration and does not start a stopped manager."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "request_timeout_seconds": {
-                    "type": "number",
-                    "minimum": 0.1,
-                    "default": 2.0,
-                    "description": "Short socket timeout for probing and flushing the live manager.",
-                },
-            },
-        },
-    )
-    def flush_runtime_config(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            args = dict(call.args or {})
-            config = effective_minion_runtime_config(self.runtime_root)
-            timeout_seconds = _bounded_timeout_seconds(args.get("request_timeout_seconds"), default=2.0)
-            probe_client = MinionManagerClient(runtime_root=self.runtime_root, request_timeout_seconds=timeout_seconds)
-            live_health: dict[str, Any] = {}
-            with contextlib.suppress(Exception):
-                live_health = probe_client.health_sync()
-            live_manager_running = bool(live_health.get("ok"))
-            live_reload: dict[str, Any] = {}
-            if live_manager_running:
-                live_reload = probe_client.reload_runtime_config_sync()
-            payload = {
-                "status": "flushed" if live_reload else "not_running",
-                "config": config,
-                "manager_running": live_manager_running,
-                "live_manager_running": live_manager_running,
-                "live_reload": live_reload,
-            }
-            return _capability_from_rpc("minion runtime config flushed" if live_reload else "minion manager is not running", payload)
-        except Exception as exc:
-            return _capability_error("minion runtime config flush failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="dispatch_workflow",
-        description=(
-            "Normal public entrypoint for Minion delegation. Pal's main agent owns source-scope shaping; pass the prepared user "
-            "intent, task_id, source acceptance ledger, and workspace facts here. Search/create a Minion task first; task.profile_family "
-            "selects how the DAG is interpreted. Dispatch does not accept profile selectors. The manager either runs the family DAG "
-            "producer or uses the generic single-node DAG producer, then consumes the resulting DAG mechanically. Do not call lower-level "
-            "plan/spawn capabilities. The goal should describe the final deliverable the whole workflow must complete; the initial "
-            "architect/DAG-producer step only plans modules and does not implement code. Put source-of-truth scope in "
-            "requirements_brief, especially requirements_brief.source_acceptance. Do not put source_acceptance inside workspace. "
-            "When the user provides numbered requirements, keep them as numbered atomic source items in requirements_brief; dispatch "
-            "mechanically compiles those items into immutable source gate checklist entries. The family DAG producer must cover those "
-            "source items through plan gate_check_refs; downstream executors/reviewers consume only module and milestone acceptance. "
-            "Do not summarize, merge, weaken, or expand source items before dispatch. For large full-scope work, include a source "
-            "item or constraint asking the architect to keep the DAG coarse: modules, dependencies, acceptance criteria, and test "
-            "strategy, not every mapping row or API wrapper. "
-            "Reference paths are different from the target repo: put read-only truth-source material such as ABI headers, patches, "
-            "specs, or docs in requirements_brief.references with names. Minion read tools can inspect those roots with "
-            "root='reference:<name>', but they are never mutation targets. "
-            "planning_depth is explicit for software workflows: sketch_only produces the architecture skeleton and module_detail adds "
-            "a second per-module planning pass before final DAG compilation. The manager does not infer task size; the caller chooses "
-            "how much architect detail to request. "
-            "interaction_mode controls user confirmation: interactive asks for plan acceptance and disables module auto-advance; "
-            "auto_after_plan asks for plan acceptance, then auto-advances modules when gates pass; autonomous auto-accepts reviewed "
-            "plans and asks only for failures, permissions, destructive/high-risk actions, or missing user-owned facts. "
-            "workspace.kind is new_project or existing_repo. Families whose manifest requires primary_language must provide it for new_project; "
-            "other artifact/profile tasks may omit it. Existing repos should "
-            "include repo_path or cwd; do not use root in new calls. Treat repo_path/cwd as the target repository source; manager "
-            "records origin_repo_path and prepares durable minion worktrees under runtime data for writable execution. Do not put "
-            "read-only reference material in repo_path."
-        ),
-        aliases=(
-            "dispatch minion",
-            "launch minion",
-            "run minion",
-            "start minion",
-            "send minion",
-            "execute minion work order",
-            "dispatch work order",
-            "launch work order",
-            "run work order",
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "task_id": {
-                    "type": "string",
-                    "description": (
-                        "Existing Minion task id. Call intro_minion_task_search first and op_minion_task_create when no matching task exists."
-                    ),
-                },
-                "goal": {"type": "string", "description": "User-visible outcome Minion should plan and execute."},
-                "requirements_brief": {
-                    "type": "object",
-                    "description": (
-                        "Optional source acceptance ledger prepared by Pal's main agent. Use this for source scope, acceptance criteria, "
-                        "constraints, references, resolved user preferences, and already-answered questions. Prefer source_acceptance as "
-                        "a list of atomic source-of-truth items. If the user wrote a numbered requirement list, preserve each item as "
-                        "an atomic source item; dispatch compiles it into source gate_contract entries for architect coverage. Downstream "
-                        "coder/reviewer work consumes the accepted plan's module and milestone AC. Put non-goals and DAG granularity "
-                        "constraints here, not in workspace."
-                    ),
-                    "properties": {
-                        "source_acceptance": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Atomic source-of-truth acceptance items the architect must cover via gate_check_refs.",
-                        },
-                        "constraints": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Planning and implementation constraints, including non-goals and DAG granularity limits.",
-                        },
-                        "references": {
-                            "type": "array",
-                            "items": {
-                                "oneOf": [
-                                    {"type": "string"},
-                                    {
-                                        "type": "object",
-                                        "properties": {
-                                            "name": {
-                                                "type": "string",
-                                                "description": "Stable short handle used by minion tools, e.g. ohos_abi_headers.",
-                                            },
-                                            "path": {
-                                                "type": "string",
-                                                "description": "Local read-only truth-source path. May be a directory, file, or glob such as /repo/*.patch.",
-                                            },
-                                            "include": {
-                                                "type": "array",
-                                                "items": {"type": "string"},
-                                                "description": "Optional path globs relative to path when path is a directory.",
-                                            },
-                                            "description": {"type": "string"},
-                                            "truth_source": {
-                                                "type": "boolean",
-                                                "default": True,
-                                                "description": "True when this reference is authoritative evidence the architect/coder must inspect before inventing constants or mappings.",
-                                            },
-                                            "required": {"type": "boolean", "default": True},
-                                        },
-                                        "required": ["path"],
-                                    },
-                                ]
-                            },
-                            "description": (
-                                "User-provided read-only reference paths, patches, docs, or external materials relevant to the task. "
-                                "These are not target repos and must not be mutated. Manager exposes normalized local references as "
-                                "workspace.reference_paths so minion read tools can select them with root='reference:<name>'."
-                            ),
-                        },
-                    },
-                },
-                "workspace": {
-                    "type": "object",
-                    "description": (
-                        "Intent-level workspace facts. Use kind=new_project with primary_language when the family requires language metadata, or "
-                        "kind=existing_repo with repo_path/cwd for repo changes. Non-software artifact/profile tasks may use "
-                        "kind=new_project without primary_language. For existing repos, repo_path or cwd is required for reliable "
-                        "repo inspection; do not use root in new calls. Do not put source_acceptance here. Do not provide runtime "
-                        "worktree paths; manager allocates them under runtime_root/data/minion/repos. Do not put reference-only "
-                        "truth-source paths here; use requirements_brief.references or workspace.reference_paths."
-                    ),
-                    "properties": {
-                        "kind": {"type": "string", "enum": ["new_project", "existing_repo"]},
-                        "repo_path": {"type": "string"},
-                        "cwd": {"type": "string"},
-                        "reference_paths": {
-                            "type": "array",
-                            "items": {"type": "object"},
-                            "description": (
-                                "Advanced: declared read-only truth-source roots. Prefer requirements_brief.references for user-provided "
-                                "reference paths; manager normalizes both into workspace.reference_paths."
-                            ),
-                        },
-                        "project_name": {"type": "string"},
-                        "primary_language": {"type": "string"},
-                        "languages": {"type": "array", "items": {"type": "string"}},
-                    },
-                },
-                "planning_depth": {
-                    "type": "string",
-                    "enum": ["sketch_only", "module_detail"],
-                    "default": "sketch_only",
-                    "description": (
-                        "Explicit staged planning depth for software workflows. sketch_only produces the architecture skeleton and lets "
-                        "manager compile a light DAG. module_detail runs a second architect stage for each sketch module before final DAG compilation. "
-                        "Pal does not infer this value from task size; the caller owns the choice."
-                    ),
-                },
-                "interaction_mode": {
-                    "type": "string",
-                    "enum": ["interactive", "auto_after_plan", "autonomous"],
-                    "default": "auto_after_plan",
-                    "description": (
-                        "interactive asks for plan acceptance and disables module auto-advance. auto_after_plan asks for plan "
-                        "acceptance, then auto-advances modules. autonomous auto-accepts passing plan review and only asks on "
-                        "failures, permissions, destructive/high-risk actions, or missing user-owned facts."
-                    ),
-                },
-                "preferred_endpoint_id": {
-                    "type": "string",
-                    "description": (
-                        "Optional enabled LLM endpoint_id to use for this minion. Fill only when the user explicitly names a model "
-                        "or endpoint for the minion; otherwise omit it so the runner follows Pal's active endpoint setting."
-                    ),
-                },
-                "prompt_observation_tag": {
-                    "type": "string",
-                    "description": (
-                        "Optional short tag for prompt/debug-log observation. It is stored in minion metadata and LLM request "
-                        "metadata, but is not rendered into the task prompt text."
-                    ),
-                },
-                "title": {"type": "string", "description": "Optional short display title for the workflow."},
-                "approval_policy": {"type": "object"},
-            },
-            "required": ["task_id", "goal", "workspace"],
-        },
-        metadata={
-            "search_priority": 50,
-            "normal_minion_entrypoint": True,
-        },
-    )
-    def dispatch_workflow(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            repository = self._repository()
-            args = _workflow_args_with_task_family(dict(call.args or {}), repository=repository)
-            profile_registry = self._profile_registry()
-            pack, workflow_payload = _workflow_entry_pack_from_args(
-                args,
-                repository=repository,
-                profile_registry=profile_registry,
-            )
-            pack = self._inject_control_route(pack, call)
-            pack = self._inject_debug_log_request(pack, call)
-            pack = self._inject_preferred_endpoint(pack, call)
-            pack = profile_registry.resolve_pack(
-                pack,
-                requested_profile_group=str(pack.profile_group or ""),
-                requested_profile_name=str(pack.profile_name or ""),
-            )
-            pack = repository.prepare_pack_for_spawn(pack)
-            self._ensure_manager_started()
-            result = self.client.spawn_sync(pack.to_dict())
-            self.last_health = dict(result)
-            child_runs = _spawn_result_runs(result)
-            payload = {
-                "status": str(result.get("status") or "ok"),
-                "workflow_id": workflow_payload["workflow_id"],
-                "work_order_id": pack.work_order_id,
-                "run_id": _spawn_result_value(result, "run_id"),
-                "minion_id": _spawn_result_value(result, "minion_id"),
-                "run": dict(result),
-                "child_runs": child_runs,
-                "child_run_ids": [str(item.get("run_id") or "") for item in child_runs if str(item.get("run_id") or "").strip()],
-                "child_work_order_id": _spawn_result_value(result, "child_work_order_id"),
-                "child_work_order_ids": _spawn_result_string_list(result, "child_work_order_ids"),
-                "module_id": _spawn_result_value(result, "module_id"),
-                "module_ids": _spawn_result_string_list(result, "module_ids"),
-                "workspace_summary": workflow_payload["workspace_summary"],
-                "planning_depth": workflow_payload["planning_depth"],
-                "architecture_mode": workflow_payload.get("architecture_mode", "staged"),
-                "requested_architecture_mode": workflow_payload.get("requested_architecture_mode", "staged"),
-                "interaction_mode": workflow_payload["interaction_mode"],
-                "initial_profile": workflow_payload["initial_profile"],
-                "profile_family": workflow_payload["profile_family"],
-                "next_action": workflow_payload["next_action"],
-            }
-            return _capability_from_rpc("minion workflow dispatched", payload)
-        except MinionWorkOrderValidationError as exc:
-            return _capability_invalid("minion workflow dispatch invalid", exc)
-        except Exception as exc:
-            return _capability_error("minion workflow dispatch failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion_task",
-        family="minion",
-        action_name="create",
-        description=(
-            "Create or update a long-lived Minion task after searching for an existing matching task. "
-            "Task is the durable semantic container and binds profile_family; work orders are execution attempts under it. "
-            "Call intro_minion_task_search first with the user goal/repo/domain and reuse a matching task_id instead of creating duplicates."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string", "description": "Optional stable task id. Omit to allocate one."},
-                "title": {"type": "string", "description": "Short task title."},
-                "goal": {"type": "string", "description": "Long-lived task goal or domain purpose."},
-                "summary": {"type": "string", "description": "Searchable task summary, constraints, repo/domain facts, or scope."},
-                "profile_family": {
-                    "type": "string",
-                    "description": (
-                        "Required profile family that interprets this task's work orders. Use software_engineering for code/repo/review "
-                        "work; use lifestyle for nutrition, diet, meal-plan, training, health check-in, or similar personal-life coaching "
-                        "tasks. Use general only when no domain family fits."
-                    ),
-                },
-                "workspace": {
-                    "type": "object",
-                    "description": "Optional durable task-level workspace facts such as repo_path/origin_repo_path, project_name, or domain context.",
-                },
-                "metadata": {"type": "object"},
-            },
-            "required": ["goal", "profile_family"],
-        },
-        metadata={"omit_family_in_canonical": True},
-    )
-    def create_task(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            args = dict(call.args or {})
-            profile_family = _profile_ref_text(args.get("profile_family") or args.get("family"))
-            if not profile_family:
-                raise MinionWorkOrderValidationError("profile_family is required", field="profile_family")
-            args["profile_family"] = profile_family
-            payload = self._repository().create_task(args)
-            return _capability_from_rpc("minion task created", payload)
-        except MinionWorkOrderValidationError as exc:
-            return _capability_invalid("minion task invalid", exc)
-        except ValueError as exc:
-            return _capability_invalid("minion task invalid", MinionWorkOrderValidationError(str(exc), field="task"))
-        except Exception as exc:
-            return _capability_error("minion task create failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="review_gate_submit",
-        description=(
-            "Submit a structured reviewer/verifier gate result. Use this from reviewer or verifier minions after checking a plan, "
-            "checkpoint, or repair target. The manager/repository validates target binding and records the gate in the ledger."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "gate_kind": {
-                    "type": "string",
-                    "enum": ["plan_acceptance", "checkpoint_verification", "repair_verification"],
-                },
-                "target": {"type": "object"},
-                "verdict": {"type": "string", "enum": ["pass", "fail", "partial"]},
-                "summary": {"type": "string"},
-                "findings": {"type": "array", "items": {"type": "object"}},
-                "required_fixes": {"type": "array", "items": {"type": "object"}},
-                "evidence": {"type": "array", "items": {"type": "object"}},
-                "commands_run": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": "For checkpoint/repair pass verdicts, include at least one command/check entry with command, cwd, status or exit_code, output summary, and covers=[exact acceptance criteria or refs]. The command field must be copied exactly from one op_exec_shell args.cmd string in this reviewer run; do not summarize, shorten, normalize, or combine commands.",
-                },
-                "api_evidence": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": "Source/docs/LSP/build evidence for API and call-shape claims. Pass verdicts require api_evidence or metadata.api_evidence_not_applicable=true with a reason. Include covers=[exact acceptance criteria or refs] when evidence proves milestone acceptance.",
-                },
-                "residual_risk": {"type": "array", "items": {"type": "object"}},
-                "report_artifact_ref": {"type": "object"},
-                "reviewer_profile": {"type": "string"},
-                "metadata": {
-                    "type": "object",
-                    "description": (
-                        "Use metadata.api_evidence_not_applicable=true only when API evidence is genuinely not applicable. "
-                        "If no LSP evidence is used on a pass verdict, set metadata.lsp_evidence_not_applicable=true with a reason. "
-                        "Top-level pass gates are external gates only and require metadata.external_verification_ref. "
-                        "Human overrides are control/UI actions only."
-                    ),
-                },
-            },
-            "required": ["gate_kind", "target", "verdict"],
-        },
-    )
-    def review_gate_submit(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            args = normalize_top_level_review_gate_args(dict(call.args or {}), repository=self._repository())
-            payload = self._repository().submit_review_gate(
-                args,
-                reviewer_profile=str(args.get("reviewer_profile") or ""),
-                work_order_id=str(args.get("work_order_id") or ""),
-                run_id=str(args.get("run_id") or ""),
-            )
-            return _capability_from_rpc("minion review gate recorded", payload)
-        except MinionWorkOrderValidationError as exc:
-            return _capability_invalid("minion review gate invalid", exc)
-        except ValueError as exc:
-            return _capability_invalid("minion review gate invalid", MinionWorkOrderValidationError(str(exc), field="review_gate"))
-        except Exception as exc:
-            return _capability_error("minion review gate failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="draft_work_order",
-        description=(
-            "Draft a minion work order candidate from user brainstorming or module-boundary discussion. "
-            "Prefer structured module plans, prompt_view, and acceptance criteria over dumping raw conversation or payload JSON."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "description": "Short work-order title."},
-                "goal": {"type": "string", "description": "User-visible outcome the minion must achieve."},
-                "instruction": {"type": "string", "description": "Concrete handoff instructions, not just the goal repeated."},
-                "source_summary": {"type": "string", "description": "Facts, files, commands, or evidence that justify the work order."},
-                "conversation_summary": {"type": "string", "description": "Short relevant user context, only when needed."},
-                "module_boundaries": {
-                    "description": "Positive module ownership boundaries and scoped responsibilities.",
-                },
-                "milestones": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": {"oneOf": [{"type": "string"}, {"type": "object"}]},
-                    "description": "Ordered, concrete milestones the minion should report against.",
-                },
-                "acceptance_criteria": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Observable checks that define done.",
-                },
-                "workspace": {
-                    "type": "object",
-                    "description": "Repo, cwd, branch, runtime, or environment facts if applicable. For local repo tasks prefer repo_path; cwd with type=local_repo is accepted as fallback.",
-                },
-                "artifacts": {"type": "array", "description": "Relevant files, logs, links, images, or previous outputs."},
-                "task_id": {"type": "string"},
-                "task_title": {"type": "string", "description": "Parent task title if different from work-order title."},
-                "proposed_work_order_id": {"type": "string"},
-                "profile_family": {
-                    "type": "string",
-                    "description": "Profile family for this draft, such as software_engineering. If profile_name is omitted, drafts the family architect profile.",
-                },
-                "profile_group": {
-                    "type": "string",
-                    "description": "Exact profile group when selecting a specific profile with profile_name.",
-                },
-                "profile_name": {
-                    "type": "string",
-                    "description": "Exact profile name within profile_family/profile_group.",
-                },
-                "minion_profile": {
-                    "type": "string",
-                    "description": "Registered canonical profile id. Prefer profile_family/profile_name unless a canonical id is already known.",
-                },
-                "metadata": {"type": "object"},
-            },
-            "required": [
-                "goal",
-                "milestones",
-            ],
-            "anyOf": [
-                {"required": ["minion_profile"]},
-                {"required": ["profile_family"]},
-                {"required": ["profile_group", "profile_name"]},
-            ],
-        },
-    )
-    def draft_work_order(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            args = validate_draft_work_order_args(dict(call.args))
-            payload = self._repository().create_work_order_draft(args)
-            return _capability_from_rpc("minion work order draft created", payload)
-        except MinionWorkOrderValidationError as exc:
-            return _capability_invalid("minion work order draft invalid", exc)
-        except Exception as exc:
-            return _capability_error("minion work order draft failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="promote_work_order_draft",
-        description="Promote a reviewed minion work order draft into a formal work order without spawning a runner",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "draft_id": {"type": "string"},
-                "reviewed_candidate": {"type": "object"},
-            },
-            "required": ["draft_id"],
-        },
-    )
-    def promote_work_order_draft(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            repository = self._repository()
-            reviewed_candidate = dict(call.args.get("reviewed_candidate") or {}) or None
-            validate_promote_work_order_args(repository, str(call.args.get("draft_id") or ""), reviewed_candidate=reviewed_candidate)
-            payload = repository.promote_work_order_draft(
-                str(call.args.get("draft_id") or ""),
-                reviewed_candidate=reviewed_candidate,
-            )
-            return _capability_from_rpc("minion work order draft promoted", payload)
-        except MinionWorkOrderValidationError as exc:
-            return _capability_invalid("minion work order draft promotion invalid", exc)
-        except Exception as exc:
-            return _capability_error("minion work order draft promotion failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="kill",
-        description="Kill a minion run",
-        args_schema={
-            "type": "object",
-            "properties": {"run_id": {"type": "string"}, "reason": {"type": "string"}},
-            "required": ["run_id"],
-        },
-    )
-    def kill(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            self._ensure_manager_started()
-            result = self.client.kill_sync(str(call.args.get("run_id") or ""), str(call.args.get("reason") or ""))
-            return _capability_from_rpc("minion killed", result)
-        except Exception as exc:
-            return _capability_error("minion kill failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="finalize",
-        description="Finalize a minion work order by squashing milestone commits into the merge target",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "work_order_id": {"type": "string"},
-                "message": {"type": "string"},
-            },
-            "required": ["work_order_id"],
-        },
-    )
-    def finalize(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            self._ensure_manager_started()
-            result = self.client.finalize_work_order_sync(
-                str(call.args.get("work_order_id") or ""),
-                message=str(call.args.get("message") or ""),
-            )
-            return _capability_from_rpc("minion work order finalized", result)
-        except Exception as exc:
-            return _capability_error("minion finalize failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="tick_parent_dag",
-        description="Tick a minion parent DAG once so ready nodes can be claimed and dispatched through manager-owned slots",
-        args_schema={
-            "type": "object",
-            "properties": {"work_order_id": {"type": "string"}, "reason": {"type": "string"}},
-            "required": ["work_order_id"],
-        },
-    )
-    def tick_parent_dag(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            self._ensure_manager_started()
-            result = self.client.request_sync(
-                "tick_parent_dag",
-                {
-                    "work_order_id": str(call.args.get("work_order_id") or ""),
-                    "reason": str(call.args.get("reason") or "capability"),
-                },
-            )
-            return _capability_from_rpc("minion parent DAG ticked", result)
-        except Exception as exc:
-            return _capability_error("minion parent DAG tick failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="accept_reviewed_plan",
-        description=(
-            "Accept a reviewed minion plan already stored on a work order and resume execution by dispatching the accepted plan "
-            "to its workflow_next executor. Use after the user confirms an acceptance_pending plan. Normally pass only "
-            "work_order_id; Pal reads plan_review.plan_ref and review_gate_ref from that work order. If the work order is a "
-            "revision child with plan_review.source_work_order_id, manager dispatches the original source work order unless "
-            "dispatch_work_order_id is explicitly provided."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "work_order_id": {
-                    "type": "string",
-                    "description": "Work order holding plan_review.status=acceptance_pending or an equivalent reviewed plan state.",
-                },
-                "dispatch_work_order_id": {
-                    "type": "string",
-                    "description": "Optional work order to execute. Defaults to plan_review.source_work_order_id for revision children, otherwise work_order_id.",
-                },
-                "plan_ref": {
-                    "type": "object",
-                    "description": "Optional reviewed plan_ref override. Defaults to work_order.metadata.plan_review.plan_ref.",
-                },
-                "review_gate_ref": {
-                    "type": "object",
-                    "description": "Optional passing plan_acceptance gate ref. Defaults to work_order.metadata.plan_review.review_gate_ref.",
-                },
-                "reason": {"type": "string"},
-                "actor": {"type": "string"},
-                "auto_advance_modules": {"type": "boolean"},
-                "allow_human_override": {
-                    "type": "boolean",
-                    "description": "Allow acceptance without a review_gate_ref by recording an explicit human override. Defaults false.",
-                },
-            },
-            "required": ["work_order_id"],
-        },
-    )
-    def accept_reviewed_plan(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            args = dict(call.args or {})
-            work_order_id = str(args.get("work_order_id") or "").strip()
-            if not work_order_id:
-                raise MinionWorkOrderValidationError("work_order_id is required", field="work_order_id")
-            repository = self._repository()
-            snapshot = repository.read_work_order(work_order_id)
-            if snapshot.get("status") != "ok":
-                raise MinionWorkOrderValidationError(f"unknown work_order_id: {work_order_id}", field="work_order_id")
-            work_order = dict(snapshot.get("work_order") or {})
-            metadata = dict(work_order.get("metadata") or {})
-            plan_review = dict(metadata.get("plan_review") or {})
-            plan_ref = args.get("plan_ref") if isinstance(args.get("plan_ref"), dict) else plan_review.get("plan_ref")
-            if not isinstance(plan_ref, dict) or not plan_ref:
-                raise MinionWorkOrderValidationError(
-                    "reviewed plan acceptance requires plan_ref or work_order.metadata.plan_review.plan_ref",
-                    field="plan_ref",
-                )
-            review_gate_ref = (
-                dict(args.get("review_gate_ref"))
-                if isinstance(args.get("review_gate_ref"), dict)
-                else dict(plan_review.get("review_gate_ref") or {})
-            )
-            allow_human_override = _coerce_bool(args.get("allow_human_override"))
-            if not review_gate_ref and not allow_human_override:
-                raise MinionWorkOrderValidationError(
-                    "reviewed plan acceptance requires review_gate_ref unless allow_human_override=true",
-                    field="review_gate_ref",
-                )
-            reason = str(args.get("reason") or "user accepted reviewed minion plan").strip()
-            human_override = {
-                "reason": reason,
-                "actor": str(args.get("actor") or "human").strip() or "human",
-                "source": "control_action",
-                "action_kind": "minion_plan_accept_reviewed",
-                "target_scope": "minion",
-                "target_id": work_order_id,
-                "interaction_origin": "capability",
-                "interaction_kind": "minion_plan_acceptance",
-            }
-            accepted = repository.accept_plan_ref(
-                plan_ref,
-                reason=reason,
-                review_gate_ref=review_gate_ref or None,
-                human_override=human_override,
-            )
-            accepted_ref = dict(accepted.get("plan_ref") or {})
-            dispatch_work_order_id = str(args.get("dispatch_work_order_id") or "").strip()
-            if not dispatch_work_order_id:
-                dispatch_work_order_id = str(plan_review.get("source_work_order_id") or "").strip() or work_order_id
-            dispatch_params: dict[str, Any] = {
-                "work_order_id": dispatch_work_order_id,
-                "plan_ref": accepted_ref,
-                "review_gate_ref": review_gate_ref,
-            }
-            if "auto_advance_modules" in args:
-                dispatch_params["auto_advance_modules"] = _coerce_bool(args.get("auto_advance_modules"))
-            self._ensure_manager_started()
-            dispatch = self.client.request_sync("dispatch_accepted_plan", dispatch_params)
-            accepted_state = {
-                "status": "accepted",
-                "plan_ref": accepted_ref,
-                "review_gate_ref": review_gate_ref,
-                "acceptance": accepted,
-                "dispatch": dispatch,
-                "updated_at": utc_now(),
-                "next_action": "executing_plan",
-                "human_decision": human_override,
-            }
-            repository.merge_work_order_metadata(dispatch_work_order_id, {"plan_review": accepted_state})
-            if dispatch_work_order_id != work_order_id:
-                repository.merge_work_order_metadata(
-                    work_order_id,
-                    {
-                        "plan_review": {
-                            **accepted_state,
-                            "dispatch_work_order_id": dispatch_work_order_id,
-                        }
-                    },
-                )
-            repository.record_minion_event(
-                {
-                    "event_kind": "plan_accepted",
-                    "work_order_id": dispatch_work_order_id,
-                    "minion_id": "",
-                    "run_id": "",
-                    "minion_profile": "control",
-                    "payload": {
-                        "status": "accepted",
-                        "summary": "user accepted reviewed minion plan",
-                        "plan_ref": accepted_ref,
-                        "review_gate_ref": review_gate_ref,
-                        "dispatch": dispatch,
-                    },
-                }
-            )
-            return _capability_from_rpc(
-                "minion reviewed plan accepted and dispatched",
-                {
-                    "status": str(dispatch.get("status") or "accepted"),
-                    "work_order_id": work_order_id,
-                    "dispatch_work_order_id": dispatch_work_order_id,
-                    "plan_ref": accepted_ref,
-                    "review_gate_ref": review_gate_ref,
-                    "acceptance": accepted,
-                    "dispatch": dispatch,
-                },
-            )
-        except MinionWorkOrderValidationError as exc:
-            return _capability_invalid("minion reviewed plan acceptance invalid", exc)
-        except Exception as exc:
-            return _capability_error("minion reviewed plan acceptance failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="request_reviewed_plan_revision",
-        description=(
-            "Request edits to a reviewer-passed minion plan and dispatch the dedicated plan revision architect. Use after the "
-            "user asks to change a plan whose work order has plan_review.status=acceptance_pending, or to retry a previous revision "
-            "spawn that failed before execution. Pass the exact user edit "
-            "instruction and the work_order_id; Pal reads the current plan_ref and review_gate_ref from manager-owned work-order "
-            "state, so this remains available when the original channel interaction has expired."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "work_order_id": {
-                    "type": "string",
-                    "description": "Work order holding the reviewer-passed plan in plan_review.status=acceptance_pending.",
-                },
-                "edit_instruction": {
-                    "type": "string",
-                    "description": "Exact user-requested plan changes for the revision architect; must not be empty.",
-                },
-                "reason": {
-                    "type": "string",
-                    "description": "Optional audit summary. Defaults to a human plan edit request.",
-                },
-                "actor": {
-                    "type": "string",
-                    "description": "Optional audit actor. Defaults to human.",
-                },
-            },
-            "required": ["work_order_id", "edit_instruction"],
-        },
-    )
-    def request_reviewed_plan_revision(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            args = dict(call.args or {})
-            work_order_id = str(args.get("work_order_id") or "").strip()
-            if not work_order_id:
-                raise MinionWorkOrderValidationError("work_order_id is required", field="work_order_id")
-            edit_instruction = str(args.get("edit_instruction") or "").strip()
-            if not edit_instruction:
-                raise MinionWorkOrderValidationError("edit_instruction is required", field="edit_instruction")
-
-            repository = self._repository()
-            snapshot = repository.read_work_order(work_order_id)
-            if snapshot.get("status") != "ok":
-                raise MinionWorkOrderValidationError(f"unknown work_order_id: {work_order_id}", field="work_order_id")
-            work_order = dict(snapshot.get("work_order") or {})
-            metadata = dict(work_order.get("metadata") or {})
-            plan_review = dict(metadata.get("plan_review") or {})
-            review_status = str(plan_review.get("status") or "").strip()
-            review_next_action = str(plan_review.get("next_action") or "").strip()
-            retryable_edit = review_status == "edit_requested" and review_next_action in {"revise_plan", "retry_revision"}
-            if review_status != "acceptance_pending" and not retryable_edit:
-                raise MinionWorkOrderValidationError(
-                    "reviewed plan revision requires plan_review.status=acceptance_pending or a failed edit request ready to retry; "
-                    f"current status is {review_status or 'missing'} and next_action is {review_next_action or 'missing'}",
-                    field="plan_review.status",
-                )
-            plan_ref = plan_review.get("plan_ref")
-            if not isinstance(plan_ref, dict) or not plan_ref:
-                raise MinionWorkOrderValidationError(
-                    "reviewed plan revision requires work_order.metadata.plan_review.plan_ref",
-                    field="plan_ref",
-                )
-            review_gate_ref = (
-                dict(plan_review.get("review_gate_ref") or {})
-                if isinstance(plan_review.get("review_gate_ref"), dict)
-                else {}
-            )
-            source_work_order_id = str(plan_review.get("source_work_order_id") or "").strip() or work_order_id
-            reason = str(args.get("reason") or "user requested edits to reviewed minion plan").strip()
-            human_decision = {
-                "action_kind": "minion_plan_edit",
-                "actor": str(args.get("actor") or "human").strip() or "human",
-                "reason": reason,
-                "edit_instruction": edit_instruction,
-                "source": "capability",
-            }
-            review_state = {
-                **plan_review,
-                "status": "edit_requested",
-                "plan_ref": dict(plan_ref),
-                "review_gate_ref": review_gate_ref,
-                "updated_at": utc_now(),
-                "next_action": "revise_plan",
-                "human_decision": human_decision,
-                "edit_instruction": edit_instruction,
-            }
-
-            self._ensure_manager_started()
-            revision = self.client.request_sync(
-                "dispatch_plan_revision",
-                {
-                    "work_order_id": source_work_order_id,
-                    "plan_ref": dict(plan_ref),
-                    "reason": reason,
-                    "edit_instruction": edit_instruction,
-                },
-            )
-            review_state["revision_dispatch"] = dict(revision)
-            review_state["next_action"] = (
-                "wait_for_revision" if str(revision.get("status") or "") == "spawned" else "revise_plan"
-            )
-            repository.merge_work_order_metadata(source_work_order_id, {"plan_review": review_state})
-            if source_work_order_id != work_order_id:
-                repository.merge_work_order_metadata(
-                    work_order_id,
-                    {"plan_review": {**review_state, "source_work_order_id": source_work_order_id}},
-                )
-            repository.record_minion_event(
-                {
-                    "event_kind": "plan_edit_requested",
-                    "work_order_id": source_work_order_id,
-                    "minion_id": "",
-                    "run_id": "",
-                    "minion_profile": "control",
-                    "payload": {
-                        "status": "edit_requested",
-                        "summary": "user requested edits to reviewed minion plan",
-                        "plan_ref": dict(plan_ref),
-                        "review_gate_ref": review_gate_ref,
-                        "edit_instruction": edit_instruction,
-                        "revision_dispatch": dict(revision),
-                        "next_action": review_state["next_action"],
-                    },
-                }
-            )
-            return _capability_from_rpc(
-                "minion reviewed plan revision requested",
-                {
-                    "status": str(revision.get("status") or "edit_requested"),
-                    "work_order_id": work_order_id,
-                    "source_work_order_id": source_work_order_id,
-                    "plan_ref": dict(plan_ref),
-                    "review_gate_ref": review_gate_ref,
-                    "edit_instruction": edit_instruction,
-                    "revision": dict(revision),
-                    "next_action": review_state["next_action"],
-                },
-            )
-        except MinionWorkOrderValidationError as exc:
-            return _capability_invalid("minion reviewed plan revision invalid", exc)
-        except Exception as exc:
-            return _capability_error("minion reviewed plan revision failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="submit_repair_bill",
-        description=(
-            "Submit a structured repair bill for a parent plan work order. The bill must reference existing module ids; "
-            "module_defect and contract_defect replay the target module plus downstream dependents. "
-            "architecture_defect blocks the parent and requires plan/module-boundary review before a replacement DAG epoch."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "parent_work_order_id": {"type": "string"},
-                "source_module_id": {"type": "string"},
-                "summary": {"type": "string"},
-                "bill_id": {"type": "string"},
-                "preferred_endpoint_id": {
-                    "type": "string",
-                    "description": (
-                        "Optional endpoint override for this repair/replay. When set, manager updates the parent work order before "
-                        "dispatching replay children so the new module run inherits this endpoint instead of the parent/profile default."
-                    ),
-                },
-                "module_patches": {
-                    "type": "object",
-                    "description": "Map of existing module_id to repair patch.",
-                },
-                "modules": {
-                    "type": "array",
-                    "description": "List of existing module patch objects with module_name or module_id.",
-                    "items": {"type": "object"},
-                },
-            },
-            "required": ["parent_work_order_id"],
-            "additionalProperties": True,
-        },
-    )
-    def submit_repair_bill(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            self._ensure_manager_started()
-            result = self.client.submit_repair_bill_sync(dict(call.args))
-            return _capability_from_rpc("minion repair bill submitted", result)
-        except Exception as exc:
-            return _capability_error("minion repair bill submit failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="recover_work_order",
-        description=(
-            "Recover stale minion parent work-order state after manager restart or runner loss. "
-            "This does not complete a module; it releases stale running_module state so the current module can be retried."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {"work_order_id": {"type": "string"}, "reason": {"type": "string"}},
-        },
-    )
-    def recover_work_order(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            self._ensure_manager_started()
-            result = self.client.request_sync(
-                "recover_work_order",
-                {"work_order_id": str(call.args.get("work_order_id") or ""), "reason": str(call.args.get("reason") or "")},
-            )
-            return _capability_from_rpc("minion work order recovered", result)
-        except Exception as exc:
-            return _capability_error("minion work order recovery failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="resume_work_order",
-        description=(
-            "Resume a blocked minion work order without submitting a repair bill. Use this for provider failures, "
-            "timeouts, interrupted runners, stale blocked child runs, or an initial workflow/architect step that blocked before "
-            "a DAG was accepted. The manager first tries the accepted-plan module cursor path; when that is not applicable it "
-            "re-dispatches the current workflow step. For semantic module defects or contract defects, submit a repair bill instead."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "work_order_id": {
-                    "type": "string",
-                    "description": "Parent work_order_id or the blocked child module work_order_id.",
-                },
-                "module_id": {"type": "string"},
-                "child_work_order_id": {"type": "string"},
-                "reason": {"type": "string"},
-                "preferred_endpoint_id": {
-                    "type": "string",
-                    "description": (
-                        "Optional enabled LLM endpoint_id to use for the resumed attempt. Useful when the previous attempt blocked "
-                        "because of provider output limits or model-specific failures."
-                    ),
-                },
-            },
-            "required": ["work_order_id"],
-        },
-    )
-    def resume_work_order(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            self._ensure_manager_started()
-            result = self.client.request_sync(
-                "resume_work_order",
-                {
-                    "work_order_id": str(call.args.get("work_order_id") or ""),
-                    "module_id": str(call.args.get("module_id") or ""),
-                    "child_work_order_id": str(call.args.get("child_work_order_id") or ""),
-                    "reason": str(call.args.get("reason") or ""),
-                    "preferred_endpoint_id": str(call.args.get("preferred_endpoint_id") or ""),
-                },
-            )
-            return _capability_from_rpc("minion work order resumed", result)
-        except Exception as exc:
-            return _capability_error("minion work order resume failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="destroy_work_order_run",
-        description=(
-            "Destroy the active runner for a minion work order or its active child module and release the parent running_module state. "
-            "Use for explicit recovery/teardown; this does not mark the module completed."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {"work_order_id": {"type": "string"}, "reason": {"type": "string"}},
-            "required": ["work_order_id"],
-        },
-    )
-    def destroy_work_order_run(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            self._ensure_manager_started()
-            result = self.client.request_sync(
-                "destroy_work_order_run",
-                {"work_order_id": str(call.args.get("work_order_id") or ""), "reason": str(call.args.get("reason") or "")},
-            )
-            return _capability_from_rpc("minion work order run destroyed", result)
-        except Exception as exc:
-            return _capability_error("minion work order run destroy failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="archive_work_order",
-        description=(
-            "Archive or restore a minion work order in the tasking database. Archived work orders are hidden from work-order search "
-            "unless include_archived=true, but their records remain readable by id. This does not stop active runners; use "
-            "destroy_work_order_run first for actively running work."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "work_order_id": {"type": "string"},
-                "reason": {"type": "string"},
-                "include_children": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Also archive/restore child module work orders referenced by the parent DAG.",
-                },
-                "restore": {"type": "boolean", "default": False, "description": "Restore archived work orders to their previous status."},
-                "force": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Allow archiving/restoring statuses that look active. Prefer destroy_work_order_run first.",
-                },
-            },
-            "required": ["work_order_id"],
-        },
-    )
-    def archive_work_order(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            result = self._repository().archive_work_order(
-                str(call.args.get("work_order_id") or ""),
-                reason=str(call.args.get("reason") or ""),
-                include_children=bool(call.args.get("include_children")),
-                restore=bool(call.args.get("restore")),
-                force=bool(call.args.get("force")),
-            )
-            return _capability_from_rpc("minion work order archive updated", result)
-        except Exception as exc:
-            return _capability_error("minion work order archive failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="remove_work_order",
-        description=(
-            "Hard-delete a minion work order from the tasking database. By default the work order must already be archived. "
-            "This removes directly associated milestones, checkpoints, ledger rows, review gates, and lesson candidates; it does not "
-            "delete runtime repos or plan revision files. Use sparingly, and stop active runs first."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "work_order_id": {"type": "string"},
-                "reason": {"type": "string"},
-                "include_children": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Also remove child module work orders referenced by the parent DAG.",
-                },
-                "force": {
-                    "type": "boolean",
-                    "default": False,
-                    "description": "Allow removing non-archived or active-looking work orders. Prefer archive_work_order first.",
-                },
-            },
-            "required": ["work_order_id"],
-        },
-    )
-    def remove_work_order(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            result = self._repository().remove_work_order(
-                str(call.args.get("work_order_id") or ""),
-                reason=str(call.args.get("reason") or ""),
-                include_children=bool(call.args.get("include_children")),
-                force=bool(call.args.get("force")),
-            )
-            return _capability_from_rpc("minion work order removed", result)
-        except Exception as exc:
-            return _capability_error("minion work order remove failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        family="minion",
-        action_name="pause_work_order",
-        description="Pause a minion parent work order at its current milestone cursor",
-        args_schema={
-            "type": "object",
-            "properties": {"work_order_id": {"type": "string"}, "reason": {"type": "string"}},
-            "required": ["work_order_id"],
-        },
-    )
-    def pause_work_order(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            self._ensure_manager_started()
-            result = self.client.request_sync(
-                "pause_work_order",
-                {"work_order_id": str(call.args.get("work_order_id") or ""), "reason": str(call.args.get("reason") or "")},
-            )
-            return _capability_from_rpc("minion work order paused", result)
-        except Exception as exc:
-            return _capability_error("minion work order pause failed", exc)
-
-    async def handle_control_action_async(self, action: ControlAction) -> Any:
-        if action.action_kind == "minion_v2_human_decision":
-            return await self._handle_v2_human_decision_async(action)
-        if action.action_kind == "minion_lesson_decision":
-            return await self._handle_lesson_decision_async(action)
-        if action.action_kind in {"minion_question_select", "minion_question_nav", "minion_question_submit"}:
-            return await self._handle_question_interaction_async(action)
-        if action.action_kind == "minion_question_answer":
-            return await self._handle_question_answer_async(action)
-        if action.action_kind == "minion_plan_accept_override":
-            return await self._handle_plan_accept_override_async(action)
-        if action.action_kind in {"minion_plan_reject", "minion_plan_edit"}:
-            return await self._handle_plan_review_decision_async(action)
-        if action.action_kind in {"minion_dag_tick", "minion_plan_pause", "minion_plan_finish"}:
-            return await self._handle_plan_control_async(action)
-        if action.action_kind != "minion_approval_decision":
-            return ""
-        decision = str(action.args.get("decision") or "").strip().lower()
-        approval_id = str(action.args.get("approval_id") or action.target_id or "").strip()
-        payload = {
-            "approval_id": approval_id,
-            "decision": decision,
-            "run_id": str(action.args.get("run_id") or ""),
-            "minion_id": str(action.args.get("minion_id") or ""),
-        }
-        self._ensure_manager_started()
-        result = await _to_thread(self.client.send_decision_sync, payload)
-        status = str(result.get("status") or RuntimeStatus.OK)
-        if status == RuntimeStatus.OK:
-            if decision == "accept_all":
-                return "Minion approval recorded; remaining approvals for this run will be accepted."
-            return f"Minion approval {decision or 'decision'} recorded."
-        return str(result.get("error") or "Minion approval decision failed.")
-
-    async def _handle_v2_human_decision_async(self, action: ControlAction) -> str:
-        decision = str(action.args.get("decision") or "").strip().lower()
-        if decision == "edit" and not str(action.args.get("edit_instruction") or "").strip():
-            return (
-                "Reply with the exact architecture edit instruction. Pal can submit it with "
-                "op_minion_submit_human_decision using this card's decision_token."
-            )
-        if decision == "clarify" and not str(action.args.get("clarification_response") or "").strip():
-            return (
-                "Reply with the requested clarification. Pal must submit it with "
-                "op_minion_submit_human_decision(decision=\"clarify\", "
-                f"decision_token=\"{str(action.args.get('decision_token') or '')}\", clarification_response=...)."
-            )
-        from pal.minion.v2.service import MinionV2WorkflowService
-
-        service = MinionV2WorkflowService(self.runtime_root)
-        try:
-            result = await _to_thread(
-                service.submit_human_decision,
-                {
-                    "decision_token": str(action.args.get("decision_token") or ""),
-                    "decision": decision,
-                    "edit_instruction": str(action.args.get("edit_instruction") or ""),
-                    "clarification_response": str(action.args.get("clarification_response") or ""),
-                    "actor": str(action.args.get("actor_id") or "pal"),
-                    "source_channel": str(action.args.get("active_channel_id") or "local"),
-                },
-            )
-        except Exception as exc:
-            return f"Minion V2 architecture decision was not applied: {exc}"
-        self.wake_v2()
-        return f"Minion V2 architecture decision accepted ({result.get('state') or decision})."
-
-    async def _handle_plan_accept_override_async(self, action: ControlAction) -> str:
-        plan_ref = action.args.get("plan_ref")
-        if not plan_ref:
-            return "Minion plan acceptance is missing plan_ref."
-        reason = str(action.args.get("reason") or action.notes or "human accepted plan through control action").strip()
-        human_override = {
-            "reason": reason,
-            "actor": str(action.args.get("actor") or "human").strip() or "human",
-            "source": "control_action",
-            "action_kind": action.action_kind,
-            "target_scope": action.target_scope,
-            "target_id": str(action.target_id or ""),
-        }
-        for key in ("interaction_origin", "interaction_id", "interaction_kind"):
-            if str(action.args.get(key) or "").strip():
-                human_override[key] = str(action.args.get(key) or "").strip()
-        if action.route is not None:
-            human_override["route"] = {
-                "endpoint_id": action.route.endpoint_id,
-                "channel_kind": action.route.channel_kind,
-            }
-        payload = self._repository().accept_plan_ref(
-            plan_ref,
-            reason=reason,
-            review_gate_ref=action.args.get("review_gate_ref"),
-            human_override=human_override,
-        )
-        work_order_id = str(action.args.get("work_order_id") or action.target_id or "").strip()
-        if work_order_id:
-            accepted_ref = dict(payload.get("plan_ref") or {})
-            review_gate_ref = dict(action.args.get("review_gate_ref") or {}) if isinstance(action.args.get("review_gate_ref"), dict) else {}
-            self._ensure_manager_started()
-            dispatch = await _to_thread(
-                self.client.request_sync,
-                "dispatch_accepted_plan",
-                {
-                    "work_order_id": work_order_id,
-                    "plan_ref": accepted_ref,
-                    "review_gate_ref": review_gate_ref,
-                },
-            )
-            self._repository().merge_work_order_metadata(
-                work_order_id,
-                {
-                    "plan_review": {
-                        "status": "accepted",
-                        "plan_ref": accepted_ref,
-                        "review_gate_ref": review_gate_ref,
-                        "acceptance": payload,
-                        "dispatch": dispatch,
-                        "updated_at": utc_now(),
-                        "next_action": "executing_plan",
-                        "human_decision": human_override,
-                    }
-                },
-            )
-            self._repository().record_minion_event(
-                {
-                    "event_kind": "plan_accepted",
-                    "work_order_id": work_order_id,
-                    "minion_id": "",
-                    "run_id": "",
-                    "minion_profile": "control",
-                    "payload": {
-                        "status": "accepted",
-                        "summary": "human accepted reviewed plan",
-                        "plan_ref": accepted_ref,
-                        "review_gate_ref": review_gate_ref,
-                        "dispatch": dispatch,
-                    },
-                }
-            )
-        plan_id = str((payload.get("plan_ref") or {}).get("plan_id") or "")
-        return f"Minion plan accepted by human override{f' ({plan_id})' if plan_id else ''}."
-
-    async def _handle_plan_review_decision_async(self, action: ControlAction) -> str:
-        plan_ref = action.args.get("plan_ref")
-        if not isinstance(plan_ref, dict):
-            return "Minion plan decision is missing plan_ref."
-        work_order_id = str(action.args.get("work_order_id") or action.target_id or "").strip()
-        if not work_order_id:
-            return "Minion plan decision is missing work_order_id."
-        decision = "rejected" if action.action_kind == "minion_plan_reject" else "edit_requested"
-        review_gate_ref = dict(action.args.get("review_gate_ref") or {}) if isinstance(action.args.get("review_gate_ref"), dict) else {}
-        next_action = "rejected" if decision == "rejected" else "revise_plan"
-        review_state = {
-            "status": decision,
-            "plan_ref": dict(plan_ref),
-            "review_gate_ref": review_gate_ref,
-            "updated_at": utc_now(),
-            "next_action": next_action,
-            "human_decision": {
-                "action_kind": action.action_kind,
-                "actor": str(action.args.get("actor") or "human").strip() or "human",
-                "reason": str(action.args.get("reason") or action.notes or "").strip(),
-            },
-        }
-        edit_instruction = str(action.args.get("edit_instruction") or "").strip()
-        if edit_instruction:
-            review_state["edit_instruction"] = edit_instruction
-        for key in ("interaction_origin", "interaction_id", "interaction_kind"):
-            if str(action.args.get(key) or "").strip():
-                review_state["human_decision"][key] = str(action.args.get(key) or "").strip()
-        revision: dict[str, Any] = {}
-        if decision == "rejected":
-            updates: dict[str, Any] = {"plan_review": review_state}
-            snapshot = self._repository().read_work_order(work_order_id)
-            metadata = dict((snapshot.get("work_order") or {}).get("metadata") or {}) if snapshot.get("status") == "ok" else {}
-            workflow = dict(metadata.get("workflow") or {}) if isinstance(metadata.get("workflow"), dict) else {}
-            if workflow:
-                blocker = {
-                    "reason": "plan_rejected",
-                    "summary": str(action.args.get("reason") or action.notes or "human rejected reviewed plan").strip(),
-                    "plan_ref": dict(plan_ref),
-                    "review_gate_ref": review_gate_ref,
-                }
-                workflow.update({"status": "blocked", "blocker": blocker, "updated_at": utc_now()})
-                steps = [dict(item) for item in list(workflow.get("steps") or []) if isinstance(item, dict)]
-                current_step_id = str(workflow.get("current_step_id") or "")
-                if steps:
-                    target_index = next(
-                        (index for index, item in enumerate(steps) if str(item.get("step_id") or "") == current_step_id),
-                        len(steps) - 1,
-                    )
-                    steps[target_index] = {**steps[target_index], "status": "blocked", "blocker": blocker, "next_action": "rejected"}
-                    workflow["steps"] = steps
-                updates["workflow"] = workflow
-            self._repository().merge_work_order_metadata(work_order_id, updates, work_order_status="blocked")
-        else:
-            self._repository().merge_work_order_metadata(work_order_id, {"plan_review": review_state})
-            self._ensure_manager_started()
-            revision = await _to_thread(
-                self.client.request_sync,
-                "dispatch_plan_revision",
-                {
-                    "work_order_id": work_order_id,
-                    "plan_ref": dict(plan_ref),
-                    "review_gate_ref": review_gate_ref,
-                    "reason": str(action.args.get("reason") or action.notes or "").strip(),
-                    "edit_instruction": edit_instruction,
-                },
-            )
-            review_state["revision_dispatch"] = revision
-            review_state["next_action"] = "wait_for_revision" if str(revision.get("status") or "") == "spawned" else "revise_plan"
-            self._repository().merge_work_order_metadata(work_order_id, {"plan_review": review_state})
-        self._repository().record_minion_event(
-            {
-                "event_kind": "plan_rejected" if decision == "rejected" else "plan_edit_requested",
-                "work_order_id": work_order_id,
-                "minion_id": "",
-                "run_id": "",
-                "minion_profile": "control",
-                "payload": {
-                    "status": decision,
-                    "summary": "human rejected reviewed plan" if decision == "rejected" else "human requested plan edit",
-                    "plan_ref": dict(plan_ref),
-                    "review_gate_ref": review_gate_ref,
-                    **({"revision_dispatch": revision} if revision else {}),
-                    "next_action": review_state["next_action"],
-                },
-            }
-        )
-        plan_id = str(plan_ref.get("plan_id") or "")
-        if decision == "rejected":
-            return f"Minion plan rejected{f' ({plan_id})' if plan_id else ''}; work order blocked pending a new user decision."
-        return f"Minion plan edit requested{f' ({plan_id})' if plan_id else ''}; revision architect dispatched."
-
-    async def _handle_plan_control_async(self, action: ControlAction) -> str:
-        work_order_id = str(action.args.get("work_order_id") or action.target_id or "").strip()
-        if not work_order_id:
-            return "Minion work order action is missing work_order_id."
-        self._ensure_manager_started()
-        if action.action_kind == "minion_dag_tick":
-            result = await _to_thread(self.client.request_sync, "tick_parent_dag", {"work_order_id": work_order_id, "reason": "control_action"})
-            if str(result.get("reason") or "") == "active_child_running":
-                child_id = str(result.get("active_child_work_order_id") or "")
-                return f"Minion work order already has an active module{f' ({child_id})' if child_id else ''}."
-            if str(result.get("status") or "") == "running_module":
-                module_id = str(result.get("module_id") or "")
-                return f"Minion DAG tick started{f' {module_id}' if module_id else ''}."
-            return f"Minion DAG tick result: {result.get('status') or 'unknown'}."
-        if action.action_kind == "minion_plan_pause":
-            result = await _to_thread(
-                self.client.request_sync,
-                "pause_work_order",
-                {"work_order_id": work_order_id, "reason": str(action.args.get("reason") or "user paused at milestone boundary")},
-            )
-            return f"Minion work order paused ({result.get('status') or 'unknown'})."
-        result = await _to_thread(
-            self.client.request_sync,
-            "finish_work_order",
-            {"work_order_id": work_order_id, "reason": str(action.args.get("reason") or "user finished at milestone boundary")},
-        )
-        return f"Minion work order finished ({result.get('status') or 'unknown'})."
-
-    async def _handle_question_answer_async(self, action: ControlAction) -> str:
-        work_order_id = str(action.args.get("work_order_id") or action.target_id or "").strip()
-        question_id = str(action.args.get("question_id") or "").strip()
-        if not work_order_id or not question_id:
-            return "Minion question answer is missing work_order_id or question_id."
-        answer = {
-            "question_id": question_id,
-            "selected_option_id": str(action.args.get("selected_option_id") or "").strip(),
-            "answer": str(action.args.get("answer") or "").strip(),
-            "run_id": str(action.args.get("run_id") or ""),
-            "minion_id": str(action.args.get("minion_id") or ""),
-            "turn_index": action.args.get("turn_index", 0),
-            "plan_revision": action.args.get("plan_revision", 0),
-        }
-        result = await _to_thread(self._repository().record_clarification_answer, work_order_id, answer)
-        if str(result.get("status") or RuntimeStatus.OK) != RuntimeStatus.OK:
-            return str(result.get("error") or "Minion question answer failed.")
-        resume = await _to_thread(self._resume_architect_after_question_answer, work_order_id, action)
-        if str(resume.get("status") or "") == "resumed":
-            run_id = str((resume.get("run") or {}).get("run_id") or "")
-            return f"Minion question answer recorded; architect resumed{f' as {run_id}' if run_id else ''}."
-        if str(resume.get("status") or "") == "skipped":
-            return "Minion question answer recorded."
-        return f"Minion question answer recorded, but architect resume failed: {resume.get('error') or resume.get('status') or 'unknown error'}"
-
-    async def _handle_question_interaction_async(self, action: ControlAction) -> Any:
-        session = minion_question_session(action.args)
-        if action.action_kind == "minion_question_submit":
-            if not minion_question_ready(session):
-                if action.route is None:
-                    return "Minion question needs more answers before submit."
-                delivery = minion_question_update_delivery(session, action.route)
-                return {"delivery": delivery} if delivery is not None else "Minion question needs more answers before submit."
-            return await self._submit_question_clarification(session, action.route)
-        if action.action_kind == "minion_question_nav":
-            session["current_index"] = action.args.get("target_index", session.get("current_index", 0))
-            if action.route is None:
-                return "Minion question page updated."
-            delivery = minion_question_update_delivery(session, action.route)
-            return {"delivery": delivery} if delivery is not None else "Minion question page updated."
-        updated = minion_question_session_with_selection(
-            session,
-            question_id=str(action.args.get("question_id") or ""),
-            selected_option_id=str(action.args.get("selected_option_id") or ""),
-            answer=str(action.args.get("answer") or ""),
-        )
-        if action.route is None:
-            return "Minion question answer recorded."
-        delivery = minion_question_update_delivery(updated, action.route)
-        return {"delivery": delivery} if delivery is not None else "Minion question answer recorded."
-
-    async def _submit_question_clarification(self, session: dict[str, Any], route: ControlRoute | None) -> Any:
-        clarification = {
-            "clarification_id": str(session.get("clarification_id") or ""),
-            "run_id": str(session.get("run_id") or ""),
-            "minion_id": str(session.get("minion_id") or ""),
-            "work_order_id": str(session.get("work_order_id") or ""),
-            "turn_index": session.get("turn_index", 0),
-            "plan_revision": session.get("plan_revision", 0),
-            "answers": minion_question_answers(session),
-        }
-        self._ensure_manager_started()
-        try:
-            result = await _to_thread(self.client.send_clarification_sync, clarification)
-        except Exception as exc:
-            return f"Minion clarification submit failed: {exc}"
-        if not bool(result.get("ok", True)):
-            return str(result.get("error") or "Minion clarification submit failed.")
-        if route is None:
-            return "Architect input received; continuing planning."
-        delivery = minion_question_resolve_delivery(session, route, "Architect input received. Continuing planning.")
-        return {"delivery": delivery} if delivery is not None else "Architect input received; continuing planning."
-
-    async def _handle_lesson_decision_async(self, action: ControlAction) -> str:
-        decision = str(action.args.get("decision") or "").strip().lower()
-        work_order_id = str(action.args.get("work_order_id") or action.target_id or "").strip()
-        task_lessons = _string_list(action.args.get("task_lessons"))
-        system_lessons = _string_list(action.args.get("system_lessons"))
-        memory_candidates = _dict_list(action.args.get("memory_candidates"))
-        if decision == "reject":
-            return "Minion lessons discarded."
-        if decision == "edit":
-            return "Lesson absorption paused. Reply with the edited lesson text and Pal can save the revised version."
-        if decision != "accept":
-            return "Unsupported minion lesson decision."
-        result = await _to_thread(
-            self._repository().absorb_lessons,
-            work_order_id,
-            task_lessons=task_lessons,
-            system_lessons=system_lessons,
-            minion_id=str(action.args.get("minion_id") or ""),
-            run_id=str(action.args.get("run_id") or ""),
-        )
-        if str(result.get("status") or RuntimeStatus.OK) != RuntimeStatus.OK:
-            return str(result.get("error") or "Minion lesson absorption failed.")
-        l3_result = await _to_thread(
-            self._commit_approved_memory_to_l3,
-            work_order_id,
-            task_lessons,
-            system_lessons,
-            memory_candidates,
-        )
-        total = int(result.get("task_lesson_count") or 0) + int(result.get("system_lesson_count") or 0)
-        reviewed = total + len(memory_candidates)
-        if l3_result:
-            return f"Minion memory accepted ({reviewed} reviewed; {total} lessons stored; {l3_result})."
-        return f"Minion memory accepted ({reviewed} reviewed; {total} lessons stored)."
-
-    def _commit_lessons_to_l3(self, work_order_id: str, task_lessons: list[str], system_lessons: list[str]) -> str:
-        return self._commit_approved_memory_to_l3(work_order_id, task_lessons, system_lessons, [])
-
-    def _commit_approved_memory_to_l3(
-        self,
-        work_order_id: str,
-        task_lessons: list[str],
-        system_lessons: list[str],
-        memory_candidates: list[dict[str, Any]],
-    ) -> str:
-        if self.context is None:
-            return ""
-        runtime = getattr(self.context, "execution_runtime", None)
-        has_capability = getattr(runtime, "has_registered_capability", None)
-        if runtime is None or not callable(has_capability) or not has_capability("op_memory_write"):
-            return ""
-        committed = 0
-        for lesson in task_lessons:
-            if self._commit_one_lesson_to_l3(runtime, lesson, scope="task", work_order_id=work_order_id):
-                committed += 1
-        for lesson in system_lessons:
-            if self._commit_one_lesson_to_l3(runtime, lesson, scope="system", work_order_id=work_order_id):
-                committed += 1
-        for candidate in memory_candidates:
-            if self._commit_one_memory_candidate_to_l3(runtime, candidate, work_order_id=work_order_id):
-                committed += 1
-        return f"{committed} memory records committed" if committed else ""
-
-    def _commit_one_lesson_to_l3(self, runtime: Any, lesson: str, *, scope: str, work_order_id: str) -> bool:
-        text = str(lesson or "").strip()
-        if not text:
-            return False
-        title = f"Minion {scope} lesson: {_preview_text(text, limit=72)}"
-        result = runtime.execute(
-            CapabilityCall(
-                name="op_memory_write",
-                args={
-                    "kind": "case",
-                    "title": title,
-                    "summary": text,
-                    "search_text": text,
-                    "scope": scope,
-                    "task_id": work_order_id if scope == "task" else "",
-                    "topics": ["minion", "lesson"],
-                    "payload": {"source": "minion", "work_order_id": work_order_id},
-                    "star": {
-                        "situation": f"Minion produced a reusable {scope} lesson for work order {work_order_id}.",
-                        "task": "Preserve the lesson so future Pal/minion work can recall it.",
-                        "action": text,
-                        "result": "The lesson was accepted for durable memory absorption.",
-                    },
-                },
-            )
-        )
-        return str(getattr(result, "status", "") or "") == RuntimeStatus.OK
-
-    def _commit_one_memory_candidate_to_l3(self, runtime: Any, candidate: dict[str, Any], *, work_order_id: str) -> bool:
-        args = _l3_commit_args_from_memory_candidate(candidate, work_order_id=work_order_id)
-        if not args:
-            return False
-        result = runtime.execute(CapabilityCall(name="op_memory_write", args=args))
-        return str(getattr(result, "status", "") or "") == RuntimeStatus.OK
+    def wake_v2(self) -> None:
+        self._require_manager()
+        self.client.request_sync("v2_wake")
 
     def has_pending_events(self) -> bool:
         with self._buffer_lock:
@@ -2357,38 +101,76 @@ class MinionManagerProvider:
 
     def drain_events_sync(self, *, limit: int = 20) -> dict[str, Any]:
         with self._buffer_lock:
-            drained = self._buffered_events[:limit]
-            del self._buffered_events[:limit]
-            remaining = len(self._buffered_events)
-        return {"events": drained, "remaining": remaining}
+            events = self._buffered_events[: max(1, int(limit))]
+            del self._buffered_events[: len(events)]
+            return {"events": events, "remaining": len(self._buffered_events)}
 
-    def record_minion_observation(self, payload: dict[str, Any]) -> None:
-        observation = _minion_observation_from_terminal(payload)
-        if not observation:
-            return
-        with self._buffer_lock:
-            key = str(observation.get("run_id") or observation.get("work_order_id") or "")
-            self.recent_observations.upsert(key, observation)
+    async def handle_control_action_async(self, action: ControlAction) -> str:
+        if action.action_kind == "minion_v2_human_decision":
+            decision = str(action.args.get("decision") or "").strip().lower()
+            if decision == "edit" and not str(action.args.get("edit_instruction") or "").strip():
+                return "Reply with the exact architecture edit instruction, then submit it with op_minion_submit_human_decision."
+            if decision == "clarify" and not str(action.args.get("clarification_response") or "").strip():
+                return "Reply with the requested clarification, then submit it with op_minion_submit_human_decision."
+            try:
+                result = await asyncio.to_thread(
+                    MinionV2WorkflowService(self.runtime_root).submit_human_decision,
+                    {
+                        "decision_token": str(action.args.get("decision_token") or ""),
+                        "decision": decision,
+                        "edit_instruction": str(action.args.get("edit_instruction") or ""),
+                        "clarification_response": str(action.args.get("clarification_response") or ""),
+                        "actor": str(action.args.get("actor_id") or "pal"),
+                        "source_channel": str(action.args.get("active_channel_id") or "local"),
+                    },
+                )
+                await asyncio.to_thread(self.wake_v2)
+                return f"Minion architecture decision recorded ({result.get('state') or decision})."
+            except Exception as exc:
+                return f"Minion architecture decision was not applied: {exc}"
+        if action.action_kind == "minion_approval_decision":
+            payload = {
+                "approval_id": str(action.args.get("approval_id") or action.target_id or ""),
+                "decision": str(action.args.get("decision") or ""),
+                "run_id": str(action.args.get("run_id") or ""),
+                "minion_id": str(action.args.get("minion_id") or ""),
+            }
+            try:
+                await asyncio.to_thread(self._require_manager)
+                await asyncio.to_thread(self.client.send_decision_sync, payload)
+                return "Minion approval decision recorded."
+            except Exception as exc:
+                return f"Minion approval decision failed: {exc}"
+        if action.action_kind == "minion_question_answer":
+            try:
+                await asyncio.to_thread(self._require_manager)
+                await asyncio.to_thread(self.client.send_clarification_sync, dict(action.args))
+                return "Minion clarification recorded."
+            except Exception as exc:
+                return f"Minion clarification failed: {exc}"
+        return ""
 
-    def recent_minion_observations(self, *, limit: int = 5) -> list[dict[str, Any]]:
-        with self._buffer_lock:
-            return [dict(item) for item in self.recent_observations.values(limit=max(1, min(int(limit or 5), 10)))]
-
-    def _ensure_manager_started(self) -> None:
+    def _start_manager(self) -> dict[str, Any]:
         if self.process is not None and self.process.poll() is None:
             try:
-                self.last_health = self.client.health_sync()
-                self._start_event_subscription()
-                return
+                owned_health = self._lifecycle_client.health_sync()
             except Exception:
-                self._stop_process_only()
+                self._stop_process_only(kill_process_group=True)
+            else:
+                try:
+                    return self._validate_health(owned_health)
+                except Exception:
+                    self._retire_incompatible_manager(owned_health)
+                    self._stop_process_only(kill_process_group=True)
         try:
-            self.last_health = self.client.health_sync()
-            self.last_error = ""
-            self._start_event_subscription()
-            return
+            existing_health = self._lifecycle_client.health_sync()
         except Exception:
-            pass
+            existing_health = None
+        if existing_health is not None:
+            try:
+                return self._validate_health(existing_health)
+            except Exception:
+                self._retire_incompatible_manager(existing_health)
         self._cleanup_stale_endpoint()
         self.runtime_root.mkdir(parents=True, exist_ok=True)
         self.process = subprocess.Popen(
@@ -2401,116 +183,168 @@ class MinionManagerProvider:
                 self._stop_process_only()
                 raise RuntimeError("minion manager exited during startup")
             try:
-                self.last_health = self.client.health_sync()
-                self.last_error = ""
-                self._start_event_subscription()
-                return
+                return self._validate_health(self._lifecycle_client.health_sync())
             except Exception:
                 time.sleep(0.2)
         raise RuntimeError("minion manager failed to start")
 
-    def wake_v2(self) -> None:
-        self._ensure_manager_started()
-        self.client.request_sync("v2_wake")
-
     def _stop_manager(self, *, force: bool = False) -> None:
-        self._stop_event_subscription()
+        _ = force
+        self.detach_manager()
+
+    def _stop_manager_locked(self) -> None:
+        self._event_stop.set()
+        manager_pid = self._manager_pid()
+        with contextlib.suppress(Exception):
+            self._lifecycle_client.shutdown_sync(graceful=True, timeout_seconds=5.0)
         process = self.process
-        if process is not None and process.poll() is None:
-            if not force and self._has_active_runs_sync():
-                self.process = None
-                self._join_event_subscription()
-                self.last_health = {}
-                with self._buffer_lock:
-                    self._buffered_events.clear()
-                return
-            self._stop_active_runs_sync()
+        if process is not None:
             with contextlib.suppress(Exception):
-                self.client.shutdown_sync()
-            with contextlib.suppress(Exception):
-                process.wait(timeout=2.0)
-        self._stop_process_only()
-        self._join_event_subscription()
+                process.wait(timeout=6.0)
+        self._wait_for_manager_exit(timeout_seconds=6.0)
+        if self._manager_is_responding():
+            self._terminate_manager(manager_pid)
+        self._stop_process_only(kill_process_group=True)
+        self._wait_for_manager_exit(timeout_seconds=1.5)
+        thread = self._event_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+        self._event_thread = None
+        if self._manager_is_responding():
+            raise RuntimeError("minion manager did not stop during detach")
+        self._cleanup_stale_endpoint()
         self.last_health = {}
-        with self._buffer_lock:
-            self._buffered_events.clear()
+
+    def _stop_process_only(self, *, kill_process_group: bool = False) -> None:
+        process = self.process
+        if process is None:
+            return
+        if process.poll() is None:
+            with contextlib.suppress(Exception):
+                if kill_process_group:
+                    os.killpg(process.pid, signal.SIGTERM)
+                else:
+                    process.terminate()
+                process.wait(timeout=1.0)
+        if process.poll() is None:
+            with contextlib.suppress(Exception):
+                if kill_process_group:
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+                process.wait(timeout=1.0)
+        self.process = None
+
+    def _require_manager(self) -> dict[str, Any]:
+        with self._lifecycle_lock:
+            if not self._attached:
+                raise RuntimeError("minion sidecar is detached")
+            health = self._validate_health(self.client.health_sync())
+            self.last_health = health
+            return health
+
+    @staticmethod
+    def _validate_health(health: dict[str, Any]) -> dict[str, Any]:
+        if not bool(health.get("ok")) or str(health.get("health_source") or "") != "minion_v2_manager":
+            raise RuntimeError("minion manager health check failed")
+        if str(health.get("lifecycle_protocol") or "") != "plugin_raii.v1":
+            raise RuntimeError("minion manager lifecycle protocol is incompatible")
+        if bool(health.get("shutdown_requested")):
+            raise RuntimeError("minion manager is shutting down")
+        return dict(health)
+
+    def _retire_incompatible_manager(self, health: dict[str, Any] | None = None) -> None:
+        payload = dict(health or {})
+        with contextlib.suppress(Exception):
+            self._lifecycle_client.shutdown_sync(graceful=True, timeout_seconds=5.0)
+        self._wait_for_manager_exit(timeout_seconds=6.0)
+        if self._manager_is_responding():
+            manager_pid = self._pid_from_health(payload)
+            if manager_pid is not None:
+                self._terminate_manager(manager_pid)
+                self._wait_for_manager_exit(timeout_seconds=1.5)
+        if self._manager_is_responding():
+            raise RuntimeError("incompatible minion manager did not stop")
+        self._cleanup_stale_endpoint()
+
+    def _manager_pid(self) -> int | None:
+        health = dict(self.last_health or {})
+        if not health:
+            with contextlib.suppress(Exception):
+                health = self._validate_health(self._lifecycle_client.health_sync())
+        return self._pid_from_health(health)
+
+    @staticmethod
+    def _pid_from_health(health: dict[str, Any]) -> int | None:
+        try:
+            pid = int(health.get("manager_pid") or 0)
+        except (TypeError, ValueError):
+            return None
+        return pid if pid > 1 and pid != os.getpid() else None
+
+    def _manager_is_responding(self) -> bool:
+        try:
+            health = self._lifecycle_client.health_sync()
+            return bool(health.get("ok")) and str(health.get("health_source") or "") == "minion_v2_manager"
+        except Exception:
+            return False
+
+    def _wait_for_manager_exit(self, *, timeout_seconds: float) -> None:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while self._manager_is_responding() and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+    @staticmethod
+    def _terminate_manager(manager_pid: int | None) -> None:
+        if manager_pid is None:
+            return
+        process_group: int | None = None
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            candidate = os.getpgid(manager_pid)
+            if candidate != os.getpgrp():
+                process_group = candidate
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            if process_group is not None:
+                os.killpg(process_group, signal.SIGTERM)
+            else:
+                os.kill(manager_pid, signal.SIGTERM)
+        for _ in range(20):
+            try:
+                os.kill(manager_pid, 0)
+            except ProcessLookupError:
+                return
+            except PermissionError:
+                return
+            time.sleep(0.05)
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            if process_group is not None:
+                os.killpg(process_group, signal.SIGKILL)
+            else:
+                os.kill(manager_pid, signal.SIGKILL)
 
     def _cleanup_stale_endpoint(self) -> None:
-        with contextlib.suppress(Exception):
-            self.client.health_sync()
-            return
         for path in (self.client.socket_path, minion_port_path(self.runtime_root)):
             if path.exists():
                 with contextlib.suppress(FileNotFoundError):
                     path.unlink()
 
-    def _has_active_runs_sync(self) -> bool:
-        with contextlib.suppress(Exception):
-            result = self.client.list_runs_sync()
-            for item in list(result.get("items") or []):
-                if not isinstance(item, dict):
-                    continue
-                if str(item.get("status") or "") in {"starting", "running", "approval_pending", "clarification_pending"}:
-                    return True
-        return False
-
-    def _stop_process_only(self) -> None:
-        process = self.process
-        if process is None:
-            return
-        try:
-            if process.poll() is None:
-                process.terminate()
-                process.wait(timeout=1.0)
-        except Exception:
-            with contextlib.suppress(Exception):
-                process.kill()
-                process.wait(timeout=1.0)
-        self.process = None
-
-    def _stop_active_runs_sync(self) -> None:
-        with contextlib.suppress(Exception):
-            result = self.client.list_runs_sync()
-            for item in list(result.get("items") or []):
-                if not isinstance(item, dict):
-                    continue
-                if str(item.get("status") or "") not in {"starting", "running", "approval_pending", "clarification_pending"}:
-                    continue
-                run_id = str(item.get("run_id") or "").strip()
-                if run_id:
-                    with contextlib.suppress(Exception):
-                        self.client.kill_sync(run_id, reason="minion manager stopping")
-
     def _start_event_subscription(self) -> None:
-        thread = self._event_subscription_thread
-        if thread is not None and thread.is_alive():
+        if self._event_thread is not None and self._event_thread.is_alive():
             return
-        self._event_subscription_stop.clear()
-        thread = threading.Thread(
-            target=self._run_event_subscription_thread,
-            name="pal-minion-event-subscription",
+        self._event_stop.clear()
+        self._event_thread = threading.Thread(
+            target=self._event_subscription_thread,
+            name="pal-minion-v2-events",
             daemon=True,
         )
-        self._event_subscription_thread = thread
-        thread.start()
+        self._event_thread.start()
 
-    def _stop_event_subscription(self) -> None:
-        self._event_subscription_stop.set()
-        self._event_subscription_active = False
-
-    def _join_event_subscription(self) -> None:
-        thread = self._event_subscription_thread
-        if thread is not None and thread is not threading.current_thread() and thread.is_alive():
-            thread.join(timeout=1.0)
-        if thread is not None and not thread.is_alive():
-            self._event_subscription_thread = None
-
-    def _run_event_subscription_thread(self) -> None:
-        while not self._event_subscription_stop.is_set():
+    def _event_subscription_thread(self) -> None:
+        while not self._event_stop.is_set():
             try:
                 asyncio.run(self._event_subscription_loop())
             except Exception as exc:
-                if self._event_subscription_stop.is_set():
+                if self._event_stop.is_set():
                     return
                 self.last_error = f"event subscription failed: {exc.__class__.__name__}: {exc}"
                 time.sleep(0.25)
@@ -2521,1579 +355,101 @@ class MinionManagerProvider:
         try:
             writer.write(
                 pack_sidecar_message(
-                    {
-                        "type": "request",
-                        "id": request_id,
-                        "method": "subscribe_events",
-                        "params": {},
-                    }
+                    {"type": "request", "id": request_id, "method": "subscribe_events", "params": {}}
                 )
             )
             await writer.drain()
             response = await read_sidecar_message(reader)
             if str(response.get("id") or "") != request_id or not bool(response.get("ok")):
                 raise RuntimeError("minion event subscription rejected")
-            self._event_subscription_active = True
-            self.last_error = ""
-            while not self._event_subscription_stop.is_set():
+            while not self._event_stop.is_set():
                 frame = await read_sidecar_message(reader)
-                if str(frame.get("type") or "") != "event":
-                    continue
-                event = frame.get("event")
+                event = frame.get("event") if str(frame.get("type") or "") == "event" else None
                 if isinstance(event, dict):
                     self._buffer_event(event)
         finally:
-            self._event_subscription_active = False
-            with contextlib.suppress(Exception):
-                writer.write(
-                    pack_sidecar_message(
-                        {
-                            "type": "request",
-                            "id": f"unsub_{uuid4().hex[:16]}",
-                            "method": "unsubscribe_events",
-                            "params": {},
-                        }
-                    )
-                )
-                await writer.drain()
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
 
     def _buffer_event(self, event: dict[str, Any]) -> None:
-        if _is_high_cardinality_minion_event(event):
+        if str(event.get("event_kind") or "") == "progress":
             return
-        key = _event_dedupe_key(event)
+        key = "|".join(
+            (
+                str(event.get("event_kind") or ""),
+                str(event.get("run_id") or ""),
+                str(event.get("workflow_id") or event.get("invocation_id") or ""),
+                str(dict(event.get("payload") or {}).get("manifest_sha") or ""),
+            )
+        )
         with self._buffer_lock:
             if key in self._seen_event_keys:
                 return
             self._seen_event_keys.add(key)
-            if len(self._seen_event_keys) > 1000:
-                self._seen_event_keys = set(list(self._seen_event_keys)[-500:])
             self._buffered_events.append(dict(event))
-        notify = self.event_notify
-        if callable(notify):
-            notify()
-
-    def _request_or_error(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        try:
-            self._ensure_manager_started()
-            result = self.client.request_sync(method, params)
-            self.last_health = dict(result)
-            return result
-        except Exception as exc:
-            return {"status": RuntimeStatus.ERROR, "error": f"{exc.__class__.__name__}: {exc}", **self._status_payload()}
-
-    def _refresh_health_snapshot(self) -> None:
-        try:
-            self._ensure_manager_started()
-            self.degraded = False
-            self.last_error = ""
-        except Exception as exc:
-            self.degraded = True
-            self.last_error = f"{exc.__class__.__name__}: {exc}"
-
-    def _repository(self) -> MinionTaskingRepository:
-        repository = MinionTaskingRepository(runtime_root=self.runtime_root)
-        repository.ensure_schema()
-        return repository
-
-    def _active_runs_snapshot(self) -> list[dict[str, Any]]:
-        if self.process is None or self.process.poll() is not None:
-            return []
-        try:
-            result = self.client.list_runs_sync()
-        except Exception:
-            return []
-        return [dict(item) for item in list(result.get("items") or []) if isinstance(item, dict)]
-
-    def _status_payload(self) -> dict[str, Any]:
-        process_running = self.process is not None and self.process.poll() is None
-        running = process_running or bool(self.last_health.get("ok"))
-        with self._buffer_lock:
-            buffered_event_count = len(self._buffered_events)
-        config = effective_minion_runtime_config(self.runtime_root)
-        payload = {
-            "module_id": "minion",
-            "mounted": self.mounted,
-            "degraded": self.degraded,
-            "manager_running": running,
-            "log_sink": current_service_log_sink_description(),
-            "minion_db_path": str(config.get("db_path") or ""),
-            "last_error": self.last_error,
-            "buffered_event_count": buffered_event_count,
-            "event_subscription_active": bool(self._event_subscription_active),
-            "profile_count": len(self._profile_registry().list_profiles()),
-        }
-        payload.update(dict(self.last_health or {}))
-        return payload
-
-    def _profile_registry(self) -> MinionProfileRegistry:
-        profile_providers: list[Any] = []
-        capability_providers: list[Any] = []
-        family_providers: list[Any] = []
-        if self.context is not None:
-            for handle in self.context.module_registry.modules.values():
-                if not bool(getattr(handle, "mounted", True)) or bool(getattr(handle, "degraded", False)):
-                    continue
-                for provider in handle.ports.values():
-                    if callable(getattr(provider, "declared_minion_profiles", None)):
-                        profile_providers.append(provider)
-                    if callable(getattr(provider, "capabilities_for_minion_profile", None)):
-                        capability_providers.append(provider)
-                    if callable(getattr(provider, "declared_minion_families", None)):
-                        family_providers.append(provider)
-        return MinionProfileRegistry(
-            profile_providers=tuple(profile_providers),
-            capability_providers=tuple(capability_providers),
-            family_providers=tuple(family_providers),
-            ambient_capabilities=tuple(self._ambient_capabilities()),
-            runtime_root=self.runtime_root,
-        )
-
-    def _ambient_capabilities(self) -> list[str]:
-        if self.context is None:
-            return []
-        try:
-            specs = self.context.execution_runtime.list_capability_specs()
-        except Exception:
-            return []
-        return [str(spec.get("name") or "").strip() for spec in specs if str(spec.get("name") or "").strip()]
-
-    def _inject_control_route(self, pack: TaskContextPack, call: CapabilityCall) -> TaskContextPack:
-        metadata = dict(pack.metadata)
-        if isinstance(metadata.get("control_route"), dict):
-            return pack
-        route = _control_route_payload_for_turn(self.context, str(call.meta.get("turn_id") or ""))
-        if not route:
-            return pack
-        metadata["control_route"] = route
-        return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
-
-    def _inject_debug_log_request(self, pack: TaskContextPack, call: CapabilityCall) -> TaskContextPack:
-        metadata = dict(pack.metadata)
-        if isinstance(metadata.get("debug_log"), dict):
-            return pack
-        if not _prompt_log_enabled_for_turn(self.context, str(call.meta.get("turn_id") or "")):
-            return pack
-        metadata["minion_debug_log_enabled"] = True
-        return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
-
-    def _inject_preferred_endpoint(self, pack: TaskContextPack, call: CapabilityCall) -> TaskContextPack:
-        preferred_endpoint_id = str(call.args.get("preferred_endpoint_id") or "").strip()
-        if not preferred_endpoint_id:
-            return pack
-        metadata = dict(pack.metadata)
-        metadata["preferred_endpoint_id"] = preferred_endpoint_id
-        metadata["preferred_endpoint_source"] = "user"
-        return TaskContextPack.from_dict({**pack.to_dict(), "metadata": metadata})
-
-    def _resume_architect_after_question_answer(self, work_order_id: str, action: ControlAction) -> dict[str, Any]:
-        repository = self._repository()
-        try:
-            pack = repository.pack_for_work_order(work_order_id)
-        except Exception as exc:
-            return {"status": "error", "error": str(exc) or exc.__class__.__name__}
-        pack = self._profile_registry().resolve_pack(pack)
-        if not _is_architect_pack(pack):
-            return {"status": "skipped", "reason": "work_order_is_not_architect", "work_order_id": work_order_id}
-        metadata = _architect_resume_metadata(pack, action)
-        if action.route is not None:
-            metadata["control_route"] = _control_route_payload_from_route(action.route)
-        resumed = TaskContextPack.from_dict(
-            {
-                **pack.to_dict(),
-                "metadata": metadata,
-                "minion_profile": pack.minion_profile,
-            }
-        )
-        resumed = repository.prepare_pack_for_spawn(resumed)
-        self._ensure_manager_started()
-        result = self.client.spawn_sync(resumed.to_dict())
-        return {"status": "resumed", "work_order_id": work_order_id, "run": dict(result or {})}
+        if self.event_notify is not None:
+            self.event_notify()
 
 
-def inspect_minion(provider: MinionManagerProvider) -> MinionSnapshot:
-    payload = provider._status_payload()
-    return MinionSnapshot(
-        mounted=provider.mounted,
-        degraded=provider.degraded,
-        manager_running=bool(payload.get("manager_running")),
-        active_count=int(payload.get("active_count") or 0),
-        run_count=int(payload.get("run_count") or 0),
-        pending_event_count=int(payload.get("pending_event_count") or 0),
-    )
-
-
-def _is_architect_pack(pack: TaskContextPack) -> bool:
-    metadata = dict(pack.metadata or {})
-    execution_contract: dict[str, Any] = {}
-    for source in (
-        dict(pack.resolved_profile or {}).get("effective_execution_contract"),
-        dict(pack.resolved_profile or {}).get("execution_contract"),
-        pack.workspace.get("execution_contract") if isinstance(pack.workspace, dict) else {},
-        metadata.get("execution_contract"),
-    ):
-        if isinstance(source, dict):
-            execution_contract.update(dict(source))
-    role = str(
-        execution_contract.get("module_role")
-        or execution_contract.get("artifact_role")
-        or execution_contract.get("role")
-        or ""
-    ).strip().lower()
-    if role == "architect":
-        return True
-    planner_work_order = metadata.get("planner_work_order")
-    if isinstance(planner_work_order, dict) and str(planner_work_order.get("role") or "").strip().lower() == "architect":
-        return True
-    if isinstance(metadata.get("architect_work_order"), dict):
-        return True
-    prompt_view = prompt_view_from_metadata(metadata, workspace=dict(pack.workspace))
-    return str(prompt_view.get("role") or "").strip().lower() == "architect"
-
-
-def _architect_resume_metadata(pack: TaskContextPack, action: ControlAction) -> dict[str, Any]:
-    metadata = dict(pack.metadata or {})
-    answers = [dict(item) for item in list(metadata.get("clarification_answers") or []) if isinstance(item, dict)]
-    if not answers:
-        answers = [
-            {
-                "question_id": str(action.args.get("question_id") or ""),
-                "selected_option_id": str(action.args.get("selected_option_id") or ""),
-                "answer": str(action.args.get("answer") or ""),
-                "run_id": str(action.args.get("run_id") or ""),
-                "minion_id": str(action.args.get("minion_id") or ""),
-                "turn_index": action.args.get("turn_index", 0),
-                "plan_revision": action.args.get("plan_revision", 0),
-            }
-        ]
-        metadata["clarification_answers"] = answers
-    planner_work_order = dict(metadata.get("planner_work_order") or {})
-    if not planner_work_order:
-        planner_work_order = build_planner_work_order(
-            goal=pack.goal or pack.instruction,
-            task_id=str(metadata.get("task_id") or ""),
-            work_order_id=pack.work_order_id,
-            turn_index=0,
-            plan_revision=0,
-        )
-    if _is_architect_pack(pack):
-        planner_work_order["role"] = "architect"
-    planner_work_order["turn_index"] = int(_coerce_int(planner_work_order.get("turn_index"), default=0)) + 1
-    planner_work_order["plan_revision"] = int(_coerce_int(planner_work_order.get("plan_revision"), default=0)) + 1
-    planner_work_order["clarifications"] = answers
-    metadata["planner_work_order"] = planner_work_order
-    metadata.pop("prompt_view", None)
-    return metadata
-
-
-def _control_route_payload_from_route(route: Any) -> dict[str, Any]:
-    if route is None:
-        return {}
-    return {
-        "endpoint_id": str(getattr(route, "endpoint_id", "") or ""),
-        "channel_kind": str(getattr(route, "channel_kind", "") or ""),
-        "reply_target": dict(getattr(route, "reply_target", {}) or {}),
-        "control_scope_key": str(getattr(route, "control_scope_key", "") or ""),
-        "correlation_id": str(getattr(route, "correlation_id", "") or ""),
-    }
-
-
-def _coerce_int(value: Any, *, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return int(default)
-
-
-def _bounded_timeout_seconds(value: Any, *, default: float, minimum: float = 0.1, maximum: float = 30.0) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        parsed = float(default)
-    return max(float(minimum), min(float(maximum), parsed))
-
-
-def _minion_observation_from_terminal(payload: dict[str, Any]) -> dict[str, Any]:
-    status = str(payload.get("status") or "").strip()
-    work_order_id = str(payload.get("work_order_id") or "").strip()
-    run_id = str(payload.get("run_id") or "").strip()
-    if not status or not (work_order_id or run_id):
-        return {}
-    artifacts = [dict(item) for item in list(payload.get("artifacts") or []) if isinstance(item, dict)]
-    primary = payload.get("primary_artifact")
-    return {
-        "status": status,
-        "summary": _preview_text(str(payload.get("summary") or ""), limit=500),
-        "run_id": run_id,
-        "work_order_id": work_order_id,
-        "minion_id": str(payload.get("minion_id") or ""),
-        "profile": str(payload.get("minion_profile") or "minion"),
-        "completed_at": str(payload.get("created_at") or utc_now()),
-        "artifacts": artifacts,
-        "primary_artifact": dict(primary) if isinstance(primary, dict) else (artifacts[0] if artifacts else {}),
-    }
-
-
-def register_with_core(context: MainContext, service: object | None = None, *, runtime_root: Path | None = None) -> ModuleHandle:
+def register_with_core(
+    context: MainContext,
+    service: object | None = None,
+    *,
+    runtime_root: Path | None = None,
+) -> ModuleHandle:
     _ = service
     resolved_root = Path(runtime_root or context.execution_runtime.runtime_root or Path.cwd() / ".pal-minion")
-    provider = MinionManagerProvider(runtime_root=resolved_root, context=context)
-    public_provider = MinionV2PublicProvider(
+    manager = MinionManagerProvider(runtime_root=resolved_root, context=context)
+    public = MinionV2PublicProvider(
         runtime_root=resolved_root,
         context=context,
-        wake_manager=provider.wake_v2,
+        wake_manager=manager.wake_v2,
+        attach_manager=manager.attach_manager,
+        detach_manager=manager.detach_manager,
     )
-    provider.event_notify = lambda: getattr(context.port_registry.get("core:core"), "notify_ready", lambda: None)()
-    event_provider = _LegacyTaskingEventProvider(service) if hasattr(service, "minion_mailbox") else provider
-    source = MinionEventSource(provider=event_provider)
-    event_handler = MinionControlEventHandler(provider=provider)
-    prompt_provider = TaskingPromptFragmentProvider(manager=provider)
+    manager.event_notify = lambda: getattr(context.port_registry.get("core:core"), "notify_ready", lambda: None)()
+    source = MinionEventSource(provider=manager)
+    handler = MinionControlEventHandler(provider=manager)
+    event_kinds = (
+        EventKind.APPROVAL_REQUEST,
+        EventKind.MINION_TERMINAL,
+        EventKind.MINION_STANDALONE_REVIEW_COMPLETED,
+        EventKind.MINION_CLARIFICATION_REQUEST,
+        EventKind.MINION_ARCHITECTURE_REVIEW_PENDING,
+    )
     handle = ModuleHandle(
         module_id="minion",
         tier=MODULE_TIER_DETACHABLE,
         detachable=True,
-        introspection_provider=public_provider,
-        prompt_fragment_providers=[prompt_provider],
+        introspection_provider=public,
         supports_lifecycle_capabilities=True,
         event_sources=[source],
-        event_handlers={
-            EventKind.APPROVAL_REQUEST: [event_handler],
-            EventKind.MINION_PROGRESS: [event_handler],
-            EventKind.MINION_CHECKPOINT: [event_handler],
-            EventKind.MINION_TERMINAL: [event_handler],
-            EventKind.MINION_MODULE_COMPLETED: [event_handler],
-            EventKind.MINION_WORK_ORDER_COMPLETED: [event_handler],
-            EventKind.MINION_CLARIFICATION_REQUEST: [event_handler],
-            EventKind.MINION_PLAN_ACCEPTANCE_PENDING: [event_handler],
-        },
+        event_handlers={kind: [handler] for kind in event_kinds},
         control_action_handlers={
-            "minion_approval_decision": provider.handle_control_action_async,
-            "minion_lesson_decision": provider.handle_control_action_async,
-            "minion_question_select": provider.handle_control_action_async,
-            "minion_question_nav": provider.handle_control_action_async,
-            "minion_question_submit": provider.handle_control_action_async,
-            "minion_question_answer": provider.handle_control_action_async,
-            "minion_plan_accept_override": provider.handle_control_action_async,
-            "minion_plan_reject": provider.handle_control_action_async,
-            "minion_plan_edit": provider.handle_control_action_async,
-            "minion_dag_tick": provider.handle_control_action_async,
-            "minion_plan_pause": provider.handle_control_action_async,
-            "minion_plan_finish": provider.handle_control_action_async,
-            "minion_v2_human_decision": provider.handle_control_action_async,
+            "minion_approval_decision": manager.handle_control_action_async,
+            "minion_question_answer": manager.handle_control_action_async,
+            "minion_v2_human_decision": manager.handle_control_action_async,
         },
-        ports={"minion": provider, "minion_v2": public_provider},
-        shutdown_sync=provider._stop_manager,
+        ports={"minion": manager, "minion_v2": public},
+        shutdown_sync=manager._stop_manager,
     )
     context.register_module(handle)
     context.event_source_registry.attach("minion", source)
-    context.event_handler_registry.register(EventKind.APPROVAL_REQUEST, event_handler, module_id="minion")
-    context.event_handler_registry.register(EventKind.MINION_PROGRESS, event_handler, module_id="minion")
-    context.event_handler_registry.register(EventKind.MINION_CHECKPOINT, event_handler, module_id="minion")
-    context.event_handler_registry.register(EventKind.MINION_TERMINAL, event_handler, module_id="minion")
-    context.event_handler_registry.register(EventKind.MINION_MODULE_COMPLETED, event_handler, module_id="minion")
-    context.event_handler_registry.register(EventKind.MINION_WORK_ORDER_COMPLETED, event_handler, module_id="minion")
-    context.event_handler_registry.register(EventKind.MINION_CLARIFICATION_REQUEST, event_handler, module_id="minion")
-    context.prompt_fragment_registry.register(prompt_provider)
+    for kind in event_kinds:
+        context.event_handler_registry.register(kind, handler, module_id="minion")
     return handle
 
 
-TaskingIntrospectionProvider = MinionManagerProvider
-TaskingSnapshot = MinionSnapshot
-
-
-def inspect_tasking(provider: MinionManagerProvider) -> MinionSnapshot:
-    return inspect_minion(provider)
-
-
-def _control_route_payload_for_turn(context: MainContext | None, turn_id: str) -> dict[str, Any]:
-    if context is None or not str(turn_id or "").strip():
-        return {}
-    core = context.port_registry.get("core:core")
-    continuation = getattr(getattr(core, "state", None), "active_turns", {}).get(str(turn_id))
-    channel_envelope = getattr(continuation, "channel_envelope", None)
-    if channel_envelope is None:
-        return {}
+def inspect_minion(provider: MinionManagerProvider) -> MinionSnapshot:
     try:
-        from pal.control.routing import route_from_channel_envelope
-
-        route = route_from_channel_envelope(channel_envelope)
+        health = provider._require_manager()
+        return MinionSnapshot(
+            mounted=True,
+            manager_running=bool(health.get("ok")),
+            active_count=int(health.get("active_count") or 0),
+            run_count=int(health.get("run_count") or 0),
+            pending_event_count=int(health.get("pending_event_count") or 0),
+        )
     except Exception:
-        return {}
-    return {
-        "endpoint_id": route.endpoint_id,
-        "channel_kind": route.channel_kind,
-        "reply_target": dict(route.reply_target),
-        "control_scope_key": route.control_scope_key,
-        "correlation_id": route.correlation_id,
-    }
-
-
-def _prompt_log_enabled_for_turn(context: MainContext | None, turn_id: str) -> bool:
-    if context is None:
-        return False
-    core = context.port_registry.get("core:core")
-    state = getattr(core, "state", None)
-    if state is None:
-        return False
-    if str(turn_id or "").strip():
-        continuation = getattr(state, "active_turns", {}).get(str(turn_id))
-        snapshot = dict(getattr(continuation, "turn_settings_snapshot", {}) or {})
-        if "prompt_log_enabled" in snapshot:
-            return bool(snapshot.get("prompt_log_enabled"))
-    return bool(getattr(state, "prompt_log_enabled", False))
-
-
-def _string_list(value: Any) -> list[str]:
-    if isinstance(value, str):
-        values = [value]
-    elif isinstance(value, (list, tuple)):
-        values = list(value)
-    else:
-        values = []
-    result: list[str] = []
-    seen: set[str] = set()
-    for item in values:
-        text = " ".join(str(item or "").split())
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        result.append(text)
-    return result
-
-
-def _dict_list(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, (list, tuple)):
-        return []
-    return [dict(item) for item in value if isinstance(item, dict)]
-
-
-def _l3_commit_args_from_memory_candidate(candidate: dict[str, Any], *, work_order_id: str) -> dict[str, Any]:
-    return l3_commit_args_from_memory_candidate(
-        candidate,
-        default_scope="task",
-        fallback_task_id=work_order_id,
-    )
-
-
-def _preview_text(text: str, *, limit: int) -> str:
-    value = " ".join(str(text or "").split())
-    if len(value) <= limit:
-        return value
-    return value[: max(0, limit - 3)].rstrip() + "..."
-
-
-def _event_dedupe_key(event: dict[str, Any]) -> str:
-    try:
-        return json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)
-    except Exception:
-        return repr(sorted(dict(event or {}).items()))
-
-
-def _is_high_cardinality_minion_event(event: dict[str, Any]) -> bool:
-    return str((event or {}).get("event_kind") or "").strip() in {"phase_started", "progress"}
-
-
-@dataclass
-class _LegacyTaskingEventProvider:
-    service: object
-
-    def has_pending_events(self) -> bool:
-        mailbox = getattr(self.service, "minion_mailbox", None)
-        return bool(getattr(mailbox, "has_pending", lambda: False)())
-
-    def drain_events_sync(self, *, limit: int = 20) -> dict[str, Any]:
-        mailbox = getattr(self.service, "minion_mailbox", None)
-        if mailbox is None:
-            return {"events": [], "remaining": 0}
-        drained = list(mailbox.drain())[:limit]
-        events = []
-        for item in drained:
-            payload = getattr(item, "payload", None)
-            event_name = str(getattr(item, "event_name", "") or "")
-            events.append(
-                {
-                    "event_kind": _legacy_event_kind(event_name),
-                    "minion_id": getattr(payload, "minion_id", ""),
-                    "run_id": getattr(payload, "run_id", ""),
-                    "work_order_id": getattr(payload, "work_order_id", ""),
-                    "payload": {
-                        "summary": getattr(payload, "summary", ""),
-                        "status": getattr(payload, "status", ""),
-                        "milestone_index": getattr(payload, "milestone_index", 0),
-                    },
-                    "created_at": "",
-                }
-            )
-        return {"events": events, "remaining": 0}
-
-
-def _legacy_event_kind(event_name: str) -> str:
-    if event_name.endswith("terminal"):
-        return "terminal"
-    if event_name.endswith("checkpoint"):
-        return "checkpoint"
-    return "progress"
-
-
-def _introspection_from_rpc(title: str, payload: dict[str, Any]) -> IntrospectionResult:
-    status = _runtime_status(payload)
-    return IntrospectionResult(
-        status=status,
-        text=title,
-        structured=payload,
-        llm_text=render_titled_structured_for_llm(title, payload),
-    )
-
-
-def _capability_from_rpc(text: str, payload: dict[str, Any]) -> CapabilityResult:
-    status = _runtime_status(payload)
-    return CapabilityResult(
-        status=status,
-        text=text,
-        structured=payload,
-        llm_text=render_titled_structured_for_llm(text, payload),
-    )
-
-
-def _spawn_result_runs(result: dict[str, Any]) -> list[dict[str, Any]]:
-    runs: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    def add(value: Any) -> None:
-        if not isinstance(value, dict):
-            return
-        run_id = str(value.get("run_id") or "").strip()
-        if not run_id or run_id in seen:
-            return
-        seen.add(run_id)
-        runs.append(dict(value))
-
-    continuation = result.get("continuation")
-    dag_tick = result.get("dag_tick")
-    has_nested_runs = (
-        isinstance(result.get("run"), dict)
-        or isinstance(continuation, dict)
-        or bool(result.get("child_runs"))
-        or bool(result.get("runs"))
-        or isinstance(dag_tick, dict)
-    )
-    if not has_nested_runs:
-        add(result)
-    add(result.get("run"))
-    if isinstance(continuation, dict):
-        add(continuation.get("run"))
-        for item in list(continuation.get("runs") or []):
-            add(item)
-    for item in list(result.get("child_runs") or []):
-        add(item)
-    for item in list(result.get("runs") or []):
-        add(item)
-    if isinstance(dag_tick, dict):
-        add(dag_tick.get("run"))
-        for item in list(dag_tick.get("runs") or []):
-            add(item)
-    if not runs:
-        add(result)
-    return runs
-
-
-def _spawn_result_primary_run(result: dict[str, Any]) -> dict[str, Any]:
-    runs = _spawn_result_runs(result)
-    return runs[0] if runs else {}
-
-
-def _spawn_result_value(result: dict[str, Any], key: str) -> str:
-    value = str(result.get(key) or "").strip()
-    if value:
-        return value
-    primary = _spawn_result_primary_run(result)
-    value = str(primary.get(key) or "").strip()
-    if value:
-        return value
-    dag_tick = result.get("dag_tick")
-    if isinstance(dag_tick, dict):
-        return str(dag_tick.get(key) or "").strip()
-    return ""
-
-
-def _spawn_result_string_list(result: dict[str, Any], key: str) -> list[str]:
-    values: list[str] = []
-    seen: set[str] = set()
-
-    def add(raw: Any) -> None:
-        text = str(raw or "").strip()
-        if not text or text in seen:
-            return
-        seen.add(text)
-        values.append(text)
-
-    raw_value = result.get(key)
-    if isinstance(raw_value, str):
-        add(raw_value)
-    elif isinstance(raw_value, (list, tuple, set)):
-        for item in raw_value:
-            add(item)
-    dag_tick = result.get("dag_tick")
-    if isinstance(dag_tick, dict):
-        nested = dag_tick.get(key)
-        if isinstance(nested, str):
-            add(nested)
-        elif isinstance(nested, (list, tuple, set)):
-            for item in nested:
-                add(item)
-    return values
-
-
-def _runtime_status(payload: dict[str, Any]) -> str:
-    status = str(payload.get("status") or "").strip()
-    if status in {item.value for item in RuntimeStatus}:
-        return status
-    return RuntimeStatus.OK
-
-
-def _profile_summary_payload(profile: dict[str, Any]) -> dict[str, Any]:
-    profile_group = str(profile.get("profile_group") or "general").strip() or "general"
-    profile_name = str(profile.get("profile_id") or profile.get("profile_name") or "generic").strip() or "generic"
-    summary = str(
-        profile.get("description_summary")
-        or profile.get("summary")
-        or profile.get("description")
-        or ""
-    ).strip()
-    if not summary:
-        summary = _first_summary_sentence(str(profile.get("identity_fragment") or profile.get("behavior_fragment") or ""))
-    return {
-        "profile_group": profile_group,
-        "profile_name": profile_name,
-        "description_summary": summary or str(profile.get("display_name") or profile_name),
-    }
-
-
-def _family_summary_payload(family: dict[str, Any]) -> dict[str, Any]:
-    metadata = dict(family.get("metadata") or {})
-    return {
-        "family_id": str(family.get("family_id") or "general").strip() or "general",
-        "display_name": str(family.get("display_name") or family.get("family_id") or "general").strip() or "general",
-        "default_executor_profile": str(family.get("default_executor_profile") or "").strip(),
-        "dag_producer_profile": str(family.get("dag_producer_profile") or "").strip(),
-        "uses_architecture_mode": bool(metadata.get("uses_architecture_mode")),
-        "require_primary_language": bool(metadata.get("require_primary_language")),
-        "source_path": str(metadata.get("source_path") or "").strip(),
-    }
-
-
-def _first_summary_sentence(text: str, *, limit: int = 180) -> str:
-    compact = " ".join(str(text or "").strip().split())
-    if not compact:
-        return ""
-    for marker in (". ", "; "):
-        if marker in compact:
-            compact = compact.split(marker, 1)[0].strip() + "."
-            break
-    if len(compact) <= limit:
-        return compact
-    return compact[: limit - 1].rstrip() + "..."
-
-
-def _profile_ref_text(value: Any) -> str:
-    return str(value or "").strip().replace("/", ".")
-
-
-def _workflow_args_with_task_family(args: dict[str, Any], *, repository: Any) -> dict[str, Any]:
-    normalized = dict(args or {})
-    task_id = str(normalized.get("task_id") or "").strip()
-    requested_family = _profile_ref_text(normalized.get("profile_family") or normalized.get("family"))
-    if not task_id:
-        raise MinionWorkOrderValidationError(
-            "task_id is required; call intro_minion_task_search first and op_minion_task_create when no matching task exists",
-            field="task_id",
-        )
-    if str(normalized.get("profile_group") or normalized.get("profile_name") or "").strip():
-        raise MinionWorkOrderValidationError(
-            "dispatch_workflow no longer accepts profile_group/profile_name; bind profile_family on the task",
-            field="profile_name",
-        )
-
-    snapshot = repository.read_task(task_id)
-    if str(snapshot.get("status") or "") == "not_found":
-        raise MinionWorkOrderValidationError(
-            "task_id was not found; call op_minion_task_create first",
-            field="task_id",
-        )
-
-    task = dict(snapshot.get("task") or {})
-    metadata = dict(task.get("metadata") or {})
-    task_family = _profile_ref_text(task.get("profile_family") or metadata.get("profile_family"))
-    if not task_family:
-        raise MinionWorkOrderValidationError("task.profile_family is required", field="task_id")
-    if requested_family and requested_family != task_family:
-        raise MinionWorkOrderValidationError(
-            f"task_id uses profile_family {task_family}; dispatch requested {requested_family}",
-            field="profile_family",
-        )
-    normalized["profile_family"] = task_family
-    normalized["_task_snapshot"] = task
-    normalized["_task_metadata"] = metadata
-    return normalized
-
-
-def _workflow_entry_pack_from_args(
-    args: dict[str, Any],
-    *,
-    repository: Any,
-    profile_registry: MinionProfileRegistry,
-) -> tuple[TaskContextPack, dict[str, Any]]:
-    goal = str(args.get("goal") or "").strip()
-    if not goal:
-        raise MinionWorkOrderValidationError("goal is required", field="goal")
-    profile_family = _profile_ref_text(args.get("profile_family") or args.get("family")) or "general"
-    family_manifest = profile_registry.family_registry().get(profile_family)
-    producer_profile = dag_producer_profile_for_family(profile_family, registry=profile_registry)
-    family_producer = bool(producer_profile)
-    uses_architecture_mode = _family_manifest_bool(family_manifest, "uses_architecture_mode")
-    workspace = _normalize_workflow_workspace(
-        dict(args.get("workspace") or {}),
-        require_primary_language=_family_manifest_bool(family_manifest, "require_primary_language"),
-    )
-    requirements_review = str(args.get("requirements_review") or "").strip().lower()
-    if requirements_review and requirements_review != "skip":
-        raise MinionWorkOrderValidationError(
-            "requirements_review mode has been removed; Pal must prepare source acceptance scope before dispatch_workflow",
-            field="requirements_review",
-        )
-    planning_depth = str(args.get("planning_depth") or "sketch_only").strip().lower() or "sketch_only"
-    if planning_depth not in {"sketch_only", "module_detail"}:
-        raise MinionWorkOrderValidationError(
-            "planning_depth must be sketch_only or module_detail",
-            field="planning_depth",
-        )
-    requested_architecture_mode = str(args.get("architecture_mode") or "staged").strip().lower() or "staged"
-    architecture_mode = "staged" if family_producer and uses_architecture_mode else "none"
-    interaction_mode = str(args.get("interaction_mode") or "auto_after_plan").strip().lower() or "auto_after_plan"
-    if interaction_mode not in {"interactive", "auto_after_plan", "autonomous"}:
-        raise MinionWorkOrderValidationError(
-            "interaction_mode must be interactive, auto_after_plan, or autonomous",
-            field="interaction_mode",
-        )
-    workflow_id = f"wf_{uuid4().hex[:12]}"
-    task_id = str(args.get("task_id") or new_work_id("task")).strip()
-    work_order_id = str(args.get("work_order_id") or new_work_id("wo")).strip()
-    title = str(args.get("title") or _first_summary_sentence(goal, limit=120) or goal).strip()
-    requirements_brief = _manager_requirements_brief_from_args(goal=goal, workspace=workspace, args=args)
-    _attach_mechanical_requirements_contract(workspace=workspace, requirements_brief=requirements_brief)
-    prompt_observation_tag = _prompt_observation_tag_from_workflow_args(args)
-    if not family_producer:
-        return _generic_dag_workflow_entry_pack(
-            args,
-            repository=repository,
-            profile_registry=profile_registry,
-            goal=goal,
-            requirements_brief=requirements_brief,
-            workspace=workspace,
-            profile_family=profile_family,
-            requested_architecture_mode=requested_architecture_mode,
-            architecture_mode=architecture_mode,
-            planning_depth=planning_depth,
-            interaction_mode=interaction_mode,
-            task_id=task_id,
-            work_order_id=work_order_id,
-            title=title,
-        )
-
-    initial_profile = producer_profile
-    initial_group, initial_name = split_profile_ref(initial_profile)
-    producer_role = _family_producer_role(family_manifest, initial_name)
-    producer_plan_label = _family_producer_plan_label(family_manifest, uses_architecture_mode=uses_architecture_mode)
-    workflow = {
-        "workflow_id": workflow_id,
-        "status": "running",
-        "entrypoint": "op_minion_dispatch_workflow",
-        "requested_architecture_mode": requested_architecture_mode,
-        "architecture_mode": architecture_mode,
-        "planning_depth": planning_depth,
-        "interaction_mode": interaction_mode,
-        "auto_advance_modules": interaction_mode != "interactive",
-        "auto_accept_on_review_pass": interaction_mode == "autonomous",
-        "profile_family": profile_family,
-        "initial_profile": initial_profile,
-        "dag_producer": {"kind": "profile", "profile": initial_profile},
-        "created_at": utc_now(),
-    }
-    workflow = append_workflow_step(
-        workflow,
-        profile=initial_profile,
-        input_artifact=requirements_brief,
-    )
-    approval_policy = dict(args.get("approval_policy") or {}) if isinstance(args.get("approval_policy"), dict) else {}
-    metadata: dict[str, Any] = {
-        "task_id": task_id,
-        "task_title": title,
-        "work_order_title": f"Plan: {title}",
-        "workflow": workflow,
-        "requirements_brief": requirements_brief,
-        "architecture_mode": architecture_mode,
-        "requested_architecture_mode": requested_architecture_mode,
-        "planning_depth": planning_depth,
-        "interaction_mode": interaction_mode,
-        "profile_family": profile_family,
-        "initial_profile": initial_profile,
-        "dag_producer": {"kind": "profile", "profile": initial_profile},
-    }
-    if prompt_observation_tag:
-        metadata["prompt_observation_tag"] = prompt_observation_tag
-    planner_work_order = build_planner_work_order(goal=goal, task_id=task_id, work_order_id=work_order_id)
-    planner_work_order["role"] = producer_role
-    _apply_family_producer_requirements(
-        planner_work_order,
-        profile_family=profile_family,
-        producer_profile=initial_profile,
-        producer_role=producer_role,
-        architecture_mode=architecture_mode,
-        requested_architecture_mode=requested_architecture_mode,
-        uses_architecture_mode=uses_architecture_mode,
-        planning_depth=planning_depth,
-    )
-    architect_milestone = {
-        "milestone_id": "produce_architecture_sketch" if producer_role == "architect" else "produce_dag_sketch",
-        "title": f"Produce {producer_plan_label}",
-        "summary": (
-            "Inspect the workspace and references as needed, then submit a staged PlanSketchArtifact that fixes the "
-            "top-level topology, module interaction contracts, lifecycle/state/ownership model, first-layer gates, "
-            "and end-to-end flow checks."
-        ),
-        "acceptance": [
-            f"{producer_role.replace('_', ' ').title()} submits a valid PlanSketchArtifact.",
-            "Sketch includes module boundaries, topology, node interaction contracts, requirement coverage, and reference evidence.",
-            "Sketch defines ownership, object/resource lifecycle, module state machines, and invariants for each module.",
-            "Sketch includes first-layer module/cross-module gates and at least one end-to-end flow gate/AC for cross-module handoff.",
-            "Sketch stops at module boundaries, interaction contracts, and first-layer review obligations.",
-            (
-                "Planning depth constraints are either satisfied or escalated with a concrete reason."
-                if uses_architecture_mode
-                else "Family planning constraints are either satisfied or escalated with a concrete reason."
-            ),
-        ],
-    }
-    plan_review = {
-        "interaction_mode": interaction_mode,
-        "auto_accept_on_review_pass": interaction_mode == "autonomous",
-        "auto_advance_modules": interaction_mode != "interactive",
-    }
-    metadata.update(
-        {
-            "planner_work_order": planner_work_order,
-            "architect_work_order": planner_work_order,
-            "plan_review": plan_review,
-            "staged_planning": {
-                "stage": "architecture_sketch",
-                "planning_depth": planning_depth,
-                "plan_id": f"plan_{task_id}",
-                "task_id": task_id,
-                "goal": goal,
-            },
-            "milestones": [architect_milestone],
-        }
-    )
-    if approval_policy:
-        metadata["approval_policy"] = approval_policy
-    pack = TaskContextPack.from_dict(
-        {
-            "work_order_id": work_order_id,
-            "goal": goal,
-            "instruction": _family_producer_workflow_instruction(
-                producer_role=producer_role,
-                producer_plan_label=producer_plan_label,
-                architecture_mode=architecture_mode,
-                requested_architecture_mode=requested_architecture_mode,
-                uses_architecture_mode=uses_architecture_mode,
-                planning_depth=planning_depth,
-            ),
-            "acceptance_criteria": [
-                "Submit a valid PlanSketchArtifact through the staged plan builder tools.",
-                "Include module boundaries, topology, node interaction contracts, ownership/lifecycle/state-machine/invariants, interfaces, and requirement coverage.",
-                "Include first-layer gates/AC and end-to-end flow gates/AC for cross-module handoff.",
-                "Leave module-local implementation breakdown, tests, positive/negative cases, and detailed evidence to module_detail.",
-                f"Do not implement production work in the {producer_role} run.",
-            ],
-            "workspace": {
-                **workspace,
-                "task_id": task_id,
-                "goal": goal,
-                "planning_depth": planning_depth,
-                "plan_builder_stage": "architecture_sketch",
-            },
-            "profile_group": initial_group or profile_family,
-            "profile_name": initial_name,
-            "metadata": metadata,
-        }
-    )
-    return pack, {
-        "workflow_id": workflow_id,
-        "requested_architecture_mode": requested_architecture_mode,
-        "architecture_mode": architecture_mode,
-        "planning_depth": planning_depth,
-        "interaction_mode": interaction_mode,
-        "initial_profile": initial_profile,
-        "profile_family": profile_family,
-        "workspace_summary": _workflow_workspace_summary(workspace),
-        "next_action": "dag_producer_running",
-    }
-
-
-def _prompt_observation_tag_from_workflow_args(args: dict[str, Any]) -> str:
-    tag = str(args.get("prompt_observation_tag") or "").strip()
-    if not tag and isinstance(args.get("metadata"), dict):
-        tag = str(dict(args.get("metadata") or {}).get("prompt_observation_tag") or "").strip()
-    return tag[:160]
-
-
-def _generic_dag_workflow_entry_pack(
-    args: dict[str, Any],
-    *,
-    repository: Any,
-    profile_registry: MinionProfileRegistry,
-    goal: str,
-    requirements_brief: dict[str, Any],
-    workspace: dict[str, Any],
-    profile_family: str,
-    requested_architecture_mode: str,
-    architecture_mode: str,
-    planning_depth: str,
-    interaction_mode: str,
-    task_id: str,
-    work_order_id: str,
-    title: str,
-) -> tuple[TaskContextPack, dict[str, Any]]:
-    workflow_id = f"wf_{uuid4().hex[:12]}"
-    task_metadata = dict(args.get("_task_metadata") or {})
-    executor = resolve_default_executor_profile(
-        profile_family=profile_family,
-        registry=profile_registry,
-        task_metadata=task_metadata,
-        workflow_metadata=dict(args.get("metadata") or {}),
-    )
-    plan_artifact = build_generic_single_node_plan_artifact(
-        goal=goal,
-        task_id=task_id,
-        profile_family=profile_family,
-        requirements_brief=requirements_brief,
-        workspace=workspace,
-        executor_profile=executor.executor_profile,
-        title=title,
-    )
-    workflow = {
-        "workflow_id": workflow_id,
-        "status": "running",
-        "entrypoint": "op_minion_dispatch_workflow",
-        "requested_architecture_mode": requested_architecture_mode,
-        "architecture_mode": architecture_mode,
-        "planning_depth": planning_depth,
-        "interaction_mode": interaction_mode,
-        "auto_advance_modules": interaction_mode != "interactive",
-        "auto_accept_on_review_pass": interaction_mode == "autonomous",
-        "profile_family": profile_family,
-        "dag_producer": {
-            "kind": "generic_single_node",
-            "executor_profile": executor.executor_profile,
-            "executor_source": executor.source,
-        },
-        "created_at": utc_now(),
-    }
-    workflow = append_workflow_step(
-        workflow,
-        profile="dag_producer.generic",
-        input_artifact=requirements_brief,
-        adapter="mechanical_single_node_plan",
-    )
-    workflow = append_workflow_step(
-        workflow,
-        profile=executor.executor_profile,
-        input_artifact={"plan_id": plan_artifact["plan_id"], "module_id": "main"},
-        adapter="dag_node_executor",
-    )
-    approval_policy = dict(args.get("approval_policy") or {}) if isinstance(args.get("approval_policy"), dict) else {}
-    metadata: dict[str, Any] = {
-        "task_id": task_id,
-        "task_title": title,
-        "work_order_title": f"Execute: {title}",
-        "workflow": workflow,
-        "requirements_brief": requirements_brief,
-        "architecture_mode": architecture_mode,
-        "requested_architecture_mode": requested_architecture_mode,
-        "planning_depth": planning_depth,
-        "interaction_mode": interaction_mode,
-        "profile_family": profile_family,
-        "dag_producer": {
-            "kind": "generic_single_node",
-            "executor_profile": executor.executor_profile,
-            "executor_source": executor.source,
-        },
-        "plan_execution": {
-            "auto_advance_modules": interaction_mode != "interactive",
-            "dag_execution": {
-                "default_executor_profile": executor.executor_profile,
-                "node_executors": {"main": executor.executor_profile},
-            },
-        },
-    }
-    prompt_observation_tag = _prompt_observation_tag_from_workflow_args(args)
-    if prompt_observation_tag:
-        metadata["prompt_observation_tag"] = prompt_observation_tag
-    if approval_policy:
-        metadata["approval_policy"] = approval_policy
-    pack = repository.build_plan_parent_pack_from_plan(
-        plan_artifact,
-        work_order_id=work_order_id,
-        workspace=workspace,
-        metadata=metadata,
-        goal=goal,
-        instruction="Execute the generated single-node DAG through the manager DAG consumer.",
-    )
-    return pack, {
-        "workflow_id": workflow_id,
-        "requested_architecture_mode": requested_architecture_mode,
-        "architecture_mode": architecture_mode,
-        "planning_depth": planning_depth,
-        "interaction_mode": interaction_mode,
-        "initial_profile": executor.executor_profile,
-        "profile_family": profile_family,
-        "workspace_summary": _workflow_workspace_summary(workspace),
-        "next_action": "dag_parent_running",
-        "dag_producer": "generic_single_node",
-    }
-
-
-def _normalize_workflow_workspace(workspace: dict[str, Any], *, require_primary_language: bool = True) -> dict[str, Any]:
-    normalized = dict(workspace or {})
-    kind = str(normalized.get("kind") or normalized.get("workspace_kind") or normalized.get("type") or "").strip().lower()
-    cwd = str(normalized.get("cwd") or normalized.get("working_dir") or normalized.get("working_directory") or "").strip()
-    repo_path = str(
-        normalized.get("repo_path")
-        or normalized.get("root")
-        or normalized.get("workspace_root")
-        or normalized.get("project_root")
-        or ""
-    ).strip()
-    if not repo_path and cwd and kind in {"existing_repo", "local_repo", "repo", "git_repo", "repository", ""}:
-        repo_path = cwd
-    if not kind:
-        kind = "existing_repo" if repo_path else "new_project"
-    if kind in {"local_repo", "repo", "git_repo", "repository"}:
-        kind = "existing_repo"
-    if kind not in {"new_project", "existing_repo"}:
-        raise MinionWorkOrderValidationError("workspace.kind must be new_project or existing_repo", field="workspace.kind")
-    normalized["kind"] = kind
-    normalized["workspace_kind"] = kind
-    if repo_path:
-        path = Path(repo_path).expanduser()
-        normalized["repo_path"] = str(path)
-        normalized.setdefault("source_repo", str(path))
-        normalized.setdefault("origin_repo_path", str(path))
-        normalized.setdefault("project_name", path.name)
-    primary_language = str(normalized.get("primary_language") or "").strip().lower()
-    languages = _workflow_language_list(normalized.get("languages"))
-    if primary_language and primary_language not in languages:
-        languages.insert(0, primary_language)
-    if kind == "new_project" and require_primary_language and not primary_language:
-        raise MinionWorkOrderValidationError(
-            "workspace.primary_language is required for new_project workflows",
-            field="workspace.primary_language",
-        )
-    if primary_language:
-        normalized["primary_language"] = primary_language
-    if languages:
-        normalized["languages"] = languages
-    normalized.setdefault("workspace_allocation", {"mode": "runtime_minion_repo"})
-    return normalized
-
-
-def _workflow_language_list(value: Any) -> list[str]:
-    if isinstance(value, str):
-        raw = [value]
-    elif isinstance(value, (list, tuple, set)):
-        raw = list(value)
-    else:
-        raw = []
-    result: list[str] = []
-    seen: set[str] = set()
-    for item in raw:
-        text = str(item or "").strip().lower()
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        result.append(text)
-    return result
-
-
-def _family_manifest_bool(manifest: Any, key: str, *, default: bool = False) -> bool:
-    metadata = dict(getattr(manifest, "metadata", {}) or {})
-    candidates = [key]
-    if key == "require_primary_language":
-        candidates.extend(["requires_primary_language", "require_primary_language_for_new_project"])
-    value = None
-    for candidate in candidates:
-        if candidate in metadata:
-            value = metadata.get(candidate)
-            break
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "on", "required"}:
-        return True
-    if text in {"0", "false", "no", "off", "optional"}:
-        return False
-    return default
-
-
-def _family_producer_role(manifest: Any, fallback_profile_name: str) -> str:
-    metadata = dict(getattr(manifest, "metadata", {}) or {})
-    role = str(metadata.get("producer_role") or metadata.get("dag_producer_role") or fallback_profile_name or "dag_producer").strip()
-    return role or "dag_producer"
-
-
-def _family_producer_plan_label(manifest: Any, *, uses_architecture_mode: bool) -> str:
-    metadata = dict(getattr(manifest, "metadata", {}) or {})
-    label = str(metadata.get("producer_plan_label") or metadata.get("dag_producer_plan_label") or "").strip()
-    if label:
-        return label
-    return "architecture plan" if uses_architecture_mode else "DAG plan"
-
-
-def _resolve_architecture_mode(requested: str, *, goal: str, workspace: dict[str, Any]) -> str:
-    if requested in {"micro", "full"}:
-        return requested
-    if str(workspace.get("kind") or "").strip().lower() == "new_project":
-        return "full"
-    touched = workspace.get("touched_files") or workspace.get("target_files") or workspace.get("files")
-    if isinstance(touched, (list, tuple, set)) and len(touched) > 3:
-        return "full"
-    text = f"{goal} {workspace.get('scope') or ''} {workspace.get('project_name') or ''}".lower()
-    full_markers = (
-        "0-1",
-        "from scratch",
-        "new project",
-        "architecture",
-        "framework",
-        "engine",
-        "multi-module",
-        "multiple modules",
-        "2-3 module",
-        "2-3 modules",
-        "several modules",
-        "parallel",
-        "orchestration",
-        "system",
-        "rewrite",
-    )
-    return "full" if any(marker in text for marker in full_markers) else "micro"
-
-
-def _apply_family_producer_requirements(
-    planner_work_order: dict[str, Any],
-    *,
-    profile_family: str,
-    producer_profile: str,
-    producer_role: str,
-    architecture_mode: str,
-    requested_architecture_mode: str,
-    uses_architecture_mode: bool,
-    planning_depth: str,
-) -> None:
-    base_requirements = dict(planner_work_order.get("planning_requirements") or {})
-    requirements = {
-        "required_stage": "architecture_sketch",
-        "stage_artifact_required": "PlanSketchArtifact",
-        "stage_focus": [
-            "Produce the top-level architecture sketch, not module-local implementation detail.",
-            "Define topology nodes, dependency/dataflow direction, and node-to-node interaction contracts.",
-            "Define module ownership, object/resource lifecycle, state machines, and invariants.",
-            "Create first-layer gates and acceptance criteria for topology, contracts, lifecycle, ownership, state, and invariants.",
-            "Create end-to-end flow gates/AC that traverse the relevant modules and prove cross-module handoff.",
-        ],
-        "stage_non_goals": [
-            "Do not split module internals into implementation steps in the sketch stage.",
-            "Do not write module-local implementation checklists, positive/negative case detail, or detailed evidence.",
-            "Do not implement code.",
-        ],
-        "module_detail_contract": (
-            "If planning_depth is module_detail, the second stage fills each module's internal implementation plan, AC, tests, "
-            "positive/negative cases, and evidence against this accepted sketch."
-        ),
-        **base_requirements,
-    }
-    requirements["profile_family"] = profile_family
-    requirements["producer_profile"] = producer_profile
-    requirements["producer_role"] = producer_role
-    requirements["dispatchable_plan_required"] = False
-    requirements["staged_plan_required"] = True
-    requirements["planning_depth"] = planning_depth
-    requirements["stage_artifact_required"] = "PlanSketchArtifact"
-    requirements["require_internal_milestones"] = False
-    requirements["require_orchestration"] = False
-    requirements["require_topology_nodes"] = True
-    requirements["required_stage"] = "architecture_sketch"
-    planner_work_order["planning_requirements"] = requirements
-    planner_work_order["profile_family"] = profile_family
-    planner_work_order["producer_profile"] = producer_profile
-    if uses_architecture_mode:
-        _apply_architecture_mode_requirements(
-            planner_work_order,
-            architecture_mode=architecture_mode,
-            requested_architecture_mode=requested_architecture_mode,
-            planning_depth=planning_depth,
-        )
-        return
-    requirements["requested_architecture_mode"] = requested_architecture_mode
-    requirements["architecture_mode"] = "none"
-    requirements["module_slug_policy"] = (
-        "Use short semantic module ids tied to the family deliverable; do not add a module_ prefix."
-    )
-    planner_work_order["planning_requirements"] = requirements
-    planner_work_order["architecture_mode"] = "none"
-    planner_work_order["requested_architecture_mode"] = requested_architecture_mode
-
-
-def _apply_architecture_mode_requirements(
-    planner_work_order: dict[str, Any],
-    *,
-    architecture_mode: str,
-    requested_architecture_mode: str,
-    planning_depth: str,
-) -> None:
-    requirements = dict(planner_work_order.get("planning_requirements") or {})
-    requirements["requested_architecture_mode"] = requested_architecture_mode
-    requirements["architecture_mode"] = architecture_mode
-    requirements["planning_depth"] = planning_depth
-    requirements["coder_requires_accepted_plan"] = True
-    requirements["module_slug_policy"] = "Use short module ids such as implementation, parser, runtime, tests, final_verification; do not add a module_ prefix."
-    requirements["micro_plan"] = False
-    requirements["sketch_stage"] = True
-    requirements["module_detail_stage"] = planning_depth == "module_detail"
-    planner_work_order["planning_requirements"] = requirements
-    planner_work_order["architecture_mode"] = architecture_mode
-    planner_work_order["requested_architecture_mode"] = requested_architecture_mode
-
-
-def _family_producer_workflow_instruction(
-    *,
-    producer_role: str,
-    producer_plan_label: str,
-    architecture_mode: str,
-    requested_architecture_mode: str,
-    uses_architecture_mode: bool,
-    planning_depth: str,
-) -> str:
-    role = str(producer_role or "dag_producer").replace("_", " ")
-    if not uses_architecture_mode:
-        return (
-            f"Produce a canonical dispatchable {producer_plan_label} for this workflow. "
-            f"Use {role} plan builder tools only; do not perform downstream production work. "
-            "The plan must include acceptance criteria, module contracts, test strategy, and dispatchable fork_join_linear topology. "
-            "If the family scope is unsafe or under-specified, report escalation_required with a concrete reason instead of dispatching "
-            "an under-specified plan."
-        )
-    sketch_label = producer_plan_label
-    if not sketch_label.strip().lower().endswith("sketch"):
-        sketch_label = f"{sketch_label} sketch"
-    return (
-        f"Produce a staged {sketch_label} for this workflow. "
-        f"The explicit planning_depth is {planning_depth}; architecture_mode is {architecture_mode} "
-        f"(requested {requested_architecture_mode}). "
-        f"Use {role} staged plan builder tools only; do not implement code. "
-        "Submit a PlanSketchArtifact with the top-level topology, node interaction contracts, module ownership, "
-        "object/resource lifecycle, module state machines, invariants, interfaces, requirement coverage, reference evidence, "
-        "first-layer gates/AC, and end-to-end flow gates/AC. Treat topology edges as work-start blockers only: use them "
-        "when a module cannot start without another module's accepted contract/setup/implementation. Do not use topology "
-        "edges for stubbed interfaces, opaque/declaration-only type references, runtime callbacks, or final integration-only "
-        "relationships; capture those as interfaces plus module/end-to-end AC. Do not create module-local implementation detail "
-        "in the sketch stage."
-    )
-
-
-def _manager_requirements_brief_from_args(*, goal: str, workspace: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
-    supplied = args.get("requirements_brief")
-    if isinstance(supplied, dict):
-        brief = dict(supplied)
-        brief.setdefault("source", "pal_main_agent")
-        brief.setdefault("goal", str(goal or "").strip())
-        brief.setdefault("workspace", _workflow_workspace_summary(workspace))
-        _attach_requirements_checklist(goal=goal, requirements_brief=brief)
-        _attach_reference_paths(workspace=workspace, requirements_brief=brief)
-        return brief
-    if isinstance(supplied, str) and supplied.strip():
-        brief = {
-            "source": "pal_main_agent",
-            "goal": str(goal or "").strip(),
-            "summary": supplied.strip(),
-            "workspace": _workflow_workspace_summary(workspace),
-        }
-        _attach_requirements_checklist(goal=goal, requirements_brief=brief)
-        _attach_reference_paths(workspace=workspace, requirements_brief=brief)
-        return brief
-    brief = _manager_requirements_brief(goal=goal, workspace=workspace)
-    _attach_reference_paths(workspace=workspace, requirements_brief=brief)
-    return brief
-
-
-def _manager_requirements_brief(*, goal: str, workspace: dict[str, Any]) -> dict[str, Any]:
-    brief = {
-        "source": "manager_generated",
-        "goal": str(goal or "").strip(),
-        "workspace": _workflow_workspace_summary(workspace),
-        "notes": [
-            "Pal main agent did not supply a separate source acceptance ledger; use the user goal and workspace facts as the source scope.",
-            "Ask only for user-owned blockers that cannot be resolved from repository inspection.",
-        ],
-    }
-    _attach_requirements_checklist(goal=goal, requirements_brief=brief)
-    return brief
-
-
-def _attach_reference_paths(*, workspace: dict[str, Any], requirements_brief: dict[str, Any]) -> None:
-    refs: list[dict[str, Any]] = []
-    for raw in list(workspace.get("reference_paths") or []):
-        item = _normalize_workflow_reference_path(raw, index=len(refs) + 1)
-        if item:
-            refs.append(item)
-    for raw in list(requirements_brief.get("reference_paths") or []):
-        item = _normalize_workflow_reference_path(raw, index=len(refs) + 1)
-        if item:
-            refs.append(item)
-    for raw in list(requirements_brief.get("references") or []):
-        item = _normalize_workflow_reference_path(raw, index=len(refs) + 1)
-        if item:
-            refs.append(item)
-    refs = _dedupe_workflow_reference_paths(refs)
-    if not refs:
-        return
-    workspace["reference_paths"] = refs
-    requirements_brief["reference_paths"] = refs
-    requirements_brief["workspace"] = _workflow_workspace_summary(workspace)
-
-
-def _normalize_workflow_reference_path(raw: Any, *, index: int) -> dict[str, Any]:
-    if isinstance(raw, str):
-        payload: dict[str, Any] = {"path": raw}
-    elif isinstance(raw, dict):
-        payload = dict(raw)
-    else:
-        return {}
-    raw_path = str(
-        payload.get("path")
-        or payload.get("root")
-        or payload.get("base_path")
-        or payload.get("glob")
-        or payload.get("pattern")
-        or ""
-    ).strip()
-    if not raw_path or _looks_like_external_reference(raw_path):
-        return {}
-    root_path, include = _workflow_reference_root_and_include(raw_path)
-    extra_include = _workflow_string_list(payload.get("include") or payload.get("includes"))
-    if extra_include:
-        include = extra_include
-    root = Path(root_path).expanduser()
-    name = _safe_workflow_reference_name(str(payload.get("name") or payload.get("id") or "")) or _safe_workflow_reference_name(root.name)
-    if not name:
-        name = f"reference_{index}"
-    item: dict[str, Any] = {
-        "name": name,
-        "path": str(root),
-        "mode": "read_only",
-        "truth_source": _workflow_bool(payload.get("truth_source"), default=True),
-    }
-    if include:
-        item["include"] = include
-    for key in ("description", "role", "required"):
-        if key in payload:
-            item[key] = payload.get(key)
-    return item
-
-
-def _workflow_reference_root_and_include(raw_path: str) -> tuple[str, list[str]]:
-    path = str(raw_path or "").strip()
-    if not _has_workflow_glob(path):
-        expanded = Path(path).expanduser()
-        if expanded.exists() and expanded.is_file():
-            return str(expanded.parent), [expanded.name]
-        return path, []
-    normalized = path.replace("\\", "/")
-    parts = normalized.split("/")
-    prefix: list[str] = []
-    suffix: list[str] = []
-    glob_seen = False
-    for part in parts:
-        if not glob_seen and not _has_workflow_glob(part):
-            prefix.append(part)
-            continue
-        glob_seen = True
-        suffix.append(part)
-    return "/".join(prefix) or ".", ["/".join(suffix) if suffix else "*"]
-
-
-def _dedupe_workflow_reference_paths(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    used_names: set[str] = set()
-    seen: set[tuple[str, tuple[str, ...]]] = set()
-    for ref in refs:
-        path = str(ref.get("path") or "").strip()
-        if not path:
-            continue
-        include = tuple(str(item) for item in list(ref.get("include") or []))
-        key = (path, include)
-        if key in seen:
-            continue
-        seen.add(key)
-        item = dict(ref)
-        base_name = _safe_workflow_reference_name(str(item.get("name") or "")) or "reference"
-        name = base_name
-        suffix = 2
-        while name in used_names:
-            name = f"{base_name}_{suffix}"
-            suffix += 1
-        used_names.add(name)
-        item["name"] = name
-        result.append(item)
-    return result
-
-
-def _looks_like_external_reference(value: str) -> bool:
-    text = str(value or "").strip().lower()
-    return "://" in text and not text.startswith("file://")
-
-
-def _has_workflow_glob(value: str) -> bool:
-    return any(char in value for char in "*?[")
-
-
-def _safe_workflow_reference_name(value: str) -> str:
-    text = str(value or "").strip().lower()
-    safe = [char if char.isalnum() else "_" for char in text]
-    return "_".join("".join(safe).split("_")).strip("_")[:80]
-
-
-def _workflow_string_list(value: Any) -> list[str]:
-    if isinstance(value, str):
-        raw = [value]
-    elif isinstance(value, (list, tuple, set)):
-        raw = list(value)
-    else:
-        raw = []
-    result: list[str] = []
-    for item in raw:
-        text = str(item or "").strip()
-        if text:
-            result.append(text)
-    return result
-
-
-def _workflow_bool(value: Any, *, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    return str(value).strip().lower() in {"1", "true", "yes", "y", "on", "required", "source_of_truth", "truth_source"}
-
-
-def _attach_requirements_checklist(*, goal: str, requirements_brief: dict[str, Any]) -> None:
-    checklist = build_requirements_checklist(goal=goal, requirements_brief=requirements_brief)
-    if not checklist:
-        return
-    requirements_brief["requirements_checklist"] = checklist
-
-
-def _attach_mechanical_requirements_contract(*, workspace: dict[str, Any], requirements_brief: dict[str, Any]) -> None:
-    if _workspace_has_gate_contract(workspace):
-        return
-    checklist = [dict(item) for item in list(requirements_brief.get("requirements_checklist") or []) if isinstance(item, dict)]
-    for index, item in enumerate(checklist):
-        metadata = dict(item.get("metadata") or {})
-        metadata.setdefault("gate_check_ref", f"gate:{index}")
-        item["metadata"] = metadata
-    if checklist:
-        requirements_brief["requirements_checklist"] = checklist
-    gate_contract = requirements_checklist_to_gate_contract(checklist)
-    if gate_contract:
-        workspace["source_gate_contract"] = gate_contract
-
-
-def _workspace_has_gate_contract(workspace: dict[str, Any]) -> bool:
-    for key in ("gate_contract", "source_gate_contract", "review_target_gate_contract"):
-        value = workspace.get(key)
-        if isinstance(value, dict) and (value.get("checks") or value.get("checklist") or value.get("items")):
-            return True
-        if isinstance(value, (list, tuple)) and value:
-            return True
-    return False
-
-
-def _workflow_workspace_summary(workspace: dict[str, Any]) -> dict[str, Any]:
-    summary = {
-        "kind": str(workspace.get("kind") or ""),
-        "project_name": str(workspace.get("project_name") or ""),
-        "repo_path": str(workspace.get("repo_path") or ""),
-        "origin_repo_path": str(workspace.get("origin_repo_path") or ""),
-        "primary_language": str(workspace.get("primary_language") or ""),
-        "languages": list(workspace.get("languages") or []),
-        "workspace_allocation": dict(workspace.get("workspace_allocation") or {}),
-    }
-    references = [dict(item) for item in list(workspace.get("reference_paths") or []) if isinstance(item, dict)]
-    if references:
-        summary["reference_paths"] = [
-            {
-                key: value
-                for key, value in {
-                    "name": item.get("name"),
-                    "path": item.get("path"),
-                    "include": item.get("include"),
-                    "truth_source": item.get("truth_source", True),
-                    "mode": item.get("mode", "read_only"),
-                    "description": item.get("description"),
-                }.items()
-                if value not in ("", None, [])
-            }
-            for item in references
-        ]
-    return summary
-
-
-def _coerce_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "on", "accepted"}
-    return bool(value)
-
-
-def _capability_invalid(text: str, exc: MinionWorkOrderValidationError) -> CapabilityResult:
-    payload = {"error": str(exc), "error_type": exc.__class__.__name__}
-    extra = getattr(exc, "payload", None)
-    if isinstance(extra, dict):
-        payload.update(extra)
-    return CapabilityResult(
-        status=RuntimeStatus.INVALID,
-        text=text,
-        structured=payload,
-        llm_text=render_titled_structured_for_llm(text, payload),
-    )
-
-
-def _capability_error(text: str, exc: Exception) -> CapabilityResult:
-    payload = {"error": str(exc), "error_type": exc.__class__.__name__}
-    extra = getattr(exc, "payload", None)
-    if isinstance(extra, dict):
-        payload.update(extra)
-    return CapabilityResult(
-        status=RuntimeStatus.ERROR,
-        text=text,
-        structured=payload,
-        llm_text=render_titled_structured_for_llm(text, payload),
-    )
-
-
-async def _to_thread(fn, *args, **kwargs):
-    return await asyncio.to_thread(fn, *args, **kwargs)
+        return MinionSnapshot(mounted=provider._attached, degraded=True)

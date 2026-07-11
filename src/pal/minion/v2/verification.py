@@ -22,7 +22,7 @@ class VerificationStatus(StrEnum):
 
 
 class DefectKind(StrEnum):
-    MODULE = "module_defect"
+    MODULE = "unit_defect"
     DEPENDENCY = "dependency_defect"
     CONTRACT = "contract_defect"
     ARCHITECTURE = "architecture_defect"
@@ -168,6 +168,7 @@ class VerificationService:
         candidate_ref: Mapping[str, Any],
         case_results: Sequence[VerificationCaseResult],
         reviewer_summary: str,
+        findings: Sequence[Mapping[str, Any]] = (),
         test_workspace_ref: Mapping[str, Any] | None = None,
     ) -> tuple[ArtifactRef, VerificationStatus]:
         if not case_results:
@@ -185,6 +186,7 @@ class VerificationService:
             "candidate_ref": dict(candidate_ref),
             "status": status.value,
             "cases": [item.to_dict() for item in case_results],
+            "findings": [dict(item) for item in findings],
             "reviewer_summary": reviewer_summary,
             "test_workspace_ref": dict(test_workspace_ref or {}),
         }
@@ -208,7 +210,7 @@ class VerificationService:
         self,
         *,
         node: AggregateSnapshot,
-        candidate_sha: str,
+        candidate_digest: str,
         verification_ref: ArtifactRef,
         defect_kind: DefectKind,
         severity: str,
@@ -218,6 +220,11 @@ class VerificationService:
         expected: Any,
         actual: Any,
         suggested_repair_boundary: Sequence[str],
+        finding_section: str = "implementation",
+        finding_summary: str = "",
+        failure_reason: str = "",
+        affected_refs: Sequence[str] = (),
+        finding_id: str = "",
     ) -> tuple[ArtifactRef, str]:
         fingerprint = finding_fingerprint(
             defect_kind=defect_kind,
@@ -230,10 +237,15 @@ class VerificationService:
             "schema_version": "1",
             "workflow_id": node.workflow_id,
             "node_run_id": node.aggregate_id,
-            "candidate_sha": candidate_sha,
+            "candidate_digest": candidate_digest,
             "verification_artifact_ref": verification_ref.to_dict(),
             "defect_kind": defect_kind.value,
             "severity": severity,
+            "finding_id": finding_id,
+            "finding_section": finding_section,
+            "finding_summary": finding_summary,
+            "failure_reason": failure_reason,
+            "affected_refs": list(affected_refs),
             "contract_refs": list(contract_refs),
             "finding_fingerprint": fingerprint,
             "minimal_reproducer_ref": dict(minimal_reproducer_ref),
@@ -447,7 +459,7 @@ def no_progress_detected(history: Sequence[Mapping[str, Any]]) -> bool:
 
 def candidate_reuse_fingerprint(
     *,
-    module_contract_hash: str,
+    unit_contract_hash: str,
     relevant_requirements_hash: str,
     relevant_evidence_hash: str,
     global_constraint_hash: str,
@@ -459,7 +471,7 @@ def candidate_reuse_fingerprint(
     environment_policy_hash: str,
 ) -> str:
     payload = {
-        "module_contract_hash": module_contract_hash,
+        "unit_contract_hash": unit_contract_hash,
         "relevant_requirements_hash": relevant_requirements_hash,
         "relevant_evidence_hash": relevant_evidence_hash,
         "global_constraint_hash": global_constraint_hash,
