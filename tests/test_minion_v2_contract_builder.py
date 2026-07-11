@@ -315,6 +315,70 @@ class ContractBuilderTests(unittest.TestCase):
         self.assertEqual(payload["units"][0]["requirement_ids"], ["R-1", "R-2"])
         self.assertEqual(payload["units"][1], base["units"][1])
 
+    def test_preseeded_revision_upserts_stable_id_collections(self) -> None:
+        base = {
+            "global_constraints": [{"id": "C-1", "constraint": "Header-only delivery."}],
+            "design_decisions": [{"id": "D-1", "decision": "Keep the old boundary."}],
+            "gate_checks": [{"id": "G-1", "check": "Compile headers."}],
+            "units": [_unit("implementation")],
+            "cross_unit_contracts": [{"id": "X-1", "producer": "implementation", "consumer": "integration"}],
+            "topology": {"depends_on": {"implementation": []}},
+            "integration_contract": {"depends_on": ["implementation"]},
+            "assumption_ledger": {"assumptions": []},
+            "risk_ledger": {"risks": []},
+        }
+        self.workspace["contract_builder_stage"] = "contract"
+        seed_contract_builder_draft(self.workspace, base)
+
+        self.assertTrue(
+            self.call(
+                "contract",
+                "op_minion_contract_add_constraints_batch",
+                {"constraints": [{"id": "C-1", "constraint": "Create the production implementation."}]},
+            ).ok
+        )
+        self.assertTrue(
+            self.call(
+                "contract",
+                "op_minion_contract_add_gate_checks_batch",
+                {"gate_checks": [{"id": "G-1", "check": "Exercise the production behavior."}]},
+            ).ok
+        )
+        submitted = self.call("contract", "op_minion_contract_submit_sketch")
+
+        self.assertTrue(submitted.ok, submitted.text)
+        payload = json.loads(Path(self.produced[-1]["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(payload["global_constraints"], [{"id": "C-1", "constraint": "Create the production implementation."}])
+        self.assertEqual(payload["gate_checks"], [{"id": "G-1", "check": "Exercise the production behavior."}])
+
+    def test_contract_validation_rejects_duplicate_stable_ids(self) -> None:
+        base = {
+            "global_constraints": [
+                {"id": "C-1", "constraint": "First."},
+                {"id": "C-1", "constraint": "Contradiction."},
+            ],
+            "design_decisions": [],
+            "gate_checks": [],
+            "units": [_unit("implementation")],
+            "cross_unit_contracts": [],
+            "topology": {"depends_on": {"implementation": []}},
+            "integration_contract": {"depends_on": ["implementation"]},
+            "assumption_ledger": {"assumptions": []},
+            "risk_ledger": {"risks": []},
+        }
+        self.workspace["contract_builder_stage"] = "contract"
+        stage = Path(self.workspace["artifact_stage_dir"]) / ".contract_builder" / "contract.json"
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_text(
+            json.dumps({"schema_version": "1", "stage": "contract", "lifecycle": "editing", "payload": base}),
+            encoding="utf-8",
+        )
+
+        result = self.call("contract", "op_minion_contract_validate")
+
+        self.assertFalse(result.ok)
+        self.assertIn("duplicate global_constraints id: C-1", result.text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -101,9 +101,9 @@ CONTRACT_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "parameters_schema": {"type": "object", "properties": {"unit_id": {"type": "string"}}, "required": ["unit_id"], "additionalProperties": False},
     },
     "op_minion_contract_validate": {"name": "op_minion_contract_validate", "description": "Run all mechanical Contract Sketch checks without submitting.", "parameters_schema": {"type": "object", "additionalProperties": False}},
-    "op_minion_contract_add_gate_checks_batch": {"name": "op_minion_contract_add_gate_checks_batch", "description": "Add source-derived architecture and end-to-end gate checks in one transaction. Include cross-unit dataflow, lifecycle, ownership, invalid-state/error, and final delivery handoffs; do not add implementation checklists.", "parameters_schema": _batch_schema("gate_checks")},
-    "op_minion_contract_add_constraints_batch": {"name": "op_minion_contract_add_constraints_batch", "description": "Add global constraints in one transaction.", "parameters_schema": _batch_schema("constraints")},
-    "op_minion_contract_add_design_decisions_batch": {"name": "op_minion_contract_add_design_decisions_batch", "description": "Add design decisions with rationale and downstream impact in one transaction.", "parameters_schema": _batch_schema("design_decisions")},
+    "op_minion_contract_add_gate_checks_batch": {"name": "op_minion_contract_add_gate_checks_batch", "description": "Add or replace source-derived architecture and end-to-end gate checks by stable id in one transaction. Include cross-unit dataflow, lifecycle, ownership, invalid-state/error, and final delivery handoffs; do not add implementation checklists.", "parameters_schema": _batch_schema("gate_checks")},
+    "op_minion_contract_add_constraints_batch": {"name": "op_minion_contract_add_constraints_batch", "description": "Add or replace global constraints by stable id in one transaction. In a preseeded revision, reuse the existing id to repair a constraint instead of appending a contradictory copy.", "parameters_schema": _batch_schema("constraints")},
+    "op_minion_contract_add_design_decisions_batch": {"name": "op_minion_contract_add_design_decisions_batch", "description": "Add or replace design decisions by stable id, with rationale and downstream impact, in one transaction.", "parameters_schema": _batch_schema("design_decisions")},
     "op_minion_contract_add_unit_outlines_batch": {
         "name": "op_minion_contract_add_unit_outlines_batch",
         "description": "Add complete Unit Contracts transactionally: boundaries, directional provided/consumed interfaces, ownership, lifecycle/state, invariants, requirement/evidence refs, complexity, and work-start blockers. owned_area must contain canonical target-owned paths/logical areas; declared read-only truth sources belong in reference_only_paths. Shared concrete files need one owner. Milestones and implementation steps are forbidden.",
@@ -124,7 +124,7 @@ CONTRACT_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "additionalProperties": False,
         },
     },
-    "op_minion_contract_add_cross_unit_contracts_batch": {"name": "op_minion_contract_add_cross_unit_contracts_batch", "description": "Add producer/consumer cross-unit contracts transactionally. State direction, data shape, validity timing, ownership transfer/borrowing, lifecycle handoff, compatibility, and invalid-state/error behavior so neither side must inspect sibling internals.", "parameters_schema": _batch_schema("cross_unit_contracts")},
+    "op_minion_contract_add_cross_unit_contracts_batch": {"name": "op_minion_contract_add_cross_unit_contracts_batch", "description": "Add or replace producer/consumer cross-unit contracts by stable id transactionally. State direction, data shape, validity timing, ownership transfer/borrowing, lifecycle handoff, compatibility, and invalid-state/error behavior so neither side must inspect sibling internals.", "parameters_schema": _batch_schema("cross_unit_contracts")},
     "op_minion_contract_set_integration": {
         "name": "op_minion_contract_set_integration",
         "description": "Set topology, integration contract, assumptions, and risks in one transaction.",
@@ -319,12 +319,12 @@ class ContractBuilderRuntime:
         }
         if name in mapping:
             field, arg_name, prefix = mapping[name]
-            existing = list(payload.get(field) or [])
-            for raw in list(args.get(arg_name) or []):
-                item = dict(raw or {})
-                item.setdefault("id", f"{prefix}-{len(existing) + 1}")
-                existing.append(item)
-            payload[field] = existing
+            payload[field] = _upsert_stable_id_items(
+                list(payload.get(field) or []),
+                list(args.get(arg_name) or []),
+                prefix=prefix,
+                field_name=field,
+            )
         elif name == "op_minion_contract_add_unit_outlines_batch":
             existing_ids = {str(item.get("unit_id") or "") for item in list(payload.get("units") or [])}
             additions = [dict(item or {}) for item in list(args.get("units") or [])]
@@ -484,6 +484,8 @@ class ContractBuilderRuntime:
         missing = sorted(required - set(payload))
         if missing:
             raise ValueError("contract draft missing fields: " + ", ".join(missing))
+        for field_name in ("global_constraints", "design_decisions", "gate_checks", "cross_unit_contracts"):
+            _require_unique_stable_ids(list(payload.get(field_name) or []), field_name=field_name)
         units = [validate_unit_contract(dict(item), complexity_policy=ComplexityBudgetPolicy()) for item in list(payload.get("units") or [])]
         if not units:
             raise ValueError("contract draft requires at least one unit")
@@ -498,6 +500,49 @@ class ContractBuilderRuntime:
             raise ValueError("topology references unknown units: " + ", ".join(sorted(unknown)))
         _assert_acyclic(depends_on)
         _reject_implementation_fields(payload)
+
+
+def _upsert_stable_id_items(
+    existing: list[Any],
+    incoming: list[Any],
+    *,
+    prefix: str,
+    field_name: str,
+) -> list[dict[str, Any]]:
+    result = [dict(item or {}) for item in existing]
+    _require_unique_stable_ids(result, field_name=field_name)
+    positions = {str(item["id"]): index for index, item in enumerate(result)}
+    incoming_ids: set[str] = set()
+    next_index = len(result) + 1
+    for raw in incoming:
+        item = dict(raw or {})
+        item_id = str(item.get("id") or "").strip()
+        if not item_id:
+            while f"{prefix}-{next_index}" in positions or f"{prefix}-{next_index}" in incoming_ids:
+                next_index += 1
+            item_id = f"{prefix}-{next_index}"
+            item["id"] = item_id
+            next_index += 1
+        if item_id in incoming_ids:
+            raise ValueError(f"duplicate {field_name} id in batch: {item_id}")
+        if item_id in positions:
+            result[positions[item_id]] = item
+        else:
+            positions[item_id] = len(result)
+            result.append(item)
+        incoming_ids.add(item_id)
+    return result
+
+
+def _require_unique_stable_ids(items: list[Any], *, field_name: str) -> None:
+    seen: set[str] = set()
+    for raw in items:
+        item_id = str(dict(raw or {}).get("id") or "").strip()
+        if not item_id:
+            raise ValueError(f"{field_name} item requires a stable id")
+        if item_id in seen:
+            raise ValueError(f"duplicate {field_name} id: {item_id}")
+        seen.add(item_id)
 
 
 def _empty_contract() -> dict[str, Any]:
