@@ -110,7 +110,8 @@ SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "Submit the complete semantic construction DAG after writing the code skeleton. This is the Architect's only completion tool. "
             "modules is a map keyed by a unique snake_case semantic module name. Each module declares only work-start blockers, one code contract "
             "entrypoint, exact frozen contract files, narrow implementation/test path scopes, read-only references, original Requirement text, and optional "
-            "critical evidence. Path scopes always use {kind:file|directory|prefix,path:...}; repository-root scopes are forbidden. The Manager validates "
+            "critical evidence. Evidence kind is exactly workspace_file|workspace_symbol|reference_file|reference_symbol|documentation|research_conclusion. "
+            "Path scopes always use {kind:file|directory|prefix,path:...}; repository-root scopes are forbidden. The Manager validates "
             "Requirement/Evidence references, DAG acyclicity, path ownership, contract comments, Git diff, and snapshot stability. Do not include workflow IDs, "
             "revision IDs, requirement/evidence/finding IDs, artifact handles, SHA values, milestones, algorithms, implementation steps, or test matrices."
         ),
@@ -131,8 +132,9 @@ SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_skeleton_review_submit": {
         "name": "op_minion_skeleton_review_submit",
         "description": (
-            "Submit PASS or FAIL for the bound Requirements plus code skeleton. Findings use semantic module names, original Requirement text, and source "
-            "path/symbol/contract section only. Do not invent IDs, handles, SHA values, JSON pointers, implementation details, or a replacement design. "
+            "Submit PASS or FAIL for the bound Requirements plus code skeleton. finding_kind is exactly requirements_defect|contract_defect|architecture_defect, "
+            "and severity is exactly error|warning. Findings use semantic module names, original Requirement text, and source path/symbol/contract section only. "
+            "Do not invent IDs, handles, SHA values, JSON pointers, implementation details, or a replacement design. "
             "A FAIL must identify every material contract-level defect in one breadth-first pass."
         ),
         "parameters_schema": {

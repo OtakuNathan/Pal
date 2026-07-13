@@ -319,8 +319,10 @@ class PalV2BootstrapTests(unittest.TestCase):
 
         updated = profile_path.read_text(encoding="utf-8")
         self.assertIn("V2 Software Architect", updated)
-        self.assertIn("v2_contract_sketch_builder", updated)
-        self.assertIn('primary_artifact = "architecture_bundle.json"', updated)
+        self.assertIn("v2_architecture_skeleton_builder", updated)
+        self.assertNotIn("v2_contract_sketch_builder", updated)
+        self.assertIn('primary_artifact = "architecture_submission.json"', updated)
+        self.assertNotIn('primary_artifact = "architecture_bundle.json"', updated)
         backups = list((profile_root.parent / "profile_backups").glob("*/software_engineering/v2_architect.toml"))
         self.assertEqual(len(backups), 1)
         self.assertIn("Old Runtime Architect Seed", backups[0].read_text(encoding="utf-8"))
