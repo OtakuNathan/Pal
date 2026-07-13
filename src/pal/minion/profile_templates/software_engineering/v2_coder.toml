@@ -19,11 +19,11 @@ Make a breadth-first pass over nearby structure, frozen contracts, relevant entr
 through the edit path. Current source, tests, build output, LSP results, and workspace state beat stale non-binding notes. If live truth contradicts a binding
 contract or dependency output, report architecture_defect instead of silently choosing or changing another unit.
 Prefer TDD: add focused project tests first, then implement. For async/concurrent/stateful code, cover ordering, repeated invocation, cancellation, timeout,
-exception escape, cleanup, and persistence consistency where relevant. The accepted skeleton defines the semantic module boundary; owned_impl and owned_test are the only writable path scopes, while the manager records real diffs and integration detects collisions. Never modify reference_only paths. Do not alter architecture,
-topology, sibling internals, or dependency contracts. If the module cannot fit its complexity budget, report ModuleSplitRequest instead of widening scope.
+exception escape, cleanup, and persistence consistency where relevant. The accepted skeleton defines the semantic module boundary; implementation_scopes and test_scopes are the only writable paths, while the Manager records the module-only delta and validates the deterministic final Candidate union. Never modify reference_only paths. Do not alter architecture,
+topology, sibling internals, or dependency contracts. If the module cannot fit one bounded candidate-review cycle, report ModuleSplitRequest instead of widening scope.
 Reduce uncertainty at the boundary: prefer explicit state and direct control flow, and use the language's type, schema, constructor, ownership, and compile-time
 facilities when they make illegal states or malformed data harder to represent. Frozen contract files are strictly read-only: if implementation requires changing
-one, report architecture_defect rather than editing it. Write only within owned_impl or owned_test scopes. Preserve repository style and stable interfaces. Make the smallest coherent
+one, report architecture_defect rather than editing it. Write only within implementation_scopes or test_scopes. Preserve repository style and stable interfaces. Make the smallest coherent
 change that satisfies the contract; do not optimize without a declared hot path, scale constraint, benchmark, or other concrete evidence.
 Use clean abstractions when they reduce real complexity or clarify ownership/lifecycle; avoid test-only hacks, overfitting, and broad refactors outside the assigned boundary.
 Add abstraction only when it removes real duplication, protects a meaningful boundary, names an invariant/lifecycle/state transition, or prevents repeated

@@ -205,6 +205,28 @@ def requirements_semantic_view(payload: Mapping[str, Any]) -> dict[str, Any]:
     clarifications = list(payload.get("open_clarifications") or [])
     if clarifications:
         result["open_clarifications"] = clarifications
+    patches = [
+        {
+            key: item[key]
+            for key in (
+                "patch_kind",
+                "section",
+                "requirement",
+                "strength",
+                "reason",
+                "affected_modules",
+                "affected_contracts",
+                "source",
+                "observed_at",
+            )
+            if key in item
+        }
+        for raw in list(payload.get("patch_ledger") or [])
+        if isinstance(raw, Mapping)
+        for item in (dict(raw),)
+    ]
+    if patches:
+        result["requirement_patches"] = patches
     return result
 
 
@@ -452,6 +474,27 @@ def compile_skeleton_markdown(
     for item in semantic_requirements(requirements_payload):
         strength = "" if item.strength == "hard" else f" [{item.strength}]"
         lines.append(f"- **{item.section}**{strength}: {item.requirement}")
+    patches = [dict(item) for item in list(requirements_payload.get("patch_ledger") or [])]
+    if patches:
+        lines.extend(["", "## Requirement Amendments", ""])
+        for patch in patches:
+            source = dict(patch.get("source") or {})
+            origin = " / ".join(
+                item
+                for item in (
+                    str(source.get("role") or ""),
+                    str(source.get("stage") or ""),
+                    str(source.get("case") or ""),
+                )
+                if item
+            )
+            lines.extend(
+                [
+                    f"- **{patch.get('section', '')}**: {patch.get('requirement', '')}",
+                    f"  - Reason: {patch.get('reason', '')}",
+                    f"  - Source: {origin or 'human edit'} at {patch.get('observed_at', '')}",
+                ]
+            )
     lines.extend(["", "## Construction DAG", ""])
     for name, raw_module in dict(submission.get("modules") or {}).items():
         module = dict(raw_module)

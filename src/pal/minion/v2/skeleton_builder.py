@@ -144,7 +144,8 @@ SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
             "modules is keyed by a unique snake_case semantic name. depends_on means ACCEPTED-before-start only; consumes separately names provider module, "
             "contract path, and optional symbol. contract_paths are frozen after Human Accept; the first is the primary contract entrypoint. "
             "implementation_scopes and test_scopes use only {kind:file|directory,path:...}; a directory must be an exclusive private namespace. "
-            "verification_nodes describe real consumer, build, dogfood, or platform scenarios and the exact module candidates they combine. Every hard "
+            "verification_nodes describe real consumer, build, dogfood, or platform scenarios and the exact module candidates they combine; depends_on must "
+            "include the complete Construction dependency closure for that scenario. Every hard "
             "Requirement needs a verification landing, but no synthetic all-module join is required. Evidence is optional and uses "
             "workspace_file|workspace_symbol|reference_file|reference_symbol|documentation|research_conclusion. The Manager preflights Requirement/Evidence "
             "references, all three graphs, path ownership, contract comments, and entrypoints before stopping the worker, then repeats validation on the "
@@ -174,6 +175,7 @@ SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": (
             "Submit PASS or FAIL for the bound Requirements plus code skeleton. finding_kind is exactly requirements_defect|contract_defect|architecture_defect, "
             "and severity is exactly error|warning. Findings use semantic module names, original Requirement text, and source path/symbol/contract section only. "
+            "Review Construction ordering, directional contract consumption, and real Verification Topology as separate graphs; no universal join is required. "
             "Do not invent IDs, handles, SHA values, JSON pointers, implementation details, or a replacement design. "
             "A FAIL must identify every material contract-level defect in one breadth-first pass."
         ),

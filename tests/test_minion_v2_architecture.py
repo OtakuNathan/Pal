@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 import unittest
@@ -16,6 +17,7 @@ from pal.minion.v2.architecture import (
     validate_unit_contract,
 )
 from pal.minion.v2.service import MinionV2WorkflowService
+from pal.minion.v2.skeleton import requirements_semantic_view
 from pal.minion.v2.workers import apply_v2_research_capability_policy
 from pal.shared import MinionInvocationPack
 
@@ -94,6 +96,75 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                 },
                 requirements_ref=requirements,
                 research_mode=ResearchMode.LOCAL_ONLY,
+            )
+
+    def test_requirement_patch_is_manager_timestamped_and_creates_an_immutable_revision(self) -> None:
+        base_ref = self.service.publish_requirements(
+            {
+                "title": "Router",
+                "requirements": [
+                    {
+                        "section": "Routing",
+                        "statement": "Route matching must be deterministic.",
+                        "strength": "hard",
+                    }
+                ],
+            }
+        )
+        finding_ref = self.store.put_json(
+            {"summary": "Reset order is externally observable."},
+            artifact_type="RepairBillArtifact",
+        )
+        patch_ref, revised_ref = self.service.publish_requirement_patch(
+            base_requirements_ref=base_ref,
+            proposal={
+                "patch_kind": "derived_constraint",
+                "section": "Reset semantics",
+                "requirement": "Reset must preserve the configured route precedence order.",
+                "strength": "hard",
+                "reason": "The public reset operation otherwise changes observable routing behavior.",
+                "affected_modules": ["router"],
+                "affected_contracts": [
+                    {"module": "router", "path": "include/router.h", "symbol": "reset"}
+                ],
+            },
+            source={
+                "role": "verifier",
+                "stage": "scenario_verification",
+                "case": "reset preserves route precedence",
+                "finding_summary": "Reset reverses equal-priority routes.",
+            },
+            source_artifact_ref=finding_ref,
+        )
+
+        base = self.store.read_json(base_ref)
+        patch = self.store.read_json(patch_ref)
+        revised = self.store.read_json(revised_ref)
+        self.assertEqual(len(base["requirements"]), 1)
+        self.assertEqual(len(revised["requirements"]), 2)
+        self.assertEqual(patch["observed_at"], patch["proposed_at"])
+        self.assertEqual(patch["source"]["role"], "verifier")
+        self.assertEqual(revised["requirement_patch_refs"], [patch_ref.to_dict()])
+        semantic = requirements_semantic_view(revised)
+        encoded = json.dumps(semantic, sort_keys=True)
+        self.assertIn("Reset must preserve the configured route precedence order.", encoded)
+        self.assertIn("reset preserves route precedence", encoded)
+        self.assertNotIn(patch_ref.sha256, encoded)
+        self.assertNotIn("source_artifact_ref", encoded)
+
+        with self.assertRaisesRegex(ValueError, "add new product semantics"):
+            self.service.publish_requirement_patch(
+                base_requirements_ref=revised_ref,
+                proposal={
+                    "patch_kind": "derived_constraint",
+                    "section": "Reset semantics",
+                    "requirement": "Reset must preserve the configured route precedence order.",
+                    "strength": "hard",
+                    "reason": "Duplicate proposal.",
+                    "affected_modules": ["router"],
+                    "affected_contracts": [],
+                },
+                source={"role": "verifier", "stage": "module_verification"},
             )
 
     def _publish_contract(self):

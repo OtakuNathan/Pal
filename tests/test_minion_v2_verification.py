@@ -29,6 +29,7 @@ from pal.minion.v2.workers import (
     _compile_standalone_review_markdown,
     _reject_manager_identity_fields,
     _validate_skeleton_coder_report,
+    _validate_semantic_verification_plan_shape,
     _validate_verifier_requirement_refs,
     _verification_case_specs,
     _verification_findings,
@@ -112,6 +113,32 @@ class MinionV2VerificationTests(unittest.TestCase):
                 work_view={"requirements": {"sections": {"Lifecycle": ["Different text."]}}},
                 cases=cases,
                 findings=findings,
+            )
+
+    def test_verifier_can_propose_semantic_requirement_patch_but_not_manager_metadata(self) -> None:
+        proposal = {
+            "requirement_patch": {
+                "patch_kind": "derived_constraint",
+                "section": "Lifecycle",
+                "requirement": "Reset preserves configured precedence.",
+                "strength": "hard",
+                "reason": "A reproduced public consumer observes reordered routes.",
+                "affected_modules": ["router"],
+                "affected_contracts": [
+                    {"module": "router", "path": "include/router.h", "symbol": "reset"}
+                ],
+            }
+        }
+        _validate_semantic_verification_plan_shape(proposal, standalone=False)
+        with self.assertRaisesRegex(ValueError, "Manager-owned"):
+            _validate_semantic_verification_plan_shape(
+                {
+                    "requirement_patch": {
+                        **proposal["requirement_patch"],
+                        "observed_at": "2026-01-01T00:00:00Z",
+                    }
+                },
+                standalone=False,
             )
 
     def test_standalone_review_markdown_exposes_semantics_not_manager_identity(self) -> None:
@@ -357,6 +384,203 @@ class MinionV2VerificationTests(unittest.TestCase):
                 )
                 self.assertEqual(result.snapshot.state, expected_state)
 
+    def test_contract_defect_carries_requirement_patch_into_replan_state(self) -> None:
+        node = self._reviewing_node("node_requirement_patch")
+        verification_ref = self.store.put_json(
+            {"status": "FAIL"}, artifact_type="VerificationArtifact"
+        )
+        repair_ref = self.store.put_json(
+            {"finding": "contract"}, artifact_type="RepairBillArtifact"
+        )
+        patch_ref = self.store.put_json(
+            {"requirement": "Reset preserves precedence."},
+            artifact_type="RequirementPatchArtifact",
+        )
+        revised_ref = self.store.put_json(
+            {"requirements": [{"statement": "Reset preserves precedence."}]},
+            artifact_type="RequirementsArtifact",
+        )
+        result = self.verification.submit_verdict(
+            node=node,
+            verification_ref=verification_ref,
+            status=VerificationStatus.FAIL,
+            actor="verifier",
+            repair_bill_ref=repair_ref,
+            finding_fingerprint_value="contract-fingerprint",
+            candidate_tree_hash="candidate-tree",
+            defect_kind=DefectKind.CONTRACT,
+            requirement_patch_ref=patch_ref,
+            revised_requirements_ref=revised_ref,
+        )
+        self.assertEqual(result.snapshot.state, "STALE")
+        self.assertEqual(result.snapshot.payload["requirement_patch_ref"], patch_ref.to_dict())
+        self.assertEqual(result.snapshot.payload["revised_requirements_ref"], revised_ref.to_dict())
+
+    def test_requirement_patch_replan_uses_revised_requirements_and_returns_to_human_review_path(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        base_requirements_ref = service.architecture.publish_requirements(
+            {
+                "requirements": [
+                    {
+                        "section": "Routing",
+                        "statement": "Route matching must be deterministic.",
+                        "strength": "hard",
+                    }
+                ]
+            }
+        )
+        repair_ref = self.store.put_json(
+            {"summary": "Reset changes route precedence."}, artifact_type="RepairBillArtifact"
+        )
+        patch_ref, revised_ref = service.architecture.publish_requirement_patch(
+            base_requirements_ref=base_requirements_ref,
+            proposal={
+                "patch_kind": "derived_constraint",
+                "section": "Reset semantics",
+                "requirement": "Reset must preserve configured route precedence.",
+                "strength": "hard",
+                "reason": "A reproduced consumer observes a changed route after reset.",
+                "affected_modules": ["router"],
+                "affected_contracts": [],
+            },
+            source={"role": "verifier", "stage": "module_verification"},
+            source_artifact_ref=repair_ref,
+        )
+        request_ref = self.store.put_json(
+            {"requirements_ref": base_requirements_ref.to_dict()},
+            artifact_type="WorkflowRequestArtifact",
+        )
+        manifest_ref = self.store.put_json(
+            {"requirements_ref": base_requirements_ref.to_dict()},
+            artifact_type="ArchitectureSkeletonArtifact",
+        )
+        topology_ref = self.store.put_json({}, artifact_type="SkeletonTopologyArtifact")
+        contract_ref = self.store.put_json({}, artifact_type="ArchitectureSkeletonModuleContractArtifact")
+        workflow_id = "wf_requirement_patch_replan"
+        epoch_id = "epoch_requirement_patch_replan"
+        node_id = "node_requirement_patch_replan"
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="test",
+                expected_version=0,
+                idempotency_key=f"{workflow_id}:create",
+                payload={"request_ref": request_ref.to_dict()},
+            )
+        )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="START_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="test",
+                expected_version=1,
+                idempotency_key=f"{workflow_id}:start",
+            )
+        )
+        for action_type, payload in (
+            (
+                "CREATE_EXECUTION_EPOCH",
+                {
+                    "architecture_manifest_ref": manifest_ref.to_dict(),
+                    "topology_ref": topology_ref.to_dict(),
+                },
+            ),
+            ("START_EXECUTION", {}),
+            ("NODES_COMPILED", {"node_ids": [node_id]}),
+        ):
+            snapshot = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id=workflow_id,
+                    aggregate_type=AggregateType.EXECUTION_EPOCH,
+                    aggregate_id=epoch_id,
+                    actor="test",
+                    expected_version=snapshot.version if snapshot else 0,
+                    idempotency_key=f"{epoch_id}:{action_type}",
+                    payload=payload,
+                )
+            )
+        node_actions = [
+            (
+                "CREATE_NODE_RUN",
+                {
+                    "unit_contract_ref": contract_ref.to_dict(),
+                    "epoch_id": epoch_id,
+                    "architecture_manifest_ref": manifest_ref.to_dict(),
+                    "dependency_node_ids": [],
+                },
+            ),
+            ("DEPENDENCIES_ACCEPTED", {"accepted_dependency_node_ids": [], "epoch_frozen": False}),
+            ("START_PRODUCING", {"fencing_token": 1}),
+            ("SUBMIT_CANDIDATE", {"fencing_token": 1}),
+            (
+                "QUIESCE_COMPLETED",
+                {
+                    "fencing_token": 1,
+                    "process_group_reaped": True,
+                    "exclusive_workspace_lock": True,
+                    "workspace_fingerprint": "tree",
+                },
+            ),
+            (
+                "CANDIDATE_SNAPSHOTTED",
+                {
+                    "candidate_ref": contract_ref.to_dict(),
+                    "candidate_digest": "candidate",
+                    "workspace_fingerprint": "tree",
+                },
+            ),
+            ("START_REVIEW", {"fencing_token": 2}),
+            (
+                "CONTRACT_DEFECT",
+                {
+                    "repair_bill_ref": repair_ref.to_dict(),
+                    "requirement_patch_ref": patch_ref.to_dict(),
+                    "revised_requirements_ref": revised_ref.to_dict(),
+                },
+            ),
+        ]
+        for action_type, payload in node_actions:
+            snapshot = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id=workflow_id,
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=node_id,
+                    actor="test",
+                    expected_version=snapshot.version if snapshot else 0,
+                    idempotency_key=f"{node_id}:{action_type}",
+                    payload=payload,
+                )
+            )
+
+        processor = MinionV2OutboxProcessor(service)
+        processor._freeze_epoch_and_replan(
+            {
+                "effect_key": "requirement-patch-replan",
+                "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                "aggregate_id": node_id,
+            }
+        )
+        revisions = [
+            item
+            for item in self.repository.list_workflow_snapshots(workflow_id)
+            if item.aggregate_type == AggregateType.ARCHITECTURE_REVISION
+        ]
+        self.assertEqual(len(revisions), 1)
+        revision = revisions[0]
+        self.assertEqual(revision.state, "ARCHITECT_QUEUED")
+        self.assertEqual(revision.payload["requirements_ref"], revised_ref.to_dict())
+        self.assertEqual(revision.payload["requirement_patch_ref"], patch_ref.to_dict())
+        self.assertEqual(revision.payload["base_architecture_manifest_ref"], manifest_ref.to_dict())
+
     def test_accepted_unit_publishes_reviewable_memory_candidate(self) -> None:
         node = self._reviewing_node("node_memory")
         verification_ref = self.store.put_json({"status": "PASS"}, artifact_type="VerificationArtifact")
@@ -559,6 +783,7 @@ class MinionV2VerificationTests(unittest.TestCase):
                     "verification_workspace_fingerprint": f"tree-{node_id}",
                 },
             ),
+            ("START_SCENARIO_VERIFICATION", {"fencing_token": 1}),
             (
                 "VERIFICATION_PASSED",
                 {

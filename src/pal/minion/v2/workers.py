@@ -62,6 +62,7 @@ from pal.minion.v2.sessions import architect_session_id, coder_session_id
 from pal.minion.v2.skeleton import (
     ARCHITECTURE_SKELETON_ARTIFACT,
     ArchitectureWorkspace,
+    SemanticReferenceError,
     SkeletonReviewFinding,
     SkeletonReviewResult,
     compile_skeleton_markdown,
@@ -112,6 +113,7 @@ SEMANTIC_EFFECT_TYPES = frozenset(
         "spawn_producer_worker",
         "enqueue_node_review",
         "spawn_verifier_worker",
+        "enqueue_scenario_verifier",
         "spawn_scenario_verifier",
         "enqueue_repair",
         "spawn_repair_worker",
@@ -174,6 +176,12 @@ class MinionV2SemanticWorker:
             if str(effect.get("aggregate_type") or "") == AggregateType.STANDALONE_REVIEW.value:
                 return await self._run_standalone_review(effect)
             return await self._run_verifier(effect)
+        if effect_type == "enqueue_scenario_verifier":
+            return self._admit_node_worker(
+                effect,
+                action_type="START_SCENARIO_VERIFICATION",
+                role="scenario_verifier",
+            )
         if effect_type == "spawn_scenario_verifier":
             return await self._run_verifier(effect, scenario_mode=True)
         if effect_type == "enqueue_repair":
@@ -216,6 +224,7 @@ class MinionV2SemanticWorker:
             "START_PRODUCING": "PRODUCING",
             "START_REVIEW": "REVIEWING",
             "START_REPAIR": "REPAIRING",
+            "START_SCENARIO_VERIFICATION": "VERIFYING",
         }[action_type]
         if node.state == target_state and node.payload.get("active_worker_id"):
             return {"provider_request_id": str(node.payload.get("active_worker_id"))}
@@ -828,6 +837,8 @@ class MinionV2SemanticWorker:
         )
         current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
         repair_ref = None
+        requirement_patch_ref = None
+        revised_requirements_ref = None
         fingerprint = ""
         defect_kind = _defect_kind(plan, node)
         dependency_node_id = _resolve_dependency_node_id(
@@ -879,6 +890,41 @@ class MinionV2SemanticWorker:
                 locations=list(finding.get("locations") or first_failure.locations),
                 invariants=list(finding.get("invariants") or first_failure.invariants),
             )
+            requirement_patch = plan.get("requirement_patch")
+            if requirement_patch:
+                if status != VerificationStatus.FAIL or defect_kind not in {
+                    DefectKind.CONTRACT,
+                    DefectKind.ARCHITECTURE,
+                }:
+                    raise ValueError(
+                        "RequirementPatch is allowed only for a reproduced contract or architecture defect"
+                    )
+                manifest = self.service.artifacts.read_json(
+                    dict(node.payload.get("architecture_manifest_ref") or {})
+                )
+                base_requirements_ref = _ref_from_mapping(manifest.get("requirements_ref"))
+                requirement_patch_ref, revised_requirements_ref = (
+                    self.service.architecture.publish_requirement_patch(
+                        base_requirements_ref=base_requirements_ref,
+                        proposal=dict(requirement_patch),
+                        source={
+                            "role": "verifier",
+                            "stage": (
+                                "scenario_verification" if scenario_mode else "module_verification"
+                            ),
+                            "case": str(finding.get("case_name") or first_failure.case_name),
+                            "finding_summary": str(finding.get("summary") or first_failure.summary),
+                        },
+                        source_artifact_ref=repair_ref,
+                        provenance={
+                            "owner": "manager",
+                            "source_role": "verifier",
+                            "source_stage": (
+                                "scenario_verification" if scenario_mode else "module_verification"
+                            ),
+                        },
+                    )
+                )
         unknown_policy = _manager_unknown_policy(node)
         if unknown_policy.human_waiver_ref:
             manifest_ref = _ref_from_mapping(node.payload.get("architecture_manifest_ref"))
@@ -908,6 +954,8 @@ class MinionV2SemanticWorker:
             dependency_node_id=dependency_node_id,
             module_node_id=module_node_id,
             scenario_fingerprint=str(node.payload.get("scenario_fingerprint") or ""),
+            requirement_patch_ref=requirement_patch_ref,
+            revised_requirements_ref=revised_requirements_ref,
         )
         self.repository.record_worker_turn(
             invocation_id=invocation_id,
@@ -1118,11 +1166,30 @@ class MinionV2SemanticWorker:
     def _resume_node(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
         if node.state == "QUEUED":
+            if str(node.payload.get("node_kind") or "") == "verification":
+                return self._admit_node_worker(
+                    effect,
+                    action_type="START_SCENARIO_VERIFICATION",
+                    role="scenario_verifier",
+                )
             return self._admit_node_worker(effect, action_type="START_PRODUCING", role="producer")
         if node.state == "REVIEW_QUEUED":
             return self._admit_node_worker(effect, action_type="START_REVIEW", role="reviewer")
         if node.state == "REPAIR_QUEUED":
             return self._admit_node_worker(effect, action_type="START_REPAIR", role="repair")
+        if node.state == "VERIFY_PREPARING":
+            current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="RETRY_VERIFICATION_PREPARATION",
+                    workflow_id=node.workflow_id,
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=node.aggregate_id,
+                    actor="minion-v2-recovery",
+                    expected_version=current.version,
+                    idempotency_key=f"effect:{effect['effect_key']}:retry-verification-preparation",
+                )
+            )
         return {}
 
     @staticmethod
@@ -1875,7 +1942,8 @@ class MinionV2SemanticWorker:
                     references[f"user_{name}"] = _path_pseudo_ref(path, name)
             instruction = (
                 "Design the requested software architecture in the bound writable worktree. Requirements is the immutable product truth. "
-                "Write contract-level code skeletons and an end-to-end integration contract, then submit only the semantic module DAG and path policy. "
+                "Write contract-level code skeletons, a Construction DAG, directional contract-consumption references, and real scenario-specific Verification Nodes. "
+                "A universal integration/join is forbidden unless a real product entrypoint requires that exact combination. "
                 "Do not implement behavior, algorithms, mapping tables, SDK call sequences, or complete tests."
             )
             if base_manifest_ref is not None:
@@ -2109,19 +2177,57 @@ class MinionV2SemanticWorker:
         submission_ref = _ref_from_mapping(revision.payload.get("pending_architecture_submission_ref"))
         submission = self.service.artifacts.read_json(submission_ref)
         requirements_ref = _ref_from_mapping(revision.payload.get("requirements_ref"))
-        manifest_ref = self.service.skeleton.snapshot_architecture(
-            workflow_name=revision.workflow_id,
-            revision_name=revision.aggregate_id,
-            architecture_workspace=architecture_workspace,
-            submission=submission,
-            requirements_ref=requirements_ref,
-            reference_roots=reference_roots,
-            evidence_catalog_ref=(
-                _ref_from_mapping(revision.payload.get("evidence_catalog_ref"))
-                if revision.payload.get("evidence_catalog_ref")
-                else None
-            ),
-        )
+        try:
+            manifest_ref = self.service.skeleton.snapshot_architecture(
+                workflow_name=revision.workflow_id,
+                revision_name=revision.aggregate_id,
+                architecture_workspace=architecture_workspace,
+                submission=submission,
+                requirements_ref=requirements_ref,
+                reference_roots=reference_roots,
+                evidence_catalog_ref=(
+                    _ref_from_mapping(revision.payload.get("evidence_catalog_ref"))
+                    if revision.payload.get("evidence_catalog_ref")
+                    else None
+                ),
+            )
+        except ValueError as exc:
+            finding_payload: dict[str, Any] = {
+                "finding_kind": "contract_defect",
+                "summary": str(exc),
+                "source": "stable_architecture_preflight",
+                "repair_instruction": (
+                    "Correct only the rejected semantic DAG, reference, contract skeleton, or path declaration; "
+                    "preserve unrelated accepted architecture content."
+                ),
+            }
+            if isinstance(exc, SemanticReferenceError):
+                finding_payload["semantic_reference_error"] = exc.to_dict()
+            finding_ref = self.service.artifacts.put_json(
+                finding_payload,
+                artifact_type="ArchitectureFindingArtifact",
+                child_refs=((submission_ref.sha256, "rejected_submission"),),
+            )
+            current = self.repository.read_snapshot(
+                AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id
+            )
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="ARCHITECTURE_SNAPSHOT_REJECTED",
+                    workflow_id=revision.workflow_id,
+                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                    aggregate_id=revision.aggregate_id,
+                    actor="minion-v2-manager",
+                    expected_version=current.version,
+                    idempotency_key=(
+                        f"architecture-snapshot-rejected:{revision.aggregate_id}:{finding_ref.sha256}"
+                    ),
+                    payload={"finding_artifact_ref": finding_ref.to_dict()},
+                )
+            )
+            self._worktree_locks.release(revision.aggregate_id)
+            self.repository.release_lease(lease_resource, invocation_id, fencing_token)
+            return {"result_artifact_ref": finding_ref.to_dict(), "status": "rejected"}
         if workspace_content_fingerprint(workspace_path) != before:
             raise RuntimeError("architecture worktree content changed while the Manager created its commit")
         current = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id)
@@ -3996,6 +4102,7 @@ def _validate_semantic_verification_plan_shape(
         "defect_kind",
         "dependency_module",
         "affected_module",
+        "requirement_patch",
         "severity",
         "suggested_repair_boundary",
         "policy_exceptions",
@@ -4016,6 +4123,25 @@ def _validate_semantic_verification_plan_shape(
     unknown = set(value) - (standalone_fields if standalone else verifier_fields)
     if unknown:
         raise ValueError("verification output contains unsupported fields: " + ", ".join(sorted(unknown)))
+    requirement_patch = value.get("requirement_patch")
+    if requirement_patch is not None:
+        if not isinstance(requirement_patch, Mapping):
+            raise ValueError("requirement_patch must be an object")
+        allowed_patch_fields = {
+            "patch_kind",
+            "section",
+            "requirement",
+            "strength",
+            "reason",
+            "affected_modules",
+            "affected_contracts",
+        }
+        extra = set(requirement_patch) - allowed_patch_fields
+        if extra:
+            raise ValueError(
+                "requirement_patch contains Manager-owned or unsupported fields: "
+                + ", ".join(sorted(extra))
+            )
     case_fields = {
         "name",
         "case_kind",

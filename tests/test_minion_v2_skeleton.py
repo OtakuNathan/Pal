@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pal.llm.contracts import CanonicalToolCall
 from pal.minion.v2.architecture import ArchitectureArtifactService
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.contracts import ActionEnvelope, AggregateType
@@ -25,7 +26,11 @@ from pal.minion.v2.skeleton import (
     review_architecture_skeleton,
     validate_architecture_submission,
 )
-from pal.minion.v2.skeleton_builder import SKELETON_BUILDER_TOOL_SPECS
+from pal.minion.v2.skeleton_builder import (
+    SKELETON_BUILDER_TOOL_SPECS,
+    skeleton_builder_tool_result,
+)
+from pal.minion.v2.workers import MinionV2SemanticWorker
 
 
 def _git(root: Path, *args: str) -> str:
@@ -471,7 +476,21 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         scenario = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, scenario_id)
         assert scenario is not None
+        self.assertEqual(scenario.state, "QUEUED")
+        MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))._admit_node_worker(
+            {
+                "effect_key": "scenario-union:admit",
+                "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                "aggregate_id": scenario_id,
+            },
+            action_type="START_SCENARIO_VERIFICATION",
+            role="scenario_verifier",
+        )
+        scenario = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, scenario_id)
+        assert scenario is not None
         self.assertEqual(scenario.state, "VERIFYING")
+        self.assertGreater(int(scenario.payload["fencing_token"]), 0)
+        self.assertEqual(scenario.payload["worker_role"], "scenario_verifier")
         scenario_worktree = Path(scenario.payload["workspace_path"])
         self.assertEqual(
             (scenario_worktree / "src" / "router.cpp").read_text(encoding="utf-8"),
@@ -501,6 +520,42 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "sha256",
         ):
             self.assertNotIn(f'"{forbidden}"', encoded)
+
+    def test_architecture_submit_preflight_keeps_invalid_submission_in_the_live_turn(self) -> None:
+        (self.repo / "include").mkdir()
+        (self.repo / "include" / "router.h").write_text(_contract("router"), encoding="utf-8")
+        requirements_path = self.runtime_root / "requirements.json"
+        requirements_path.write_text(json.dumps(self.requirements), encoding="utf-8")
+        workspace = {
+            "repo_path": str(self.repo),
+            "reference_paths": [{"name": "requirements", "path": str(requirements_path)}],
+            "artifact_dir": str(self.runtime_root / "artifacts"),
+            "artifact_stage_dir": str(self.runtime_root / "artifact-stage"),
+        }
+        submission = self._submission()
+        submission["modules"]["router"]["covers"][0]["requirement"] = (
+            "Route matching should probably be deterministic."
+        )
+        produced: list[dict[str, object]] = []
+        rejected = skeleton_builder_tool_result(
+            CanonicalToolCall(name="op_minion_architecture_submit", args=submission),
+            workspace,
+            produced,
+        )
+        self.assertFalse(rejected.ok)
+        self.assertEqual(produced, [])
+        self.assertTrue(rejected.structured["possible_matches"])
+        self.assertFalse(
+            (Path(workspace["artifact_stage_dir"]) / "architecture_submission.json").exists()
+        )
+
+        accepted = skeleton_builder_tool_result(
+            CanonicalToolCall(name="op_minion_architecture_submit", args=self._submission()),
+            workspace,
+            produced,
+        )
+        self.assertTrue(accepted.ok)
+        self.assertEqual(len(produced), 1)
 
     def test_software_workflow_imports_skeleton_and_rejects_legacy_contract_graph(self) -> None:
         workspace = self._provision_complete_workspace("external", "initial")

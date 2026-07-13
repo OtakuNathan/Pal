@@ -7,6 +7,7 @@ import re
 from typing import Any, Mapping
 from datetime import datetime, timezone
 
+from pal.foundation.persistence import utc_now
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.contracts import ActionEnvelope, AggregateType, DispatchResult
 from pal.minion.v2.repository import MinionV2Repository
@@ -26,6 +27,11 @@ EVIDENCE_SOURCE_KINDS = frozenset(
 class RequirementStrength(StrEnum):
     HARD = "hard"
     SOFT = "soft"
+
+
+REQUIREMENT_PATCH_KINDS = frozenset(
+    {"clarification", "derived_constraint", "regression_obligation", "human_edit"}
+)
 
 
 class UnitBehaviorKind(StrEnum):
@@ -268,6 +274,112 @@ class ArchitectureArtifactService:
             artifact_type="RequirementsArtifact",
             provenance=provenance,
         )
+
+    def publish_requirement_patch(
+        self,
+        *,
+        base_requirements_ref: ArtifactRef | Mapping[str, Any],
+        proposal: Mapping[str, Any],
+        source: Mapping[str, Any],
+        source_artifact_ref: ArtifactRef | Mapping[str, Any] | None = None,
+        provenance: Mapping[str, Any] | None = None,
+    ) -> tuple[ArtifactRef, ArtifactRef]:
+        base_ref = (
+            base_requirements_ref
+            if isinstance(base_requirements_ref, ArtifactRef)
+            else ArtifactRef.from_mapping(base_requirements_ref)
+        )
+        raw_base = dict(self.artifacts.read_json(base_ref))
+        base = validate_requirements_artifact(raw_base)
+        patch = _normalize_requirement_patch(proposal)
+        normalized_existing = {
+            _normalized_requirement_key(
+                str(item.get("section") or "Requirements"),
+                str(item.get("statement") or ""),
+            )
+            for item in list(base.get("requirements") or [])
+        }
+        patch_key = _normalized_requirement_key(patch["section"], patch["requirement"])
+        if patch_key in normalized_existing:
+            raise ValueError("RequirementPatch must add new product semantics, not repeat an existing Requirement")
+        now = utc_now()
+        source_ref = (
+            source_artifact_ref
+            if isinstance(source_artifact_ref, ArtifactRef)
+            else ArtifactRef.from_mapping(source_artifact_ref)
+            if source_artifact_ref
+            else None
+        )
+        patch_payload = {
+            "schema_version": "1",
+            **patch,
+            "source": _normalize_requirement_patch_source(source),
+            "observed_at": now,
+            "proposed_at": now,
+            "base_requirements_ref": base_ref.to_dict(),
+            **({"source_artifact_ref": source_ref.to_dict()} if source_ref else {}),
+        }
+        patch_children = [(base_ref.sha256, "base_requirements")]
+        if source_ref is not None:
+            patch_children.append((source_ref.sha256, "source_finding"))
+        patch_ref = self.artifacts.put_json(
+            patch_payload,
+            artifact_type="RequirementPatchArtifact",
+            provenance=provenance,
+            child_refs=tuple(patch_children),
+        )
+        revised_input = {
+            **base,
+            "requirements": [
+                *list(base.get("requirements") or []),
+                {
+                    "section": patch["section"],
+                    "statement": patch["requirement"],
+                    "strength": patch["strength"],
+                    "source_refs": [f"requirement_patch:{patch_ref.sha256}"],
+                    "acceptance_semantics": patch["reason"],
+                },
+            ],
+        }
+        revised = validate_requirements_artifact(revised_input)
+        prior_patch_refs = [
+            dict(item)
+            for item in list(raw_base.get("requirement_patch_refs") or [])
+            if isinstance(item, Mapping) and item.get("sha256")
+        ]
+        prior_ledger = [
+            dict(item)
+            for item in list(raw_base.get("patch_ledger") or [])
+            if isinstance(item, Mapping)
+        ]
+        revised.update(
+            {
+                "schema_version": "2",
+                "parent_requirements_ref": base_ref.to_dict(),
+                "requirement_patch_refs": [*prior_patch_refs, patch_ref.to_dict()],
+                "patch_ledger": [
+                    *prior_ledger,
+                    {
+                        "patch_kind": patch["patch_kind"],
+                        "section": patch["section"],
+                        "requirement": patch["requirement"],
+                        "strength": patch["strength"],
+                        "reason": patch["reason"],
+                        "affected_modules": list(patch["affected_modules"]),
+                        "affected_contracts": list(patch["affected_contracts"]),
+                        "source": patch_payload["source"],
+                        "observed_at": now,
+                    },
+                ],
+            }
+        )
+        revised_ref = self.artifacts.put_json(
+            revised,
+            artifact_type="RequirementsArtifact",
+            provenance={**dict(provenance or {}), "revision_kind": "requirement_patch"},
+            child_refs=((base_ref.sha256, "parent_requirements"), (patch_ref.sha256, "requirement_patch")),
+        )
+        return patch_ref, revised_ref
 
     def publish_evidence_catalog(
         self,
@@ -589,6 +701,85 @@ def validate_requirements_artifact(payload: Mapping[str, Any]) -> dict[str, Any]
         "open_clarifications": list(payload.get("open_clarifications") or []),
         "source_coverage": list(payload.get("source_coverage") or []),
     }
+
+
+def _normalize_requirement_patch(value: Mapping[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "patch_kind",
+        "section",
+        "requirement",
+        "strength",
+        "reason",
+        "affected_modules",
+        "affected_contracts",
+    }
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(
+            "RequirementPatch proposal contains Manager-owned or unsupported fields: "
+            + ", ".join(sorted(unknown))
+        )
+    patch_kind = str(value.get("patch_kind") or "").strip()
+    section = str(value.get("section") or "").strip()
+    requirement = str(value.get("requirement") or "").strip()
+    strength = str(value.get("strength") or "hard").strip().lower()
+    reason = str(value.get("reason") or "").strip()
+    if patch_kind not in REQUIREMENT_PATCH_KINDS:
+        raise ValueError("RequirementPatch patch_kind is invalid")
+    if not section or not requirement or not reason:
+        raise ValueError("RequirementPatch requires section, requirement, and reason")
+    if strength not in {item.value for item in RequirementStrength}:
+        raise ValueError("RequirementPatch strength must be hard or soft")
+    affected_modules = _text_list(value.get("affected_modules"))
+    if not affected_modules:
+        raise ValueError("RequirementPatch requires at least one affected semantic module name")
+    affected_contracts: list[dict[str, str]] = []
+    for raw in list(value.get("affected_contracts") or []):
+        if not isinstance(raw, Mapping):
+            raise ValueError("RequirementPatch affected_contracts entries must be objects")
+        module = str(raw.get("module") or "").strip()
+        path = str(raw.get("path") or "").strip()
+        symbol = str(raw.get("symbol") or "").strip()
+        if not module or not path:
+            raise ValueError("RequirementPatch contract references require module and path")
+        affected_contracts.append(
+            {"module": module, "path": path, **({"symbol": symbol} if symbol else {})}
+        )
+    return {
+        "patch_kind": patch_kind,
+        "section": section,
+        "requirement": requirement,
+        "strength": strength,
+        "reason": reason,
+        "affected_modules": affected_modules,
+        "affected_contracts": affected_contracts,
+    }
+
+
+def _normalize_requirement_patch_source(value: Mapping[str, Any]) -> dict[str, str]:
+    allowed = {"role", "stage", "case", "finding_summary"}
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError("RequirementPatch source contains unsupported fields: " + ", ".join(sorted(unknown)))
+    role = str(value.get("role") or "").strip()
+    stage = str(value.get("stage") or "").strip()
+    if not role or not stage:
+        raise ValueError("RequirementPatch source requires role and stage")
+    return {
+        "role": role,
+        "stage": stage,
+        **({"case": str(value.get("case") or "").strip()} if value.get("case") else {}),
+        **(
+            {"finding_summary": str(value.get("finding_summary") or "").strip()}
+            if value.get("finding_summary")
+            else {}
+        ),
+    }
+
+
+def _normalized_requirement_key(section: str, requirement: str) -> tuple[str, str]:
+    normalize = lambda text: " ".join(str(text).split()).casefold()
+    return normalize(section), normalize(requirement)
 
 
 def validate_evidence_catalog(payload: Mapping[str, Any], *, research_mode: ResearchMode) -> dict[str, Any]:

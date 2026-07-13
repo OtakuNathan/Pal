@@ -1234,7 +1234,12 @@ class DagScheduler:
                 ready.append(node)
         scheduled: list[str] = []
         for node in ready[:available_slots]:
-            baseline = prepare_node_dependency_baseline(node, node_by_id)
+            node_kind = str(node.payload.get("node_kind") or "unit")
+            baseline = prepare_node_dependency_baseline(
+                node,
+                node_by_id,
+                apply_candidates=node_kind != "verification",
+            )
             payload = {
                 "accepted_dependency_node_ids": sorted(
                     set(node.payload.get("dependency_node_ids") or []) & accepted_ids
@@ -1242,7 +1247,6 @@ class DagScheduler:
                 "epoch_frozen": False,
                 **baseline,
             }
-            node_kind = str(node.payload.get("node_kind") or "unit")
             verification = node_kind == "verification"
             legacy_integration = node_kind == "integration"
             if node.state == "BLOCKED_BY_DEPS":
@@ -1811,6 +1815,8 @@ def provision_verification_worktree(
 def prepare_node_dependency_baseline(
     node: AggregateSnapshot,
     node_by_id: Mapping[str, AggregateSnapshot],
+    *,
+    apply_candidates: bool = True,
 ) -> dict[str, Any]:
     workspace = Path(str(node.payload.get("workspace_path") or ""))
     if not workspace.is_dir():
@@ -1819,15 +1825,15 @@ def prepare_node_dependency_baseline(
     accepted_digests: list[str] = []
     output_hashes: dict[str, str] = {}
     dependency_outputs: dict[str, Any] = {}
-    for dependency_id in sorted(str(item) for item in list(node.payload.get("dependency_node_ids") or [])):
-        dependency = node_by_id[dependency_id]
+    for dependency in _ordered_dependency_closure(node, node_by_id):
+        dependency_id = dependency.aggregate_id
         if dependency.state != "ACCEPTED":
             raise ValueError(f"dependency is not accepted: {dependency_id}")
         candidate_digest = str(dependency.payload.get("candidate_digest") or "")
         if not candidate_digest:
             raise ValueError(f"accepted dependency has no candidate digest: {dependency_id}")
         if adapter == SOFTWARE_GIT_ADAPTER:
-            if not _git_is_ancestor(workspace, candidate_digest, "HEAD"):
+            if apply_candidates and not _git_is_ancestor(workspace, candidate_digest, "HEAD"):
                 _git(workspace, "cherry-pick", candidate_digest)
         elif adapter != ARTIFACT_BUNDLE_ADAPTER:
             raise ValueError(f"unsupported execution adapter: {adapter}")
@@ -1853,6 +1859,38 @@ def prepare_node_dependency_baseline(
         "dependency_outputs": dependency_outputs,
         "dependency_fingerprint": dependency_fingerprint(node, node_by_id),
     }
+
+
+def _ordered_dependency_closure(
+    node: AggregateSnapshot,
+    node_by_id: Mapping[str, AggregateSnapshot],
+) -> tuple[AggregateSnapshot, ...]:
+    ordered: list[AggregateSnapshot] = []
+    permanent: set[str] = set()
+    visiting: set[str] = set()
+
+    def visit(node_id: str) -> None:
+        if node_id in permanent:
+            return
+        if node_id in visiting:
+            raise ValueError("construction dependency graph contains a cycle")
+        dependency = node_by_id.get(node_id)
+        if dependency is None:
+            raise ValueError(f"dependency node does not exist in epoch: {node_id}")
+        visiting.add(node_id)
+        for parent_id in sorted(
+            str(item) for item in list(dependency.payload.get("dependency_node_ids") or [])
+        ):
+            visit(parent_id)
+        visiting.remove(node_id)
+        permanent.add(node_id)
+        ordered.append(dependency)
+
+    for dependency_id in sorted(
+        str(item) for item in list(node.payload.get("dependency_node_ids") or [])
+    ):
+        visit(dependency_id)
+    return tuple(ordered)
 
 
 def workspace_content_fingerprint(worktree: Path) -> str:

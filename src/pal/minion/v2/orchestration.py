@@ -470,6 +470,17 @@ class MinionV2OutboxProcessor:
                 )
             )
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, source.workflow_id)
+        base_manifest_ref = dict(source.payload.get("architecture_manifest_ref") or {})
+        manifest_requirements_ref: dict[str, Any] = {}
+        if base_manifest_ref.get("sha256"):
+            manifest = self.service.artifacts.read_json(base_manifest_ref)
+            manifest_requirements_ref = dict(manifest.get("requirements_ref") or {})
+        requirements_ref = dict(
+            source.payload.get("revised_requirements_ref")
+            or manifest_requirements_ref
+            or workflow_request_from_snapshot(self.service, workflow).get("requirements_ref")
+            or {}
+        )
         revision_id = _derived_id("arch", str(effect["effect_key"]))
         self.repository.dispatch(
             ActionEnvelope(
@@ -482,9 +493,14 @@ class MinionV2OutboxProcessor:
                 idempotency_key=f"effect:{effect['effect_key']}:replan",
                 payload={
                     "request_ref": workflow.payload.get("request_ref"),
-                    "requirements_ref": dict(workflow_request_from_snapshot(self.service, workflow).get("requirements_ref") or {}),
-                    "base_architecture_manifest_ref": source.payload.get("architecture_manifest_ref"),
+                    "requirements_ref": requirements_ref,
+                    "base_architecture_manifest_ref": base_manifest_ref,
                     "replan_finding_ref": finding_ref,
+                    **(
+                        {"requirement_patch_ref": dict(source.payload["requirement_patch_ref"])}
+                        if source.payload.get("requirement_patch_ref")
+                        else {}
+                    ),
                     "source_execution_epoch_id": epoch_id,
                     "research_mode": "local_only",
                     "revision_number": 1,

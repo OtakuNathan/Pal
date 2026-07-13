@@ -397,6 +397,19 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertEqual(snapshotting_result.snapshot.state, ArchitectureRevisionState.ARCHITECT_SNAPSHOTTING)
         self.assertEqual(snapshotting_result.effects[0].effect_type, "snapshot_architecture")
 
+        rejected = self.engine.transition(
+            snapshotting_result.snapshot,
+            self.action(
+                "ARCHITECTURE_SNAPSHOT_REJECTED",
+                AggregateType.ARCHITECTURE_REVISION,
+                "arch_skeleton",
+                payload={"finding_artifact_ref": {"sha256": "preflight-finding"}},
+                expected_version=5,
+            ),
+        )
+        self.assertEqual(rejected.snapshot.state, ArchitectureRevisionState.ARCHITECT_QUEUED)
+        self.assertEqual(rejected.effects[0].effect_type, "enqueue_architecture_stage")
+
         reviewed = self.engine.transition(
             snapshotting_result.snapshot,
             self.action(

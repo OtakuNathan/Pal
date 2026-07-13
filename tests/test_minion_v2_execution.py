@@ -11,7 +11,8 @@ from pathlib import Path
 
 from pal.minion.v2 import ActionEnvelope, AggregateType, ContentAddressedArtifactStore, MinionV2Repository
 from pal.minion.v2.architecture import ArchitectureArtifactService, ResearchMode
-from pal.minion.v2.contracts import AggregateVersionConflict, StaleFencingToken
+from pal.minion.v2.adapters import SOFTWARE_GIT_ADAPTER
+from pal.minion.v2.contracts import AggregateSnapshot, AggregateVersionConflict, StaleFencingToken
 from pal.minion.v2.execution import (
     CandidateSnapshotService,
     DagScheduler,
@@ -20,6 +21,7 @@ from pal.minion.v2.execution import (
     UnitWorkViewBuilder,
     NodeQuiescer,
     WorkspaceLockRegistry,
+    prepare_node_dependency_baseline,
     provision_verification_worktree,
     terminate_process_group,
 )
@@ -177,6 +179,81 @@ class MinionV2ExecutionTests(unittest.TestCase):
         self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1", max_new_nodes=3), (compilation.unit_node_ids["b"],))
         self._accept_node(compilation.unit_node_ids["b"])
         self.assertEqual(scheduler.schedule_ready_nodes(workflow_id="wf_exec", epoch_id="epoch_1", max_new_nodes=3), (compilation.integration_node_id,))
+
+    def test_node_baseline_applies_the_complete_construction_dependency_closure(self) -> None:
+        worktree = self.runtime_root / "dependency_closure_repo"
+        worktree.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=worktree, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+        (worktree / "base.txt").write_text("base\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=worktree, check=True)
+        base_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+        (worktree / "foundation.txt").write_text("foundation\n", encoding="utf-8")
+        subprocess.run(["git", "add", "foundation.txt"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "foundation"], cwd=worktree, check=True)
+        foundation_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+        (worktree / "drawing.txt").write_text("drawing\n", encoding="utf-8")
+        subprocess.run(["git", "add", "drawing.txt"], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "drawing"], cwd=worktree, check=True)
+        drawing_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+        subprocess.run(["git", "checkout", "-q", "--detach", base_sha], cwd=worktree, check=True)
+
+        def node(
+            node_id: str,
+            *,
+            state: str,
+            candidate_digest: str = "",
+            dependencies: tuple[str, ...] = (),
+        ) -> AggregateSnapshot:
+            return AggregateSnapshot(
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=node_id,
+                workflow_id="wf_dependency_closure",
+                state=state,
+                version=1,
+                payload={
+                    "workspace_path": str(worktree),
+                    "execution_adapter": SOFTWARE_GIT_ADAPTER,
+                    "dependency_node_ids": list(dependencies),
+                    "candidate_digest": candidate_digest,
+                    "candidate_ref": {"sha256": candidate_digest},
+                    "output_hashes": {"surface": node_id},
+                },
+                created_at="2026-01-01T00:00:00+00:00",
+                updated_at="2026-01-01T00:00:00+00:00",
+            )
+
+        foundation = node("foundation", state="ACCEPTED", candidate_digest=foundation_sha)
+        drawing = node(
+            "drawing",
+            state="ACCEPTED",
+            candidate_digest=drawing_sha,
+            dependencies=(foundation.aggregate_id,),
+        )
+        window = node("window", state="BLOCKED_BY_DEPS", dependencies=(drawing.aggregate_id,))
+        baseline = prepare_node_dependency_baseline(
+            window,
+            {
+                foundation.aggregate_id: foundation,
+                drawing.aggregate_id: drawing,
+                window.aggregate_id: window,
+            },
+        )
+
+        self.assertEqual(
+            baseline["accepted_dependency_candidate_digests"],
+            [foundation_sha, drawing_sha],
+        )
+        self.assertEqual((worktree / "foundation.txt").read_text(encoding="utf-8"), "foundation\n")
+        self.assertEqual((worktree / "drawing.txt").read_text(encoding="utf-8"), "drawing\n")
 
     def test_scheduler_queues_independent_nodes_in_the_same_tick(self) -> None:
         manifest = self._manifest()
