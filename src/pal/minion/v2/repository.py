@@ -835,6 +835,33 @@ class MinionV2Repository:
             result["metadata"] = json.loads(str(result.pop("metadata_json")))
             return result
 
+    def read_latest_effect_result_artifact(
+        self,
+        *,
+        workflow_id: str,
+        aggregate_type: AggregateType,
+        aggregate_id: str,
+        effect_type: str,
+    ) -> dict[str, Any] | None:
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT result_artifact_ref_json
+                FROM minion_v2_outbox
+                WHERE workflow_id = ? AND aggregate_type = ? AND aggregate_id = ?
+                  AND effect_type = ? AND status = 'completed'
+                  AND result_artifact_ref_json != '{}'
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (str(workflow_id), aggregate_type.value, str(aggregate_id), str(effect_type)),
+            ).fetchone()
+            if row is None:
+                return None
+            value = json.loads(str(row["result_artifact_ref_json"] or "{}"))
+            return dict(value) if isinstance(value, dict) and value.get("sha256") else None
+
     def issue_human_decision_token(
         self,
         *,
@@ -936,10 +963,10 @@ class MinionV2Repository:
             rows = connection.execute(
                 """
                 SELECT * FROM minion_v2_human_decisions
-                WHERE workflow_id = ? AND actor_id = ? AND active_channel_id = ? AND status = 'issued'
+                WHERE workflow_id = ? AND actor_id = ? AND status = 'issued'
                 ORDER BY issued_at DESC
                 """,
-                (str(workflow_id), str(actor_id), str(active_channel_id)),
+                (str(workflow_id), str(actor_id)),
             ).fetchall()
             bindings = {
                 (
@@ -964,14 +991,13 @@ class MinionV2Repository:
                 UPDATE minion_v2_human_decisions
                 SET status = 'expired'
                 WHERE workflow_id = ? AND architecture_revision_id = ? AND manifest_sha = ?
-                  AND actor_id = ? AND active_channel_id = ? AND status = 'issued'
+                  AND actor_id = ? AND status = 'issued'
                 """,
                 (
                     str(workflow_id),
                     architecture_revision_id,
                     manifest_sha,
                     str(actor_id),
-                    str(active_channel_id),
                 ),
             )
             connection.execute(
@@ -1542,6 +1568,11 @@ class MinionV2Repository:
         waiting_for_user = bool(active is not None and active.state in _HUMAN_WAIT_STATES)
         liveness = self._liveness_locked(connection, workflow, snapshots, waiting_for_user)
         blocker = dict((active.payload if active is not None else workflow.payload).get("blocker") or {})
+        active_worker_id = (
+            ""
+            if waiting_for_user
+            else str((active.payload if active is not None else {}).get("active_worker_id") or "")
+        )
         connection.execute(
             """
             INSERT INTO minion_v2_workflow_projection(
@@ -1569,7 +1600,7 @@ class MinionV2Repository:
                 workflow.state,
                 active.aggregate_type.value if active is not None else "",
                 active.aggregate_id if active is not None else "",
-                str((active.payload if active is not None else {}).get("active_worker_id") or ""),
+                active_worker_id,
                 _json(blocker),
                 _json(list(next_actions)),
                 int(waiting_for_user),

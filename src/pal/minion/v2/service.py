@@ -12,7 +12,12 @@ from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.catalog import MinionV2Catalog
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
 from pal.minion.v2.repository import MinionV2Repository
-from pal.minion.v2.skeleton import GitBackedSkeletonService, review_architecture_skeleton
+from pal.minion.v2.skeleton import (
+    ARCHITECTURE_SKELETON_ARTIFACT,
+    GitBackedSkeletonService,
+    compile_skeleton_markdown,
+    review_architecture_skeleton,
+)
 
 
 ROUTER_OPERATIONS = {
@@ -536,7 +541,10 @@ class MinionV2WorkflowService:
             raise ValueError(f"No submitted artifact named {name!r} exists in this channel.")
         return _artifact_ref_from_record(record).to_dict()
 
-    def workflow_status(self, workflow_id: str) -> dict[str, Any]:
+    def workflow_status(self, workflow_id: str, *, view: str = "status") -> dict[str, Any]:
+        normalized_view = str(view or "status").strip().lower()
+        if normalized_view not in {"status", "human_review"}:
+            raise ValueError("workflow status view must be status or human_review")
         projection = self.repository.read_workflow_projection(workflow_id)
         if projection is None:
             return {"status": "not_found", "workflow_id": workflow_id}
@@ -551,10 +559,11 @@ class MinionV2WorkflowService:
             task_id = str(workflow.payload.get("task_id") or "")
             tasks = self.repository.search_tasks(task_id=task_id, include_archived=True, limit=1) if task_id else ()
             task_title = str(tasks[0].get("title") or "") if tasks else ""
-        active_worker = str(projection.get("active_worker_id") or "")
+        waiting_for_user = bool(projection["waiting_for_user"])
+        active_worker = "" if waiting_for_user else str(projection.get("active_worker_id") or "")
         invocation = self.repository.read_worker_invocation(active_worker) if active_worker else None
         latest_event = self.repository.read_latest_workflow_event(workflow_id)
-        return {
+        result = {
             "status": "ok",
             "workflow_id": workflow_id,
             "current_phase": projection["current_phase"],
@@ -568,10 +577,59 @@ class MinionV2WorkflowService:
             "active_worker_role": str((invocation or {}).get("role") or ""),
             "blocker": projection["blocker"],
             "next_legal_action": _public_next_actions(workflow_state, active_state),
-            "waiting_for_user": bool(projection["waiting_for_user"]),
+            "waiting_for_user": waiting_for_user,
+            "human_review_available": active_state == "HUMAN_REVIEW",
             "liveness": projection["liveness"],
             "metrics": projection["metrics"],
             "last_progress_event": dict(latest_event or {}),
+        }
+        if normalized_view == "human_review":
+            if active is None or active.state != "HUMAN_REVIEW":
+                raise ValueError("workflow is not waiting for architecture human review")
+            result["human_review"] = self._human_review_view(active)
+        return result
+
+    def _human_review_view(self, revision: AggregateSnapshot) -> dict[str, Any]:
+        manifest_ref = dict(revision.payload.get("architecture_manifest_ref") or {})
+        if not manifest_ref:
+            raise ValueError("human review has no architecture manifest")
+        card_ref = dict(revision.payload.get("human_review_card_ref") or {})
+        if not card_ref:
+            card_ref = dict(
+                self.repository.read_latest_effect_result_artifact(
+                    workflow_id=revision.workflow_id,
+                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                    aggregate_id=revision.aggregate_id,
+                    effect_type="publish_human_architecture_review",
+                )
+                or {}
+            )
+        card: dict[str, Any] = {}
+        if card_ref:
+            record = self.repository.read_artifact_record(str(card_ref.get("sha256") or ""))
+            if record and str(record.get("artifact_type") or "") == "HumanReviewCardArtifact":
+                card = dict(self.artifacts.read_json(card_ref))
+                if str(card.get("manifest_sha") or "") != str(manifest_ref.get("sha256") or ""):
+                    raise ValueError("human review card is stale for the active architecture revision")
+        if card:
+            markdown = str(card.get("markdown") or "")
+            actions = [str(item) for item in list(card.get("actions") or [])]
+        else:
+            manifest = dict(self.artifacts.read_json(manifest_ref))
+            record = self.repository.read_artifact_record(str(manifest_ref.get("sha256") or ""))
+            if record and str(record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT:
+                requirements = self.artifacts.read_json(dict(manifest.get("requirements_ref") or {}))
+                markdown = compile_skeleton_markdown(manifest, requirements_payload=requirements)
+            else:
+                markdown = self.architecture.compile_human_review_markdown(manifest_ref)
+            actions = ["accept", "edit", "reject"]
+        review_ref = dict(revision.payload.get("review_artifact_ref") or {})
+        review = dict(self.artifacts.read_json(review_ref)) if review_ref else {}
+        return {
+            "markdown": markdown,
+            "actions": actions,
+            "review_verdict": str(review.get("verdict") or ""),
+            "findings": list(review.get("findings") or []),
         }
 
     def control_workflow(
@@ -671,6 +729,7 @@ class MinionV2WorkflowService:
             raise ValueError("edit decision requires edit_instruction")
         if decision == "clarify" and not str(data.get("clarification_response") or "").strip():
             raise ValueError("clarify decision requires clarification_response")
+        self._rebind_human_decision_channel(data)
         token = str(data.get("decision_token") or "")
         if not token:
             token = self.repository.reissue_human_decision_token(
@@ -761,6 +820,42 @@ class MinionV2WorkflowService:
             )
         )
         return {"status": "accepted", "workflow_id": workflow_id, "revision_id": revision_id, "state": result.snapshot.state}
+
+    def _rebind_human_decision_channel(self, data: Mapping[str, Any]) -> None:
+        workflow_id = str(data.get("workflow_id") or "")
+        actor = str(data.get("actor") or "")
+        source_channel = str(data.get("source_channel") or "")
+        control_route = dict(data.get("control_route") or {})
+        if not workflow_id or not actor or not source_channel or not control_route:
+            return
+        workflow = self._workflow_snapshot(workflow_id)
+        if workflow.state != "ACTIVE":
+            raise ValueError("human decision channel can only be rebound for an active workflow")
+        current_channel = str(workflow.payload.get("active_channel") or "")
+        current_route = dict(workflow.payload.get("control_route") or {})
+        if current_channel == source_channel and current_route == control_route:
+            return
+        route_hash = hashlib.sha256(
+            json.dumps(control_route, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:16]
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="REBIND_CHANNEL",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor=actor,
+                source_channel=source_channel,
+                expected_version=workflow.version,
+                idempotency_key=f"rebind-channel:{workflow_id}:{workflow.version}:{source_channel}:{route_hash}",
+                payload={"active_channel": source_channel, "control_route": control_route},
+            )
+        )
+        self.repository.bind_channel_workflow(
+            actor_id=actor,
+            channel_id=source_channel,
+            workflow_id=workflow_id,
+        )
 
     def archive_workflow(self, *, workflow_id: str, actor: str, reason: str = "") -> dict[str, Any]:
         workflow = self._workflow_snapshot(workflow_id)

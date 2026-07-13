@@ -207,11 +207,20 @@ class MinionV2PublicProvider:
         action_name="status",
         description=(
             "Read the current channel-bound workflow, or select one by natural-language Task title. Returns phase, active module/role, blocker, "
-            "next legal actions, user-wait flag, timings, last progress, and liveness without exposing Manager identities."
+            "next legal actions, user-wait flag, timings, last progress, and liveness without exposing Manager identities. When human_review_available "
+            "is true, call this same tool with view=human_review to read the durable Architecture Markdown, reviewer verdict/findings, and available actions."
         ),
         args_schema={
             "type": "object",
-            "properties": {"task": {"type": "string"}},
+            "properties": {
+                "task": {"type": "string"},
+                "view": {
+                    "type": "string",
+                    "enum": ["status", "human_review"],
+                    "default": "status",
+                    "description": "status returns the compact projection; human_review returns the durable pending review without internal ids or tokens.",
+                },
+            },
             "additionalProperties": False,
         },
     )
@@ -221,7 +230,10 @@ class MinionV2PublicProvider:
             workflow_id = self.service.resolve_workflow_selector(
                 selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
             )
-            payload = self.service.workflow_status(workflow_id)
+            payload = self.service.workflow_status(
+                workflow_id,
+                view=str(call.args.get("view") or "status"),
+            )
             return _public_result("minion workflow status", payload)
         except ValueError as exc:
             return _invalid("minion workflow selection invalid", exc)
@@ -292,6 +304,7 @@ class MinionV2PublicProvider:
                     "workflow_id": workflow_id,
                     "actor": actor,
                     "source_channel": channel,
+                    "control_route": self._control_route(call),
                 }
             )
             self._wake()
@@ -436,6 +449,11 @@ def _public_payload(value: Any) -> Any:
         "active_aggregate_id",
         "active_aggregate_type",
         "active_worker",
+        "decision_token",
+        "actor_id",
+        "active_channel_id",
+        "route",
+        "control_route",
         "request_ref",
         "artifact_ref",
         "last_progress_event_id",

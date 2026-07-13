@@ -498,6 +498,52 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
         self.assertNotIn("fencing_token", resumed.payload)
         self.assertNotIn("lease_resource_key", resumed.payload)
 
+    def test_architecture_review_handoff_clears_worker_and_persists_card(self) -> None:
+        reviewing = AggregateSnapshot(
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch_human_review",
+            workflow_id="wf_test",
+            state=ArchitectureRevisionState.REVIEWING,
+            version=4,
+            payload={
+                "active_worker_id": "inv_reviewer",
+                "fencing_token": 9,
+                "lease_resource_key": "architecture:arch_human_review:review",
+            },
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        waiting = self.engine.transition(
+            reviewing,
+            self.action(
+                "ARCHITECTURE_REVIEW_PASSED",
+                AggregateType.ARCHITECTURE_REVISION,
+                "arch_human_review",
+                expected_version=4,
+                payload={
+                    "review_artifact_ref": {"sha256": "review"},
+                    "architecture_manifest_ref": {"sha256": "manifest"},
+                },
+            ),
+        ).snapshot
+        self.assertEqual(waiting.state, ArchitectureRevisionState.HUMAN_REVIEW)
+        self.assertNotIn("active_worker_id", waiting.payload)
+        self.assertNotIn("fencing_token", waiting.payload)
+        self.assertNotIn("lease_resource_key", waiting.payload)
+
+        published = self.engine.transition(
+            waiting,
+            self.action(
+                "HUMAN_REVIEW_PUBLISHED",
+                AggregateType.ARCHITECTURE_REVISION,
+                "arch_human_review",
+                expected_version=5,
+                payload={"human_review_card_ref": {"sha256": "card"}},
+            ),
+        ).snapshot
+        self.assertEqual(published.state, ArchitectureRevisionState.HUMAN_REVIEW)
+        self.assertEqual(published.payload["human_review_card_ref"], {"sha256": "card"})
+
     def test_transition_table_uses_only_declared_aggregate_states(self) -> None:
         declared = {
             AggregateType.TASK: {str(item) for item in TaskState},

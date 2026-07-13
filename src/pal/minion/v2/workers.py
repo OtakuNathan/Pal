@@ -2584,54 +2584,79 @@ class MinionV2SemanticWorker:
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, revision.workflow_id)
         if workflow is None:
             raise ValueError("architecture revision has no workflow")
-        actor = str(workflow.payload.get("owner") or "pal")
-        channel = str(workflow.payload.get("active_channel") or "local")
-        record = self.repository.read_artifact_record(manifest_ref.sha256)
-        if record and str(record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT:
-            artifact = self.service.artifacts.read_json(manifest_ref)
-            requirements = self.service.artifacts.read_json(dict(artifact.get("requirements_ref") or {}))
-            decision_token = self.repository.issue_human_decision_token(
-                workflow_id=revision.workflow_id,
-                architecture_revision_id=revision.aggregate_id,
-                manifest_sha=manifest_ref.sha256,
-                actor_id=actor,
-                active_channel_id=channel,
-            )
-            payload = {
-                "workflow_id": revision.workflow_id,
-                "architecture_revision_id": revision.aggregate_id,
-                "manifest_sha": manifest_ref.sha256,
-                "actor_id": actor,
-                "active_channel_id": channel,
-                "decision_token": decision_token,
-                "markdown": compile_skeleton_markdown(artifact, requirements_payload=requirements),
-                "actions": ["accept", "edit", "reject"],
-                "route": dict(workflow.payload.get("control_route") or {}),
-            }
+        stored_card = dict(revision.payload.get("human_review_card_ref") or {})
+        if stored_card:
+            card_ref = _ref_from_mapping(stored_card)
+            payload = dict(self.service.artifacts.read_json(card_ref))
         else:
-            card = self.service.architecture.create_human_review_card(
-                workflow_id=revision.workflow_id,
-                architecture_revision_id=revision.aggregate_id,
-                manifest_ref=manifest_ref,
-                actor_id=actor,
-                active_channel_id=channel,
+            actor = str(workflow.payload.get("owner") or "pal")
+            channel = str(workflow.payload.get("active_channel") or "local")
+            record = self.repository.read_artifact_record(manifest_ref.sha256)
+            if record and str(record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT:
+                artifact = self.service.artifacts.read_json(manifest_ref)
+                requirements = self.service.artifacts.read_json(dict(artifact.get("requirements_ref") or {}))
+                decision_token = self.repository.issue_human_decision_token(
+                    workflow_id=revision.workflow_id,
+                    architecture_revision_id=revision.aggregate_id,
+                    manifest_sha=manifest_ref.sha256,
+                    actor_id=actor,
+                    active_channel_id=channel,
+                )
+                payload = {
+                    "workflow_id": revision.workflow_id,
+                    "architecture_revision_id": revision.aggregate_id,
+                    "manifest_sha": manifest_ref.sha256,
+                    "actor_id": actor,
+                    "active_channel_id": channel,
+                    "decision_token": decision_token,
+                    "markdown": compile_skeleton_markdown(artifact, requirements_payload=requirements),
+                    "actions": ["accept", "edit", "reject"],
+                    "route": dict(workflow.payload.get("control_route") or {}),
+                }
+            else:
+                card = self.service.architecture.create_human_review_card(
+                    workflow_id=revision.workflow_id,
+                    architecture_revision_id=revision.aggregate_id,
+                    manifest_ref=manifest_ref,
+                    actor_id=actor,
+                    active_channel_id=channel,
+                )
+                payload = {
+                    "workflow_id": card.workflow_id,
+                    "architecture_revision_id": card.architecture_revision_id,
+                    "manifest_sha": card.manifest_sha,
+                    "actor_id": card.actor_id,
+                    "active_channel_id": card.active_channel_id,
+                    "decision_token": card.decision_token,
+                    "markdown": card.markdown,
+                    "actions": list(card.actions),
+                    "route": dict(workflow.payload.get("control_route") or {}),
+                }
+            card_ref = self.service.artifacts.put_json(
+                payload,
+                artifact_type="HumanReviewCardArtifact",
+                child_refs=((manifest_ref.sha256, "architecture_manifest"),),
             )
-            payload = {
-                "workflow_id": card.workflow_id,
-                "architecture_revision_id": card.architecture_revision_id,
-                "manifest_sha": card.manifest_sha,
-                "actor_id": card.actor_id,
-                "active_channel_id": card.active_channel_id,
-                "decision_token": card.decision_token,
-                "markdown": card.markdown,
-                "actions": list(card.actions),
-                "route": dict(workflow.payload.get("control_route") or {}),
-            }
-        card_ref = self.service.artifacts.put_json(
-            payload,
-            artifact_type="HumanReviewCardArtifact",
-            child_refs=((manifest_ref.sha256, "architecture_manifest"),),
-        )
+            current = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id)
+            if current is None:
+                raise ValueError("architecture revision disappeared before human review publication")
+            if not current.payload.get("human_review_card_ref"):
+                current = self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="HUMAN_REVIEW_PUBLISHED",
+                        workflow_id=revision.workflow_id,
+                        aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                        aggregate_id=revision.aggregate_id,
+                        actor="minion-v2-manager",
+                        expected_version=current.version,
+                        idempotency_key=f"human-review-published:{effect.get('effect_id') or card_ref.sha256}",
+                        payload={"human_review_card_ref": card_ref.to_dict()},
+                    )
+                ).snapshot
+            persisted_ref = dict(current.payload.get("human_review_card_ref") or {})
+            if persisted_ref and str(persisted_ref.get("sha256") or "") != card_ref.sha256:
+                card_ref = _ref_from_mapping(persisted_ref)
+                payload = dict(self.service.artifacts.read_json(card_ref))
         if self.publish_human_review is not None:
             await self.publish_human_review({**payload, "card_ref": card_ref.to_dict()})
         return {"result_artifact_ref": card_ref.to_dict()}

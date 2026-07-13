@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import subprocess
@@ -44,6 +45,10 @@ def _git(root: Path, *args: str) -> str:
     if completed.returncode != 0:
         raise RuntimeError(completed.stderr or completed.stdout)
     return completed.stdout
+
+
+async def _record_async(bucket: list[dict[str, object]], payload: dict[str, object]) -> None:
+    bucket.append(dict(payload))
 
 
 def _contract(module: str) -> str:
@@ -718,6 +723,110 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         assert changed_node is not None
         self.assertEqual(changed_node.state, "BLOCKED_BY_DEPS")
+
+    def test_human_review_publish_persists_and_reuses_the_card(self) -> None:
+        workspace = self._provision_complete_workspace("human-card", "initial")
+        manifest_ref = self.service.snapshot_architecture(
+            workflow_name="human-card",
+            revision_name="initial",
+            architecture_workspace=workspace,
+            submission=self._submission(),
+            requirements_ref=self.requirements_ref,
+        )
+        workflows = MinionV2WorkflowService(self.runtime_root)
+        workflow_id = "wf_human_card"
+        revision_id = "arch_human_card"
+        workflows.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="nathan",
+                source_channel="socket:test",
+                expected_version=0,
+                idempotency_key="create-human-card",
+                payload={
+                    "owner": "nathan",
+                    "active_channel": "socket:test",
+                    "control_route": {"channel_kind": "socket", "endpoint_id": "test"},
+                },
+            )
+        )
+        workflows.repository.dispatch(
+            ActionEnvelope(
+                action_type="START_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="nathan",
+                expected_version=1,
+                idempotency_key="start-human-card",
+            )
+        )
+        review_ref = workflows.artifacts.put_json(
+            {"verdict": "PASS", "findings": []},
+            artifact_type="ArchitectureReviewArtifact",
+        )
+        sequence = [
+            ("CREATE_ARCHITECTURE_REVISION", {"requirements_ref": self.requirements_ref.to_dict()}),
+            ("START_ARCHITECT", {"fencing_token": 1, "active_worker_id": "inv-architect"}),
+            (
+                "ARCHITECT_COMPLETED",
+                {
+                    "requirements_ref": self.requirements_ref.to_dict(),
+                    "architecture_manifest_ref": manifest_ref.to_dict(),
+                },
+            ),
+            ("START_ARCHITECTURE_REVIEW", {"fencing_token": 2, "active_worker_id": "inv-reviewer"}),
+            (
+                "ARCHITECTURE_REVIEW_PASSED",
+                {
+                    "review_artifact_ref": review_ref.to_dict(),
+                    "architecture_manifest_ref": manifest_ref.to_dict(),
+                },
+            ),
+        ]
+        for action_type, payload in sequence:
+            current = workflows.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision_id)
+            workflows.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id=workflow_id,
+                    aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                    aggregate_id=revision_id,
+                    actor="test",
+                    expected_version=current.version if current is not None else 0,
+                    idempotency_key=f"human-card:{action_type}",
+                    payload=payload,
+                )
+            )
+        published: list[dict[str, object]] = []
+        worker = MinionV2SemanticWorker(
+            workflows,
+            publish_human_review=lambda payload: _record_async(published, payload),
+        )
+        effect = {
+            "effect_type": "publish_human_architecture_review",
+            "effect_id": "effect-human-card",
+            "workflow_id": workflow_id,
+            "aggregate_type": AggregateType.ARCHITECTURE_REVISION.value,
+            "aggregate_id": revision_id,
+        }
+
+        first = asyncio.run(worker.execute_semantic_effect(effect))
+        second = asyncio.run(worker.execute_semantic_effect({**effect, "effect_id": "effect-human-card-retry"}))
+
+        current = workflows.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision_id)
+        assert current is not None
+        self.assertEqual(current.state, "HUMAN_REVIEW")
+        self.assertEqual(
+            current.payload["human_review_card_ref"]["sha256"],
+            first["result_artifact_ref"]["sha256"],
+        )
+        self.assertEqual(first["result_artifact_ref"], second["result_artifact_ref"])
+        self.assertEqual(len(published), 2)
+        self.assertEqual(published[0]["card_ref"], published[1]["card_ref"])
 
     def _provision_complete_workspace(self, workflow_id: str, revision_name: str):
         workspace = self.service.provision_architecture_workspace(

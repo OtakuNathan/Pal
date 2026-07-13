@@ -152,6 +152,13 @@ def _resume_cleanup_reducer(payload: Mapping[str, Any], action: ActionEnvelope) 
     return updated
 
 
+def _worker_finished_reducer(payload: Mapping[str, Any], action: ActionEnvelope) -> Mapping[str, Any]:
+    updated = dict(_merge_payload(payload, action))
+    for field in ("active_worker_id", "fencing_token", "lease_resource_key"):
+        updated.pop(field, None)
+    return updated
+
+
 def _cancel_reducer(cancel_target: str):
     def reducer(payload: Mapping[str, Any], action: ActionEnvelope) -> Mapping[str, Any]:
         updated = dict(_merge_payload(payload, action))
@@ -273,6 +280,7 @@ def _workflow_transitions() -> list[TransitionSpec]:
         _spec(kind, S.ACTIVE, "LINK_ARCHITECTURE_REVISION", S.ACTIVE, guard=_required("architecture_revision_id")),
         _spec(kind, S.ACTIVE, "LINK_EXECUTION_EPOCH", S.ACTIVE, guard=_required("execution_epoch_id")),
         _spec(kind, S.ACTIVE, "LINK_STANDALONE_REVIEW", S.ACTIVE, guard=_required("standalone_review_id")),
+        _spec(kind, S.ACTIVE, "REBIND_CHANNEL", S.ACTIVE, guard=_required("active_channel", "control_route")),
         _spec(kind, S.ACTIVE, "MARK_COMPLETED", S.COMPLETED, guard=_required("result_artifact_ref")),
         _spec(kind, S.ACTIVE, "REJECT_WORKFLOW", S.REJECTED),
         _spec(kind, S.PAUSE_REQUESTED, "CHILDREN_PAUSED", S.PAUSED),
@@ -373,10 +381,49 @@ def _architecture_transitions() -> list[TransitionSpec]:
         _spec(kind, S.CLARIFICATION_PENDING, "CLARIFICATION_PROVIDED", S.ARCHITECT_QUEUED, guard=_required("decision_token", "clarification_ref", "clarification_response_ref"), effects=_effect("enqueue_architecture_stage", stage="architect")),
         _spec(kind, S.REVIEW_QUEUED, "START_ARCHITECTURE_REVIEW", S.REVIEWING, guard=_lease_guard),
         _spec(kind, S.REVIEWING, "REBIND_ARCHITECTURE_REVIEW", S.REVIEWING, guard=_lease_guard),
-        _spec(kind, S.REVIEWING, "ARCHITECTURE_REVIEW_PASSED", S.HUMAN_REVIEW, guard=_required("review_artifact_ref", "architecture_manifest_ref"), effects=_effect("publish_human_architecture_review")),
-        _spec(kind, S.REVIEWING, "REQUIREMENTS_DEFECT", S.ARCHITECT_QUEUED, guard=_required("finding_artifact_ref"), effects=_effect("enqueue_architecture_stage", stage="architect")),
-        _spec(kind, S.REVIEWING, "CONTRACT_DEFECT", S.ARCHITECT_QUEUED, guard=_required("finding_artifact_ref"), effects=_effect("enqueue_architecture_stage", stage="architect")),
-        _spec(kind, S.REVIEWING, "ARCHITECTURE_DEFECT", S.ARCHITECT_QUEUED, guard=_required("finding_artifact_ref"), effects=_effect("enqueue_architecture_stage", stage="architect")),
+        _spec(
+            kind,
+            S.REVIEWING,
+            "ARCHITECTURE_REVIEW_PASSED",
+            S.HUMAN_REVIEW,
+            guard=_required("review_artifact_ref", "architecture_manifest_ref"),
+            reducer=_worker_finished_reducer,
+            effects=_effect("publish_human_architecture_review"),
+        ),
+        _spec(
+            kind,
+            S.HUMAN_REVIEW,
+            "HUMAN_REVIEW_PUBLISHED",
+            S.HUMAN_REVIEW,
+            guard=_required("human_review_card_ref"),
+        ),
+        _spec(
+            kind,
+            S.REVIEWING,
+            "REQUIREMENTS_DEFECT",
+            S.ARCHITECT_QUEUED,
+            guard=_required("finding_artifact_ref"),
+            reducer=_worker_finished_reducer,
+            effects=_effect("enqueue_architecture_stage", stage="architect"),
+        ),
+        _spec(
+            kind,
+            S.REVIEWING,
+            "CONTRACT_DEFECT",
+            S.ARCHITECT_QUEUED,
+            guard=_required("finding_artifact_ref"),
+            reducer=_worker_finished_reducer,
+            effects=_effect("enqueue_architecture_stage", stage="architect"),
+        ),
+        _spec(
+            kind,
+            S.REVIEWING,
+            "ARCHITECTURE_DEFECT",
+            S.ARCHITECT_QUEUED,
+            guard=_required("finding_artifact_ref"),
+            reducer=_worker_finished_reducer,
+            effects=_effect("enqueue_architecture_stage", stage="architect"),
+        ),
         _spec(kind, S.HUMAN_REVIEW, "HUMAN_ACCEPT", S.ACCEPTED, guard=_required("decision_token", "architecture_manifest_ref"), effects=_effect("submit_action", action_type="START_EXECUTION")),
         _spec(kind, S.HUMAN_REVIEW, "HUMAN_EDIT", S.REVISION_PENDING, guard=_required("decision_token", "edit_instruction_ref"), effects=_effect("create_architecture_revision")),
         _spec(kind, S.HUMAN_REVIEW, "HUMAN_REJECT", S.REJECTED, guard=_required("decision_token"), effects=_effect("submit_workflow_rejection")),

@@ -866,6 +866,45 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         self.assertNotIn("decision_token", submitted[0])
         self.assertNotIn("workflow_id", result.structured)
 
+    def test_public_status_human_review_view_hides_card_bindings(self) -> None:
+        requested: list[tuple[str, str]] = []
+        provider = MinionV2PublicProvider(runtime_root=self.runtime_root, wake_manager=lambda: None)
+        provider.service.resolve_workflow_selector = lambda **_kwargs: "wf_internal"
+
+        def status(workflow_id: str, *, view: str = "status") -> dict[str, object]:
+            requested.append((workflow_id, view))
+            return {
+                "status": "ok",
+                "workflow_id": workflow_id,
+                "current_phase": "human_review",
+                "waiting_for_user": True,
+                "human_review_available": True,
+                "human_review": {
+                    "markdown": "# Review me",
+                    "actions": ["accept", "edit", "reject"],
+                    "decision_token": "secret",
+                    "actor_id": "nathan",
+                    "active_channel_id": "socket:old",
+                    "manifest_sha": "hidden",
+                    "route": {"session_id": "hidden"},
+                },
+            }
+
+        provider.service.workflow_status = status
+        result = provider.workflow_status(
+            CapabilityCall(
+                name="intro_minion_workflow_status",
+                meta={"actor_id": "nathan", "channel_id": "socket:new"},
+                args={"task": "Router", "view": "human_review"},
+            )
+        )
+
+        self.assertEqual(requested, [("wf_internal", "human_review")])
+        self.assertEqual(result.structured["human_review"]["markdown"], "# Review me")
+        encoded = json.dumps(result.structured, sort_keys=True)
+        for forbidden in ("workflow_id", "decision_token", "actor_id", "active_channel_id", "manifest_sha", "route"):
+            self.assertNotIn(forbidden, encoded)
+
     def test_new_requirement_routes_to_architecture_revision_without_cursor_state(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         task_id = self._create_task(service, "route")

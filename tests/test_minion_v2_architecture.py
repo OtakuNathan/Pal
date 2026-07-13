@@ -337,6 +337,174 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             self.service.submit_human_decision(wrong_channel, decision="reject")
         self.assertEqual(self.repository.inspect_human_decision_token(card.decision_token)["status"], "issued")
 
+    def test_manual_human_decision_rebinds_pending_card_to_current_channel(self) -> None:
+        requirements, evidence, manifest = self._publish_contract()
+        workflow_id = "wf_channel_rebind"
+        revision_id = "arch_channel_rebind"
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="nathan",
+                expected_version=0,
+                idempotency_key="create-channel-rebind",
+                payload={
+                    "owner": "nathan",
+                    "active_channel": "socket:old-session",
+                    "control_route": {"reply_target": {"session_id": "old"}},
+                },
+            )
+        )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="START_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="nathan",
+                expected_version=1,
+                idempotency_key="start-channel-rebind",
+            )
+        )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="LINK_ARCHITECTURE_REVISION",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="nathan",
+                expected_version=2,
+                idempotency_key="link-channel-rebind",
+                payload={"architecture_revision_id": revision_id},
+            )
+        )
+        review_ref = self.store.put_json(
+            {"verdict": "PASS", "findings": []},
+            artifact_type="ArchitectureReviewArtifact",
+        )
+        self._drive_revision_to_human_review(
+            workflow_id=workflow_id,
+            revision_id=revision_id,
+            requirements_ref=requirements.to_dict(),
+            evidence_ref=evidence.to_dict(),
+            manifest_ref=manifest.to_dict(),
+            review_ref=review_ref.to_dict(),
+        )
+        old_card = self.service.create_human_review_card(
+            workflow_id=workflow_id,
+            architecture_revision_id=revision_id,
+            manifest_ref=manifest,
+            actor_id="nathan",
+            active_channel_id="socket:old-session",
+        )
+
+        result = MinionV2WorkflowService(self.runtime_root).submit_human_decision(
+            {
+                "workflow_id": workflow_id,
+                "decision": "accept",
+                "actor": "nathan",
+                "source_channel": "socket:new-session",
+                "control_route": {"reply_target": {"session_id": "new"}},
+            }
+        )
+
+        self.assertEqual(result["state"], "ACCEPTED")
+        self.assertEqual(self.repository.inspect_human_decision_token(old_card.decision_token)["status"], "expired")
+        rebound = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        self.assertEqual(rebound.payload["active_channel"], "socket:new-session")
+        self.assertEqual(rebound.payload["control_route"], {"reply_target": {"session_id": "new"}})
+
+    def test_workflow_status_can_render_durable_pending_human_review(self) -> None:
+        requirements, evidence, manifest = self._publish_contract()
+        workflow_id = "wf_review_status"
+        revision_id = "arch_review_status"
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="nathan",
+                expected_version=0,
+                idempotency_key="create-review-status",
+                payload={"owner": "nathan", "active_channel": "socket:test"},
+            )
+        )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="START_WORKFLOW",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="nathan",
+                expected_version=1,
+                idempotency_key="start-review-status",
+            )
+        )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="LINK_ARCHITECTURE_REVISION",
+                workflow_id=workflow_id,
+                aggregate_type=AggregateType.WORKFLOW,
+                aggregate_id=workflow_id,
+                actor="nathan",
+                expected_version=2,
+                idempotency_key="link-review-status",
+                payload={"architecture_revision_id": revision_id},
+            )
+        )
+        review_ref = self.store.put_json(
+            {"verdict": "PASS", "findings": []},
+            artifact_type="ArchitectureReviewArtifact",
+        )
+        self._drive_revision_to_human_review(
+            workflow_id=workflow_id,
+            revision_id=revision_id,
+            requirements_ref=requirements.to_dict(),
+            evidence_ref=evidence.to_dict(),
+            manifest_ref=manifest.to_dict(),
+            review_ref=review_ref.to_dict(),
+        )
+        card_ref = self.store.put_json(
+            {
+                "workflow_id": workflow_id,
+                "architecture_revision_id": revision_id,
+                "manifest_sha": manifest.sha256,
+                "actor_id": "nathan",
+                "active_channel_id": "socket:expired-session",
+                "decision_token": "secret-token",
+                "markdown": "# Durable architecture review",
+                "actions": ["accept", "edit", "reject"],
+            },
+            artifact_type="HumanReviewCardArtifact",
+            child_refs=((manifest.sha256, "architecture_manifest"),),
+        )
+        claimed = self.repository.claim_outbox("legacy-card-worker", limit=20)
+        review_effect = next(item for item in claimed if item["effect_type"] == "publish_human_architecture_review")
+        for item in claimed:
+            self.repository.complete_outbox_effect(
+                item["effect_id"],
+                worker_id="legacy-card-worker",
+                result_artifact_ref=(
+                    card_ref.to_dict() if item["effect_id"] == review_effect["effect_id"] else None
+                ),
+            )
+
+        status = MinionV2WorkflowService(self.runtime_root).workflow_status(
+            workflow_id,
+            view="human_review",
+        )
+
+        self.assertTrue(status["waiting_for_user"])
+        self.assertTrue(status["human_review_available"])
+        self.assertEqual(status["active_worker"], "")
+        self.assertEqual(status["active_worker_role"], "")
+        self.assertEqual(status["human_review"]["markdown"], "# Durable architecture review")
+        self.assertEqual(status["human_review"]["review_verdict"], "PASS")
+        self.assertNotIn("decision_token", status["human_review"])
+
     def test_human_waiver_is_invalidated_by_manifest_or_fragment_change(self) -> None:
         _requirements, evidence, manifest = self._publish_contract()
         fragment_hashes = {"evidence_catalog": evidence.sha256}
@@ -471,6 +639,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         requirements_ref: dict,
         evidence_ref: dict,
         manifest_ref: dict,
+        review_ref: dict | None = None,
     ) -> None:
         actions = [
             ("CREATE_ARCHITECTURE_REVISION", {}, 0),
@@ -479,7 +648,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             ("START_ARCHITECTURE_REVIEW", {"fencing_token": 2}, 3),
             (
                 "ARCHITECTURE_REVIEW_PASSED",
-                {"review_artifact_ref": manifest_ref, "architecture_manifest_ref": manifest_ref},
+                {"review_artifact_ref": review_ref or manifest_ref, "architecture_manifest_ref": manifest_ref},
                 4,
             ),
         ]
