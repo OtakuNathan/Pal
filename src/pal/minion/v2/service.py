@@ -261,6 +261,18 @@ class MinionV2WorkflowService:
                 trusted_required=operation == "execute_trusted",
                 family_id=str(task.payload.get("family_id") or ""),
             )
+        if operation == "review_and_repair" and str(task.payload.get("family_id") or "") == "software_engineering":
+            self._validate_external_architecture_ref(
+                artifact_ref,
+                trusted_required=False,
+                family_id="software_engineering",
+            )
+            repair_artifact = dict(self.artifacts.read_json(artifact_ref))
+            repair_modules = dict(dict(repair_artifact.get("submission") or {}).get("modules") or {})
+            if len(repair_modules) != 1:
+                raise ValueError(
+                    "software review_and_repair requires a bounded single-module ArchitectureSkeletonArtifact"
+                )
         request_payload = {
             "schema_version": "1",
             "workflow_id": workflow_id,

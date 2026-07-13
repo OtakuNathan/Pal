@@ -5,7 +5,6 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from dataclasses import replace
 from pathlib import Path
 
 from pal.minion.v2.architecture import ArchitectureArtifactService
@@ -292,20 +291,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         skeleton = self.artifacts.read_json(skeleton_ref)
         architecture = ArchitectureArtifactService(self.artifacts, self.repository)
-        compilation = ExecutionCompiler(self.repository, architecture).compile_epoch(
-            workflow_id="execution",
-            epoch_id="execution-epoch",
-            manifest_ref=skeleton_ref,
-        )
-
-        for node_id in compilation.node_run_ids:
-            node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
-            self.assertIsNotNone(node)
-            assert node is not None
-            self.assertEqual(_git(Path(node.payload["workspace_path"]), "rev-parse", "HEAD").strip(), skeleton["skeleton_commit_sha"])
-
-        router = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.unit_node_ids["router"])
-        assert router is not None
         repair_ref = self.artifacts.put_json(
             {
                 "workflow_id": "hidden-workflow",
@@ -330,10 +315,22 @@ class MinionV2SkeletonTests(unittest.TestCase):
             },
             artifact_type="RepairBillArtifact",
         )
-        router = replace(
-            router,
-            payload={**dict(router.payload), "historical_repair_bill_refs": [repair_ref.to_dict()]},
+        compilation = ExecutionCompiler(self.repository, architecture).compile_epoch(
+            workflow_id="execution",
+            epoch_id="execution-epoch",
+            manifest_ref=skeleton_ref,
+            initial_repair_bill_ref=repair_ref.to_dict(),
         )
+
+        for node_id in compilation.node_run_ids:
+            node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+            self.assertIsNotNone(node)
+            assert node is not None
+            self.assertEqual(_git(Path(node.payload["workspace_path"]), "rev-parse", "HEAD").strip(), skeleton["skeleton_commit_sha"])
+
+        router = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.unit_node_ids["router"])
+        assert router is not None
+        self.assertEqual(router.payload["historical_repair_bill_refs"], [repair_ref.to_dict()])
         work_view_ref = UnitWorkViewBuilder(architecture).build(router, dependency_outputs={})
         work_view = self.artifacts.read_json(work_view_ref)
         encoded = json.dumps(work_view, sort_keys=True)
@@ -390,6 +387,14 @@ class MinionV2SkeletonTests(unittest.TestCase):
             }
         )
         self.assertEqual(started["state"], "CREATED")
+        repair = workflows.start_workflow(
+            {
+                "task_id": "external-task",
+                "operation": "review_and_repair",
+                "artifact_ref": skeleton_ref.to_dict(),
+            }
+        )
+        self.assertEqual(repair["state"], "CREATED")
 
         legacy_ref = self.artifacts.put_json(
             {"legacy": True},
@@ -400,6 +405,14 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 {
                     "task_id": "external-task",
                     "operation": "review_then_execute",
+                    "artifact_ref": legacy_ref.to_dict(),
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "legacy SWE JSON contract graph"):
+            workflows.start_workflow(
+                {
+                    "task_id": "external-task",
+                    "operation": "review_and_repair",
                     "artifact_ref": legacy_ref.to_dict(),
                 }
             )

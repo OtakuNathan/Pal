@@ -232,6 +232,7 @@ class MinionV2OutboxProcessor:
                 workflow_id=review.workflow_id,
                 manifest_ref=dict(review.payload.get("architecture_manifest_ref") or {}),
                 causation_key=str(effect["effect_key"]),
+                initial_repair_bill_ref=dict(review.payload.get("repair_bill_ref") or {}) or None,
             )
         if effect_type == "submit_workflow_rejection":
             revision = self._effect_snapshot(effect)
@@ -476,6 +477,7 @@ class MinionV2OutboxProcessor:
         manifest_ref: Mapping[str, Any],
         causation_key: str,
         reuse_from_epoch_id: str = "",
+        initial_repair_bill_ref: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         record = self.repository.read_artifact_record(str(manifest_ref.get("sha256") or ""))
         if record is None:
@@ -494,6 +496,7 @@ class MinionV2OutboxProcessor:
             epoch_id=epoch_id,
             manifest_ref=ref,
             reuse_from_epoch_id=reuse_from_epoch_id,
+            initial_repair_bill_ref=initial_repair_bill_ref,
         )
         self._link_workflow(workflow_id, "LINK_EXECUTION_EPOCH", {"execution_epoch_id": epoch_id}, causation_key)
         return {"epoch_id": epoch_id, "node_ids": list(compilation.node_run_ids)}

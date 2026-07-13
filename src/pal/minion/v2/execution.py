@@ -194,6 +194,7 @@ class ExecutionCompiler:
         manifest_ref: ArtifactRef,
         actor: str = "minion-manager",
         reuse_from_epoch_id: str = "",
+        initial_repair_bill_ref: Mapping[str, Any] | None = None,
     ) -> ExecutionCompilation:
         record = self.repository.read_artifact_record(manifest_ref.sha256)
         if record and str(record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT:
@@ -203,6 +204,7 @@ class ExecutionCompiler:
                 manifest_ref=manifest_ref,
                 actor=actor,
                 reuse_from_epoch_id=reuse_from_epoch_id,
+                initial_repair_bill_ref=initial_repair_bill_ref,
             )
         manifest = validate_architecture_manifest(self.architecture.artifacts.read_json(manifest_ref))
         fragments = self.architecture.load_manifest_fragments(manifest)
@@ -364,12 +366,15 @@ class ExecutionCompiler:
         manifest_ref: ArtifactRef,
         actor: str,
         reuse_from_epoch_id: str,
+        initial_repair_bill_ref: Mapping[str, Any] | None,
     ) -> ExecutionCompilation:
         artifact = dict(self.architecture.artifacts.read_json(manifest_ref))
         submission = dict(artifact.get("submission") or {})
         modules = {str(name): dict(value or {}) for name, value in dict(submission.get("modules") or {}).items()}
         if not modules:
             raise ValueError("ArchitectureSkeletonArtifact has no modules")
+        if initial_repair_bill_ref and len(modules) != 1:
+            raise ValueError("an initial RepairBill requires a bounded single-module skeleton")
         depends_on = {
             name: [str(item) for item in list(module.get("depends_on") or [])]
             for name, module in modules.items()
@@ -497,6 +502,11 @@ class ExecutionCompiler:
                             "owned_test": list(paths.get("owned_test") or []),
                             "reference_only": list(paths.get("reference_only") or []),
                         },
+                        **(
+                            {"historical_repair_bill_refs": [dict(initial_repair_bill_ref)]}
+                            if initial_repair_bill_ref
+                            else {}
+                        ),
                         **dict(workspaces[name]),
                     },
                 )

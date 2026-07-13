@@ -1143,13 +1143,54 @@ class MinionV2SemanticWorker:
         request_ref = _ref_from_mapping(review.payload.get("review_request_ref"))
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, review.workflow_id)
         request = workflow_request_from_snapshot(self.service, workflow)
-        workspace = dict(request.get("workspace") or {})
-        repo_path = str(workspace.get("repo_path") or workspace.get("cwd") or self.service.runtime_root)
-        review_repo, review_scratch, base_sha = _prepare_standalone_review_workspace(
-            self.service.runtime_root,
-            review.aggregate_id,
-            Path(repo_path),
+        request_record = self.repository.read_artifact_record(request_ref.sha256)
+        skeleton_review = bool(
+            request_record
+            and str(request_record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT
         )
+        if skeleton_review:
+            skeleton = self.service.artifacts.read_json(request_ref)
+            requirements_ref = _ref_from_mapping(skeleton.get("requirements_ref"))
+            requirements = requirements_semantic_view(
+                self.service.artifacts.read_json(requirements_ref)
+            )
+            review_repo = self.service.skeleton.provision_review_worktree(
+                artifact=skeleton,
+                review_name=f"standalone-{review.aggregate_id}",
+            )
+            review_scratch = (
+                self.service.runtime_root
+                / "data"
+                / "minion"
+                / "v2"
+                / "standalone-reviews"
+                / _safe_component(review.aggregate_id)
+                / "review-scratch"
+            )
+            review_scratch.mkdir(parents=True, exist_ok=True)
+            base_sha = str(skeleton.get("skeleton_commit_sha") or "")
+            submission = dict(skeleton.get("submission") or {})
+            review_view_ref = self.service.artifacts.put_json(
+                {
+                    "review_goal": str(request.get("goal") or "Review the accepted software architecture and implementation."),
+                    "requirements": requirements,
+                    "modules": dict(submission.get("modules") or {}),
+                    "integration": dict(submission.get("integration") or {}),
+                },
+                artifact_type="StandaloneSkeletonReviewViewArtifact",
+                provenance={"owner": "manager", "audience": "standalone_reviewer"},
+                child_refs=((request_ref.sha256, "architecture_skeleton"),),
+            )
+            reviewer_inputs = {"review_request": review_view_ref}
+        else:
+            workspace = dict(request.get("workspace") or {})
+            repo_path = str(workspace.get("repo_path") or workspace.get("cwd") or self.service.runtime_root)
+            review_repo, review_scratch, base_sha = _prepare_standalone_review_workspace(
+                self.service.runtime_root,
+                review.aggregate_id,
+                Path(repo_path),
+            )
+            reviewer_inputs = {"review_request": request_ref}
         terminal, prompt_ref, terminal_ref = await self._run_profile(
             effect=effect,
             snapshot=review,
@@ -1159,7 +1200,7 @@ class MinionV2SemanticWorker:
             profile=self._profile_for_role_or(review.workflow_id, "reviewer", fallback="verifier"),
             role_override="reviewer",
             instruction="Perform the requested standalone review. Report evidence-grounded findings and do not modify the target. Repair is a separate explicit workflow.",
-            reference_refs={"review_request": request_ref},
+            reference_refs=reviewer_inputs,
             workspace_override={"kind": "existing_repo", "repo_path": str(review_repo), "project_name": "standalone-review"},
             prepare_workspace=False,
         )
@@ -1168,6 +1209,12 @@ class MinionV2SemanticWorker:
         _reject_manager_identity_fields(plan, owner="Standalone Reviewer output")
         case_specs = _verification_case_specs(plan.get("cases"))
         findings = _standalone_review_findings(plan, case_specs)
+        if skeleton_review:
+            _validate_verifier_requirement_refs(
+                work_view=self.service.artifacts.read_json(review_view_ref),
+                cases=case_specs,
+                findings=findings,
+            )
         verification_policy = self._workflow_policy(review.workflow_id, "verification")
         case_timeout = float(verification_policy.get("case_timeout_seconds") or 300)
         results = [
@@ -1299,9 +1346,26 @@ class MinionV2SemanticWorker:
             str(workflow_request.get("operation") or "") == "review_and_repair"
             and str(report.get("status") or "") == VerificationStatus.FAIL
         ):
-            manifest_ref = self._compile_review_repair_manifest(review, workflow_request, report_ref)
+            if self._uses_git_skeleton(review.workflow_id):
+                manifest_ref = _ref_from_mapping(review.payload.get("review_request_ref"))
+                record = self.repository.read_artifact_record(manifest_ref.sha256)
+                if record is None or str(record.get("artifact_type") or "") != ARCHITECTURE_SKELETON_ARTIFACT:
+                    raise ValueError(
+                        "software review_and_repair requires an ArchitectureSkeletonArtifact"
+                    )
+                repair_bill_ref = self._publish_standalone_repair_bill(
+                    report_ref=report_ref,
+                    manifest_ref=manifest_ref,
+                )
+            else:
+                manifest_ref = self._compile_contract_review_repair_manifest(
+                    review, workflow_request, report_ref
+                )
+                repair_bill_ref = None
             action_type = "HANDOFF_REPAIR"
             payload["architecture_manifest_ref"] = manifest_ref.to_dict()
+            if repair_bill_ref is not None:
+                payload["repair_bill_ref"] = repair_bill_ref.to_dict()
         self.repository.dispatch(
             ActionEnvelope(
                 action_type=action_type,
@@ -1316,7 +1380,51 @@ class MinionV2SemanticWorker:
         )
         return {"result_artifact_ref": report_ref}
 
-    def _compile_review_repair_manifest(
+    def _publish_standalone_repair_bill(
+        self,
+        *,
+        report_ref: Mapping[str, Any],
+        manifest_ref: ArtifactRef,
+    ) -> ArtifactRef:
+        report = dict(self.service.artifacts.read_json(report_ref))
+        findings = [dict(item or {}) for item in list(report.get("findings") or [])]
+        if not findings:
+            raise ValueError("review_and_repair FAIL requires at least one semantic finding")
+        artifact = dict(self.service.artifacts.read_json(manifest_ref))
+        modules = dict(dict(artifact.get("submission") or {}).get("modules") or {})
+        if len(modules) != 1:
+            raise ValueError("review_and_repair requires exactly one bounded module")
+        module_name = next(iter(modules))
+        finding = findings[0]
+        payload = {
+            "schema_version": "1",
+            "module_name": module_name,
+            "defect_kind": DefectKind.MODULE.value,
+            "severity": str(finding.get("severity") or "major"),
+            "finding_section": str(finding.get("finding_section") or "implementation"),
+            "finding_summary": str(finding.get("summary") or "Standalone review failed."),
+            "failure_reason": str(finding.get("failure_reason") or ""),
+            "case_name": str(finding.get("case") or ""),
+            "requirements": [dict(item) for item in list(finding.get("requirements") or [])],
+            "locations": [dict(item) for item in list(finding.get("locations") or [])],
+            "invariants": [str(item) for item in list(finding.get("invariants") or [])],
+            "expected": "The accepted skeleton contract and Requirements are satisfied.",
+            "actual": str(finding.get("failure_reason") or finding.get("summary") or "Review failed."),
+            "suggested_repair_boundary": [
+                str(item) for item in list(finding.get("suggested_repair_boundary") or [])
+            ],
+            "regression_test_obligation": {
+                "instruction": "Reproduce this standalone finding before repair and preserve the probe as a regression."
+            },
+        }
+        return self.service.artifacts.put_json(
+            payload,
+            artifact_type="RepairBillArtifact",
+            provenance={"owner": "manager", "source": "standalone_review"},
+            child_refs=((str(report_ref.get("sha256") or ""), "standalone_review"),),
+        )
+
+    def _compile_contract_review_repair_manifest(
         self,
         review: AggregateSnapshot,
         workflow_request: Mapping[str, Any],
@@ -3996,6 +4104,16 @@ def _standalone_review_findings(
                 ],
             }
         )
+        finding = findings[-1]
+        if not (
+            finding["requirements"]
+            or finding["locations"]
+            or finding["invariants"]
+            or finding["evidence"]
+        ):
+            raise ValueError(
+                "standalone finding requires Requirement text, a source location, an invariant, or concrete evidence"
+            )
     return findings
 
 
@@ -4011,6 +4129,10 @@ def _standalone_review_status(
     if verdict == "approved":
         return VerificationStatus.PASS
     if verdict == "changes_requested":
+        if not list(plan.get("findings") or []) and not any(
+            item.status == VerificationStatus.FAIL for item in results
+        ):
+            raise ValueError("standalone changes_requested verdict requires a finding or failed case")
         return VerificationStatus.FAIL
     if verdict == "blocked":
         return VerificationStatus.UNKNOWN
