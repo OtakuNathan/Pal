@@ -23,14 +23,6 @@ if TYPE_CHECKING:
 
 @capability_node(
     namespace=INTROSPECTION_NAMESPACE,
-    scope="minion_task",
-    path_module_id="minion_task",
-    kind="module",
-    source="builtin:minion-v2",
-    target_kind="task",
-)
-@capability_node(
-    namespace=INTROSPECTION_NAMESPACE,
     scope="minion_workflow",
     path_module_id="minion_workflow",
     kind="module",
@@ -82,175 +74,54 @@ class MinionV2PublicProvider:
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="minion",
-        action_name="task_create",
-        description=(
-            "Create one long-lived Minion Task and bind its immutable family. Call this before op_minion_start_workflow when no existing task_id "
-            "was supplied. This delegates later repository research, architecture, production, and verification to Minion roles; the foreground "
-            "agent should not inspect or implement the target itself before creating the Task. Workflows are execution contracts under this Task."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"},
-                "title": {"type": "string"},
-                "objective": {"type": "string"},
-                "family_id": {"type": "string"},
-                "workspace": {
-                    "type": "object",
-                    "description": "Task workspace. For an existing repository use kind=existing_repo and repo_path; repo_root/root/path are accepted aliases and normalized.",
-                    "properties": {
-                        "kind": {"type": "string"},
-                        "repo_path": {"type": "string"},
-                        "repo_root": {"type": "string"},
-                        "primary_language": {"type": "string"},
-                    },
-                },
-                "references": {
-                    "type": "array",
-                    "description": "Read-only truth-source references. Prefer {name,path,description,required}; local file:// URIs are accepted and normalized to path.",
-                    "items": {"type": "object"},
-                },
-                "policies": {"type": "object"},
-            },
-            "required": ["title", "objective", "family_id", "workspace"],
-        },
-    )
-    def task_create(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            actor, channel = self._actor_and_channel(call)
-            payload = self.service.create_task({**dict(call.args or {}), "actor": actor, "source_channel": channel})
-            return _result("minion Task created", payload)
-        except ValueError as exc:
-            return _invalid("minion Task request invalid", exc)
-        except Exception as exc:
-            return _error("minion Task creation failed", exc)
-
-    @capability_action(
-        namespace=INTROSPECTION_NAMESPACE,
-        scope="minion_task",
-        action_name="search",
-        description="Find long-lived Minion Tasks by exact task_id, project/repository text, objective, or family.",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"},
-                "query": {"type": "string"},
-                "family_id": {"type": "string"},
-                "include_archived": {"type": "boolean", "default": False},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
-            },
-        },
-    )
-    def task_search(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            return _result("minion Task search", self.service.search_tasks(dict(call.args or {})))
-        except Exception as exc:
-            return _error("minion Task search failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        action_name="task_update",
-        description="Version the project objective, workspace, references, or policy of one active Task. family_id is immutable.",
-        args_schema={
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"},
-                "title": {"type": "string"},
-                "objective": {"type": "string"},
-                "workspace": {"type": "object"},
-                "references": {"type": "array"},
-                "policies": {"type": "object"},
-            },
-            "required": ["task_id"],
-        },
-    )
-    def task_update(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            actor, channel = self._actor_and_channel(call)
-            payload = self.service.update_task({**dict(call.args or {}), "actor": actor, "source_channel": channel})
-            return _result("minion Task updated", payload)
-        except ValueError as exc:
-            return _invalid("minion Task update invalid", exc)
-        except Exception as exc:
-            return _error("minion Task update failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        action_name="task_archive",
-        description="Archive an active Task after every child Workflow is terminal.",
-        args_schema={
-            "type": "object",
-            "properties": {"task_id": {"type": "string"}, "reason": {"type": "string"}},
-            "required": ["task_id"],
-        },
-    )
-    def task_archive(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            actor, channel = self._actor_and_channel(call)
-            payload = self.service.archive_task({**dict(call.args or {}), "actor": actor, "source_channel": channel})
-            return _result("minion Task archived", payload)
-        except ValueError as exc:
-            return _invalid("minion Task archive invalid", exc)
-        except Exception as exc:
-            return _error("minion Task archive failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
-        action_name="prepare_requirements",
-        description=(
-            "Normalize the user's confirmed request in the foreground and publish the immutable RequirementsArtifact used by both Architect and "
-            "Architecture Reviewer. Keep product requirements separate from workflow policy. Call this before op_minion_start_workflow for "
-            "new_requirement; Minion roles may not rewrite the result."
-        ),
-        args_schema={
-            "type": "object",
-            "properties": {
-                "requirements": {"type": "array", "items": {"type": "object"}},
-                "open_clarifications": {"type": "array"},
-                "source_coverage": {"type": "array"},
-            },
-            "required": ["requirements"],
-        },
-    )
-    def prepare_requirements(self, call: CapabilityCall) -> CapabilityResult:
-        try:
-            actor, channel = self._actor_and_channel(call)
-            payload = self.service.prepare_requirements(
-                {**dict(call.args or {}), "actor": actor, "source_channel": channel}
-            )
-            return _result("minion requirements prepared", payload)
-        except ValueError as exc:
-            return _invalid("minion requirements invalid", exc)
-        except Exception as exc:
-            return _error("minion requirements preparation failed", exc)
-
-    @capability_action(
-        namespace=OPERATION_NAMESPACE,
-        scope="minion",
         action_name="start_workflow",
         description=(
-            "Start one durable Minion V2 workflow. Use new_requirement for a user request; execute_trusted only for an "
-            "internally trusted ArchitectureContractArtifact; review_then_execute for an external V2 architecture that must "
-            "be reviewed first; standalone_review for review-only; review_and_repair for a bounded review/repair loop. "
-            "This is the only normal workflow creation entrypoint. It requires the task_id returned by op_minion_task_create or an existing Task. "
-            "When the user asks Minion to do the work, call this capability instead of reading the target repository, constructing the architecture, "
-            "or implementing the request in the foreground agent."
+            "Start one durable Minion workflow and bind it to the current actor/channel. Supply the user-confirmed goal, natural-language Requirement "
+            "sections, family, workspace, and truth-source references. The Manager creates or reuses the internal Task and all identities. Use "
+            "review_then_execute with artifact for a named external architecture, execute_trusted only for a Manager-trusted named artifact, "
+            "standalone_review for review-only, and review_and_repair for bounded repair. Never inspect or implement the target in the foreground first."
         ),
         args_schema={
             "type": "object",
             "properties": {
-                "workflow_id": {"type": "string"},
-                "task_id": {"type": "string"},
+                "task": {"type": "string", "description": "Optional natural-language title of an existing Task."},
+                "title": {"type": "string"},
+                "family_id": {"type": "string", "default": "software_engineering"},
                 "operation": {
                     "type": "string",
                     "enum": ["new_requirement", "execute_trusted", "review_then_execute", "standalone_review", "review_and_repair"],
                     "default": "new_requirement",
                 },
                 "goal": {"type": "string"},
-                "requirements_ref": {"type": "object"},
+                "workspace": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "repo_path": {"type": "string"},
+                        "repo_root": {"type": "string"},
+                        "primary_language": {"type": "string"},
+                    },
+                    "additionalProperties": True,
+                },
+                "sections": {
+                    "type": "object",
+                    "description": "Immutable Requirement text grouped by natural-language section.",
+                    "additionalProperties": {"type": "array", "items": {"type": "string"}},
+                },
+                "requirements": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "section": {"type": "string"},
+                            "statement": {"type": "string"},
+                            "strength": {"type": "string", "enum": ["hard", "soft"]},
+                        },
+                        "required": ["section", "statement"],
+                        "additionalProperties": False,
+                    },
+                },
+                "strengths": {"type": "object"},
                 "constraints": {"type": "array"},
                 "approved_evidence": {
                     "type": "array",
@@ -258,24 +129,35 @@ class MinionV2PublicProvider:
                 },
                 "references": {"type": "array"},
                 "research_mode": {"type": "string", "enum": ["none", "local_only", "external_allowed"], "default": "local_only"},
-                "artifact_ref": {"type": "object"},
+                "artifact": {"type": "string", "description": "Natural-language name previously given to op_minion_submit_artifact."},
             },
-            "required": ["task_id"],
+            "additionalProperties": False,
         },
     )
     def start_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
+            args = dict(call.args or {})
+            task_selector = str(args.pop("task", "") or "").strip()
+            artifact_name = str(args.pop("artifact", "") or "").strip()
+            if task_selector:
+                args["task_id"] = self.service.resolve_task_selector(selector=task_selector, actor=actor)
+            if artifact_name:
+                args["artifact_ref"] = self.service.resolve_artifact_name(
+                    name=artifact_name,
+                    actor=actor,
+                    source_channel=channel,
+                )
             payload = self.service.start_workflow(
                 {
-                    **dict(call.args or {}),
+                    **args,
                     "actor": actor,
                     "source_channel": channel,
                     "control_route": self._control_route(call),
                 }
             )
             self._wake()
-            return _result("minion V2 workflow created", payload)
+            return _public_result("minion workflow created", payload)
         except ValueError as exc:
             return _invalid("minion V2 workflow request invalid", exc)
         except Exception as exc:
@@ -286,26 +168,34 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="submit_artifact",
         description=(
-            "Publish a durable content-addressed V2 artifact before starting or revising a workflow. This does not execute it. "
-            "trusted_internal_source may only be set by trusted internal callers."
+            "Publish a durable artifact under a natural-language name in the current actor/channel. This does not execute it. "
+            "Later workflow calls refer to this name; the Manager owns its content hash and internal identity."
         ),
         args_schema={
             "type": "object",
             "properties": {
+                "name": {"type": "string"},
                 "artifact_type": {"type": "string"},
                 "schema_version": {"type": "string", "default": "1"},
                 "media_type": {"type": "string", "default": "application/json"},
                 "content": {},
-                "provenance": {"type": "object"},
-                "metadata": {"type": "object"},
             },
-            "required": ["artifact_type", "content"],
+            "required": ["name", "artifact_type", "content"],
+            "additionalProperties": False,
         },
     )
     def submit_artifact(self, call: CapabilityCall) -> CapabilityResult:
         try:
-            payload = self.service.submit_artifact(dict(call.args or {}))
-            return _result("minion V2 artifact published", payload)
+            actor, channel = self._actor_and_channel(call)
+            payload = self.service.submit_artifact(
+                {
+                    **dict(call.args or {}),
+                    "actor": actor,
+                    "source_channel": channel,
+                    "trusted_internal_source": False,
+                }
+            )
+            return _public_result("minion artifact published", payload)
         except ValueError as exc:
             return _invalid("minion V2 artifact invalid", exc)
         except Exception as exc:
@@ -316,19 +206,25 @@ class MinionV2PublicProvider:
         scope="minion_workflow",
         action_name="status",
         description=(
-            "Read the durable V2 workflow projection. Always returns one current phase, active aggregate/worker, blocker, "
-            "next legal actions, user-wait flag, timing metrics, last progress event, and liveness."
+            "Read the current channel-bound workflow, or select one by natural-language Task title. Returns phase, active module/role, blocker, "
+            "next legal actions, user-wait flag, timings, last progress, and liveness without exposing Manager identities."
         ),
         args_schema={
             "type": "object",
-            "properties": {"workflow_id": {"type": "string"}},
-            "required": ["workflow_id"],
+            "properties": {"task": {"type": "string"}},
+            "additionalProperties": False,
         },
     )
     def workflow_status(self, call: CapabilityCall) -> CapabilityResult:
         try:
-            payload = self.service.workflow_status(str(call.args.get("workflow_id") or ""))
-            return _result("minion V2 workflow status", payload)
+            actor, channel = self._actor_and_channel(call)
+            workflow_id = self.service.resolve_workflow_selector(
+                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            )
+            payload = self.service.workflow_status(workflow_id)
+            return _public_result("minion workflow status", payload)
+        except ValueError as exc:
+            return _invalid("minion workflow selection invalid", exc)
         except Exception as exc:
             return _error("minion V2 workflow status failed", exc)
 
@@ -342,20 +238,23 @@ class MinionV2PublicProvider:
         ),
         args_schema={
             "type": "object",
-            "properties": {"workflow_id": {"type": "string"}},
-            "required": ["workflow_id"],
+            "properties": {"task": {"type": "string"}},
+            "additionalProperties": False,
         },
     )
     def resume_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
+            workflow_id = self.service.resolve_workflow_selector(
+                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            )
             payload = self.service.resume_workflow(
-                workflow_id=str(call.args.get("workflow_id") or ""),
+                workflow_id=workflow_id,
                 actor=actor,
                 source_channel=channel,
             )
             self._wake()
-            return _result("minion V2 workflow resume requested", payload)
+            return _public_result("minion workflow resume requested", payload)
         except ValueError as exc:
             return _invalid("minion V2 workflow cannot resume", exc)
         except Exception as exc:
@@ -366,8 +265,8 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="submit_human_decision",
         description=(
-            "Submit Accept/Edit/Reject for the exact architecture revision card. The decision token, actor, channel, revision, "
-            "and manifest SHA are atomically checked and consumed once. Use this when an inline card expired as well as for button handling."
+            "Submit Accept/Edit/Reject for the exact architecture card. The Manager atomically validates the one-time decision token and its "
+            "bound actor, channel, revision, and content before acting. Use this when an inline card expired as well as for button handling."
         ),
         args_schema={
             "type": "object",
@@ -387,7 +286,7 @@ class MinionV2PublicProvider:
                 {**dict(call.args or {}), "actor": actor, "source_channel": channel}
             )
             self._wake()
-            return _result("minion V2 human decision accepted", payload)
+            return _public_result("minion human decision accepted", payload)
         except ValueError as exc:
             return _invalid("minion V2 human decision stale or invalid", exc)
         except Exception as exc:
@@ -401,25 +300,29 @@ class MinionV2PublicProvider:
         args_schema={
             "type": "object",
             "properties": {
-                "workflow_id": {"type": "string"},
+                "task": {"type": "string"},
                 "command": {"type": "string", "enum": ["pause", "cancel"]},
                 "reason": {"type": "string"},
             },
-            "required": ["workflow_id", "command"],
+            "required": ["command"],
+            "additionalProperties": False,
         },
     )
     def control_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
+            workflow_id = self.service.resolve_workflow_selector(
+                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            )
             payload = self.service.control_workflow(
-                workflow_id=str(call.args.get("workflow_id") or ""),
+                workflow_id=workflow_id,
                 command=str(call.args.get("command") or ""),
                 actor=actor,
                 source_channel=channel,
                 reason=str(call.args.get("reason") or ""),
             )
             self._wake()
-            return _result("minion V2 workflow control requested", payload)
+            return _public_result("minion workflow control requested", payload)
         except ValueError as exc:
             return _invalid("minion V2 workflow control invalid", exc)
         except Exception as exc:
@@ -432,19 +335,22 @@ class MinionV2PublicProvider:
         description="Archive a terminal V2 workflow. Active workflows must be cancelled and settled first.",
         args_schema={
             "type": "object",
-            "properties": {"workflow_id": {"type": "string"}, "reason": {"type": "string"}},
-            "required": ["workflow_id"],
+            "properties": {"task": {"type": "string"}, "reason": {"type": "string"}},
+            "additionalProperties": False,
         },
     )
     def archive_workflow(self, call: CapabilityCall) -> CapabilityResult:
         try:
-            actor, _channel = self._actor_and_channel(call)
+            actor, channel = self._actor_and_channel(call)
+            workflow_id = self.service.resolve_workflow_selector(
+                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            )
             payload = self.service.archive_workflow(
-                workflow_id=str(call.args.get("workflow_id") or ""),
+                workflow_id=workflow_id,
                 actor=actor,
                 reason=str(call.args.get("reason") or ""),
             )
-            return _result("minion V2 workflow archived", payload)
+            return _public_result("minion workflow archived", payload)
         except ValueError as exc:
             return _invalid("minion V2 workflow archive invalid", exc)
         except Exception as exc:
@@ -497,13 +403,55 @@ class MinionV2PublicProvider:
         self.wake_manager()
 
 
-def _result(title: str, payload: dict[str, Any]) -> CapabilityResult:
+def _public_result(title: str, payload: dict[str, Any]) -> CapabilityResult:
+    public = _public_payload(payload)
     return CapabilityResult(
         status=RuntimeStatus.OK,
         text=title,
-        structured=payload,
-        llm_text=render_titled_structured_for_llm(title, payload),
+        structured=public,
+        llm_text=render_titled_structured_for_llm(title, public),
     )
+
+
+def _public_payload(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_public_payload(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    hidden = {
+        "workflow_id",
+        "task_id",
+        "revision_id",
+        "architecture_revision_id",
+        "aggregate_id",
+        "active_aggregate_id",
+        "active_aggregate_type",
+        "active_worker",
+        "request_ref",
+        "artifact_ref",
+        "last_progress_event_id",
+    }
+    aliases = {
+        "task_title": "task",
+        "current_phase": "phase",
+        "workflow_state": "state",
+        "active_node_state": "active_state",
+    }
+    result: dict[str, Any] = {}
+    for raw_key, item in value.items():
+        key = str(raw_key)
+        lowered = key.casefold()
+        if key in hidden or key.endswith("_ref") or key.endswith("_sha") or "sha256" in lowered:
+            continue
+        if key == "next_action" and item == "manager_outbox_tick":
+            result["next_action"] = "background orchestration"
+            continue
+        public_key = aliases.get(key, key)
+        public_value = _public_payload(item)
+        if public_key == "last_progress_event" and isinstance(public_value, dict):
+            public_value.pop("aggregate_type", None)
+        result[public_key] = public_value
+    return result
 
 
 def _invalid(title: str, exc: Exception) -> CapabilityResult:

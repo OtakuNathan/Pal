@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from copy import deepcopy
+import json
 import shutil
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from pal.core.runtime import PalCore
+from pal.execution.contracts import CapabilityCall
 from pal.minion import register_with_core as register_minion_with_core
 from pal.minion.capabilities import MinionManagerProvider, inspect_minion
 from pal.minion.ipc import minion_port_path, minion_socket_path
@@ -736,7 +738,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 {"ok": True, "health_source": "minion_v2_manager", "manager_pid": 42}
             )
 
-    def test_minion_plugin_exposes_task_first_v2_business_capabilities(self) -> None:
+    def test_minion_plugin_exposes_only_semantic_v2_business_capabilities(self) -> None:
         core = PalCore()
         register_minion_with_core(core.context, runtime_root=self.runtime_root)
         core.publish_module_capabilities("minion")
@@ -756,19 +758,86 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                     "op_minion_submit_human_decision",
                     "op_minion_control_workflow",
                     "op_minion_archive_workflow",
-                    "op_minion_task_create",
-                    "intro_minion_task_search",
-                    "op_minion_task_update",
-                    "op_minion_task_archive",
-                    "op_minion_prepare_requirements",
                 },
             )
+            schemas = json.dumps(
+                {
+                    descriptor.canonical_path: descriptor.parameters_schema
+                    for descriptor in core.context.capability_registry.descriptors.values()
+                    if descriptor.module_id == "minion"
+                },
+                sort_keys=True,
+            )
+            for forbidden in (
+                "workflow_id",
+                "task_id",
+                "revision_id",
+                "requirement_id",
+                "evidence_id",
+                "artifact_ref",
+                "sha256",
+            ):
+                self.assertNotIn(f'"{forbidden}"', schemas)
             self.assertNotIn("op_minion_dispatch_workflow", canonical)
             self.assertNotIn("op_minion_tick_parent_dag", canonical)
             self.assertNotIn("op_minion_recover_work_order", canonical)
         finally:
             with contextlib.suppress(Exception):
                 core.detach_module("minion")
+
+    def test_public_provider_binds_current_workflow_without_exposing_manager_identity(self) -> None:
+        wakes: list[str] = []
+        provider = MinionV2PublicProvider(
+            runtime_root=self.runtime_root,
+            wake_manager=lambda: wakes.append("wake"),
+        )
+        meta = {"actor_id": "nathan", "channel_id": "socket:test"}
+        started = provider.start_workflow(
+            CapabilityCall(
+                name="op_minion_start_workflow",
+                meta=meta,
+                args={
+                    "title": "Tiny semantic router",
+                    "family_id": "software_engineering",
+                    "goal": "Implement deterministic rule routing.",
+                    "workspace": {"kind": "new_project", "project_name": "tiny-router"},
+                    "sections": {
+                        "Routing": ["Route matching must be deterministic."],
+                    },
+                },
+            )
+        )
+        self.assertEqual(wakes, ["wake"])
+        self.assertEqual(started.structured["task"], "Tiny semantic router")
+        encoded = json.dumps(started.structured, sort_keys=True)
+        for forbidden in ("workflow_id", "task_id", "artifact_ref", "sha256"):
+            self.assertNotIn(forbidden, encoded)
+
+        restarted = MinionV2PublicProvider(runtime_root=self.runtime_root, wake_manager=lambda: None)
+        status = restarted.workflow_status(
+            CapabilityCall(name="intro_minion_workflow_status", meta=meta, args={})
+        )
+        self.assertEqual(status.structured["task"], "Tiny semantic router")
+        self.assertEqual(status.structured["phase"], "created")
+        self.assertNotIn("active_aggregate_id", json.dumps(status.structured, sort_keys=True))
+
+        artifact = restarted.submit_artifact(
+            CapabilityCall(
+                name="op_minion_submit_artifact",
+                meta=meta,
+                args={
+                    "name": "router review notes",
+                    "artifact_type": "ReviewNotesArtifact",
+                    "content": {"summary": "Check deterministic ordering."},
+                },
+            )
+        )
+        self.assertEqual(artifact.structured["name"], "router review notes")
+        self.assertNotIn("artifact_ref", artifact.structured)
+        resolved = MinionV2WorkflowService(self.runtime_root).resolve_artifact_name(
+            name="router review notes", actor="nathan", source_channel="socket:test"
+        )
+        self.assertTrue(resolved["sha256"])
 
     def test_new_requirement_routes_to_architecture_revision_without_cursor_state(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)

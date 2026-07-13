@@ -2501,11 +2501,23 @@ class MinionV2SemanticWorker:
             )
         workspace["reference_paths"] = references
         profile_group, profile_name = profile.rsplit(".", 1)
+        if skeleton_mode and role == "architect":
+            invocation_acceptance = [
+                "Write the contract-level code skeleton in the bound architecture worktree.",
+                "Submit the complete semantic module DAG and path policy exactly once through op_minion_architecture_submit.",
+            ]
+        elif skeleton_mode and role == "architecture_reviewer":
+            invocation_acceptance = [
+                "Review the bound Requirements, skeleton diff, code contracts, and semantic DAG.",
+                "Submit one PASS or FAIL through op_minion_skeleton_review_submit.",
+            ]
+        else:
+            invocation_acceptance = ["Write the exact primary JSON artifact required by the profile output contract."]
         pack = MinionInvocationPack(
             invocation_id=invocation_id,
             goal=instruction,
             instruction=instruction,
-            acceptance_criteria=["Write the exact primary JSON artifact required by the profile output contract."],
+            acceptance_criteria=invocation_acceptance,
             workspace=workspace,
             profile_group=profile_group,
             profile_name=profile_name,

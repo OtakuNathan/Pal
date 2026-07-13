@@ -140,7 +140,7 @@ def _render_execution_rules(scaffold: dict[str, Any]) -> str:
         (
             "- Work only on the bound role invocation.",
             "- Inspect immutable inputs before making claims or edits.",
-            "- Architecture roles must use the controlled Contract Builder; they cannot write arbitrary plan files.",
+            "- Architecture roles must use their bound architecture tools and output contract; they cannot invent alternate plan artifacts.",
             "- Producers cannot accept their own output; verifiers cannot repair candidates.",
             f"- Visible capabilities: {', '.join(allowed) if allowed else '(none)' }.",
         )

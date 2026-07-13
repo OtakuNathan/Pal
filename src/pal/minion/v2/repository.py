@@ -229,6 +229,146 @@ class MinionV2Repository:
                 },
             )
 
+    def bind_channel_workflow(self, *, actor_id: str, channel_id: str, workflow_id: str) -> None:
+        self.ensure_schema()
+        actor = str(actor_id or "").strip()
+        channel = str(channel_id or "").strip()
+        workflow = str(workflow_id or "").strip()
+        if not actor or not channel or not workflow:
+            raise ValueError("channel workflow binding requires actor, channel, and workflow")
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM minion_v2_aggregate_snapshots WHERE aggregate_type = ? AND aggregate_id = ?",
+                (AggregateType.WORKFLOW.value, workflow),
+            ).fetchone()
+            if row is None:
+                raise ValueError("channel workflow binding requires an existing workflow")
+            connection.execute(
+                """
+                INSERT INTO minion_v2_channel_bindings(actor_id, channel_id, workflow_id, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(actor_id, channel_id) DO UPDATE SET
+                    workflow_id = excluded.workflow_id,
+                    updated_at = excluded.updated_at
+                """,
+                (actor, channel, workflow, utc_now()),
+            )
+
+    def read_channel_workflow(self, *, actor_id: str, channel_id: str) -> str:
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT workflow_id FROM minion_v2_channel_bindings WHERE actor_id = ? AND channel_id = ?",
+                (str(actor_id or "").strip(), str(channel_id or "").strip()),
+            ).fetchone()
+        return str(row["workflow_id"]) if row is not None else ""
+
+    def search_workflows(
+        self,
+        *,
+        actor_id: str,
+        channel_id: str,
+        query: str = "",
+        include_terminal: bool = False,
+        limit: int = 20,
+    ) -> tuple[dict[str, Any], ...]:
+        self.ensure_schema()
+        clauses = ["s.aggregate_type = ?", "json_extract(s.payload_json, '$.owner') = ?"]
+        parameters: list[Any] = [AggregateType.WORKFLOW.value, str(actor_id or "").strip()]
+        if channel_id:
+            clauses.append("json_extract(s.payload_json, '$.active_channel') = ?")
+            parameters.append(str(channel_id).strip())
+        if not include_terminal:
+            clauses.append("s.state NOT IN ('COMPLETED', 'REJECTED', 'CANCELLED')")
+        text = str(query or "").strip().lower()
+        if text:
+            clauses.append("(lower(coalesce(t.title, '')) LIKE ? OR lower(coalesce(t.objective, '')) LIKE ?)")
+            pattern = f"%{text}%"
+            parameters.extend((pattern, pattern))
+        parameters.append(max(1, min(int(limit), 100)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT s.aggregate_id AS workflow_id, s.state AS workflow_state,
+                       s.updated_at, coalesce(t.title, '') AS task_title,
+                       coalesce(t.objective, '') AS task_objective
+                FROM minion_v2_aggregate_snapshots AS s
+                LEFT JOIN minion_v2_task_projection AS t
+                  ON t.task_id = json_extract(s.payload_json, '$.task_id')
+                WHERE """
+                + " AND ".join(clauses)
+                + " ORDER BY s.updated_at DESC, s.aggregate_id LIMIT ?",
+                tuple(parameters),
+            ).fetchall()
+        return tuple(dict(row) for row in rows)
+
+    def bind_artifact_alias(
+        self,
+        *,
+        actor_id: str,
+        channel_id: str,
+        alias: str,
+        artifact_sha256: str,
+    ) -> None:
+        self.ensure_schema()
+        actor = str(actor_id or "").strip()
+        channel = str(channel_id or "").strip()
+        name = str(alias or "").strip()
+        digest = str(artifact_sha256 or "").removeprefix("sha256:")
+        if not actor or not channel or not name or not digest:
+            raise ValueError("artifact alias requires actor, channel, name, and artifact")
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT durable FROM minion_v2_artifacts WHERE sha256 = ?",
+                (digest,),
+            ).fetchone()
+            if row is None or int(row["durable"]) != 1:
+                raise ValueError("artifact alias requires a durable artifact")
+            connection.execute(
+                """
+                INSERT INTO minion_v2_artifact_aliases(actor_id, channel_id, alias, artifact_sha256, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(actor_id, channel_id, alias) DO UPDATE SET
+                    artifact_sha256 = excluded.artifact_sha256,
+                    updated_at = excluded.updated_at
+                """,
+                (actor, channel, name, digest, utc_now()),
+            )
+
+    def resolve_artifact_alias(self, *, actor_id: str, channel_id: str, alias: str) -> dict[str, Any] | None:
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT a.* FROM minion_v2_artifacts AS a
+                JOIN minion_v2_artifact_aliases AS x ON x.artifact_sha256 = a.sha256
+                WHERE x.actor_id = ? AND x.channel_id = ? AND x.alias = ?
+                """,
+                (str(actor_id or "").strip(), str(channel_id or "").strip(), str(alias or "").strip()),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["durable"] = bool(result["durable"])
+        result["provenance"] = json.loads(str(result.pop("provenance_json")))
+        result["metadata"] = json.loads(str(result.pop("metadata_json")))
+        return result
+
+    def read_latest_workflow_event(self, workflow_id: str) -> dict[str, Any] | None:
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT event_type, aggregate_type, created_at
+                FROM minion_v2_domain_events
+                WHERE workflow_id = ?
+                ORDER BY created_at DESC, event_id DESC
+                LIMIT 1
+                """,
+                (str(workflow_id),),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def search_tasks(
         self,
         *,

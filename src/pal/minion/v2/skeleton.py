@@ -580,6 +580,10 @@ class GitBackedSkeletonService:
             )
             skeleton_sha = _git(architecture_workspace.worktree, "rev-parse", "HEAD").strip()
         skeleton_tree = _git(architecture_workspace.worktree, "rev-parse", f"{skeleton_sha}^{{tree}}").strip()
+        contract_file_hashes = {
+            path: _git(architecture_workspace.worktree, "rev-parse", f"{skeleton_sha}:{path}").strip()
+            for path in sorted(declared_contract_paths)
+        }
         with tempfile.TemporaryDirectory(prefix="pal-skeleton-bundle-") as temporary:
             bundle_path = Path(temporary) / "architecture.bundle"
             _git(architecture_workspace.worktree, "bundle", "create", str(bundle_path), "--all")
@@ -607,6 +611,7 @@ class GitBackedSkeletonService:
             "base_tree_sha": architecture_workspace.base_tree_sha,
             "skeleton_commit_sha": skeleton_sha,
             "skeleton_tree_sha": skeleton_tree,
+            "contract_file_hashes": contract_file_hashes,
             "changed_paths": changed_paths,
             "path_policy": _compiled_path_policy(normalized),
             "original_workspace_head": architecture_workspace.original_head,

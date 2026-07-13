@@ -24,7 +24,7 @@ Finish with exactly one op_minion_architecture_submit call. The JSON is only a s
 output_contract_fragment = """
 Write the code skeleton, then call op_minion_architecture_submit once. Pal writes architecture_submission.json and the Manager creates the immutable skeleton commit and Git bundle. Keep final chat short.
 """
-capability_groups = ["workspace_read", "workspace_write", "code_intel", "verification_shell", "v2_bound_input_read", "v2_architecture_skeleton_builder"]
+capability_groups = ["workspace_read", "workspace_write", "code_intel", "verification_shell", "web_research", "v2_bound_input_read", "v2_architecture_skeleton_builder"]
 
 [capability_policy]
 mode = "profile_only"

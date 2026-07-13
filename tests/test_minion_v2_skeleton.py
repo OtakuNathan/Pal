@@ -9,8 +9,8 @@ from pathlib import Path
 
 from pal.minion.v2.architecture import ArchitectureArtifactService
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
-from pal.minion.v2.contracts import AggregateType
-from pal.minion.v2.execution import ExecutionCompiler, UnitWorkViewBuilder
+from pal.minion.v2.contracts import ActionEnvelope, AggregateType
+from pal.minion.v2.execution import DagScheduler, ExecutionCompiler, UnitWorkViewBuilder
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.skeleton import (
@@ -369,6 +369,111 @@ class MinionV2SkeletonTests(unittest.TestCase):
                 }
             )
 
+    def test_candidate_reuse_transplants_module_diff_and_stops_when_contract_changes(self) -> None:
+        workspace = self._provision_complete_workspace("reuse", "initial")
+        initial_ref = self.service.snapshot_architecture(
+            workflow_name="reuse",
+            revision_name="initial",
+            architecture_workspace=workspace,
+            submission=self._submission(),
+            requirements_ref=self.requirements_ref,
+        )
+        architecture = ArchitectureArtifactService(self.artifacts, self.repository)
+        compiler = ExecutionCompiler(self.repository, architecture)
+        source = compiler.compile_epoch(
+            workflow_id="reuse",
+            epoch_id="reuse-source",
+            manifest_ref=initial_ref,
+        )
+        source_node_id = source.unit_node_ids["router"]
+        DagScheduler(self.repository).schedule_ready_nodes(
+            workflow_id="reuse", epoch_id="reuse-source", max_new_nodes=1
+        )
+        source_node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, source_node_id)
+        assert source_node is not None
+        source_worktree = Path(source_node.payload["workspace_path"])
+        (source_worktree / "src").mkdir(exist_ok=True)
+        (source_worktree / "src" / "router.cpp").write_text(
+            "int route_rule() { return 1; }\n", encoding="utf-8"
+        )
+        _git(source_worktree, "add", "src/router.cpp")
+        _git(
+            source_worktree,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "router candidate",
+        )
+        source_candidate_digest = _git(source_worktree, "rev-parse", "HEAD").strip()
+        candidate_ref = self.artifacts.put_json(
+            {
+                "base_sha": source_node.payload["base_sha"],
+                "candidate_digest": source_candidate_digest,
+                "changed_paths": ["src/router.cpp"],
+            },
+            artifact_type="CandidateSnapshotArtifact",
+        )
+        verification_ref = self.artifacts.put_json(
+            {"status": "PASS"}, artifact_type="VerificationArtifact"
+        )
+        self._accept_candidate(
+            source_node_id,
+            candidate_ref=candidate_ref.to_dict(),
+            candidate_digest=source_candidate_digest,
+            verification_ref=verification_ref.to_dict(),
+        )
+
+        reused = compiler.compile_epoch(
+            workflow_id="reuse",
+            epoch_id="reuse-target",
+            manifest_ref=initial_ref,
+            reuse_from_epoch_id="reuse-source",
+        )
+        reused_node = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN, reused.unit_node_ids["router"]
+        )
+        assert reused_node is not None
+        self.assertEqual(reused_node.state, "ACCEPTED")
+        self.assertTrue((Path(reused_node.payload["workspace_path"]) / "src" / "router.cpp").is_file())
+        self.assertNotEqual(reused_node.payload["candidate_digest"], source_candidate_digest)
+
+        initial = self.artifacts.read_json(initial_ref)
+        changed_workspace = self.service.provision_architecture_workspace(
+            workflow_id="reuse",
+            revision_name="changed-contract",
+            workspace={"repo_path": str(self.repo)},
+            requirements_ref=self.requirements_ref,
+            base_artifact=initial,
+        )
+        changed_contract = _contract("router").replace(
+            "Existing public signatures remain stable.",
+            "Existing public signatures and result ordering remain stable.",
+        )
+        (changed_workspace.worktree / "include" / "router.h").write_text(
+            changed_contract, encoding="utf-8"
+        )
+        changed_ref = self.service.snapshot_architecture(
+            workflow_name="reuse",
+            revision_name="changed-contract",
+            architecture_workspace=changed_workspace,
+            submission=self._submission(),
+            requirements_ref=self.requirements_ref,
+        )
+        changed = compiler.compile_epoch(
+            workflow_id="reuse",
+            epoch_id="reuse-changed",
+            manifest_ref=changed_ref,
+            reuse_from_epoch_id="reuse-source",
+        )
+        changed_node = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN, changed.unit_node_ids["router"]
+        )
+        assert changed_node is not None
+        self.assertEqual(changed_node.state, "BLOCKED_BY_DEPS")
+
     def _provision_complete_workspace(self, workflow_id: str, revision_name: str):
         workspace = self.service.provision_architecture_workspace(
             workflow_id=workflow_id,
@@ -383,6 +488,59 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "End-to-end route construction and matching contract.\n", encoding="utf-8"
         )
         return workspace
+
+    def _accept_candidate(
+        self,
+        node_id: str,
+        *,
+        candidate_ref: dict[str, object],
+        candidate_digest: str,
+        verification_ref: dict[str, object],
+    ) -> None:
+        sequence = [
+            ("START_PRODUCING", {"fencing_token": 1}),
+            ("SUBMIT_CANDIDATE", {"fencing_token": 1}),
+            (
+                "QUIESCE_COMPLETED",
+                {
+                    "fencing_token": 1,
+                    "process_group_reaped": True,
+                    "exclusive_workspace_lock": True,
+                    "workspace_fingerprint": "tree",
+                },
+            ),
+            (
+                "CANDIDATE_SNAPSHOTTED",
+                {
+                    "candidate_ref": candidate_ref,
+                    "candidate_digest": candidate_digest,
+                    "workspace_fingerprint": "tree",
+                },
+            ),
+            ("START_REVIEW", {"fencing_token": 2}),
+            (
+                "REVIEW_PASSED",
+                {
+                    "verification_artifact_ref": verification_ref,
+                    "output_hashes": {"public_surface": "router-v1"},
+                },
+            ),
+        ]
+        for action_type, payload in sequence:
+            node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+            assert node is not None
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id=node.workflow_id,
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=node.aggregate_id,
+                    actor="test",
+                    expected_version=node.version,
+                    idempotency_key=f"{node_id}:{action_type}:{node.version}",
+                    payload=payload,
+                )
+            )
 
     def _submission(self) -> dict[str, object]:
         return {

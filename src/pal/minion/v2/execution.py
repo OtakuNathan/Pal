@@ -304,7 +304,7 @@ class ExecutionCompiler:
             )
 
         integration_node_id = f"{epoch_id}:node:integration"
-        integration_dependencies = [unit_node_ids[unit_id] for unit_id in sorted(unit_node_ids)]
+        integration_dependencies = [unit_node_ids[unit_id] for unit_id in _topological_module_order(depends_on)]
         self.repository.dispatch(
             _action(
                 "CREATE_NODE_RUN",
@@ -381,14 +381,20 @@ class ExecutionCompiler:
             child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
         )
         module_refs: dict[str, ArtifactRef] = {}
+        contract_file_hashes = dict(artifact.get("contract_file_hashes") or {})
         for name, module in modules.items():
+            paths = dict(module.get("paths") or {})
             module_refs[name] = self.architecture.artifacts.put_json(
                 {
                     "module_name": name,
                     "depends_on": depends_on[name],
-                    "paths": dict(module.get("paths") or {}),
+                    "paths": paths,
                     "covers": list(module.get("covers") or []),
                     "evidence": list(module.get("evidence") or []),
+                    "contract_file_hashes": {
+                        path: str(contract_file_hashes.get(path) or "")
+                        for path in list(paths.get("frozen_contract") or [])
+                    },
                 },
                 artifact_type=SKELETON_MODULE_CONTRACT_ARTIFACT,
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
@@ -407,6 +413,10 @@ class ExecutionCompiler:
                 },
                 "covers": list(integration.get("covers") or []),
                 "evidence": list(integration.get("evidence") or []),
+                "contract_file_hashes": {
+                    path: str(contract_file_hashes.get(path) or "")
+                    for path in list(integration.get("frozen_contract") or [])
+                },
             },
             artifact_type=SKELETON_MODULE_CONTRACT_ARTIFACT,
             child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
@@ -437,10 +447,25 @@ class ExecutionCompiler:
             unit_ids=sorted(modules),
             architecture_artifact=artifact,
         )
+        workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
+        request = (
+            self.architecture.artifacts.read_json(dict(workflow.payload.get("request_ref") or {}))
+            if workflow is not None and workflow.payload.get("request_ref")
+            else {}
+        )
         environment_fingerprint = _stable_json_hash(
             {
-                "skeleton_tree_sha": str(artifact.get("skeleton_tree_sha") or ""),
                 "execution_adapter": SOFTWARE_GIT_ADAPTER,
+                "workspace_environment_policy": dict(
+                    dict(request.get("workspace") or {}).get("workspace_environment_policy") or {}
+                ),
+                "toolchain": dict(request.get("toolchain") or {}),
+            }
+        )
+        global_constraint_hash = _stable_json_hash(
+            {
+                "constraints": list(request.get("constraints") or []),
+                "requirements": self.architecture.artifacts.read_json(dict(artifact.get("requirements_ref") or {})),
             }
         )
         unit_node_ids = {name: f"{epoch_id}:node:{name}" for name in modules}
@@ -465,6 +490,7 @@ class ExecutionCompiler:
                         "accepted_dependency_node_ids": [],
                         "epoch_frozen": False,
                         "environment_fingerprint": environment_fingerprint,
+                        "global_constraint_hash": global_constraint_hash,
                         "path_policy": {
                             "frozen_contract": list(paths.get("frozen_contract") or []),
                             "owned_impl": list(paths.get("owned_impl") or []),
@@ -476,6 +502,9 @@ class ExecutionCompiler:
                 )
             )
         integration_node_id = f"{epoch_id}:node:integration"
+        integration_dependencies = [
+            unit_node_ids[module_name] for module_name in _topological_module_order(depends_on)
+        ]
         self.repository.dispatch(
             _action(
                 "CREATE_NODE_RUN",
@@ -491,10 +520,11 @@ class ExecutionCompiler:
                     "node_kind": "integration",
                     "unit_contract_ref": integration_ref.to_dict(),
                     "architecture_manifest_ref": manifest_ref.to_dict(),
-                    "dependency_node_ids": [unit_node_ids[name] for name in sorted(modules)],
+                    "dependency_node_ids": integration_dependencies,
                     "accepted_dependency_node_ids": [],
                     "epoch_frozen": False,
                     "environment_fingerprint": environment_fingerprint,
+                    "global_constraint_hash": global_constraint_hash,
                     "path_policy": {
                         "frozen_contract": list(integration.get("frozen_contract") or []),
                         "owned_impl": list(integration.get("owned_impl") or []),
@@ -505,10 +535,16 @@ class ExecutionCompiler:
                 },
             )
         )
-        # Candidate reuse for skeleton epochs is intentionally conservative: a
-        # future epoch starts clean unless the complete semantic/path/dependency
-        # fingerprint can be proven equal by the reuse service.
-        _ = reuse_from_epoch_id
+        if reuse_from_epoch_id:
+            reuse_accepted_candidates(
+                repository=self.repository,
+                architecture=self.architecture,
+                workflow_id=workflow_id,
+                source_epoch_id=reuse_from_epoch_id,
+                target_epoch_id=epoch_id,
+                target_manifest_ref=manifest_ref,
+                actor=actor,
+            )
         node_ids = tuple([*(unit_node_ids[name] for name in sorted(unit_node_ids)), integration_node_id])
         self.repository.dispatch(
             _action(
@@ -545,6 +581,27 @@ def reuse_accepted_candidates(
     source_manifest_ref = ArtifactRef.from_mapping(
         dict(source_epoch.payload.get("architecture_manifest_ref") or {})
     )
+    source_record = repository.read_artifact_record(source_manifest_ref.sha256)
+    target_record = repository.read_artifact_record(target_manifest_ref.sha256)
+    source_is_skeleton = bool(
+        source_record and str(source_record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT
+    )
+    target_is_skeleton = bool(
+        target_record and str(target_record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT
+    )
+    if source_is_skeleton or target_is_skeleton:
+        if not (source_is_skeleton and target_is_skeleton):
+            return ()
+        return _reuse_accepted_skeleton_candidates(
+            repository=repository,
+            architecture=architecture,
+            workflow_id=workflow_id,
+            source_epoch_id=source_epoch_id,
+            target_epoch_id=target_epoch_id,
+            source_manifest_ref=source_manifest_ref,
+            target_manifest_ref=target_manifest_ref,
+            actor=actor,
+        )
     source_manifest = validate_architecture_manifest(architecture.artifacts.read_json(source_manifest_ref))
     target_manifest = validate_architecture_manifest(architecture.artifacts.read_json(target_manifest_ref))
     source_fragments = architecture.load_manifest_fragments(source_manifest)
@@ -575,7 +632,12 @@ def reuse_accepted_candidates(
             AggregateType.DAG_NODE_RUN,
             target_nodes[unit_id].aggregate_id,
         )
-        if source_node is None or source_node.state != "ACCEPTED" or target_node is None:
+        if (
+            source_node is None
+            or source_node.state != "ACCEPTED"
+            or target_node is None
+            or target_node.state != "BLOCKED_BY_DEPS"
+        ):
             continue
         dependency_ids = [str(item) for item in list(target_node.payload.get("dependency_node_ids") or [])]
         accepted_dependencies = [
@@ -648,6 +710,304 @@ def reuse_accepted_candidates(
         target_nodes[unit_id] = result.snapshot
         reused.append(result.snapshot.aggregate_id)
     return tuple(reused)
+
+
+def _reuse_accepted_skeleton_candidates(
+    *,
+    repository: MinionV2Repository,
+    architecture: ArchitectureArtifactService,
+    workflow_id: str,
+    source_epoch_id: str,
+    target_epoch_id: str,
+    source_manifest_ref: ArtifactRef,
+    target_manifest_ref: ArtifactRef,
+    actor: str,
+) -> tuple[str, ...]:
+    source_artifact = dict(architecture.artifacts.read_json(source_manifest_ref))
+    target_artifact = dict(architecture.artifacts.read_json(target_manifest_ref))
+    snapshots = repository.list_workflow_snapshots(workflow_id)
+    source_nodes = {
+        str(item.payload.get("module_name") or item.payload.get("unit_id") or ""): item
+        for item in snapshots
+        if item.aggregate_type == AggregateType.DAG_NODE_RUN
+        and str(item.payload.get("epoch_id") or "") == source_epoch_id
+        and str(item.payload.get("node_kind") or "") == "unit"
+    }
+    target_nodes = {
+        str(item.payload.get("module_name") or item.payload.get("unit_id") or ""): item
+        for item in snapshots
+        if item.aggregate_type == AggregateType.DAG_NODE_RUN
+        and str(item.payload.get("epoch_id") or "") == target_epoch_id
+        and str(item.payload.get("node_kind") or "") == "unit"
+    }
+    source_contracts = {
+        name: (
+            dict(node.payload.get("unit_contract_ref") or {}),
+            dict(architecture.artifacts.read_json(dict(node.payload.get("unit_contract_ref") or {}))),
+        )
+        for name, node in source_nodes.items()
+    }
+    target_contracts = {
+        name: (
+            dict(node.payload.get("unit_contract_ref") or {}),
+            dict(architecture.artifacts.read_json(dict(node.payload.get("unit_contract_ref") or {}))),
+        )
+        for name, node in target_nodes.items()
+    }
+    dependencies = {
+        name: [str(item) for item in list(contract.get("depends_on") or [])]
+        for name, (_ref, contract) in target_contracts.items()
+    }
+    if set(dependencies) != set(target_nodes):
+        return ()
+    reused: list[str] = []
+    for module_name in _topological_module_order(dependencies):
+        source_node = source_nodes.get(module_name)
+        target_node = repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN,
+            target_nodes[module_name].aggregate_id,
+        )
+        if source_node is None or source_node.state != "ACCEPTED" or target_node is None:
+            continue
+        source_contract = source_contracts.get(module_name)
+        target_contract = target_contracts.get(module_name)
+        if source_contract is None or target_contract is None:
+            continue
+        target_node_by_module = {
+            name: repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id) or node
+            for name, node in target_nodes.items()
+        }
+        dependency_modules = dependencies[module_name]
+        if any(target_node_by_module[name].state != "ACCEPTED" for name in dependency_modules):
+            continue
+        source_fingerprint = _skeleton_candidate_reuse_signature(
+            artifact=source_artifact,
+            contract_ref=source_contract[0],
+            contract=source_contract[1],
+            node=source_node,
+            dependencies=dependency_modules,
+            node_by_module=source_nodes,
+            contracts_by_module=source_contracts,
+        )
+        target_fingerprint = _skeleton_candidate_reuse_signature(
+            artifact=target_artifact,
+            contract_ref=target_contract[0],
+            contract=target_contract[1],
+            node=target_node,
+            dependencies=dependency_modules,
+            node_by_module=target_node_by_module,
+            contracts_by_module=target_contracts,
+        )
+        if not source_fingerprint or source_fingerprint != target_fingerprint:
+            continue
+        source_candidate_ref = dict(source_node.payload.get("candidate_ref") or {})
+        verification_ref = dict(source_node.payload.get("verification_artifact_ref") or {})
+        source_candidate_digest = str(source_node.payload.get("candidate_digest") or "")
+        if not source_candidate_ref or not verification_ref or not source_candidate_digest:
+            continue
+        target_nodes_by_id = {
+            item.aggregate_id: item for item in target_node_by_module.values()
+        }
+        baseline = prepare_node_dependency_baseline(target_node, target_nodes_by_id)
+        candidate_ref, candidate_digest, target_base = _transplant_skeleton_candidate(
+            architecture=architecture,
+            source_node=source_node,
+            target_node=target_node,
+            source_candidate_ref=source_candidate_ref,
+            source_candidate_digest=source_candidate_digest,
+            target_contract_ref=target_contract[0],
+            target_fingerprint=target_fingerprint,
+            baseline=baseline,
+        )
+        accepted_dependencies = [
+            str(target_node_by_module[name].aggregate_id) for name in dependency_modules
+        ]
+        result = repository.dispatch(
+            _action(
+                "REUSE_ACCEPTED_CANDIDATE",
+                workflow_id,
+                AggregateType.DAG_NODE_RUN,
+                target_node.aggregate_id,
+                actor,
+                target_node.version,
+                {
+                    "candidate_ref": candidate_ref.to_dict(),
+                    "candidate_digest": candidate_digest,
+                    "verification_artifact_ref": verification_ref,
+                    "reuse_fingerprint": target_fingerprint,
+                    "accepted_dependency_node_ids": accepted_dependencies,
+                    "epoch_frozen": False,
+                    "output_hashes": dict(source_node.payload.get("output_hashes") or {}),
+                    "reused_from_epoch_id": source_epoch_id,
+                    **baseline,
+                    "base_sha": target_base,
+                    "base_digest": target_base,
+                },
+            )
+        )
+        target_nodes[module_name] = result.snapshot
+        reused.append(result.snapshot.aggregate_id)
+    return tuple(reused)
+
+
+def _skeleton_candidate_reuse_signature(
+    *,
+    artifact: Mapping[str, Any],
+    contract_ref: Mapping[str, Any],
+    contract: Mapping[str, Any],
+    node: AggregateSnapshot,
+    dependencies: list[str],
+    node_by_module: Mapping[str, AggregateSnapshot],
+    contracts_by_module: Mapping[str, tuple[Mapping[str, Any], Mapping[str, Any]]],
+) -> str:
+    dependency_outputs: dict[str, Any] = {}
+    dependency_interfaces: dict[str, Any] = {}
+    for dependency in sorted(dependencies):
+        dependency_node = node_by_module.get(dependency)
+        dependency_contract = contracts_by_module.get(dependency)
+        if dependency_node is None or dependency_contract is None:
+            return ""
+        output_hashes = dict(dependency_node.payload.get("output_hashes") or {})
+        if not output_hashes:
+            return ""
+        dependency_outputs[dependency] = output_hashes
+        dependency_interfaces[dependency] = {
+            "contract_hash": str(dependency_contract[0].get("sha256") or ""),
+            "contract_file_hashes": dict(dependency_contract[1].get("contract_file_hashes") or {}),
+        }
+    integration = dict(dict(artifact.get("submission") or {}).get("integration") or {})
+    integration_hashes = {
+        path: str(dict(artifact.get("contract_file_hashes") or {}).get(path) or "")
+        for path in list(integration.get("frozen_contract") or [])
+    }
+    try:
+        return candidate_reuse_fingerprint(
+            unit_contract_hash=str(contract_ref.get("sha256") or ""),
+            relevant_requirements_hash=_stable_json_hash(list(contract.get("covers") or [])),
+            relevant_evidence_hash=_stable_json_hash(list(contract.get("evidence") or [])),
+            global_constraint_hash=str(node.payload.get("global_constraint_hash") or ""),
+            owned_area_hash=_stable_json_hash(dict(contract.get("paths") or {})),
+            dependency_set_hash=_stable_json_hash(sorted(dependencies)),
+            dependency_interface_hash=_stable_json_hash(dependency_interfaces),
+            dependency_output_hash=_stable_json_hash(dependency_outputs),
+            integration_contract_subset_hash=_stable_json_hash(
+                {
+                    "covers": list(integration.get("covers") or []),
+                    "contract_file_hashes": integration_hashes,
+                }
+            ),
+            environment_policy_hash=str(node.payload.get("environment_fingerprint") or ""),
+        )
+    except ValueError:
+        return ""
+
+
+def _transplant_skeleton_candidate(
+    *,
+    architecture: ArchitectureArtifactService,
+    source_node: AggregateSnapshot,
+    target_node: AggregateSnapshot,
+    source_candidate_ref: Mapping[str, Any],
+    source_candidate_digest: str,
+    target_contract_ref: Mapping[str, Any],
+    target_fingerprint: str,
+    baseline: Mapping[str, Any],
+) -> tuple[ArtifactRef, str, str]:
+    source_candidate = dict(architecture.artifacts.read_json(source_candidate_ref))
+    source_base = str(source_candidate.get("base_sha") or "")
+    changed_paths = [str(item) for item in list(source_candidate.get("changed_paths") or [])]
+    source_git = Path(str(source_node.payload.get("common_git_dir") or ""))
+    target_worktree = Path(str(target_node.payload.get("workspace_path") or ""))
+    if not source_base or not changed_paths or not source_git.is_dir() or not target_worktree.is_dir():
+        raise ValueError("reusable skeleton candidate has incomplete Git provenance")
+    path_policy = dict(target_node.payload.get("path_policy") or {})
+    _validate_skeleton_candidate_paths(changed_paths, path_policy)
+    candidate_key = _stable_json_hash(
+        {
+            "source_candidate_ref": str(source_candidate_ref.get("sha256") or ""),
+            "target_contract_ref": str(target_contract_ref.get("sha256") or ""),
+            "target_fingerprint": target_fingerprint,
+        }
+    )
+    existing = _find_candidate_commit(target_worktree, candidate_key)
+    if existing:
+        candidate_digest = existing
+        target_base = _git(target_worktree, "rev-parse", f"{existing}^").strip()
+    else:
+        if _git(target_worktree, "status", "--porcelain").strip():
+            raise RuntimeError("target worktree is dirty before candidate reuse")
+        completed = subprocess.run(
+            [
+                "git",
+                f"--git-dir={source_git}",
+                "diff",
+                "--binary",
+                source_base,
+                source_candidate_digest,
+                "--",
+                *changed_paths,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0 or not completed.stdout:
+            raise RuntimeError(completed.stderr.decode("utf-8", errors="replace") or "reusable candidate diff is empty")
+        checked = subprocess.run(
+            ["git", "-C", str(target_worktree), "apply", "--check", "--binary", "-"],
+            input=completed.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if checked.returncode != 0:
+            raise RuntimeError(checked.stderr.decode("utf-8", errors="replace") or "reusable candidate does not apply")
+        applied = subprocess.run(
+            ["git", "-C", str(target_worktree), "apply", "--index", "--binary", "-"],
+            input=completed.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if applied.returncode != 0:
+            raise RuntimeError(applied.stderr.decode("utf-8", errors="replace") or "failed to apply reusable candidate")
+        target_base = str(baseline.get("base_sha") or "")
+        actual_paths = git_changed_paths(target_worktree, target_base)
+        _validate_skeleton_candidate_paths(actual_paths, path_policy)
+        _git(
+            target_worktree,
+            "-c",
+            "user.name=Pal Minion",
+            "-c",
+            "user.email=minion@localhost",
+            "commit",
+            "-m",
+            f"minion reused candidate {target_node.aggregate_id}\n\nPal-Candidate-Key: {candidate_key}",
+        )
+        candidate_digest = _git(target_worktree, "rev-parse", "HEAD").strip()
+        changed_paths = actual_paths
+    candidate = {
+        "schema_version": "1",
+        "candidate_digest": candidate_digest,
+        "base_sha": target_base,
+        "parent_candidate_sha": "",
+        "module_contract_hash": str(target_contract_ref.get("sha256") or ""),
+        "dependency_output_hashes": dict(baseline.get("dependency_output_hashes") or {}),
+        "environment_fingerprint": str(target_node.payload.get("environment_fingerprint") or ""),
+        "workspace_fingerprint": workspace_content_fingerprint(target_worktree),
+        "changed_paths": changed_paths,
+        "candidate_key": candidate_key,
+        "reused_from_candidate": str(source_candidate_ref.get("sha256") or ""),
+    }
+    ref = architecture.artifacts.put_json(
+        candidate,
+        artifact_type="CandidateSnapshotArtifact",
+        child_refs=(
+            (str(source_candidate_ref["sha256"]), "reuses"),
+            (str(target_contract_ref["sha256"]), "module_contract"),
+        ),
+    )
+    return ref, candidate_digest, target_base
 
 
 def _candidate_reuse_signature(
@@ -1459,7 +1819,9 @@ async def _wait_for_process_group_exit(process_group: int, timeout_seconds: floa
 
 
 def git_changed_paths(worktree: Path, base_sha: str) -> list[str]:
-    output = _git_bytes(worktree, "diff", "--name-only", "-z", base_sha, "--")
+    # Report both sides of a rename so moving a frozen/reference-only path into
+    # an owned scope cannot bypass the path policy.
+    output = _git_bytes(worktree, "diff", "--name-only", "--no-renames", "-z", base_sha, "--")
     tracked = [item.decode("utf-8", errors="surrogateescape") for item in output.split(b"\0") if item]
     untracked_output = _git_bytes(worktree, "ls-files", "--others", "--exclude-standard", "-z")
     untracked = [item.decode("utf-8", errors="surrogateescape") for item in untracked_output.split(b"\0") if item]

@@ -202,6 +202,39 @@ class MinionV2ExecutionTests(unittest.TestCase):
 
         self.assertEqual(set(queued), set(compilation.unit_node_ids.values()))
 
+    def test_integration_dependencies_preserve_topological_merge_order(self) -> None:
+        manifest = self._manifest()
+        payload = self.store.read_json(manifest)
+        contracts = [self.store.read_json(ref) for ref in payload["unit_contract_refs"]]
+        refs_by_name = {
+            str(contract["unit_id"]): ref
+            for contract, ref in zip(contracts, payload["unit_contract_refs"], strict=True)
+        }
+        topology = self.architecture.publish_fragment(
+            {"depends_on": {"a": ["b"], "b": []}},
+            artifact_type="TopologyArtifact",
+        )
+        reordered = self.architecture.publish_manifest(
+            {
+                **payload,
+                "unit_contract_refs": [refs_by_name["a"], refs_by_name["b"]],
+                "topology_ref": topology.to_dict(),
+            }
+        )
+        compilation = ExecutionCompiler(self.repository, self.architecture).compile_epoch(
+            workflow_id="wf_topological_merge",
+            epoch_id="epoch_topological_merge",
+            manifest_ref=reordered,
+        )
+        integration = self.repository.read_snapshot(
+            AggregateType.DAG_NODE_RUN, compilation.integration_node_id
+        )
+        assert integration is not None
+        self.assertEqual(
+            integration.payload["dependency_node_ids"],
+            [compilation.unit_node_ids["b"], compilation.unit_node_ids["a"]],
+        )
+
     def test_replan_reuses_only_exactly_matching_accepted_candidates(self) -> None:
         manifest = self._manifest()
         first = ExecutionCompiler(self.repository, self.architecture).compile_epoch(
@@ -462,6 +495,97 @@ class MinionV2ExecutionTests(unittest.TestCase):
         self.assertFalse(locks.is_held("node_reject_candidate"))
         snapshot(contract_hash=contract.sha256)
         self.assertFalse(locks.is_held("node_reject_candidate"))
+
+    def test_skeleton_candidate_rejects_frozen_reference_and_unowned_changes(self) -> None:
+        cases = {
+            "frozen rename": (
+                lambda root: subprocess.run(
+                    ["git", "mv", "include/contract.h", "src/contract.h"], cwd=root, check=True
+                ),
+                "frozen architecture contracts",
+            ),
+            "reference write": (
+                lambda root: (root / "reference" / "api.h").write_text(
+                    "changed reference\n", encoding="utf-8"
+                ),
+                "reference-only paths",
+            ),
+            "outside write": (
+                lambda root: (root / "docs.txt").write_text("outside\n", encoding="utf-8"),
+                "outside its owned",
+            ),
+        }
+        for index, (name, (mutate, error)) in enumerate(cases.items()):
+            with self.subTest(name=name):
+                worktree = self.runtime_root / f"skeleton_candidate_{index}"
+                worktree.mkdir()
+                subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+                subprocess.run(["git", "config", "user.name", "Test"], cwd=worktree, check=True)
+                subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+                for directory in ("include", "reference", "src", "tests"):
+                    (worktree / directory).mkdir()
+                (worktree / "include" / "contract.h").write_text("contract\n", encoding="utf-8")
+                (worktree / "reference" / "api.h").write_text("reference\n", encoding="utf-8")
+                (worktree / "src" / "owned.cpp").write_text("base\n", encoding="utf-8")
+                subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+                subprocess.run(["git", "commit", "-qm", "base"], cwd=worktree, check=True)
+                base_sha = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+                ).strip()
+                mutate(worktree)
+
+                node_id = f"node_skeleton_candidate_{index}"
+                contract = self.store.put_json(
+                    {"module_name": name}, artifact_type="ArchitectureSkeletonModuleContractArtifact"
+                )
+                self.repository.dispatch(
+                    ActionEnvelope(
+                        action_type="CREATE_NODE_RUN",
+                        workflow_id="wf_skeleton_candidate",
+                        aggregate_type=AggregateType.DAG_NODE_RUN,
+                        aggregate_id=node_id,
+                        actor="test",
+                        expected_version=0,
+                        idempotency_key=f"{node_id}:create",
+                        payload={
+                            "unit_contract_ref": contract.to_dict(),
+                            "epoch_id": "epoch_skeleton_candidate",
+                            "environment_fingerprint": "env-hash",
+                        },
+                    )
+                )
+                lease = self.repository.claim_lease(f"worktree:{node_id}", f"worker_{index}", ttl_seconds=60)
+                locks = WorkspaceLockRegistry()
+                quiesced = NodeQuiescer(
+                    self.repository, _StoppedProcessController(), locks
+                ).quiesce(
+                    node_run_id=node_id,
+                    worker_id=lease.owner_id,
+                    lease_resource_key=lease.resource_key,
+                    fencing_token=lease.fencing_token,
+                    worktree=worktree,
+                )
+                with self.assertRaisesRegex(ValueError, error):
+                    CandidateSnapshotService(self.repository, self.store, locks).create_candidate(
+                        node_run_id=node_id,
+                        worker_id=lease.owner_id,
+                        lease_resource_key=lease.resource_key,
+                        fencing_token=lease.fencing_token,
+                        worktree=worktree,
+                        expected_workspace_fingerprint=quiesced.workspace_fingerprint,
+                        reference_only_paths=[],
+                        path_policy={
+                            "frozen_contract": ["include/contract.h"],
+                            "reference_only": ["reference/api.h"],
+                            "owned_impl": [{"kind": "directory", "path": "src"}],
+                            "owned_test": [{"kind": "directory", "path": "tests"}],
+                        },
+                        base_sha=base_sha,
+                        unit_contract_hash=contract.sha256,
+                        dependency_output_hashes={},
+                        environment_fingerprint="env-hash",
+                    )
+                self.assertFalse(locks.is_held(node_id))
 
     def _accept_node(self, node_id: str) -> None:
         dummy = self.store.put_json({"node_id": node_id}, artifact_type="TestArtifact")

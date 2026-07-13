@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 5
+MINION_V2_SCHEMA_VERSION = 6
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -234,6 +234,23 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             metrics_json TEXT NOT NULL DEFAULT '{}',
             last_progress_event_id TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS minion_v2_channel_bindings (
+            actor_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(actor_id, channel_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS minion_v2_artifact_aliases (
+            actor_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            alias TEXT NOT NULL,
+            artifact_sha256 TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(actor_id, channel_id, alias)
         );
 
         CREATE TABLE IF NOT EXISTS minion_v2_node_projection (
