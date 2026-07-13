@@ -5,9 +5,7 @@ domain_keywords = ["general", "generic", "task"]
 workflow_template = "contract_dag.v2"
 
 [roles]
-requirements = "general.requirements_analyst"
-research = "general.researcher"
-planner = "general.contract_planner"
+architect = "general.architect"
 architecture_reviewer = "general.architecture_reviewer"
 producer = "generic"
 repair = "generic"
@@ -15,7 +13,6 @@ verifier = "general.verifier"
 
 [builders]
 requirements = "requirements.v2"
-evidence = "evidence_catalog.v2"
 contract = "contract_sketch.v2"
 verification = "verification.v2"
 

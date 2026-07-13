@@ -62,7 +62,7 @@ WORKSPACE_FILE_TOOL_SPECS: dict[str, dict[str, Any]] = {
         "name": "op_file_write",
         "description": (
             "Use this first for creating, overwriting, or appending UTF-8 text files under the current project repo; do not use op_exec_shell with tee/echo/printf redirection when this tool is visible. "
-            "Create, overwrite, or append to a UTF-8 text file under the current project repo. "
+            "Set mode to create, overwrite, or append for a UTF-8 text file under the current project repo. "
             "Create mode fails if the file exists. Overwrite and append require a current prior op_file_read snapshot."
         ),
         "parameters_schema": {

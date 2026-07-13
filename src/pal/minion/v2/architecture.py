@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+import re
 from typing import Any, Mapping
 from datetime import datetime, timezone
 
@@ -36,9 +37,149 @@ class UnitBehaviorKind(StrEnum):
 
 class ArchitectureFindingKind(StrEnum):
     REQUIREMENTS_DEFECT = "requirements_defect"
-    EVIDENCE_GAP = "evidence_gap"
     CONTRACT_DEFECT = "contract_defect"
     ARCHITECTURE_DEFECT = "architecture_defect"
+
+
+REVISION_TARGET_SECTIONS = frozenset(
+    {
+        "requirements",
+        "constraint",
+        "design_decision",
+        "gate_check",
+        "unit",
+        "cross_unit_contract",
+        "topology",
+        "integration_contract",
+        "assumption_ledger",
+        "risk_ledger",
+    }
+)
+REVISION_TARGET_OPERATIONS = frozenset({"create", "update", "delete"})
+
+
+@dataclass(frozen=True)
+class ArchitectureRevisionTarget:
+    """A stable semantic location that a revision may change.
+
+    The target deliberately contains no artifact handle or JSON pointer. IDs and
+    field names survive content-addressed artifact replacement; the manager
+    resolves them against the current manifest before binding the revision.
+    """
+
+    section: str
+    target_id: str
+    fields: tuple[str, ...] = ()
+    operation: str = "update"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "section": self.section,
+            "id": self.target_id,
+            "fields": list(self.fields),
+            "operation": self.operation,
+        }
+
+
+def normalize_revision_targets(values: Any) -> tuple[ArchitectureRevisionTarget, ...]:
+    """Validate and deduplicate stable revision targets in input order."""
+
+    result: list[ArchitectureRevisionTarget] = []
+    seen: set[tuple[str, str, tuple[str, ...], str]] = set()
+    for raw in list(values or []):
+        if not isinstance(raw, Mapping):
+            raise ValueError("revision target must be an object")
+        section = str(raw.get("section") or "").strip()
+        target_id = str(raw.get("id") or "").strip()
+        operation = str(raw.get("operation") or "update").strip()
+        fields = tuple(dict.fromkeys(str(item).strip() for item in list(raw.get("fields") or []) if str(item).strip()))
+        if section not in REVISION_TARGET_SECTIONS:
+            raise ValueError(f"invalid revision target section: {section or '<empty>'}")
+        if not target_id:
+            raise ValueError(f"revision target {section} requires a stable id")
+        if operation not in REVISION_TARGET_OPERATIONS:
+            raise ValueError(f"invalid revision target operation: {operation}")
+        target = ArchitectureRevisionTarget(section, target_id, fields, operation)
+        key = (target.section, target.target_id, target.fields, target.operation)
+        if key not in seen:
+            result.append(target)
+            seen.add(key)
+    return tuple(result)
+
+
+def contract_revision_changes(
+    base: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+) -> tuple[ArchitectureRevisionTarget, ...]:
+    """Return semantic CRUD changes between two Contract Builder payloads."""
+
+    changes: list[ArchitectureRevisionTarget] = []
+
+    def stable_collection(section: str, field_name: str, id_field: str = "id") -> None:
+        before = {
+            str(dict(item or {}).get(id_field) or ""): dict(item or {})
+            for item in list(base.get(field_name) or [])
+            if str(dict(item or {}).get(id_field) or "")
+        }
+        after = {
+            str(dict(item or {}).get(id_field) or ""): dict(item or {})
+            for item in list(candidate.get(field_name) or [])
+            if str(dict(item or {}).get(id_field) or "")
+        }
+        for item_id in sorted(set(before) | set(after)):
+            old = before.get(item_id)
+            new = after.get(item_id)
+            if old is None:
+                changes.append(ArchitectureRevisionTarget(section, item_id, tuple(sorted(new or {})), "create"))
+            elif new is None:
+                changes.append(ArchitectureRevisionTarget(section, item_id, (), "delete"))
+            elif old != new:
+                fields = tuple(sorted(key for key in set(old) | set(new) if old.get(key) != new.get(key)))
+                changes.append(ArchitectureRevisionTarget(section, item_id, fields, "update"))
+
+    stable_collection("constraint", "global_constraints")
+    stable_collection("design_decision", "design_decisions")
+    stable_collection("gate_check", "gate_checks")
+    stable_collection("unit", "units", "unit_id")
+    stable_collection("cross_unit_contract", "cross_unit_contracts")
+
+    before_dependencies = dict(dict(base.get("topology") or {}).get("depends_on") or {})
+    after_dependencies = dict(dict(candidate.get("topology") or {}).get("depends_on") or {})
+    for unit_id in sorted(set(before_dependencies) | set(after_dependencies)):
+        old = before_dependencies.get(unit_id)
+        new = after_dependencies.get(unit_id)
+        if old is None:
+            changes.append(ArchitectureRevisionTarget("topology", str(unit_id), ("depends_on",), "create"))
+        elif new is None:
+            changes.append(ArchitectureRevisionTarget("topology", str(unit_id), (), "delete"))
+        elif old != new:
+            changes.append(ArchitectureRevisionTarget("topology", str(unit_id), ("depends_on",), "update"))
+
+    for section, field_name, target_id in (
+        ("integration_contract", "integration_contract", "integration"),
+        ("assumption_ledger", "assumption_ledger", "assumptions"),
+        ("risk_ledger", "risk_ledger", "risks"),
+    ):
+        old = dict(base.get(field_name) or {})
+        new = dict(candidate.get(field_name) or {})
+        if old != new:
+            fields = tuple(sorted(key for key in set(old) | set(new) if old.get(key) != new.get(key)))
+            changes.append(ArchitectureRevisionTarget(section, target_id, fields, "update"))
+    return tuple(changes)
+
+
+def revision_target_allows(
+    target: ArchitectureRevisionTarget,
+    allowed: tuple[ArchitectureRevisionTarget, ...],
+) -> bool:
+    """Whether an actual semantic change is inside a manager-issued scope."""
+
+    for scope in allowed:
+        if (scope.section, scope.target_id, scope.operation) != (target.section, target.target_id, target.operation):
+            continue
+        if not scope.fields or set(target.fields).issubset(scope.fields):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -75,6 +216,7 @@ class ArchitectureFinding:
     summary: str
     refs: tuple[str, ...] = ()
     severity: str = "error"
+    revision_targets: tuple[ArchitectureRevisionTarget, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +224,7 @@ class ArchitectureFinding:
             "summary": self.summary,
             "refs": list(self.refs),
             "severity": self.severity,
+            "revision_targets": [item.to_dict() for item in self.revision_targets],
         }
 
 
@@ -504,6 +647,8 @@ def validate_unit_contract(
     *,
     complexity_policy: ComplexityBudgetPolicy,
 ) -> dict[str, Any]:
+    if "evidence_ids" in payload:
+        raise ValueError("unit contracts must not contain architect evidence_ids")
     forbidden = {
         "milestones",
         "milestone",
@@ -564,7 +709,6 @@ def validate_unit_contract(
             "compatibility": list(payload.get("compatibility") or []),
             "dependency_constraints": list(payload.get("dependency_constraints") or []),
             "requirement_ids": _text_list(payload.get("requirement_ids")),
-            "evidence_ids": _text_list(payload.get("evidence_ids")),
             "verification_obligations": list(payload.get("verification_obligations") or []),
             "complexity_budget": budget,
             "split_conditions": split_conditions,
@@ -575,9 +719,10 @@ def validate_unit_contract(
 
 
 def validate_architecture_manifest(payload: Mapping[str, Any]) -> dict[str, Any]:
+    if "evidence_catalog_ref" in payload:
+        raise ValueError("architecture manifests must not contain an evidence catalog")
     required_single = (
         "requirements_ref",
-        "evidence_catalog_ref",
         "global_constraints_ref",
         "design_decisions_ref",
         "gate_checks_ref",
@@ -632,42 +777,38 @@ def review_architecture_contract(
     except ValueError as exc:
         findings.append(ArchitectureFinding(ArchitectureFindingKind.REQUIREMENTS_DEFECT, str(exc)))
         requirements = {"requirements": []}
-    evidence_payload = dict(fragments.get("evidence_catalog") or {})
-    try:
-        evidence = validate_evidence_catalog(
-            evidence_payload,
-            research_mode=ResearchMode(str(evidence_payload.get("research_mode") or "local_only")),
-        )
-    except (ValueError, TypeError) as exc:
-        findings.append(ArchitectureFinding(ArchitectureFindingKind.EVIDENCE_GAP, str(exc)))
-        evidence = {"evidence": []}
     modules: list[dict[str, Any]] = []
     for raw_module in list(fragments.get("unit_contract") or []):
         try:
             modules.append(validate_unit_contract(raw_module, complexity_policy=complexity_policy))
         except ValueError as exc:
             unit_id = str(dict(raw_module or {}).get("unit_id") or "unknown")
-            findings.append(ArchitectureFinding(ArchitectureFindingKind.CONTRACT_DEFECT, str(exc), (unit_id,)))
+            findings.append(
+                ArchitectureFinding(
+                    ArchitectureFindingKind.CONTRACT_DEFECT,
+                    str(exc),
+                    (unit_id,),
+                    revision_targets=(ArchitectureRevisionTarget("unit", unit_id, (), "update"),),
+                )
+            )
     requirement_ids = {str(item["requirement_id"]) for item in requirements["requirements"]}
-    hard_requirement_ids = {
-        str(item["requirement_id"])
-        for item in requirements["requirements"]
-        if str(item.get("strength")) == RequirementStrength.HARD
-    }
-    evidence_ids = {str(item["evidence_id"]) for item in evidence["evidence"]}
-    evidence_requirement_ids = {
-        requirement_id
-        for item in evidence["evidence"]
-        for requirement_id in list(item.get("supports_requirement_ids") or [])
-    }
     covered_requirements = {requirement_id for module in modules for requirement_id in module["requirement_ids"]}
     unknown_requirement_refs = covered_requirements - requirement_ids
     if unknown_requirement_refs:
+        affected_units = [
+            str(module["unit_id"])
+            for module in modules
+            if set(module["requirement_ids"]) & unknown_requirement_refs
+        ]
         findings.append(
             ArchitectureFinding(
                 ArchitectureFindingKind.CONTRACT_DEFECT,
                 "unit contracts reference unknown requirements",
                 tuple(sorted(unknown_requirement_refs)),
+                revision_targets=tuple(
+                    ArchitectureRevisionTarget("unit", unit_id, ("requirement_ids",), "update")
+                    for unit_id in sorted(affected_units)
+                ),
             )
         )
     missing_coverage = requirement_ids - covered_requirements
@@ -677,34 +818,156 @@ def review_architecture_contract(
                 ArchitectureFindingKind.CONTRACT_DEFECT,
                 "requirements are not owned by any unit contract",
                 tuple(sorted(missing_coverage)),
-            )
-        )
-    missing_hard_evidence = hard_requirement_ids - evidence_requirement_ids
-    if missing_hard_evidence:
-        findings.append(
-            ArchitectureFinding(
-                ArchitectureFindingKind.EVIDENCE_GAP,
-                "hard requirements lack supporting evidence",
-                tuple(sorted(missing_hard_evidence)),
-            )
-        )
-    unknown_evidence_refs = {
-        evidence_id for module in modules for evidence_id in module["evidence_ids"] if evidence_id not in evidence_ids
-    }
-    if unknown_evidence_refs:
-        findings.append(
-            ArchitectureFinding(
-                ArchitectureFindingKind.EVIDENCE_GAP,
-                "unit contracts reference unknown evidence",
-                tuple(sorted(unknown_evidence_refs)),
+                revision_targets=tuple(
+                    ArchitectureRevisionTarget("unit", str(module["unit_id"]), ("requirement_ids",), "update")
+                    for module in modules
+                ),
             )
         )
     topology = dict(fragments.get("topology") or {})
     unit_ids = {str(module["unit_id"]) for module in modules}
     topology_findings = _validate_topology(topology, unit_ids)
     findings.extend(topology_findings)
+    findings.extend(_review_complexity_budget(modules))
+    findings.extend(
+        _review_declared_interface_handoffs(
+            modules,
+            [dict(item or {}) for item in list(fragments.get("cross_unit_contract") or [])],
+        )
+    )
     verdict = "PASS" if not findings else "FAIL"
     return ArchitectureReviewResult(verdict=verdict, findings=tuple(findings))
+
+
+def _review_complexity_budget(modules: list[Mapping[str, Any]]) -> list[ArchitectureFinding]:
+    findings: list[ArchitectureFinding] = []
+    for module in modules:
+        violations = _text_list(module.get("complexity_policy_violations"))
+        if not violations or module.get("complexity_waiver_ref"):
+            continue
+        unit_id = str(module.get("unit_id") or "unknown")
+        findings.append(
+            ArchitectureFinding(
+                ArchitectureFindingKind.CONTRACT_DEFECT,
+                "module exceeds its complexity budget without a human waiver; split it before execution: " + "; ".join(violations),
+                (unit_id, *violations),
+                revision_targets=(
+                    ArchitectureRevisionTarget(
+                        "unit",
+                        unit_id,
+                        ("complexity_budget", "split_conditions"),
+                        "update",
+                    ),
+                ),
+            )
+        )
+    return findings
+
+
+def _review_declared_interface_handoffs(
+    modules: list[Mapping[str, Any]],
+    cross_contracts: list[Mapping[str, Any]],
+) -> list[ArchitectureFinding]:
+    """Check that a consumed internal interface has a real provider and handoff.
+
+    `consumed_interfaces[].ownership` already names the owning module in the
+    contract schema. Requiring a matching producer/consumer contract turns
+    that field into an auditable dependency rather than an aspirational note.
+    """
+
+    findings: list[ArchitectureFinding] = []
+    module_by_id = {str(item.get("unit_id") or ""): item for item in modules}
+    for consumer in modules:
+        consumer_id = str(consumer.get("unit_id") or "")
+        for consumed in list(consumer.get("consumed_interfaces") or []):
+            interface = dict(consumed or {})
+            provider_id = str(interface.get("ownership") or "").strip()
+            interface_name = str(interface.get("name") or "").strip()
+            if not consumer_id or not interface_name or provider_id not in module_by_id:
+                continue
+            provider = module_by_id[provider_id]
+            pair_contracts = [
+                contract
+                for contract in cross_contracts
+                if str(contract.get("producer") or "") == provider_id
+                and str(contract.get("consumer") or "") == consumer_id
+            ]
+            matching_contract = next(
+                (
+                    contract
+                    for contract in pair_contracts
+                    if _interface_names_compatible(interface_name, str(contract.get("interface") or ""))
+                ),
+                None,
+            )
+            if matching_contract is None:
+                if pair_contracts:
+                    contract = pair_contracts[0]
+                    contract_id = str(contract.get("id") or _revision_cross_contract_id(provider_id, consumer_id))
+                    findings.append(
+                        ArchitectureFinding(
+                            ArchitectureFindingKind.CONTRACT_DEFECT,
+                            f"cross-unit contract {contract_id} does not describe {consumer_id}'s consumed interface {interface_name} from {provider_id}",
+                            (provider_id, consumer_id, contract_id, interface_name),
+                            revision_targets=(
+                                ArchitectureRevisionTarget(
+                                    "cross_unit_contract",
+                                    contract_id,
+                                    ("interface", "data_shape", "ownership_transfer", "lifecycle_handoff", "error_behavior"),
+                                    "update",
+                                ),
+                            ),
+                        )
+                    )
+                else:
+                    contract_id = _revision_cross_contract_id(provider_id, consumer_id)
+                    findings.append(
+                        ArchitectureFinding(
+                            ArchitectureFindingKind.CONTRACT_DEFECT,
+                            f"{consumer_id} consumes {interface_name} from {provider_id} without a directional cross-unit contract",
+                            (provider_id, consumer_id, interface_name),
+                            revision_targets=(
+                                ArchitectureRevisionTarget("cross_unit_contract", contract_id, (), "create"),
+                            ),
+                        )
+                    )
+            provided = [dict(item or {}) for item in list(provider.get("provided_interfaces") or [])]
+            if not any(_interface_names_compatible(interface_name, str(item.get("name") or "")) for item in provided):
+                findings.append(
+                    ArchitectureFinding(
+                        ArchitectureFindingKind.CONTRACT_DEFECT,
+                        f"{consumer_id} consumes {interface_name} from {provider_id}, but {provider_id} does not declare a compatible provided interface",
+                        (provider_id, consumer_id, interface_name),
+                        revision_targets=(
+                            ArchitectureRevisionTarget("unit", provider_id, ("provided_interfaces",), "update"),
+                        ),
+                    )
+                )
+    return findings
+
+
+def _revision_cross_contract_id(producer_id: str, consumer_id: str) -> str:
+    def normalize(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", value.lower().removeprefix("ohos_")).strip("_")
+
+    return f"xcu_{normalize(producer_id)}_to_{normalize(consumer_id)}"
+
+
+def _interface_names_compatible(expected: str, actual: str) -> bool:
+    if not expected or not actual:
+        return False
+    ignored = {"ohos", "native", "typed", "ops", "interface", "lifecycle", "the", "and"}
+    expected_tokens = {
+        token
+        for token in re.findall(r"[a-z0-9]+", expected.lower())
+        if token not in ignored
+    }
+    actual_tokens = {
+        token
+        for token in re.findall(r"[a-z0-9]+", actual.lower())
+        if token not in ignored
+    }
+    return bool(expected_tokens) and expected_tokens.issubset(actual_tokens)
 
 
 def compile_architecture_markdown(manifest: Mapping[str, Any], fragments: Mapping[str, Any]) -> str:
@@ -731,7 +994,6 @@ def compile_architecture_markdown(manifest: Mapping[str, Any], fragments: Mappin
                 f"- Starts after: {dependencies}",
                 f"- Owns: {', '.join(_text_list(module.get('owned_area'))) or 'none'}",
                 f"- Requirements: {', '.join(_text_list(module.get('requirement_ids'))) or 'none'}",
-                f"- Evidence: {', '.join(_text_list(module.get('evidence_ids'))) or 'none'}",
                 "- Invariants:",
             ]
         )
@@ -754,20 +1016,35 @@ def _validate_topology(topology: Mapping[str, Any], unit_ids: set[str]) -> tuple
     }
     findings: list[ArchitectureFinding] = []
     if set(depends_on) != unit_ids:
+        missing_nodes = sorted(unit_ids - set(depends_on))
+        extra_nodes = sorted(set(depends_on) - unit_ids)
         findings.append(
             ArchitectureFinding(
                 ArchitectureFindingKind.ARCHITECTURE_DEFECT,
                 "topology node set does not match unit contracts",
                 tuple(sorted(set(depends_on) ^ unit_ids)),
+                revision_targets=tuple(
+                    [ArchitectureRevisionTarget("topology", unit_id, ("depends_on",), "create") for unit_id in missing_nodes]
+                    + [ArchitectureRevisionTarget("topology", unit_id, (), "delete") for unit_id in extra_nodes]
+                ),
             )
         )
     unknown = {dependency for dependencies in depends_on.values() for dependency in dependencies if dependency not in unit_ids}
     if unknown:
+        affected_nodes = sorted(
+            unit_id
+            for unit_id, dependencies in depends_on.items()
+            if any(dependency in unknown for dependency in dependencies)
+        )
         findings.append(
             ArchitectureFinding(
                 ArchitectureFindingKind.ARCHITECTURE_DEFECT,
                 "topology references unknown dependency nodes",
                 tuple(sorted(unknown)),
+                revision_targets=tuple(
+                    ArchitectureRevisionTarget("topology", unit_id, ("depends_on",), "update")
+                    for unit_id in affected_nodes
+                ),
             )
         )
     indegree = {unit_id: 0 for unit_id in unit_ids}
@@ -789,7 +1066,17 @@ def _validate_topology(topology: Mapping[str, Any], unit_ids: set[str]) -> tuple
                 ready.sort()
     if visited != len(unit_ids):
         cycle_nodes = tuple(sorted(unit_id for unit_id, count in indegree.items() if count > 0))
-        findings.append(ArchitectureFinding(ArchitectureFindingKind.ARCHITECTURE_DEFECT, "topology contains a cycle", cycle_nodes))
+        findings.append(
+            ArchitectureFinding(
+                ArchitectureFindingKind.ARCHITECTURE_DEFECT,
+                "topology contains a cycle",
+                cycle_nodes,
+                revision_targets=tuple(
+                    ArchitectureRevisionTarget("topology", unit_id, ("depends_on",), "update")
+                    for unit_id in cycle_nodes
+                ),
+            )
+        )
     return tuple(findings)
 
 

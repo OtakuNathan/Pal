@@ -7,7 +7,12 @@ import unittest
 from pathlib import Path
 
 from pal.llm.contracts import CanonicalToolCall
-from pal.minion.v2.contract_builder import contract_builder_tool_result, seed_contract_builder_draft
+from pal.minion.v2.contract_builder import (
+    CONTRACT_BUILDER_TOOL_SPECS,
+    contract_builder_tool_result,
+    seed_contract_builder_draft,
+)
+from pal.minion.scoped_execution import _WORKSPACE_TOOL_SPECS
 
 
 def _unit(unit_id: str) -> dict:
@@ -27,7 +32,6 @@ def _unit(unit_id: str) -> dict:
         "compatibility": [],
         "dependency_constraints": [],
         "requirement_ids": ["R-1"],
-        "evidence_ids": ["E-1"],
         "verification_obligations": ["Verify the output contract."],
         "complexity_budget": {
             "target_file_count": 1,
@@ -62,6 +66,61 @@ class ContractBuilderTests(unittest.TestCase):
             self.produced,
         )
 
+    def test_registered_builder_schemas_have_no_opaque_objects(self) -> None:
+        def opaque_paths(value: object, path: str) -> list[str]:
+            if isinstance(value, list):
+                return [item for index, child in enumerate(value) for item in opaque_paths(child, f"{path}[{index}]")]
+            if not isinstance(value, dict):
+                return []
+            found = []
+            if value.get("type") == "object":
+                additional = value.get("additionalProperties")
+                if "properties" not in value and not isinstance(additional, dict):
+                    found.append(path)
+            for key, child in value.items():
+                found.extend(opaque_paths(child, f"{path}.{key}"))
+            return found
+
+        opaque = [
+            path
+            for name, spec in CONTRACT_BUILDER_TOOL_SPECS.items()
+            for path in opaque_paths(spec["parameters_schema"], name)
+        ]
+        self.assertEqual(opaque, [])
+
+    def test_unit_kind_enum_is_visible_in_schema_and_description(self) -> None:
+        spec = CONTRACT_BUILDER_TOOL_SPECS["op_minion_contract_add_unit_outlines_batch"]
+        kind = spec["parameters_schema"]["properties"]["units"]["items"]["properties"]["unit_behavior_kind"]
+        expected = ["stateless", "resource_owner", "service", "workflow", "adapter"]
+        self.assertEqual(kind["enum"], expected)
+        for value in expected:
+            self.assertIn(value, spec["description"])
+
+    def test_all_scoped_tool_enum_values_are_named_in_descriptions(self) -> None:
+        gaps: list[str] = []
+
+        def inspect(value: object, *, description: str, path: str) -> None:
+            if isinstance(value, list):
+                for index, child in enumerate(value):
+                    inspect(child, description=description, path=f"{path}[{index}]")
+                return
+            if not isinstance(value, dict):
+                return
+            if isinstance(value.get("enum"), list):
+                missing = [str(item) for item in value["enum"] if str(item) not in description]
+                if missing:
+                    gaps.append(f"{path}: {', '.join(missing)}")
+            for key, child in value.items():
+                inspect(child, description=description, path=f"{path}.{key}")
+
+        for name, spec in _WORKSPACE_TOOL_SPECS.items():
+            inspect(
+                spec.get("parameters_schema") or {},
+                description=str(spec.get("description") or ""),
+                path=name,
+            )
+        self.assertEqual(gaps, [])
+
     def test_requirements_submit_is_builder_owned(self) -> None:
         replaced = self.call(
             "requirements",
@@ -75,124 +134,25 @@ class ContractBuilderTests(unittest.TestCase):
         self.assertEqual(payload["requirements"][0]["requirement_id"], "R-1")
         self.assertEqual(self.produced[-1]["role"], "primary")
 
-    def test_evidence_can_be_persisted_incrementally(self) -> None:
-        first = self.call(
-            "evidence",
-            "op_minion_evidence_add_batch",
-            {
-                "evidence": [
-                    {
-                        "evidence_id": "E-1",
-                        "source_kind": "local",
-                        "location": "src/a.py:1-3",
-                        "line_start": 1,
-                        "line_end": 3,
-                        "summary": "Defines the public contract.",
-                        "supports_requirement_ids": ["R-1"],
-                    }
-                ]
-            },
+    def test_architect_builder_exposes_contract_only(self) -> None:
+        self.assertTrue(self.call("architect", "op_minion_contract_read").ok)
+        rejected = self.call(
+            "architect",
+            "op_minion_requirements_replace_batch",
+            {"requirements": [{"statement": "Produce a report", "strength": "hard"}]},
         )
-        self.assertTrue(first.ok)
-        second = self.call(
-            "evidence",
-            "op_minion_evidence_add_batch",
-            {
-                "evidence": [
-                    {
-                        "evidence_id": "E-2",
-                        "source_kind": "local",
-                        "location": "src/b.py:4-8",
-                        "line_start": 4,
-                        "line_end": 8,
-                        "summary": "Shows the required lifecycle.",
-                        "supports_requirement_ids": ["R-1"],
-                    }
-                ]
-            },
-        )
-        self.assertTrue(second.ok)
-        submitted = self.call("evidence", "op_minion_evidence_submit")
-        self.assertTrue(submitted.ok)
-        payload = json.loads(Path(self.produced[-1]["path"]).read_text(encoding="utf-8"))
-        self.assertEqual([item["evidence_id"] for item in payload["evidence"]], ["E-1", "E-2"])
-
-        duplicate = self.call(
-            "evidence",
-            "op_minion_evidence_add_batch",
-            {"evidence": [{"evidence_id": "E-2", "source_kind": "local", "location": "x", "content_sha256": "a" * 64}]},
-        )
-        self.assertFalse(duplicate.ok)
-        self.assertIn("duplicate evidence_id", duplicate.text)
+        self.assertFalse(rejected.ok)
+        self.assertIn("not available to architect", rejected.text)
 
     def test_builder_rejects_missing_writable_artifact_stage(self) -> None:
         result = contract_builder_tool_result(
-            CanonicalToolCall(name="op_minion_evidence_add_batch", args={"evidence": []}),
-            {"contract_builder_stage": "evidence"},
+            CanonicalToolCall(name="op_minion_contract_read", args={}),
+            {"contract_builder_stage": "contract"},
             [],
         )
 
         self.assertFalse(result.ok)
         self.assertIn("requires artifact_stage_dir", result.text)
-
-    def test_evidence_builder_rejects_noncanonical_source_kind(self) -> None:
-        result = self.call(
-            "evidence",
-            "op_minion_evidence_add_batch",
-            {
-                "evidence": [
-                    {
-                        "evidence_id": "E-1",
-                        "source_kind": "reference",
-                        "location": "qtbase.patch:1-2",
-                        "line_start": 1,
-                        "line_end": 2,
-                        "summary": "Ambiguous source kinds must be corrected before submission.",
-                        "supports_requirement_ids": ["R-1"],
-                    }
-                ]
-            },
-        )
-
-        self.assertFalse(result.ok)
-        self.assertIn("invalid evidence source_kind: reference", result.text)
-
-    def test_evidence_submit_requires_complete_bound_requirement_coverage(self) -> None:
-        requirements = self.root / "requirements.json"
-        requirements.write_text(
-            json.dumps(
-                {
-                    "requirements": [
-                        {"requirement_id": "R-1"},
-                        {"requirement_id": "R-2"},
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        self.workspace["reference_paths"] = [{"name": "requirements", "path": str(requirements)}]
-        added = self.call(
-            "evidence",
-            "op_minion_evidence_add_batch",
-            {
-                "evidence": [
-                    {
-                        "evidence_id": "E-1",
-                        "source_kind": "local",
-                        "location": "src/a.py:1-2",
-                        "line_start": 1,
-                        "line_end": 2,
-                        "summary": "Supports only the first requirement.",
-                        "supports_requirement_ids": ["R-1"],
-                    }
-                ]
-            },
-        )
-
-        self.assertTrue(added.ok)
-        submitted = self.call("evidence", "op_minion_evidence_submit")
-        self.assertFalse(submitted.ok)
-        self.assertIn("requirements lack supporting evidence: R-2", submitted.text)
 
     def test_contract_builder_rejects_cycles_and_milestones(self) -> None:
         invalid = _unit("a")
@@ -252,11 +212,51 @@ class ContractBuilderTests(unittest.TestCase):
                         "finding_kind": "contract_defect",
                         "summary": "missing ownership",
                         "refs": ["R-1"],
+                        "revision_targets": [
+                            {"section": "unit", "id": "report", "fields": ["ownership"]}
+                        ],
                     }
                 ],
             },
         )
         self.assertTrue(valid.ok)
+
+    def test_scoped_revision_rejects_unmarked_semantic_drift(self) -> None:
+        base = {
+            "global_constraints": [{"id": "C-1", "constraint": "Keep ownership explicit."}],
+            "design_decisions": [],
+            "gate_checks": [],
+            "units": [_unit("foundation"), _unit("window")],
+            "cross_unit_contracts": [],
+            "topology": {"depends_on": {"foundation": [], "window": ["foundation"]}},
+            "integration_contract": {"depends_on": ["foundation", "window"]},
+            "assumption_ledger": {"assumptions": []},
+            "risk_ledger": {"risks": []},
+        }
+        self.workspace["contract_builder_stage"] = "contract"
+        seed_contract_builder_draft(
+            self.workspace,
+            base,
+            revision_scope={
+                "write_targets": [
+                    {"section": "unit", "id": "foundation", "fields": ["ownership"], "operation": "update"}
+                ]
+            },
+        )
+        scoped_read = self.call("contract", "op_minion_contract_revision_read")
+        self.assertTrue(scoped_read.ok, scoped_read.text)
+        self.assertEqual(scoped_read.structured["current_values"][0]["target"]["id"], "foundation")
+
+        allowed = _unit("foundation")
+        allowed["ownership"] = {"owner": "revised-foundation"}
+        self.assertTrue(
+            self.call("contract", "op_minion_contract_replace_unit_outlines_batch", {"units": [allowed]}).ok
+        )
+        forbidden = _unit("window")
+        forbidden["ownership"] = {"owner": "revised-window"}
+        result = self.call("contract", "op_minion_contract_replace_unit_outlines_batch", {"units": [forbidden]})
+        self.assertFalse(result.ok)
+        self.assertIn("outside its bound scope", result.text)
 
     def test_contract_submit_compiles_canonical_bundle(self) -> None:
         self.assertTrue(self.call("contract", "op_minion_contract_add_unit_outlines_batch", {"units": [_unit("report")]}).ok)

@@ -31,7 +31,6 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
 
         facts_ref, facts_digest = self.adapter.snapshot_candidate(
             workspace=facts,
-            owned_area=["artifact:facts"],
             reference_only_paths=[],
             unit_contract_hash="facts-contract",
             dependency_output_hashes={},
@@ -39,7 +38,6 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
         )
         report_ref, report_digest = self.adapter.snapshot_candidate(
             workspace=report,
-            owned_area=["artifact:report"],
             reference_only_paths=[],
             unit_contract_hash="report-contract",
             dependency_output_hashes={"facts": facts_digest},
@@ -70,23 +68,21 @@ class ArtifactBundleAdapterTests(unittest.TestCase):
         self.assertTrue((destination / "facts.json").is_file())
         self.assertTrue((destination / "checkin.json").is_file())
 
-    def test_candidate_enforces_owned_and_reference_only_paths(self) -> None:
+    def test_candidate_allows_workspace_files_and_enforces_reference_only_paths(self) -> None:
         workspace = self.root / "workspace"
         workspace.mkdir()
         (workspace / "private.json").write_text("{}", encoding="utf-8")
-        with self.assertRaisesRegex(ValueError, "ownership"):
+        ref, _ = self.adapter.snapshot_candidate(
+            workspace=workspace,
+            reference_only_paths=[],
+            unit_contract_hash="contract",
+            dependency_output_hashes={},
+            environment_fingerprint="test",
+        )
+        self.assertEqual({item["path"] for item in self.store.read_json(ref)["files"]}, {"private.json"})
+        with self.assertRaisesRegex(ValueError, "reference-only"):
             self.adapter.snapshot_candidate(
                 workspace=workspace,
-                owned_area=["public/**"],
-                reference_only_paths=[],
-                unit_contract_hash="contract",
-                dependency_output_hashes={},
-                environment_fingerprint="test",
-            )
-        with self.assertRaisesRegex(ValueError, "reference_only"):
-            self.adapter.snapshot_candidate(
-                workspace=workspace,
-                owned_area=["**"],
                 reference_only_paths=["private.json"],
                 unit_contract_hash="contract",
                 dependency_output_hashes={},

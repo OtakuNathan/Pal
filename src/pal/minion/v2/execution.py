@@ -476,16 +476,10 @@ def _candidate_reuse_signature(
     node_by_module: Mapping[str, AggregateSnapshot],
 ) -> str:
     requirement_ids = {str(item) for item in list(contract.get("requirement_ids") or [])}
-    evidence_ids = {str(item) for item in list(contract.get("evidence_ids") or [])}
     requirements = [
         item
         for item in list(dict(fragments.get("requirements") or {}).get("requirements") or [])
         if str(item.get("requirement_id") or "") in requirement_ids
-    ]
-    evidence = [
-        item
-        for item in list(dict(fragments.get("evidence_catalog") or {}).get("evidence") or [])
-        if str(item.get("evidence_id") or "") in evidence_ids
     ]
     dependency_modules = sorted(dependencies.get(unit_id) or [])
     dependency_interfaces = {
@@ -507,7 +501,7 @@ def _candidate_reuse_signature(
     return candidate_reuse_fingerprint(
         unit_contract_hash=str(contract_ref.get("sha256") or ""),
         relevant_requirements_hash=_stable_json_hash(requirements),
-        relevant_evidence_hash=_stable_json_hash(evidence),
+        relevant_evidence_hash=_stable_json_hash([]),
         global_constraint_hash=str(dict(manifest.get("global_constraints_ref") or {}).get("sha256") or ""),
         owned_area_hash=_stable_json_hash(list(contract.get("owned_area") or [])),
         dependency_set_hash=_stable_json_hash(dependency_modules),
@@ -702,23 +696,14 @@ class UnitWorkViewBuilder:
         fragments = self.architecture.load_manifest_fragments(manifest)
         unit_contract = self.architecture.artifacts.read_json(dict(node.payload["unit_contract_ref"]))
         requirement_ids = {str(item) for item in list(unit_contract.get("requirement_ids") or [])}
-        evidence_ids = {str(item) for item in list(unit_contract.get("evidence_ids") or [])}
         requirements = [
             item
             for item in list(dict(fragments.get("requirements") or {}).get("requirements") or [])
             if str(item.get("requirement_id") or "") in requirement_ids
         ]
-        evidence = [
-            item
-            for item in list(dict(fragments.get("evidence_catalog") or {}).get("evidence") or [])
-            if str(item.get("evidence_id") or "") in evidence_ids
-        ]
         found_requirement_ids = {str(item.get("requirement_id") or "") for item in requirements}
-        found_evidence_ids = {str(item.get("evidence_id") or "") for item in evidence}
         if found_requirement_ids != requirement_ids:
             raise ValueError(f"UnitWorkView lost requirements: {sorted(requirement_ids - found_requirement_ids)}")
-        if found_evidence_ids != evidence_ids:
-            raise ValueError(f"UnitWorkView lost architect evidence: {sorted(evidence_ids - found_evidence_ids)}")
         unit_id = str(unit_contract.get("unit_id") or "")
         cross_contracts = [
             item
@@ -732,7 +717,6 @@ class UnitWorkViewBuilder:
             "epoch_id": str(node.payload.get("epoch_id") or ""),
             "unit_contract": unit_contract,
             "requirements": requirements,
-            "evidence": evidence,
             "cross_unit_contracts": cross_contracts,
             "global_constraints": fragments.get("global_constraints"),
             "assumptions": fragments.get("assumption_ledger"),
@@ -805,7 +789,6 @@ class CandidateSnapshotService:
         fencing_token: int,
         worktree: Path,
         expected_workspace_fingerprint: str,
-        owned_area: list[str],
         reference_only_paths: list[str],
         base_sha: str,
         unit_contract_hash: str,
@@ -836,7 +819,7 @@ class CandidateSnapshotService:
             if before != expected_workspace_fingerprint:
                 raise RuntimeError("worktree changed after quiescing")
             changed_paths = git_changed_paths(worktree, base_sha)
-            _validate_changed_paths(changed_paths, owned_area, reference_only_paths)
+            _validate_reference_only_paths(changed_paths, reference_only_paths)
             if not changed_paths:
                 raise ValueError("candidate has no changes")
             candidate_key = hashlib.sha256(
@@ -1180,13 +1163,10 @@ def exclusive_workspace_lock(worktree: Path) -> Iterator[None]:
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
-def _validate_changed_paths(changed_paths: list[str], owned_area: list[str], reference_only_paths: list[str]) -> None:
+def _validate_reference_only_paths(changed_paths: list[str], reference_only_paths: list[str]) -> None:
     reference_violations = [path for path in changed_paths if _matches_any(path, reference_only_paths)]
-    outside_owned = [path for path in changed_paths if not _matches_any(path, owned_area)]
     if reference_violations:
         raise ValueError(f"candidate modified reference-only paths: {reference_violations}")
-    if outside_owned:
-        raise ValueError(f"candidate modified paths outside owned_area: {outside_owned}")
 
 
 def _matches_any(path: str, patterns: list[str]) -> bool:

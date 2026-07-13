@@ -48,7 +48,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         ref = MinionV2Catalog(self.root, self.store).publish_family_binding("lifestyle")
         binding = self.store.read_json(ref)
         self.assertEqual(binding["workflow_template"], "contract_dag.v2")
-        self.assertTrue({"requirements", "research", "planner", "architecture_reviewer", "producer", "repair", "verifier"} <= set(binding["roles"]))
+        self.assertTrue({"architect", "architecture_reviewer", "producer", "repair", "verifier"} <= set(binding["roles"]))
         self.assertEqual(set(binding["adapters"].values()), {"artifact_bundle.v2"})
         self.assertEqual(set(binding["profile_hashes"]), set(binding["roles"]))
         self.assertEqual(binding["policies"]["llm"]["temperature"], 0.05)
@@ -58,14 +58,14 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         ref = MinionV2Catalog(self.root, self.store).publish_family_binding("general")
         binding = self.store.read_json(ref)
         self.assertEqual(binding["workflow_template"], "contract_dag.v2")
-        self.assertTrue({"requirements", "research", "planner", "architecture_reviewer", "producer", "repair", "verifier"} <= set(binding["roles"]))
+        self.assertTrue({"architect", "architecture_reviewer", "producer", "repair", "verifier"} <= set(binding["roles"]))
         self.assertEqual(set(binding["adapters"].values()), {"artifact_bundle.v2"})
         self.assertEqual(set(binding["profile_hashes"]), set(binding["roles"]))
 
-    def test_planner_cannot_bypass_builder_but_producer_can_write_workspace(self) -> None:
+    def test_architect_cannot_bypass_builder_but_producer_can_write_workspace(self) -> None:
         planner = apply_v2_role_capability_policy(
-            self._pack("lifestyle.contract_planner"),
-            role="planner",
+            self._pack("lifestyle.architect"),
+            role="architect",
         )
         self.assertIn("op_minion_contract_submit_sketch", planner.allowed_capabilities)
         self.assertNotIn("op_file_write", planner.allowed_capabilities)
@@ -79,29 +79,30 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("op_minion_artifact_write", producer.allowed_capabilities)
         self.assertNotIn("op_web_search", producer.allowed_capabilities)
 
-    def test_local_only_research_removes_external_search(self) -> None:
-        researcher = self._pack("lifestyle.researcher")
-        self.assertIn("op_web_search", researcher.allowed_capabilities)
-        local = apply_v2_research_capability_policy(researcher, research_mode="local_only")
+    def test_architect_has_no_external_research_surface(self) -> None:
+        architect = self._pack("lifestyle.architect")
+        self.assertNotIn("op_web_search", architect.allowed_capabilities)
+        self.assertNotIn("op_web_read", architect.allowed_capabilities)
+        local = apply_v2_research_capability_policy(architect, research_mode="local_only")
         self.assertNotIn("op_web_search", local.allowed_capabilities)
         self.assertNotIn("op_web_read", local.allowed_capabilities)
 
-    def test_requirements_roles_only_receive_the_controlled_builder(self) -> None:
+    def test_architect_roles_receive_only_contract_builder(self) -> None:
         for profile in (
-            "general.requirements_analyst",
-            "lifestyle.requirements_analyst",
-            "software_engineering.v2_requirements_analyst",
+            "general.architect",
+            "lifestyle.architect",
+            "software_engineering.v2_architect",
         ):
             with self.subTest(profile=profile):
                 requirements = self._pack(profile)
-                self.assertIn("op_minion_requirements_replace_batch", requirements.allowed_capabilities)
-                self.assertIn("op_minion_requirements_submit", requirements.allowed_capabilities)
+                self.assertNotIn("op_minion_requirements_replace_batch", requirements.allowed_capabilities)
+                self.assertNotIn("op_minion_requirements_submit", requirements.allowed_capabilities)
+                self.assertIn("op_file_read", requirements.allowed_capabilities)
                 self.assertIn("op_minion_input_read", requirements.allowed_capabilities)
-                self.assertNotIn("op_tree", requirements.allowed_capabilities)
-                self.assertNotIn("op_search", requirements.allowed_capabilities)
-                self.assertNotIn("op_file_read", requirements.allowed_capabilities)
-                self.assertNotIn("op_git", requirements.allowed_capabilities)
-                self.assertEqual(requirements.workspace.get("workspace_policy", {}).get("mode"), "artifact_only")
+                self.assertNotIn("op_minion_evidence_submit", requirements.allowed_capabilities)
+                self.assertIn("op_minion_contract_submit_sketch", requirements.allowed_capabilities)
+                self.assertNotIn("op_file_write", requirements.allowed_capabilities)
+                self.assertEqual(requirements.workspace.get("workspace_policy", {}).get("mode"), "read_only_repo")
 
     def test_bound_input_reader_exposes_only_the_named_immutable_file(self) -> None:
         bound = self.root / "workflow-request.json"
@@ -173,27 +174,19 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertTrue(binding["policies"]["verification"]["require_warning_clean"])
 
     def test_software_architecture_and_verification_profiles_preserve_rigorous_methods(self) -> None:
-        requirements = str(self._pack("software_engineering.v2_requirements_analyst").resolved_profile["behavior_fragment"])
-        research = str(self._pack("software_engineering.v2_researcher").resolved_profile["behavior_fragment"])
-        planner = str(self._pack("software_engineering.v2_contract_planner").resolved_profile["behavior_fragment"])
+        architect = str(self._pack("software_engineering.v2_architect").resolved_profile["behavior_fragment"])
         architecture_review = str(
             self._pack("software_engineering.v2_architecture_reviewer").resolved_profile["behavior_fragment"]
         )
         verifier = str(self._pack("software_engineering.v2_verifier").resolved_profile["behavior_fragment"])
         generic = str(self._pack("general.generic").resolved_profile["behavior_fragment"])
 
-        self.assertIn("every member of an enumerated", requirements)
-        self.assertIn("strict allowlist", requirements)
-        self.assertIn("read-only truth-source", research)
-        self.assertIn("architecture-feasibility", research)
-        self.assertIn("An implementation-detail gap is not an architecture blocker", research)
-        self.assertIn("ownership transfer or borrowing", planner)
-        self.assertIn("Assign each concrete file", planner)
-        self.assertIn("one candidate-review cycle", planner)
-        self.assertIn("RequirementsArtifact is normative and authoritative", planner)
-        self.assertIn("Stub the unavailable environment, never the requested behavior", planner)
-        self.assertIn("assign creation of the required production file", planner)
-        self.assertIn("implementation need not be predetermined", planner)
+        self.assertIn("RequirementsArtifact is immutable and authoritative", architect)
+        self.assertIn("feasibility", architect)
+        self.assertIn("foundation, language/runtime bridge", architect)
+        self.assertIn("one candidate-review cycle", architect)
+        self.assertIn("Never reduce the core goal to a stub", architect)
+        self.assertIn("Do not define milestones", architect)
         self.assertIn("claim-driven trace", architecture_review)
         self.assertIn("unrelated fragment drift", architecture_review)
         self.assertIn("structured complexity budget", architecture_review)
@@ -207,7 +200,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("Perform the detailed local", str(self._pack("software_engineering.v2_coder").resolved_profile["behavior_fragment"]))
 
     def test_profile_tool_description_override_is_applied_to_scoped_surface(self) -> None:
-        researcher = self._pack("software_engineering.v2_researcher")
+        researcher = self._pack("software_engineering.v2_architect")
         override = str(researcher.resolved_profile["capability_description_overrides"]["op_web_search"])
         base = ExecutionRuntime()
         base.register_capability(
@@ -240,7 +233,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         source = self.root / "source"
         source.mkdir()
         (source / "reference.txt").write_text("truth", encoding="utf-8")
-        planner = apply_v2_role_capability_policy(self._pack("lifestyle.contract_planner"), role="planner")
+        planner = apply_v2_role_capability_policy(self._pack("lifestyle.architect"), role="architect")
         planner = MinionInvocationPack.from_dict(
             {**planner.to_dict(), "workspace": {**dict(planner.workspace), "repo_path": str(source)}}
         )
@@ -274,12 +267,16 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 "workspace": {"kind": "artifact_project", "project_name": "nutrition"},
             }
         )
+        prepared = service.prepare_requirements(
+            {"requirements": [{"requirement_id": "R-1", "statement": "Produce a check-in", "strength": "hard"}]}
+        )
         service.start_workflow(
             {
                 "workflow_id": "nutrition-workflow",
                 "task_id": "nutrition-task",
                 "operation": "new_requirement",
                 "goal": "Summarize declared nutrition observations without inventing facts",
+                "requirements_ref": prepared["requirements_ref"],
             }
         )
         architecture = ArchitectureArtifactService(self.store, self.repository)
@@ -318,7 +315,6 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 "compatibility": [],
                 "dependency_constraints": [],
                 "requirement_ids": ["R-1"],
-                "evidence_ids": ["E-1"],
                 "verification_obligations": ["Validate JSON and source coverage."],
                 "complexity_budget": {
                     "target_file_count": 1,
@@ -336,7 +332,6 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         manifest = architecture.publish_manifest(
             {
                 "requirements_ref": requirements.to_dict(),
-                "evidence_catalog_ref": evidence.to_dict(),
                 "global_constraints_ref": fragment([], "GlobalConstraintsArtifact").to_dict(),
                 "design_decisions_ref": fragment([], "DesignDecisionsArtifact").to_dict(),
                 "gate_checks_ref": fragment([], "ArchitectureGateChecksArtifact").to_dict(),

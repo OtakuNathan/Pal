@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import shutil
 import tempfile
 import unittest
@@ -29,6 +30,7 @@ from pal.minion.v2.contracts import (
     TaskState,
 )
 from pal.minion.v2.recovery import MinionV2Recovery
+from pal.minion.v2.sessions import architect_session_id, coder_session_id
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.machines import all_transition_specs
 from pal.minion.v2.orchestration import MECHANICAL_EFFECT_TYPES
@@ -133,6 +135,114 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row["status"], "completed")
 
+    def test_worker_session_suspends_and_resumes_with_same_continuation(self) -> None:
+        root = Path(tempfile.mkdtemp(prefix="pal_v2_worker_session_"))
+        self.addCleanup(shutil.rmtree, root, True)
+        repository = MinionV2Repository(root)
+        store = ContentAddressedArtifactStore(root, repository)
+        prompt = store.put_json({"prompt": "initial"}, artifact_type="WorkerPromptPackArtifact")
+        continuation = store.put_json(
+            {"session_id": "inv-session", "llm_round_count": 7},
+            artifact_type="AgentSessionContinuationArtifact",
+        )
+        lease = repository.claim_lease("architecture:arch-session:architect", "inv-session", ttl_seconds=60)
+        repository.record_worker_invocation(
+            invocation_id="inv-session",
+            workflow_id="wf-session",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch-session",
+            lease_resource_key=lease.resource_key,
+            fencing_token=lease.fencing_token,
+            role="v2_architect",
+            prompt_pack_ref=prompt.to_dict(),
+        )
+        repository.suspend_worker_invocation(
+            invocation_id="inv-session",
+            fencing_token=lease.fencing_token,
+            continuation_ref=continuation.to_dict(),
+        )
+        repository.release_lease(lease.resource_key, lease.owner_id, lease.fencing_token)
+
+        resumed_lease = repository.claim_lease(lease.resource_key, "inv-session", ttl_seconds=60)
+        resumed_prompt = store.put_json({"prompt": "review response"}, artifact_type="WorkerPromptPackArtifact")
+        repository.record_worker_invocation(
+            invocation_id="inv-session",
+            workflow_id="wf-session",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch-session-revision",
+            lease_resource_key=resumed_lease.resource_key,
+            fencing_token=resumed_lease.fencing_token,
+            role="v2_architect",
+            prompt_pack_ref=resumed_prompt.to_dict(),
+        )
+
+        invocation = repository.read_worker_invocation("inv-session")
+        self.assertEqual(invocation["status"], "running")
+        self.assertEqual(invocation["aggregate_id"], "arch-session-revision")
+        self.assertEqual(invocation["continuation_ref"]["sha256"], continuation.sha256)
+        self.assertEqual(invocation["prompt_pack_ref"]["sha256"], resumed_prompt.sha256)
+
+    def test_role_session_ids_are_stable_across_response_effects(self) -> None:
+        self.assertEqual(architect_session_id("wf-1"), architect_session_id("wf-1"))
+        self.assertNotEqual(architect_session_id("wf-1"), architect_session_id("wf-2"))
+        self.assertEqual(coder_session_id("node-1"), coder_session_id("node-1"))
+        self.assertNotEqual(coder_session_id("node-1"), coder_session_id("node-2"))
+
+    def test_running_worker_states_have_fenced_rebind_self_transitions(self) -> None:
+        node_cases = {
+            DagNodeRunState.PRODUCING: "REBIND_PRODUCER",
+            DagNodeRunState.QUIESCING: "REBIND_QUIESCER",
+            DagNodeRunState.SNAPSHOTTING: "REBIND_SNAPSHOTTER",
+            DagNodeRunState.REVIEWING: "REBIND_REVIEWER",
+            DagNodeRunState.REPAIRING: "REBIND_REPAIRER",
+        }
+        for state, action_type in node_cases.items():
+            with self.subTest(state=state):
+                snapshot = AggregateSnapshot(
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id="node-rebind",
+                    workflow_id="wf_test",
+                    state=state,
+                    version=3,
+                    payload={"fencing_token": 1},
+                    created_at="2026-01-01T00:00:00+00:00",
+                    updated_at="2026-01-01T00:00:00+00:00",
+                )
+                result = self.engine.transition(
+                    snapshot,
+                    self.action(
+                        action_type,
+                        AggregateType.DAG_NODE_RUN,
+                        "node-rebind",
+                        payload={"fencing_token": 2, "active_worker_id": "worker-2"},
+                        expected_version=3,
+                    ),
+                )
+                self.assertEqual(result.snapshot.state, state)
+                self.assertEqual(result.snapshot.payload["fencing_token"], 2)
+
+        review = AggregateSnapshot(
+            aggregate_type=AggregateType.STANDALONE_REVIEW,
+            aggregate_id="review-rebind",
+            workflow_id="wf_test",
+            state=StandaloneReviewState.REVIEWING,
+            version=4,
+            payload={"fencing_token": 1},
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        rebound = self.engine.transition(
+            review,
+            self.action(
+                "REBIND_REVIEWER",
+                AggregateType.STANDALONE_REVIEW,
+                "review-rebind",
+                payload={"fencing_token": 2},
+                expected_version=4,
+            ),
+        )
+        self.assertEqual(rebound.snapshot.state, StandaloneReviewState.REVIEWING)
+
     def test_architecture_typed_findings_route_to_owning_stage(self) -> None:
         snapshot = AggregateSnapshot(
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
@@ -145,10 +255,9 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             updated_at="2026-01-01T00:00:00+00:00",
         )
         cases = {
-            "REQUIREMENTS_DEFECT": ArchitectureRevisionState.REQUIREMENTS_QUEUED,
-            "EVIDENCE_GAP": ArchitectureRevisionState.RESEARCH_QUEUED,
-            "CONTRACT_DEFECT": ArchitectureRevisionState.PLANNING_QUEUED,
-            "ARCHITECTURE_DEFECT": ArchitectureRevisionState.PLANNING_QUEUED,
+            "REQUIREMENTS_DEFECT": ArchitectureRevisionState.ARCHITECT_QUEUED,
+            "CONTRACT_DEFECT": ArchitectureRevisionState.ARCHITECT_QUEUED,
+            "ARCHITECTURE_DEFECT": ArchitectureRevisionState.ARCHITECT_QUEUED,
         }
         for action_type, expected_state in cases.items():
             with self.subTest(action_type=action_type):
@@ -273,13 +382,13 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
             aggregate_id="arch_1",
             workflow_id="wf_test",
-            state=ArchitectureRevisionState.RESEARCH_RUNNING,
+            state=ArchitectureRevisionState.ARCHITECT_RUNNING,
             version=4,
             payload={
                 "blocker": {"kind": "old_failure"},
                 "active_worker_id": "inv_old",
                 "fencing_token": 4,
-                "lease_resource_key": "architecture:arch_1:research",
+                "lease_resource_key": "architecture:arch_1:architect",
             },
             created_at="2026-01-01T00:00:00+00:00",
             updated_at="2026-01-01T00:00:00+00:00",
@@ -296,7 +405,7 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
             paused,
             self.action("RESUME", AggregateType.ARCHITECTURE_REVISION, "arch_1", expected_version=6),
         ).snapshot
-        self.assertEqual(resumed.state, ArchitectureRevisionState.RESEARCH_QUEUED)
+        self.assertEqual(resumed.state, ArchitectureRevisionState.ARCHITECT_QUEUED)
         self.assertNotIn("blocker", resumed.payload)
         self.assertNotIn("active_worker_id", resumed.payload)
         self.assertNotIn("fencing_token", resumed.payload)
@@ -376,6 +485,31 @@ class MinionV2PersistenceTests(unittest.TestCase):
         self.assertEqual(projection["current_phase"], "created")
         self.assertEqual(projection["liveness"], "outbox")
 
+    def test_bare_queued_state_without_outbox_is_orphaned(self) -> None:
+        self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="queued-create"))
+        self.repository.dispatch(self.action("START_WORKFLOW", version=1, key="queued-start"))
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_ARCHITECTURE_REVISION",
+                workflow_id="wf_1",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id="arch_queued",
+                actor="test",
+                expected_version=0,
+                idempotency_key="queued-architecture",
+            )
+        )
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                ("wf_1",),
+            )
+        self.repository.rebuild_workflow_projections()
+
+        projection = self.repository.read_workflow_projection("wf_1")
+        self.assertEqual(projection["current_phase"], "architecture")
+        self.assertEqual(projection["liveness"], "orphaned")
+
     def test_idempotency_key_cannot_hide_a_different_request(self) -> None:
         self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="same"))
         with self.assertRaises(ValueError):
@@ -434,6 +568,37 @@ class MinionV2PersistenceTests(unittest.TestCase):
         self.assertEqual(metrics["tool_time_ms"], 35)
         self.assertEqual(metrics["worker_time_ms"], 180)
         self.assertEqual(metrics["review_time_ms"], 120)
+
+    def test_worker_progress_events_advance_durable_round_ledger(self) -> None:
+        prompt = self.artifacts.put_json({"prompt": "test"}, artifact_type="WorkerPromptPackArtifact")
+        lease = self.repository.claim_lease("worker:events", "inv_events", ttl_seconds=60)
+        self.repository.record_worker_invocation(
+            invocation_id="inv_events",
+            workflow_id="wf_1",
+            aggregate_type=AggregateType.WORKFLOW,
+            aggregate_id="wf_1",
+            lease_resource_key=lease.resource_key,
+            fencing_token=lease.fencing_token,
+            role="architect",
+            prompt_pack_ref=prompt.to_dict(),
+        )
+        self.repository.record_worker_event(
+            {
+                "invocation_id": "inv_events",
+                "event_kind": "progress",
+                "created_at": "2026-01-01T00:00:01+00:00",
+                "payload": {"phase": "llm_round_completed", "round": 7, "tool_call_count": 19},
+            }
+        )
+        with self.repository._connect() as connection:
+            invocation = connection.execute(
+                "SELECT last_completed_turn FROM minion_v2_worker_invocations WHERE invocation_id = 'inv_events'"
+            ).fetchone()
+            event = connection.execute(
+                "SELECT phase, round_index, tool_call_count FROM minion_v2_worker_events WHERE invocation_id = 'inv_events'"
+            ).fetchone()
+        self.assertEqual(invocation["last_completed_turn"], 7)
+        self.assertEqual((event["phase"], event["round_index"], event["tool_call_count"]), ("llm_round_completed", 7, 19))
 
     def test_lease_fencing_rejects_zombie_worker(self) -> None:
         first = self.repository.claim_lease("worktree:node_1", "worker_1", ttl_seconds=60)

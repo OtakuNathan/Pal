@@ -265,7 +265,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         profile_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles"
 
         self.assertTrue((profile_root / "generic.toml").is_file())
-        self.assertTrue((profile_root / "general" / "contract_planner.toml").is_file())
+        self.assertTrue((profile_root / "general" / "architect.toml").is_file())
         self.assertFalse((profile_root / "software_engineering" / "planner.toml").is_file())
         self.assertTrue((profile_root / "software_engineering" / "v2_coder.toml").is_file())
         self.assertTrue((profile_root / "software_engineering" / "v2_verifier.toml").is_file())
@@ -285,7 +285,7 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.assertEqual(software["family_id"], "software_engineering")
         self.assertTrue(software["metadata"]["builtin"])
         self.assertEqual(software["workflow_template"], "contract_dag.v2")
-        self.assertEqual(software["roles"]["planner"], "software_engineering.v2_contract_planner")
+        self.assertEqual(software["roles"]["architect"], "software_engineering.v2_architect")
 
     def test_wizard_minion_profile_template_seed_preserves_user_edits(self) -> None:
         profile_path = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles" / "software_engineering" / "v2_coder.toml"
@@ -300,12 +300,12 @@ class PalV2BootstrapTests(unittest.TestCase):
 
     def test_wizard_minion_profile_template_seed_refreshes_builtin_copies(self) -> None:
         profile_root = self.registration.runtime.runtime_root / "plugins" / "minion" / "profiles"
-        profile_path = profile_root / "software_engineering" / "v2_contract_planner.toml"
+        profile_path = profile_root / "software_engineering" / "v2_architect.toml"
         profile_path.write_text(
             "\n".join(
                 [
-                    'profile_id = "v2_contract_planner"',
-                    'display_name = "Old Runtime Contract Planner Seed"',
+                    'profile_id = "v2_architect"',
+                    'display_name = "Old Runtime Architect Seed"',
                     'profile_group = "software_engineering"',
                     "[metadata]",
                     "builtin = true",
@@ -318,12 +318,12 @@ class PalV2BootstrapTests(unittest.TestCase):
         self.wizard.provision_minion_profile_templates(self.registration)
 
         updated = profile_path.read_text(encoding="utf-8")
-        self.assertIn("V2 Contract Planner", updated)
+        self.assertIn("V2 Software Architect", updated)
         self.assertIn("v2_contract_sketch_builder", updated)
         self.assertIn('primary_artifact = "architecture_bundle.json"', updated)
-        backups = list((profile_root.parent / "profile_backups").glob("*/software_engineering/v2_contract_planner.toml"))
+        backups = list((profile_root.parent / "profile_backups").glob("*/software_engineering/v2_architect.toml"))
         self.assertEqual(len(backups), 1)
-        self.assertIn("Old Runtime Contract Planner Seed", backups[0].read_text(encoding="utf-8"))
+        self.assertIn("Old Runtime Architect Seed", backups[0].read_text(encoding="utf-8"))
 
     def test_wizard_minion_family_template_seed_preserves_user_edits(self) -> None:
         family_path = self.registration.runtime.runtime_root / "plugins" / "minion" / "families" / "software_engineering.toml"

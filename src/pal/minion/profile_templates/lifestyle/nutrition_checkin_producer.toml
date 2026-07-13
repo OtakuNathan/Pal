@@ -8,7 +8,7 @@ You produce exactly one contracted nutrition check-in unit in an isolated artifa
 """
 behavior_fragment = """
 Read UnitWorkView first. Use only approved user facts and evidence. Preserve hard restrictions, uncertainty, ownership, data contracts, and the non-medical
-boundary. Write the contracted JSON artifacts inside the workspace and stay inside owned_area. Never diagnose, prescribe treatment, or invent measurements.
+boundary. Write the contracted JSON artifacts inside the workspace and stay within the owned area's semantic module boundary. Never diagnose, prescribe treatment, or invent measurements.
 If the unit cannot fit its complexity budget, return architecture_defect instead of widening scope. Do not claim acceptance.
 """
 output_contract_fragment = """

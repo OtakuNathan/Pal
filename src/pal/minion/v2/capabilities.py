@@ -199,6 +199,37 @@ class MinionV2PublicProvider:
     @capability_action(
         namespace=OPERATION_NAMESPACE,
         scope="minion",
+        action_name="prepare_requirements",
+        description=(
+            "Normalize the user's confirmed request in the foreground and publish the immutable RequirementsArtifact used by both Architect and "
+            "Architecture Reviewer. Keep product requirements separate from workflow policy. Call this before op_minion_start_workflow for "
+            "new_requirement; Minion roles may not rewrite the result."
+        ),
+        args_schema={
+            "type": "object",
+            "properties": {
+                "requirements": {"type": "array", "items": {"type": "object"}},
+                "open_clarifications": {"type": "array"},
+                "source_coverage": {"type": "array"},
+            },
+            "required": ["requirements"],
+        },
+    )
+    def prepare_requirements(self, call: CapabilityCall) -> CapabilityResult:
+        try:
+            actor, channel = self._actor_and_channel(call)
+            payload = self.service.prepare_requirements(
+                {**dict(call.args or {}), "actor": actor, "source_channel": channel}
+            )
+            return _result("minion requirements prepared", payload)
+        except ValueError as exc:
+            return _invalid("minion requirements invalid", exc)
+        except Exception as exc:
+            return _error("minion requirements preparation failed", exc)
+
+    @capability_action(
+        namespace=OPERATION_NAMESPACE,
+        scope="minion",
         action_name="start_workflow",
         description=(
             "Start one durable Minion V2 workflow. Use new_requirement for a user request; execute_trusted only for an "
@@ -219,7 +250,7 @@ class MinionV2PublicProvider:
                     "default": "new_requirement",
                 },
                 "goal": {"type": "string"},
-                "requirements": {"type": "array"},
+                "requirements_ref": {"type": "object"},
                 "constraints": {"type": "array"},
                 "approved_evidence": {
                     "type": "array",

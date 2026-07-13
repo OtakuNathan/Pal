@@ -204,7 +204,6 @@ class ArtifactBundleAdapter:
         self,
         *,
         workspace: Path,
-        owned_area: Sequence[str],
         reference_only_paths: Sequence[str],
         unit_contract_hash: str,
         dependency_output_hashes: Mapping[str, str],
@@ -214,12 +213,10 @@ class ArtifactBundleAdapter:
     ) -> tuple[ArtifactRef, str]:
         files = _bundle_files(workspace)
         changed_paths = [str(item["path"]) for item in files]
-        violations = [path for path in changed_paths if not _is_owned(path, owned_area)]
         reference_violations = [path for path in changed_paths if _matches_any(path, reference_only_paths)]
-        if violations or reference_violations:
+        if reference_violations:
             raise ValueError(
-                "artifact candidate violates ownership: "
-                + json.dumps({"outside_owned_area": violations, "reference_only": reference_violations}, sort_keys=True)
+                "artifact candidate modified reference-only paths: " + json.dumps(reference_violations, sort_keys=True)
             )
         payload = {
             "schema_version": "1",
@@ -299,7 +296,6 @@ class ArtifactBundleAdapter:
                 owners[relative] = node_run_id
         ref, digest = self.snapshot_candidate(
             workspace=integration_workspace,
-            owned_area=("artifact:integration",),
             reference_only_paths=(),
             unit_contract_hash=architecture_manifest_sha,
             dependency_output_hashes={str(item.get("node_run_id") or ""): str(dict(item.get("candidate_ref") or {}).get("sha256") or "") for item in ordered_candidates},
@@ -375,12 +371,6 @@ def _bundle_files_allow_empty(workspace: Path) -> list[dict[str, str]]:
     for path in sorted(item for item in workspace.rglob("*") if item.is_file() and ".pal-candidate" not in item.parts):
         result.append({"path": path.relative_to(workspace).as_posix(), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
     return result
-
-
-def _is_owned(path: str, owned_area: Sequence[str]) -> bool:
-    if any(str(item).startswith(("artifact:", "component:", "domain:")) for item in owned_area):
-        return True
-    return _matches_any(path, owned_area)
 
 
 def _matches_any(path: str, patterns: Sequence[str]) -> bool:

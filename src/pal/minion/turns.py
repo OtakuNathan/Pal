@@ -6,6 +6,7 @@ from pal.shared import MinionInvocationPack
 _V2_RUNNER_METADATA_KEYS = frozenset(
     {
         "allow_text_only_completion",
+        "agent_session",
         "clarification_answers",
         "control_route",
         "debug_log",

@@ -245,6 +245,7 @@ class MinionManager:
 
     async def _publish_v2_worker_event(self, event: Mapping[str, Any]) -> None:
         item = dict(event)
+        self.v2_service.repository.record_worker_event(item)
         run_id = str(item.get("run_id") or "")
         state = self.runs.get(run_id)
         if state is not None:

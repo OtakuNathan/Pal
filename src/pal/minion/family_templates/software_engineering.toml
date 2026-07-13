@@ -5,9 +5,7 @@ domain_keywords = ["code", "software", "repo", "test", "build", "review", "bug",
 workflow_template = "contract_dag.v2"
 
 [roles]
-requirements = "software_engineering.v2_requirements_analyst"
-research = "software_engineering.v2_researcher"
-planner = "software_engineering.v2_contract_planner"
+architect = "software_engineering.v2_architect"
 architecture_reviewer = "software_engineering.v2_architecture_reviewer"
 producer = "software_engineering.v2_coder"
 repair = "software_engineering.v2_coder"
@@ -16,7 +14,6 @@ reviewer = "software_engineering.v2_reviewer"
 
 [builders]
 requirements = "requirements.v2"
-evidence = "evidence_catalog.v2"
 contract = "contract_sketch.v2"
 verification = "verification.v2"
 

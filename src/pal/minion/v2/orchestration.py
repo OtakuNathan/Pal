@@ -9,6 +9,7 @@ from pal.minion.v2.artifacts import ArtifactRef
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType
 from pal.minion.v2.execution import DagScheduler, ExecutionCompiler
 from pal.minion.v2.service import MinionV2WorkflowService, workflow_request_from_snapshot
+from pal.minion.v2.sessions import architect_session_id, coder_session_id
 from pal.minion.v2.verification import DefectPropagationService
 
 
@@ -234,6 +235,7 @@ class MinionV2OutboxProcessor:
             )
         if effect_type == "submit_workflow_rejection":
             revision = self._effect_snapshot(effect)
+            self.repository.complete_worker_session(architect_session_id(revision.workflow_id))
             workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, revision.workflow_id)
             if workflow is not None and workflow.state == "ACTIVE":
                 self.repository.dispatch(
@@ -302,6 +304,7 @@ class MinionV2OutboxProcessor:
             manifest_ref = dict(snapshot.payload.get("architecture_manifest_ref") or {})
             if not manifest_ref:
                 raise ValueError("accepted architecture revision has no manifest")
+            self.repository.complete_worker_session(architect_session_id(snapshot.workflow_id))
             return self._compile_execution(
                 workflow_id=snapshot.workflow_id,
                 manifest_ref=manifest_ref,
@@ -340,6 +343,7 @@ class MinionV2OutboxProcessor:
                     idempotency_key=f"effect:{effect['effect_key']}:revision",
                     payload={
                         "request_ref": dict(workflow.payload["request_ref"]),
+                        "requirements_ref": dict(request["requirements_ref"]),
                         "research_mode": str(request.get("research_mode") or "local_only"),
                         "revision_number": 1,
                     },
@@ -408,6 +412,7 @@ class MinionV2OutboxProcessor:
                 idempotency_key=f"effect:{effect['effect_key']}:revision",
                 payload={
                     "request_ref": previous.payload.get("request_ref"),
+                    "requirements_ref": previous.payload.get("requirements_ref"),
                     "parent_revision_id": previous.aggregate_id,
                     "revision_number": int(previous.payload.get("revision_number") or 1) + 1,
                     "edit_instruction_ref": previous.payload.get("edit_instruction_ref"),
@@ -421,6 +426,8 @@ class MinionV2OutboxProcessor:
 
     def _freeze_epoch_and_replan(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         source = self._effect_snapshot(effect)
+        if source.aggregate_type == AggregateType.DAG_NODE_RUN:
+            self.repository.complete_worker_session(coder_session_id(source.aggregate_id))
         epoch_id = str(source.payload.get("epoch_id") or "")
         epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)
         finding_ref = source.payload.get("repair_bill_ref") or source.payload.get("finding_artifact_ref")
@@ -450,6 +457,7 @@ class MinionV2OutboxProcessor:
                 idempotency_key=f"effect:{effect['effect_key']}:replan",
                 payload={
                     "request_ref": workflow.payload.get("request_ref"),
+                    "requirements_ref": dict(workflow_request_from_snapshot(self.service, workflow).get("requirements_ref") or {}),
                     "base_architecture_manifest_ref": source.payload.get("architecture_manifest_ref"),
                     "replan_finding_ref": finding_ref,
                     "source_execution_epoch_id": epoch_id,
@@ -492,6 +500,7 @@ class MinionV2OutboxProcessor:
 
     def _node_accepted(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
+        self.repository.complete_worker_session(coder_session_id(node.aggregate_id))
         epoch_id = str(node.payload.get("epoch_id") or "")
         if str(node.payload.get("node_kind") or "") == "integration":
             epoch = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch_id)

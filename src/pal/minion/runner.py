@@ -565,6 +565,7 @@ class MinionRunner:
     _memory_service: MemoryService | None = field(default=None, init=False, repr=False)
     _pending_control_messages: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _cancel_requested: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+    _agent_session_checkpoint: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     async def run(self) -> int:
         bundle: MinionRuntimeBundle | None = None
@@ -667,12 +668,38 @@ class MinionRunner:
                 ).items()
             },
         )
-        channel_envelope = _minion_task_envelope(self.pack, minion_id=self.minion_id, run_id=self.run_id)
+        session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
+        session_id = str(session_metadata.get("session_id") or "").strip()
+        restored = self._load_agent_session_checkpoint(workspace, session_id=session_id)
+        initial_instruction = str(restored.get("initial_instruction") or self.pack.instruction or self.pack.goal).strip()
+        prompt_pack = self.pack
+        if initial_instruction and initial_instruction != str(self.pack.instruction or ""):
+            prompt_pack = MinionInvocationPack.from_dict(
+                {**self.pack.to_dict(), "goal": initial_instruction, "instruction": initial_instruction}
+            )
+        channel_envelope = _minion_task_envelope(prompt_pack, minion_id=self.minion_id, run_id=self.run_id)
+        tool_protocol_messages = [
+            dict(item)
+            for item in list(restored.get("tool_protocol_messages") or [])
+            if isinstance(item, dict)
+        ]
+        response_keys = [str(item) for item in list(restored.get("response_keys") or []) if str(item)]
+        response_key = str(session_metadata.get("response_key") or "").strip()
+        if restored and response_key and response_key not in response_keys:
+            response_text = str(self.pack.instruction or self.pack.goal or "").strip()
+            if response_text:
+                tool_protocol_messages.append({"role": "user", "content": response_text})
+            response_keys.append(response_key)
+        elif not restored and response_key:
+            response_keys.append(response_key)
         state = MinionAgentLoopState(
             execution_runtime=execution_runtime,
             memory_service=memory_service,
             memory_l3=memory_l3,
             channel_envelope=channel_envelope,
+            tool_protocol_messages=tool_protocol_messages,
+            llm_round_count=max(0, int(restored.get("llm_round_count") or 0)),
+            tool_call_count=max(0, int(restored.get("tool_call_count") or 0)),
         )
         max_output_tokens = _resolve_minion_max_output_tokens(bundle.llm_runtime, self.pack)
 
@@ -718,6 +745,16 @@ class MinionRunner:
             control_scope_key=f"minion:{self.run_id}",
             turn_settings_snapshot=_minion_turn_settings_snapshot(self.pack),
             tool_protocol_messages=state.tool_protocol_messages,
+            tool_batch_count=max(0, int(restored.get("tool_batch_count") or 0)),
+            preferred_llm_endpoint_id=str(restored.get("preferred_llm_endpoint_id") or "") or None,
+            preferred_llm_model_id=str(restored.get("preferred_llm_model_id") or "") or None,
+        )
+        self._persist_agent_session_checkpoint(
+            workspace,
+            state,
+            continuation,
+            initial_instruction=initial_instruction,
+            response_keys=response_keys,
         )
         begin_tool_results = getattr(state.execution_runtime, "begin_tool_result_turn", None)
         if callable(begin_tool_results):
@@ -740,6 +777,17 @@ class MinionRunner:
                     )
                 await self._commit_minion_l1(state, outcome.commit_payload.transcript)
                 self.memory_candidates = _memory_candidates_from_l3(state.memory_l3)
+                final_reply = str(outcome.final_reply or "").strip()
+                if final_reply:
+                    continuation.tool_protocol_messages.append({"role": "assistant", "content": final_reply})
+                    self._sync_minion_state_from_continuation(state, continuation)
+                self._persist_agent_session_checkpoint(
+                    workspace,
+                    state,
+                    continuation,
+                    initial_instruction=initial_instruction,
+                    response_keys=response_keys,
+                )
                 return outcome.final_reply
             current = await self._execute_minion_agent_effect(
                 executor,
@@ -748,7 +796,73 @@ class MinionRunner:
                 yielded,
                 max_output_tokens=max_output_tokens,
             )
+            if not continuation.pending_tool_call_batch and not continuation.pending_tool_results:
+                self._persist_agent_session_checkpoint(
+                    workspace,
+                    state,
+                    continuation,
+                    initial_instruction=initial_instruction,
+                    response_keys=response_keys,
+                )
             await self._raise_if_cancel_requested()
+
+    def _load_agent_session_checkpoint(self, workspace: dict[str, Any], *, session_id: str) -> dict[str, Any]:
+        if not session_id:
+            return {}
+        run_dir = Path(str(workspace.get("run_dir") or ""))
+        if not run_dir.is_dir():
+            return {}
+        candidates: list[tuple[int, Path]] = []
+        for path in run_dir.glob("session-continuation-*.json"):
+            match = re.fullmatch(r"session-continuation-(\d+)\.json", path.name)
+            if match:
+                candidates.append((int(match.group(1)), path))
+        for _, path in sorted(candidates, reverse=True):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict) and str(value.get("session_id") or "") == session_id:
+                self._agent_session_checkpoint = dict(value)
+                return dict(value)
+        return {}
+
+    def _persist_agent_session_checkpoint(
+        self,
+        workspace: dict[str, Any],
+        state: MinionAgentLoopState,
+        continuation: TurnContinuation,
+        *,
+        initial_instruction: str,
+        response_keys: list[str],
+    ) -> None:
+        session_metadata = dict((self.pack.metadata or {}).get("agent_session") or {})
+        session_id = str(session_metadata.get("session_id") or "").strip()
+        fencing_token = int(session_metadata.get("fencing_token") or 0)
+        run_dir = Path(str(workspace.get("run_dir") or ""))
+        if not session_id or fencing_token <= 0 or not run_dir.is_dir():
+            return
+        if continuation.pending_tool_call_batch or continuation.pending_tool_results:
+            return
+        payload = {
+            "schema_version": "1",
+            "session_id": session_id,
+            "invocation_id": self.pack.invocation_id,
+            "fencing_token": fencing_token,
+            "initial_instruction": str(initial_instruction),
+            "response_keys": list(response_keys),
+            "tool_protocol_messages": [dict(item) for item in continuation.tool_protocol_messages],
+            "llm_round_count": int(state.llm_round_count),
+            "tool_call_count": int(state.tool_call_count),
+            "tool_batch_count": int(continuation.tool_batch_count),
+            "preferred_llm_endpoint_id": str(continuation.preferred_llm_endpoint_id or ""),
+            "preferred_llm_model_id": str(continuation.preferred_llm_model_id or ""),
+        }
+        target = run_dir / f"session-continuation-{fencing_token}.json"
+        temporary = run_dir / f".{target.name}.{os.getpid()}.tmp"
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        os.replace(temporary, target)
+        self._agent_session_checkpoint = payload
 
     def _runner_memory(self) -> tuple[MockL3Plugin, MemoryService]:
         if self._memory_l3 is not None and self._memory_service is not None:
@@ -1494,10 +1608,29 @@ class MinionRunner:
         return self.user_interaction
 
     def _completion_evidence_present(self) -> bool:
-        return bool(self.produced_artifacts)
+        return self._required_primary_artifact_present()
 
     def _artifact_completion_evidence_present(self) -> bool:
-        return bool(self.produced_artifacts)
+        return self._required_primary_artifact_present()
+
+    def _required_primary_artifact_present(self) -> bool:
+        output_policy = dict((self.pack.workspace or {}).get("output_policy") or {})
+        if not output_policy:
+            output_policy = dict((self.pack.resolved_profile or {}).get("effective_output_policy") or {})
+        required = str(output_policy.get("primary_artifact") or "").strip()
+        if not required:
+            return bool(self.produced_artifacts)
+        for artifact in self.produced_artifacts:
+            if str(artifact.get("role") or "").strip().lower() != "primary":
+                continue
+            candidates = {
+                str(artifact.get("relative_path") or "").strip(),
+                str(artifact.get("requested_relative_path") or "").strip(),
+                Path(str(artifact.get("path") or "")).name,
+            }
+            if required in candidates:
+                return True
+        return False
 
     def _completion_evidence_fallback_text(self, error_text: str) -> str:
         summary = str(error_text or "LLM final report generation failed").strip()

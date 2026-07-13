@@ -14,7 +14,6 @@ from pal.minion.v2.contract_builder import (
     ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
     CONTRACT_BUILDER_CAPABILITIES,
     CONTRACT_SKETCH_BUILDER_CAPABILITIES,
-    EVIDENCE_BUILDER_CAPABILITIES,
     REQUIREMENTS_BUILDER_CAPABILITIES,
     is_contract_builder_capability,
 )
@@ -337,7 +336,6 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "minion_artifacts": ("op_minion_artifact_write", "op_minion_artifact_edit"),
     "v2_requirements_builder": REQUIREMENTS_BUILDER_CAPABILITIES,
     "v2_bound_input_read": ("op_minion_input_read",),
-    "v2_evidence_builder": EVIDENCE_BUILDER_CAPABILITIES,
     "v2_contract_sketch_builder": CONTRACT_SKETCH_BUILDER_CAPABILITIES,
     "v2_architecture_review_builder": ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),

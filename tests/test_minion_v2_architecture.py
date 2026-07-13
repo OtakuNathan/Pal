@@ -8,9 +8,11 @@ from pathlib import Path
 from pal.minion.v2 import ActionEnvelope, AggregateType, ContentAddressedArtifactStore, MinionV2Repository
 from pal.minion.v2.architecture import (
     ArchitectureArtifactService,
+    ArchitectureFindingKind,
     ComplexityBudgetPolicy,
     HumanReviewCard,
     ResearchMode,
+    review_architecture_contract,
     validate_unit_contract,
 )
 from pal.minion.v2.service import MinionV2WorkflowService
@@ -49,7 +51,6 @@ def _unit_contract() -> dict:
         "compatibility": ["C ABI"],
         "dependency_constraints": [],
         "requirement_ids": ["R-1"],
-        "evidence_ids": ["E-1"],
         "verification_obligations": [{"kind": "consumer_compile"}],
         "complexity_budget": _complexity_budget(),
         "split_conditions": [],
@@ -149,7 +150,6 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         manifest = self.service.publish_manifest(
             {
                 "requirements_ref": requirements.to_dict(),
-                "evidence_catalog_ref": evidence.to_dict(),
                 "global_constraints_ref": constraints.to_dict(),
                 "design_decisions_ref": decisions.to_dict(),
                 "gate_checks_ref": gates.to_dict(),
@@ -191,6 +191,34 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         self.assertIn("## Module Topology", markdown)
         self.assertIn("### foundation", markdown)
         self.assertNotIn("milestone", markdown.lower())
+
+    def test_mechanical_review_rejects_unwaived_complexity_and_missing_handoff(self) -> None:
+        producer = _unit_contract()
+        producer["unit_id"] = "producer"
+        producer["provided_interfaces"] = [{"name": "Published value"}]
+        producer["complexity_budget"] = _complexity_budget(public_interface_count=99)
+        producer["split_conditions"] = ["Split if it becomes too large."]
+        consumer = _unit_contract()
+        consumer["unit_id"] = "consumer"
+        consumer["consumed_interfaces"] = [{"name": "Published value", "ownership": "producer"}]
+        review = review_architecture_contract(
+            {},
+            {
+                "requirements": {"requirements": [{"requirement_id": "R-1", "statement": "One", "strength": "hard"}]},
+                "unit_contract": [producer, consumer],
+                "cross_unit_contract": [],
+                "topology": {"depends_on": {"producer": [], "consumer": ["producer"]}},
+            },
+            complexity_policy=ComplexityBudgetPolicy(),
+        )
+
+        self.assertEqual(review.verdict, "FAIL")
+        self.assertTrue(all(item.revision_targets for item in review.findings))
+        self.assertTrue(any("complexity budget" in item.summary for item in review.findings))
+        handoff = next(item for item in review.findings if "without a directional cross-unit contract" in item.summary)
+        self.assertEqual(handoff.finding_kind, ArchitectureFindingKind.CONTRACT_DEFECT)
+        self.assertEqual(handoff.revision_targets[0].section, "cross_unit_contract")
+        self.assertEqual(handoff.revision_targets[0].operation, "create")
 
     def test_human_decision_token_is_bound_and_single_use(self) -> None:
         requirements, evidence, manifest = self._publish_contract()
@@ -299,7 +327,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         )
         self.repository.dispatch(
             ActionEnvelope(
-                action_type="START_REQUIREMENTS",
+                action_type="START_ARCHITECT",
                 workflow_id=workflow_id,
                 aggregate_type=AggregateType.ARCHITECTURE_REVISION,
                 aggregate_id=revision_id,
@@ -338,7 +366,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
                 "source_channel": "socket:test",
             }
         )
-        self.assertEqual(result["state"], "REQUIREMENTS_QUEUED")
+        self.assertEqual(result["state"], "ARCHITECT_QUEUED")
         self.assertEqual(self.repository.inspect_human_decision_token(token)["status"], "consumed")
         with self.assertRaisesRegex(ValueError, "stale or already consumed"):
             service.submit_human_decision(
@@ -355,8 +383,8 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         pack = MinionInvocationPack(
             invocation_id="research",
             profile_group="software_engineering",
-            profile_name="v2_researcher",
-            minion_profile="software_engineering.v2_researcher",
+            profile_name="v2_architect",
+            minion_profile="software_engineering.v2_architect",
             allowed_capabilities=["op_tree", "op_web_search", "op_web_read"],
         )
         local = apply_v2_research_capability_policy(pack, research_mode="local_only")
@@ -375,17 +403,13 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
     ) -> None:
         actions = [
             ("CREATE_ARCHITECTURE_REVISION", {}, 0),
-            ("START_REQUIREMENTS", {"fencing_token": 1}, 1),
-            ("REQUIREMENTS_COMPLETED", {"requirements_ref": requirements_ref}, 2),
-            ("START_RESEARCH", {"fencing_token": 2}, 3),
-            ("RESEARCH_COMPLETED", {"evidence_catalog_ref": evidence_ref}, 4),
-            ("START_PLANNING", {"fencing_token": 3}, 5),
-            ("PLANNING_COMPLETED", {"architecture_manifest_ref": manifest_ref}, 6),
-            ("START_ARCHITECTURE_REVIEW", {"fencing_token": 4}, 7),
+            ("START_ARCHITECT", {"fencing_token": 1}, 1),
+            ("ARCHITECT_COMPLETED", {"requirements_ref": requirements_ref, "architecture_manifest_ref": manifest_ref}, 2),
+            ("START_ARCHITECTURE_REVIEW", {"fencing_token": 2}, 3),
             (
                 "ARCHITECTURE_REVIEW_PASSED",
                 {"review_artifact_ref": manifest_ref, "architecture_manifest_ref": manifest_ref},
-                8,
+                4,
             ),
         ]
         for action_type, payload, version in actions:

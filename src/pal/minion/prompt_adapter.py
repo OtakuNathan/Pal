@@ -102,7 +102,11 @@ def render_minion_task_prompt(pack: MinionInvocationPack) -> str:
     if references:
         lines.extend(["", "## Immutable Inputs"])
         for item in references:
-            lines.append(f"- {item.get('name')}: {item.get('path')} (truth_source={bool(item.get('truth_source'))})")
+            name = str(item.get("name") or "")
+            if bool(item.get("bound_input")):
+                lines.append(f"- {name}: bound immutable artifact; read with op_minion_input_read(name=\"{name}\")")
+            else:
+                lines.append(f"- {name}: declared read-only reference (truth_source={bool(item.get('truth_source'))})")
     lines.extend(
         [
             "",

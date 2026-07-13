@@ -13,9 +13,7 @@ from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 
 CONTRACT_DAG_ROLES = frozenset(
     {
-        "requirements",
-        "research",
-        "planner",
+        "architect",
         "architecture_reviewer",
         "producer",
         "repair",
@@ -26,7 +24,6 @@ CONTRACT_DAG_ROLES = frozenset(
 REGISTERED_BUILDERS = frozenset(
     {
         "requirements.v2",
-        "evidence_catalog.v2",
         "contract_sketch.v2",
         "verification.v2",
     }

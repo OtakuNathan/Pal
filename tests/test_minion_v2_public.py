@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from copy import deepcopy
 import shutil
 import tempfile
 import unittest
@@ -15,11 +16,19 @@ from pal.minion import register_with_core as register_minion_with_core
 from pal.minion.capabilities import MinionManagerProvider, inspect_minion
 from pal.minion.ipc import minion_port_path, minion_socket_path
 from pal.minion.v2.capabilities import MinionV2PublicProvider
+from pal.minion.v2.contract_builder import ARCHITECT_BUILDER_CAPABILITIES
 from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.service import MinionV2WorkflowService
-from pal.minion.v2.workers import MinionV2SemanticWorker
+from pal.minion.v2.sessions import architect_session_id, coder_session_id
+from pal.minion.v2.workers import (
+    MinionV2SemanticWorker,
+    apply_v2_revision_scope_capability_policy,
+    apply_v2_role_capability_policy,
+)
 from pal.minion.v2 import ActionEnvelope, AggregateType
+from pal.minion.v2.contracts import StaleFencingToken
 from pal.minion.manager import MinionManager
+from pal.minion.prompt_adapter import render_minion_task_prompt
 from pal.minion.runner import MinionRunner
 from pal.shared import MinionInvocationPack
 
@@ -82,24 +91,143 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
 
+    def test_revision_scope_read_is_not_exposed_to_initial_architect(self) -> None:
+        pack = MinionInvocationPack(
+            invocation_id="inv-capability-scope",
+            allowed_capabilities=[
+                *ARCHITECT_BUILDER_CAPABILITIES,
+                "op_minion_contract_revision_read",
+            ],
+        )
+
+        initial = apply_v2_role_capability_policy(pack, role="architect")
+        self.assertNotIn("op_minion_contract_revision_read", initial.allowed_capabilities)
+        self.assertIn("op_minion_contract_read", initial.allowed_capabilities)
+
+        scoped = apply_v2_revision_scope_capability_policy(initial)
+        self.assertIn("op_minion_contract_revision_read", scoped.allowed_capabilities)
+        self.assertNotIn("op_minion_contract_read", scoped.allowed_capabilities)
+
+    def test_runner_checkpoint_uses_fenced_files_and_restores_latest_safe_turn(self) -> None:
+        run_dir = self.runtime_root / "agent-session"
+        run_dir.mkdir(parents=True)
+        first_pack = MinionInvocationPack(
+            invocation_id="inv-session-checkpoint",
+            instruction="initial assignment",
+            workspace={"run_dir": str(run_dir)},
+            metadata={
+                "agent_session": {
+                    "session_id": "inv-session-checkpoint",
+                    "response_key": "effect-1",
+                    "fencing_token": 3,
+                }
+            },
+        )
+        first = MinionRunner(
+            runtime_root=self.runtime_root,
+            pack=first_pack,
+            minion_id=first_pack.invocation_id,
+            run_id="run-session-checkpoint",
+            write_event=lambda _event: None,
+            read_decision=lambda: None,
+        )
+        state = SimpleNamespace(llm_round_count=8, tool_call_count=21)
+        continuation = SimpleNamespace(
+            pending_tool_call_batch=[],
+            pending_tool_results=[],
+            tool_protocol_messages=[{"role": "assistant", "content": "inspected the boundary"}],
+            tool_batch_count=6,
+            preferred_llm_endpoint_id="glm",
+            preferred_llm_model_id="glm-5.2",
+        )
+        first._persist_agent_session_checkpoint(
+            first_pack.workspace,
+            state,
+            continuation,
+            initial_instruction="initial assignment",
+            response_keys=["effect-1"],
+        )
+
+        second_pack = MinionInvocationPack(
+            invocation_id="inv-session-checkpoint",
+            instruction="repair reviewer finding",
+            workspace={"run_dir": str(run_dir)},
+            metadata={
+                "agent_session": {
+                    "session_id": "inv-session-checkpoint",
+                    "response_key": "effect-2",
+                    "fencing_token": 4,
+                }
+            },
+        )
+        second = MinionRunner(
+            runtime_root=self.runtime_root,
+            pack=second_pack,
+            minion_id=second_pack.invocation_id,
+            run_id="run-session-checkpoint",
+            write_event=lambda _event: None,
+            read_decision=lambda: None,
+        )
+        restored = second._load_agent_session_checkpoint(
+            second_pack.workspace,
+            session_id="inv-session-checkpoint",
+        )
+        self.assertEqual(restored["llm_round_count"], 8)
+        self.assertEqual(restored["tool_call_count"], 21)
+        self.assertEqual(restored["response_keys"], ["effect-1"])
+        self.assertEqual(restored["tool_protocol_messages"], continuation.tool_protocol_messages)
+        self.assertTrue((run_dir / "session-continuation-3.json").is_file())
+
+    @staticmethod
+    def _start_workflow(service: MinionV2WorkflowService, request: dict):
+        payload = dict(request)
+        if str(payload.get("operation") or "new_requirement") == "new_requirement" and not payload.get("requirements_ref"):
+            prepared = service.prepare_requirements(
+                {"requirements": [{"requirement_id": "R-1", "statement": str(payload.get("goal") or "bounded task"), "strength": "hard", "source_refs": ["test"]}]}
+            )
+            payload["requirements_ref"] = prepared["requirements_ref"]
+        return service.start_workflow(payload)
+
+    def test_supporting_artifact_does_not_complete_required_primary_output(self) -> None:
+        pack = MinionInvocationPack(
+            invocation_id="inv-primary",
+            workspace={"output_policy": {"primary_artifact": "architecture_bundle.json"}},
+        )
+        runner = MinionRunner(
+            runtime_root=self.runtime_root,
+            pack=pack,
+            minion_id="inv-primary",
+            run_id="run-primary",
+            write_event=lambda _event: None,
+            read_decision=lambda: None,
+        )
+        runner.produced_artifacts = [
+            {"role": "supporting", "relative_path": "requirements.json", "path": "/tmp/requirements.json"}
+        ]
+        self.assertFalse(runner._completion_evidence_present())
+        runner.produced_artifacts.append(
+            {"role": "primary", "relative_path": "architecture_bundle.json", "path": "/tmp/architecture_bundle.json"}
+        )
+        self.assertTrue(runner._completion_evidence_present())
+
     def test_architecture_stage_resolves_snapshot_before_profile(self) -> None:
         worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
         worker._effect_snapshot = lambda _effect: SimpleNamespace(workflow_id="wf-order")
 
         def stop_after_profile(workflow_id: str, role: str) -> str:
-            self.assertEqual((workflow_id, role), ("wf-order", "requirements"))
+            self.assertEqual((workflow_id, role), ("wf-order", "architect"))
             raise RuntimeError("profile-resolved-after-snapshot")
 
         worker._profile_for_role = stop_after_profile
         with self.assertRaisesRegex(RuntimeError, "profile-resolved-after-snapshot"):
-            asyncio.run(worker._run_architecture_stage({"payload": {"stage": "requirements"}}))
+            asyncio.run(worker._run_architecture_stage({"payload": {"stage": "architect"}}))
 
     def test_resume_does_not_reclaim_a_live_architecture_stage(self) -> None:
         worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
         worker._effect_snapshot = lambda _effect: SimpleNamespace(
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
             aggregate_id="arch-live",
-            state="PLANNING_RUNNING",
+            state="ARCHITECT_RUNNING",
         )
         worker.repository.read_lease = lambda _key: {
             "owner_id": "inv-live",
@@ -116,9 +244,9 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             workflow_id="wf-live",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
             aggregate_id="arch-live",
-            state="PLANNING_RUNNING",
+            state="ARCHITECT_RUNNING",
         )
-        worker._profile_for_role = lambda *_args: "software_engineering.v2_contract_planner"
+        worker._profile_for_role = lambda *_args: "software_engineering.v2_architect"
         worker.repository.read_snapshot = lambda *_args: SimpleNamespace(state="ACTIVE")
         worker.repository.read_lease = lambda _key: {
             "owner_id": "inv-live",
@@ -127,24 +255,24 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         result = asyncio.run(
             worker._run_architecture_stage(
-                {"effect_id": "eff-duplicate", "payload": {"stage": "planning"}}
+                {"effect_id": "eff-duplicate", "payload": {"stage": "architect"}}
             )
         )
 
         self.assertEqual(result, {"status": "already_running", "active_worker_id": "inv-live"})
 
-    def test_requirements_stage_uses_artifact_only_workspace(self) -> None:
+    def test_architect_stage_uses_prepared_read_only_workspace(self) -> None:
         worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
         revision = SimpleNamespace(
             workflow_id="wf-requirements-scope",
             aggregate_id="arch-requirements-scope",
             aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-            state="REQUIREMENTS_RUNNING",
+            state="ARCHITECT_RUNNING",
             version=1,
             payload={},
         )
         worker._effect_snapshot = lambda _effect: revision
-        worker._profile_for_role = lambda *_args: "software_engineering.v2_requirements_analyst"
+        worker._profile_for_role = lambda *_args: "software_engineering.v2_architect"
         worker._architecture_stage_prompt = lambda *_args: ("normalize", {})
         worker.repository.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=3)
         worker.repository.release_lease = lambda *_args, **_kwargs: None
@@ -159,22 +287,123 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker.repository.dispatch = capture_dispatch
 
         async def capture_scope(**kwargs):
-            self.assertEqual(kwargs["workspace_override"], {"kind": "artifact_only"})
-            self.assertFalse(kwargs["prepare_workspace"])
-            raise RuntimeError("requirements-scope-captured")
+            self.assertEqual(kwargs["invocation_id"], architect_session_id(revision.workflow_id))
+            self.assertIsNone(kwargs["workspace_override"])
+            self.assertTrue(kwargs["prepare_workspace"])
+            raise RuntimeError("architect-scope-captured")
 
         worker._run_profile = capture_scope
-        with self.assertRaisesRegex(RuntimeError, "requirements-scope-captured"):
+        with self.assertRaisesRegex(RuntimeError, "architect-scope-captured"):
             asyncio.run(
                 worker._run_architecture_stage(
                     {
                         "effect_id": "eff-requirements-scope",
                         "effect_key": "event:0",
-                        "payload": {"stage": "requirements"},
+                        "payload": {"stage": "architect"},
                     }
                 )
             )
-        self.assertEqual(dispatched, ["REBIND_REQUIREMENTS"])
+        self.assertEqual(dispatched, ["REBIND_ARCHITECT"])
+
+    def test_producer_and_repair_admission_reuse_one_coder_session(self) -> None:
+        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        claims: list[str] = []
+        actions: list[ActionEnvelope] = []
+
+        def claim(_resource: str, owner_id: str, **_kwargs):
+            claims.append(owner_id)
+            return SimpleNamespace(fencing_token=len(claims))
+
+        worker.repository.claim_lease = claim
+        worker.repository.dispatch = lambda action: actions.append(action)
+        snapshots = iter(
+            (
+                SimpleNamespace(
+                    workflow_id="wf-coder-session",
+                    aggregate_id="node-coder-session",
+                    state="QUEUED",
+                    version=1,
+                    payload={"candidate_cycle": 0},
+                ),
+                SimpleNamespace(
+                    workflow_id="wf-coder-session",
+                    aggregate_id="node-coder-session",
+                    state="REPAIR_QUEUED",
+                    version=7,
+                    payload={"candidate_cycle": 1},
+                ),
+            )
+        )
+        worker._effect_snapshot = lambda _effect: next(snapshots)
+
+        worker._admit_node_worker(
+            {"effect_key": "producer"},
+            action_type="START_PRODUCING",
+            role="producer",
+        )
+        worker._admit_node_worker(
+            {"effect_key": "repair"},
+            action_type="START_REPAIR",
+            role="repair",
+        )
+
+        expected = coder_session_id("node-coder-session")
+        self.assertEqual(claims, [expected, expected])
+        self.assertEqual([item.payload["active_worker_id"] for item in actions], [expected, expected])
+
+    def test_snapshot_effect_rebinds_expired_lease_and_reacquires_workspace_lock(self) -> None:
+        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        workspace = self.runtime_root / "snapshot-worktree"
+        workspace.mkdir()
+        node = SimpleNamespace(
+            workflow_id="wf-rebind",
+            aggregate_id="node-rebind",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            state="SNAPSHOTTING",
+            version=8,
+            payload={
+                "active_worker_id": coder_session_id("node-rebind"),
+                "lease_resource_key": "node:node-rebind:writer",
+                "fencing_token": 1,
+                "workspace_path": str(workspace),
+                "workspace_fingerprint": "stable-tree",
+                "execution_adapter": "artifact_bundle",
+            },
+        )
+        worker.repository.assert_fencing_token = lambda *_args: (_ for _ in ()).throw(StaleFencingToken("expired"))
+        worker.repository.read_lease = lambda _key: {
+            "owner_id": "",
+            "fencing_token": 1,
+            "expires_at": "2026-01-01T00:00:00+00:00",
+            "metadata": {},
+        }
+        worker.repository.claim_lease = lambda *_args, **_kwargs: SimpleNamespace(fencing_token=2)
+        worker._workspace_fingerprint = lambda *_args: "stable-tree"
+        captured: list[ActionEnvelope] = []
+
+        def dispatch(action):
+            captured.append(action)
+            rebound = SimpleNamespace(
+                **{key: getattr(node, key) for key in ("workflow_id", "aggregate_id", "aggregate_type", "state")},
+                version=9,
+                payload={**node.payload, **action.payload},
+            )
+            return SimpleNamespace(snapshot=rebound)
+
+        worker.repository.dispatch = dispatch
+        with patch("pal.minion.v2.workers.workspace_has_live_processes", return_value=False):
+            rebound = asyncio.run(
+                worker._ensure_node_effect_lease(
+                    node,
+                    action_type="REBIND_SNAPSHOTTER",
+                    role="producer",
+                )
+            )
+
+        self.assertEqual(captured[0].action_type, "REBIND_SNAPSHOTTER")
+        self.assertEqual(rebound.payload["fencing_token"], 2)
+        self.assertTrue(worker._worktree_locks.is_held("node-rebind"))
+        worker._worktree_locks.release("node-rebind")
 
     def test_paused_architecture_stage_does_not_restart_worker(self) -> None:
         worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
@@ -188,7 +417,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         )
         workflow = SimpleNamespace(state="PAUSED")
         worker._effect_snapshot = lambda _effect: revision
-        worker._profile_for_role = lambda *_args: "software_engineering.v2_researcher"
+        worker._profile_for_role = lambda *_args: "software_engineering.v2_architect"
         worker.repository.read_snapshot = lambda *_args: workflow
         worker.repository.claim_lease = lambda *_args, **_kwargs: self.fail("paused effect claimed a lease")
 
@@ -197,71 +426,63 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 {
                     "effect_id": "eff-paused-stage",
                     "effect_key": "event:0",
-                    "payload": {"stage": "research"},
+                    "payload": {"stage": "architect"},
                 }
             )
         )
 
         self.assertEqual(result, {"status": "superseded"})
 
-    def test_nonblocking_requirements_assumptions_do_not_request_human_clarification(self) -> None:
-        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
-        revision = SimpleNamespace(
-            workflow_id="wf-nonblocking",
-            aggregate_id="arch-nonblocking",
-            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
-            version=2,
-        )
-        dispatched: list[str] = []
-        worker.repository.read_snapshot = lambda *_args: SimpleNamespace(version=2)
-        worker.repository.dispatch = lambda action: dispatched.append(action.action_type) or SimpleNamespace(snapshot=revision)
-
-        result = worker._accept_architecture_stage_output(
-            "requirements",
-            revision,
-            {
-                "requirements": [
-                    {
-                        "requirement_id": "R-1",
-                        "statement": "Implement the declared contract.",
-                        "strength": "hard",
-                        "source_refs": ["request"],
-                        "acceptance_semantics": "Every declaration has a real implementation.",
-                        "ambiguities": [],
-                    }
-                ],
-                "open_clarifications": [
-                    {
-                        "topic": "environment",
-                        "clarification": "SDK presence is not known yet.",
-                        "blocking": False,
-                        "bounded_assumption": "Use the declared local fallback when absent.",
-                    }
-                ],
-                "source_coverage": [],
-            },
-        )
-
-        self.assertEqual(result.artifact_type, "RequirementsArtifact")
-        self.assertEqual(dispatched, ["REQUIREMENTS_COMPLETED"])
-
-    def test_research_revision_handoff_includes_base_evidence_catalog(self) -> None:
+    def test_architect_revision_handoff_binds_only_semantic_scope(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         worker = MinionV2SemanticWorker(service)
         request_ref = service.artifacts.put_json({"goal": "research"}, artifact_type="WorkflowRequestArtifact")
         requirements_ref = service.artifacts.put_json({"requirements": []}, artifact_type="RequirementsArtifact")
-        evidence_ref = service.artifacts.put_json({"evidence": []}, artifact_type="EvidenceCatalogArtifact")
+        constraints_ref = service.artifacts.put_json([], artifact_type="GlobalConstraintsArtifact")
+        decisions_ref = service.artifacts.put_json([], artifact_type="DesignDecisionsArtifact")
+        gates_ref = service.artifacts.put_json([], artifact_type="ArchitectureGateChecksArtifact")
+        unit_ref = service.artifacts.put_json({"unit_id": "foundation"}, artifact_type="UnitContractArtifact")
+        topology_ref = service.artifacts.put_json({"depends_on": {"foundation": []}}, artifact_type="TopologyArtifact")
+        integration_ref = service.artifacts.put_json({"depends_on": ["foundation"]}, artifact_type="IntegrationContractArtifact")
+        assumptions_ref = service.artifacts.put_json({"assumptions": []}, artifact_type="AssumptionLedgerArtifact")
+        risks_ref = service.artifacts.put_json({"risks": []}, artifact_type="RiskLedgerArtifact")
+        manifest_ref = service.artifacts.put_json(
+            {
+                "requirements_ref": requirements_ref.to_dict(),
+                "global_constraints_ref": constraints_ref.to_dict(),
+                "design_decisions_ref": decisions_ref.to_dict(),
+                "gate_checks_ref": gates_ref.to_dict(),
+                "unit_contract_refs": [unit_ref.to_dict()],
+                "cross_unit_contract_refs": [],
+                "topology_ref": topology_ref.to_dict(),
+                "integration_contract_ref": integration_ref.to_dict(),
+                "assumption_ledger_ref": assumptions_ref.to_dict(),
+                "risk_ledger_ref": risks_ref.to_dict(),
+            },
+            artifact_type="ArchitectureContractArtifact",
+        )
         finding_ref = service.artifacts.put_json(
-            {"finding_kind": "evidence_gap", "summary": "link requirements"},
+            {
+                "findings": [
+                    {
+                        "finding_kind": "contract_defect",
+                        "summary": "repair the module boundary",
+                        "revision_targets": [
+                            {"section": "unit", "id": "foundation", "fields": ["ownership"], "operation": "update"}
+                        ],
+                    }
+                ]
+            },
             artifact_type="ArchitectureFindingArtifact",
         )
         workflow = SimpleNamespace(payload={"request_ref": request_ref.to_dict()})
         revision = SimpleNamespace(
             workflow_id="wf-research-revision",
+            aggregate_id="arch-research-revision",
             payload={
                 "request_ref": request_ref.to_dict(),
                 "requirements_ref": requirements_ref.to_dict(),
-                "evidence_catalog_ref": evidence_ref.to_dict(),
+                "base_architecture_manifest_ref": manifest_ref.to_dict(),
                 "finding_artifact_ref": finding_ref.to_dict(),
                 "research_mode": "local_only",
             },
@@ -269,11 +490,147 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         worker.repository.read_snapshot = lambda *_args: workflow
 
         with patch("pal.minion.v2.workers.workflow_request_from_snapshot", return_value={"references": []}):
-            instruction, refs = worker._architecture_stage_prompt("research", revision)
+            instruction, refs = worker._architecture_stage_prompt("architect", revision)
 
-        self.assertEqual(refs["base_evidence_catalog"].sha256, evidence_ref.sha256)
+        self.assertIn("revision_scope", refs)
+        self.assertNotIn("base_global_constraints", refs)
         self.assertEqual(refs["revision_finding"].sha256, finding_ref.sha256)
-        self.assertIn("retain every unaffected base evidence entry", instruction)
+        scope = service.artifacts.read_json(refs["revision_scope"])
+        self.assertEqual(scope["write_targets"][0]["id"], "foundation")
+        self.assertIn("scoped revision", instruction)
+        self.assertIn("op_minion_input_read", instruction)
+
+    def test_bound_artifact_prompt_hides_storage_path_and_names_reader(self) -> None:
+        pack = MinionInvocationPack(
+            invocation_id="inv_bound_prompt",
+            goal="inspect",
+            workspace={
+                "reference_paths": [
+                    {
+                        "name": "revision_finding",
+                        "path": "/host-only/artifacts/secret.json",
+                        "bound_input": True,
+                        "truth_source": True,
+                    }
+                ]
+            },
+        )
+        prompt = render_minion_task_prompt(pack)
+        self.assertIn('op_minion_input_read(name="revision_finding")', prompt)
+        self.assertNotIn("/host-only/artifacts/secret.json", prompt)
+
+    def test_architect_revision_seeds_the_contract_builder_draft(self) -> None:
+        worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+        captured: dict[str, object] = {}
+        ref = worker.service.artifacts.put_json({"base": True}, artifact_type="ArchitectureContractArtifact")
+        snapshot = SimpleNamespace(
+            workflow_id="wf-seeded-revision",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch-seeded-revision",
+            payload={"research_mode": "local_only", "base_architecture_manifest_ref": ref.to_dict()},
+        )
+        worker.repository.read_snapshot = lambda *_args: SimpleNamespace(payload={})
+        worker._base_contract_builder_payload_from_manifest = lambda _ref: {"seed": "base"}
+
+        def record(**_kwargs) -> None:
+            raise RuntimeError("stop-after-seed")
+
+        identity = lambda pack, **_kwargs: pack
+        with (
+            patch("pal.minion.v2.workers.seed_contract_builder_draft") as seed,
+            patch("pal.minion.v2.workers.workflow_request_from_snapshot", return_value={"workspace": {"kind": "new_project"}}),
+            patch("pal.minion.v2.workers.MinionProfileRegistry.resolve_pack", lambda _registry, pack: pack),
+            patch("pal.minion.v2.workers.apply_v2_role_capability_policy", identity),
+            patch("pal.minion.v2.workers.apply_v2_research_capability_policy", identity),
+            patch("pal.minion.v2.workers.sanitize_runner_session_pack", identity),
+            patch("pal.minion.v2.workers.with_minion_sandbox_metadata", lambda _root, pack, **_kwargs: pack),
+            patch.object(worker.repository, "record_worker_invocation", side_effect=record),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stop-after-seed"):
+                asyncio.run(
+                    worker._run_profile(
+                        effect={"effect_id": "eff-seed", "effect_key": "event:seed"},
+                        snapshot=snapshot,
+                        invocation_id="inv_seeded_revision",
+                        lease_resource="architecture:arch-seeded-revision:architect",
+                        fencing_token=1,
+                        profile="software_engineering.v2_architect",
+                        role_override="architect",
+                        instruction="repair only the finding",
+                        reference_refs={},
+                        prepare_workspace=False,
+                    )
+                )
+        self.assertEqual(seed.call_count, 1)
+        self.assertEqual(seed.call_args.args[1], {"seed": "base"})
+        self.assertIsNone(seed.call_args.kwargs["revision_scope"])
+
+    def test_scoped_revision_reuses_unmodified_fragment_refs(self) -> None:
+        service = MinionV2WorkflowService(self.runtime_root)
+        worker = MinionV2SemanticWorker(service)
+        requirements = service.architecture.publish_requirements(
+            {"requirements": [{"requirement_id": "R-1", "statement": "Implement the module.", "strength": "hard"}]}
+        )
+
+        def unit(unit_id: str) -> dict[str, object]:
+            return {
+                "unit_id": unit_id,
+                "unit_behavior_kind": "stateless",
+                "responsibility": f"Own {unit_id}.",
+                "owned_area": [unit_id],
+                "reference_only_paths": [],
+                "provided_interfaces": [],
+                "consumed_interfaces": [],
+                "ownership": {"owner": unit_id},
+                "lifecycle": "N/A: stateless",
+                "state_model": "stateless",
+                "invariants": ["deterministic"],
+                "error_behavior": [],
+                "compatibility": [],
+                "dependency_constraints": [],
+                "requirement_ids": ["R-1"],
+                "verification_obligations": [],
+                "complexity_budget": {
+                    "target_file_count": 1,
+                    "estimated_context_tokens": 100,
+                    "public_interface_count": 1,
+                    "cross_unit_contract_count": 0,
+                    "stateful_resource_count": 0,
+                    "expected_candidate_cycles": 1,
+                    "platform_dependency_level": 0,
+                },
+                "split_conditions": [],
+            }
+
+        base = {
+            "global_constraints": [{"id": "C-1", "constraint": "Keep stable."}],
+            "design_decisions": [],
+            "gate_checks": [],
+            "units": [unit("foundation"), unit("window")],
+            "cross_unit_contracts": [],
+            "topology": {"depends_on": {"foundation": [], "window": ["foundation"]}},
+            "integration_contract": {"depends_on": ["foundation", "window"]},
+            "assumption_ledger": {"assumptions": []},
+            "risk_ledger": {"risks": []},
+        }
+        revision = SimpleNamespace(
+            aggregate_id="arch-structural-sharing",
+            payload={"requirements_ref": requirements.to_dict()},
+        )
+        base_ref = worker._publish_planning_bundle(revision, base, requirements_ref=requirements)
+        changed = deepcopy(base)
+        changed["units"][0]["ownership"] = {"owner": "foundation-revised"}
+        revised_ref = worker._publish_planning_bundle(
+            revision,
+            changed,
+            requirements_ref=requirements,
+            base_manifest_ref=base_ref,
+        )
+        old_manifest = service.artifacts.read_json(base_ref)
+        new_manifest = service.artifacts.read_json(revised_ref)
+        self.assertEqual(new_manifest["global_constraints_ref"], old_manifest["global_constraints_ref"])
+        self.assertNotEqual(new_manifest["unit_contract_refs"][0], old_manifest["unit_contract_refs"][0])
+        self.assertEqual(new_manifest["unit_contract_refs"][1], old_manifest["unit_contract_refs"][1])
 
     def test_profile_worker_preserves_scheduler_lease_owner_id(self) -> None:
         worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
@@ -307,11 +664,11 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                         effect={"effect_id": "eff-lease-owner", "effect_key": "event:0"},
                         snapshot=snapshot,
                         invocation_id=leased_invocation_id,
-                        lease_resource="architecture:arch-lease-owner:requirements",
+                        lease_resource="architecture:arch-lease-owner:architect",
                         fencing_token=7,
-                        profile="software_engineering.v2_requirements_analyst",
-                        role_override="requirements",
-                        instruction="normalize requirements",
+                        profile="software_engineering.v2_architect",
+                        role_override="architect",
+                        instruction="produce architecture",
                         reference_refs={},
                         prepare_workspace=False,
                     )
@@ -403,6 +760,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                     "intro_minion_task_search",
                     "op_minion_task_update",
                     "op_minion_task_archive",
+                    "op_minion_prepare_requirements",
                 },
             )
             self.assertNotIn("op_minion_dispatch_workflow", canonical)
@@ -415,7 +773,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_new_requirement_routes_to_architecture_revision_without_cursor_state(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         task_id = self._create_task(service, "route")
-        started = service.start_workflow(
+        started = self._start_workflow(service,
             {
                 "task_id": task_id,
                 "workflow_id": "wf_route",
@@ -430,8 +788,8 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         asyncio.run(processor.process_once(limit=10))
         asyncio.run(processor.process_once(limit=10))
         status = service.workflow_status(started["workflow_id"])
-        self.assertEqual(status["current_phase"], "requirements")
-        self.assertEqual(status["active_node_state"], "REQUIREMENTS_QUEUED")
+        self.assertEqual(status["current_phase"], "architecture")
+        self.assertEqual(status["active_node_state"], "ARCHITECT_QUEUED")
         snapshots = service.repository.list_workflow_snapshots("wf_route")
         self.assertFalse(any("milestone" in key or "cursor" in key for item in snapshots for key in item.payload))
 
@@ -444,7 +802,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "content": {"repository": "demo", "sha": "abc"},
             }
         )["artifact_ref"]
-        service.start_workflow(
+        self._start_workflow(service,
             {
                 "task_id": task_id,
                 "workflow_id": "wf_review_only",
@@ -468,7 +826,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_resume_workflow_resolves_recoverable_child_triage(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         task_id = self._create_task(service, "triage-resume")
-        service.start_workflow(
+        self._start_workflow(service,
             {
                 "task_id": task_id,
                 "workflow_id": "wf_triage_resume",
@@ -505,7 +863,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
         resumed = service.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id)
         self.assertEqual(result["status"], "triage_resolved")
-        self.assertEqual(resumed.state, "REQUIREMENTS_QUEUED")
+        self.assertEqual(resumed.state, "ARCHITECT_QUEUED")
 
     def test_task_workspace_and_file_uri_references_are_normalized(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
@@ -523,7 +881,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "references": [{"uri": f"file://{patch}", "note": "truth"}],
             }
         )
-        started = service.start_workflow(
+        started = self._start_workflow(service,
             {
                 "task_id": created["task_id"],
                 "workflow_id": "wf_normalized_task",
@@ -542,7 +900,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_effect_replay_after_side_effect_before_ack_is_idempotent(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         task_id = self._create_task(service, "effect_replay")
-        service.start_workflow(
+        self._start_workflow(service,
             {
                 "task_id": task_id,
                 "workflow_id": "wf_effect_replay",
@@ -564,7 +922,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
     def test_pause_settles_only_after_child_pause_confirmation(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)
         task_id = self._create_task(service, "pause")
-        service.start_workflow(
+        self._start_workflow(service,
             {
                 "task_id": task_id,
                 "workflow_id": "wf_pause",
@@ -602,7 +960,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         async def scenario() -> None:
             service = MinionV2WorkflowService(self.runtime_root)
             task_id = self._create_task(service, "concurrent_control")
-            service.start_workflow(
+            self._start_workflow(service,
                 {
                     "task_id": task_id,
                     "workflow_id": "wf_concurrent_control",

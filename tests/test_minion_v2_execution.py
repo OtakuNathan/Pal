@@ -73,7 +73,6 @@ def _contract(unit_id: str, requirement_id: str, evidence_id: str, owned_area: s
         "compatibility": [],
         "dependency_constraints": [],
         "requirement_ids": [requirement_id],
-        "evidence_ids": [evidence_id],
         "verification_obligations": [{"kind": "consumer_probe"}],
         "complexity_budget": _budget(),
         "split_conditions": [],
@@ -153,7 +152,6 @@ class MinionV2ExecutionTests(unittest.TestCase):
         return self.architecture.publish_manifest(
             {
                 "requirements_ref": requirements.to_dict(),
-                "evidence_catalog_ref": evidence.to_dict(),
                 "global_constraints_ref": constraints.to_dict(),
                 "design_decisions_ref": decisions.to_dict(),
                 "gate_checks_ref": gates.to_dict(),
@@ -252,7 +250,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             "BLOCKED_BY_DEPS",
         )
 
-    def test_unit_work_view_preserves_architect_evidence(self) -> None:
+    def test_unit_work_view_preserves_bound_requirements_without_architect_evidence(self) -> None:
         manifest = self._manifest()
         compilation = ExecutionCompiler(self.repository, self.architecture).compile_epoch(
             workflow_id="wf_view",
@@ -262,7 +260,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
         node = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.unit_node_ids["a"])
         view_ref = UnitWorkViewBuilder(self.architecture).build(node, dependency_outputs={})
         view = self.store.read_json(view_ref)
-        self.assertEqual([item["evidence_id"] for item in view["evidence"]], ["E-A"])
+        self.assertNotIn("evidence", view)
         self.assertEqual([item["requirement_id"] for item in view["requirements"]], ["R-A"])
 
     def test_verification_uses_disposable_detached_worktree(self) -> None:
@@ -389,7 +387,6 @@ class MinionV2ExecutionTests(unittest.TestCase):
             fencing_token=lease.fencing_token,
             worktree=worktree,
             expected_workspace_fingerprint=quiesced.workspace_fingerprint,
-            owned_area=["src/**"],
             reference_only_paths=["references/**"],
             base_sha=base_sha,
             unit_contract_hash=contract.sha256,
@@ -402,7 +399,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
         message = subprocess.check_output(["git", "log", "-1", "--format=%B"], cwd=worktree, text=True)
         self.assertIn("Pal-Candidate-Key:", message)
 
-    def test_candidate_rejects_contract_hash_and_owned_area_violations(self) -> None:
+    def test_candidate_rejects_contract_hash_and_reference_only_violations(self) -> None:
         worktree = self.runtime_root / "candidate_rejection_repo"
         worktree.mkdir()
         subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
@@ -453,7 +450,6 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 fencing_token=lease.fencing_token,
                 worktree=worktree,
                 expected_workspace_fingerprint=quiesced.workspace_fingerprint,
-                owned_area=["src/**"],
                 reference_only_paths=["references/**"],
                 base_sha=base_sha,
                 unit_contract_hash=contract_hash,
@@ -464,8 +460,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "contract hash"):
             snapshot(contract_hash="wrong")
         self.assertFalse(locks.is_held("node_reject_candidate"))
-        with self.assertRaisesRegex(ValueError, "outside owned_area"):
-            snapshot(contract_hash=contract.sha256)
+        snapshot(contract_hash=contract.sha256)
         self.assertFalse(locks.is_held("node_reject_candidate"))
 
     def _accept_node(self, node_id: str) -> None:

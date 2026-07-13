@@ -5,9 +5,7 @@ domain_keywords = ["nutrition", "diet", "meal", "training", "fitness", "weight",
 workflow_template = "contract_dag.v2"
 
 [roles]
-requirements = "lifestyle.requirements_analyst"
-research = "lifestyle.researcher"
-planner = "lifestyle.contract_planner"
+architect = "lifestyle.architect"
 architecture_reviewer = "lifestyle.architecture_reviewer"
 producer = "lifestyle.nutrition_checkin_producer"
 repair = "lifestyle.nutrition_checkin_producer"
@@ -15,7 +13,6 @@ verifier = "lifestyle.verifier"
 
 [builders]
 requirements = "requirements.v2"
-evidence = "evidence_catalog.v2"
 contract = "contract_sketch.v2"
 verification = "verification.v2"
 

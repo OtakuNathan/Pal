@@ -31,9 +31,7 @@ from pal.minion.v2.schema import ensure_minion_v2_schema
 
 
 _QUEUED_STATES = {
-    "REQUIREMENTS_QUEUED",
-    "RESEARCH_QUEUED",
-    "PLANNING_QUEUED",
+    "ARCHITECT_QUEUED",
     "REVIEW_QUEUED",
     "QUEUED",
     "REPAIR_QUEUED",
@@ -787,8 +785,13 @@ class MinionV2Repository:
                     fencing_token, role, prompt_pack_ref_json, status, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
                 ON CONFLICT(invocation_id) DO UPDATE SET
+                    workflow_id = excluded.workflow_id,
+                    aggregate_type = excluded.aggregate_type,
+                    aggregate_id = excluded.aggregate_id,
                     lease_resource_key = excluded.lease_resource_key,
                     fencing_token = excluded.fencing_token,
+                    role = excluded.role,
+                    prompt_pack_ref_json = excluded.prompt_pack_ref_json,
                     status = 'running',
                     updated_at = excluded.updated_at
                 """,
@@ -805,6 +808,125 @@ class MinionV2Repository:
                     now,
                 ),
             )
+
+    def read_worker_invocation(self, invocation_id: str) -> dict[str, Any] | None:
+        self.ensure_schema()
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM minion_v2_worker_invocations WHERE invocation_id = ?",
+                (str(invocation_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        for key in ("prompt_pack_ref_json", "continuation_ref_json"):
+            raw = str(value.pop(key, "{}") or "{}")
+            value[key.removesuffix("_json")] = json.loads(raw)
+        return value
+
+    def suspend_worker_invocation(
+        self,
+        *,
+        invocation_id: str,
+        fencing_token: int,
+        continuation_ref: Mapping[str, Any],
+        status: str = "suspended",
+    ) -> None:
+        normalized = str(status or "suspended").strip().lower()
+        if normalized not in {"suspended", "interrupted"}:
+            raise ValueError("worker suspension status must be suspended or interrupted")
+        self.ensure_schema()
+        with self._transaction() as connection:
+            invocation = connection.execute(
+                "SELECT * FROM minion_v2_worker_invocations WHERE invocation_id = ?",
+                (str(invocation_id),),
+            ).fetchone()
+            if invocation is None:
+                raise KeyError(f"unknown worker invocation: {invocation_id}")
+            self._assert_lease_locked(
+                connection,
+                str(invocation["lease_resource_key"]),
+                str(invocation_id),
+                int(fencing_token),
+            )
+            self._assert_artifact_refs_durable(connection, continuation_ref)
+            connection.execute(
+                """
+                UPDATE minion_v2_worker_invocations
+                SET status = ?, continuation_ref_json = ?, updated_at = ?
+                WHERE invocation_id = ?
+                """,
+                (normalized, _json(dict(continuation_ref)), utc_now(), str(invocation_id)),
+            )
+            self._rebuild_workflow_projection_locked(connection, str(invocation["workflow_id"]), "")
+
+    def complete_worker_session(self, invocation_id: str, *, status: str = "completed") -> bool:
+        normalized = str(status or "completed").strip().lower()
+        if normalized not in {"completed", "cancelled"}:
+            raise ValueError("worker session completion status must be completed or cancelled")
+        self.ensure_schema()
+        with self._transaction() as connection:
+            invocation = connection.execute(
+                "SELECT * FROM minion_v2_worker_invocations WHERE invocation_id = ?",
+                (str(invocation_id),),
+            ).fetchone()
+            if invocation is None:
+                return False
+            if str(invocation["status"]) == normalized:
+                return True
+            snapshot = self._read_snapshot_locked(
+                connection,
+                AggregateType(str(invocation["aggregate_type"])),
+                str(invocation["aggregate_id"]),
+            )
+            allowed_terminal = {
+                AggregateType.ARCHITECTURE_REVISION: {"ACCEPTED", "REJECTED", "CANCELLED"},
+                AggregateType.DAG_NODE_RUN: {"ACCEPTED", "STALE", "CANCELLED"},
+            }
+            if snapshot is None or snapshot.state not in allowed_terminal.get(snapshot.aggregate_type, set()):
+                raise ValueError("worker session cannot complete before its owned aggregate reaches a terminal outcome")
+            connection.execute(
+                "UPDATE minion_v2_worker_invocations SET status = ?, updated_at = ? WHERE invocation_id = ?",
+                (normalized, utc_now(), str(invocation_id)),
+            )
+            self._rebuild_workflow_projection_locked(connection, str(invocation["workflow_id"]), "")
+            return True
+
+    def record_worker_event(self, event: Mapping[str, Any]) -> None:
+        invocation_id = str(event.get("invocation_id") or event.get("minion_id") or "").strip()
+        if not invocation_id:
+            return
+        event_kind = str(event.get("event_kind") or "progress")
+        payload = dict(event.get("payload") or {})
+        phase = str(payload.get("phase") or "")
+        round_index = int(payload.get("round") or 0)
+        tool_call_count = int(payload.get("tool_call_count") or 0)
+        created_at = str(event.get("created_at") or utc_now())
+        self.ensure_schema()
+        with self._transaction() as connection:
+            invocation = connection.execute(
+                "SELECT status FROM minion_v2_worker_invocations WHERE invocation_id = ?",
+                (invocation_id,),
+            ).fetchone()
+            if invocation is None:
+                return
+            connection.execute(
+                """
+                INSERT INTO minion_v2_worker_events(
+                    invocation_id, event_kind, phase, round_index, tool_call_count, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (invocation_id, event_kind, phase, round_index, tool_call_count, _json(payload), created_at),
+            )
+            if event_kind == "progress" and phase == "llm_round_completed":
+                connection.execute(
+                    """
+                    UPDATE minion_v2_worker_invocations
+                    SET last_completed_turn = MAX(last_completed_turn, ?), updated_at = ?
+                    WHERE invocation_id = ?
+                    """,
+                    (round_index, created_at, invocation_id),
+                )
 
     def record_worker_turn(
         self,
@@ -1258,8 +1380,10 @@ class MinionV2Repository:
         ).fetchone()
         if pending_effect is not None:
             return "outbox"
-        if any(item.state in _QUEUED_STATES for item in snapshots):
-            return "queued"
+        # Queue admission is represented by the outbox entry written in the
+        # same transaction as the state transition.  There is no independent
+        # snapshot-scanning scheduler, so a bare queued state is an orphaned
+        # workflow, not a source of liveness.
         return "orphaned"
 
     def _workflow_metrics_locked(self, connection: sqlite3.Connection, workflow_id: str) -> dict[str, Any]:
@@ -1522,12 +1646,8 @@ def _current_phase(workflow: AggregateSnapshot, active: AggregateSnapshot | None
         return "created" if workflow.state == "CREATED" else "routing"
     if active.aggregate_type == AggregateType.ARCHITECTURE_REVISION:
         state = active.state
-        if state.startswith("REQUIREMENTS") or state == "CLARIFICATION_PENDING":
-            return "requirements"
-        if state.startswith("RESEARCH"):
-            return "research"
-        if state.startswith("PLANNING"):
-            return "planning"
+        if state.startswith("ARCHITECT") or state == "CLARIFICATION_PENDING":
+            return "architecture"
         if state in {"REVIEW_QUEUED", "REVIEWING"}:
             return "architecture_review"
         if state in {"HUMAN_REVIEW", "REVISION_PENDING"}:

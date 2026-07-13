@@ -86,6 +86,23 @@ class MinionV2WorkflowService:
             "task_revision_ref": revision_ref.to_dict(),
         }
 
+    def prepare_requirements(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        data = dict(request)
+        payload = {
+            "requirements": list(data.get("requirements") or []),
+            "open_clarifications": list(data.get("open_clarifications") or []),
+            "source_coverage": list(data.get("source_coverage") or []),
+        }
+        ref = self.architecture.publish_requirements(
+            payload,
+            provenance={
+                "actor": str(data.get("actor") or "pal"),
+                "source_channel": str(data.get("source_channel") or "local"),
+                "owner": "foreground_pal",
+            },
+        )
+        return {"status": "prepared", "requirements_ref": ref.to_dict()}
+
     def search_tasks(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
         tasks = self.repository.search_tasks(
@@ -193,8 +210,15 @@ class MinionV2WorkflowService:
         research_mode = ResearchMode(str(data.get("research_mode") or ResearchMode.LOCAL_ONLY))
         goal = str(data.get("goal") or "").strip()
         artifact_ref = _artifact_ref_mapping(data.get("artifact_ref"))
+        requirements_ref = _artifact_ref_mapping(data.get("requirements_ref"))
         if operation == "new_requirement" and not goal:
             raise ValueError("new_requirement workflow requires goal")
+        if operation == "new_requirement" and not requirements_ref:
+            raise ValueError("new_requirement workflow requires a prepared requirements_ref")
+        if requirements_ref:
+            record = self.repository.read_artifact_record(str(requirements_ref.get("sha256") or ""))
+            if record is None or str(record.get("artifact_type") or "") != "RequirementsArtifact":
+                raise ValueError("requirements_ref must reference a durable RequirementsArtifact")
         if operation != "new_requirement" and not artifact_ref:
             raise ValueError(f"{operation} requires artifact_ref")
         if operation in {"execute_trusted", "review_then_execute"}:
@@ -207,7 +231,7 @@ class MinionV2WorkflowService:
             "family_binding_ref": family_binding_ref.to_dict(),
             "operation": operation,
             "goal": goal,
-            "requirements": data.get("requirements") or [],
+            "requirements_ref": requirements_ref,
             "constraints": data.get("constraints") or [],
             "approved_evidence": list(data.get("approved_evidence") or []),
             "workspace": _normalize_workspace(task_revision.get("workspace")),
@@ -227,6 +251,7 @@ class MinionV2WorkflowService:
             child_refs=(
                 (str(task_revision_ref["sha256"]), "task_revision"),
                 (family_binding_ref.sha256, "family_binding"),
+                *(((str(requirements_ref["sha256"]), "requirements"),) if requirements_ref else ()),
                 *(((str(artifact_ref["sha256"]), "input"),) if artifact_ref else ()),
             ),
         )

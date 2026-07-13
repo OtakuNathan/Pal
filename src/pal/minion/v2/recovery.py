@@ -86,7 +86,7 @@ class MinionV2Recovery:
                     actor="minion-v2-recovery",
                     expected_version=snapshot.version,
                     idempotency_key=f"orphan-triage:{aggregate_type.value}:{aggregate_id}:{snapshot.version}",
-                    payload={"blocker": {"kind": "orphaned_workflow", "reason": "no lease, outbox, queued work, or explicit wait"}},
+                    payload={"blocker": {"kind": "orphaned_workflow", "reason": "no live lease, pending outbox effect, or explicit wait"}},
                 )
             )
             triaged.append(aggregate_id)

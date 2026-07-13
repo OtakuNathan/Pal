@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 4
+MINION_V2_SCHEMA_VERSION = 5
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -167,6 +167,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             fencing_token INTEGER NOT NULL,
             role TEXT NOT NULL,
             prompt_pack_ref_json TEXT NOT NULL,
+            continuation_ref_json TEXT NOT NULL DEFAULT '{}',
             status TEXT NOT NULL,
             last_completed_turn INTEGER NOT NULL DEFAULT 0,
             total_input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -178,6 +179,20 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS minion_v2_worker_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invocation_id TEXT NOT NULL,
+            event_kind TEXT NOT NULL,
+            phase TEXT NOT NULL DEFAULT '',
+            round_index INTEGER NOT NULL DEFAULT 0,
+            tool_call_count INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS minion_v2_worker_events_invocation
+        ON minion_v2_worker_events(invocation_id, event_id);
 
         CREATE TABLE IF NOT EXISTS minion_v2_worker_turns (
             invocation_id TEXT NOT NULL,
@@ -238,6 +253,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
     )
     _ensure_column(connection, "minion_v2_worker_invocations", "total_tool_latency_ms", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "minion_v2_worker_invocations", "total_wall_latency_ms", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(connection, "minion_v2_worker_invocations", "continuation_ref_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(connection, "minion_v2_worker_turns", "tool_latency_ms", "INTEGER NOT NULL DEFAULT 0")
     _ensure_column(connection, "minion_v2_worker_turns", "wall_latency_ms", "INTEGER NOT NULL DEFAULT 0")
     connection.execute(
