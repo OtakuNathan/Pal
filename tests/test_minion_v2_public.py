@@ -776,6 +776,7 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
                 "evidence_id",
                 "artifact_ref",
                 "sha256",
+                "decision_token",
             ):
                 self.assertNotIn(f'"{forbidden}"', schemas)
             self.assertNotIn("op_minion_dispatch_workflow", canonical)
@@ -838,6 +839,32 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
             name="router review notes", actor="nathan", source_channel="socket:test"
         )
         self.assertTrue(resolved["sha256"])
+
+    def test_public_human_decision_resolves_pending_card_without_token_argument(self) -> None:
+        wakes: list[str] = []
+        submitted: list[dict[str, object]] = []
+        provider = MinionV2PublicProvider(
+            runtime_root=self.runtime_root,
+            wake_manager=lambda: wakes.append("wake"),
+        )
+        provider.service.resolve_workflow_selector = lambda **_kwargs: "wf_internal"
+        provider.service.submit_human_decision = lambda request: (
+            submitted.append(dict(request))
+            or {"status": "accepted", "workflow_id": "wf_internal", "state": "ACCEPTED"}
+        )
+        result = provider.submit_human_decision(
+            CapabilityCall(
+                name="op_minion_submit_human_decision",
+                meta={"actor_id": "nathan", "channel_id": "socket:test"},
+                args={"task": "OHOS platform layer", "decision": "accept"},
+            )
+        )
+        self.assertEqual(wakes, ["wake"])
+        self.assertEqual(submitted[0]["workflow_id"], "wf_internal")
+        self.assertEqual(submitted[0]["actor"], "nathan")
+        self.assertEqual(submitted[0]["source_channel"], "socket:test")
+        self.assertNotIn("decision_token", submitted[0])
+        self.assertNotIn("workflow_id", result.structured)
 
     def test_new_requirement_routes_to_architecture_revision_without_cursor_state(self) -> None:
         service = MinionV2WorkflowService(self.runtime_root)

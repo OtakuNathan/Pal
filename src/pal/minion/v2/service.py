@@ -652,8 +652,20 @@ class MinionV2WorkflowService:
 
     def submit_human_decision(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
-        token = str(data.get("decision_token") or "")
         decision = str(data.get("decision") or "").strip().lower()
+        if decision not in {"accept", "edit", "reject", "clarify"}:
+            raise ValueError("human decision must be accept, edit, reject, or clarify")
+        if decision == "edit" and not str(data.get("edit_instruction") or "").strip():
+            raise ValueError("edit decision requires edit_instruction")
+        if decision == "clarify" and not str(data.get("clarification_response") or "").strip():
+            raise ValueError("clarify decision requires clarification_response")
+        token = str(data.get("decision_token") or "")
+        if not token:
+            token = self.repository.reissue_human_decision_token(
+                workflow_id=str(data.get("workflow_id") or ""),
+                actor_id=str(data.get("actor") or ""),
+                active_channel_id=str(data.get("source_channel") or ""),
+            )
         token_record = self.repository.inspect_human_decision_token(token)
         if token_record is None:
             raise ValueError("unknown human decision token")

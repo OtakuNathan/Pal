@@ -901,6 +901,99 @@ class MinionV2Repository:
             result.pop("token_hash", None)
             return result
 
+    def reissue_human_decision_token(
+        self,
+        *,
+        workflow_id: str,
+        actor_id: str,
+        active_channel_id: str,
+        ttl_seconds: int = 86400,
+    ) -> str:
+        """Replace the unique pending card token for a semantic/manual decision path."""
+
+        required = {
+            "workflow_id": workflow_id,
+            "actor_id": actor_id,
+            "active_channel_id": active_channel_id,
+        }
+        missing = [key for key, value in required.items() if not str(value or "").strip()]
+        if missing:
+            raise ValueError(f"human decision binding missing fields: {', '.join(missing)}")
+        self.ensure_schema()
+        now = _utc_datetime()
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        expires_at = now + timedelta(seconds=max(60, int(ttl_seconds)))
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                UPDATE minion_v2_human_decisions
+                SET status = 'expired'
+                WHERE status = 'issued' AND expires_at <= ?
+                """,
+                (now.isoformat(),),
+            )
+            rows = connection.execute(
+                """
+                SELECT * FROM minion_v2_human_decisions
+                WHERE workflow_id = ? AND actor_id = ? AND active_channel_id = ? AND status = 'issued'
+                ORDER BY issued_at DESC
+                """,
+                (str(workflow_id), str(actor_id), str(active_channel_id)),
+            ).fetchall()
+            bindings = {
+                (
+                    str(row["architecture_revision_id"]),
+                    str(row["manifest_sha"]),
+                )
+                for row in rows
+            }
+            if not bindings:
+                raise ValueError("current workflow has no pending human decision")
+            if len(bindings) != 1:
+                raise ValueError("current workflow has multiple pending human decisions")
+            architecture_revision_id, manifest_sha = next(iter(bindings))
+            artifact = connection.execute(
+                "SELECT durable FROM minion_v2_artifacts WHERE sha256 = ?",
+                (manifest_sha,),
+            ).fetchone()
+            if artifact is None or int(artifact["durable"]) != 1:
+                raise ValueError("pending human decision references a non-durable artifact")
+            connection.execute(
+                """
+                UPDATE minion_v2_human_decisions
+                SET status = 'expired'
+                WHERE workflow_id = ? AND architecture_revision_id = ? AND manifest_sha = ?
+                  AND actor_id = ? AND active_channel_id = ? AND status = 'issued'
+                """,
+                (
+                    str(workflow_id),
+                    architecture_revision_id,
+                    manifest_sha,
+                    str(actor_id),
+                    str(active_channel_id),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO minion_v2_human_decisions(
+                    token_hash, workflow_id, architecture_revision_id, manifest_sha,
+                    actor_id, active_channel_id, expires_at, issued_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    token_hash,
+                    str(workflow_id),
+                    architecture_revision_id,
+                    manifest_sha,
+                    str(actor_id),
+                    str(active_channel_id),
+                    expires_at.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+        return token
+
     def record_worker_invocation(
         self,
         *,

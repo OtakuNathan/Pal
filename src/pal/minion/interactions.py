@@ -107,7 +107,7 @@ def minion_architecture_review_delivery(payload: dict[str, Any], route: ControlR
         interaction_id=f"minion_v2_architecture_{revision_id}",
         interaction_kind="minion_v2_architecture_review",
         route=route,
-        text=str(payload.get("markdown") or f"Architecture {revision_id}\nManifest: {manifest_sha}"),
+        text=str(payload.get("markdown") or "Architecture review is ready."),
         buttons=buttons,
     )
     return delivery_for_interaction(route, "interactive_open", interaction)

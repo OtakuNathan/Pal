@@ -265,25 +265,34 @@ class MinionV2PublicProvider:
         scope="minion",
         action_name="submit_human_decision",
         description=(
-            "Submit Accept/Edit/Reject for the exact architecture card. The Manager atomically validates the one-time decision token and its "
-            "bound actor, channel, revision, and content before acting. Use this when an inline card expired as well as for button handling."
+            "Submit Accept/Edit/Reject for the current channel-bound architecture review. The Manager resolves the unique pending card and "
+            "atomically validates its actor, channel, revision, and content before acting. Use this manual path when an inline card expired."
         ),
         args_schema={
             "type": "object",
             "properties": {
-                "decision_token": {"type": "string"},
+                "task": {"type": "string"},
                 "decision": {"type": "string", "enum": ["accept", "edit", "reject", "clarify"]},
                 "edit_instruction": {"type": "string"},
                 "clarification_response": {"type": "string"},
             },
-            "required": ["decision_token", "decision"],
+            "required": ["decision"],
+            "additionalProperties": False,
         },
     )
     def submit_human_decision(self, call: CapabilityCall) -> CapabilityResult:
         try:
             actor, channel = self._actor_and_channel(call)
+            workflow_id = self.service.resolve_workflow_selector(
+                selector=str(call.args.get("task") or ""), actor=actor, source_channel=channel
+            )
             payload = self.service.submit_human_decision(
-                {**dict(call.args or {}), "actor": actor, "source_channel": channel}
+                {
+                    **dict(call.args or {}),
+                    "workflow_id": workflow_id,
+                    "actor": actor,
+                    "source_channel": channel,
+                }
             )
             self._wake()
             return _public_result("minion human decision accepted", payload)

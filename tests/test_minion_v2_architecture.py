@@ -359,7 +359,7 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
         service = MinionV2WorkflowService(self.runtime_root)
         result = service.submit_human_decision(
             {
-                "decision_token": token,
+                "workflow_id": workflow_id,
                 "decision": "clarify",
                 "clarification_response": "The checked-in OHOS ABI headers are authoritative.",
                 "actor": "nathan",
@@ -367,11 +367,11 @@ class MinionV2ArchitectureContractTests(unittest.TestCase):
             }
         )
         self.assertEqual(result["state"], "ARCHITECT_QUEUED")
-        self.assertEqual(self.repository.inspect_human_decision_token(token)["status"], "consumed")
-        with self.assertRaisesRegex(ValueError, "stale or already consumed"):
+        self.assertEqual(self.repository.inspect_human_decision_token(token)["status"], "expired")
+        with self.assertRaisesRegex(ValueError, "no pending human decision"):
             service.submit_human_decision(
                 {
-                    "decision_token": token,
+                    "workflow_id": workflow_id,
                     "decision": "clarify",
                     "clarification_response": "duplicate",
                     "actor": "nathan",
