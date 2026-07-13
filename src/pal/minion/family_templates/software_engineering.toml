@@ -14,7 +14,7 @@ reviewer = "software_engineering.v2_reviewer"
 
 [builders]
 requirements = "requirements.v2"
-contract = "contract_sketch.v2"
+contract = "skeleton_git.v2"
 verification = "verification.v2"
 
 [adapters]

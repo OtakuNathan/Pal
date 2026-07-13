@@ -24,6 +24,12 @@ from pal.minion.v2.contract_builder import (
     contract_builder_tool_result,
     is_contract_builder_capability,
 )
+from pal.minion.v2.skeleton_builder import (
+    SKELETON_BUILDER_CAPABILITIES,
+    SKELETON_BUILDER_TOOL_SPECS,
+    is_skeleton_builder_capability,
+    skeleton_builder_tool_result,
+)
 from pal.minion.workspace_file_tools import (
     WORKSPACE_FILE_TOOL_SPECS,
     bound_input_tool_result,
@@ -75,6 +81,7 @@ MINION_DIRECT_WORK_TOOL_SURFACE = (
     "op_minion_artifact_write",
     "op_minion_artifact_edit",
     *CONTRACT_BUILDER_CAPABILITIES,
+    *SKELETON_BUILDER_CAPABILITIES,
     "op_web_search",
     "op_web_read",
     "op_memory_recall",
@@ -159,6 +166,7 @@ _WORKSPACE_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     **WORKSPACE_FILE_TOOL_SPECS,
     **CONTRACT_BUILDER_TOOL_SPECS,
+    **SKELETON_BUILDER_TOOL_SPECS,
 }
 
 
@@ -334,6 +342,8 @@ class MinionScopedExecutionRuntime:
                 self.base_runtime.register_tool(_HydratedTool(name=name, spec=spec, handler=handler))
 
     def _handler(self, name: str) -> Any | None:
+        if is_skeleton_builder_capability(name):
+            return lambda call, _ctx: skeleton_builder_tool_result(call, self.workspace, self.produced_artifacts)
         if is_contract_builder_capability(name):
             return lambda call, _ctx: contract_builder_tool_result(call, self.workspace, self.produced_artifacts)
         if name == "op_minion_input_read":

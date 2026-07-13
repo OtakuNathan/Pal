@@ -339,6 +339,80 @@ class MinionV2TransitionKernelTests(unittest.TestCase):
                 ),
             )
 
+    def test_architect_submission_quiesces_before_manager_snapshot_and_review(self) -> None:
+        running = AggregateSnapshot(
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch_skeleton",
+            workflow_id="wf_test",
+            state=ArchitectureRevisionState.ARCHITECT_RUNNING,
+            version=3,
+            payload={"fencing_token": 4},
+            created_at="2026-01-01T00:00:00+00:00",
+            updated_at="2026-01-01T00:00:00+00:00",
+        )
+        quiescing_result = self.engine.transition(
+            running,
+            self.action(
+                "ARCHITECT_SUBMITTED",
+                AggregateType.ARCHITECTURE_REVISION,
+                "arch_skeleton",
+                payload={
+                    "requirements_ref": {"sha256": "requirements"},
+                    "pending_architecture_submission_ref": {"sha256": "submission"},
+                    "architecture_workspace_path": "/tmp/architecture",
+                    "fencing_token": 4,
+                },
+                expected_version=3,
+            ),
+        )
+        self.assertEqual(quiescing_result.snapshot.state, ArchitectureRevisionState.ARCHITECT_QUIESCING)
+        self.assertEqual(quiescing_result.effects[0].effect_type, "quiesce_architect")
+
+        with self.assertRaises(TransitionGuardError):
+            self.engine.transition(
+                quiescing_result.snapshot,
+                self.action(
+                    "ARCHITECT_QUIESCED",
+                    AggregateType.ARCHITECTURE_REVISION,
+                    "arch_skeleton",
+                    payload={"fencing_token": 4, "workspace_fingerprint": "tree"},
+                    expected_version=4,
+                ),
+            )
+        snapshotting_result = self.engine.transition(
+            quiescing_result.snapshot,
+            self.action(
+                "ARCHITECT_QUIESCED",
+                AggregateType.ARCHITECTURE_REVISION,
+                "arch_skeleton",
+                payload={
+                    "fencing_token": 4,
+                    "process_group_reaped": True,
+                    "exclusive_workspace_lock": True,
+                    "workspace_fingerprint": "tree",
+                },
+                expected_version=4,
+            ),
+        )
+        self.assertEqual(snapshotting_result.snapshot.state, ArchitectureRevisionState.ARCHITECT_SNAPSHOTTING)
+        self.assertEqual(snapshotting_result.effects[0].effect_type, "snapshot_architecture")
+
+        reviewed = self.engine.transition(
+            snapshotting_result.snapshot,
+            self.action(
+                "ARCHITECTURE_SNAPSHOTTED",
+                AggregateType.ARCHITECTURE_REVISION,
+                "arch_skeleton",
+                payload={
+                    "requirements_ref": {"sha256": "requirements"},
+                    "architecture_manifest_ref": {"sha256": "skeleton"},
+                },
+                expected_version=5,
+            ),
+        )
+        self.assertEqual(reviewed.snapshot.state, ArchitectureRevisionState.REVIEW_QUEUED)
+        self.assertEqual(reviewed.effects[0].effect_type, "enqueue_architecture_review")
+
     def test_cancel_wins_over_late_quiesce_completion(self) -> None:
         quiescing = AggregateSnapshot(
             aggregate_type=AggregateType.DAG_NODE_RUN,

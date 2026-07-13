@@ -17,6 +17,12 @@ from pal.minion.v2.contract_builder import (
     REQUIREMENTS_BUILDER_CAPABILITIES,
     is_contract_builder_capability,
 )
+from pal.minion.v2.skeleton_builder import (
+    ARCHITECTURE_SKELETON_CAPABILITIES,
+    SKELETON_BUILDER_CAPABILITIES,
+    SKELETON_REVIEW_CAPABILITIES,
+    is_skeleton_builder_capability,
+)
 from pal.shared import MinionInvocationPack
 
 
@@ -338,6 +344,8 @@ CAPABILITY_GROUPS: dict[str, tuple[str, ...]] = {
     "v2_bound_input_read": ("op_minion_input_read",),
     "v2_contract_sketch_builder": CONTRACT_SKETCH_BUILDER_CAPABILITIES,
     "v2_architecture_review_builder": ARCHITECTURE_REVIEW_BUILDER_CAPABILITIES,
+    "v2_architecture_skeleton_builder": ARCHITECTURE_SKELETON_CAPABILITIES,
+    "v2_skeleton_review_builder": SKELETON_REVIEW_CAPABILITIES,
     "minion_memory_candidates": ("op_minion_memory_candidate_write",),
     "memory_recall": ("op_memory_recall",),
     "workspace_read": WORKSPACE_READ_CAPABILITIES,
@@ -421,6 +429,7 @@ MINION_INTERNAL_ALLOWED_CAPABILITIES = frozenset(
         "op_minion_input_read",
         "op_minion_memory_candidate_write",
         *CONTRACT_BUILDER_CAPABILITIES,
+        *SKELETON_BUILDER_CAPABILITIES,
     }
 )
 
@@ -457,7 +466,11 @@ def is_minion_capability_denied(name: str, *, capability_policy: dict[str, Any] 
     denied = DEFAULT_MINION_DENIED_CAPABILITIES | frozenset(extra_denied)
     if capability in denied:
         return True
-    if capability in MINION_INTERNAL_ALLOWED_CAPABILITIES or is_contract_builder_capability(capability):
+    if (
+        capability in MINION_INTERNAL_ALLOWED_CAPABILITIES
+        or is_contract_builder_capability(capability)
+        or is_skeleton_builder_capability(capability)
+    ):
         return False
     if str(policy.get("risk") or "").strip().lower() == "read_only" and capability == "op_exec_shell":
         return True

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+import hashlib
 import re
 from typing import Any, Mapping
 from datetime import datetime, timezone
@@ -535,6 +536,17 @@ class ArchitectureArtifactService:
 
 def validate_requirements_artifact(payload: Mapping[str, Any]) -> dict[str, Any]:
     requirements = list(payload.get("requirements") or [])
+    if not requirements and isinstance(payload.get("sections"), Mapping):
+        strengths = dict(payload.get("strengths") or {})
+        requirements = [
+            {
+                "section": str(section),
+                "statement": str(statement),
+                "strength": str(strengths.get(str(statement)) or "hard"),
+            }
+            for section, statements in dict(payload.get("sections") or {}).items()
+            for statement in list(statements or [])
+        ]
     if not requirements:
         raise ValueError("requirements artifact must contain at least one requirement")
     seen: set[str] = set()
@@ -542,8 +554,11 @@ def validate_requirements_artifact(payload: Mapping[str, Any]) -> dict[str, Any]
     for item in requirements:
         if not isinstance(item, Mapping):
             raise ValueError("requirement entries must be objects")
-        requirement_id = str(item.get("requirement_id") or item.get("id") or "").strip()
+        section = str(item.get("section") or "Requirements").strip()
         statement = str(item.get("statement") or item.get("text") or "").strip()
+        requirement_id = str(item.get("requirement_id") or item.get("id") or "").strip()
+        if not requirement_id and section and statement:
+            requirement_id = "req_" + hashlib.sha256(f"{section}\0{statement}".encode("utf-8")).hexdigest()[:16]
         strength = str(item.get("strength") or "hard").strip().lower()
         if not requirement_id or not statement:
             raise ValueError("each requirement needs requirement_id and statement")
@@ -555,6 +570,7 @@ def validate_requirements_artifact(payload: Mapping[str, Any]) -> dict[str, Any]
         normalized.append(
             {
                 "requirement_id": requirement_id,
+                "section": section,
                 "statement": statement,
                 "strength": strength,
                 "source_refs": _text_list(item.get("source_refs")),
@@ -562,8 +578,13 @@ def validate_requirements_artifact(payload: Mapping[str, Any]) -> dict[str, Any]
                 "ambiguities": _text_list(item.get("ambiguities")),
             }
         )
+    sections: dict[str, list[str]] = {}
+    for item in normalized:
+        sections.setdefault(str(item["section"]), []).append(str(item["statement"]))
     return {
         "schema_version": "1",
+        "title": str(payload.get("title") or "Requirements").strip(),
+        "sections": sections,
         "requirements": normalized,
         "open_clarifications": list(payload.get("open_clarifications") or []),
         "source_coverage": list(payload.get("source_coverage") or []),

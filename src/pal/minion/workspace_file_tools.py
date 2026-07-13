@@ -136,6 +136,13 @@ async def workspace_file_tool_result(
         relative, absolute = _workspace_file_path(root, call.args)
         if not _workspace_path_allowed_by_reference(absolute, root, root_info):
             raise ValueError("path is outside the declared immutable input include set")
+        if (
+            str(root_info.get("root_kind") or "") != "reference"
+            and call.name in {"op_file_edit", "op_file_write", "op_path_delete"}
+            and workspace.get("write_path_scopes")
+            and not any(_write_scope_matches(relative, dict(item or {})) for item in list(workspace["write_path_scopes"]))
+        ):
+            raise ValueError("path is outside this module's writable implementation/test scopes")
         tool_name, tool_args = _underlying_file_tool(call, absolute)
     except Exception as exc:
         message = str(exc) or exc.__class__.__name__
@@ -269,6 +276,23 @@ def _underlying_file_tool(call: CanonicalToolCall, absolute: Path) -> tuple[str,
     if call.name == "op_file_state":
         return "op_file_state", {"file_path": str(absolute)}
     raise ValueError(f"unknown scoped file tool: {call.name}")
+
+
+def _write_scope_matches(path: str, scope: dict[str, Any]) -> bool:
+    normalized = str(path).replace("\\", "/").strip("/")
+    target = str(scope.get("path") or "").replace("\\", "/").strip("/")
+    kind = str(scope.get("kind") or "")
+    if not target:
+        return False
+    if kind == "file":
+        return normalized == target
+    if kind == "directory":
+        return normalized == target or normalized.startswith(target + "/")
+    if kind == "prefix":
+        target_parent, _, target_name = target.rpartition("/")
+        parent, _, name = normalized.rpartition("/")
+        return parent == target_parent and name.startswith(target_name)
+    return False
 
 
 def _workspace_result(

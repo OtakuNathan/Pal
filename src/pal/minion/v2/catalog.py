@@ -25,6 +25,7 @@ REGISTERED_BUILDERS = frozenset(
     {
         "requirements.v2",
         "contract_sketch.v2",
+        "skeleton_git.v2",
         "verification.v2",
     }
 )

@@ -12,6 +12,7 @@ from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.catalog import MinionV2Catalog
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.skeleton import GitBackedSkeletonService, review_architecture_skeleton
 
 
 ROUTER_OPERATIONS = {
@@ -30,12 +31,14 @@ class MinionV2WorkflowService:
     artifacts: ContentAddressedArtifactStore = field(init=False)
     architecture: ArchitectureArtifactService = field(init=False)
     catalog: MinionV2Catalog = field(init=False)
+    skeleton: GitBackedSkeletonService = field(init=False)
 
     def __post_init__(self) -> None:
         self.repository = MinionV2Repository(Path(self.runtime_root))
         self.artifacts = ContentAddressedArtifactStore(Path(self.runtime_root), self.repository)
         self.architecture = ArchitectureArtifactService(self.artifacts, self.repository)
         self.catalog = MinionV2Catalog(Path(self.runtime_root), self.artifacts)
+        self.skeleton = GitBackedSkeletonService(Path(self.runtime_root), self.artifacts)
 
     def create_task(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
@@ -89,7 +92,10 @@ class MinionV2WorkflowService:
     def prepare_requirements(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
         payload = {
+            "title": str(data.get("title") or "Requirements").strip(),
             "requirements": list(data.get("requirements") or []),
+            "sections": dict(data.get("sections") or {}),
+            "strengths": dict(data.get("strengths") or {}),
             "open_clarifications": list(data.get("open_clarifications") or []),
             "source_coverage": list(data.get("source_coverage") or []),
         }
@@ -193,6 +199,8 @@ class MinionV2WorkflowService:
     def start_workflow(self, request: Mapping[str, Any]) -> dict[str, Any]:
         data = dict(request)
         task_id = str(data.get("task_id") or "").strip()
+        if not task_id:
+            task_id = self._create_or_reuse_task_for_workflow(data)
         task = self.repository.read_snapshot(AggregateType.TASK, task_id)
         if task is None or task.state != "ACTIVE":
             raise ValueError("start_workflow requires an active task_id")
@@ -214,7 +222,32 @@ class MinionV2WorkflowService:
         if operation == "new_requirement" and not goal:
             raise ValueError("new_requirement workflow requires goal")
         if operation == "new_requirement" and not requirements_ref:
-            raise ValueError("new_requirement workflow requires a prepared requirements_ref")
+            requirements_payload: dict[str, Any]
+            if data.get("sections"):
+                requirements_payload = {
+                    "title": str(data.get("title") or goal or "Requirements"),
+                    "sections": dict(data.get("sections") or {}),
+                    "strengths": dict(data.get("strengths") or {}),
+                }
+            elif data.get("requirements"):
+                requirements_payload = {
+                    "title": str(data.get("title") or goal or "Requirements"),
+                    "requirements": list(data.get("requirements") or []),
+                }
+            else:
+                requirements_payload = {
+                    "title": str(data.get("title") or goal or "Requirements"),
+                    "sections": {"Requested outcome": [goal]},
+                }
+            prepared = self.prepare_requirements(
+                {
+                    **requirements_payload,
+                    "actor": actor,
+                    "source_channel": source_channel,
+                    "source_coverage": ["foreground user request"],
+                }
+            )
+            requirements_ref = dict(prepared["requirements_ref"])
         if requirements_ref:
             record = self.repository.read_artifact_record(str(requirements_ref.get("sha256") or ""))
             if record is None or str(record.get("artifact_type") or "") != "RequirementsArtifact":
@@ -222,7 +255,11 @@ class MinionV2WorkflowService:
         if operation != "new_requirement" and not artifact_ref:
             raise ValueError(f"{operation} requires artifact_ref")
         if operation in {"execute_trusted", "review_then_execute"}:
-            self._validate_external_architecture_ref(artifact_ref, trusted_required=operation == "execute_trusted")
+            self._validate_external_architecture_ref(
+                artifact_ref,
+                trusted_required=operation == "execute_trusted",
+                family_id=str(task.payload.get("family_id") or ""),
+            )
         request_payload = {
             "schema_version": "1",
             "workflow_id": workflow_id,
@@ -287,6 +324,45 @@ class MinionV2WorkflowService:
             "request_ref": request_ref.to_dict(),
             "next_action": "manager_outbox_tick",
         }
+
+    def _create_or_reuse_task_for_workflow(self, data: Mapping[str, Any]) -> str:
+        goal = str(data.get("goal") or data.get("objective") or "").strip()
+        family_id = str(data.get("family_id") or "software_engineering").strip()
+        workspace = _normalize_workspace(data.get("workspace"))
+        title = str(data.get("title") or goal or "Minion workflow").strip()
+        if not workspace:
+            raise ValueError("one-click start_workflow requires workspace when task_id is omitted")
+        workspace_key = _workspace_key(workspace)
+        candidates = self.repository.search_tasks(
+            query="",
+            family_id=family_id,
+            include_archived=False,
+            limit=100,
+        )
+        match = next(
+            (
+                item
+                for item in candidates
+                if str(item.get("workspace_key") or "") == workspace_key
+                and str(item.get("objective") or "") == goal
+            ),
+            None,
+        )
+        if match is not None:
+            return str(match["task_id"])
+        created = self.create_task(
+            {
+                "title": title,
+                "objective": goal,
+                "family_id": family_id,
+                "workspace": workspace,
+                "references": list(data.get("references") or []),
+                "policies": dict(data.get("policies") or {}),
+                "actor": str(data.get("actor") or "pal"),
+                "source_channel": str(data.get("source_channel") or "local"),
+            }
+        )
+        return str(created["task_id"])
 
     def _publish_task_revision(
         self,
@@ -589,16 +665,45 @@ class MinionV2WorkflowService:
         artifact_ref: Mapping[str, Any],
         *,
         trusted_required: bool,
+        family_id: str,
     ) -> None:
         record = self.repository.read_artifact_record(str(artifact_ref.get("sha256") or ""))
         if record is None or not record.get("durable"):
             raise ValueError("external artifact is not durable")
-        if str(record.get("artifact_type") or "") != "ArchitectureContractArtifact":
-            raise ValueError("execute_trusted accepts ArchitectureContractArtifact only; legacy plan formats are not supported")
-        if str(record.get("schema_version") or "") != "1":
-            raise ValueError("unsupported ArchitectureContractArtifact schema version")
         if trusted_required and not bool(dict(record.get("metadata") or {}).get("trusted_internal_source")):
             raise ValueError("execute_trusted requires an internally trusted artifact source")
+        artifact_type = str(record.get("artifact_type") or "")
+        if family_id == "software_engineering":
+            if artifact_type != "ArchitectureSkeletonArtifact":
+                raise ValueError(
+                    "software_engineering workflows accept ArchitectureSkeletonArtifact only; "
+                    "the legacy SWE JSON contract graph is not supported"
+                )
+            if str(record.get("schema_version") or "") != "1":
+                raise ValueError("unsupported ArchitectureSkeletonArtifact schema version")
+            artifact = dict(self.artifacts.read_json(_artifact_ref_from_record(record)))
+            for key in ("requirements_ref", "git_bundle_ref"):
+                child = dict(artifact.get(key) or {})
+                child_record = self.repository.read_artifact_record(str(child.get("sha256") or ""))
+                if child_record is None or not child_record.get("durable"):
+                    raise ValueError(f"ArchitectureSkeletonArtifact has no durable {key}")
+            worktree = self.skeleton.provision_review_worktree(
+                artifact=artifact,
+                review_name=f"external-{str(record['sha256'])[:16]}",
+            )
+            requirements = self.artifacts.read_json(dict(artifact["requirements_ref"]))
+            review = review_architecture_skeleton(
+                artifact,
+                worktree=worktree,
+                requirements_payload=requirements,
+            )
+            if review.verdict != "PASS":
+                raise ValueError("external ArchitectureSkeletonArtifact failed mechanical skeleton validation")
+            return
+        if artifact_type != "ArchitectureContractArtifact":
+            raise ValueError("this family requires an ArchitectureContractArtifact")
+        if str(record.get("schema_version") or "") != "1":
+            raise ValueError("unsupported ArchitectureContractArtifact schema version")
         review = self.architecture.review_manifest(_artifact_ref_from_record(record))
         if review.verdict != "PASS":
             raise ValueError("external ArchitectureContractArtifact failed V2 contract validation")

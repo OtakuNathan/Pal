@@ -24,6 +24,11 @@ from pal.minion.v2.adapters import (
 from pal.minion.v2.artifacts import ArtifactRef, ContentAddressedArtifactStore
 from pal.minion.v2.contracts import ActionEnvelope, AggregateSnapshot, AggregateType, DispatchResult
 from pal.minion.v2.repository import MinionV2Repository
+from pal.minion.v2.skeleton import (
+    ARCHITECTURE_SKELETON_ARTIFACT,
+    SKELETON_MODULE_CONTRACT_ARTIFACT,
+    requirements_semantic_view,
+)
 from pal.minion.v2.verification import candidate_reuse_fingerprint
 
 
@@ -190,6 +195,15 @@ class ExecutionCompiler:
         actor: str = "minion-manager",
         reuse_from_epoch_id: str = "",
     ) -> ExecutionCompilation:
+        record = self.repository.read_artifact_record(manifest_ref.sha256)
+        if record and str(record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT:
+            return self._compile_skeleton_epoch(
+                workflow_id=workflow_id,
+                epoch_id=epoch_id,
+                manifest_ref=manifest_ref,
+                actor=actor,
+                reuse_from_epoch_id=reuse_from_epoch_id,
+            )
         manifest = validate_architecture_manifest(self.architecture.artifacts.read_json(manifest_ref))
         fragments = self.architecture.load_manifest_fragments(manifest)
         topology = dict(fragments.get("topology") or {})
@@ -324,6 +338,178 @@ class ExecutionCompiler:
                 actor=actor,
             )
         node_ids = tuple([*(unit_node_ids[unit_id] for unit_id in sorted(unit_node_ids)), integration_node_id])
+        self.repository.dispatch(
+            _action(
+                "NODES_COMPILED",
+                workflow_id,
+                AggregateType.EXECUTION_EPOCH,
+                epoch_id,
+                actor,
+                2,
+                {"node_ids": list(node_ids), "integration_node_id": integration_node_id},
+            )
+        )
+        return ExecutionCompilation(
+            epoch_id=epoch_id,
+            node_run_ids=node_ids,
+            unit_node_ids=unit_node_ids,
+            integration_node_id=integration_node_id,
+        )
+
+    def _compile_skeleton_epoch(
+        self,
+        *,
+        workflow_id: str,
+        epoch_id: str,
+        manifest_ref: ArtifactRef,
+        actor: str,
+        reuse_from_epoch_id: str,
+    ) -> ExecutionCompilation:
+        artifact = dict(self.architecture.artifacts.read_json(manifest_ref))
+        submission = dict(artifact.get("submission") or {})
+        modules = {str(name): dict(value or {}) for name, value in dict(submission.get("modules") or {}).items()}
+        if not modules:
+            raise ValueError("ArchitectureSkeletonArtifact has no modules")
+        depends_on = {
+            name: [str(item) for item in list(module.get("depends_on") or [])]
+            for name, module in modules.items()
+        }
+        _topological_module_order(depends_on)
+        topology_ref = self.architecture.artifacts.put_json(
+            {"depends_on": depends_on},
+            artifact_type="SkeletonTopologyArtifact",
+            child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
+        )
+        module_refs: dict[str, ArtifactRef] = {}
+        for name, module in modules.items():
+            module_refs[name] = self.architecture.artifacts.put_json(
+                {
+                    "module_name": name,
+                    "depends_on": depends_on[name],
+                    "paths": dict(module.get("paths") or {}),
+                    "covers": list(module.get("covers") or []),
+                    "evidence": list(module.get("evidence") or []),
+                },
+                artifact_type=SKELETON_MODULE_CONTRACT_ARTIFACT,
+                child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
+            )
+        integration = dict(submission.get("integration") or {})
+        integration_ref = self.architecture.artifacts.put_json(
+            {
+                "module_name": "integration",
+                "depends_on": sorted(modules),
+                "paths": {
+                    "contract_entrypoint": integration.get("contract_entrypoint"),
+                    "frozen_contract": list(integration.get("frozen_contract") or []),
+                    "owned_impl": list(integration.get("owned_impl") or []),
+                    "owned_test": [],
+                    "reference_only": [],
+                },
+                "covers": list(integration.get("covers") or []),
+                "evidence": list(integration.get("evidence") or []),
+            },
+            artifact_type=SKELETON_MODULE_CONTRACT_ARTIFACT,
+            child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
+        )
+        self.repository.dispatch(
+            _action(
+                "CREATE_EXECUTION_EPOCH",
+                workflow_id,
+                AggregateType.EXECUTION_EPOCH,
+                epoch_id,
+                actor,
+                0,
+                {
+                    "architecture_manifest_ref": manifest_ref.to_dict(),
+                    "topology_ref": topology_ref.to_dict(),
+                    "architecture_manifest_sha": manifest_ref.sha256,
+                    "skeleton_commit_sha": str(artifact.get("skeleton_commit_sha") or ""),
+                },
+            )
+        )
+        self.repository.dispatch(
+            _action("START_EXECUTION", workflow_id, AggregateType.EXECUTION_EPOCH, epoch_id, actor, 1, {})
+        )
+        workspaces = provision_skeleton_epoch_worktrees(
+            self.repository.runtime_root,
+            artifacts=self.architecture.artifacts,
+            epoch_id=epoch_id,
+            unit_ids=sorted(modules),
+            architecture_artifact=artifact,
+        )
+        environment_fingerprint = _stable_json_hash(
+            {
+                "skeleton_tree_sha": str(artifact.get("skeleton_tree_sha") or ""),
+                "execution_adapter": SOFTWARE_GIT_ADAPTER,
+            }
+        )
+        unit_node_ids = {name: f"{epoch_id}:node:{name}" for name in modules}
+        for name in sorted(modules):
+            paths = dict(modules[name].get("paths") or {})
+            self.repository.dispatch(
+                _action(
+                    "CREATE_NODE_RUN",
+                    workflow_id,
+                    AggregateType.DAG_NODE_RUN,
+                    unit_node_ids[name],
+                    actor,
+                    0,
+                    {
+                        "epoch_id": epoch_id,
+                        "unit_id": name,
+                        "module_name": name,
+                        "node_kind": "unit",
+                        "unit_contract_ref": module_refs[name].to_dict(),
+                        "architecture_manifest_ref": manifest_ref.to_dict(),
+                        "dependency_node_ids": [unit_node_ids[item] for item in depends_on[name]],
+                        "accepted_dependency_node_ids": [],
+                        "epoch_frozen": False,
+                        "environment_fingerprint": environment_fingerprint,
+                        "path_policy": {
+                            "frozen_contract": list(paths.get("frozen_contract") or []),
+                            "owned_impl": list(paths.get("owned_impl") or []),
+                            "owned_test": list(paths.get("owned_test") or []),
+                            "reference_only": list(paths.get("reference_only") or []),
+                        },
+                        **dict(workspaces[name]),
+                    },
+                )
+            )
+        integration_node_id = f"{epoch_id}:node:integration"
+        self.repository.dispatch(
+            _action(
+                "CREATE_NODE_RUN",
+                workflow_id,
+                AggregateType.DAG_NODE_RUN,
+                integration_node_id,
+                actor,
+                0,
+                {
+                    "epoch_id": epoch_id,
+                    "unit_id": "integration",
+                    "module_name": "integration",
+                    "node_kind": "integration",
+                    "unit_contract_ref": integration_ref.to_dict(),
+                    "architecture_manifest_ref": manifest_ref.to_dict(),
+                    "dependency_node_ids": [unit_node_ids[name] for name in sorted(modules)],
+                    "accepted_dependency_node_ids": [],
+                    "epoch_frozen": False,
+                    "environment_fingerprint": environment_fingerprint,
+                    "path_policy": {
+                        "frozen_contract": list(integration.get("frozen_contract") or []),
+                        "owned_impl": list(integration.get("owned_impl") or []),
+                        "owned_test": [],
+                        "reference_only": [],
+                    },
+                    **dict(workspaces["integration"]),
+                },
+            )
+        )
+        # Candidate reuse for skeleton epochs is intentionally conservative: a
+        # future epoch starts clean unless the complete semantic/path/dependency
+        # fingerprint can be proven equal by the reuse service.
+        _ = reuse_from_epoch_id
+        node_ids = tuple([*(unit_node_ids[name] for name in sorted(unit_node_ids)), integration_node_id])
         self.repository.dispatch(
             _action(
                 "NODES_COMPILED",
@@ -692,6 +878,9 @@ class UnitWorkViewBuilder:
 
     def build(self, node: AggregateSnapshot, *, dependency_outputs: Mapping[str, Any]) -> ArtifactRef:
         manifest_ref = dict(node.payload.get("architecture_manifest_ref") or {})
+        record = self.architecture.repository.read_artifact_record(str(manifest_ref.get("sha256") or ""))
+        if record and str(record.get("artifact_type") or "") == ARCHITECTURE_SKELETON_ARTIFACT:
+            return self._build_skeleton_view(node, dependency_outputs=dependency_outputs)
         manifest = validate_architecture_manifest(self.architecture.artifacts.read_json(manifest_ref))
         fragments = self.architecture.load_manifest_fragments(manifest)
         unit_contract = self.architecture.artifacts.read_json(dict(node.payload["unit_contract_ref"]))
@@ -732,6 +921,59 @@ class UnitWorkViewBuilder:
             child_refs=(
                 (str(manifest_ref["sha256"]), "architecture_manifest"),
                 (str(dict(node.payload["unit_contract_ref"])["sha256"]), "unit_contract"),
+            ),
+        )
+
+    def _build_skeleton_view(
+        self,
+        node: AggregateSnapshot,
+        *,
+        dependency_outputs: Mapping[str, Any],
+    ) -> ArtifactRef:
+        manifest_ref = dict(node.payload.get("architecture_manifest_ref") or {})
+        artifact = dict(self.architecture.artifacts.read_json(manifest_ref))
+        contract_ref = dict(node.payload.get("unit_contract_ref") or {})
+        contract = dict(self.architecture.artifacts.read_json(contract_ref))
+        requirements_ref = dict(artifact.get("requirements_ref") or {})
+        requirements = requirements_semantic_view(self.architecture.artifacts.read_json(requirements_ref))
+        covered = {
+            (str(item.get("section") or ""), str(item.get("requirement") or ""))
+            for item in list(contract.get("covers") or [])
+        }
+        requirement_sections = {
+            section: [text for text in values if (str(section), str(text)) in covered]
+            for section, values in dict(requirements.get("sections") or {}).items()
+        }
+        requirement_sections = {section: values for section, values in requirement_sections.items() if values}
+        if sum(len(values) for values in requirement_sections.values()) != len(covered):
+            raise ValueError("ModuleWorkView lost one or more semantic Requirement references")
+        path_policy = dict(node.payload.get("path_policy") or contract.get("paths") or {})
+        payload = {
+            "schema_version": "1",
+            "module_name": str(contract.get("module_name") or node.payload.get("module_name") or ""),
+            "requirements": {
+                "title": str(requirements.get("title") or "Requirements"),
+                "sections": requirement_sections,
+            },
+            "contract_entrypoint": str(dict(contract.get("paths") or {}).get("contract_entrypoint") or ""),
+            "frozen_contract": list(path_policy.get("frozen_contract") or []),
+            "owned_impl": list(path_policy.get("owned_impl") or []),
+            "owned_test": list(path_policy.get("owned_test") or []),
+            "reference_only": list(path_policy.get("reference_only") or []),
+            "construction_dependencies": list(contract.get("depends_on") or []),
+            "evidence": list(contract.get("evidence") or []),
+            "dependency_outputs": dict(dependency_outputs),
+            "historical_repair_bills": list(node.payload.get("historical_repair_bill_refs") or []),
+            "node_run_journal": dict(
+                (self.architecture.repository.read_node_journal(node.aggregate_id) or {}).get("journal") or {}
+            ),
+        }
+        return self.architecture.artifacts.put_json(
+            payload,
+            artifact_type="ModuleWorkViewArtifact",
+            child_refs=(
+                (str(manifest_ref["sha256"]), "architecture_skeleton"),
+                (str(contract_ref["sha256"]), "module_contract"),
             ),
         )
 
@@ -790,6 +1032,7 @@ class CandidateSnapshotService:
         worktree: Path,
         expected_workspace_fingerprint: str,
         reference_only_paths: list[str],
+        path_policy: Mapping[str, Any] | None = None,
         base_sha: str,
         unit_contract_hash: str,
         dependency_output_hashes: Mapping[str, str],
@@ -819,7 +1062,10 @@ class CandidateSnapshotService:
             if before != expected_workspace_fingerprint:
                 raise RuntimeError("worktree changed after quiescing")
             changed_paths = git_changed_paths(worktree, base_sha)
-            _validate_reference_only_paths(changed_paths, reference_only_paths)
+            if path_policy:
+                _validate_skeleton_candidate_paths(changed_paths, path_policy)
+            else:
+                _validate_reference_only_paths(changed_paths, reference_only_paths)
             if not changed_paths:
                 raise ValueError("candidate has no changes")
             candidate_key = hashlib.sha256(
@@ -965,6 +1211,79 @@ def provision_epoch_worktrees(
             "epoch_base_tree_sha": base_tree_sha,
             "base_digest": base_sha,
             "base_sha": base_sha,
+        }
+    return result
+
+
+def provision_skeleton_epoch_worktrees(
+    runtime_root: Path,
+    *,
+    artifacts: ContentAddressedArtifactStore,
+    epoch_id: str,
+    unit_ids: list[str],
+    architecture_artifact: Mapping[str, Any],
+) -> dict[str, dict[str, str]]:
+    epoch_root = Path(runtime_root) / "data" / "minion" / "v2" / "repos" / epoch_id
+    common_git_dir = epoch_root / "project.git"
+    worktree_root = epoch_root / "worktrees"
+    skeleton_sha = str(architecture_artifact.get("skeleton_commit_sha") or "")
+    skeleton_tree = str(architecture_artifact.get("skeleton_tree_sha") or "")
+    bundle_ref = ArtifactRef.from_mapping(dict(architecture_artifact.get("git_bundle_ref") or {}))
+    if not skeleton_sha or not skeleton_tree or not bundle_ref.sha256:
+        raise ValueError("ArchitectureSkeletonArtifact is missing its commit, tree, or Git bundle")
+    if not common_git_dir.exists():
+        epoch_root.mkdir(parents=True, exist_ok=True)
+        bundle_path = epoch_root / "architecture.bundle"
+        bundle_path.write_bytes(artifacts.read_bytes(bundle_ref))
+        completed = subprocess.run(
+            ["git", "clone", "--bare", str(bundle_path), str(common_git_dir)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        bundle_path.unlink(missing_ok=True)
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr or completed.stdout or "failed to restore skeleton epoch repository")
+    restored_tree = _git_dir(common_git_dir, "rev-parse", f"{skeleton_sha}^{{tree}}").strip()
+    if restored_tree != skeleton_tree:
+        raise RuntimeError("restored skeleton Git bundle does not match the accepted tree")
+    result: dict[str, dict[str, str]] = {}
+    for unit_id in [*unit_ids, "integration"]:
+        safe_id = _safe_ref(unit_id)
+        worktree = worktree_root / safe_id
+        branch = f"v2/{_safe_ref(epoch_id)}/{safe_id}"
+        if not worktree.exists():
+            worktree.parent.mkdir(parents=True, exist_ok=True)
+            completed = subprocess.run(
+                [
+                    "git",
+                    f"--git-dir={common_git_dir}",
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    str(worktree),
+                    skeleton_sha,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(completed.stderr or completed.stdout or f"failed to provision skeleton node {unit_id}")
+        if _git(worktree, "rev-parse", "HEAD").strip() != skeleton_sha:
+            raise RuntimeError(f"node {unit_id} did not start from the accepted skeleton commit")
+        result[unit_id] = {
+            "workspace_path": str(worktree),
+            "common_git_dir": str(common_git_dir),
+            "worktree_branch": branch,
+            "epoch_base_sha": skeleton_sha,
+            "epoch_base_tree_sha": skeleton_tree,
+            "base_digest": skeleton_sha,
+            "base_sha": skeleton_sha,
+            "execution_adapter": SOFTWARE_GIT_ADAPTER,
         }
     return result
 
@@ -1169,6 +1488,41 @@ def _validate_reference_only_paths(changed_paths: list[str], reference_only_path
         raise ValueError(f"candidate modified reference-only paths: {reference_violations}")
 
 
+def _validate_skeleton_candidate_paths(changed_paths: list[str], policy: Mapping[str, Any]) -> None:
+    frozen = {str(item).replace(os.sep, "/") for item in list(policy.get("frozen_contract") or [])}
+    references = {str(item).replace(os.sep, "/") for item in list(policy.get("reference_only") or [])}
+    writable = [
+        dict(item or {})
+        for item in [*list(policy.get("owned_impl") or []), *list(policy.get("owned_test") or [])]
+    ]
+    frozen_violations = sorted(path for path in changed_paths if path.replace(os.sep, "/") in frozen)
+    if frozen_violations:
+        raise ValueError("candidate modified frozen architecture contracts: " + ", ".join(frozen_violations))
+    reference_violations = sorted(path for path in changed_paths if path.replace(os.sep, "/") in references)
+    if reference_violations:
+        raise ValueError("candidate modified reference-only paths: " + ", ".join(reference_violations))
+    outside = sorted(path for path in changed_paths if not any(_path_scope_matches(path, scope) for scope in writable))
+    if outside:
+        raise ValueError("candidate changed paths outside its owned implementation/test scopes: " + ", ".join(outside))
+
+
+def _path_scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
+    normalized = str(path).replace(os.sep, "/").strip("/")
+    target = str(scope.get("path") or "").replace(os.sep, "/").strip("/")
+    kind = str(scope.get("kind") or "")
+    if not target:
+        return False
+    if kind == "file":
+        return normalized == target
+    if kind == "directory":
+        return normalized == target or normalized.startswith(target + "/")
+    if kind == "prefix":
+        target_parent, _, target_name = target.rpartition("/")
+        parent, _, name = normalized.rpartition("/")
+        return parent == target_parent and name.startswith(target_name)
+    return False
+
+
 def _matches_any(path: str, patterns: list[str]) -> bool:
     normalized = path.replace(os.sep, "/")
     for pattern in patterns:
@@ -1220,6 +1574,16 @@ def _git(worktree: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args],
         cwd=worktree,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout
+
+
+def _git_dir(git_dir: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", f"--git-dir={git_dir}", *args],
         check=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

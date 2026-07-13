@@ -88,11 +88,7 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertNotIn("op_web_read", local.allowed_capabilities)
 
     def test_architect_roles_receive_only_contract_builder(self) -> None:
-        for profile in (
-            "general.architect",
-            "lifestyle.architect",
-            "software_engineering.v2_architect",
-        ):
+        for profile in ("general.architect", "lifestyle.architect"):
             with self.subTest(profile=profile):
                 requirements = self._pack(profile)
                 self.assertNotIn("op_minion_requirements_replace_batch", requirements.allowed_capabilities)
@@ -103,6 +99,13 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
                 self.assertIn("op_minion_contract_submit_sketch", requirements.allowed_capabilities)
                 self.assertNotIn("op_file_write", requirements.allowed_capabilities)
                 self.assertEqual(requirements.workspace.get("workspace_policy", {}).get("mode"), "read_only_repo")
+
+        software = self._pack("software_engineering.v2_architect")
+        self.assertIn("op_minion_architecture_submit", software.allowed_capabilities)
+        self.assertNotIn("op_minion_contract_submit_sketch", software.allowed_capabilities)
+        self.assertIn("op_file_write", software.allowed_capabilities)
+        self.assertIn("op_file_edit", software.allowed_capabilities)
+        self.assertEqual(software.workspace.get("workspace_policy", {}).get("mode"), "writable_git_branch")
 
     def test_bound_input_reader_exposes_only_the_named_immutable_file(self) -> None:
         bound = self.root / "workflow-request.json"
@@ -186,12 +189,12 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertIn("foundation, language/runtime bridge", architect)
         self.assertIn("one candidate-review cycle", architect)
         self.assertIn("Never reduce the core goal to a stub", architect)
-        self.assertIn("Do not define milestones", architect)
-        self.assertIn("claim-driven trace", architecture_review)
-        self.assertIn("unrelated fragment drift", architecture_review)
-        self.assertIn("structured complexity budget", architecture_review)
-        self.assertIn("PASS means independent coders can make those local choices", architecture_review)
-        self.assertIn("breadth-first in one pass", architecture_review)
+        self.assertIn("Never include opaque IDs, handles, SHA values, milestones", architect)
+        self.assertIn("Audit breadth-first in one pass", architecture_review)
+        self.assertIn("unique data/worker/object/resource ownership", architecture_review)
+        self.assertIn("one candidate-review cycle", architecture_review)
+        self.assertIn("Confirm independent Coders can implement each module", architecture_review)
+        self.assertIn("verify a local repair without reopening unchanged architecture", architecture_review)
         self.assertIn("happens-before", verifier)
         self.assertIn("exact public delivery surface", verifier)
         self.assertIn("VerificationPolicy", verifier)
