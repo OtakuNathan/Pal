@@ -5,7 +5,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from pal.llm.contracts import CanonicalToolCall, CanonicalToolResult
-from pal.minion.v2.skeleton import MODULE_NAME_PATTERN, PATH_SCOPE_KINDS
+from pal.minion.v2.skeleton import (
+    MODULE_NAME_PATTERN,
+    PATH_SCOPE_KINDS,
+    SemanticReferenceError,
+    validate_architecture_submission,
+)
 from pal.minion.workspace_tools import _append_unique_artifact, _write_minion_artifact
 from pal.shared import RuntimeStatus
 
@@ -56,39 +61,67 @@ _PATH_SCOPE_SCHEMA = {
     "required": ["kind", "path"],
     "additionalProperties": False,
 }
+_CONTRACT_REF_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "module": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "symbol": {"type": "string"},
+    },
+    "required": ["module", "path"],
+    "additionalProperties": False,
+}
 _MODULE_PATHS_SCHEMA = {
     "type": "object",
     "properties": {
-        "contract_entrypoint": {"type": "string", "minLength": 1},
-        "frozen_contract": {"type": "array", "items": {"type": "string"}},
-        "owned_impl": {"type": "array", "items": _PATH_SCOPE_SCHEMA, "minItems": 1},
-        "owned_test": {"type": "array", "items": _PATH_SCOPE_SCHEMA, "minItems": 1},
+        "contract_paths": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "implementation_scopes": {"type": "array", "items": _PATH_SCOPE_SCHEMA, "minItems": 1},
+        "test_scopes": {"type": "array", "items": _PATH_SCOPE_SCHEMA, "minItems": 1},
         "reference_only": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["contract_entrypoint", "frozen_contract", "owned_impl", "owned_test", "reference_only"],
+    "required": ["contract_paths", "implementation_scopes", "test_scopes", "reference_only"],
     "additionalProperties": False,
 }
 _MODULE_SCHEMA = {
     "type": "object",
     "properties": {
         "depends_on": {"type": "array", "items": {"type": "string"}},
+        "consumes": {"type": "array", "items": _CONTRACT_REF_SCHEMA},
         "paths": _MODULE_PATHS_SCHEMA,
         "covers": {"type": "array", "items": _REQUIREMENT_REF_SCHEMA, "minItems": 1},
         "evidence": {"type": "array", "items": _EVIDENCE_REF_SCHEMA},
     },
-    "required": ["depends_on", "paths", "covers", "evidence"],
+    "required": ["depends_on", "consumes", "paths", "covers", "evidence"],
     "additionalProperties": False,
 }
-_INTEGRATION_SCHEMA = {
+_VERIFICATION_ENTRYPOINT_SCHEMA = {
     "type": "object",
     "properties": {
-        "contract_entrypoint": {"type": "string", "minLength": 1},
-        "frozen_contract": {"type": "array", "items": {"type": "string"}},
-        "owned_impl": {"type": "array", "items": _PATH_SCOPE_SCHEMA, "minItems": 1},
-        "covers": {"type": "array", "items": _REQUIREMENT_REF_SCHEMA, "minItems": 1},
-        "evidence": {"type": "array", "items": _EVIDENCE_REF_SCHEMA},
+        "kind": {
+            "type": "string",
+            "enum": ["source_symbol", "build_target", "product_entrypoint", "platform_probe"],
+        },
+        "path": {"type": "string"},
+        "symbol": {"type": "string"},
+        "target": {"type": "string"},
     },
-    "required": ["contract_entrypoint", "frozen_contract", "owned_impl", "covers", "evidence"],
+    "required": ["kind"],
+    "additionalProperties": False,
+}
+_VERIFICATION_NODE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "kind": {
+            "type": "string",
+            "enum": ["consumer_probe", "end_to_end", "dogfood", "platform"],
+        },
+        "depends_on": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        "consumes": {"type": "array", "items": _CONTRACT_REF_SCHEMA, "minItems": 1},
+        "covers": {"type": "array", "items": _REQUIREMENT_REF_SCHEMA, "minItems": 1},
+        "entrypoints": {"type": "array", "items": _VERIFICATION_ENTRYPOINT_SCHEMA, "minItems": 1},
+        "environment": {"type": "object"},
+    },
+    "required": ["kind", "depends_on", "consumes", "covers", "entrypoints", "environment"],
     "additionalProperties": False,
 }
 _LOCATION_SCHEMA = {
@@ -107,12 +140,15 @@ SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     "op_minion_architecture_submit": {
         "name": "op_minion_architecture_submit",
         "description": (
-            "Submit the complete semantic construction DAG after writing the code skeleton. This is the Architect's only completion tool. "
-            "modules is a map keyed by a unique snake_case semantic module name. Each module declares only work-start blockers, one code contract "
-            "entrypoint, exact frozen contract files, narrow implementation/test path scopes, read-only references, original Requirement text, and optional "
-            "critical evidence. Evidence kind is exactly workspace_file|workspace_symbol|reference_file|reference_symbol|documentation|research_conclusion. "
-            "Path scopes always use {kind:file|directory|prefix,path:...}; repository-root scopes are forbidden. The Manager validates "
-            "Requirement/Evidence references, DAG acyclicity, path ownership, contract comments, Git diff, and snapshot stability. Do not include workflow IDs, "
+            "Preflight and submit the complete semantic architecture index after writing the code skeleton. This is the Architect's only completion tool. "
+            "modules is keyed by a unique snake_case semantic name. depends_on means ACCEPTED-before-start only; consumes separately names provider module, "
+            "contract path, and optional symbol. contract_paths are frozen after Human Accept; the first is the primary contract entrypoint. "
+            "implementation_scopes and test_scopes use only {kind:file|directory,path:...}; a directory must be an exclusive private namespace. "
+            "verification_nodes describe real consumer, build, dogfood, or platform scenarios and the exact module candidates they combine. Every hard "
+            "Requirement needs a verification landing, but no synthetic all-module join is required. Evidence is optional and uses "
+            "workspace_file|workspace_symbol|reference_file|reference_symbol|documentation|research_conclusion. The Manager preflights Requirement/Evidence "
+            "references, all three graphs, path ownership, contract comments, and entrypoints before stopping the worker, then repeats validation on the "
+            "stable snapshot. Do not include workflow IDs, "
             "revision IDs, requirement/evidence/finding IDs, artifact handles, SHA values, milestones, algorithms, implementation steps, or test matrices."
         ),
         "parameters_schema": {
@@ -123,9 +159,13 @@ SKELETON_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
                     "minProperties": 1,
                     "additionalProperties": _MODULE_SCHEMA,
                 },
-                "integration": _INTEGRATION_SCHEMA,
+                "verification_nodes": {
+                    "type": "object",
+                    "minProperties": 1,
+                    "additionalProperties": _VERIFICATION_NODE_SCHEMA,
+                },
             },
-            "required": ["modules", "integration"],
+            "required": ["modules", "verification_nodes"],
             "additionalProperties": False,
         },
     },
@@ -189,6 +229,7 @@ def skeleton_builder_tool_result(
         payload = dict(call.args or {})
         if name == "op_minion_architecture_submit":
             _validate_submission_shape(payload)
+            _preflight_submission(payload, workspace)
             filename = "architecture_submission.json"
             title = "V2 architecture skeleton submission"
         elif name == "op_minion_skeleton_review_submit":
@@ -220,12 +261,17 @@ def skeleton_builder_tool_result(
         )
     except Exception as exc:
         message = f"{exc.__class__.__name__}: {exc}"
+        structured = (
+            exc.to_dict()
+            if isinstance(exc, SemanticReferenceError)
+            else {"error": str(exc), "error_type": exc.__class__.__name__}
+        )
         return CanonicalToolResult(
             name=call.name,
             ok=False,
             text=message,
             llm_text=message,
-            structured={"error": str(exc), "error_type": exc.__class__.__name__},
+            structured=structured,
             call_id=call.call_id,
             status=RuntimeStatus.INVALID,
         )
@@ -240,21 +286,50 @@ def _validate_submission_shape(payload: Mapping[str, Any]) -> None:
         if MODULE_NAME_PATTERN.fullmatch(str(name)) is None:
             raise ValueError(f"invalid semantic module name: {name}")
         module = dict(raw_module or {})
-        missing = {"depends_on", "paths", "covers", "evidence"} - set(module)
+        missing = {"depends_on", "consumes", "paths", "covers", "evidence"} - set(module)
         if missing:
             raise ValueError(f"module {name} is missing: {', '.join(sorted(missing))}")
         unknown = set(str(item) for item in list(module.get("depends_on") or [])) - names
         if unknown:
             raise ValueError(f"module {name} references unknown dependencies: {', '.join(sorted(unknown))}")
         paths = dict(module.get("paths") or {})
-        if not str(paths.get("contract_entrypoint") or "").strip():
-            raise ValueError(f"module {name} requires paths.contract_entrypoint")
-        for field in ("owned_impl", "owned_test"):
+        if not list(paths.get("contract_paths") or []):
+            raise ValueError(f"module {name} requires paths.contract_paths")
+        for field in ("implementation_scopes", "test_scopes"):
             if not list(paths.get(field) or []):
                 raise ValueError(f"module {name} requires paths.{field}")
     _assert_acyclic({str(name): [str(item) for item in list(dict(module).get("depends_on") or [])] for name, module in modules.items()})
-    if not isinstance(payload.get("integration"), Mapping):
-        raise ValueError("integration must be an object")
+    verification_nodes = payload.get("verification_nodes")
+    if not isinstance(verification_nodes, Mapping) or not verification_nodes:
+        raise ValueError("verification_nodes must be a non-empty map")
+
+
+def _preflight_submission(payload: Mapping[str, Any], workspace: Mapping[str, Any]) -> None:
+    references = {
+        str(item.get("name") or ""): Path(str(item.get("path") or ""))
+        for item in list(workspace.get("reference_paths") or [])
+        if str(item.get("name") or "") and str(item.get("path") or "")
+    }
+    requirements_path = references.pop("requirements", None)
+    if requirements_path is None or not requirements_path.is_file():
+        raise ValueError("bound RequirementsArtifact is unavailable for architecture preflight")
+    requirements = json.loads(requirements_path.read_text(encoding="utf-8"))
+    evidence_path = references.pop("evidence_catalog", None)
+    evidence = (
+        json.loads(evidence_path.read_text(encoding="utf-8"))
+        if evidence_path is not None and evidence_path.is_file()
+        else None
+    )
+    repo_path = Path(str(workspace.get("repo_path") or "")).expanduser()
+    if not repo_path.is_dir():
+        raise ValueError("architecture worktree is unavailable for architecture preflight")
+    validate_architecture_submission(
+        payload,
+        requirements_payload=requirements,
+        workspace_root=repo_path,
+        reference_roots=references,
+        evidence_catalog=evidence,
+    )
 
 
 def _validate_review_shape(payload: Mapping[str, Any]) -> None:

@@ -419,6 +419,60 @@ class MinionV2VerificationTests(unittest.TestCase):
             "STALE",
         )
 
+    def test_dependency_defect_stales_only_verification_scenarios_in_its_actual_closure(self) -> None:
+        verification_ref = self.store.put_json(
+            {"status": "PASS", "scenario_fingerprint": "scenario-a"},
+            artifact_type="VerificationArtifact",
+        )
+        other_verification_ref = self.store.put_json(
+            {"status": "PASS", "scenario_fingerprint": "scenario-b"},
+            artifact_type="VerificationArtifact",
+        )
+        repair_ref = self.store.put_json(
+            {"finding": "dependency"}, artifact_type="RepairBillArtifact"
+        )
+        module_a = self.verification.submit_verdict(
+            node=self._reviewing_node("node_module_a"),
+            verification_ref=verification_ref,
+            status=VerificationStatus.PASS,
+            actor="reviewer",
+        ).snapshot
+        module_b = self.verification.submit_verdict(
+            node=self._reviewing_node("node_module_b"),
+            verification_ref=other_verification_ref,
+            status=VerificationStatus.PASS,
+            actor="reviewer",
+        ).snapshot
+        scenario_a = self._accepted_scenario(
+            "node_scenario_a",
+            dependency_node_ids=(module_a.aggregate_id,),
+            scenario_fingerprint="scenario-a",
+            verification_ref=verification_ref,
+        )
+        scenario_b = self._accepted_scenario(
+            "node_scenario_b",
+            dependency_node_ids=(module_b.aggregate_id,),
+            scenario_fingerprint="scenario-b",
+            verification_ref=other_verification_ref,
+        )
+
+        affected = DefectPropagationService(self.repository).propagate_dependency_defect(
+            workflow_id=module_a.workflow_id,
+            epoch_id="epoch",
+            dependency_node_id=module_a.aggregate_id,
+            repair_bill_ref=repair_ref,
+        )
+
+        self.assertEqual(affected, (scenario_a.aggregate_id,))
+        self.assertEqual(
+            self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, scenario_a.aggregate_id).state,
+            "STALE",
+        )
+        self.assertEqual(
+            self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, scenario_b.aggregate_id).state,
+            "ACCEPTED",
+        )
+
     def _reviewing_node(
         self,
         node_id: str,
@@ -463,6 +517,73 @@ class MinionV2VerificationTests(unittest.TestCase):
                 )
             )
         return self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+
+    def _accepted_scenario(
+        self,
+        node_id: str,
+        *,
+        dependency_node_ids: tuple[str, ...],
+        scenario_fingerprint: str,
+        verification_ref,
+    ) -> AggregateSnapshot:
+        contract = self.store.put_json(
+            {"verification_name": node_id},
+            artifact_type="VerificationScenarioContractArtifact",
+        )
+        union = self.store.put_json(
+            {"scenario": node_id}, artifact_type="CandidateUnionArtifact"
+        )
+        actions = [
+            (
+                "CREATE_NODE_RUN",
+                {
+                    "unit_contract_ref": contract.to_dict(),
+                    "epoch_id": "epoch",
+                    "node_kind": "verification",
+                    "dependency_node_ids": list(dependency_node_ids),
+                },
+            ),
+            (
+                "VERIFICATION_DEPENDENCIES_ACCEPTED",
+                {
+                    "accepted_dependency_node_ids": list(dependency_node_ids),
+                    "epoch_frozen": False,
+                },
+            ),
+            (
+                "VERIFICATION_PREPARED",
+                {
+                    "scenario_fingerprint": scenario_fingerprint,
+                    "scenario_candidate_union_ref": union.to_dict(),
+                    "scenario_commit_sha": f"commit-{node_id}",
+                    "verification_workspace_fingerprint": f"tree-{node_id}",
+                },
+            ),
+            (
+                "VERIFICATION_PASSED",
+                {
+                    "verification_artifact_ref": verification_ref.to_dict(),
+                    "scenario_fingerprint": scenario_fingerprint,
+                },
+            ),
+        ]
+        for action_type, payload in actions:
+            snapshot = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type=action_type,
+                    workflow_id="wf_verify",
+                    aggregate_type=AggregateType.DAG_NODE_RUN,
+                    aggregate_id=node_id,
+                    actor="test",
+                    expected_version=snapshot.version if snapshot else 0,
+                    idempotency_key=f"{node_id}:{action_type}",
+                    payload=payload,
+                )
+            )
+        snapshot = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node_id)
+        assert snapshot is not None
+        return snapshot
 
 
 class MinionV2IntegrationTests(unittest.TestCase):
@@ -515,7 +636,11 @@ class MinionV2IntegrationTests(unittest.TestCase):
                 architecture_manifest_sha="manifest",
             )
 
-        self.assertEqual(self._git("rev-parse", "HEAD").strip(), sha_a)
+        self.assertEqual(
+            self._git("rev-parse", "HEAD^{tree}").strip(),
+            self._git("rev-parse", f"{sha_a}^{{tree}}").strip(),
+        )
+        self.assertEqual((self.repo / "base.txt").read_text(encoding="utf-8"), "from a\n")
 
     def _candidate(self, branch: str, filename: str, content: str) -> str:
         self._git("checkout", "-q", "-B", branch, self.base)

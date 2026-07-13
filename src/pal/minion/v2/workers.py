@@ -68,7 +68,12 @@ from pal.minion.v2.skeleton import (
     requirements_semantic_view,
     review_architecture_skeleton,
 )
-from pal.minion.v2.integration import IntegrationOwnershipDefect, IntegrationService
+from pal.minion.v2.integration import (
+    CandidateUnionConflict,
+    CandidateUnionService,
+    IntegrationOwnershipDefect,
+    IntegrationService,
+)
 from pal.minion.v2.verification import (
     DefectKind,
     UnknownPolicy,
@@ -107,6 +112,7 @@ SEMANTIC_EFFECT_TYPES = frozenset(
         "spawn_producer_worker",
         "enqueue_node_review",
         "spawn_verifier_worker",
+        "spawn_scenario_verifier",
         "enqueue_repair",
         "spawn_repair_worker",
         "quiesce_worker",
@@ -168,6 +174,8 @@ class MinionV2SemanticWorker:
             if str(effect.get("aggregate_type") or "") == AggregateType.STANDALONE_REVIEW.value:
                 return await self._run_standalone_review(effect)
             return await self._run_verifier(effect)
+        if effect_type == "spawn_scenario_verifier":
+            return await self._run_verifier(effect, scenario_mode=True)
         if effect_type == "enqueue_repair":
             return self._admit_node_worker(effect, action_type="START_REPAIR", role="repair")
         if effect_type == "spawn_repair_worker":
@@ -419,9 +427,12 @@ class MinionV2SemanticWorker:
                 "repo_path": str(node.payload.get("workspace_path") or ""),
                 "project_name": str(node.payload.get("unit_id") or "unit"),
                 "write_path_scopes": [
-                    *list(dict(node.payload.get("path_policy") or {}).get("owned_impl") or []),
-                    *list(dict(node.payload.get("path_policy") or {}).get("owned_test") or []),
+                    *list(dict(node.payload.get("path_policy") or {}).get("implementation_scopes") or []),
+                    *list(dict(node.payload.get("path_policy") or {}).get("test_scopes") or []),
                 ],
+                "require_os_path_enforcement": self._is_skeleton_manifest(
+                    node.payload.get("architecture_manifest_ref")
+                ),
             },
             prepare_workspace=False,
         )
@@ -590,6 +601,7 @@ class MinionV2SemanticWorker:
                     reference_only_paths=[str(item) for item in list(contract.get("reference_only_paths") or [])],
                     path_policy=dict(node.payload.get("path_policy") or {}),
                     base_sha=base_sha,
+                    candidate_baseline_sha=str(node.payload.get("base_sha") or ""),
                     unit_contract_hash=contract_ref.sha256,
                     dependency_output_hashes=dict(node.payload.get("dependency_output_hashes") or {}),
                     environment_fingerprint=str(node.payload.get("environment_fingerprint") or "default"),
@@ -647,20 +659,43 @@ class MinionV2SemanticWorker:
         self.repository.release_lease(lease_resource, invocation_id, fencing_token)
         return {"result_artifact_ref": candidate_ref.to_dict()}
 
-    async def _run_verifier(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
+    async def _run_verifier(
+        self,
+        effect: Mapping[str, Any],
+        *,
+        scenario_mode: bool = False,
+    ) -> Mapping[str, Any]:
         node = self._effect_snapshot(effect)
+        scenario_mode = scenario_mode or str(node.payload.get("node_kind") or "") == "verification"
         node = await self._ensure_node_effect_lease(
             node,
-            action_type="REBIND_REVIEWER",
+            action_type="REBIND_SCENARIO_VERIFIER" if scenario_mode else "REBIND_REVIEWER",
             role="reviewer",
         )
         invocation_id = str(node.payload.get("active_worker_id") or "")
         lease_resource = str(node.payload.get("lease_resource_key") or "")
         fencing_token = int(node.payload.get("fencing_token") or 0)
-        candidate_ref = _ref_from_mapping(node.payload.get("candidate_ref"))
-        candidate_digest = str(node.payload.get("candidate_digest") or "")
+        candidate_ref = _ref_from_mapping(
+            node.payload.get("unit_contract_ref") if scenario_mode else node.payload.get("candidate_ref")
+        )
+        candidate_digest = str(
+            node.payload.get("scenario_fingerprint") if scenario_mode else node.payload.get("candidate_digest") or ""
+        )
         adapter = self._execution_adapter(node)
-        if adapter == SOFTWARE_GIT_ADAPTER:
+        if scenario_mode and adapter == SOFTWARE_GIT_ADAPTER:
+            review_workspace = Path(str(node.payload.get("workspace_path") or ""))
+            if not review_workspace.is_dir():
+                raise ValueError("verification scenario workspace is unavailable")
+            review_scratch = (
+                self.service.runtime_root
+                / "data"
+                / "minion"
+                / "v2"
+                / "verification-scratch"
+                / _safe_component(node.aggregate_id)
+            )
+            review_scratch.mkdir(parents=True, exist_ok=True)
+        elif adapter == SOFTWARE_GIT_ADAPTER:
             review_workspace, review_scratch = provision_verification_worktree(
                 self.service.runtime_root,
                 node=node,
@@ -676,7 +711,9 @@ class MinionV2SemanticWorker:
             )
         else:
             raise ValueError(f"unsupported verification adapter: {adapter}")
-        if str(node.payload.get("node_kind") or "") == "integration":
+        if scenario_mode:
+            view_ref = _ref_from_mapping(node.payload.get("scenario_work_view_ref"))
+        elif str(node.payload.get("node_kind") or "") == "integration":
             integration_contract = self.service.artifacts.read_json(
                 dict(node.payload["unit_contract_ref"])
             )
@@ -718,9 +755,13 @@ class MinionV2SemanticWorker:
                 "node_kind": str(node.payload.get("node_kind") or "unit"),
                 "changed_paths": [str(item) for item in list(candidate.get("changed_paths") or [])],
                 "candidate_cycle": int(node.payload.get("candidate_cycle") or 0),
-                "instruction": "Inspect the immutable candidate with Git show/diff in the bound review worktree.",
+                "instruction": (
+                    "Verify the exact accepted-module scenario assembled in the bound read-only worktree."
+                    if scenario_mode
+                    else "Inspect the immutable candidate with Git show/diff in the bound review worktree."
+                ),
             },
-            artifact_type="CandidateSemanticViewArtifact",
+            artifact_type="VerificationScenarioSemanticViewArtifact" if scenario_mode else "CandidateSemanticViewArtifact",
             provenance={"owner": "manager", "audience": "verifier"},
             child_refs=((candidate_ref.sha256, "candidate"),),
         )
@@ -733,8 +774,9 @@ class MinionV2SemanticWorker:
             profile=self._profile_for_role(node.workflow_id, "verifier"),
             role_override="verifier",
             instruction=(
-                "Generate and run adversarial verification for the bound candidate. Historical RepairBills come first. "
-                "Write reproducible case commands; the manager will rerun them and owns the verdict."
+                "Generate and run adversarial verification for the bound real usage scenario. Prove only the Requirements claimed by this exact module combination, entrypoint, and environment. Write reproducible case commands; the manager reruns them and owns the verdict."
+                if scenario_mode
+                else "Generate and run adversarial verification for the bound candidate. Historical RepairBills come first. Write reproducible case commands; the manager will rerun them and owns the verdict."
             ),
             reference_refs={"module_work_view": view_ref, "candidate_diff": candidate_view_ref},
             workspace_override={
@@ -774,6 +816,7 @@ class MinionV2SemanticWorker:
             review_scratch=review_scratch,
             candidate_digest=candidate_digest,
             execution_adapter=adapter,
+            include_candidate_patch=not scenario_mode,
         )
         report_ref, status = verification.publish_report(
             node=node,
@@ -793,6 +836,12 @@ class MinionV2SemanticWorker:
             dependency_module=str(plan.get("dependency_module") or ""),
             required=defect_kind == DefectKind.DEPENDENCY,
         )
+        module_node_id = _resolve_dependency_node_id(
+            self.repository,
+            node,
+            dependency_module=str(plan.get("affected_module") or ""),
+            required=scenario_mode and defect_kind == DefectKind.MODULE and status == VerificationStatus.FAIL,
+        )
         if status in {VerificationStatus.FAIL, VerificationStatus.UNKNOWN}:
             first_failure = next(
                 (item for item in case_results if item.status in {VerificationStatus.FAIL, VerificationStatus.UNKNOWN}),
@@ -809,7 +858,7 @@ class MinionV2SemanticWorker:
             )
             repair_ref, fingerprint = verification.publish_repair_bill(
                 node=current,
-                candidate_digest=str(node.payload.get("candidate_digest") or ""),
+                candidate_digest=candidate_digest,
                 verification_ref=report_ref,
                 defect_kind=defect_kind,
                 severity=str(finding.get("severity") or plan.get("severity") or "major"),
@@ -854,9 +903,11 @@ class MinionV2SemanticWorker:
             unknown_policy=unknown_policy,
             repair_bill_ref=repair_ref,
             finding_fingerprint_value=fingerprint,
-            candidate_tree_hash=str(node.payload.get("candidate_digest") or ""),
+            candidate_tree_hash=candidate_digest,
             defect_kind=defect_kind,
             dependency_node_id=dependency_node_id,
+            module_node_id=module_node_id,
+            scenario_fingerprint=str(node.payload.get("scenario_fingerprint") or ""),
         )
         self.repository.record_worker_turn(
             invocation_id=invocation_id,
@@ -1086,6 +1137,12 @@ class MinionV2SemanticWorker:
     async def _publish_final_deliverable(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         epoch = self._effect_snapshot(effect)
         snapshots = self.repository.list_workflow_snapshots(epoch.workflow_id)
+        epoch_nodes = [
+            item
+            for item in snapshots
+            if item.aggregate_type == AggregateType.DAG_NODE_RUN
+            and str(item.payload.get("epoch_id") or "") == epoch.aggregate_id
+        ]
         integration = next(
             (
                 item
@@ -1098,7 +1155,7 @@ class MinionV2SemanticWorker:
             None,
         )
         if integration is None:
-            raise ValueError("final publish requires an ACCEPTED integration node")
+            return await self._publish_skeleton_candidate_union(effect, epoch, epoch_nodes)
         verification_ref = _ref_from_mapping(integration.payload.get("verification_artifact_ref"))
         adapter = self._execution_adapter(integration)
         if adapter == SOFTWARE_GIT_ADAPTER:
@@ -1119,6 +1176,118 @@ class MinionV2SemanticWorker:
             )
         else:
             raise ValueError(f"unsupported publisher adapter: {adapter}")
+        current = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="FINAL_DELIVERABLE_PUBLISHED",
+                workflow_id=epoch.workflow_id,
+                aggregate_type=AggregateType.EXECUTION_EPOCH,
+                aggregate_id=epoch.aggregate_id,
+                actor="minion-v2-manager",
+                expected_version=current.version,
+                idempotency_key=f"publish:{deliverable_ref.sha256}",
+                payload={"published_deliverable_ref": deliverable_ref.to_dict()},
+            )
+        )
+        return {"result_artifact_ref": deliverable_ref.to_dict()}
+
+    async def _publish_skeleton_candidate_union(
+        self,
+        effect: Mapping[str, Any],
+        epoch: AggregateSnapshot,
+        nodes: list[AggregateSnapshot],
+    ) -> Mapping[str, Any]:
+        implementation = [item for item in nodes if str(item.payload.get("node_kind") or "unit") == "unit"]
+        verification = [item for item in nodes if str(item.payload.get("node_kind") or "") == "verification"]
+        if not implementation or not verification or any(item.state != "ACCEPTED" for item in nodes):
+            raise ValueError("final candidate union requires all implementation and verification nodes ACCEPTED")
+        verification_refs: list[dict[str, Any]] = []
+        scenario_fingerprints: dict[str, str] = {}
+        for node in verification:
+            ref = dict(node.payload.get("verification_artifact_ref") or {})
+            report = dict(self.service.artifacts.read_json(ref))
+            expected = str(node.payload.get("scenario_fingerprint") or "")
+            if not expected or str(report.get("scenario_fingerprint") or "") != expected:
+                raise ValueError(f"Verification Node {node.payload.get('module_name')} has stale scenario evidence")
+            verification_refs.append(ref)
+            scenario_fingerprints[str(node.payload.get("module_name") or node.aggregate_id)] = expected
+        ordered = _topological_implementation_nodes(implementation)
+        common_git_dir = Path(str(ordered[0].payload.get("common_git_dir") or ""))
+        skeleton_sha = str(epoch.payload.get("skeleton_commit_sha") or "")
+        if not common_git_dir.is_dir() or not skeleton_sha:
+            raise ValueError("candidate union requires the accepted skeleton Git repository")
+        publish_worktree = common_git_dir.parent / "worktrees" / "__publish__"
+        branch = f"v2/{_safe_component(epoch.aggregate_id)}/publish"
+        if not publish_worktree.exists():
+            publish_worktree.parent.mkdir(parents=True, exist_ok=True)
+            completed = subprocess.run(
+                [
+                    "git",
+                    f"--git-dir={common_git_dir}",
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    str(publish_worktree),
+                    skeleton_sha,
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(completed.stderr or completed.stdout or "failed to create publish worktree")
+        else:
+            subprocess.run(["git", "-C", str(publish_worktree), "reset", "--hard", skeleton_sha], check=True)
+            subprocess.run(["git", "-C", str(publish_worktree), "clean", "-fd"], check=True)
+        candidates = [
+            {
+                "module_name": str(node.payload.get("module_name") or node.payload.get("unit_id") or ""),
+                "candidate_digest": str(node.payload.get("candidate_digest") or ""),
+                "candidate_ref": dict(node.payload.get("candidate_ref") or {}),
+            }
+            for node in ordered
+        ]
+        service = CandidateUnionService(self.service.artifacts)
+        try:
+            union_ref, commit_sha = service.compose(
+                publish_worktree=publish_worktree,
+                ordered_candidates=candidates,
+                architecture_skeleton_ref=dict(epoch.payload.get("architecture_manifest_ref") or {}),
+            )
+        except CandidateUnionConflict as exc:
+            finding_ref = self.service.artifacts.put_json(
+                {
+                    "finding_kind": "architecture_defect",
+                    "summary": str(exc),
+                    "affected_modules": [item["module_name"] for item in candidates],
+                    "source": "final_candidate_union",
+                },
+                artifact_type="ArchitectureFindingArtifact",
+            )
+            current = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
+            self.repository.dispatch(
+                ActionEnvelope(
+                    action_type="REPLAN_REQUESTED",
+                    workflow_id=epoch.workflow_id,
+                    aggregate_type=AggregateType.EXECUTION_EPOCH,
+                    aggregate_id=epoch.aggregate_id,
+                    actor="minion-v2-manager",
+                    expected_version=current.version,
+                    idempotency_key=f"union-conflict:{finding_ref.sha256}",
+                    payload={"finding_artifact_ref": finding_ref.to_dict()},
+                )
+            )
+            return {"result_artifact_ref": finding_ref.to_dict()}
+        deliverable_ref = service.publish(
+            repository=publish_worktree,
+            union_ref=union_ref,
+            commit_sha=commit_sha,
+            branch_name=f"pal/v2/{epoch.workflow_id}",
+            verification_refs=verification_refs,
+            scenario_fingerprints=scenario_fingerprints,
+        )
         current = self.repository.read_snapshot(AggregateType.EXECUTION_EPOCH, epoch.aggregate_id)
         self.repository.dispatch(
             ActionEnvelope(
@@ -3286,9 +3455,10 @@ class MinionV2SemanticWorker:
         review_scratch: Path,
         candidate_digest: str,
         execution_adapter: str,
+        include_candidate_patch: bool = True,
     ) -> ArtifactRef:
         patch_bytes = b""
-        if execution_adapter == SOFTWARE_GIT_ADAPTER:
+        if execution_adapter == SOFTWARE_GIT_ADAPTER and include_candidate_patch:
             patch_bytes = subprocess.run(
                 ["git", "-C", str(review_worktree), "diff", "--binary", candidate_digest, "--"],
                 stdout=subprocess.PIPE,
@@ -3825,6 +3995,7 @@ def _validate_semantic_verification_plan_shape(
         "findings",
         "defect_kind",
         "dependency_module",
+        "affected_module",
         "severity",
         "suggested_repair_boundary",
         "policy_exceptions",
@@ -4261,6 +4432,29 @@ def _prepare_standalone_review_workspace(
 
 def _safe_component(value: str) -> str:
     return "".join(character if character.isalnum() or character in {"-", "_"} else "_" for character in value)
+
+
+def _topological_implementation_nodes(nodes: list[AggregateSnapshot]) -> list[AggregateSnapshot]:
+    by_id = {item.aggregate_id: item for item in nodes}
+    pending = {
+        item.aggregate_id: {
+            str(dependency)
+            for dependency in list(item.payload.get("dependency_node_ids") or [])
+            if str(dependency) in by_id
+        }
+        for item in nodes
+    }
+    ordered: list[AggregateSnapshot] = []
+    while pending:
+        ready = sorted(node_id for node_id, dependencies in pending.items() if not dependencies)
+        if not ready:
+            raise ValueError("implementation Candidate graph contains a cycle during final union")
+        for node_id in ready:
+            ordered.append(by_id[node_id])
+            pending.pop(node_id)
+        for dependencies in pending.values():
+            dependencies.difference_update(ready)
+    return ordered
 
 
 def _lease_is_live(lease: Mapping[str, Any]) -> bool:

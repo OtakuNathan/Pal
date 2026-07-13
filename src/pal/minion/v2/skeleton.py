@@ -35,7 +35,11 @@ CONTRACT_COMMENT_SECTIONS = (
     "Errors",
     "Compatibility",
 )
-PATH_SCOPE_KINDS = frozenset({"file", "directory", "prefix"})
+PATH_SCOPE_KINDS = frozenset({"file", "directory"})
+VERIFICATION_KINDS = frozenset({"consumer_probe", "end_to_end", "dogfood", "platform"})
+VERIFICATION_ENTRYPOINT_KINDS = frozenset(
+    {"source_symbol", "build_target", "product_entrypoint", "platform_probe"}
+)
 _IGNORED_SNAPSHOT_PARTS = frozenset(
     {
         ".git",
@@ -111,11 +115,7 @@ class PathScope:
         normalized = _normalized_repo_path(candidate)
         if self.kind == "file":
             return normalized == self.path
-        if self.kind == "directory":
-            return normalized == self.path or normalized.startswith(self.path + "/")
-        candidate_path = PurePosixPath(normalized)
-        prefix_path = PurePosixPath(self.path)
-        return candidate_path.parent == prefix_path.parent and candidate_path.name.startswith(prefix_path.name)
+        return normalized == self.path or normalized.startswith(self.path + "/")
 
 
 @dataclass(frozen=True)
@@ -313,6 +313,7 @@ def validate_architecture_submission(
             raise ValueError(f"module {name} must be an object")
         module = dict(raw_module)
         depends_on = _unique_text(module.get("depends_on"))
+        consumes = [_normalize_contract_reference(item) for item in list(module.get("consumes") or [])]
         paths = _normalize_module_paths(name, module.get("paths"))
         covers = [
             resolve_requirement_reference(dict(item or {}), requirements_payload).to_dict()
@@ -331,6 +332,7 @@ def validate_architecture_submission(
         ]
         modules[name] = {
             "depends_on": depends_on,
+            "consumes": consumes,
             "paths": paths,
             "covers": covers,
             "evidence": evidence,
@@ -342,10 +344,22 @@ def validate_architecture_submission(
     cycle = _cycle_nodes({name: module["depends_on"] for name, module in modules.items()})
     if cycle:
         raise ValueError("Architecture DAG contains a cycle: " + ", ".join(cycle))
-    integration = _normalize_integration(submission.get("integration"), requirements_payload)
-    _validate_path_policy(modules, integration)
-    _validate_contract_entrypoints(modules, integration, Path(workspace_root))
-    return {"modules": modules, "integration": integration}
+    verification_nodes = _normalize_verification_nodes(
+        submission.get("verification_nodes"),
+        requirements_payload=requirements_payload,
+        workspace_root=Path(workspace_root),
+    )
+    collisions = sorted(set(modules) & set(verification_nodes))
+    if collisions:
+        raise ValueError(
+            "Implementation modules and Verification Nodes must have distinct semantic names: "
+            + ", ".join(collisions)
+        )
+    _validate_contract_graph(modules, verification_nodes)
+    _validate_verification_coverage(verification_nodes, requirements_payload)
+    _validate_path_policy(modules)
+    _validate_declared_paths(modules, verification_nodes, Path(workspace_root))
+    return {"modules": modules, "verification_nodes": verification_nodes}
 
 
 def review_architecture_skeleton(
@@ -362,28 +376,29 @@ def review_architecture_skeleton(
         for module in dict(submission.get("modules") or {}).values()
         for item in list(dict(module).get("covers") or [])
     }
-    integration = dict(submission.get("integration") or {})
-    covered.update(
+    verification_nodes = dict(submission.get("verification_nodes") or {})
+    verified = {
         (_normalized_semantic_text(item["section"]), _normalized_semantic_text(item["requirement"]))
-        for item in list(integration.get("covers") or [])
-    )
+        for node in verification_nodes.values()
+        for item in list(dict(node).get("covers") or [])
+    }
     missing = [
         item
         for item in requirements
         if item.strength == "hard"
-        and (_normalized_semantic_text(item.section), _normalized_semantic_text(item.requirement)) not in covered
+        and (_normalized_semantic_text(item.section), _normalized_semantic_text(item.requirement)) not in verified
     ]
     for item in missing:
         findings.append(
             SkeletonReviewFinding(
                 "contract_defect",
-                "A hard Requirement is not covered by any module or the integration contract.",
+                "A hard Requirement has no real Verification Node landing.",
                 requirements=(item.to_dict(),),
             )
         )
     for name, raw_module in dict(submission.get("modules") or {}).items():
         module = dict(raw_module)
-        entrypoint = str(dict(module.get("paths") or {}).get("contract_entrypoint") or "")
+        entrypoint = str((list(dict(module.get("paths") or {}).get("contract_paths") or []) or [""])[0])
         path = Path(worktree) / entrypoint
         try:
             content = path.read_text(encoding="utf-8")
@@ -437,7 +452,7 @@ def compile_skeleton_markdown(
     for item in semantic_requirements(requirements_payload):
         strength = "" if item.strength == "hard" else f" [{item.strength}]"
         lines.append(f"- **{item.section}**{strength}: {item.requirement}")
-    lines.extend(["", "## Module DAG", ""])
+    lines.extend(["", "## Construction DAG", ""])
     for name, raw_module in dict(submission.get("modules") or {}).items():
         module = dict(raw_module)
         paths = dict(module.get("paths") or {})
@@ -447,7 +462,8 @@ def compile_skeleton_markdown(
                 f"### {name}",
                 "",
                 f"- Starts after: {dependencies}",
-                f"- Contract: `{paths.get('contract_entrypoint', '')}`",
+                f"- Contracts: {', '.join(f'`{item}`' for item in list(paths.get('contract_paths') or []))}",
+                f"- Consumes: {', '.join(_format_contract_reference(item) for item in list(module.get('consumes') or [])) or 'none'}",
                 "- Covers:",
             ]
         )
@@ -456,11 +472,16 @@ def compile_skeleton_markdown(
             for item in list(module.get("covers") or [])
         )
         lines.append("")
-    lines.extend(["## Integration", ""])
-    integration = dict(submission.get("integration") or {})
-    lines.append(f"- Contract: `{integration.get('contract_entrypoint', '')}`")
-    for item in list(integration.get("covers") or []):
-        lines.append(f"- **{item.get('section', '')}**: {item.get('requirement', '')}")
+    lines.extend(["## Verification Topology", ""])
+    for name, raw_node in dict(submission.get("verification_nodes") or {}).items():
+        node = dict(raw_node)
+        dependencies = ", ".join(node.get("depends_on") or [])
+        lines.extend([f"### {name}", "", f"- Kind: {node.get('kind', '')}", f"- Combines: {dependencies}", "- Proves:"])
+        lines.extend(
+            f"  - **{item.get('section', '')}**: {item.get('requirement', '')}"
+            for item in list(node.get("covers") or [])
+        )
+        lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -548,10 +569,9 @@ class GitBackedSkeletonService:
             evidence_catalog=evidence_catalog,
         )
         changed_paths = _git_changed_paths(architecture_workspace.worktree, architecture_workspace.base_sha)
-        declared_contract_paths = _declared_architect_paths(normalized)
-        undeclared = [path for path in changed_paths if path not in declared_contract_paths]
+        undeclared = [path for path in changed_paths if not _architect_path_is_declared(path, normalized)]
         if undeclared:
-            raise ValueError("Architect changed paths not declared as frozen contracts: " + ", ".join(undeclared))
+            raise ValueError("Architect changed paths outside declared contract/implementation/test skeleton scopes: " + ", ".join(undeclared))
         _git(architecture_workspace.worktree, "add", "-A")
         submission_hash = _stable_hash(normalized)
         commit_key = hashlib.sha256(
@@ -580,6 +600,11 @@ class GitBackedSkeletonService:
             )
             skeleton_sha = _git(architecture_workspace.worktree, "rev-parse", "HEAD").strip()
         skeleton_tree = _git(architecture_workspace.worktree, "rev-parse", f"{skeleton_sha}^{{tree}}").strip()
+        declared_contract_paths = {
+            str(path)
+            for module in dict(normalized.get("modules") or {}).values()
+            for path in list(dict(dict(module).get("paths") or {}).get("contract_paths") or [])
+        }
         contract_file_hashes = {
             path: _git(architecture_workspace.worktree, "rev-parse", f"{skeleton_sha}:{path}").strip()
             for path in sorted(declared_contract_paths)
@@ -600,7 +625,7 @@ class GitBackedSkeletonService:
             child_refs=((requirements_ref.sha256, "requirements"),),
         )
         payload = {
-            "schema_version": "1",
+            "schema_version": "2",
             "requirements_ref": requirements_ref.to_dict(),
             "evidence_catalog_ref": evidence_catalog_ref.to_dict() if evidence_catalog_ref else {},
             "submission": normalized,
@@ -769,66 +794,136 @@ class GitBackedSkeletonService:
 
 def _normalize_module_paths(module_name: str, value: Any) -> dict[str, Any]:
     paths = dict(value or {}) if isinstance(value, Mapping) else {}
-    contract_entrypoint = _normalized_repo_path(str(paths.get("contract_entrypoint") or ""))
-    if not contract_entrypoint:
-        raise ValueError(f"module {module_name} requires paths.contract_entrypoint")
-    frozen = [_normalized_repo_path(str(item)) for item in list(paths.get("frozen_contract") or [])]
-    if contract_entrypoint not in frozen:
-        frozen.insert(0, contract_entrypoint)
-    owned_impl = _normalize_path_scopes(paths.get("owned_impl"), field=f"{module_name}.owned_impl")
-    owned_test = _normalize_path_scopes(paths.get("owned_test"), field=f"{module_name}.owned_test")
+    contracts = [_normalized_repo_path(str(item)) for item in list(paths.get("contract_paths") or [])]
+    if not contracts:
+        raise ValueError(f"module {module_name} requires paths.contract_paths")
+    implementation = _normalize_path_scopes(
+        paths.get("implementation_scopes"), field=f"{module_name}.implementation_scopes"
+    )
+    tests = _normalize_path_scopes(paths.get("test_scopes"), field=f"{module_name}.test_scopes")
     references = [_normalized_repo_path(str(item)) for item in list(paths.get("reference_only") or [])]
     return {
-        "contract_entrypoint": contract_entrypoint,
-        "frozen_contract": list(dict.fromkeys(frozen)),
-        "owned_impl": [item.to_dict() for item in owned_impl],
-        "owned_test": [item.to_dict() for item in owned_test],
+        "contract_paths": list(dict.fromkeys(contracts)),
+        "implementation_scopes": [item.to_dict() for item in implementation],
+        "test_scopes": [item.to_dict() for item in tests],
         "reference_only": list(dict.fromkeys(references)),
     }
 
 
-def _normalize_integration(value: Any, requirements_payload: Mapping[str, Any]) -> dict[str, Any]:
+def _normalize_contract_reference(value: Any) -> dict[str, str]:
     if not isinstance(value, Mapping):
-        raise ValueError("Architecture submission requires an integration contract")
-    integration = dict(value)
-    entrypoint = _normalized_repo_path(str(integration.get("contract_entrypoint") or ""))
-    if not entrypoint:
-        contract_paths = list(integration.get("contract_paths") or [])
-        entrypoint = _normalized_repo_path(str(contract_paths[0] if contract_paths else ""))
-    if not entrypoint:
-        raise ValueError("integration.contract_entrypoint is required")
-    frozen = [_normalized_repo_path(str(item)) for item in list(integration.get("frozen_contract") or integration.get("contract_paths") or [])]
-    if entrypoint not in frozen:
-        frozen.insert(0, entrypoint)
-    owned = _normalize_path_scopes(
-        integration.get("owned_impl") or integration.get("owned_paths"), field="integration.owned_impl"
-    )
-    covers = [
-        resolve_requirement_reference(dict(item or {}), requirements_payload).to_dict()
-        for item in list(integration.get("covers") or [])
-    ]
-    if not covers:
-        raise ValueError("integration must cover at least one end-to-end Requirement")
-    return {
-        "contract_entrypoint": entrypoint,
-        "frozen_contract": list(dict.fromkeys(frozen)),
-        "owned_impl": [item.to_dict() for item in owned],
-        "covers": covers,
-        "evidence": [dict(item or {}) for item in list(integration.get("evidence") or [])],
-    }
+        raise ValueError("contract consumption references must be objects")
+    module = str(value.get("module") or "").strip()
+    path = _normalized_repo_path(str(value.get("path") or ""))
+    symbol = str(value.get("symbol") or "").strip()
+    if not module or not path:
+        raise ValueError("contract consumption references require module and path")
+    result = {"module": module, "path": path}
+    if symbol:
+        result["symbol"] = symbol
+    return result
+
+
+def _normalize_verification_nodes(
+    value: Any,
+    *,
+    requirements_payload: Mapping[str, Any],
+    workspace_root: Path,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("Architecture submission requires at least one Verification Node")
+    result: dict[str, dict[str, Any]] = {}
+    for raw_name, raw_node in value.items():
+        name = str(raw_name or "").strip()
+        if MODULE_NAME_PATTERN.fullmatch(name) is None:
+            raise ValueError(f"invalid semantic Verification Node name: {name or '<empty>'}")
+        if not isinstance(raw_node, Mapping):
+            raise ValueError(f"Verification Node {name} must be an object")
+        node = dict(raw_node)
+        kind = str(node.get("kind") or "").strip()
+        if kind not in VERIFICATION_KINDS:
+            raise ValueError(f"Verification Node {name} has invalid kind: {kind or '<empty>'}")
+        depends_on = _unique_text(node.get("depends_on"))
+        if not depends_on:
+            raise ValueError(f"Verification Node {name} must combine at least one implementation module")
+        consumes = [_normalize_contract_reference(item) for item in list(node.get("consumes") or [])]
+        if not consumes:
+            raise ValueError(f"Verification Node {name} must consume at least one declared contract")
+        covers = [
+            resolve_requirement_reference(dict(item or {}), requirements_payload).to_dict()
+            for item in list(node.get("covers") or [])
+        ]
+        if not covers:
+            raise ValueError(f"Verification Node {name} must cover at least one Requirement")
+        entrypoints = [
+            _normalize_verification_entrypoint(item, node_name=name, workspace_root=workspace_root)
+            for item in list(node.get("entrypoints") or [])
+        ]
+        if not entrypoints:
+            raise ValueError(f"Verification Node {name} requires a real entrypoint or build target")
+        environment = node.get("environment")
+        if not isinstance(environment, Mapping):
+            raise ValueError(f"Verification Node {name} environment must be an object")
+        result[name] = {
+            "kind": kind,
+            "depends_on": depends_on,
+            "consumes": consumes,
+            "covers": covers,
+            "entrypoints": entrypoints,
+            "environment": dict(environment),
+        }
+    return result
+
+
+def _normalize_verification_entrypoint(
+    value: Any,
+    *,
+    node_name: str,
+    workspace_root: Path,
+) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"Verification Node {node_name} entrypoints must be objects")
+    kind = str(value.get("kind") or "").strip()
+    if kind not in VERIFICATION_ENTRYPOINT_KINDS:
+        raise ValueError(f"Verification Node {node_name} has invalid entrypoint kind: {kind or '<empty>'}")
+    path = _normalized_repo_path(str(value.get("path") or ""))
+    symbol = str(value.get("symbol") or "").strip()
+    target = str(value.get("target") or "").strip()
+    if kind in {"source_symbol", "product_entrypoint"} and not path:
+        raise ValueError(f"Verification Node {node_name} {kind} requires path")
+    if kind == "source_symbol" and not symbol:
+        raise ValueError(f"Verification Node {node_name} source_symbol requires symbol")
+    if kind in {"build_target", "platform_probe"} and not target:
+        raise ValueError(f"Verification Node {node_name} {kind} requires target")
+    if path:
+        source = workspace_root / path
+        if not source.is_file():
+            raise ValueError(f"Verification Node {node_name} entrypoint path does not exist: {path}")
+        if symbol:
+            content = source.read_text(encoding="utf-8", errors="replace")
+            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", content) is None:
+                raise ValueError(f"Verification Node {node_name} entrypoint symbol does not exist: {path}::{symbol}")
+    result = {"kind": kind}
+    if path:
+        result["path"] = path
+    if symbol:
+        result["symbol"] = symbol
+    if target:
+        result["target"] = target
+    return result
 
 
 def _normalize_path_scopes(value: Any, *, field: str) -> tuple[PathScope, ...]:
     result: list[PathScope] = []
     for raw in list(value or []):
         if isinstance(raw, str):
-            raise ValueError(f"{field} path scopes require explicit kind=file|directory|prefix")
+            raise ValueError(f"{field} path scopes require explicit kind=file|directory")
         if not isinstance(raw, Mapping):
             raise ValueError(f"{field} path scope must be an object")
         kind = str(raw.get("kind") or "").strip()
         path = _normalized_repo_path(str(raw.get("path") or ""))
         if kind not in PATH_SCOPE_KINDS:
-            raise ValueError(f"{field} path scope kind must be file, directory, or prefix")
+            raise ValueError(f"{field} path scope kind must be file or directory")
         if not path or (kind != "file" and "/" not in path):
             raise ValueError(f"{field} must use a file or narrow subdirectory/prefix, never the repository root")
         result.append(PathScope(kind, path.rstrip("/")))
@@ -837,25 +932,19 @@ def _normalize_path_scopes(value: Any, *, field: str) -> tuple[PathScope, ...]:
     return tuple(dict.fromkeys(result))
 
 
-def _validate_path_policy(modules: Mapping[str, Mapping[str, Any]], integration: Mapping[str, Any]) -> None:
+def _validate_path_policy(modules: Mapping[str, Mapping[str, Any]]) -> None:
     owners: list[tuple[str, PathScope]] = []
     frozen: dict[str, str] = {}
     references: list[tuple[str, str]] = []
     for name, module in modules.items():
         paths = dict(module["paths"])
-        for path in paths["frozen_contract"]:
+        for path in paths["contract_paths"]:
             previous = frozen.setdefault(path, name)
             if previous != name:
                 raise ValueError(f"frozen contract path {path} is owned by both {previous} and {name}")
-        for value in [*paths["owned_impl"], *paths["owned_test"]]:
+        for value in [*paths["implementation_scopes"], *paths["test_scopes"]]:
             owners.append((name, PathScope(str(value["kind"]), str(value["path"]))))
         references.extend((name, path) for path in paths["reference_only"])
-    for path in integration["frozen_contract"]:
-        previous = frozen.setdefault(path, "integration")
-        if previous != "integration":
-            raise ValueError(f"frozen contract path {path} is owned by both {previous} and integration")
-    for value in integration["owned_impl"]:
-        owners.append(("integration", PathScope(str(value["kind"]), str(value["path"]))))
     for index, (owner, scope) in enumerate(owners):
         for other_owner, other_scope in owners[index + 1 :]:
             if owner != other_owner and _path_scopes_overlap(scope, other_scope):
@@ -874,20 +963,164 @@ def _validate_path_policy(modules: Mapping[str, Mapping[str, Any]], integration:
                 )
 
 
-def _validate_contract_entrypoints(
-    modules: Mapping[str, Mapping[str, Any]], integration: Mapping[str, Any], workspace_root: Path
+def _validate_contract_graph(
+    modules: Mapping[str, Mapping[str, Any]],
+    verification_nodes: Mapping[str, Mapping[str, Any]],
+) -> None:
+    contract_paths = {
+        name: set(str(item) for item in list(dict(module["paths"])["contract_paths"]))
+        for name, module in modules.items()
+    }
+    consumed: set[tuple[str, str]] = set()
+    for consumer_name, module in modules.items():
+        for reference in list(module.get("consumes") or []):
+            provider = str(reference["module"])
+            path = str(reference["path"])
+            if provider == consumer_name:
+                raise ValueError(f"module {consumer_name} cannot consume its own cross-module contract")
+            _validate_contract_reference(provider, path, contract_paths, consumer=f"module {consumer_name}")
+            consumed.add((provider, path))
+    names = set(modules)
+    construction_dependencies = {
+        name: set(str(item) for item in list(module.get("depends_on") or []))
+        for name, module in modules.items()
+    }
+    for node_name, node in verification_nodes.items():
+        dependencies = set(str(item) for item in list(node.get("depends_on") or []))
+        unknown = sorted(dependencies - names)
+        if unknown:
+            raise ValueError(
+                f"Verification Node {node_name} references unknown implementation modules: {', '.join(unknown)}"
+            )
+        required_closure = _dependency_closure(dependencies, construction_dependencies)
+        missing_dependencies = sorted(required_closure - dependencies)
+        if missing_dependencies:
+            raise ValueError(
+                f"Verification Node {node_name} must list the complete construction dependency closure; "
+                f"missing: {', '.join(missing_dependencies)}"
+            )
+        for reference in list(node.get("consumes") or []):
+            provider = str(reference["module"])
+            path = str(reference["path"])
+            _validate_contract_reference(provider, path, contract_paths, consumer=f"Verification Node {node_name}")
+            if provider not in dependencies:
+                raise ValueError(
+                    f"Verification Node {node_name} consumes {provider}:{path} but does not include {provider} in depends_on"
+                )
+            consumed.add((provider, path))
+    unconsumed = sorted(
+        f"{module}:{path}"
+        for module, paths in contract_paths.items()
+        for path in paths
+        if (module, path) not in consumed
+    )
+    if unconsumed:
+        raise ValueError(
+            "Architecture declares externally observable contracts with no real consumer: " + ", ".join(unconsumed)
+        )
+
+
+def _dependency_closure(
+    roots: set[str],
+    dependencies: Mapping[str, set[str]],
+) -> set[str]:
+    closure = set(roots)
+    frontier = list(roots)
+    while frontier:
+        current = frontier.pop()
+        for dependency in dependencies.get(current, set()):
+            if dependency not in closure:
+                closure.add(dependency)
+                frontier.append(dependency)
+    return closure
+
+
+def _validate_contract_reference(
+    provider: str,
+    path: str,
+    contract_paths: Mapping[str, set[str]],
+    *,
+    consumer: str,
+) -> None:
+    if provider not in contract_paths:
+        raise ValueError(f"{consumer} consumes an unknown provider module: {provider}")
+    if path not in contract_paths[provider]:
+        raise ValueError(f"{consumer} consumes an undeclared contract path: {provider}:{path}")
+
+
+def _validate_verification_coverage(
+    verification_nodes: Mapping[str, Mapping[str, Any]],
+    requirements_payload: Mapping[str, Any],
+) -> None:
+    verified = {
+        (_normalized_semantic_text(str(item["section"])), _normalized_semantic_text(str(item["requirement"])))
+        for node in verification_nodes.values()
+        for item in list(node.get("covers") or [])
+    }
+    missing = [
+        item
+        for item in semantic_requirements(requirements_payload)
+        if item.strength == "hard"
+        and (_normalized_semantic_text(item.section), _normalized_semantic_text(item.requirement)) not in verified
+    ]
+    if missing:
+        raise ValueError(
+            "Hard Requirements without a real Verification Node landing: "
+            + "; ".join(f"{item.section}: {item.requirement}" for item in missing)
+        )
+
+
+def _validate_declared_paths(
+    modules: Mapping[str, Mapping[str, Any]],
+    verification_nodes: Mapping[str, Mapping[str, Any]],
+    workspace_root: Path,
 ) -> None:
     for name, module in modules.items():
-        entrypoint = str(dict(module["paths"])["contract_entrypoint"])
+        paths = dict(module["paths"])
+        entrypoint = str(list(paths["contract_paths"])[0])
         target = workspace_root / entrypoint
         if not target.is_file():
             raise ValueError(f"module {name} contract entrypoint does not exist: {entrypoint}")
         missing = contract_comment_missing_sections(target.read_text(encoding="utf-8"), module_name=name)
         if missing:
             raise ValueError(f"module {name} contract entrypoint is incomplete: {', '.join(missing)}")
-    integration_entrypoint = workspace_root / str(integration["contract_entrypoint"])
-    if not integration_entrypoint.is_file():
-        raise ValueError(f"integration contract entrypoint does not exist: {integration['contract_entrypoint']}")
+        for contract_path in list(paths["contract_paths"]):
+            if not (workspace_root / contract_path).is_file():
+                raise ValueError(f"module {name} contract path does not exist: {contract_path}")
+        for raw_scope in [*list(paths["implementation_scopes"]), *list(paths["test_scopes"])]:
+            scope = PathScope(str(raw_scope["kind"]), str(raw_scope["path"]))
+            declared = workspace_root / scope.path
+            if scope.kind == "file" and not declared.is_file():
+                raise ValueError(f"module {name} writable file does not exist in the skeleton: {scope.path}")
+            if scope.kind == "directory" and not declared.is_dir():
+                raise ValueError(f"module {name} writable directory does not exist in the skeleton: {scope.path}")
+        for reference in list(paths["reference_only"]):
+            if not (workspace_root / reference).exists():
+                raise ValueError(f"module {name} reference-only path does not exist: {reference}")
+    for consumer_name, module in modules.items():
+        for reference in list(module.get("consumes") or []):
+            symbol = str(reference.get("symbol") or "")
+            if not symbol:
+                continue
+            target = workspace_root / str(reference["path"])
+            content = target.read_text(encoding="utf-8", errors="replace")
+            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", content) is None:
+                raise ValueError(
+                    f"module {consumer_name} consumes an unknown contract symbol: "
+                    f"{reference['module']}:{reference['path']}::{symbol}"
+                )
+    for node_name, node in verification_nodes.items():
+        for reference in list(node.get("consumes") or []):
+            symbol = str(reference.get("symbol") or "")
+            if not symbol:
+                continue
+            target = workspace_root / str(reference["path"])
+            content = target.read_text(encoding="utf-8", errors="replace")
+            if re.search(rf"(?<![A-Za-z0-9_]){re.escape(symbol)}(?![A-Za-z0-9_])", content) is None:
+                raise ValueError(
+                    f"Verification Node {node_name} consumes an unknown contract symbol: "
+                    f"{reference['module']}:{reference['path']}::{symbol}"
+                )
 
 
 def _compiled_path_policy(submission: Mapping[str, Any]) -> dict[str, Any]:
@@ -895,29 +1128,26 @@ def _compiled_path_policy(submission: Mapping[str, Any]) -> dict[str, Any]:
     for name, raw_module in dict(submission.get("modules") or {}).items():
         paths = dict(dict(raw_module).get("paths") or {})
         modules[name] = {
-            "frozen_contract": list(paths.get("frozen_contract") or []),
-            "owned_impl": list(paths.get("owned_impl") or []),
-            "owned_test": list(paths.get("owned_test") or []),
+            "contract_paths": list(paths.get("contract_paths") or []),
+            "implementation_scopes": list(paths.get("implementation_scopes") or []),
+            "test_scopes": list(paths.get("test_scopes") or []),
             "reference_only": list(paths.get("reference_only") or []),
         }
-    integration = dict(submission.get("integration") or {})
-    return {
-        "modules": modules,
-        "integration": {
-            "frozen_contract": list(integration.get("frozen_contract") or []),
-            "owned_impl": list(integration.get("owned_impl") or []),
-        },
-    }
+    return {"modules": modules}
 
 
-def _declared_architect_paths(submission: Mapping[str, Any]) -> set[str]:
-    result = {
-        path
-        for module in dict(submission.get("modules") or {}).values()
-        for path in list(dict(dict(module).get("paths") or {}).get("frozen_contract") or [])
-    }
-    result.update(list(dict(submission.get("integration") or {}).get("frozen_contract") or []))
-    return result
+def _architect_path_is_declared(path: str, submission: Mapping[str, Any]) -> bool:
+    for module in dict(submission.get("modules") or {}).values():
+        paths = dict(dict(module).get("paths") or {})
+        if path in set(str(item) for item in list(paths.get("contract_paths") or [])):
+            return True
+        for raw_scope in [
+            *list(paths.get("implementation_scopes") or []),
+            *list(paths.get("test_scopes") or []),
+        ]:
+            if PathScope(str(raw_scope["kind"]), str(raw_scope["path"])).matches(path):
+                return True
+    return False
 
 
 def _path_scopes_overlap(left: PathScope, right: PathScope) -> bool:
@@ -927,6 +1157,12 @@ def _path_scopes_overlap(left: PathScope, right: PathScope) -> bool:
     if right.kind == "directory":
         probes.add(right.path + "/__pal_probe__")
     return any(left.matches(path) and right.matches(path) for path in probes)
+
+
+def _format_contract_reference(value: Mapping[str, Any]) -> str:
+    symbol = str(value.get("symbol") or "")
+    suffix = f"::{symbol}" if symbol else ""
+    return f"`{value.get('module', '')}:{value.get('path', '')}{suffix}`"
 
 
 def _cycle_nodes(depends_on: Mapping[str, Sequence[str]]) -> tuple[str, ...]:

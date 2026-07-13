@@ -12,6 +12,93 @@ class IntegrationOwnershipDefect(RuntimeError):
     pass
 
 
+class CandidateUnionConflict(RuntimeError):
+    pass
+
+
+@dataclass
+class CandidateUnionService:
+    artifacts: ContentAddressedArtifactStore
+
+    def compose(
+        self,
+        *,
+        publish_worktree: Path,
+        ordered_candidates: Sequence[Mapping[str, Any]],
+        architecture_skeleton_ref: Mapping[str, Any],
+    ) -> tuple[ArtifactRef, str]:
+        applied: list[dict[str, str]] = []
+        seen_modules: set[str] = set()
+        for candidate in ordered_candidates:
+            module_name = str(candidate.get("module_name") or "")
+            candidate_digest = str(candidate.get("candidate_digest") or "")
+            if not module_name or not candidate_digest:
+                raise ValueError("candidate union requires module_name and candidate_digest")
+            if module_name in seen_modules:
+                raise ValueError(f"candidate union contains module more than once: {module_name}")
+            try:
+                _git(publish_worktree, "cherry-pick", candidate_digest)
+            except subprocess.CalledProcessError as exc:
+                _git_no_check(publish_worktree, "cherry-pick", "--abort")
+                raise CandidateUnionConflict(
+                    f"module {module_name} conflicted during deterministic candidate union"
+                ) from exc
+            seen_modules.add(module_name)
+            applied.append({"module_name": module_name, "candidate_digest": candidate_digest})
+        commit_sha = _git(publish_worktree, "rev-parse", "HEAD").strip()
+        ref = self.artifacts.put_json(
+            {
+                "schema_version": "1",
+                "architecture_skeleton_ref": dict(architecture_skeleton_ref),
+                "commit_sha": commit_sha,
+                "applied_module_candidates": applied,
+            },
+            artifact_type="CandidateUnionArtifact",
+            child_refs=tuple(
+                (str(candidate["candidate_ref"]["sha256"]), "module_candidate")
+                for candidate in ordered_candidates
+                if dict(candidate.get("candidate_ref") or {}).get("sha256")
+            ),
+        )
+        return ref, commit_sha
+
+    def publish(
+        self,
+        *,
+        repository: Path,
+        union_ref: ArtifactRef,
+        commit_sha: str,
+        branch_name: str,
+        verification_refs: Sequence[Mapping[str, Any]],
+        scenario_fingerprints: Mapping[str, str],
+    ) -> ArtifactRef:
+        if not branch_name.strip() or branch_name.startswith("-"):
+            raise ValueError("invalid final branch name")
+        if not verification_refs or set(scenario_fingerprints) == set():
+            raise ValueError("final publish requires accepted scenario verification evidence")
+        _git(repository, "branch", "-f", branch_name, commit_sha)
+        if _git(repository, "rev-parse", branch_name).strip() != commit_sha:
+            raise RuntimeError("published branch does not resolve to the deterministic candidate union")
+        children = [(union_ref.sha256, "candidate_union")]
+        children.extend(
+            (str(ref["sha256"]), "scenario_verification")
+            for ref in verification_refs
+            if ref.get("sha256")
+        )
+        return self.artifacts.put_json(
+            {
+                "schema_version": "2",
+                "branch_name": branch_name,
+                "commit_sha": commit_sha,
+                "candidate_union_ref": union_ref.to_dict(),
+                "verification_refs": [dict(item) for item in verification_refs],
+                "scenario_fingerprints": dict(scenario_fingerprints),
+            },
+            artifact_type="PublishedBranchArtifact",
+            child_refs=tuple(children),
+        )
+
+
 @dataclass
 class IntegrationService:
     artifacts: ContentAddressedArtifactStore

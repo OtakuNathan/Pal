@@ -11,6 +11,7 @@ from pal.minion.v2.architecture import ArchitectureArtifactService
 from pal.minion.v2.artifacts import ContentAddressedArtifactStore
 from pal.minion.v2.contracts import ActionEnvelope, AggregateType
 from pal.minion.v2.execution import DagScheduler, ExecutionCompiler, UnitWorkViewBuilder
+from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.repository import MinionV2Repository
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.skeleton import (
@@ -67,6 +68,10 @@ class MinionV2SkeletonTests(unittest.TestCase):
         _git(self.repo, "init", "-q", "-b", "main")
         (self.repo / "README.md").write_text("base\n", encoding="utf-8")
         (self.repo / "deleted.txt").write_text("remove me\n", encoding="utf-8")
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "router.cpp").write_text("// implementation skeleton\n", encoding="utf-8")
+        (self.repo / "tests").mkdir()
+        (self.repo / "tests" / "test_router.cpp").write_text("// test skeleton\n", encoding="utf-8")
         _git(self.repo, "add", "-A")
         _git(
             self.repo,
@@ -138,19 +143,65 @@ class MinionV2SkeletonTests(unittest.TestCase):
         contract = self.repo / "include" / "router.h"
         contract.parent.mkdir()
         contract.write_text(_contract("router"), encoding="utf-8")
-        (self.repo / "tests" / "contracts").mkdir(parents=True)
-        (self.repo / "tests" / "contracts" / "integration.md").write_text("integration\n", encoding="utf-8")
         submission = self._submission()
         submission["modules"]["other"] = {
             **submission["modules"]["router"],
             "paths": {
                 **submission["modules"]["router"]["paths"],
-                "contract_entrypoint": "include/other.h",
-                "frozen_contract": ["include/other.h"],
+                "contract_paths": ["include/other.h"],
             },
         }
+        submission["verification_nodes"]["router_consumer_probe"]["depends_on"].append("other")
+        submission["verification_nodes"]["router_consumer_probe"]["consumes"].append(
+            {"module": "other", "path": "include/other.h", "symbol": "RuleRouter"}
+        )
         (self.repo / "include" / "other.h").write_text(_contract("other"), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "overlap"):
+            validate_architecture_submission(
+                submission,
+                requirements_payload=self.requirements,
+                workspace_root=self.repo,
+            )
+
+    def test_verification_node_requires_complete_construction_dependency_closure(self) -> None:
+        (self.repo / "include").mkdir()
+        (self.repo / "include" / "router.h").write_text(_contract("router"), encoding="utf-8")
+        (self.repo / "include" / "consumer.h").write_text(_contract("consumer"), encoding="utf-8")
+        (self.repo / "src" / "consumer.cpp").write_text("// consumer\n", encoding="utf-8")
+        (self.repo / "tests" / "test_consumer.cpp").write_text("// consumer test\n", encoding="utf-8")
+        submission = self._submission()
+        submission["modules"]["consumer"] = {
+            "depends_on": ["router"],
+            "consumes": [{"module": "router", "path": "include/router.h", "symbol": "RuleRouter"}],
+            "paths": {
+                "contract_paths": ["include/consumer.h"],
+                "implementation_scopes": [{"kind": "file", "path": "src/consumer.cpp"}],
+                "test_scopes": [{"kind": "file", "path": "tests/test_consumer.cpp"}],
+                "reference_only": [],
+            },
+            "covers": submission["modules"]["router"]["covers"],
+            "evidence": [],
+        }
+        scenario = submission["verification_nodes"]["router_consumer_probe"]
+        scenario["depends_on"] = ["consumer"]
+        scenario["consumes"] = [
+            {"module": "consumer", "path": "include/consumer.h", "symbol": "RuleRouter"}
+        ]
+        with self.assertRaisesRegex(ValueError, "complete construction dependency closure.*router"):
+            validate_architecture_submission(
+                submission,
+                requirements_payload=self.requirements,
+                workspace_root=self.repo,
+            )
+
+    def test_verification_and_implementation_names_cannot_collide(self) -> None:
+        (self.repo / "include").mkdir()
+        (self.repo / "include" / "router.h").write_text(_contract("router"), encoding="utf-8")
+        submission = self._submission()
+        submission["verification_nodes"]["router"] = submission["verification_nodes"].pop(
+            "router_consumer_probe"
+        )
+        with self.assertRaisesRegex(ValueError, "distinct semantic names"):
             validate_architecture_submission(
                 submission,
                 requirements_payload=self.requirements,
@@ -174,10 +225,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
         (workspace.worktree / "include").mkdir()
         (workspace.worktree / "include" / "router.h").write_text(_contract("router"), encoding="utf-8")
-        (workspace.worktree / "tests" / "contracts").mkdir(parents=True)
-        (workspace.worktree / "tests" / "contracts" / "integration.md").write_text(
-            "End-to-end route construction and matching contract.\n", encoding="utf-8"
-        )
         artifact_ref = self.service.snapshot_architecture(
             workflow_name="tiny-router",
             revision_name="initial",
@@ -345,9 +392,104 @@ class MinionV2SkeletonTests(unittest.TestCase):
         for forbidden_value in ("hidden-workflow", "hidden-node", "hidden-candidate", "hidden-fingerprint"):
             self.assertNotIn(forbidden_value, encoded)
 
+    def test_verification_scenario_runs_on_the_declared_candidate_union(self) -> None:
+        workspace = self._provision_complete_workspace("scenario-union", "initial")
+        skeleton_ref = self.service.snapshot_architecture(
+            workflow_name="scenario-union",
+            revision_name="initial",
+            architecture_workspace=workspace,
+            submission=self._submission(),
+            requirements_ref=self.requirements_ref,
+        )
+        architecture = ArchitectureArtifactService(self.artifacts, self.repository)
+        compilation = ExecutionCompiler(self.repository, architecture).compile_epoch(
+            workflow_id="scenario-union",
+            epoch_id="scenario-union-epoch",
+            manifest_ref=skeleton_ref,
+        )
+        scheduler = DagScheduler(self.repository)
+        self.assertEqual(
+            scheduler.schedule_ready_nodes(
+                workflow_id="scenario-union",
+                epoch_id="scenario-union-epoch",
+                max_new_nodes=2,
+            ),
+            (compilation.unit_node_ids["router"],),
+        )
+        router_id = compilation.unit_node_ids["router"]
+        router = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, router_id)
+        assert router is not None
+        router_worktree = Path(router.payload["workspace_path"])
+        (router_worktree / "src" / "router.cpp").write_text(
+            "int route_rule() { return 17; }\n", encoding="utf-8"
+        )
+        _git(router_worktree, "add", "src/router.cpp")
+        _git(
+            router_worktree,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "router candidate",
+        )
+        candidate_digest = _git(router_worktree, "rev-parse", "HEAD").strip()
+        candidate_ref = self.artifacts.put_json(
+            {
+                "base_sha": router.payload["base_sha"],
+                "candidate_digest": candidate_digest,
+                "changed_paths": ["src/router.cpp"],
+            },
+            artifact_type="CandidateSnapshotArtifact",
+        )
+        verification_ref = self.artifacts.put_json(
+            {"status": "PASS"}, artifact_type="VerificationArtifact"
+        )
+        self._accept_candidate(
+            router_id,
+            candidate_ref=candidate_ref.to_dict(),
+            candidate_digest=candidate_digest,
+            verification_ref=verification_ref.to_dict(),
+        )
+        scenario_id = compilation.verification_node_ids["router_consumer_probe"]
+        self.assertEqual(
+            scheduler.schedule_ready_nodes(
+                workflow_id="scenario-union",
+                epoch_id="scenario-union-epoch",
+                max_new_nodes=2,
+            ),
+            (scenario_id,),
+        )
+        processor = MinionV2OutboxProcessor(MinionV2WorkflowService(self.runtime_root))
+        result = processor._prepare_verification_scenario(
+            {
+                "effect_key": "scenario-union:prepare",
+                "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                "aggregate_id": scenario_id,
+            }
+        )
+        scenario = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, scenario_id)
+        assert scenario is not None
+        self.assertEqual(scenario.state, "VERIFYING")
+        scenario_worktree = Path(scenario.payload["workspace_path"])
+        self.assertEqual(
+            (scenario_worktree / "src" / "router.cpp").read_text(encoding="utf-8"),
+            "int route_rule() { return 17; }\n",
+        )
+        union = self.artifacts.read_json(scenario.payload["scenario_candidate_union_ref"])
+        self.assertEqual(
+            union["applied_module_candidates"],
+            [{"module_name": "router", "candidate_digest": candidate_digest}],
+        )
+        self.assertEqual(result["result_artifact_ref"], scenario.payload["scenario_work_view_ref"])
+
     def test_skeleton_builder_schema_contains_semantics_not_manager_identity(self) -> None:
         encoded = json.dumps(SKELETON_BUILDER_TOOL_SPECS, sort_keys=True)
-        self.assertIn("contract_entrypoint", encoded)
+        self.assertIn("contract_paths", encoded)
+        self.assertIn("verification_nodes", encoded)
+        self.assertIn("consumes", encoded)
+        self.assertNotIn('"prefix"', encoded)
         self.assertIn("requirement", encoded)
         for forbidden in (
             "workflow_id",
@@ -531,10 +673,6 @@ class MinionV2SkeletonTests(unittest.TestCase):
         )
         (workspace.worktree / "include").mkdir(exist_ok=True)
         (workspace.worktree / "include" / "router.h").write_text(_contract("router"), encoding="utf-8")
-        (workspace.worktree / "tests" / "contracts").mkdir(parents=True, exist_ok=True)
-        (workspace.worktree / "tests" / "contracts" / "integration.md").write_text(
-            "End-to-end route construction and matching contract.\n", encoding="utf-8"
-        )
         return workspace
 
     def _accept_candidate(
@@ -595,11 +733,11 @@ class MinionV2SkeletonTests(unittest.TestCase):
             "modules": {
                 "router": {
                     "depends_on": [],
+                    "consumes": [],
                     "paths": {
-                        "contract_entrypoint": "include/router.h",
-                        "frozen_contract": ["include/router.h"],
-                        "owned_impl": [{"kind": "prefix", "path": "src/router"}],
-                        "owned_test": [{"kind": "prefix", "path": "tests/test_router"}],
+                        "contract_paths": ["include/router.h"],
+                        "implementation_scopes": [{"kind": "file", "path": "src/router.cpp"}],
+                        "test_scopes": [{"kind": "file", "path": "tests/test_router.cpp"}],
                         "reference_only": [],
                     },
                     "covers": [
@@ -615,17 +753,28 @@ class MinionV2SkeletonTests(unittest.TestCase):
                     "evidence": [],
                 }
             },
-            "integration": {
-                "contract_entrypoint": "tests/contracts/integration.md",
-                "frozen_contract": ["tests/contracts/integration.md"],
-                "owned_impl": [{"kind": "directory", "path": "tests/integration"}],
-                "covers": [
-                    {
-                        "section": "Routing",
-                        "requirement": "Route matching must be deterministic.",
-                    }
-                ],
-                "evidence": [],
+            "verification_nodes": {
+                "router_consumer_probe": {
+                    "kind": "consumer_probe",
+                    "depends_on": ["router"],
+                    "consumes": [
+                        {"module": "router", "path": "include/router.h", "symbol": "RuleRouter"}
+                    ],
+                    "covers": [
+                        {
+                            "section": "Routing",
+                            "requirement": "Route matching must be deterministic.",
+                        },
+                        {
+                            "section": "Compatibility",
+                            "requirement": "Existing public signatures remain stable.",
+                        },
+                    ],
+                    "entrypoints": [
+                        {"kind": "source_symbol", "path": "include/router.h", "symbol": "RuleRouter"}
+                    ],
+                    "environment": {},
+                }
             },
         }
 

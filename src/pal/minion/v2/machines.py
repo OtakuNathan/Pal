@@ -207,6 +207,29 @@ def _ready_dependencies(payload: Mapping[str, Any], action: ActionEnvelope) -> N
         raise TransitionGuardError("execution epoch is frozen")
 
 
+def _node_kind(expected: str):
+    def guard(payload: Mapping[str, Any], _action: ActionEnvelope) -> None:
+        actual = str(payload.get("node_kind") or "unit")
+        if actual != expected:
+            raise TransitionGuardError(f"action requires node_kind={expected}, found {actual}")
+
+    return guard
+
+
+def _node_kind_in(*expected: str):
+    allowed = frozenset(expected)
+
+    def guard(payload: Mapping[str, Any], _action: ActionEnvelope) -> None:
+        actual = str(payload.get("node_kind") or "unit")
+        if actual not in allowed:
+            expected_text = ", ".join(sorted(allowed))
+            raise TransitionGuardError(
+                f"action requires node_kind in {{{expected_text}}}, found {actual}"
+            )
+
+    return guard
+
+
 def _lease_guard(_payload: Mapping[str, Any], action: ActionEnvelope) -> None:
     token = action.payload.get("fencing_token")
     if not isinstance(token, int) or token <= 0:
@@ -413,8 +436,17 @@ def _execution_transitions() -> list[TransitionSpec]:
         _spec(kind, S.RUNNING, "SCHEDULE_TICK", S.RUNNING, effects=_effect("schedule_ready_nodes")),
         _spec(kind, S.RUNNING, "ALL_UNIT_NODES_ACCEPTED", S.RUNNING, effects=_effect("queue_integration_node")),
         _spec(kind, S.RUNNING, "INTEGRATION_ACCEPTED", S.FINALIZING, guard=_required("integration_candidate_ref"), effects=_effect("publish_final_deliverable")),
+        _spec(
+            kind,
+            S.RUNNING,
+            "ALL_REQUIRED_NODES_ACCEPTED",
+            S.FINALIZING,
+            guard=_required("accepted_candidate_refs", "verification_artifact_refs"),
+            effects=_effect("publish_final_deliverable"),
+        ),
         _spec(kind, S.FINALIZING, "FINAL_DELIVERABLE_PUBLISHED", S.COMPLETED, guard=_required("published_deliverable_ref"), effects=_effect("submit_workflow_completion")),
         _spec(kind, S.RUNNING, "REPLAN_REQUESTED", S.REPLAN_REQUIRED, guard=_required("finding_artifact_ref"), effects=_effect("freeze_epoch_and_create_revision")),
+        _spec(kind, S.FINALIZING, "REPLAN_REQUESTED", S.REPLAN_REQUIRED, guard=_required("finding_artifact_ref"), effects=_effect("freeze_epoch_and_create_revision")),
         _spec(kind, S.PAUSE_REQUESTED, "NODES_PAUSED", S.PAUSED),
         _spec(
             kind,
@@ -466,13 +498,37 @@ def _node_transitions() -> list[TransitionSpec]:
             "REUSE_ACCEPTED_CANDIDATE",
             S.ACCEPTED,
             guard=_all(
+                _node_kind("unit"),
                 _required("candidate_ref", "candidate_digest", "verification_artifact_ref", "reuse_fingerprint"),
                 _ready_dependencies,
             ),
             effects=_effects("notify_node_accepted", "publish_accepted_memory_candidate"),
         ),
-        _spec(kind, S.BLOCKED_BY_DEPS, "DEPENDENCIES_ACCEPTED", S.QUEUED, guard=_ready_dependencies, effects=_effect("enqueue_producer")),
-        _spec(kind, S.QUEUED, "START_PRODUCING", S.PRODUCING, guard=_lease_guard, effects=_effect("spawn_producer_worker")),
+        _spec(kind, S.BLOCKED_BY_DEPS, "DEPENDENCIES_ACCEPTED", S.QUEUED, guard=_all(_node_kind("unit"), _ready_dependencies), effects=_effect("enqueue_producer")),
+        _spec(
+            kind,
+            S.BLOCKED_BY_DEPS,
+            "LEGACY_INTEGRATION_DEPENDENCIES_ACCEPTED",
+            S.QUEUED,
+            guard=_all(_node_kind("integration"), _ready_dependencies),
+            effects=_effect("enqueue_producer"),
+        ),
+        _spec(
+            kind,
+            S.BLOCKED_BY_DEPS,
+            "VERIFICATION_DEPENDENCIES_ACCEPTED",
+            S.VERIFY_PREPARING,
+            guard=_all(_node_kind("verification"), _ready_dependencies),
+            effects=_effect("prepare_verification_scenario"),
+        ),
+        _spec(
+            kind,
+            S.QUEUED,
+            "START_PRODUCING",
+            S.PRODUCING,
+            guard=_all(_node_kind_in("unit", "integration"), _lease_guard),
+            effects=_effect("spawn_producer_worker"),
+        ),
         _spec(kind, S.PRODUCING, "REBIND_PRODUCER", S.PRODUCING, guard=_lease_guard),
         _spec(kind, S.PRODUCING, "SUBMIT_CANDIDATE", S.QUIESCING, guard=_lease_guard, effects=_effect("quiesce_worker")),
         _spec(kind, S.REPAIRING, "SUBMIT_CANDIDATE", S.QUIESCING, guard=_lease_guard, effects=_effect("quiesce_worker")),
@@ -494,7 +550,48 @@ def _node_transitions() -> list[TransitionSpec]:
         _spec(kind, S.REVIEWING, "ARCHITECTURE_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("freeze_epoch_and_create_revision")),
         _spec(kind, S.REPAIR_QUEUED, "START_REPAIR", S.REPAIRING, guard=_lease_guard, effects=_effect("spawn_repair_worker")),
         _spec(kind, S.REPAIRING, "REBIND_REPAIRER", S.REPAIRING, guard=_lease_guard),
-        _spec(kind, S.STALE, "REQUEUE_STALE", S.QUEUED, guard=_required("unit_contract_ref", "dependency_fingerprint"), effects=_effect("enqueue_producer")),
+        _spec(
+            kind,
+            S.VERIFY_PREPARING,
+            "VERIFICATION_PREPARED",
+            S.VERIFYING,
+            guard=_required(
+                "scenario_fingerprint",
+                "scenario_candidate_union_ref",
+                "scenario_commit_sha",
+                "verification_workspace_fingerprint",
+            ),
+            effects=_effect("spawn_scenario_verifier"),
+        ),
+        _spec(kind, S.VERIFY_PREPARING, "REBIND_VERIFICATION_PREPARER", S.VERIFY_PREPARING),
+        _spec(kind, S.VERIFYING, "REBIND_SCENARIO_VERIFIER", S.VERIFYING, guard=_lease_guard),
+        _spec(kind, S.VERIFYING, "VERIFICATION_PASSED", S.ACCEPTED, guard=_required("verification_artifact_ref", "scenario_fingerprint"), effects=_effect("notify_node_accepted")),
+        _spec(kind, S.VERIFYING, "VERIFICATION_UNKNOWN_ALLOWED", S.ACCEPTED, guard=_all(_required("verification_artifact_ref", "scenario_fingerprint"), _allowed_unknown_guard), effects=_effect("notify_node_accepted")),
+        _spec(kind, S.VERIFYING, "MODULE_DEFECT", S.STALE, guard=_required("repair_bill_ref", "module_node_id"), effects=_effect("reopen_dependency_and_stale_descendants")),
+        _spec(kind, S.VERIFYING, "DEPENDENCY_DEFECT", S.STALE, guard=_required("repair_bill_ref", "dependency_node_id"), effects=_effect("reopen_dependency_and_stale_descendants")),
+        _spec(kind, S.VERIFYING, "CONTRACT_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("freeze_epoch_and_create_revision")),
+        _spec(kind, S.VERIFYING, "ARCHITECTURE_DEFECT", S.STALE, guard=_required("repair_bill_ref"), effects=_effect("freeze_epoch_and_create_revision")),
+        _spec(kind, S.STALE, "REQUEUE_STALE", S.QUEUED, guard=_all(_node_kind("unit"), _required("unit_contract_ref", "dependency_fingerprint"), _ready_dependencies), effects=_effect("enqueue_producer")),
+        _spec(
+            kind,
+            S.STALE,
+            "REQUEUE_LEGACY_INTEGRATION_STALE",
+            S.QUEUED,
+            guard=_all(
+                _node_kind("integration"),
+                _required("unit_contract_ref", "dependency_fingerprint"),
+                _ready_dependencies,
+            ),
+            effects=_effect("enqueue_producer"),
+        ),
+        _spec(
+            kind,
+            S.STALE,
+            "REQUEUE_VERIFICATION_STALE",
+            S.VERIFY_PREPARING,
+            guard=_all(_node_kind("verification"), _required("unit_contract_ref", "dependency_fingerprint"), _ready_dependencies),
+            effects=_effect("prepare_verification_scenario"),
+        ),
         _spec(kind, S.PAUSE_REQUESTED, "PAUSE_CONFIRMED", S.PAUSED),
         _spec(
             kind,
@@ -505,7 +602,7 @@ def _node_transitions() -> list[TransitionSpec]:
         _spec(kind, S.ACCEPTED, "REOPEN_DEPENDENCY", S.REPAIR_QUEUED, guard=_required("repair_bill_ref"), effects=_effect("enqueue_repair")),
         _spec(kind, S.ACCEPTED, "MEMORY_CANDIDATE_PUBLISHED", S.ACCEPTED, guard=_required("memory_candidate_ref")),
     ]
-    pausable = {S.QUEUED, S.PRODUCING, S.REVIEW_QUEUED, S.REVIEWING, S.REPAIR_QUEUED, S.REPAIRING}
+    pausable = {S.QUEUED, S.PRODUCING, S.REVIEW_QUEUED, S.REVIEWING, S.REPAIR_QUEUED, S.REPAIRING, S.VERIFY_PREPARING, S.VERIFYING}
     resumable = frozenset(str(state) for state in pausable)
     for state in pausable:
         transitions.append(_spec(kind, state, "REQUEST_PAUSE", S.PAUSE_REQUESTED, reducer=_pause_reducer(str(state)), effects=_effect("pause_node_worker")))
@@ -518,6 +615,8 @@ def _node_transitions() -> list[TransitionSpec]:
         str(S.REPAIRING): str(S.REPAIR_QUEUED),
         str(S.QUIESCING): str(S.QUEUED),
         str(S.SNAPSHOTTING): str(S.QUEUED),
+        str(S.VERIFY_PREPARING): str(S.VERIFY_PREPARING),
+        str(S.VERIFYING): str(S.VERIFY_PREPARING),
     }
     transitions.append(_spec(kind, S.PAUSED, "RESUME", _mapped_resume_target(node_resume), effects=_effect("resume_node_work")))
     cancellable = pausable | {S.BLOCKED_BY_DEPS, S.QUIESCING, S.SNAPSHOTTING, S.STALE, S.PAUSE_REQUESTED, S.PAUSED, S.TRIAGE_REQUIRED}
@@ -535,7 +634,7 @@ def _node_transitions() -> list[TransitionSpec]:
     directly_staleable = {S.BLOCKED_BY_DEPS, S.QUEUED, S.REVIEW_QUEUED, S.REPAIR_QUEUED, S.ACCEPTED, S.CANCELLED}
     for state in directly_staleable:
         transitions.append(_spec(kind, state, "MARK_STALE", S.STALE, guard=_required("stale_reason_ref")))
-    for state in {S.PRODUCING, S.QUIESCING, S.SNAPSHOTTING, S.REVIEWING, S.REPAIRING, S.PAUSE_REQUESTED, S.PAUSED}:
+    for state in {S.PRODUCING, S.QUIESCING, S.SNAPSHOTTING, S.REVIEWING, S.REPAIRING, S.VERIFY_PREPARING, S.VERIFYING, S.PAUSE_REQUESTED, S.PAUSED}:
         transitions.append(
             _spec(
                 kind,

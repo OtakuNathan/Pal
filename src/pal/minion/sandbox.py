@@ -95,14 +95,21 @@ def sandbox_supported_backend() -> str:
 def with_minion_sandbox_metadata(runtime_root: Path, pack: MinionInvocationPack, *, run_id: str) -> MinionInvocationPack:
     metadata = dict(pack.metadata or {})
     sandbox_config = dict(metadata.get("sandbox") or {})
+    require_path_enforcement = bool((pack.workspace or {}).get("require_os_path_enforcement"))
     if _falsey(sandbox_config.get("enabled")) or _falsey(os.environ.get("PAL_MINION_SANDBOX")):
+        if require_path_enforcement:
+            raise RuntimeError("scoped writable Minion workspaces require an OS sandbox")
         metadata["sandbox"] = {"enabled": False, "backend": "disabled"}
         return MinionInvocationPack.from_dict({**pack.to_dict(), "metadata": metadata})
     backend = str(sandbox_config.get("backend") or os.environ.get("PAL_MINION_SANDBOX_BACKEND") or sandbox_supported_backend()).strip()
     if not backend:
+        if require_path_enforcement:
+            raise RuntimeError("scoped writable Minion workspaces require bubblewrap on Linux")
         metadata["sandbox"] = {"enabled": True, "backend": "unavailable", "reason": "no supported minion sandbox backend found"}
         return MinionInvocationPack.from_dict({**pack.to_dict(), "metadata": metadata})
     if backend != "bwrap":
+        if require_path_enforcement:
+            raise RuntimeError("scoped writable Minion workspaces fail closed without the bubblewrap adapter")
         metadata["sandbox"] = {"enabled": True, "backend": "unavailable", "reason": f"unsupported minion sandbox backend: {backend}"}
         return MinionInvocationPack.from_dict({**pack.to_dict(), "metadata": metadata})
     workspace_path = _workspace_path_from_pack(pack)
@@ -400,10 +407,21 @@ def _build_bwrap_invocation(
         _append_bind_path(args, nvm_root, read_only=True)
     workspace_policy = dict(pack.workspace.get("workspace_policy") or {})
     read_only_workspace = str(workspace_policy.get("mode") or "").strip().lower() == "read_only_repo"
+    write_scopes = [dict(item or {}) for item in list(pack.workspace.get("write_path_scopes") or [])]
+    scoped_writable_workspace = bool(write_scopes)
     for bind_path in _sandbox_git_metadata_bind_paths(sandbox):
-        _append_bind_path(args, bind_path, read_only=read_only_workspace)
+        _append_bind_path(args, bind_path, read_only=True)
     if workspace_path and workspace_path.exists():
-        _append_bind_path(args, workspace_path, read_only=read_only_workspace)
+        _append_bind_path(
+            args,
+            workspace_path,
+            read_only=read_only_workspace or scoped_writable_workspace,
+        )
+        if scoped_writable_workspace:
+            _append_scoped_workspace_binds(args, workspace_path, write_scopes)
+        git_marker = workspace_path / ".git"
+        if git_marker.exists() or git_marker.is_symlink():
+            _append_bind_path(args, git_marker, read_only=True)
     for command in blacklist:
         wrapper = deny_dir / command
         if not wrapper.exists():
@@ -440,8 +458,29 @@ def _append_runtime_root_binds(args: list[str], runtime_root: Path) -> None:
 
 def _append_bind_path(args: list[str], path: Path, *, read_only: bool) -> None:
     path = Path(path).expanduser()
-    _append_dir_scaffold(args, path)
+    _append_dir_scaffold(args, path if path.is_dir() else path.parent)
     args.extend(["--ro-bind" if read_only else "--bind", str(path), str(path)])
+
+
+def _append_scoped_workspace_binds(
+    args: list[str],
+    workspace_path: Path,
+    scopes: list[dict[str, Any]],
+) -> None:
+    root = workspace_path.resolve()
+    for raw_scope in scopes:
+        kind = str(raw_scope.get("kind") or "").strip()
+        relative = str(raw_scope.get("path") or "").strip().replace("\\", "/")
+        if kind not in {"file", "directory"} or not relative:
+            raise RuntimeError("OS write scopes require kind=file|directory and a relative path")
+        target = (root / relative).resolve()
+        if not target.is_relative_to(root):
+            raise RuntimeError(f"OS write scope escapes its worktree: {relative}")
+        if kind == "file" and not target.is_file():
+            raise RuntimeError(f"OS writable file does not exist in the accepted skeleton: {relative}")
+        if kind == "directory" and not target.is_dir():
+            raise RuntimeError(f"OS writable directory does not exist in the accepted skeleton: {relative}")
+        _append_bind_path(args, target, read_only=False)
 
 
 def _sandbox_git_metadata_bind_paths(sandbox: dict[str, Any]) -> tuple[Path, ...]:

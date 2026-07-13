@@ -240,6 +240,79 @@ class MinionSandboxTests(unittest.TestCase):
                 )
             )
 
+    def test_scoped_writable_workspace_enforces_paths_for_shell_processes(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_scoped_") as tmp:
+            root = Path(tmp)
+            runtime_root = root / "runtime"
+            repo = root / "repo"
+            (repo / "contracts").mkdir(parents=True)
+            (repo / "src" / "private").mkdir(parents=True)
+            (repo / "tests").mkdir()
+            (repo / "contracts" / "router.py").write_text("contract\n", encoding="utf-8")
+            (repo / "src" / "router.py").write_text("impl\n", encoding="utf-8")
+            (repo / "src" / "sibling.py").write_text("sibling\n", encoding="utf-8")
+            (repo / "src" / "private" / "seed.py").write_text("seed\n", encoding="utf-8")
+            (repo / "tests" / "test_router.py").write_text("test\n", encoding="utf-8")
+            _git(repo, "init")
+            _git(repo, "config", "user.email", "pal-test@example.invalid")
+            _git(repo, "config", "user.name", "Pal Test")
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "-m", "initial")
+            pack = MinionInvocationPack(
+                invocation_id="scoped",
+                goal="implement router",
+                workspace={
+                    "repo_path": str(repo),
+                    "require_os_path_enforcement": True,
+                    "write_path_scopes": [
+                        {"kind": "file", "path": "src/router.py"},
+                        {"kind": "directory", "path": "src/private"},
+                        {"kind": "file", "path": "tests/test_router.py"},
+                    ],
+                    "workspace_policy": {"mode": "writable_git_branch"},
+                },
+            )
+            with patch.dict(os.environ, {"PAL_MINION_SANDBOX_SCRATCH_ROOT": str(root / "scratch")}):
+                pack = with_minion_sandbox_metadata(runtime_root, pack, run_id="run_scoped")
+                script = """
+printf changed > src/router.py
+printf new > src/private/new.py
+printf changed-test > tests/test_router.py
+if printf bad > contracts/router.py 2>/dev/null; then exit 21; fi
+if printf bad > src/sibling.py 2>/dev/null; then exit 22; fi
+if printf bad > .git/config 2>/dev/null; then exit 23; fi
+"""
+                argv, env = build_sandboxed_runner_invocation(
+                    runtime_root=runtime_root,
+                    pack=pack,
+                    argv=["/bin/sh", "-c", script],
+                    env={"PATH": "/usr/bin:/bin"},
+                )
+            result = subprocess.run(argv, env=env, cwd=repo, capture_output=True, text=True, timeout=20)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((repo / "src" / "router.py").read_text(), "changed")
+            self.assertEqual((repo / "src" / "private" / "new.py").read_text(), "new")
+            self.assertEqual((repo / "tests" / "test_router.py").read_text(), "changed-test")
+            self.assertEqual((repo / "contracts" / "router.py").read_text(), "contract\n")
+            self.assertEqual((repo / "src" / "sibling.py").read_text(), "sibling\n")
+
+    def test_scoped_writable_workspace_fails_closed_without_sandbox(self) -> None:
+        pack = MinionInvocationPack(
+            invocation_id="scoped-disabled",
+            goal="implement",
+            workspace={
+                "repo_path": "/tmp",
+                "require_os_path_enforcement": True,
+                "write_path_scopes": [{"kind": "directory", "path": "owned"}],
+            },
+        )
+        with patch.dict(os.environ, {"PAL_MINION_SANDBOX": "0"}):
+            with self.assertRaisesRegex(RuntimeError, "require an OS sandbox"):
+                with_minion_sandbox_metadata(Path("/tmp"), pack, run_id="disabled")
+
     def test_sandbox_scratch_prefers_temp_root_and_falls_back_when_unusable(self) -> None:
         with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_scratch_") as tmp:
             root = Path(tmp)

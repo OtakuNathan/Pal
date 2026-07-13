@@ -422,6 +422,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
             expected_workspace_fingerprint=quiesced.workspace_fingerprint,
             reference_only_paths=["references/**"],
             base_sha=base_sha,
+            candidate_baseline_sha=base_sha,
             unit_contract_hash=contract.sha256,
             dependency_output_hashes={},
             environment_fingerprint="env-hash",
@@ -431,6 +432,116 @@ class MinionV2ExecutionTests(unittest.TestCase):
         self.assertEqual(self.store.read_json(candidate_ref)["changed_paths"], ["src/a.txt"])
         message = subprocess.check_output(["git", "log", "-1", "--format=%B"], cwd=worktree, text=True)
         self.assertIn("Pal-Candidate-Key:", message)
+
+    def test_repair_candidate_is_a_cumulative_delta_from_the_fixed_node_baseline(self) -> None:
+        worktree = self.runtime_root / "cumulative_candidate_repo"
+        worktree.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=worktree, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=worktree, check=True)
+        (worktree / "src").mkdir()
+        (worktree / "src" / "first.cpp").write_text("base first\n", encoding="utf-8")
+        (worktree / "src" / "second.cpp").write_text("base second\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=worktree, check=True)
+        subprocess.run(["git", "commit", "-qm", "base"], cwd=worktree, check=True)
+        baseline_sha = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=worktree, text=True
+        ).strip()
+        contract = self.store.put_json(
+            {"module_name": "cumulative"},
+            artifact_type="ArchitectureSkeletonModuleContractArtifact",
+        )
+        node_id = "node_cumulative_candidate"
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_NODE_RUN",
+                workflow_id="wf_cumulative_candidate",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id=node_id,
+                actor="test",
+                expected_version=0,
+                idempotency_key=f"{node_id}:create",
+                payload={
+                    "unit_contract_ref": contract.to_dict(),
+                    "epoch_id": "epoch_cumulative_candidate",
+                    "environment_fingerprint": "env-hash",
+                },
+            )
+        )
+        lease = self.repository.claim_lease(
+            f"worktree:{node_id}", "worker_cumulative", ttl_seconds=60
+        )
+        locks = WorkspaceLockRegistry()
+        snapshotter = CandidateSnapshotService(self.repository, self.store, locks)
+
+        def snapshot(*, current_head: str, parent_candidate: str = ""):
+            quiesced = NodeQuiescer(
+                self.repository, _StoppedProcessController(), locks
+            ).quiesce(
+                node_run_id=node_id,
+                worker_id=lease.owner_id,
+                lease_resource_key=lease.resource_key,
+                fencing_token=lease.fencing_token,
+                worktree=worktree,
+            )
+            return snapshotter.create_candidate(
+                node_run_id=node_id,
+                worker_id=lease.owner_id,
+                lease_resource_key=lease.resource_key,
+                fencing_token=lease.fencing_token,
+                worktree=worktree,
+                expected_workspace_fingerprint=quiesced.workspace_fingerprint,
+                reference_only_paths=[],
+                path_policy={
+                    "contract_paths": [],
+                    "reference_only": [],
+                    "implementation_scopes": [{"kind": "directory", "path": "src"}],
+                    "test_scopes": [],
+                },
+                base_sha=current_head,
+                candidate_baseline_sha=baseline_sha,
+                unit_contract_hash=contract.sha256,
+                dependency_output_hashes={},
+                environment_fingerprint="env-hash",
+                parent_candidate_digest=parent_candidate,
+            )
+
+        (worktree / "src" / "first.cpp").write_text("implemented first\n", encoding="utf-8")
+        first_ref, first_digest = snapshot(current_head=baseline_sha)
+        (worktree / "src" / "second.cpp").write_text("repaired second\n", encoding="utf-8")
+        second_ref, second_digest = snapshot(
+            current_head=first_digest,
+            parent_candidate=first_digest,
+        )
+
+        second = self.store.read_json(second_ref)
+        self.assertEqual(second["base_sha"], baseline_sha)
+        self.assertEqual(second["previous_head_sha"], first_digest)
+        self.assertEqual(second["parent_candidate_digest"], first_digest)
+        self.assertEqual(second["changed_paths"], ["src/first.cpp", "src/second.cpp"])
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "rev-parse", f"{second_digest}^"], cwd=worktree, text=True
+            ).strip(),
+            baseline_sha,
+        )
+
+        union_worktree = self.runtime_root / "cumulative_union"
+        subprocess.run(
+            ["git", "worktree", "add", "-q", "-b", "union", str(union_worktree), baseline_sha],
+            cwd=worktree,
+            check=True,
+        )
+        subprocess.run(["git", "cherry-pick", second_digest], cwd=union_worktree, check=True)
+        self.assertEqual(
+            (union_worktree / "src" / "first.cpp").read_text(encoding="utf-8"),
+            "implemented first\n",
+        )
+        self.assertEqual(
+            (union_worktree / "src" / "second.cpp").read_text(encoding="utf-8"),
+            "repaired second\n",
+        )
+        self.assertEqual(self.store.read_json(first_ref)["changed_paths"], ["src/first.cpp"])
 
     def test_candidate_rejects_contract_hash_and_reference_only_violations(self) -> None:
         worktree = self.runtime_root / "candidate_rejection_repo"
@@ -485,6 +596,7 @@ class MinionV2ExecutionTests(unittest.TestCase):
                 expected_workspace_fingerprint=quiesced.workspace_fingerprint,
                 reference_only_paths=["references/**"],
                 base_sha=base_sha,
+                candidate_baseline_sha=base_sha,
                 unit_contract_hash=contract_hash,
                 dependency_output_hashes={},
                 environment_fingerprint="env-hash",
@@ -575,12 +687,13 @@ class MinionV2ExecutionTests(unittest.TestCase):
                         expected_workspace_fingerprint=quiesced.workspace_fingerprint,
                         reference_only_paths=[],
                         path_policy={
-                            "frozen_contract": ["include/contract.h"],
+                            "contract_paths": ["include/contract.h"],
                             "reference_only": ["reference/api.h"],
-                            "owned_impl": [{"kind": "directory", "path": "src"}],
-                            "owned_test": [{"kind": "directory", "path": "tests"}],
+                            "implementation_scopes": [{"kind": "directory", "path": "src"}],
+                            "test_scopes": [{"kind": "directory", "path": "tests"}],
                         },
                         base_sha=base_sha,
+                        candidate_baseline_sha=base_sha,
                         unit_contract_hash=contract.sha256,
                         dependency_output_hashes={},
                         environment_fingerprint="env-hash",

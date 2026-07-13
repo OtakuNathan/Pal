@@ -37,7 +37,8 @@ class ExecutionCompilation:
     epoch_id: str
     node_run_ids: tuple[str, ...]
     unit_node_ids: Mapping[str, str]
-    integration_node_id: str
+    verification_node_ids: Mapping[str, str] = field(default_factory=dict)
+    integration_node_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -355,6 +356,7 @@ class ExecutionCompiler:
             epoch_id=epoch_id,
             node_run_ids=node_ids,
             unit_node_ids=unit_node_ids,
+            verification_node_ids={},
             integration_node_id=integration_node_id,
         )
 
@@ -380,8 +382,26 @@ class ExecutionCompiler:
             for name, module in modules.items()
         }
         _topological_module_order(depends_on)
+        verification_nodes = {
+            str(name): dict(value or {})
+            for name, value in dict(submission.get("verification_nodes") or {}).items()
+        }
+        if not verification_nodes:
+            raise ValueError("ArchitectureSkeletonArtifact has no Verification Nodes")
         topology_ref = self.architecture.artifacts.put_json(
-            {"depends_on": depends_on},
+            {
+                "construction": {"depends_on": depends_on},
+                "contract_consumption": {
+                    name: list(module.get("consumes") or []) for name, module in modules.items()
+                },
+                "verification": {
+                    name: {
+                        "depends_on": list(node.get("depends_on") or []),
+                        "consumes": list(node.get("consumes") or []),
+                    }
+                    for name, node in verification_nodes.items()
+                },
+            },
             artifact_type="SkeletonTopologyArtifact",
             child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
         )
@@ -393,39 +413,26 @@ class ExecutionCompiler:
                 {
                     "module_name": name,
                     "depends_on": depends_on[name],
+                    "consumes": list(module.get("consumes") or []),
                     "paths": paths,
                     "covers": list(module.get("covers") or []),
                     "evidence": list(module.get("evidence") or []),
                     "contract_file_hashes": {
                         path: str(contract_file_hashes.get(path) or "")
-                        for path in list(paths.get("frozen_contract") or [])
+                        for path in list(paths.get("contract_paths") or [])
                     },
                 },
                 artifact_type=SKELETON_MODULE_CONTRACT_ARTIFACT,
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
             )
-        integration = dict(submission.get("integration") or {})
-        integration_ref = self.architecture.artifacts.put_json(
-            {
-                "module_name": "integration",
-                "depends_on": sorted(modules),
-                "paths": {
-                    "contract_entrypoint": integration.get("contract_entrypoint"),
-                    "frozen_contract": list(integration.get("frozen_contract") or []),
-                    "owned_impl": list(integration.get("owned_impl") or []),
-                    "owned_test": [],
-                    "reference_only": [],
-                },
-                "covers": list(integration.get("covers") or []),
-                "evidence": list(integration.get("evidence") or []),
-                "contract_file_hashes": {
-                    path: str(contract_file_hashes.get(path) or "")
-                    for path in list(integration.get("frozen_contract") or [])
-                },
-            },
-            artifact_type=SKELETON_MODULE_CONTRACT_ARTIFACT,
-            child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
-        )
+        verification_refs = {
+            name: self.architecture.artifacts.put_json(
+                {"verification_name": name, **node},
+                artifact_type="VerificationScenarioContractArtifact",
+                child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
+            )
+            for name, node in verification_nodes.items()
+        }
         self.repository.dispatch(
             _action(
                 "CREATE_EXECUTION_EPOCH",
@@ -445,11 +452,12 @@ class ExecutionCompiler:
         self.repository.dispatch(
             _action("START_EXECUTION", workflow_id, AggregateType.EXECUTION_EPOCH, epoch_id, actor, 1, {})
         )
+        all_workspace_names = [*sorted(modules), *sorted(verification_nodes)]
         workspaces = provision_skeleton_epoch_worktrees(
             self.repository.runtime_root,
             artifacts=self.architecture.artifacts,
             epoch_id=epoch_id,
-            unit_ids=sorted(modules),
+            unit_ids=all_workspace_names,
             architecture_artifact=artifact,
         )
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, workflow_id)
@@ -497,9 +505,9 @@ class ExecutionCompiler:
                         "environment_fingerprint": environment_fingerprint,
                         "global_constraint_hash": global_constraint_hash,
                         "path_policy": {
-                            "frozen_contract": list(paths.get("frozen_contract") or []),
-                            "owned_impl": list(paths.get("owned_impl") or []),
-                            "owned_test": list(paths.get("owned_test") or []),
+                            "contract_paths": list(paths.get("contract_paths") or []),
+                            "implementation_scopes": list(paths.get("implementation_scopes") or []),
+                            "test_scopes": list(paths.get("test_scopes") or []),
                             "reference_only": list(paths.get("reference_only") or []),
                         },
                         **(
@@ -511,40 +519,42 @@ class ExecutionCompiler:
                     },
                 )
             )
-        integration_node_id = f"{epoch_id}:node:integration"
-        integration_dependencies = [
-            unit_node_ids[module_name] for module_name in _topological_module_order(depends_on)
-        ]
-        self.repository.dispatch(
-            _action(
-                "CREATE_NODE_RUN",
-                workflow_id,
-                AggregateType.DAG_NODE_RUN,
-                integration_node_id,
-                actor,
-                0,
-                {
-                    "epoch_id": epoch_id,
-                    "unit_id": "integration",
-                    "module_name": "integration",
-                    "node_kind": "integration",
-                    "unit_contract_ref": integration_ref.to_dict(),
-                    "architecture_manifest_ref": manifest_ref.to_dict(),
-                    "dependency_node_ids": integration_dependencies,
-                    "accepted_dependency_node_ids": [],
-                    "epoch_frozen": False,
-                    "environment_fingerprint": environment_fingerprint,
-                    "global_constraint_hash": global_constraint_hash,
-                    "path_policy": {
-                        "frozen_contract": list(integration.get("frozen_contract") or []),
-                        "owned_impl": list(integration.get("owned_impl") or []),
-                        "owned_test": [],
-                        "reference_only": [],
+        verification_node_ids = {
+            name: f"{epoch_id}:verification:{name}" for name in verification_nodes
+        }
+        for name in sorted(verification_nodes):
+            scenario = verification_nodes[name]
+            self.repository.dispatch(
+                _action(
+                    "CREATE_NODE_RUN",
+                    workflow_id,
+                    AggregateType.DAG_NODE_RUN,
+                    verification_node_ids[name],
+                    actor,
+                    0,
+                    {
+                        "epoch_id": epoch_id,
+                        "unit_id": name,
+                        "module_name": name,
+                        "node_kind": "verification",
+                        "unit_contract_ref": verification_refs[name].to_dict(),
+                        "architecture_manifest_ref": manifest_ref.to_dict(),
+                        "dependency_node_ids": [unit_node_ids[item] for item in list(scenario.get("depends_on") or [])],
+                        "accepted_dependency_node_ids": [],
+                        "epoch_frozen": False,
+                        "environment_fingerprint": environment_fingerprint,
+                        "verification_environment": dict(scenario.get("environment") or {}),
+                        "verification_entrypoints": list(scenario.get("entrypoints") or []),
+                        "path_policy": {
+                            "contract_paths": [],
+                            "implementation_scopes": [],
+                            "test_scopes": [],
+                            "reference_only": [],
+                        },
+                        **dict(workspaces[name]),
                     },
-                    **dict(workspaces["integration"]),
-                },
+                )
             )
-        )
         if reuse_from_epoch_id:
             reuse_accepted_candidates(
                 repository=self.repository,
@@ -555,7 +565,12 @@ class ExecutionCompiler:
                 target_manifest_ref=manifest_ref,
                 actor=actor,
             )
-        node_ids = tuple([*(unit_node_ids[name] for name in sorted(unit_node_ids)), integration_node_id])
+        node_ids = tuple(
+            [
+                *(unit_node_ids[name] for name in sorted(unit_node_ids)),
+                *(verification_node_ids[name] for name in sorted(verification_node_ids)),
+            ]
+        )
         self.repository.dispatch(
             _action(
                 "NODES_COMPILED",
@@ -564,14 +579,18 @@ class ExecutionCompiler:
                 epoch_id,
                 actor,
                 2,
-                {"node_ids": list(node_ids), "integration_node_id": integration_node_id},
+                {
+                    "node_ids": list(node_ids),
+                    "implementation_node_ids": list(unit_node_ids.values()),
+                    "verification_node_ids": list(verification_node_ids.values()),
+                },
             )
         )
         return ExecutionCompilation(
             epoch_id=epoch_id,
             node_run_ids=node_ids,
             unit_node_ids=unit_node_ids,
-            integration_node_id=integration_node_id,
+            verification_node_ids=verification_node_ids,
         )
 
 
@@ -885,10 +904,11 @@ def _skeleton_candidate_reuse_signature(
             "contract_hash": str(dependency_contract[0].get("sha256") or ""),
             "contract_file_hashes": dict(dependency_contract[1].get("contract_file_hashes") or {}),
         }
-    integration = dict(dict(artifact.get("submission") or {}).get("integration") or {})
-    integration_hashes = {
-        path: str(dict(artifact.get("contract_file_hashes") or {}).get(path) or "")
-        for path in list(integration.get("frozen_contract") or [])
+    module_name = str(contract.get("module_name") or node.payload.get("module_name") or "")
+    verification_subset = {
+        name: scenario
+        for name, scenario in dict(dict(artifact.get("submission") or {}).get("verification_nodes") or {}).items()
+        if module_name in set(str(item) for item in list(dict(scenario).get("depends_on") or []))
     }
     try:
         return candidate_reuse_fingerprint(
@@ -900,12 +920,7 @@ def _skeleton_candidate_reuse_signature(
             dependency_set_hash=_stable_json_hash(sorted(dependencies)),
             dependency_interface_hash=_stable_json_hash(dependency_interfaces),
             dependency_output_hash=_stable_json_hash(dependency_outputs),
-            integration_contract_subset_hash=_stable_json_hash(
-                {
-                    "covers": list(integration.get("covers") or []),
-                    "contract_file_hashes": integration_hashes,
-                }
-            ),
+            integration_contract_subset_hash=_stable_json_hash(verification_subset),
             environment_policy_hash=str(node.payload.get("environment_fingerprint") or ""),
         )
     except ValueError:
@@ -1197,7 +1212,15 @@ class DagScheduler:
         }
         accepted_ids = {node_id for node_id, item in node_by_id.items() if item.state == "ACCEPTED"}
         active_slots = sum(
-            item.state in {"PRODUCING", "REVIEWING", "REPAIRING", "QUIESCING", "SNAPSHOTTING"}
+            item.state in {
+                "PRODUCING",
+                "REVIEWING",
+                "REPAIRING",
+                "QUIESCING",
+                "SNAPSHOTTING",
+                "VERIFY_PREPARING",
+                "VERIFYING",
+            }
             for item in node_by_id.values()
         )
         available_slots = max(0, int(max_new_nodes) - active_slots)
@@ -1219,8 +1242,24 @@ class DagScheduler:
                 "epoch_frozen": False,
                 **baseline,
             }
-            action_type = "DEPENDENCIES_ACCEPTED" if node.state == "BLOCKED_BY_DEPS" else "REQUEUE_STALE"
-            if action_type == "REQUEUE_STALE":
+            node_kind = str(node.payload.get("node_kind") or "unit")
+            verification = node_kind == "verification"
+            legacy_integration = node_kind == "integration"
+            if node.state == "BLOCKED_BY_DEPS":
+                if verification:
+                    action_type = "VERIFICATION_DEPENDENCIES_ACCEPTED"
+                elif legacy_integration:
+                    action_type = "LEGACY_INTEGRATION_DEPENDENCIES_ACCEPTED"
+                else:
+                    action_type = "DEPENDENCIES_ACCEPTED"
+            else:
+                if verification:
+                    action_type = "REQUEUE_VERIFICATION_STALE"
+                elif legacy_integration:
+                    action_type = "REQUEUE_LEGACY_INTEGRATION_STALE"
+                else:
+                    action_type = "REQUEUE_STALE"
+            if node.state == "STALE":
                 payload.update(
                     {
                         "unit_contract_ref": node.payload.get("unit_contract_ref"),
@@ -1338,8 +1377,8 @@ class UnitWorkViewBuilder:
             )
             semantic_dependency_outputs[dependency_name] = {
                 "status": "accepted" if dependency.state == "ACCEPTED" else dependency.state.lower(),
-                "contract_entrypoint": str(
-                    dict(dependency_contract.get("paths") or {}).get("contract_entrypoint") or ""
+                "contract_paths": list(
+                    dict(dependency_contract.get("paths") or {}).get("contract_paths") or []
                 ),
                 "declared_outputs": sorted(
                     str(key) for key in dict(dependency.payload.get("output_hashes") or {})
@@ -1358,12 +1397,12 @@ class UnitWorkViewBuilder:
                 "title": str(requirements.get("title") or "Requirements"),
                 "sections": requirement_sections,
             },
-            "contract_entrypoint": str(dict(contract.get("paths") or {}).get("contract_entrypoint") or ""),
-            "frozen_contract": list(path_policy.get("frozen_contract") or []),
-            "owned_impl": list(path_policy.get("owned_impl") or []),
-            "owned_test": list(path_policy.get("owned_test") or []),
+            "contract_paths": list(path_policy.get("contract_paths") or []),
+            "implementation_scopes": list(path_policy.get("implementation_scopes") or []),
+            "test_scopes": list(path_policy.get("test_scopes") or []),
             "reference_only": list(path_policy.get("reference_only") or []),
             "construction_dependencies": list(contract.get("depends_on") or []),
+            "contract_consumption": list(contract.get("consumes") or []),
             "evidence": list(contract.get("evidence") or []),
             "dependency_outputs": semantic_dependency_outputs,
             "historical_repair_bills": [
@@ -1440,6 +1479,7 @@ class CandidateSnapshotService:
         reference_only_paths: list[str],
         path_policy: Mapping[str, Any] | None = None,
         base_sha: str,
+        candidate_baseline_sha: str,
         unit_contract_hash: str,
         dependency_output_hashes: Mapping[str, str],
         environment_fingerprint: str,
@@ -1467,7 +1507,9 @@ class CandidateSnapshotService:
             before = workspace_content_fingerprint(worktree)
             if before != expected_workspace_fingerprint:
                 raise RuntimeError("worktree changed after quiescing")
-            changed_paths = git_changed_paths(worktree, base_sha)
+            if not candidate_baseline_sha:
+                raise ValueError("candidate requires the fixed assembled Node baseline")
+            changed_paths = git_changed_paths(worktree, candidate_baseline_sha)
             if path_policy:
                 _validate_skeleton_candidate_paths(changed_paths, path_policy)
             else:
@@ -1478,7 +1520,8 @@ class CandidateSnapshotService:
                 json.dumps(
                     {
                         "node_run_id": node_run_id,
-                        "base_sha": base_sha,
+                        "candidate_baseline_sha": candidate_baseline_sha,
+                        "previous_head_sha": base_sha,
                         "parent_candidate_digest": parent_candidate_digest,
                         "workspace_fingerprint": before,
                         "unit_contract_hash": unit_contract_hash,
@@ -1492,16 +1535,37 @@ class CandidateSnapshotService:
             else:
                 _git(worktree, "add", "-A")
                 message = f"minion candidate {node_run_id}\n\nPal-Candidate-Key: {candidate_key}"
-                _git(worktree, "-c", "user.name=Pal Minion", "-c", "user.email=minion@localhost", "commit", "-m", message)
-                candidate_digest = _git(worktree, "rev-parse", "HEAD").strip()
+                tree_sha = _git(worktree, "write-tree").strip()
+                candidate_digest = _git(
+                    worktree,
+                    "-c",
+                    "user.name=Pal Minion",
+                    "-c",
+                    "user.email=minion@localhost",
+                    "commit-tree",
+                    tree_sha,
+                    "-p",
+                    candidate_baseline_sha,
+                    "-m",
+                    message,
+                ).strip()
+                _git(worktree, "update-ref", f"refs/pal/candidates/{candidate_key}", candidate_digest)
+                _git(worktree, "reset", "--hard", candidate_digest)
             after = workspace_content_fingerprint(worktree)
             if before != after:
                 raise RuntimeError("worktree content changed while candidate commit was created")
+            baseline_tree_sha = _git(worktree, "rev-parse", f"{candidate_baseline_sha}^{{tree}}").strip()
+            candidate_tree_sha = _git(worktree, "rev-parse", f"{candidate_digest}^{{tree}}").strip()
+            delta_patch = _git_bytes(worktree, "diff", "--binary", candidate_baseline_sha, candidate_digest, "--")
             candidate = {
-                "schema_version": "1",
+                "schema_version": "2",
                 "node_run_id": node_run_id,
                 "candidate_digest": candidate_digest,
-                "base_sha": base_sha,
+                "base_sha": candidate_baseline_sha,
+                "previous_head_sha": base_sha,
+                "baseline_tree_sha": baseline_tree_sha,
+                "candidate_tree_sha": candidate_tree_sha,
+                "delta_patch_sha": hashlib.sha256(delta_patch).hexdigest(),
                 "parent_candidate_digest": parent_candidate_digest,
                 "repair_bill_ref": dict(repair_bill_ref or {}),
                 "unit_contract_hash": unit_contract_hash,
@@ -1655,7 +1719,7 @@ def provision_skeleton_epoch_worktrees(
     if restored_tree != skeleton_tree:
         raise RuntimeError("restored skeleton Git bundle does not match the accepted tree")
     result: dict[str, dict[str, str]] = {}
-    for unit_id in [*unit_ids, "integration"]:
+    for unit_id in unit_ids:
         safe_id = _safe_ref(unit_id)
         worktree = worktree_root / safe_id
         branch = f"v2/{_safe_ref(epoch_id)}/{safe_id}"
@@ -1897,11 +1961,14 @@ def _validate_reference_only_paths(changed_paths: list[str], reference_only_path
 
 
 def _validate_skeleton_candidate_paths(changed_paths: list[str], policy: Mapping[str, Any]) -> None:
-    frozen = {str(item).replace(os.sep, "/") for item in list(policy.get("frozen_contract") or [])}
+    frozen = {str(item).replace(os.sep, "/") for item in list(policy.get("contract_paths") or [])}
     references = {str(item).replace(os.sep, "/") for item in list(policy.get("reference_only") or [])}
     writable = [
         dict(item or {})
-        for item in [*list(policy.get("owned_impl") or []), *list(policy.get("owned_test") or [])]
+        for item in [
+            *list(policy.get("implementation_scopes") or []),
+            *list(policy.get("test_scopes") or []),
+        ]
     ]
     frozen_violations = sorted(path for path in changed_paths if path.replace(os.sep, "/") in frozen)
     if frozen_violations:
@@ -1924,10 +1991,6 @@ def _path_scope_matches(path: str, scope: Mapping[str, Any]) -> bool:
         return normalized == target
     if kind == "directory":
         return normalized == target or normalized.startswith(target + "/")
-    if kind == "prefix":
-        target_parent, _, target_name = target.rpartition("/")
-        parent, _, name = normalized.rpartition("/")
-        return parent == target_parent and name.startswith(target_name)
     return False
 
 
