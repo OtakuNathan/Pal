@@ -587,11 +587,11 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
         core.publish_module_capabilities("minion")
 
         result = core.context.execution_runtime.execute(
-            CapabilityCall(name="minion_workflow_status", args={"workflow_id": "wf_missing"})
+            CapabilityCall(name="minion_workflow_status", args={})
         )
 
-        self.assertEqual(result.status, "ok")
-        self.assertEqual(result.structured["status"], "not_found")
+        self.assertEqual(result.status, RuntimeStatus.INVALID)
+        self.assertIn("No Minion workflow", result.llm_text)
 
     def test_execution_registers_shell_exec_builtin_tool(self) -> None:
         core = PalCore()
@@ -1820,9 +1820,10 @@ class PalV2ArchitectureSkeletonTests(unittest.TestCase):
                 self.assertIn("minion_workflow_status", core.context.capability_registry.descriptors)
                 self.assertIn("minion.manager", core.context.event_source_registry.sources)
                 observed = core.context.execution_runtime.execute(
-                    CapabilityCall(name="minion_workflow_status", args={"workflow_id": "wf_missing"})
+                    CapabilityCall(name="minion_workflow_status", args={})
                 )
-                self.assertEqual(observed.status, "ok")
+                self.assertEqual(observed.status, RuntimeStatus.INVALID)
+                self.assertIn("No Minion workflow", observed.llm_text)
             finally:
                 with contextlib.suppress(Exception):
                     core.detach_module("minion")
