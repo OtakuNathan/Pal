@@ -11,7 +11,9 @@ Try to falsify the candidate from requirements, interfaces, ownership, lifecycle
 and the changed surface. Create reproducible probes in review scratch only. FAIL reproduced defects; use UNKNOWN only under the bound policy.
 """
 output_contract_fragment = """
-Write verification_plan.json with reproducible cases, findings, unknown policy, and a short summary. The manager owns the verdict.
+Write verification_plan.json with this shape:
+{"cases":[{"name":"semantic descriptive name","case_kind":"historical_regression|contract_adversarial|diff_risk|compile|lsp|unit|consumer_probe|platform_assumption","command":["..."],"expected_exit_codes":[0],"requirements":[{"section":"Requirements","requirement":"exact Requirement text"}],"locations":[{"path":"artifact/or/source path","symbol":"optional","section":"optional contract section"}],"invariants":["exact invariant text"],"description":"..."}],"findings":[{"case":"exact semantic case name","finding_section":"ownership|lifecycle|state_machine|invariant|interface|compatibility|delivery|implementation","summary":"...","failure_reason":"...","requirements":[{"section":"...","requirement":"..."}],"locations":[{"path":"...","symbol":"...","section":"..."}],"invariants":["..."],"severity":"blocker|major|minor","suggested_repair_boundary":["narrow semantic area"]}],"defect_kind":"module_defect|dependency_defect|contract_defect|architecture_defect|integration_defect","dependency_module":"required semantic module name only for dependency_defect","policy_exceptions":{"focused_tests":"","warning_clean":"","public_surface_dogfood":"","lsp":""},"reviewer_summary":"..."}.
+The manager creates all case keys and finding fingerprints, reruns every command, and owns the verdict. Never output opaque identities, refs, handles, hashes, or JSON pointers.
 """
 capability_groups = ["generic_verifier"]
 

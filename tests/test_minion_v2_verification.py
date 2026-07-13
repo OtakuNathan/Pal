@@ -23,6 +23,15 @@ from pal.minion.v2.verification import (
     candidate_reuse_fingerprint,
     finding_fingerprint,
     no_progress_detected,
+    repair_bill_semantic_view,
+)
+from pal.minion.v2.workers import (
+    _compile_standalone_review_markdown,
+    _reject_manager_identity_fields,
+    _validate_skeleton_coder_report,
+    _validate_verifier_requirement_refs,
+    _verification_case_specs,
+    _verification_findings,
 )
 
 
@@ -40,15 +49,154 @@ class MinionV2VerificationTests(unittest.TestCase):
         result = VerificationCaseRunner(self.store).run(
             VerificationCaseSpec(
                 case_id="case_1",
+                case_name="deterministic invariant probe",
                 case_kind=VerificationCaseKind.CONTRACT_ADVERSARIAL,
                 command=("sh", "-c", "printf pass-output"),
-                contract_refs=("INV-1",),
+                locations=({"path": "src/module.py", "section": "Invariants"},),
             ),
             cwd=self.runtime_root,
         )
         self.assertEqual(result.status, VerificationStatus.PASS)
         self.assertEqual(self.store.read_bytes(result.stdout_ref), b"pass-output")
         self.assertTrue(self.repository.artifact_is_durable(str(result.stderr_ref["sha256"])))
+
+    def test_verifier_uses_semantic_names_and_manager_generates_case_keys(self) -> None:
+        plan = {
+            "cases": [
+                {
+                    "name": "released resource rejects use",
+                    "case_kind": "contract_adversarial",
+                    "command": ["sh", "-c", "exit 7"],
+                    "expected_exit_codes": [0],
+                    "requirements": [
+                        {
+                            "section": "Lifecycle",
+                            "requirement": "Released resources reject further use.",
+                        }
+                    ],
+                    "locations": [{"path": "src/resource.py", "symbol": "use"}],
+                    "invariants": ["Released is terminal."],
+                    "description": "Exercise use after release.",
+                }
+            ],
+            "findings": [
+                {
+                    "case": "released resource rejects use",
+                    "finding_section": "lifecycle",
+                    "summary": "Use after release succeeds.",
+                    "failure_reason": "The public method returns success.",
+                    "severity": "blocker",
+                    "suggested_repair_boundary": ["src/resource.py"],
+                }
+            ],
+        }
+        _reject_manager_identity_fields(plan, owner="test verifier")
+        cases = _verification_case_specs(plan["cases"])
+        findings = _verification_findings(plan, cases)
+        self.assertTrue(cases[0].case_id.startswith("case_"))
+        self.assertNotEqual(cases[0].case_id, cases[0].case_name)
+        self.assertEqual(findings[0]["case_name"], cases[0].case_name)
+        _validate_verifier_requirement_refs(
+            work_view={
+                "requirements": {
+                    "sections": {"Lifecycle": ["Released resources reject further use."]}
+                }
+            },
+            cases=cases,
+            findings=findings,
+        )
+        with self.assertRaisesRegex(ValueError, "Manager-owned identity"):
+            _reject_manager_identity_fields({**plan, "finding_id": "F-1"}, owner="test verifier")
+        with self.assertRaisesRegex(ValueError, "outside its ModuleWorkView"):
+            _validate_verifier_requirement_refs(
+                work_view={"requirements": {"sections": {"Lifecycle": ["Different text."]}}},
+                cases=cases,
+                findings=findings,
+            )
+
+    def test_standalone_review_markdown_exposes_semantics_not_manager_identity(self) -> None:
+        markdown = _compile_standalone_review_markdown(
+            {
+                "status": "FAIL",
+                "reviewer_summary": "The released-state contract is violated.",
+                "report_ref": {"sha256": "hidden-report-digest"},
+                "findings": [
+                    {
+                        "case": "released resource rejects use",
+                        "finding_section": "lifecycle",
+                        "summary": "Use after release succeeds.",
+                        "failure_reason": "The method returns success after release.",
+                        "requirements": [
+                            {
+                                "section": "Lifecycle",
+                                "requirement": "Released resources reject further use.",
+                            }
+                        ],
+                        "locations": [{"path": "src/resource.py", "symbol": "use"}],
+                        "severity": "high",
+                    }
+                ],
+                "cases": [
+                    {
+                        "name": "released resource rejects use",
+                        "status": "FAIL",
+                        "command": ["pytest", "tests/test_resource.py"],
+                        "stdout_ref": {"sha256": "hidden-stdout-digest"},
+                    }
+                ],
+                "test_gaps": ["Platform shutdown could not be simulated."],
+            }
+        )
+        self.assertIn("Use after release succeeds.", markdown)
+        self.assertIn("Lifecycle - Released resources reject further use.", markdown)
+        self.assertIn("src/resource.py::use", markdown)
+        self.assertIn("released resource rejects use", markdown)
+        self.assertNotIn("hidden-report-digest", markdown)
+        self.assertNotIn("hidden-stdout-digest", markdown)
+        self.assertNotIn("sha256", markdown)
+
+    def test_coder_defect_report_is_bound_to_module_and_requirement_text(self) -> None:
+        report = {
+            "status": "architecture_defect",
+            "summary": "The frozen contract cannot represent native state.",
+            "affected_module": "font_backend",
+            "locations": [{"path": "include/ohos_font.h", "symbol": "OHOSFont"}],
+            "requirements": [
+                {
+                    "section": "Font rendering",
+                    "requirement": "Support native font creation and rendering.",
+                }
+            ],
+        }
+        work_view = {
+            "requirements": {
+                "sections": {
+                    "Font rendering": ["Support native font creation and rendering."]
+                }
+            }
+        }
+        _validate_skeleton_coder_report(
+            report,
+            expected_module="font_backend",
+            work_view=work_view,
+        )
+        with self.assertRaisesRegex(ValueError, "bound module"):
+            _validate_skeleton_coder_report(
+                {**report, "affected_module": "drawing_backend"},
+                expected_module="font_backend",
+                work_view=work_view,
+            )
+        with self.assertRaisesRegex(ValueError, "outside its ModuleWorkView"):
+            _validate_skeleton_coder_report(
+                {
+                    **report,
+                    "requirements": [
+                        {"section": "Font rendering", "requirement": "A fabricated requirement."}
+                    ],
+                },
+                expected_module="font_backend",
+                work_view=work_view,
+            )
 
     def test_repair_bill_has_stable_fingerprint_and_regression_obligation(self) -> None:
         node = self._reviewing_node("node_repair")
@@ -57,9 +205,17 @@ class MinionV2VerificationTests(unittest.TestCase):
         case_result = VerificationCaseRunner(self.store).run(
             VerificationCaseSpec(
                 case_id="case_fail",
+                case_name="released resource rejects use",
                 case_kind=VerificationCaseKind.CONTRACT_ADVERSARIAL,
                 command=("sh", "-c", "exit 7"),
-                contract_refs=("INV-1",),
+                requirements=(
+                    {
+                        "section": "Lifecycle",
+                        "requirement": "Released resources reject further use.",
+                    },
+                ),
+                locations=({"path": "src/module/core.py", "symbol": "use_resource"},),
+                invariants=("A released resource cannot return to ready.",),
             ),
             cwd=self.runtime_root,
         )
@@ -76,7 +232,6 @@ class MinionV2VerificationTests(unittest.TestCase):
             verification_ref=report_ref,
             defect_kind=DefectKind.MODULE,
             severity="high",
-            contract_refs=["INV-1"],
             minimal_reproducer_ref=output.to_dict(),
             test_artifact_ref=output.to_dict(),
             expected={"returncode": 0},
@@ -85,25 +240,43 @@ class MinionV2VerificationTests(unittest.TestCase):
             finding_section="invariant",
             finding_summary="Invariant can be broken",
             failure_reason="case_fail exits 7",
-            affected_refs=["src/module/core.py:42"],
-            finding_id="F-1",
+            case_name="released resource rejects use",
+            requirements=[
+                {
+                    "section": "Lifecycle",
+                    "requirement": "Released resources reject further use.",
+                }
+            ],
+            locations=[{"path": "src/module/core.py", "symbol": "use_resource"}],
+            invariants=["A released resource cannot return to ready."],
         )
         repair = self.store.read_json(repair_ref)
         self.assertEqual(repair["finding_fingerprint"], fingerprint)
         self.assertIn("regression_test_obligation", repair)
         self.assertEqual(repair["finding_section"], "invariant")
-        self.assertEqual(repair["finding_id"], "F-1")
-        self.assertEqual(repair["affected_refs"], ["src/module/core.py:42"])
+        self.assertNotIn("finding_id", repair)
+        self.assertNotIn("affected_refs", repair)
+        self.assertEqual(repair["locations"], [{"path": "src/module/core.py", "symbol": "use_resource"}])
         self.assertEqual(
             fingerprint,
             finding_fingerprint(
                 defect_kind=DefectKind.MODULE,
-                contract_refs=["INV-1"],
+                contract_refs=[
+                    "requirement:Lifecycle:Released resources reject further use.",
+                    "location:src/module/core.py:use_resource:",
+                    "invariant:A released resource cannot return to ready.",
+                ],
                 reproducer_hash=output.sha256,
                 expected={"returncode": 0},
                 actual={"returncode": 7},
             ),
         )
+        semantic = repair_bill_semantic_view(self.store, repair_ref)
+        encoded = str(semantic)
+        self.assertEqual(semantic["case_name"], "released resource rejects use")
+        self.assertIn("src/module/core.py", encoded)
+        for forbidden in ("workflow_id", "node_run_id", "candidate_digest", "sha256", "_ref"):
+            self.assertNotIn(forbidden, encoded)
 
     def test_unknown_hard_semantics_requires_human_waiver(self) -> None:
         assumption = self.store.put_json({"owner": "platform", "verification_plan": "device CI"}, artifact_type="AssumptionLedgerArtifact")

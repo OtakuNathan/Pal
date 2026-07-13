@@ -15,9 +15,9 @@ positives, deduplicate overlap, and state unreviewed surfaces or residual uncert
 If the request is review-only, produce the report and stop. Do not begin repair merely because a fix appears straightforward.
 """
 output_contract_fragment = """
-Write standalone_review.json with verdict=approved|changes_requested|blocked, scope, reviewed_surfaces, findings ordered by severity, optional reproducible
-cases, commands_or_lsp_evidence, test_gaps, unreviewed_surfaces, residual_risk, and reviewer_summary. Each finding includes finding_id, finding_section,
-summary, failure_reason, affected_refs, contract_refs, severity, evidence, and optional case_id. Keep final chat short.
+Write standalone_review.json with this shape:
+{"verdict":"approved|changes_requested|blocked","scope":{},"reviewed_surfaces":["..."],"cases":[{"name":"semantic descriptive name","case_kind":"historical_regression|contract_adversarial|diff_risk|compile|lsp|unit|consumer_probe|platform_assumption","command":["..."],"expected_exit_codes":[0],"requirements":[{"section":"Requirement section","requirement":"exact Requirement text"}],"locations":[{"path":"src/file","symbol":"optional","section":"optional contract section"}],"invariants":["exact invariant"],"description":"..."}],"findings":[{"case":"optional exact semantic case name","finding_section":"ownership|lifecycle|state_machine|invariant|interface|compatibility|delivery|implementation","summary":"...","failure_reason":"...","requirements":[{"section":"...","requirement":"..."}],"locations":[{"path":"...","symbol":"...","section":"..."}],"invariants":["..."],"severity":"blocker|major|minor","evidence":["..."],"suggested_repair_boundary":["narrow path"]}],"commands_or_lsp_evidence":["..."],"test_gaps":["..."],"unreviewed_surfaces":["..."],"residual_risk":["..."],"reviewer_summary":"..."}.
+The Manager creates internal identities. Never output finding/case IDs, handles, hashes, refs, or JSON pointers. Keep final chat short.
 """
 capability_groups = ["software_verifier"]
 

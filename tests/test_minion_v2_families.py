@@ -187,6 +187,27 @@ class MinionV2FamilyBindingTests(unittest.TestCase):
         self.assertEqual(binding["policies"]["llm"]["temperature"], 0.05)
         self.assertTrue(binding["policies"]["verification"]["require_warning_clean"])
 
+        forbidden_author_fields = (
+            "workflow_id",
+            "revision_id",
+            "module_id",
+            "unit_id",
+            "requirement_id",
+            "evidence_id",
+            "finding_id",
+            "case_id",
+            "artifact_sha",
+            "json_pointer",
+        )
+        for profile_name in (
+            "software_engineering.v2_coder",
+            "software_engineering.v2_verifier",
+            "software_engineering.v2_reviewer",
+        ):
+            output_contract = str(self._pack(profile_name).resolved_profile["output_contract_fragment"])
+            for field_name in forbidden_author_fields:
+                self.assertNotIn(field_name, output_contract, f"{profile_name} exposes {field_name}")
+
     def test_software_architecture_and_verification_profiles_preserve_rigorous_methods(self) -> None:
         architect = str(self._pack("software_engineering.v2_architect").resolved_profile["behavior_fragment"])
         architecture_review = str(

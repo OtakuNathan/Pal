@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -22,7 +23,7 @@ class VerificationStatus(StrEnum):
 
 
 class DefectKind(StrEnum):
-    MODULE = "unit_defect"
+    MODULE = "module_defect"
     DEPENDENCY = "dependency_defect"
     CONTRACT = "contract_defect"
     ARCHITECTURE = "architecture_defect"
@@ -46,8 +47,11 @@ class VerificationCaseSpec:
     case_kind: VerificationCaseKind
     command: tuple[str, ...]
     expected_exit_codes: tuple[int, ...] = (0,)
-    contract_refs: tuple[str, ...] = ()
     description: str = ""
+    case_name: str = ""
+    requirements: tuple[Mapping[str, str], ...] = ()
+    locations: tuple[Mapping[str, str], ...] = ()
+    invariants: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -60,12 +64,15 @@ class VerificationCaseResult:
     stdout_ref: Mapping[str, Any]
     stderr_ref: Mapping[str, Any]
     environment: Mapping[str, Any]
-    contract_refs: tuple[str, ...]
     summary: str
+    case_name: str = ""
+    requirements: tuple[Mapping[str, str], ...] = ()
+    locations: tuple[Mapping[str, str], ...] = ()
+    invariants: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "case_id": self.case_id,
+            "name": self.case_name or self.case_id,
             "case_kind": self.case_kind.value,
             "status": self.status.value,
             "command": list(self.command),
@@ -73,7 +80,9 @@ class VerificationCaseResult:
             "stdout_ref": dict(self.stdout_ref),
             "stderr_ref": dict(self.stderr_ref),
             "environment": dict(self.environment),
-            "contract_refs": list(self.contract_refs),
+            "requirements": [dict(item) for item in self.requirements],
+            "locations": [dict(item) for item in self.locations],
+            "invariants": list(self.invariants),
             "summary": self.summary,
         }
 
@@ -151,8 +160,11 @@ class VerificationCaseRunner:
             stdout_ref=stdout_ref.to_dict(),
             stderr_ref=stderr_ref.to_dict(),
             environment=environment_record,
-            contract_refs=case.contract_refs,
             summary=summary,
+            case_name=case.case_name,
+            requirements=case.requirements,
+            locations=case.locations,
+            invariants=case.invariants,
         )
 
 
@@ -186,7 +198,7 @@ class VerificationService:
             "candidate_ref": dict(candidate_ref),
             "status": status.value,
             "cases": [item.to_dict() for item in case_results],
-            "findings": [dict(item) for item in findings],
+            "findings": [semantic_finding_payload(item) for item in findings],
             "reviewer_summary": reviewer_summary,
             "test_workspace_ref": dict(test_workspace_ref or {}),
         }
@@ -214,7 +226,6 @@ class VerificationService:
         verification_ref: ArtifactRef,
         defect_kind: DefectKind,
         severity: str,
-        contract_refs: Sequence[str],
         minimal_reproducer_ref: Mapping[str, Any],
         test_artifact_ref: Mapping[str, Any],
         expected: Any,
@@ -223,12 +234,19 @@ class VerificationService:
         finding_section: str = "implementation",
         finding_summary: str = "",
         failure_reason: str = "",
-        affected_refs: Sequence[str] = (),
-        finding_id: str = "",
+        case_name: str = "",
+        requirements: Sequence[Mapping[str, str]] = (),
+        locations: Sequence[Mapping[str, str]] = (),
+        invariants: Sequence[str] = (),
     ) -> tuple[ArtifactRef, str]:
+        semantic_contract_refs = _semantic_reference_keys(
+            requirements=requirements,
+            locations=locations,
+            invariants=invariants,
+        )
         fingerprint = finding_fingerprint(
             defect_kind=defect_kind,
-            contract_refs=contract_refs,
+            contract_refs=semantic_contract_refs,
             reproducer_hash=str(minimal_reproducer_ref.get("sha256") or ""),
             expected=expected,
             actual=actual,
@@ -240,13 +258,15 @@ class VerificationService:
             "candidate_digest": candidate_digest,
             "verification_artifact_ref": verification_ref.to_dict(),
             "defect_kind": defect_kind.value,
+            "module_name": str(node.payload.get("module_name") or node.payload.get("unit_id") or ""),
             "severity": severity,
-            "finding_id": finding_id,
             "finding_section": finding_section,
             "finding_summary": finding_summary,
             "failure_reason": failure_reason,
-            "affected_refs": list(affected_refs),
-            "contract_refs": list(contract_refs),
+            "case_name": case_name,
+            "requirements": [dict(item) for item in requirements],
+            "locations": [dict(item) for item in locations],
+            "invariants": [str(item) for item in invariants],
             "finding_fingerprint": fingerprint,
             "minimal_reproducer_ref": dict(minimal_reproducer_ref),
             "test_artifact_ref": dict(test_artifact_ref),
@@ -419,6 +439,101 @@ class DefectPropagationService:
         return tuple(sorted(affected))
 
 
+def repair_bill_semantic_view(
+    artifacts: ContentAddressedArtifactStore,
+    repair_bill_ref: ArtifactRef | Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compile a RepairBill for a worker without exposing manager identities."""
+
+    bill = dict(artifacts.read_json(repair_bill_ref))
+    reproducer: dict[str, Any] = {}
+    reproducer_ref = bill.get("minimal_reproducer_ref")
+    if isinstance(reproducer_ref, Mapping) and reproducer_ref.get("sha256"):
+        try:
+            raw = dict(artifacts.read_json(reproducer_ref))
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            raw = {}
+        reproducer = {
+            key: raw[key]
+            for key in (
+                "name",
+                "case_kind",
+                "status",
+                "command",
+                "exit_code",
+                "requirements",
+                "locations",
+                "invariants",
+                "summary",
+            )
+            if key in raw
+        }
+    test_files: list[dict[str, Any]] = []
+    test_ref = bill.get("test_artifact_ref")
+    if isinstance(test_ref, Mapping) and test_ref.get("sha256"):
+        try:
+            test_workspace = dict(artifacts.read_json(test_ref))
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            test_workspace = {}
+        for item in list(test_workspace.get("files") or []):
+            entry = dict(item or {})
+            encoded = str(entry.get("content_base64") or "")
+            content = ""
+            binary = False
+            if encoded:
+                try:
+                    raw = base64.b64decode(encoded, validate=True)
+                    content = raw.decode("utf-8")
+                except (ValueError, UnicodeDecodeError):
+                    binary = True
+            test_files.append(
+                {
+                    "path": str(entry.get("path") or ""),
+                    **({"content": content} if not binary else {"binary": True}),
+                }
+            )
+    return {
+        "module_name": str(bill.get("module_name") or ""),
+        "defect_kind": str(bill.get("defect_kind") or ""),
+        "severity": str(bill.get("severity") or ""),
+        "finding_section": str(bill.get("finding_section") or "implementation"),
+        "summary": str(bill.get("finding_summary") or ""),
+        "failure_reason": str(bill.get("failure_reason") or ""),
+        "case_name": str(bill.get("case_name") or reproducer.get("name") or ""),
+        "requirements": [dict(item) for item in list(bill.get("requirements") or [])],
+        "locations": [dict(item) for item in list(bill.get("locations") or [])],
+        "invariants": [str(item) for item in list(bill.get("invariants") or [])],
+        "reproducer": reproducer,
+        "expected": bill.get("expected"),
+        "actual": bill.get("actual"),
+        "suggested_repair_boundary": [
+            str(item) for item in list(bill.get("suggested_repair_boundary") or [])
+        ],
+        "test_files": test_files,
+        "regression_test_obligation": str(
+            dict(bill.get("regression_test_obligation") or {}).get("instruction") or ""
+        ),
+    }
+
+
+def semantic_finding_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    item = dict(value)
+    return {
+        "case": str(item.get("case_name") or ""),
+        "finding_section": str(item.get("finding_section") or "implementation"),
+        "summary": str(item.get("summary") or ""),
+        "failure_reason": str(item.get("failure_reason") or ""),
+        "requirements": [dict(entry) for entry in list(item.get("requirements") or [])],
+        "locations": [dict(entry) for entry in list(item.get("locations") or [])],
+        "invariants": [str(entry) for entry in list(item.get("invariants") or [])],
+        "evidence": list(item.get("evidence") or []),
+        "severity": str(item.get("severity") or "major"),
+        "suggested_repair_boundary": [
+            str(entry) for entry in list(item.get("suggested_repair_boundary") or [])
+        ],
+    }
+
+
 def aggregate_verification_status(statuses: Sequence[VerificationStatus] | Any) -> VerificationStatus:
     values = tuple(statuses)
     if any(item == VerificationStatus.FAIL for item in values):
@@ -446,6 +561,30 @@ def finding_fingerprint(
         "actual_hash": _normalized_hash(actual),
     }
     return hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _semantic_reference_keys(
+    *,
+    requirements: Sequence[Mapping[str, str]],
+    locations: Sequence[Mapping[str, str]],
+    invariants: Sequence[str],
+) -> list[str]:
+    values = [
+        *(f"requirement:{str(item.get('section') or '')}:{str(item.get('requirement') or '')}" for item in requirements),
+        *(
+            "location:"
+            + ":".join(
+                (
+                    str(item.get("path") or ""),
+                    str(item.get("symbol") or ""),
+                    str(item.get("section") or ""),
+                )
+            )
+            for item in locations
+        ),
+        *(f"invariant:{str(item)}" for item in invariants),
+    ]
+    return sorted(value for value in values if value)
 
 
 def no_progress_detected(history: Sequence[Mapping[str, Any]]) -> bool:

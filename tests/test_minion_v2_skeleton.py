@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from pal.minion.v2.architecture import ArchitectureArtifactService
@@ -305,13 +306,47 @@ class MinionV2SkeletonTests(unittest.TestCase):
 
         router = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, compilation.unit_node_ids["router"])
         assert router is not None
+        repair_ref = self.artifacts.put_json(
+            {
+                "workflow_id": "hidden-workflow",
+                "node_run_id": "hidden-node",
+                "candidate_digest": "hidden-candidate",
+                "finding_fingerprint": "hidden-fingerprint",
+                "module_name": "router",
+                "defect_kind": "module_defect",
+                "severity": "major",
+                "finding_section": "invariant",
+                "finding_summary": "Routing order changes after reset.",
+                "failure_reason": "The reset probe returns a different route.",
+                "case_name": "reset preserves deterministic routing",
+                "requirements": [
+                    {"section": "Routing", "requirement": "Route matching must be deterministic."}
+                ],
+                "locations": [{"path": "src/router.cpp", "symbol": "reset"}],
+                "invariants": ["Reset preserves route ordering."],
+                "expected": {"route": "first"},
+                "actual": {"route": "second"},
+                "suggested_repair_boundary": ["src/router.cpp"],
+            },
+            artifact_type="RepairBillArtifact",
+        )
+        router = replace(
+            router,
+            payload={**dict(router.payload), "historical_repair_bill_refs": [repair_ref.to_dict()]},
+        )
         work_view_ref = UnitWorkViewBuilder(architecture).build(router, dependency_outputs={})
         work_view = self.artifacts.read_json(work_view_ref)
         encoded = json.dumps(work_view, sort_keys=True)
         self.assertEqual(work_view["module_name"], "router")
         self.assertEqual(work_view["requirements"]["sections"], self.requirements["sections"])
+        self.assertEqual(
+            work_view["historical_repair_bills"][0]["case_name"],
+            "reset preserves deterministic routing",
+        )
         for forbidden in ("workflow_id", "revision_id", "node_run_id", "epoch_id", "sha256"):
             self.assertNotIn(forbidden, encoded)
+        for forbidden_value in ("hidden-workflow", "hidden-node", "hidden-candidate", "hidden-fingerprint"):
+            self.assertNotIn(forbidden_value, encoded)
 
     def test_skeleton_builder_schema_contains_semantics_not_manager_identity(self) -> None:
         encoded = json.dumps(SKELETON_BUILDER_TOOL_SPECS, sort_keys=True)

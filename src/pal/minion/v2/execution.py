@@ -29,7 +29,7 @@ from pal.minion.v2.skeleton import (
     SKELETON_MODULE_CONTRACT_ARTIFACT,
     requirements_semantic_view,
 )
-from pal.minion.v2.verification import candidate_reuse_fingerprint
+from pal.minion.v2.verification import candidate_reuse_fingerprint, repair_bill_semantic_view
 
 
 @dataclass(frozen=True)
@@ -1308,6 +1308,39 @@ class UnitWorkViewBuilder:
         if sum(len(values) for values in requirement_sections.values()) != len(covered):
             raise ValueError("ModuleWorkView lost one or more semantic Requirement references")
         path_policy = dict(node.payload.get("path_policy") or contract.get("paths") or {})
+        semantic_dependency_outputs: dict[str, Any] = {}
+        dependency_names = {str(item) for item in list(contract.get("depends_on") or [])}
+        for dependency_id in list(node.payload.get("dependency_node_ids") or []):
+            dependency = self.architecture.repository.read_snapshot(
+                AggregateType.DAG_NODE_RUN, str(dependency_id)
+            )
+            if dependency is None:
+                continue
+            dependency_name = str(
+                dependency.payload.get("module_name") or dependency.payload.get("unit_id") or ""
+            )
+            if dependency_name not in dependency_names:
+                continue
+            dependency_contract = dict(
+                self.architecture.artifacts.read_json(
+                    dict(dependency.payload.get("unit_contract_ref") or {})
+                )
+            )
+            semantic_dependency_outputs[dependency_name] = {
+                "status": "accepted" if dependency.state == "ACCEPTED" else dependency.state.lower(),
+                "contract_entrypoint": str(
+                    dict(dependency_contract.get("paths") or {}).get("contract_entrypoint") or ""
+                ),
+                "declared_outputs": sorted(
+                    str(key) for key in dict(dependency.payload.get("output_hashes") or {})
+                ),
+                "available_in_worktree": dependency.state == "ACCEPTED",
+            }
+        historical_refs = [
+            dict(item)
+            for item in list(node.payload.get("historical_repair_bill_refs") or [])
+            if isinstance(item, Mapping) and item.get("sha256")
+        ]
         payload = {
             "schema_version": "1",
             "module_name": str(contract.get("module_name") or node.payload.get("module_name") or ""),
@@ -1322,8 +1355,10 @@ class UnitWorkViewBuilder:
             "reference_only": list(path_policy.get("reference_only") or []),
             "construction_dependencies": list(contract.get("depends_on") or []),
             "evidence": list(contract.get("evidence") or []),
-            "dependency_outputs": dict(dependency_outputs),
-            "historical_repair_bills": list(node.payload.get("historical_repair_bill_refs") or []),
+            "dependency_outputs": semantic_dependency_outputs,
+            "historical_repair_bills": [
+                repair_bill_semantic_view(self.architecture.artifacts, item) for item in historical_refs
+            ],
             "node_run_journal": dict(
                 (self.architecture.repository.read_node_journal(node.aggregate_id) or {}).get("journal") or {}
             ),
@@ -1334,6 +1369,7 @@ class UnitWorkViewBuilder:
             child_refs=(
                 (str(manifest_ref["sha256"]), "architecture_skeleton"),
                 (str(contract_ref["sha256"]), "module_contract"),
+                *((str(item["sha256"]), "historical_repair_bill") for item in historical_refs),
             ),
         )
 

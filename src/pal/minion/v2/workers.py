@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import base64
-import json
+import contextlib
 import hashlib
+import json
 import os
 import signal
 import shutil
@@ -78,6 +78,8 @@ from pal.minion.v2.verification import (
     VerificationService,
     VerificationStatus,
     aggregate_verification_status,
+    repair_bill_semantic_view,
+    semantic_finding_payload,
 )
 from pal.shared import MinionInvocationPack
 
@@ -383,7 +385,13 @@ class MinionV2SemanticWorker:
         references = {"unit_work_view": view_ref}
         repair_ref = node.payload.get("repair_bill_ref")
         if isinstance(repair_ref, Mapping) and repair_ref.get("sha256"):
-            references["repair_bill"] = _ref_from_mapping(repair_ref)
+            semantic_repair_ref = self.service.artifacts.put_json(
+                repair_bill_semantic_view(self.service.artifacts, repair_ref),
+                artifact_type="RepairBillSemanticViewArtifact",
+                provenance={"owner": "manager", "audience": "coder"},
+                child_refs=((str(repair_ref["sha256"]), "repair_bill"),),
+            )
+            references["repair_bill"] = semantic_repair_ref
         instruction = (
             "Repair only the defects in the bound RepairBill. Regress the reviewer reproducer first, add the relevant regression "
             "test to the project, and make the smallest contract-preserving change. Do not revisit unrelated code."
@@ -418,6 +426,13 @@ class MinionV2SemanticWorker:
             prepare_workspace=False,
         )
         report = _primary_json_output(terminal)
+        if self._is_skeleton_manifest(node.payload.get("architecture_manifest_ref")):
+            _validate_skeleton_coder_report(
+                report,
+                expected_module=str(node.payload.get("module_name") or node.payload.get("unit_id") or ""),
+                work_view=self.service.artifacts.read_json(view_ref),
+            )
+            _reject_manager_identity_fields(report, owner="Coder output")
         status = str(report.get("status") or "candidate_ready").strip().lower()
         report_ref = self.service.artifacts.put_json(
             report,
@@ -662,14 +677,25 @@ class MinionV2SemanticWorker:
         else:
             raise ValueError(f"unsupported verification adapter: {adapter}")
         if str(node.payload.get("node_kind") or "") == "integration":
+            integration_contract = self.service.artifacts.read_json(
+                dict(node.payload["unit_contract_ref"])
+            )
+            dependency_modules: list[str] = []
+            for dependency_id in list(node.payload.get("dependency_node_ids") or []):
+                dependency = self.repository.read_snapshot(
+                    AggregateType.DAG_NODE_RUN, str(dependency_id)
+                )
+                if dependency is None:
+                    raise ValueError("integration verifier cannot resolve a dependency module")
+                dependency_modules.append(
+                    str(dependency.payload.get("module_name") or dependency.payload.get("unit_id") or "")
+                )
             view_ref = self.service.artifacts.put_json(
                 {
                     "schema_version": "1",
-                    "node_run_id": node.aggregate_id,
-                    "node_kind": "integration",
-                    "integration_contract": self.service.artifacts.read_json(dict(node.payload["unit_contract_ref"])),
-                    "dependency_node_ids": list(node.payload.get("dependency_node_ids") or []),
-                    "accepted_dependency_candidate_digests": list(node.payload.get("accepted_dependency_candidate_digests") or []),
+                    "module_name": "integration",
+                    "integration_contract": integration_contract,
+                    "accepted_dependency_modules": dependency_modules,
                     "verification_obligations": ["full build", "full test", "cross-unit lifecycle and interface adversarial probes"],
                 },
                 artifact_type="IntegrationWorkViewArtifact",
@@ -680,6 +706,24 @@ class MinionV2SemanticWorker:
             if not isinstance(view_value, Mapping) or not view_value.get("sha256"):
                 raise ValueError("verifier requires the exact UnitWorkView used by coder")
             view_ref = _ref_from_mapping(view_value)
+            if self._is_skeleton_manifest(node.payload.get("architecture_manifest_ref")):
+                view_ref = UnitWorkViewBuilder(self.service.architecture).build(
+                    node,
+                    dependency_outputs=dict(node.payload.get("dependency_outputs") or {}),
+                )
+        candidate = dict(self.service.artifacts.read_json(candidate_ref))
+        candidate_view_ref = self.service.artifacts.put_json(
+            {
+                "module_name": str(node.payload.get("module_name") or node.payload.get("unit_id") or ""),
+                "node_kind": str(node.payload.get("node_kind") or "unit"),
+                "changed_paths": [str(item) for item in list(candidate.get("changed_paths") or [])],
+                "candidate_cycle": int(node.payload.get("candidate_cycle") or 0),
+                "instruction": "Inspect the immutable candidate with Git show/diff in the bound review worktree.",
+            },
+            artifact_type="CandidateSemanticViewArtifact",
+            provenance={"owner": "manager", "audience": "verifier"},
+            child_refs=((candidate_ref.sha256, "candidate"),),
+        )
         terminal, prompt_ref, terminal_ref = await self._run_profile(
             effect=effect,
             snapshot=node,
@@ -692,7 +736,7 @@ class MinionV2SemanticWorker:
                 "Generate and run adversarial verification for the bound candidate. Historical RepairBills come first. "
                 "Write reproducible case commands; the manager will rerun them and owns the verdict."
             ),
-            reference_refs={"unit_work_view": view_ref, "candidate": candidate_ref},
+            reference_refs={"module_work_view": view_ref, "candidate_diff": candidate_view_ref},
             workspace_override={
                 "kind": "existing_repo",
                 "repo_path": str(review_workspace),
@@ -701,8 +745,15 @@ class MinionV2SemanticWorker:
             prepare_workspace=False,
         )
         plan = _primary_json_output(terminal)
-        case_specs = [_verification_case_spec(item) for item in list(plan.get("cases") or [])]
+        _validate_semantic_verification_plan_shape(plan, standalone=False)
+        _reject_manager_identity_fields(plan, owner="Verifier output")
+        case_specs = _verification_case_specs(plan.get("cases"))
         findings = _verification_findings(plan, case_specs)
+        _validate_verifier_requirement_refs(
+            work_view=self.service.artifacts.read_json(view_ref),
+            cases=case_specs,
+            findings=findings,
+        )
         verification_policy = self._workflow_policy(node.workflow_id, "verification")
         _validate_verification_policy(plan, case_specs, verification_policy, node)
         case_timeout = float(verification_policy.get("case_timeout_seconds") or 300)
@@ -736,7 +787,12 @@ class MinionV2SemanticWorker:
         repair_ref = None
         fingerprint = ""
         defect_kind = _defect_kind(plan, node)
-        dependency_node_id = str(plan.get("dependency_node_id") or "")
+        dependency_node_id = _resolve_dependency_node_id(
+            self.repository,
+            node,
+            dependency_module=str(plan.get("dependency_module") or ""),
+            required=defect_kind == DefectKind.DEPENDENCY,
+        )
         if status in {VerificationStatus.FAIL, VerificationStatus.UNKNOWN}:
             first_failure = next(
                 (item for item in case_results if item.status in {VerificationStatus.FAIL, VerificationStatus.UNKNOWN}),
@@ -757,7 +813,6 @@ class MinionV2SemanticWorker:
                 verification_ref=report_ref,
                 defect_kind=defect_kind,
                 severity=str(finding.get("severity") or plan.get("severity") or "major"),
-                contract_refs=tuple(finding.get("contract_refs") or first_failure.contract_refs),
                 minimal_reproducer_ref=case_ref.to_dict(),
                 test_artifact_ref=test_workspace_ref.to_dict(),
                 expected={"exit_codes": list(case_specs[case_results.index(first_failure)].expected_exit_codes)},
@@ -770,10 +825,12 @@ class MinionV2SemanticWorker:
                 finding_section=str(finding.get("finding_section") or "implementation"),
                 finding_summary=str(finding.get("summary") or ""),
                 failure_reason=str(finding.get("failure_reason") or first_failure.summary),
-                affected_refs=list(finding.get("affected_refs") or []),
-                finding_id=str(finding.get("finding_id") or ""),
+                case_name=str(finding.get("case_name") or first_failure.case_name),
+                requirements=list(finding.get("requirements") or first_failure.requirements),
+                locations=list(finding.get("locations") or first_failure.locations),
+                invariants=list(finding.get("invariants") or first_failure.invariants),
             )
-        unknown_policy = _unknown_policy(plan)
+        unknown_policy = _manager_unknown_policy(node)
         if unknown_policy.human_waiver_ref:
             manifest_ref = _ref_from_mapping(node.payload.get("architecture_manifest_ref"))
             manifest = self.service.artifacts.read_json(manifest_ref)
@@ -1107,7 +1164,9 @@ class MinionV2SemanticWorker:
             prepare_workspace=False,
         )
         plan = _primary_json_output(terminal)
-        case_specs = [_verification_case_spec(item) for item in list(plan.get("cases") or [])]
+        _validate_semantic_verification_plan_shape(plan, standalone=True)
+        _reject_manager_identity_fields(plan, owner="Standalone Reviewer output")
+        case_specs = _verification_case_specs(plan.get("cases"))
         findings = _standalone_review_findings(plan, case_specs)
         verification_policy = self._workflow_policy(review.workflow_id, "verification")
         case_timeout = float(verification_policy.get("case_timeout_seconds") or 300)
@@ -1124,15 +1183,15 @@ class MinionV2SemanticWorker:
             review_worktree=review_repo,
             review_scratch=review_scratch,
             candidate_digest=base_sha,
+            execution_adapter=SOFTWARE_GIT_ADAPTER,
         )
         status = _standalone_review_status(plan, results)
         report_ref = self.service.artifacts.put_json(
             {
                 "schema_version": "1",
-                "review_id": review.aggregate_id,
                 "status": status.value,
                 "cases": [item.to_dict() for item in results],
-                "findings": findings,
+                "findings": [semantic_finding_payload(item) for item in findings],
                 "reviewer_summary": str(plan.get("reviewer_summary") or ""),
                 "scope": plan.get("scope") or {},
                 "reviewed_surfaces": list(plan.get("reviewed_surfaces") or []),
@@ -1140,7 +1199,6 @@ class MinionV2SemanticWorker:
                 "test_gaps": list(plan.get("test_gaps") or []),
                 "unreviewed_surfaces": list(plan.get("unreviewed_surfaces") or []),
                 "residual_risk": list(plan.get("residual_risk") or []),
-                "test_workspace_ref": test_workspace_ref.to_dict(),
             },
             artifact_type="StandaloneReviewReportArtifact",
             child_refs=(
@@ -1221,6 +1279,7 @@ class MinionV2SemanticWorker:
     async def _publish_standalone_report(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         review = self._effect_snapshot(effect)
         report_ref = dict(review.payload.get("verification_artifact_ref") or {})
+        report = self.service.artifacts.read_json(report_ref)
         workflow = self.repository.read_snapshot(AggregateType.WORKFLOW, review.workflow_id)
         workflow_request = workflow_request_from_snapshot(self.service, workflow)
         if self.publish_human_review is not None:
@@ -1230,13 +1289,12 @@ class MinionV2SemanticWorker:
                     "standalone_review_id": review.aggregate_id,
                     "report_ref": report_ref,
                     "route": dict(workflow.payload.get("control_route") or {}),
-                    "summary": "Minion V2 standalone review completed.",
+                    "summary": _compile_standalone_review_markdown(report),
                 }
             )
         current = self.repository.read_snapshot(AggregateType.STANDALONE_REVIEW, review.aggregate_id)
         action_type = "ACKNOWLEDGE_REPORT"
         payload: dict[str, Any] = {}
-        report = self.service.artifacts.read_json(report_ref)
         if (
             str(workflow_request.get("operation") or "") == "review_and_repair"
             and str(report.get("status") or "") == VerificationStatus.FAIL
@@ -3453,18 +3511,57 @@ def _append_ref(existing: Any, value: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _verification_case_specs(value: Any) -> list[VerificationCaseSpec]:
+    cases = [_verification_case_spec(item) for item in list(value or [])]
+    names = [item.case_name for item in cases]
+    if len(set(names)) != len(names):
+        raise ValueError("verification case names must be unique semantic names")
+    return cases
+
+
 def _verification_case_spec(value: Any) -> VerificationCaseSpec:
     if not isinstance(value, Mapping):
         raise ValueError("verification case must be an object")
+    name = str(value.get("name") or "").strip()
+    if not name:
+        raise ValueError("verification case requires a semantic name")
     command = tuple(str(item) for item in list(value.get("command") or []) if str(item))
     if not command:
-        raise ValueError("verification case requires a command argv")
+        raise ValueError(f"verification case {name!r} requires a command argv")
+    requirements = _semantic_requirement_refs(value.get("requirements"), owner=f"case {name!r}")
+    locations = _semantic_locations(value.get("locations"), owner=f"case {name!r}")
+    invariants = tuple(str(item).strip() for item in list(value.get("invariants") or []) if str(item).strip())
+    if not (requirements or locations or invariants):
+        raise ValueError(
+            f"verification case {name!r} requires Requirement text, a source location, or an invariant"
+        )
+    case_kind = VerificationCaseKind(str(value.get("case_kind") or ""))
+    expected_exit_codes = tuple(int(item) for item in list(value.get("expected_exit_codes") or [0]))
+    case_key = hashlib.sha256(
+        json.dumps(
+            {
+                "name": name,
+                "case_kind": case_kind.value,
+                "command": command,
+                "expected_exit_codes": expected_exit_codes,
+                "requirements": requirements,
+                "locations": locations,
+                "invariants": invariants,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     return VerificationCaseSpec(
-        case_id=str(value.get("case_id") or "").strip(),
-        case_kind=VerificationCaseKind(str(value.get("case_kind") or "")),
+        case_id=f"case_{case_key[:20]}",
+        case_name=name,
+        case_kind=case_kind,
         command=command,
-        expected_exit_codes=tuple(int(item) for item in list(value.get("expected_exit_codes") or [0])),
-        contract_refs=tuple(str(item) for item in list(value.get("contract_refs") or [])),
+        expected_exit_codes=expected_exit_codes,
+        requirements=requirements,
+        locations=locations,
+        invariants=invariants,
         description=str(value.get("description") or ""),
     )
 
@@ -3487,42 +3584,59 @@ def _verification_findings(
     plan: Mapping[str, Any],
     cases: list[VerificationCaseSpec],
 ) -> list[dict[str, Any]]:
-    case_ids = {item.case_id for item in cases if item.case_id}
+    cases_by_name = {item.case_name: item for item in cases}
     findings: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for index, raw in enumerate(list(plan.get("findings") or []), start=1):
+    for raw in list(plan.get("findings") or []):
         if not isinstance(raw, Mapping):
             raise ValueError("verification finding must be an object")
         item = dict(raw)
-        finding_id = str(item.get("finding_id") or f"F-{index}").strip()
-        case_id = str(item.get("case_id") or "").strip()
+        case_name = str(item.get("case") or "").strip()
         section = str(item.get("finding_section") or "implementation").strip()
-        if not finding_id or finding_id in seen:
-            raise ValueError(f"invalid or duplicate verification finding_id: {finding_id or '<empty>'}")
-        if not case_id or case_id not in case_ids:
-            raise ValueError(f"verification finding {finding_id} must reference a declared case_id")
+        if not case_name or case_name not in cases_by_name:
+            raise ValueError("verification finding must reference a declared semantic case name")
         if section not in _FINDING_SECTIONS:
-            raise ValueError(f"verification finding {finding_id} has invalid finding_section: {section}")
+            raise ValueError(f"verification finding for {case_name!r} has invalid finding_section: {section}")
         summary = str(item.get("summary") or "").strip()
         failure_reason = str(item.get("failure_reason") or "").strip()
         if not summary or not failure_reason:
-            raise ValueError(f"verification finding {finding_id} requires summary and failure_reason")
-        findings.append(
-            {
-                "finding_id": finding_id,
-                "case_id": case_id,
-                "finding_section": section,
-                "summary": summary,
-                "failure_reason": failure_reason,
-                "affected_refs": [str(value) for value in list(item.get("affected_refs") or [])],
-                "contract_refs": [str(value) for value in list(item.get("contract_refs") or [])],
-                "severity": str(item.get("severity") or "major"),
-                "suggested_repair_boundary": [
-                    str(value) for value in list(item.get("suggested_repair_boundary") or [])
-                ],
-            }
-        )
-        seen.add(finding_id)
+            raise ValueError(f"verification finding for {case_name!r} requires summary and failure_reason")
+        case = cases_by_name[case_name]
+        finding = {
+            "case_id": case.case_id,
+            "case_name": case_name,
+            "finding_section": section,
+            "summary": summary,
+            "failure_reason": failure_reason,
+            "requirements": list(
+                _semantic_requirement_refs(item.get("requirements"), owner=f"finding for {case_name!r}")
+                or case.requirements
+            ),
+            "locations": list(
+                _semantic_locations(item.get("locations"), owner=f"finding for {case_name!r}")
+                or case.locations
+            ),
+            "invariants": [
+                str(value).strip()
+                for value in list(item.get("invariants") or case.invariants)
+                if str(value).strip()
+            ],
+            "severity": str(item.get("severity") or "major"),
+            "suggested_repair_boundary": [
+                str(value) for value in list(item.get("suggested_repair_boundary") or [])
+            ],
+        }
+        if not (finding["requirements"] or finding["locations"] or finding["invariants"]):
+            raise ValueError(
+                f"verification finding for {case_name!r} requires Requirement text, a source location, or an invariant"
+            )
+        finding_key = hashlib.sha256(
+            json.dumps(finding, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if finding_key in seen:
+            raise ValueError(f"duplicate semantic verification finding for {case_name!r}")
+        findings.append(finding)
+        seen.add(finding_key)
     return findings
 
 
@@ -3549,18 +3663,262 @@ def _confirmed_verification_findings(
         spec = specs[case_id]
         confirmed.append(
             {
-                "finding_id": f"F-{len(confirmed) + 1}",
                 "case_id": case_id,
+                "case_name": spec.case_name,
                 "finding_section": "implementation",
-                "summary": spec.description or f"Verification case {case_id} did not pass",
+                "summary": spec.description or f"Verification case {spec.case_name!r} did not pass",
                 "failure_reason": result.summary,
-                "affected_refs": [],
-                "contract_refs": list(spec.contract_refs),
+                "requirements": [dict(item) for item in spec.requirements],
+                "locations": [dict(item) for item in spec.locations],
+                "invariants": list(spec.invariants),
                 "severity": "major",
                 "suggested_repair_boundary": [],
             }
         )
     return confirmed
+
+
+def _semantic_requirement_refs(value: Any, *, owner: str) -> tuple[dict[str, str], ...]:
+    result: list[dict[str, str]] = []
+    for raw in list(value or []):
+        item = dict(raw or {})
+        section = str(item.get("section") or "").strip()
+        requirement = str(item.get("requirement") or "").strip()
+        if not section or not requirement:
+            raise ValueError(f"{owner} Requirement references require section and original requirement text")
+        result.append({"section": section, "requirement": requirement})
+    return tuple(result)
+
+
+def _semantic_locations(value: Any, *, owner: str) -> tuple[dict[str, str], ...]:
+    result: list[dict[str, str]] = []
+    for raw in list(value or []):
+        item = dict(raw or {})
+        path = str(item.get("path") or "").strip()
+        if not path:
+            raise ValueError(f"{owner} source locations require path")
+        result.append(
+            {
+                "path": path,
+                **({"symbol": str(item.get("symbol") or "").strip()} if item.get("symbol") else {}),
+                **({"section": str(item.get("section") or "").strip()} if item.get("section") else {}),
+            }
+        )
+    return tuple(result)
+
+
+def _validate_semantic_verification_plan_shape(
+    value: Mapping[str, Any],
+    *,
+    standalone: bool,
+) -> None:
+    verifier_fields = {
+        "cases",
+        "findings",
+        "defect_kind",
+        "dependency_module",
+        "severity",
+        "suggested_repair_boundary",
+        "policy_exceptions",
+        "reviewer_summary",
+    }
+    standalone_fields = {
+        "verdict",
+        "scope",
+        "reviewed_surfaces",
+        "cases",
+        "findings",
+        "commands_or_lsp_evidence",
+        "test_gaps",
+        "unreviewed_surfaces",
+        "residual_risk",
+        "reviewer_summary",
+    }
+    unknown = set(value) - (standalone_fields if standalone else verifier_fields)
+    if unknown:
+        raise ValueError("verification output contains unsupported fields: " + ", ".join(sorted(unknown)))
+    case_fields = {
+        "name",
+        "case_kind",
+        "command",
+        "expected_exit_codes",
+        "requirements",
+        "locations",
+        "invariants",
+        "description",
+    }
+    finding_fields = {
+        "case",
+        "finding_section",
+        "summary",
+        "failure_reason",
+        "requirements",
+        "locations",
+        "invariants",
+        "severity",
+        "suggested_repair_boundary",
+        "evidence",
+    }
+    for index, raw in enumerate(list(value.get("cases") or [])):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"verification case {index} must be an object")
+        extra = set(raw) - case_fields
+        if extra:
+            raise ValueError(
+                f"verification case {index} contains unsupported fields: " + ", ".join(sorted(extra))
+            )
+    for index, raw in enumerate(list(value.get("findings") or [])):
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"verification finding {index} must be an object")
+        extra = set(raw) - finding_fields
+        if extra:
+            raise ValueError(
+                f"verification finding {index} contains unsupported fields: " + ", ".join(sorted(extra))
+            )
+
+
+def _validate_skeleton_coder_report(
+    value: Mapping[str, Any],
+    *,
+    expected_module: str,
+    work_view: Mapping[str, Any],
+) -> None:
+    allowed = {
+        "current_micro_plan",
+        "completed_checklist",
+        "files_inspected",
+        "files_changed",
+        "tests_run",
+        "open_questions",
+        "known_failures",
+        "status",
+        "summary",
+        "affected_module",
+        "locations",
+        "requirements",
+    }
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError("Coder output contains unsupported fields: " + ", ".join(sorted(unknown)))
+    status = str(value.get("status") or "").strip()
+    if status not in {"candidate_ready", "architecture_defect", "module_split_request"}:
+        raise ValueError("Coder output status must be candidate_ready, architecture_defect, or module_split_request")
+    if status in {"architecture_defect", "module_split_request"}:
+        if not str(value.get("summary") or "").strip():
+            raise ValueError(f"Coder output status {status} requires summary")
+        affected_module = str(value.get("affected_module") or "").strip()
+        if not affected_module:
+            raise ValueError(f"Coder output status {status} requires affected_module")
+        if affected_module != str(expected_module or "").strip():
+            raise ValueError(
+                f"Coder output may report a defect only for its bound module {expected_module!r}"
+            )
+        locations = _semantic_locations(value.get("locations"), owner=f"Coder {status}")
+        requirements = _semantic_requirement_refs(value.get("requirements"), owner=f"Coder {status}")
+        if not (locations or requirements):
+            raise ValueError(
+                f"Coder output status {status} requires Requirement text or a source location"
+            )
+        referenced_requirements = {
+            (str(item.get("section") or ""), str(item.get("requirement") or ""))
+            for item in requirements
+        }
+        unknown_requirements = sorted(referenced_requirements - _work_view_requirement_refs(work_view))
+        if unknown_requirements:
+            rendered = "; ".join(f"{section}: {requirement}" for section, requirement in unknown_requirements)
+            raise ValueError("Coder referenced Requirement text outside its ModuleWorkView: " + rendered)
+
+
+def _reject_manager_identity_fields(value: Any, *, owner: str, path: str = "$") -> None:
+    if isinstance(value, Mapping):
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            lowered = key.casefold()
+            if (
+                lowered.endswith("_id")
+                or lowered.endswith("_ref")
+                or lowered.endswith("_sha")
+                or "sha256" in lowered
+                or lowered in {"handle", "json_pointer", "artifact"}
+            ):
+                raise ValueError(f"{owner} contains Manager-owned identity field at {path}.{key}")
+            _reject_manager_identity_fields(item, owner=owner, path=f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _reject_manager_identity_fields(item, owner=owner, path=f"{path}[{index}]")
+
+
+def _resolve_dependency_node_id(
+    repository: MinionV2Repository,
+    node: AggregateSnapshot,
+    *,
+    dependency_module: str,
+    required: bool,
+) -> str:
+    name = str(dependency_module or "").strip()
+    if not required and not name:
+        return ""
+    if not name:
+        raise ValueError("dependency_defect requires dependency_module")
+    matches: list[str] = []
+    for dependency_id in list(node.payload.get("dependency_node_ids") or []):
+        dependency = repository.read_snapshot(AggregateType.DAG_NODE_RUN, str(dependency_id))
+        if dependency is None:
+            continue
+        module_name = str(dependency.payload.get("module_name") or dependency.payload.get("unit_id") or "")
+        if module_name == name:
+            matches.append(dependency.aggregate_id)
+    if len(matches) != 1:
+        raise ValueError(f"dependency_module {name!r} does not name exactly one direct dependency")
+    return matches[0]
+
+
+def _validate_verifier_requirement_refs(
+    *,
+    work_view: Mapping[str, Any],
+    cases: list[VerificationCaseSpec],
+    findings: list[Mapping[str, Any]],
+) -> None:
+    allowed = _work_view_requirement_refs(work_view)
+    referenced = {
+        (str(item.get("section") or ""), str(item.get("requirement") or ""))
+        for case in cases
+        for item in case.requirements
+    }
+    referenced.update(
+        (str(item.get("section") or ""), str(item.get("requirement") or ""))
+        for finding in findings
+        for item in list(finding.get("requirements") or [])
+    )
+    unknown = sorted(referenced - allowed)
+    if unknown:
+        rendered = "; ".join(f"{section}: {requirement}" for section, requirement in unknown)
+        raise ValueError("verifier referenced Requirement text outside its ModuleWorkView: " + rendered)
+
+
+def _work_view_requirement_refs(work_view: Mapping[str, Any]) -> set[tuple[str, str]]:
+    raw_requirements = work_view.get("requirements")
+    if isinstance(raw_requirements, Mapping):
+        requirements = dict(raw_requirements)
+        allowed = {
+            (str(section), str(requirement))
+            for section, values in dict(requirements.get("sections") or {}).items()
+            for requirement in list(values or [])
+        }
+    else:
+        allowed = {
+            (
+                str(dict(item or {}).get("section") or "Requirements"),
+                str(dict(item or {}).get("statement") or dict(item or {}).get("requirement") or ""),
+            )
+            for item in list(raw_requirements or [])
+        }
+    integration = dict(work_view.get("integration_contract") or {})
+    allowed.update(
+        (str(item.get("section") or ""), str(item.get("requirement") or ""))
+        for item in list(integration.get("covers") or [])
+    )
+    return allowed
 
 
 def _validate_verification_policy(
@@ -3596,31 +3954,46 @@ def _standalone_review_findings(
     plan: Mapping[str, Any],
     cases: list[VerificationCaseSpec],
 ) -> list[dict[str, Any]]:
-    case_ids = {item.case_id for item in cases if item.case_id}
+    cases_by_name = {item.case_name: item for item in cases}
     findings: list[dict[str, Any]] = []
-    for index, raw in enumerate(list(plan.get("findings") or []), start=1):
+    for raw in list(plan.get("findings") or []):
         item = dict(raw or {})
         section = str(item.get("finding_section") or "implementation").strip()
         if section not in _FINDING_SECTIONS:
             raise ValueError(f"standalone finding has invalid finding_section: {section}")
-        case_id = str(item.get("case_id") or "").strip()
-        if case_id and case_id not in case_ids:
-            raise ValueError(f"standalone finding references unknown case_id: {case_id}")
+        case_name = str(item.get("case") or "").strip()
+        if case_name and case_name not in cases_by_name:
+            raise ValueError(f"standalone finding references unknown case name: {case_name}")
         summary = str(item.get("summary") or "").strip()
         failure_reason = str(item.get("failure_reason") or "").strip()
         if not summary or not failure_reason:
             raise ValueError("standalone finding requires summary and failure_reason")
+        case = cases_by_name.get(case_name)
         findings.append(
             {
-                "finding_id": str(item.get("finding_id") or f"F-{index}"),
-                "case_id": case_id,
+                "case_id": case.case_id if case is not None else "",
+                "case_name": case_name,
                 "finding_section": section,
                 "summary": summary,
                 "failure_reason": failure_reason,
-                "affected_refs": [str(value) for value in list(item.get("affected_refs") or [])],
-                "contract_refs": [str(value) for value in list(item.get("contract_refs") or [])],
+                "requirements": list(
+                    _semantic_requirement_refs(item.get("requirements"), owner="standalone finding")
+                    or (case.requirements if case is not None else ())
+                ),
+                "locations": list(
+                    _semantic_locations(item.get("locations"), owner="standalone finding")
+                    or (case.locations if case is not None else ())
+                ),
+                "invariants": [
+                    str(value).strip()
+                    for value in list(item.get("invariants") or (case.invariants if case is not None else ()))
+                    if str(value).strip()
+                ],
                 "severity": str(item.get("severity") or "major"),
                 "evidence": list(item.get("evidence") or []),
+                "suggested_repair_boundary": [
+                    str(value) for value in list(item.get("suggested_repair_boundary") or [])
+                ],
             }
         )
     return findings
@@ -3644,6 +4017,70 @@ def _standalone_review_status(
     raise ValueError("standalone review verdict must be approved, changes_requested, or blocked")
 
 
+def _compile_standalone_review_markdown(report: Mapping[str, Any]) -> str:
+    """Render the semantic review result without leaking Manager-owned identities."""
+
+    status = str(report.get("status") or VerificationStatus.UNKNOWN)
+    lines = ["# Standalone Review", "", f"**Status:** {status}"]
+    summary = str(report.get("reviewer_summary") or "").strip()
+    if summary:
+        lines.extend(("", summary))
+
+    findings = [dict(item or {}) for item in list(report.get("findings") or [])]
+    lines.extend(("", "## Findings"))
+    if not findings:
+        lines.append("- No findings.")
+    for index, finding in enumerate(findings, start=1):
+        severity = str(finding.get("severity") or "major").upper()
+        section = str(finding.get("finding_section") or "implementation")
+        finding_summary = str(finding.get("summary") or "Finding").strip()
+        lines.extend(("", f"### {index}. [{severity}] {finding_summary}", f"- Area: {section}"))
+        case_name = str(finding.get("case") or "").strip()
+        if case_name:
+            lines.append(f"- Case: {case_name}")
+        reason = str(finding.get("failure_reason") or "").strip()
+        if reason:
+            lines.append(f"- Reason: {reason}")
+        for requirement in list(finding.get("requirements") or []):
+            item = dict(requirement or {})
+            lines.append(
+                "- Requirement: "
+                f"{str(item.get('section') or 'Requirements')} - "
+                f"{str(item.get('requirement') or '')}"
+            )
+        for location in list(finding.get("locations") or []):
+            item = dict(location or {})
+            label = str(item.get("path") or "")
+            if item.get("symbol"):
+                label += f"::{str(item['symbol'])}"
+            if item.get("section"):
+                label += f" ({str(item['section'])})"
+            lines.append(f"- Location: {label}")
+        for invariant in list(finding.get("invariants") or []):
+            lines.append(f"- Invariant: {str(invariant)}")
+
+    cases = [dict(item or {}) for item in list(report.get("cases") or [])]
+    lines.extend(("", "## Verification Cases"))
+    if not cases:
+        lines.append("- No executable cases were required.")
+    for case in cases:
+        name = str(case.get("name") or "unnamed case")
+        case_status = str(case.get("status") or VerificationStatus.UNKNOWN)
+        command = json.dumps(list(case.get("command") or []), ensure_ascii=False)
+        lines.append(f"- **{name}**: {case_status}; command `{command}`")
+
+    for heading, key in (
+        ("Test Gaps", "test_gaps"),
+        ("Unreviewed Surfaces", "unreviewed_surfaces"),
+        ("Residual Risk", "residual_risk"),
+    ):
+        values = [str(item) for item in list(report.get(key) or []) if str(item).strip()]
+        if not values:
+            continue
+        lines.extend(("", f"## {heading}", *(f"- {item}" for item in values)))
+    return "\n".join(lines).strip() + "\n"
+
+
 def _defect_kind(plan: Mapping[str, Any], node: AggregateSnapshot) -> DefectKind:
     raw = str(plan.get("defect_kind") or "").strip()
     if raw:
@@ -3653,8 +4090,8 @@ def _defect_kind(plan: Mapping[str, Any], node: AggregateSnapshot) -> DefectKind
     return DefectKind.MODULE
 
 
-def _unknown_policy(plan: Mapping[str, Any]) -> UnknownPolicy:
-    raw = dict(plan.get("unknown_policy") or {})
+def _manager_unknown_policy(node: AggregateSnapshot) -> UnknownPolicy:
+    raw = dict(node.payload.get("unknown_policy") or {})
     return UnknownPolicy(
         architecture_allows_platform_unknown=bool(raw.get("architecture_allows_platform_unknown")),
         assumption_ref=dict(raw.get("assumption_ref") or {}) or None,
