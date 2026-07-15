@@ -29,6 +29,13 @@ class MinionV2Recovery:
         for lease in self.repository.expired_leases():
             metadata = dict(lease.get("metadata") or {})
             process_group = int(metadata.get("process_group_id") or 0)
+            if process_group <= 0 and str(lease.get("resource_key") or "").startswith(
+                "assignment:"
+            ):
+                attempt = self.repository.read_worker_attempt(
+                    str(lease.get("owner_id") or "")
+                )
+                process_group = int(dict(attempt or {}).get("process_group_id") or 0)
             worktree = Path(str(metadata.get("workspace_path") or "")) if metadata.get("workspace_path") else None
             reaped = self._kill_and_reap(process_group)
             if reaped and worktree is not None:

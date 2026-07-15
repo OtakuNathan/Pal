@@ -2242,27 +2242,33 @@ class MinionRunner:
 def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> MinionRuntimeBundle:
     from pal.core import register_with_core as register_core_with_core
 
-    database = PalV2Database(db_path=Path(runtime_root) / "pal.sqlite3")
+    read_only_database = os.environ.get("PAL_DATABASE_READ_ONLY") == "1"
+    database = PalV2Database(
+        db_path=Path(runtime_root) / "pal.sqlite3",
+        read_only=read_only_database,
+    )
     database.initialize(ALL_MODELS)
     llm_repository = LLMEndpointRepository()
     web_search_repository = WebSearchProviderRepository()
     web_fetch_repository = WebFetchProviderRepository()
-    if not llm_repository.list_enabled():
-        llm_repository.ensure_defaults(DEFAULT_LLM_ENDPOINTS)
-    if not web_search_repository.list_all():
-        web_search_repository.ensure_defaults(DEFAULT_WEB_SEARCH_PROVIDERS)
-    if not web_fetch_repository.list_all():
-        web_fetch_repository.ensure_defaults(DEFAULT_WEB_FETCH_PROVIDERS)
+    if not read_only_database:
+        if not llm_repository.list_enabled():
+            llm_repository.ensure_defaults(DEFAULT_LLM_ENDPOINTS)
+        if not web_search_repository.list_all():
+            web_search_repository.ensure_defaults(DEFAULT_WEB_SEARCH_PROVIDERS)
+        if not web_fetch_repository.list_all():
+            web_fetch_repository.ensure_defaults(DEFAULT_WEB_FETCH_PROVIDERS)
     settings = RuntimeSettingRepository()
-    settings.ensure_defaults()
-    if settings.get("active_web_search_provider_id") is None:
-        enabled = web_search_repository.list_enabled()
-        if enabled:
-            settings.set("active_web_search_provider_id", enabled[0].provider_id)
-    if settings.get("active_web_fetch_provider_id") is None:
-        enabled = web_fetch_repository.list_enabled()
-        if enabled:
-            settings.set("active_web_fetch_provider_id", enabled[0].provider_id)
+    if not read_only_database:
+        settings.ensure_defaults()
+        if settings.get("active_web_search_provider_id") is None:
+            enabled = web_search_repository.list_enabled()
+            if enabled:
+                settings.set("active_web_search_provider_id", enabled[0].provider_id)
+        if settings.get("active_web_fetch_provider_id") is None:
+            enabled = web_fetch_repository.list_enabled()
+            if enabled:
+                settings.set("active_web_fetch_provider_id", enabled[0].provider_id)
 
     config = RuntimeConfig.load(Path(runtime_root))
     core = PalCore(config=config)
@@ -2295,6 +2301,7 @@ def build_slim_minion_runtime(runtime_root: Path, *, run_id: str = "") -> Minion
     l3_plugin = SQLiteVecL3Plugin(
         service=memory_service,
         embedding_provider=build_ollama_embedding_provider_from_config(config),
+        read_only=read_only_database,
     )
     memory_service.l3_selector.active_provider_id = l3_plugin.provider_id
     register_l3_with_core(core.context, l3_plugin)

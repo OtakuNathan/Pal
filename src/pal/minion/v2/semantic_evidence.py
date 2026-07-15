@@ -485,8 +485,16 @@ def execution_workspace_fingerprint(workspace: Mapping[str, Any]) -> str:
     return digest.hexdigest()
 
 
-def _artifact_store(workspace: Mapping[str, Any]) -> ContentAddressedArtifactStore:
+def _artifact_store(workspace: Mapping[str, Any]) -> Any:
     root = _runtime_root(workspace)
+    from pal.minion.v2.worker_gateway import (
+        WorkerGatewayArtifactStore,
+        worker_gateway_client_from_env,
+    )
+
+    gateway = worker_gateway_client_from_env(root)
+    if gateway is not None:
+        return WorkerGatewayArtifactStore(gateway)
     repository = MinionV2Repository(root)
     repository.ensure_schema()
     return ContentAddressedArtifactStore(root, repository)

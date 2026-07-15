@@ -45,16 +45,22 @@ class RepositoryBase:
 @dataclass
 class PalV2Database:
     db_path: Path
+    read_only: bool = False
     raw_sql_hooks: RawSQLHookRegistry = field(default_factory=RawSQLHookRegistry)
 
     def __post_init__(self) -> None:
+        database_path: str | Path = self.db_path
+        database_options: dict[str, object] = {}
+        pragmas = {"foreign_keys": 1, "journal_mode": "wal"}
+        if self.read_only:
+            database_path = f"file:{self.db_path.resolve()}?mode=ro"
+            database_options["uri"] = True
+            pragmas = {"foreign_keys": 1, "query_only": 1}
         self._database = SqliteDatabase(
-            self.db_path,
-            pragmas={
-                "foreign_keys": 1,
-                "journal_mode": "wal",
-            },
+            database_path,
+            pragmas=pragmas,
             check_same_thread=False,
+            **database_options,
         )
 
     @property
@@ -65,12 +71,16 @@ class PalV2Database:
         # PalV2 assumes schema preparation and migrations are handled outside
         # the runtime. Initialization only binds models and installs optional
         # raw SQL extensions needed by the already-prepared database.
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.read_only:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        elif not self.db_path.is_file():
+            raise FileNotFoundError(f"read-only Pal database does not exist: {self.db_path}")
         database_proxy.initialize(self._database)
         self._database.connect(reuse_if_open=True)
         self._database.bind(models, bind_refs=True, bind_backrefs=True)
-        self._database.create_tables(list(models), safe=True)
-        self.install_raw_sql_extensions()
+        if not self.read_only:
+            self._database.create_tables(list(models), safe=True)
+            self.install_raw_sql_extensions()
 
     def install_raw_sql_extensions(self) -> None:
         statements = self.raw_sql_hooks.iter_statements()

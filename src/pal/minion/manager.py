@@ -16,7 +16,12 @@ from pal.llm.runtime import scoped_llm_event_sink
 from pal.minion.catalog import MinionCatalogService
 from pal.minion.config import effective_minion_runtime_config
 from pal.minion.event_delivery import MinionEventDelivery
-from pal.minion.ipc import cleanup_manager_endpoint, start_manager_server
+from pal.minion.ipc import (
+    cleanup_manager_endpoint,
+    cleanup_worker_gateway_endpoint,
+    start_manager_server,
+    start_worker_gateway_server,
+)
 from pal.minion.llm_broker import (
     llm_outcome_to_payload,
     llm_request_from_payload,
@@ -29,6 +34,7 @@ from pal.minion.v2.orchestration import MinionV2OutboxProcessor
 from pal.minion.v2.recovery import MinionV2Recovery
 from pal.minion.v2.service import MinionV2WorkflowService
 from pal.minion.v2.workers import MinionV2SemanticWorker
+from pal.minion.v2.worker_gateway import WorkerAssignmentGateway
 from pal.shared import MinionApprovalDecision, MinionInvocationPack
 
 
@@ -86,7 +92,9 @@ class MinionManager:
     max_parallel_modules: int | None = None
     graceful_shutdown_timeout_seconds: float = _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS
     server: asyncio.base_events.Server | None = None
+    worker_server: asyncio.base_events.Server | None = None
     endpoint_info: dict[str, Any] = field(default_factory=dict)
+    worker_endpoint_info: dict[str, Any] = field(default_factory=dict)
     runs: dict[str, MinionRunState] = field(default_factory=dict)
     started_at: str = field(default_factory=utc_now)
     catalog: MinionCatalogService = field(init=False)
@@ -95,6 +103,7 @@ class MinionManager:
     v2_service: MinionV2WorkflowService = field(init=False)
     v2_outbox: MinionV2OutboxProcessor = field(init=False)
     v2_semantic_worker: MinionV2SemanticWorker = field(init=False)
+    worker_gateway: WorkerAssignmentGateway = field(init=False)
     _llm_broker_bundle: Any | None = field(default=None, init=False, repr=False)
     _shutdown_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _drain_requested: asyncio.Event = field(default_factory=asyncio.Event, init=False)
@@ -112,8 +121,10 @@ class MinionManager:
         self.max_parallel_modules = max(1, int(self.max_parallel_modules or configured or _DEFAULT_MAX_PARALLEL_NODES))
         self.events = MinionEventDelivery()
         self.v2_service = MinionV2WorkflowService(Path(self.runtime_root))
+        self.worker_gateway = WorkerAssignmentGateway(self.v2_service)
         self.v2_semantic_worker = MinionV2SemanticWorker(
             self.v2_service,
+            max_parallel_workers=self.max_parallel_modules,
             publish_human_review=self._publish_v2_human_review,
             publish_worker_event=self._publish_v2_worker_event,
             register_broker_run=self._register_v2_broker_run,
@@ -136,28 +147,56 @@ class MinionManager:
     async def run(self) -> None:
         recovery = await asyncio.to_thread(MinionV2Recovery(self.v2_service).recover)
         self.server, self.endpoint_info = await start_manager_server(self.runtime_root, self._handle_client)
-        self.logger.info("minion manager listening: %s recovery=%s", self.endpoint_info, recovery)
+        self.worker_server, self.worker_endpoint_info = await start_worker_gateway_server(
+            self.runtime_root,
+            self._handle_worker_client,
+        )
+        self.logger.info(
+            "minion manager listening: %s worker_gateway=%s recovery=%s",
+            self.endpoint_info,
+            self.worker_endpoint_info,
+            recovery,
+        )
         remove_signals = self._install_signal_handlers()
-        async with self.server:
+        async with self.server, self.worker_server:
             serve_task = asyncio.create_task(self.server.serve_forever(), name="minion-manager-serve")
+            worker_serve_task = asyncio.create_task(
+                self.worker_server.serve_forever(),
+                name="minion-worker-gateway-serve",
+            )
+            recovered_assignments = await self.v2_semantic_worker.recover_background_assignments()
+            if recovered_assignments:
+                self.logger.info(
+                    "recovered %s durable worker assignment(s)",
+                    recovered_assignments,
+                )
             self._v2_outbox_task = asyncio.create_task(self._run_v2_outbox(), name="minion-v2-outbox")
             try:
                 await self._shutdown_event.wait()
             finally:
                 remove_signals()
+                self.v2_semantic_worker.request_stop()
                 if self._v2_outbox_task is not None:
                     self._v2_outbox_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await self._v2_outbox_task
                 await self.v2_outbox.stop_background()
+                # Keep both IPC endpoints alive while active workers reach a
+                # safe point and persist their final receipt or continuation.
+                await self.close_all()
                 serve_task.cancel()
+                worker_serve_task.cancel()
                 self.server.close()
+                self.worker_server.close()
                 await self.server.wait_closed()
+                await self.worker_server.wait_closed()
                 with contextlib.suppress(asyncio.CancelledError):
                     await serve_task
-                await self.close_all()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await worker_serve_task
                 await self.events.close()
                 await cleanup_manager_endpoint(self.runtime_root)
+                await cleanup_worker_gateway_endpoint(self.runtime_root)
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -185,6 +224,64 @@ class MinionManager:
             error_kind=lambda _exc: "manager",
             logger=self.logger,
         )
+
+    async def _handle_worker_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            while not reader.at_eof():
+                try:
+                    request = await read_sidecar_message(reader)
+                except asyncio.IncompleteReadError:
+                    return
+                writer.write(
+                    pack_sidecar_message(
+                        await dispatch_sidecar_request(
+                            request,
+                            self._call_worker_method,
+                            error_kind=lambda _exc: "worker_gateway",
+                            logger=self.logger,
+                        )
+                    )
+                )
+                await writer.drain()
+        except (ConnectionError, OSError, ValueError):
+            return
+        finally:
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+
+    async def _call_worker_method(
+        self,
+        method: str,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        broker_handlers = {
+            "llm_preflight": self.llm_broker_preflight,
+            "llm_generate": self.llm_broker_generate,
+            "llm_generate_stream": self.llm_broker_generate_stream,
+            "llm_resolve_max_output_tokens": self.llm_broker_resolve_max_output_tokens,
+            "llm_resolve_endpoint_facts": self.llm_broker_resolve_endpoint_facts,
+        }
+        if method in broker_handlers:
+            payload = dict(params or {})
+            token = str(payload.pop("access_token", ""))
+            authenticated = await asyncio.to_thread(
+                self.worker_gateway.authorize,
+                token,
+            )
+            run_id = str(payload.get("run_id") or "")
+            run = self.runs.get(run_id)
+            assignment = dict(authenticated.get("assignment") or {})
+            if run is None or run.minion_id != str(assignment.get("session_id") or ""):
+                raise PermissionError(
+                    "worker assignment token does not own the requested broker run"
+                )
+            return await broker_handlers[method](payload)
+        return await asyncio.to_thread(self.worker_gateway.call, method, params)
 
     async def _call_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         handlers = {
@@ -263,6 +360,7 @@ class MinionManager:
                 await asyncio.sleep(0.05)
                 continue
             try:
+                await self.v2_semantic_worker.recover_background_assignments()
                 if self.v2_outbox.start_available(max_concurrency=self.max_parallel_modules + 8):
                     await asyncio.sleep(0)
                     continue
@@ -474,6 +572,7 @@ class MinionManager:
             int(config.get("max_parallel_llm_nodes", config.get("max_parallel_modules", self.max_parallel_modules)) or self.max_parallel_modules),
         )
         self.v2_outbox.max_parallel_nodes = self.max_parallel_modules
+        self.v2_semantic_worker.max_parallel_workers = self.max_parallel_modules
         self._v2_wake_event.set()
         return {"ok": True, "status": "ok", "config": config, "max_parallel_llm_nodes": self.max_parallel_modules}
 
@@ -487,6 +586,7 @@ class MinionManager:
         self._shutdown_reason = reason
         self._shutdown_started_at = self._shutdown_started_at or utc_now()
         self.graceful_shutdown_timeout_seconds = max(0.0, timeout_seconds)
+        self.v2_semantic_worker.request_stop()
         if graceful:
             self._drain_requested.set()
             if self._drain_task is None or self._drain_task.done():
@@ -540,7 +640,10 @@ class MinionManager:
                 and state.process.returncode is None
                 and state.status not in _TERMINAL_RUN_STATUSES
             ]
-            background_count = self.v2_outbox.active_background_count
+            background_count = (
+                self.v2_outbox.active_background_count
+                + self.v2_semantic_worker.active_background_count
+            )
             if not active_runs and background_count == 0:
                 break
             if asyncio.get_running_loop().time() >= deadline:
@@ -563,6 +666,9 @@ class MinionManager:
         if waiters:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(asyncio.gather(*waiters), timeout=self.graceful_shutdown_timeout_seconds)
+        await self.v2_semantic_worker.stop_background_workers(
+            timeout_seconds=self.graceful_shutdown_timeout_seconds,
+        )
         if self._llm_broker_bundle is not None:
             close = getattr(self._llm_broker_bundle, "close", None)
             if callable(close):

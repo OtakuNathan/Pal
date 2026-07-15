@@ -14,6 +14,7 @@ from pal.llm import EndpointResolver, LLMRuntime
 from pal.llm.contracts import CanonicalLLMOutcome, CanonicalLLMRequest, CanonicalToolCall, CanonicalToolResult, LLMPreflightAdvice, LLMPreflightRequest
 from pal.minion.manager import MinionManager, MinionRunState
 from pal.minion.llm_broker import (
+    MinionBrokerLLMRuntime,
     llm_outcome_from_payload,
     llm_outcome_to_payload,
     llm_request_from_payload,
@@ -43,6 +44,21 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 class MinionSandboxTests(unittest.TestCase):
+    def test_sandboxed_broker_requires_assignment_gateway_token(self) -> None:
+        runtime = MinionBrokerLLMRuntime(
+            Path("/tmp/pal-minion-broker-token"),
+            run_id="run-token",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "PAL_MINION_SANDBOXED": "1",
+                "PAL_MINION_ASSIGNMENT_TOKEN": "",
+            },
+        ):
+            with self.assertRaisesRegex(RuntimeError, "assignment-scoped"):
+                _ = runtime._client
+
     def test_minion_temperature_accepts_low_deterministic_profile_value(self) -> None:
         pack = MinionInvocationPack(invocation_id="temperature", goal="g", metadata={"temperature": 0.05})
         self.assertEqual(_minion_temperature(pack, fallback=0.7), 0.05)
@@ -114,6 +130,7 @@ class MinionSandboxTests(unittest.TestCase):
                         "OPENAI_API_KEY": "secret",
                         "NORMAL_VALUE": "kept",
                         "PAL_TOKEN": "secret",
+                        "PAL_MINION_ASSIGNMENT_TOKEN": "assignment-only",
                     },
                     runtime_root=Path(tmp),
                     run_id="run_env",
@@ -123,7 +140,9 @@ class MinionSandboxTests(unittest.TestCase):
             self.assertEqual(env["NORMAL_VALUE"], "kept")
             self.assertNotIn("OPENAI_API_KEY", env)
             self.assertNotIn("PAL_TOKEN", env)
+            self.assertEqual(env["PAL_MINION_ASSIGNMENT_TOKEN"], "assignment-only")
             self.assertEqual(env["PAL_MINION_LLM_BROKER"], "1")
+            self.assertEqual(env["PAL_DATABASE_READ_ONLY"], "1")
             self.assertEqual(env["PAL_MINION_SANDBOXED"], "1")
             self.assertEqual(env["TMPDIR"], str(Path(tmp) / "tmp_scratch" / "run_env" / "tmp"))
 
@@ -239,6 +258,52 @@ class MinionSandboxTests(unittest.TestCase):
                     for index in range(max(0, len(argv) - 2))
                 )
             )
+
+    def test_worker_sees_read_only_pal_db_and_only_its_minion_runtime_slice(self) -> None:
+        if not shutil.which("bwrap"):
+            self.skipTest("bubblewrap is not available")
+        with tempfile.TemporaryDirectory(prefix="pal_minion_sandbox_runtime_scope_") as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            run_dir = root / "data" / "minion" / "runtime" / "invocations" / "attempt-1"
+            run_dir.mkdir(parents=True)
+            minion_db = root / "data" / "minion" / "minion.sqlite3"
+            minion_db.write_text("private", encoding="utf-8")
+            pal_db = root / "pal.sqlite3"
+            pal_db.write_text("memory", encoding="utf-8")
+            worker_socket = root / "data" / "minion-worker" / "worker.sock"
+            worker_socket.parent.mkdir(parents=True)
+            worker_socket.write_text("endpoint", encoding="utf-8")
+            pack = MinionInvocationPack(
+                invocation_id="attempt-1",
+                goal="work",
+                workspace={"repo_path": str(repo), "run_dir": str(run_dir)},
+                metadata={
+                    "sandbox": {
+                        "enabled": True,
+                        "backend": "bwrap",
+                        "run_id": "runtime-scope",
+                    }
+                },
+            )
+
+            argv, _env = build_sandboxed_runner_invocation(
+                runtime_root=root,
+                pack=pack,
+                argv=["python", "-c", "pass"],
+                env={"PATH": "/usr/bin:/bin", "PAL_MINION_ASSIGNMENT_TOKEN": "token"},
+            )
+
+            triples = [argv[index : index + 3] for index in range(max(0, len(argv) - 2))]
+            self.assertIn(["--ro-bind", str(pal_db), str(pal_db)], triples)
+            self.assertIn(["--ro-bind", str(worker_socket), str(worker_socket)], triples)
+            self.assertIn(["--bind", str(run_dir), str(run_dir)], triples)
+            self.assertNotIn(
+                ["--bind", str(root / "data" / "minion"), str(root / "data" / "minion")],
+                triples,
+            )
+            self.assertNotIn(str(minion_db), argv)
 
     def test_scoped_writable_workspace_enforces_paths_for_shell_processes(self) -> None:
         if not shutil.which("bwrap"):

@@ -13,6 +13,7 @@ from typing import Any
 
 from pal.foundation.log_paths import pal_log_root
 from pal.foundation.sidecar import python_subprocess_env
+from pal.minion.ipc import minion_worker_port_path, minion_worker_socket_path
 from pal.shared import RUN_SHELL_SCOPE_HINT, MinionInvocationPack, format_dedicated_tool_route_hints
 
 
@@ -237,6 +238,7 @@ def scrub_minion_sandbox_env(
     scratch_dir: str | Path | None = None,
 ) -> dict[str, str]:
     result: dict[str, str] = {}
+    assignment_token = str(dict(env or {}).get("PAL_MINION_ASSIGNMENT_TOKEN") or "")
     for key, value in dict(env or {}).items():
         upper = str(key or "").upper()
         if any(marker in upper for marker in _SECRET_ENV_MARKERS):
@@ -247,6 +249,9 @@ def scrub_minion_sandbox_env(
     scratch = _coerce_scratch_dir(runtime_root, run_id, scratch_dir)
     result["PAL_MINION_SANDBOXED"] = "1"
     result["PAL_MINION_LLM_BROKER"] = "1"
+    result["PAL_DATABASE_READ_ONLY"] = "1"
+    if assignment_token:
+        result["PAL_MINION_ASSIGNMENT_TOKEN"] = assignment_token
     result["HOME"] = str(scratch / "home")
     result["TMPDIR"] = str(scratch / "tmp")
     result["XDG_CACHE_HOME"] = str(scratch / "cache")
@@ -397,7 +402,7 @@ def _build_bwrap_invocation(
             args.extend(["--dir", str(host_path)])
             args.extend(["--ro-bind", str(host_path), str(host_path)])
     _append_dir_scaffold(args, Path(runtime_root))
-    _append_runtime_root_binds(args, Path(runtime_root))
+    _append_runtime_root_binds(args, Path(runtime_root), pack)
     source_root = _pal_source_root()
     _append_bind_path(args, source_root, read_only=True)
     for python_path in _python_dependency_paths():
@@ -422,6 +427,12 @@ def _build_bwrap_invocation(
         git_marker = workspace_path / ".git"
         if git_marker.exists() or git_marker.is_symlink():
             _append_bind_path(args, git_marker, read_only=True)
+    for reference in list(pack.workspace.get("reference_paths") or []):
+        if bool(dict(reference or {}).get("bound_input")):
+            continue
+        reference_path = Path(str(dict(reference or {}).get("path") or "")).expanduser()
+        if reference_path.exists():
+            _append_bind_path(args, reference_path, read_only=True)
     for command in blacklist:
         wrapper = deny_dir / command
         if not wrapper.exists():
@@ -434,17 +445,19 @@ def _build_bwrap_invocation(
     return args
 
 
-def _append_runtime_root_binds(args: list[str], runtime_root: Path) -> None:
+def _append_runtime_root_binds(
+    args: list[str],
+    runtime_root: Path,
+    pack: MinionInvocationPack,
+) -> None:
     runtime_root = Path(runtime_root).expanduser()
     _append_dir_scaffold(args, runtime_root)
     for file_name in ("pal.sqlite3", "pal.sqlite3-shm", "pal.sqlite3-wal", "config.toml"):
         path = runtime_root / file_name
         if path.exists():
-            read_only = file_name == "config.toml"
-            args.extend(["--ro-bind" if read_only else "--bind", str(path), str(path)])
+            args.extend(["--ro-bind", str(path), str(path)])
     for dir_name, read_only in (
-        ("data/minion", False),
-        ("data/lsp", False),
+        ("data/lsp", True),
         ("data/tool_results", False),
         ("artifacts", False),
         ("plugins", True),
@@ -454,6 +467,16 @@ def _append_runtime_root_binds(args: list[str], runtime_root: Path) -> None:
         if path.exists():
             _append_dir_scaffold(args, path)
             args.extend(["--ro-bind" if read_only else "--bind", str(path), str(path)])
+    run_dir_value = str(pack.workspace.get("run_dir") or "").strip()
+    run_dir = Path(run_dir_value).expanduser() if run_dir_value else None
+    if run_dir is not None and run_dir.is_dir():
+        _append_bind_path(args, run_dir, read_only=False)
+    for endpoint_path in (
+        minion_worker_socket_path(runtime_root),
+        minion_worker_port_path(runtime_root),
+    ):
+        if endpoint_path.exists():
+            _append_bind_path(args, endpoint_path, read_only=True)
 
 
 def _append_bind_path(args: list[str], path: Path, *, read_only: bool) -> None:

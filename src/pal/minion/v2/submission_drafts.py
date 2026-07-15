@@ -29,6 +29,33 @@ class SubmissionDraftContext:
     input_fingerprint: str
     authoring_contract_version: str = AUTHORING_CONTRACT_VERSION
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "workflow_id": self.workflow_id,
+            "invocation_id": self.invocation_id,
+            "lease_resource_key": self.lease_resource_key,
+            "fencing_token": self.fencing_token,
+            "role": self.role,
+            "draft_kind": self.draft_kind,
+            "input_fingerprint": self.input_fingerprint,
+            "authoring_contract_version": self.authoring_contract_version,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "SubmissionDraftContext":
+        return cls(
+            workflow_id=str(value.get("workflow_id") or "").strip(),
+            invocation_id=str(value.get("invocation_id") or "").strip(),
+            lease_resource_key=str(value.get("lease_resource_key") or "").strip(),
+            fencing_token=int(value.get("fencing_token") or 0),
+            role=str(value.get("role") or "").strip(),
+            draft_kind=str(value.get("draft_kind") or "").strip(),
+            input_fingerprint=str(value.get("input_fingerprint") or "").strip(),
+            authoring_contract_version=str(
+                value.get("authoring_contract_version") or ""
+            ).strip(),
+        )
+
     @property
     def draft_key(self) -> str:
         return _stable_hash(
@@ -99,6 +126,45 @@ class SubmissionDraftSnapshot:
     submission_payload_hash: str = ""
     submitted_at: str = ""
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "draft_key": self.draft_key,
+            "version": self.version,
+            "status": self.status,
+            "payload": dict(self.payload),
+            "source_draft_key": self.source_draft_key,
+            "workflow_id": self.workflow_id,
+            "invocation_id": self.invocation_id,
+            "lease_resource_key": self.lease_resource_key,
+            "fencing_token": self.fencing_token,
+            "role": self.role,
+            "draft_kind": self.draft_kind,
+            "input_fingerprint": self.input_fingerprint,
+            "submission_artifact_ref": dict(self.submission_artifact_ref),
+            "submission_payload_hash": self.submission_payload_hash,
+            "submitted_at": self.submitted_at,
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "SubmissionDraftSnapshot":
+        return cls(
+            draft_key=str(value.get("draft_key") or ""),
+            version=int(value.get("version") or 0),
+            status=str(value.get("status") or ""),
+            payload=dict(value.get("payload") or {}),
+            source_draft_key=str(value.get("source_draft_key") or ""),
+            workflow_id=str(value.get("workflow_id") or ""),
+            invocation_id=str(value.get("invocation_id") or ""),
+            lease_resource_key=str(value.get("lease_resource_key") or ""),
+            fencing_token=int(value.get("fencing_token") or 0),
+            role=str(value.get("role") or ""),
+            draft_kind=str(value.get("draft_kind") or ""),
+            input_fingerprint=str(value.get("input_fingerprint") or ""),
+            submission_artifact_ref=dict(value.get("submission_artifact_ref") or {}),
+            submission_payload_hash=str(value.get("submission_payload_hash") or ""),
+            submitted_at=str(value.get("submitted_at") or ""),
+        )
+
 
 DraftReducer = Callable[[dict[str, Any]], tuple[dict[str, Any], Mapping[str, Any]]]
 
@@ -109,6 +175,13 @@ class SubmissionDraftStore:
     def __init__(self, runtime_root: Path) -> None:
         self.runtime_root = Path(runtime_root)
         self.db_path = minion_db_path(self.runtime_root)
+        from pal.minion.v2.worker_gateway import worker_gateway_client_from_env
+
+        self._worker_gateway = worker_gateway_client_from_env(self.runtime_root)
+
+    @property
+    def uses_worker_gateway(self) -> bool:
+        return self._worker_gateway is not None
 
     def mutate(
         self,
@@ -123,6 +196,26 @@ class SubmissionDraftStore:
         operation = str(operation_key or "").strip()
         if not operation:
             raise ValueError("Draft mutation requires an operation key")
+        if self._worker_gateway is not None:
+            snapshot = self.read(context, seed=seed)
+            if snapshot.status != ACTIVE_DRAFT_STATUS:
+                raise ValueError("submission Draft is already frozen; start a new fenced invocation")
+            next_payload, result = reducer(_deepcopy_json(snapshot.payload))
+            if not isinstance(next_payload, dict):
+                raise TypeError("Draft reducer must return an object payload")
+            response = self._worker_gateway.request_sync(
+                "draft_mutate",
+                {
+                    "context": context.to_dict(),
+                    "operation_key": operation,
+                    "request": dict(request),
+                    "expected_version": snapshot.version,
+                    "next_payload": next_payload,
+                    "result": dict(result),
+                    "seed": dict(seed or {}),
+                },
+            )
+            return dict(response.get("result") or {})
         request_hash = _stable_hash(dict(request))
         self._ensure_schema()
         with self._transaction() as connection:
@@ -177,6 +270,85 @@ class SubmissionDraftStore:
             )
             return encoded_result
 
+    def mutate_precomputed(
+        self,
+        context: SubmissionDraftContext,
+        *,
+        operation_key: str,
+        request: Mapping[str, Any],
+        expected_version: int,
+        next_payload: Mapping[str, Any],
+        result: Mapping[str, Any],
+        seed: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        """CAS a reducer result computed by an assignment-scoped worker.
+
+        The Manager still owns idempotency, fencing and the durable mutation;
+        only the pure reducer runs in the sandbox process.
+        """
+
+        self._assert_authoring_contract(context)
+        operation = str(operation_key or "").strip()
+        if not operation:
+            raise ValueError("Draft mutation requires an operation key")
+        if not isinstance(next_payload, Mapping):
+            raise TypeError("Draft reducer must return an object payload")
+        request_hash = _stable_hash(dict(request))
+        self._ensure_schema()
+        with self._transaction() as connection:
+            self._assert_fence(connection, context)
+            snapshot = self._read_or_create_locked(connection, context, seed=seed)
+            duplicate = connection.execute(
+                """
+                SELECT request_hash, result_json
+                FROM minion_v2_submission_draft_ops
+                WHERE draft_key = ? AND operation_key = ?
+                """,
+                (context.draft_key, operation),
+            ).fetchone()
+            if duplicate is not None:
+                if str(duplicate["request_hash"]) != request_hash:
+                    raise ValueError("Draft operation key was reused with different arguments")
+                return dict(json.loads(str(duplicate["result_json"])))
+            if snapshot.status != ACTIVE_DRAFT_STATUS:
+                raise ValueError("submission Draft is already frozen; start a new fenced invocation")
+            if snapshot.version != int(expected_version):
+                raise RuntimeError("submission Draft CAS conflict")
+            next_version = snapshot.version + 1
+            updated = connection.execute(
+                """
+                UPDATE minion_v2_submission_drafts
+                SET payload_json = ?, version = ?, updated_at = ?
+                WHERE draft_key = ? AND version = ? AND status = ?
+                """,
+                (
+                    _json(dict(next_payload)),
+                    next_version,
+                    utc_now(),
+                    context.draft_key,
+                    snapshot.version,
+                    ACTIVE_DRAFT_STATUS,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("submission Draft CAS conflict")
+            encoded_result = {**dict(result), "draft_version": next_version}
+            connection.execute(
+                """
+                INSERT INTO minion_v2_submission_draft_ops(
+                    draft_key, operation_key, request_hash, result_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    context.draft_key,
+                    operation,
+                    request_hash,
+                    _json(encoded_result),
+                    utc_now(),
+                ),
+            )
+            return encoded_result
+
     def read(
         self,
         context: SubmissionDraftContext,
@@ -184,6 +356,15 @@ class SubmissionDraftStore:
         seed: Mapping[str, Any] | None = None,
     ) -> SubmissionDraftSnapshot:
         self._assert_authoring_contract(context)
+        if self._worker_gateway is not None:
+            from pal.minion.v2.worker_gateway import decode_remote_draft_snapshot
+
+            return decode_remote_draft_snapshot(
+                self._worker_gateway.request_sync(
+                    "draft_read",
+                    {"context": context.to_dict(), "seed": dict(seed or {})},
+                )
+            )
         self._ensure_schema()
         with self._transaction() as connection:
             self._assert_fence(connection, context)
@@ -196,8 +377,21 @@ class SubmissionDraftStore:
         expected_version: int,
         submission_artifact_ref: Mapping[str, Any] | None = None,
         submission_payload_hash: str = "",
+        submission_payload: Mapping[str, Any] | None = None,
     ) -> None:
         self._assert_authoring_contract(context)
+        if self._worker_gateway is not None:
+            if not isinstance(submission_payload, Mapping):
+                raise ValueError("remote submission requires its compiled JSON payload")
+            self._worker_gateway.request_sync(
+                "draft_submit",
+                {
+                    "context": context.to_dict(),
+                    "expected_version": int(expected_version),
+                    "submission": dict(submission_payload),
+                },
+            )
+            return
         self._ensure_schema()
         artifact_ref = dict(submission_artifact_ref or {})
         payload_hash = str(submission_payload_hash or "")

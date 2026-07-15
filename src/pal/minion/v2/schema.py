@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 12
+MINION_V2_SCHEMA_VERSION = 14
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -212,6 +212,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             input_fingerprint TEXT NOT NULL,
             required_inputs_json TEXT NOT NULL DEFAULT '[]',
             input_refs_json TEXT NOT NULL DEFAULT '{}',
+            execution_spec_json TEXT NOT NULL DEFAULT '{}',
             submission_kind TEXT NOT NULL,
             state TEXT NOT NULL DEFAULT 'queued',
             active_attempt_id TEXT NOT NULL DEFAULT '',
@@ -239,6 +240,7 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             lease_resource_key TEXT NOT NULL,
             fencing_token INTEGER NOT NULL,
             process_group_id INTEGER NOT NULL DEFAULT 0,
+            access_token_hash TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'starting',
             prompt_pack_ref_json TEXT NOT NULL DEFAULT '{}',
             response_artifact_ref_json TEXT NOT NULL DEFAULT '{}',
@@ -413,6 +415,8 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
     _ensure_column(connection, "minion_v2_submission_drafts", "submitted_artifact_ref_json", "TEXT NOT NULL DEFAULT '{}'")
     _ensure_column(connection, "minion_v2_submission_drafts", "submission_payload_hash", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(connection, "minion_v2_submission_drafts", "submitted_at", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "minion_v2_worker_attempts", "access_token_hash", "TEXT NOT NULL DEFAULT ''")
+    _ensure_column(connection, "minion_v2_worker_assignments", "execution_spec_json", "TEXT NOT NULL DEFAULT '{}'")
     connection.execute(
         """
         INSERT INTO minion_v2_schema_meta(schema_key, schema_value)

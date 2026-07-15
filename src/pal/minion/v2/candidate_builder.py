@@ -310,7 +310,11 @@ def _submit_candidate(
         if str(existing.get("role") or "") == "primary":
             existing["role"] = "deliverable"
     _append_unique_artifact(produced_artifacts, artifact)
-    store.mark_submitted(context, expected_version=snapshot.version)
+    store.mark_submitted(
+        context,
+        expected_version=snapshot.version,
+        submission_payload=report,
+    )
     return _ok(
         call,
         "Candidate intent recorded. Stop now; Manager will quiesce and snapshot the worktree.",

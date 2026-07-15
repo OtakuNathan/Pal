@@ -172,6 +172,7 @@ class SQLiteVecL3Plugin:
     embedder: InitVar[EmbeddingProviderPort | None] = None
     provider_id: str = "sqlite_vec_l3"
     mounted: bool = True
+    read_only: bool = False
     fusion_weights: dict[str, float] = field(
         default_factory=lambda: {
             "vector": 0.40,
@@ -185,7 +186,8 @@ class SQLiteVecL3Plugin:
     last_embedding_error: str = ""
 
     def __post_init__(self, embedder: EmbeddingProviderPort | None) -> None:
-        self.repository.ensure_schema()
+        if not self.read_only:
+            self.repository.ensure_schema()
         if self.embedding_provider is None and embedder is not None:
             self.embedding_provider = embedder
         if self.embedding_provider is None:
@@ -869,7 +871,15 @@ class SQLiteVecL3Plugin:
     def recall(self, query: MemoryQuery) -> L3RecallResult:
         if not self.mounted:
             return L3RecallResult()
-        refreshed = self.refresh_indexes(limit=min(max(query.limit, 1), 8))
+        refreshed = (
+            {
+                "refreshed": 0,
+                "vector_available": True,
+                "read_only": True,
+            }
+            if self.read_only
+            else self.refresh_indexes(limit=min(max(query.limit, 1), 8))
+        )
         candidate_limit = max(query.limit * 4, 16)
         search_text = _stable_document_search_text(*query.queries)
         lexical_candidates, lexical_source_counts = self.repository.collect_lexical_candidates(
@@ -934,7 +944,8 @@ class SQLiteVecL3Plugin:
         limited = scored_hits[: max(query.limit, 1)]
         hits = [item[2] for item in limited]
         projected_entries = [self._project_entry(hit, source_kind="l3_recall", candidate_state="candidate") for hit in hits]
-        self.repository.bump_usage([hit["document_id"] for hit in hits])
+        if not self.read_only:
+            self.repository.bump_usage([hit["document_id"] for hit in hits])
         hot_entries = [entry for entry, (_, doc_id, hit) in zip(projected_entries, limited) if hit.get("scores", {}).get("final", 0) >= RECALL_PROMOTION_THRESHOLD]
         cool_entries = [entry for entry in projected_entries if entry not in hot_entries]
         if hot_entries:

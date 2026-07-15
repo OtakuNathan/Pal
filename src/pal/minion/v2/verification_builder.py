@@ -270,7 +270,7 @@ VERIFICATION_BUILDER_TOOL_SPECS: dict[str, dict[str, Any]] = {
     },
     "op_minion_verification_check_unavailable": {
         "name": "op_verification_check_unavailable",
-        "description": "Record focused_tests, warning_clean, public_surface_dogfood, lsp, historical_regressions, or platform_probe as UNKNOWN with a concrete environmental reason. This never manufactures PASS evidence.",
+        "description": "Record focused_tests, warning_clean, consumer_probe, public_surface_dogfood, lsp, historical_regressions, or platform_probe as UNKNOWN with a concrete environmental reason. This never manufactures PASS evidence.",
         "parameters_schema": _UNAVAILABLE_SCHEMA,
     },
     **{
@@ -1054,34 +1054,42 @@ def _submit(
     validate_semantic_verification_plan_shape(output, standalone=standalone, require_complete=True)
     if not standalone:
         _preflight_verification_submission(output, workspace)
-    runtime_root = Path(str(workspace["runtime_root"]))
-    submission_store = ContentAddressedArtifactStore(
-        runtime_root,
-        MinionV2Repository(runtime_root),
-    )
-    submission_ref = submission_store.put_json(
-        output,
-        artifact_type=(
-            "StandaloneReviewSubmissionArtifact"
-            if standalone
-            else "VerifierSubmissionArtifact"
-        ),
-        provenance={
-            "workflow_id": context.workflow_id,
-            "invocation_id": context.invocation_id,
-            "role": context.role,
-            "draft_key": context.draft_key,
-        },
-    )
-    submission_payload_hash = hashlib.sha256(
-        json.dumps(output, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    store.mark_submitted(
-        context,
-        expected_version=snapshot.version,
-        submission_artifact_ref=submission_ref.to_dict(),
-        submission_payload_hash=submission_payload_hash,
-    )
+    if store.uses_worker_gateway:
+        store.mark_submitted(
+            context,
+            expected_version=snapshot.version,
+            submission_payload=output,
+        )
+    else:
+        runtime_root = Path(str(workspace["runtime_root"]))
+        submission_store = ContentAddressedArtifactStore(
+            runtime_root,
+            MinionV2Repository(runtime_root),
+        )
+        submission_ref = submission_store.put_json(
+            output,
+            artifact_type=(
+                "StandaloneReviewSubmissionArtifact"
+                if standalone
+                else "VerifierSubmissionArtifact"
+            ),
+            provenance={
+                "workflow_id": context.workflow_id,
+                "invocation_id": context.invocation_id,
+                "role": context.role,
+                "draft_key": context.draft_key,
+            },
+        )
+        submission_payload_hash = hashlib.sha256(
+            json.dumps(output, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        store.mark_submitted(
+            context,
+            expected_version=snapshot.version,
+            submission_artifact_ref=submission_ref.to_dict(),
+            submission_payload_hash=submission_payload_hash,
+            submission_payload=output,
+        )
     artifact = _write_minion_artifact(
         dict(workspace),
         {

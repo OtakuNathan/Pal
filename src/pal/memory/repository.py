@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,6 +34,8 @@ class L3ProviderSelector:
 
 class MemoryDurableRepository:
     def ensure_schema(self) -> None:
+        if os.environ.get("PAL_DATABASE_READ_ONLY") == "1":
+            return
         ensure_memory_schema()
         self.ensure_fts_indexes_synced()
 

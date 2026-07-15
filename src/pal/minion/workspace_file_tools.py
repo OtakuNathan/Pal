@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -188,6 +189,42 @@ async def bound_input_tool_result(
     if reference is None:
         available = ", ".join(str(item.get("name") or "") for item in references)
         return _bound_input_error(call, f"unknown bound input: {name}; available: {available or '(none)'}")
+    if bool(reference.get("bound_input")):
+        from pal.minion.v2.worker_gateway import worker_gateway_client_from_env
+
+        gateway = worker_gateway_client_from_env(
+            Path(str(workspace.get("runtime_root") or ""))
+        )
+        if gateway is not None:
+            try:
+                response = await asyncio.to_thread(
+                    gateway.request_sync,
+                    "bound_input_read",
+                    {
+                        "name": name,
+                        "path": str(call.args.get("path") or ""),
+                        "start_line": int(call.args.get("start_line") or 1),
+                        "limit_lines": int(call.args.get("limit_lines") or 2000),
+                    },
+                )
+            except Exception as exc:
+                return _bound_input_error(call, f"{exc.__class__.__name__}: {exc}")
+            text = str(response.get("content") or "")
+            return CanonicalToolResult(
+                name=call.name,
+                ok=True,
+                text=text,
+                structured={
+                    "input_name": name,
+                    "start_line": int(response.get("start_line") or 1),
+                    "returned_lines": int(response.get("returned_lines") or 0),
+                    "total_lines": int(response.get("total_lines") or 0),
+                    "has_more": bool(response.get("has_more")),
+                },
+                call_id=call.call_id,
+                llm_text=text,
+                status=RuntimeStatus.OK,
+            )
     includes = [str(item) for item in list(reference.get("include") or []) if str(item).strip()]
     relative = str(call.args.get("path") or "").strip()
     if not relative:

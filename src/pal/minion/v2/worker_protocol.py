@@ -55,6 +55,7 @@ class WorkerAssignmentRequest:
     input_fingerprint: str
     required_inputs: tuple[str, ...]
     input_refs: Mapping[str, Mapping[str, Any]]
+    execution_spec: Mapping[str, Any]
     submission_kind: str
 
     def __post_init__(self) -> None:
@@ -82,6 +83,8 @@ class WorkerAssignmentRequest:
                 "worker assignment required inputs have no bound artifact: "
                 + ", ".join(unknown)
             )
+        if not str(dict(self.execution_spec or {}).get("effect_type") or "").strip():
+            raise ValueError("worker assignment execution spec requires effect_type")
 
     @property
     def assignment_id(self) -> str:
@@ -105,6 +108,7 @@ class WorkerAssignmentRequest:
                 str(name): dict(ref)
                 for name, ref in sorted(self.input_refs.items())
             },
+            "execution_spec": dict(self.execution_spec),
             "submission_kind": self.submission_kind,
         }
 

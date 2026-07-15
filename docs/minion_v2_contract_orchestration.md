@@ -1,6 +1,6 @@
 # Minion V2 Contract-Driven Orchestration
 
-Status: active implementation as of 2026-07-14.
+Status: active implementation as of 2026-07-15.
 
 Minion V2 is a clean workflow cutover. V1 plans, milestones, cursors,
 checkpoints, write RPCs, and workflow resume paths are not accepted by V2.
@@ -17,16 +17,31 @@ The five aggregate types are Workflow, Architecture Revision, Execution Epoch,
 DAG Node Run, and Standalone Review. Workflow phase is a query projection
 derived from child aggregate state. It is not a second writable state field.
 
-## Durable Effects
+## Durable Effects And Workers
 
-Network, LLM, process spawn, channel delivery, Git publication, and cross-
-aggregate action submission are outbox effects with at-least-once delivery.
-Each effect is keyed by its causative event and index. Effect receipts and
-action idempotency make crash replay safe.
+Network delivery, process admission, channel delivery, Git publication, and
+cross-aggregate action submission are outbox effects with at-least-once
+delivery. Each effect is keyed by its causative event and index. Effect receipts
+and action idempotency make crash replay safe.
 
-The manager runs long semantic effects in a bounded background task pool, so
-pause/cancel/recovery effects can be claimed while an LLM worker is active.
-The foreground Pal channel loop never waits for a semantic effect.
+Long LLM work is not an in-flight Outbox attempt. The Outbox effect durably
+creates or locates a `WorkerAssignment`, starts it in a bounded supervisor, and
+ACKs once that assignment exists. A worker session preserves cognitive
+continuation, an assignment binds one immutable role/input/effect contract, and
+an attempt binds one process, lease, fencing token, and access token. Manager
+restart recovers queued, retryable, running, or submission-recorded assignments
+without recreating the causative Outbox effect.
+
+Worker submit first records an immutable submission receipt. The corresponding
+business Action and assignment settlement then commit in the same SQLite
+transaction. If a crash occurs between an older/replayed business Action and
+settlement, action dedup reconciles the same receipt without another LLM call.
+Pause and cancel terminate the current assignment and revoke its token; Resume
+creates a new assignment in the preserved session. A cancelled assignment can
+never be changed back to retryable by a late process callback.
+
+The foreground Pal channel loop never waits for a semantic worker. Global
+worker slots, rather than completed Outbox attempts, enforce LLM concurrency.
 
 Workers hold leases with monotonically increasing fencing tokens. On startup,
 an expired worker's recorded process group is terminated and reaped before the
@@ -78,6 +93,17 @@ depth four, with no arrays of objects, schema-valued `additionalProperties`, or
 `oneOf`/`anyOf`. Old monolithic builder and revision-read capabilities are not
 compatibility aliases.
 
+Sandboxed workers cannot mount Minion's database or content-addressed store.
+They receive only an assignment-scoped gateway endpoint and an opaque attempt
+token. The gateway exposes bound-input reads, fenced Draft mutation/submission,
+artifact publication, and the LLM broker. A token is checked against its active
+attempt lease and may use only the broker run owned by that assignment session.
+
+Pal's main SQLite database, WAL/SHM files, and configuration are mounted
+read-only so ordinary memory recall remains available. The slim worker runtime
+opens SQLite with `mode=ro` and `query_only`, skips schema/default provisioning,
+does not refresh memory indexes, and does not increment recall usage counters.
+
 Developer and verifier checks execute when their dedicated tool is called.
 Command, environment, stdout, stderr, status, and LSP diagnostics are persisted
 as immutable evidence before the Draft advances. An unchanged check can reuse
@@ -103,10 +129,13 @@ artifact.
 
 ## Execution and Verification
 
-An accepted manifest compiles to an immutable execution epoch. A node becomes
-ready only when every dependency node is `ACCEPTED`, the epoch is active, and a
-slot is available. Integration is an ordinary join node depending on every
-module node.
+An accepted manifest compiles to an immutable execution epoch. A construction
+node becomes ready only when every declared dependency node is `ACCEPTED`, the
+epoch is active, and a slot is available. Construction dependencies express
+what must be accepted before work starts; verification topology separately
+expresses real consumers, entrypoints, build targets, and environments. No
+synthetic all-module join is required. A whole-system integration or dogfood
+node exists only when the Requirements describe that real usage scenario.
 
 Coder receives a filtered `ModuleWorkView` containing only its contract,
 requirements, architect evidence, cross-contracts, dependency outputs,
@@ -116,7 +145,7 @@ not a global cursor.
 Coder cannot commit. Candidate submission follows:
 
 ```text
-CODING/REPAIRING -> QUIESCING -> SNAPSHOTTING -> REVIEW_QUEUED
+PRODUCING/REPAIRING -> QUIESCING -> SNAPSHOTTING -> REVIEW_QUEUED
 ```
 
 Quiescing revokes the worker token, stops and reaps the process group, verifies
@@ -209,7 +238,9 @@ rebind the uniquely matched workflow to the current channel.
 
 ## Persistence
 
-V2 tables use the `minion_v2_` prefix in Minion's SQLite database. Artifact
+V2 tables use the `minion_v2_` prefix in Minion's SQLite database. Durable
+worker session, assignment, attempt, input-read, submission, and effect-attempt
+records use the same database and transaction boundary. Artifact
 bytes live under `data/minion/artifacts/sha256/`; SQLite stores metadata and
 reference edges. Publication writes a same-filesystem temporary file, fsyncs,
 atomically renames, fsyncs the parent, and only then records durable metadata.

@@ -136,6 +136,12 @@ from pal.minion.v2.submission_drafts import (
     authoring_input_fingerprint,
 )
 from pal.minion.v2.semantic_evidence import recorded_cases
+from pal.minion.v2.worker_gateway import WORKER_GATEWAY_TOKEN_ENV
+from pal.minion.v2.worker_protocol import (
+    WorkerAssignmentRequest,
+    WorkerAssignmentState,
+    stable_hash,
+)
 from pal.shared import MinionInvocationPack
 
 
@@ -148,6 +154,22 @@ BrokerRunUnregistrar = Callable[[str], None]
 _ARCHITECTURE_STAGE_CONFIG = {
     "architect": ("architect", "START_ARCHITECT"),
 }
+
+
+def _worker_submission_kind(role: str, *, skeleton_mode: bool) -> str:
+    if role == "architect":
+        return "architecture" if skeleton_mode else "contract"
+    return {
+        "architecture_reviewer": "architecture_review",
+        "producer": "candidate",
+        "repair": "candidate",
+        "verifier": "verification",
+        "scenario_verifier": "verification",
+        "reviewer": "standalone_review",
+        "requirements": "requirements",
+        "planner": "contract",
+        "research": "contract",
+    }.get(role, "contract")
 
 
 def _architecture_submit_idempotency_key(
@@ -199,6 +221,7 @@ SEMANTIC_EFFECT_TYPES = frozenset(
 @dataclass
 class MinionV2SemanticWorker:
     service: MinionV2WorkflowService
+    max_parallel_workers: int = 5
     publish_human_review: HumanReviewPublisher | None = None
     publish_worker_event: WorkerEventPublisher | None = None
     register_broker_run: BrokerRunRegistrar | None = None
@@ -207,10 +230,44 @@ class MinionV2SemanticWorker:
     _run_to_invocation: dict[str, str] = field(default_factory=dict, init=False)
     _worktree_locks: WorkspaceLockRegistry = field(default_factory=WorkspaceLockRegistry, init=False)
     _revoked_tokens: set[tuple[str, int]] = field(default_factory=set, init=False)
+    _background_workers: dict[str, asyncio.Task[Mapping[str, Any]]] = field(
+        default_factory=dict,
+        init=False,
+    )
+    _assignment_ready_events: dict[str, asyncio.Event] = field(
+        default_factory=dict,
+        init=False,
+    )
+    _assignment_ids_by_effect: dict[str, str] = field(default_factory=dict, init=False)
+    _stopping: bool = field(default=False, init=False)
 
     @property
     def repository(self):
         return self.service.repository
+
+    @property
+    def active_background_count(self) -> int:
+        return sum(not task.done() for task in self._background_workers.values())
+
+    def request_stop(self) -> None:
+        self._stopping = True
+
+    async def stop_background_workers(self, *, timeout_seconds: float = 10.0) -> None:
+        self.request_stop()
+        tracked = tuple(self._background_workers.items())
+        if not tracked:
+            return
+        tasks = tuple(task for _effect_key, task in tracked)
+        _done, pending = await asyncio.wait(
+            tasks,
+            timeout=max(0.0, float(timeout_seconds)),
+        )
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for effect_key, _task in tracked:
+            self._mark_interrupted_assignment_retryable(effect_key)
 
     async def _release_managed_lsp_workspace(self, workspace: Path) -> Mapping[str, Any]:
         try:
@@ -229,9 +286,15 @@ class MinionV2SemanticWorker:
     async def execute_semantic_effect(self, effect: Mapping[str, Any]) -> Mapping[str, Any]:
         effect_type = str(effect.get("effect_type") or "")
         if effect_type == "enqueue_architecture_stage":
-            return await self._run_architecture_stage(effect)
+            return await self._launch_background_worker(
+                effect,
+                self._run_architecture_stage,
+            )
         if effect_type == "enqueue_architecture_review":
-            return await self._run_architecture_review(effect)
+            return await self._launch_background_worker(
+                effect,
+                self._run_architecture_review,
+            )
         if effect_type == "quiesce_architect":
             return await self._quiesce_architect(effect)
         if effect_type == "snapshot_architecture":
@@ -247,13 +310,19 @@ class MinionV2SemanticWorker:
         if effect_type == "enqueue_producer":
             return self._admit_node_worker(effect, action_type="START_PRODUCING", role="producer")
         if effect_type == "spawn_producer_worker":
-            return await self._run_producer(effect, repair=False)
+            return await self._launch_background_worker(
+                effect,
+                lambda value: self._run_producer(value, repair=False),
+            )
         if effect_type == "enqueue_node_review":
             return self._admit_node_worker(effect, action_type="START_REVIEW", role="reviewer")
         if effect_type == "spawn_verifier_worker":
             if str(effect.get("aggregate_type") or "") == AggregateType.STANDALONE_REVIEW.value:
-                return await self._run_standalone_review(effect)
-            return await self._run_verifier(effect)
+                return await self._launch_background_worker(
+                    effect,
+                    self._run_standalone_review,
+                )
+            return await self._launch_background_worker(effect, self._run_verifier)
         if effect_type == "enqueue_scenario_verifier":
             return self._admit_node_worker(
                 effect,
@@ -261,11 +330,17 @@ class MinionV2SemanticWorker:
                 role="scenario_verifier",
             )
         if effect_type == "spawn_scenario_verifier":
-            return await self._run_verifier(effect, scenario_mode=True)
+            return await self._launch_background_worker(
+                effect,
+                lambda value: self._run_verifier(value, scenario_mode=True),
+            )
         if effect_type == "enqueue_repair":
             return self._admit_node_worker(effect, action_type="START_REPAIR", role="repair")
         if effect_type == "spawn_repair_worker":
-            return await self._run_producer(effect, repair=True)
+            return await self._launch_background_worker(
+                effect,
+                lambda value: self._run_producer(value, repair=True),
+            )
         if effect_type == "quiesce_worker":
             return await self._quiesce_node(effect)
         if effect_type == "snapshot_candidate":
@@ -289,6 +364,461 @@ class MinionV2SemanticWorker:
         if effect_type == "publish_review_report":
             return await self._publish_standalone_report(effect)
         raise RuntimeError(f"V2 semantic effect is not implemented yet: {effect_type}")
+
+    async def _launch_background_worker(
+        self,
+        effect: Mapping[str, Any],
+        runner: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]],
+    ) -> Mapping[str, Any]:
+        if self._stopping:
+            raise DeferredEffectError("worker supervisor is stopping")
+        effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "").strip()
+        if not effect_key:
+            raise ValueError("background worker effect requires an effect key")
+        existing = self._background_workers.get(effect_key)
+        if existing is not None and not existing.done():
+            return {
+                "provider_request_id": self._assignment_ids_by_effect.get(effect_key, effect_key),
+                "status": "already_running",
+            }
+        if self.active_background_count >= max(1, int(self.max_parallel_workers)):
+            raise DeferredEffectError("worker supervisor has no available execution slot")
+        ready = self._assignment_ready_events.setdefault(effect_key, asyncio.Event())
+        task = asyncio.create_task(
+            self._background_worker_loop(effect, runner),
+            name=f"minion-v2-assignment-{hashlib.sha256(effect_key.encode()).hexdigest()[:12]}",
+        )
+        self._background_workers[effect_key] = task
+        task.add_done_callback(
+            lambda completed, key=effect_key: self._background_worker_done(key, completed)
+        )
+        ready_wait = asyncio.create_task(ready.wait())
+        done, _pending = await asyncio.wait(
+            {task, ready_wait},
+            timeout=120.0,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if ready_wait not in done:
+            ready_wait.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ready_wait
+        if task in done:
+            return dict(task.result())
+        if ready.is_set():
+            return {
+                "provider_request_id": self._assignment_ids_by_effect.get(effect_key, effect_key),
+                "status": "assignment_started",
+            }
+        raise RuntimeError("worker assignment was not durably created within 120 seconds")
+
+    async def _background_worker_loop(
+        self,
+        effect: Mapping[str, Any],
+        runner: Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]],
+    ) -> Mapping[str, Any]:
+        effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
+        supervisor_failures = 0
+        while True:
+            if self._stopping:
+                assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
+                if not assignment_id:
+                    raise DeferredEffectError(
+                        "worker supervisor stopped before creating a durable assignment"
+                    )
+                return {
+                    "provider_request_id": assignment_id,
+                    "status": "suspended",
+                }
+            assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
+            if assignment_id:
+                assignment = self.repository.read_worker_assignment(assignment_id)
+                if assignment is not None:
+                    disposition = self._worker_assignment_disposition(effect, assignment)
+                    if disposition:
+                        self._release_background_business_lease(effect)
+                        return {
+                            "provider_request_id": assignment_id,
+                            "status": disposition,
+                        }
+            try:
+                result = await runner(effect)
+                assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
+                if assignment_id:
+                    assignment = self.repository.read_worker_assignment(assignment_id)
+                    if (
+                        assignment is not None
+                        and assignment["state"]
+                        == WorkerAssignmentState.SUBMISSION_RECORDED.value
+                    ):
+                        raise SubmissionInvariantError(
+                            "worker business action returned without atomically settling "
+                            "its durable submission"
+                        )
+                return result
+            except asyncio.CancelledError:
+                raise
+            except DeferredEffectError:
+                assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
+                if not assignment_id:
+                    raise
+                self._release_background_business_lease(effect)
+                return {
+                    "provider_request_id": assignment_id,
+                    "status": "suspended",
+                }
+            except Exception as exc:
+                supervisor_failures += 1
+                assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
+                if not assignment_id:
+                    raise
+                assignment = self.repository.read_worker_assignment(assignment_id)
+                if assignment is None:
+                    raise
+                disposition = self._worker_assignment_disposition(effect, assignment)
+                if disposition:
+                    self._release_background_business_lease(effect)
+                    return {
+                        "provider_request_id": assignment_id,
+                        "status": disposition,
+                    }
+                if assignment["state"] == WorkerAssignmentState.SETTLED.value:
+                    return {
+                        "provider_request_id": assignment_id,
+                        "status": "settled",
+                    }
+                if assignment["state"] in {
+                    WorkerAssignmentState.CLAIMED.value,
+                    WorkerAssignmentState.RUNNING.value,
+                }:
+                    assignment = self._fail_active_assignment(
+                        assignment,
+                        error_kind="worker_supervisor_failure",
+                        error_text=f"{exc.__class__.__name__}: {exc}",
+                        retryable=True,
+                    )
+                attempts = self.repository.list_worker_attempts(assignment_id)
+                if self._stopping:
+                    self._release_background_business_lease(effect)
+                    return {
+                        "provider_request_id": assignment_id,
+                        "status": "suspended",
+                    }
+                if (
+                    assignment["state"] in {
+                        WorkerAssignmentState.QUEUED.value,
+                        WorkerAssignmentState.RETRYABLE.value,
+                        WorkerAssignmentState.SUBMISSION_RECORDED.value,
+                    }
+                    and max(len(attempts), supervisor_failures) < 3
+                ):
+                    # A recorded submission is already the durable LLM result.
+                    # Replay the role wrapper so it can reconcile the same
+                    # receipt with its business Action; _run_profile will not
+                    # invoke the model again for this assignment state.
+                    self._release_background_business_lease(effect)
+                    await asyncio.sleep(5.0)
+                    continue
+                if assignment["state"] == WorkerAssignmentState.RETRYABLE.value and attempts:
+                    assignment = self.repository.fail_worker_attempt(
+                        assignment_id=assignment_id,
+                        attempt_id_value=str(attempts[-1]["attempt_id"]),
+                        error_kind="attempt_budget_exhausted",
+                        error_text=f"{exc.__class__.__name__}: {exc}",
+                        retryable=False,
+                    )
+                self._release_background_business_lease(effect)
+                self._triage_background_worker(effect, assignment, exc)
+                return {
+                    "provider_request_id": assignment_id,
+                    "status": "triage_required",
+                }
+
+    def _fail_active_assignment(
+        self,
+        assignment: Mapping[str, Any],
+        *,
+        error_kind: str,
+        error_text: str,
+        retryable: bool,
+    ) -> dict[str, Any]:
+        attempt_id_value = str(assignment.get("active_attempt_id") or "")
+        if not attempt_id_value:
+            return dict(assignment)
+        attempt = self.repository.read_worker_attempt(attempt_id_value)
+        if attempt is None:
+            return dict(assignment)
+        lease_resource = str(attempt.get("lease_resource_key") or "")
+        fencing_token = int(attempt.get("fencing_token") or 0)
+        updated = self.repository.fail_worker_attempt(
+            assignment_id=str(assignment["assignment_id"]),
+            attempt_id_value=attempt_id_value,
+            error_kind=error_kind,
+            error_text=error_text,
+            retryable=retryable,
+        )
+        if lease_resource and fencing_token:
+            with contextlib.suppress(Exception):
+                self.repository.release_lease(
+                    lease_resource,
+                    attempt_id_value,
+                    fencing_token,
+                )
+        return updated
+
+    def _mark_interrupted_assignment_retryable(self, effect_key: str) -> None:
+        assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
+        if not assignment_id:
+            return
+        assignment = self.repository.read_worker_assignment(assignment_id)
+        if assignment is None or assignment["state"] not in {
+            WorkerAssignmentState.CLAIMED.value,
+            WorkerAssignmentState.RUNNING.value,
+        }:
+            return
+        self._fail_active_assignment(
+            assignment,
+            error_kind="manager_shutdown",
+            error_text="manager stopped before the worker assignment settled",
+            retryable=True,
+        )
+
+    def _background_worker_done(
+        self,
+        effect_key: str,
+        task: asyncio.Task[Mapping[str, Any]],
+    ) -> None:
+        if not task.cancelled():
+            # Retrieve the exception so an early launch failure cannot become
+            # an unobserved asyncio task warning after its Outbox waiter exits.
+            task.exception()
+        if self._background_workers.get(effect_key) is task:
+            self._background_workers.pop(effect_key, None)
+        self._assignment_ready_events.pop(effect_key, None)
+
+    def _signal_assignment_ready(
+        self,
+        effect: Mapping[str, Any],
+        assignment_id: str,
+    ) -> None:
+        effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
+        if not effect_key:
+            return
+        self._assignment_ids_by_effect[effect_key] = str(assignment_id)
+        event = self._assignment_ready_events.get(effect_key)
+        if event is not None:
+            event.set()
+
+    def _worker_assignment_disposition(
+        self,
+        effect: Mapping[str, Any],
+        assignment: Mapping[str, Any],
+    ) -> str:
+        assignment_state = str(assignment.get("state") or "")
+        if assignment_state == WorkerAssignmentState.CANCELLED.value:
+            return "cancelled"
+        if assignment_state == WorkerAssignmentState.SETTLED.value:
+            return "settled"
+        expected_states = {
+            "enqueue_architecture_stage": {"ARCHITECT_RUNNING"},
+            "enqueue_architecture_review": {"REVIEWING"},
+            "spawn_producer_worker": {"PRODUCING"},
+            "spawn_repair_worker": {"REPAIRING"},
+            "spawn_verifier_worker": {"REVIEWING"},
+            "spawn_scenario_verifier": {"VERIFYING"},
+        }.get(str(effect.get("effect_type") or ""))
+        if not expected_states:
+            return ""
+        try:
+            aggregate_type = AggregateType(str(assignment.get("aggregate_type") or ""))
+            snapshot = self.repository.read_snapshot(
+                aggregate_type,
+                str(assignment.get("aggregate_id") or ""),
+            )
+        except (KeyError, ValueError):
+            return "superseded"
+        if snapshot is None:
+            return "superseded"
+        if snapshot.state in expected_states:
+            return ""
+        if snapshot.state in {"PAUSE_REQUESTED", "PAUSED"}:
+            return "suspended"
+        if snapshot.state in {"CANCEL_REQUESTED", "CANCELLED", "STALE"}:
+            return "cancelled"
+        return "superseded"
+
+    def _worker_submission_settlement(
+        self,
+        effect: Mapping[str, Any],
+        *,
+        required: bool = True,
+    ) -> dict[str, str]:
+        effect_key = str(effect.get("effect_key") or effect.get("effect_id") or "")
+        assignment_id = self._assignment_ids_by_effect.get(effect_key, "")
+        if not assignment_id:
+            return {}
+        assignment = self.repository.read_worker_assignment(assignment_id)
+        if assignment is None:
+            raise SubmissionInvariantError("worker assignment disappeared before settlement")
+        if assignment["state"] not in {
+            WorkerAssignmentState.SUBMISSION_RECORDED.value,
+            WorkerAssignmentState.SETTLED.value,
+        }:
+            if not required:
+                return {}
+            raise SubmissionInvariantError(
+                "worker business action requires a durable submission receipt"
+            )
+        payload_hash = str(assignment.get("submission_payload_hash") or "")
+        if not payload_hash:
+            raise SubmissionInvariantError(
+                "worker assignment submission receipt has no payload hash"
+            )
+        return {
+            "worker_assignment_id": assignment_id,
+            "worker_submission_payload_hash": payload_hash,
+        }
+
+    def _release_background_business_lease(self, effect: Mapping[str, Any]) -> None:
+        try:
+            snapshot = self._effect_snapshot(effect)
+            resource = str(snapshot.payload.get("lease_resource_key") or "")
+            owner = str(snapshot.payload.get("active_worker_id") or "")
+            token = int(snapshot.payload.get("fencing_token") or 0)
+            if resource and owner and token:
+                self.repository.release_lease(resource, owner, token)
+        except Exception:
+            return
+
+    def _triage_background_worker(
+        self,
+        effect: Mapping[str, Any],
+        assignment: Mapping[str, Any],
+        error: Exception,
+    ) -> None:
+        snapshot = self._effect_snapshot(effect)
+        if "ENTER_TRIAGE" not in self.repository.engine.legal_actions(
+            snapshot.aggregate_type,
+            snapshot.state,
+        ):
+            return
+        failure_ref = self.service.artifacts.put_json(
+            {
+                "kind": "worker_assignment_failed",
+                "role": str(assignment.get("role") or ""),
+                "attempt_count": len(
+                    self.repository.list_worker_attempts(str(assignment["assignment_id"]))
+                ),
+                "error": f"{error.__class__.__name__}: {error}",
+            },
+            artifact_type="WorkerAssignmentFailureArtifact",
+        )
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="ENTER_TRIAGE",
+                workflow_id=snapshot.workflow_id,
+                aggregate_type=snapshot.aggregate_type,
+                aggregate_id=snapshot.aggregate_id,
+                actor="minion-v2-worker-supervisor",
+                expected_version=snapshot.version,
+                idempotency_key=(
+                    f"worker-assignment-triage:{assignment['assignment_id']}:"
+                    f"{len(self.repository.list_worker_attempts(str(assignment['assignment_id'])))}"
+                ),
+                payload={
+                    "failure_artifact_ref": failure_ref.to_dict(),
+                    "blocker": str(error),
+                },
+            ),
+            **self._worker_submission_settlement(effect, required=False),
+        )
+
+    async def recover_background_assignments(self) -> int:
+        if self._stopping:
+            return 0
+        available = max(
+            0,
+            max(1, int(self.max_parallel_workers)) - self.active_background_count,
+        )
+        if available == 0:
+            return 0
+        recoverable = sorted(
+            self.repository.list_worker_assignments(
+            states=(
+                WorkerAssignmentState.QUEUED.value,
+                WorkerAssignmentState.CLAIMED.value,
+                WorkerAssignmentState.RUNNING.value,
+                WorkerAssignmentState.RETRYABLE.value,
+                WorkerAssignmentState.SUBMISSION_RECORDED.value,
+            )
+            ),
+            key=lambda item: (
+                {
+                    WorkerAssignmentState.SUBMISSION_RECORDED.value: 0,
+                    WorkerAssignmentState.RUNNING.value: 1,
+                    WorkerAssignmentState.CLAIMED.value: 1,
+                    WorkerAssignmentState.RETRYABLE.value: 2,
+                    WorkerAssignmentState.QUEUED.value: 3,
+                }.get(str(item.get("state") or ""), 9),
+                str(item.get("created_at") or ""),
+                str(item.get("assignment_id") or ""),
+            ),
+        )
+        started = 0
+        for assignment in recoverable:
+            if started >= available:
+                break
+            effect = dict(assignment.get("execution_spec") or {})
+            effect_key = str(effect.get("effect_key") or assignment["assignment_key"])
+            effect["effect_key"] = effect_key
+            effect.setdefault("effect_id", f"assignment:{assignment['assignment_id']}")
+            runner = self._runner_for_recovered_effect(effect)
+            if runner is None:
+                continue
+            disposition = self._worker_assignment_disposition(effect, assignment)
+            if disposition:
+                self.repository.cancel_worker_assignments(
+                    workflow_id=str(assignment["workflow_id"]),
+                    aggregate_type=str(assignment["aggregate_type"]),
+                    aggregate_id=str(assignment["aggregate_id"]),
+                    reason=f"assignment recovery suppressed: {disposition}",
+                )
+                continue
+            self._assignment_ids_by_effect[effect_key] = str(assignment["assignment_id"])
+            ready = self._assignment_ready_events.setdefault(effect_key, asyncio.Event())
+            ready.set()
+            if effect_key in self._background_workers and not self._background_workers[effect_key].done():
+                continue
+            task = asyncio.create_task(
+                self._background_worker_loop(effect, runner),
+                name=f"minion-v2-recovered-{str(assignment['assignment_id'])[-12:]}",
+            )
+            self._background_workers[effect_key] = task
+            task.add_done_callback(
+                lambda completed, key=effect_key: self._background_worker_done(key, completed)
+            )
+            started += 1
+        return started
+
+    def _runner_for_recovered_effect(
+        self,
+        effect: Mapping[str, Any],
+    ) -> Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any]]] | None:
+        effect_type = str(effect.get("effect_type") or "")
+        if effect_type == "enqueue_architecture_stage":
+            return self._run_architecture_stage
+        if effect_type == "enqueue_architecture_review":
+            return self._run_architecture_review
+        if effect_type == "spawn_producer_worker":
+            return lambda value: self._run_producer(value, repair=False)
+        if effect_type == "spawn_repair_worker":
+            return lambda value: self._run_producer(value, repair=True)
+        if effect_type == "spawn_scenario_verifier":
+            return lambda value: self._run_verifier(value, scenario_mode=True)
+        if effect_type == "spawn_verifier_worker":
+            if str(effect.get("aggregate_type") or "") == AggregateType.STANDALONE_REVIEW.value:
+                return self._run_standalone_review
+            return self._run_verifier
+        return None
 
     def _admit_node_worker(
         self,
@@ -610,7 +1140,8 @@ class MinionV2SemanticWorker:
                     expected_version=current.version,
                     idempotency_key=f"producer-defect:{node.aggregate_id}:{report_ref.sha256}",
                     payload={"finding_artifact_ref": report_ref.to_dict()},
-                )
+                ),
+                **self._worker_submission_settlement(effect),
             )
             self.repository.complete_worker_session(coder_session_id(node.aggregate_id))
             self.repository.release_lease(lease_resource, invocation_id, fencing_token)
@@ -631,7 +1162,8 @@ class MinionV2SemanticWorker:
                     "producer_report_ref": report_ref.to_dict(),
                     "unit_work_view_ref": view_ref.to_dict(),
                 },
-            )
+            ),
+            **self._worker_submission_settlement(effect),
         )
         return {"provider_request_id": invocation_id, "result_artifact_ref": report_ref.to_dict()}
 
@@ -1156,6 +1688,7 @@ class MinionV2SemanticWorker:
             scenario_fingerprint=str(node.payload.get("scenario_fingerprint") or ""),
             requirement_patch_ref=requirement_patch_ref,
             revised_requirements_ref=revised_requirements_ref,
+            **self._worker_submission_settlement(effect),
         )
         self.repository.record_worker_turn(
             invocation_id=invocation_id,
@@ -1275,6 +1808,12 @@ class MinionV2SemanticWorker:
             workspace = Path(worktree_text)
             await self._release_managed_lsp_workspace(workspace)
             _raise_if_workspace_held(workspace, "node worker still holds its worktree")
+        self.repository.cancel_worker_assignments(
+            workflow_id=node.workflow_id,
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id=node.aggregate_id,
+            reason="node cancelled" if cancel else "node paused",
+        )
         current = self.repository.read_snapshot(AggregateType.DAG_NODE_RUN, node.aggregate_id)
         action_type = "CANCEL_CONFIRMED" if cancel or current.state == "CANCEL_REQUESTED" else "PAUSE_CONFIRMED"
         self.repository.dispatch(
@@ -1318,6 +1857,12 @@ class MinionV2SemanticWorker:
                 architecture_workspace,
                 "aggregate worker still holds the architecture worktree",
             )
+        self.repository.cancel_worker_assignments(
+            workflow_id=snapshot.workflow_id,
+            aggregate_type=snapshot.aggregate_type,
+            aggregate_id=snapshot.aggregate_id,
+            reason="aggregate cancelled" if cancel else "aggregate paused",
+        )
         current = self.repository.read_snapshot(snapshot.aggregate_type, snapshot.aggregate_id)
         action_type = "CANCEL_CONFIRMED" if cancel else "PAUSE_CONFIRMED"
         self.repository.dispatch(
@@ -1744,7 +2289,8 @@ class MinionV2SemanticWorker:
                 expected_version=current.version,
                 idempotency_key=f"standalone-report:{report_ref.sha256}",
                 payload={"verification_artifact_ref": report_ref.to_dict()},
-            )
+            ),
+            **self._worker_submission_settlement(effect),
         )
         if skeleton_review_workspace is not None:
             skeleton_review_workspace.cleanup()
@@ -2077,7 +2623,8 @@ class MinionV2SemanticWorker:
                             else {}
                         ),
                     },
-                )
+                ),
+                **self._worker_submission_settlement(effect),
             )
             self.repository.record_worker_turn(
                 invocation_id=invocation_id,
@@ -2349,7 +2896,8 @@ class MinionV2SemanticWorker:
                             else {}
                         ),
                     },
-                )
+                ),
+                **self._worker_submission_settlement(effect),
             )
             # ARCHITECT_SUBMITTED transfers the live writer lease to the
             # quiesce/snapshot effects. Releasing it here makes a normal
@@ -2749,7 +3297,12 @@ class MinionV2SemanticWorker:
                     artifact_type="ArchitectureReviewArtifact",
                     child_refs=((manifest_ref.sha256, "architecture_manifest"),),
                 )
-                self._dispatch_architecture_review_result(revision, mechanical, review_ref)
+                self._dispatch_architecture_review_result(
+                    revision,
+                    mechanical,
+                    review_ref,
+                    effect=effect,
+                )
                 return {"result_artifact_ref": review_ref.to_dict()}
             prompt = (
                 "Review the bound ArchitectureContractArtifact and its attached fragments by tracing only its requirements, contracts, topology, "
@@ -2819,7 +3372,12 @@ class MinionV2SemanticWorker:
                 artifact_type="ArchitectureReviewArtifact",
                 child_refs=((manifest_ref.sha256, "architecture_manifest"),),
             )
-            self._dispatch_architecture_review_result(revision, semantic, review_ref)
+            self._dispatch_architecture_review_result(
+                revision,
+                semantic,
+                review_ref,
+                effect=effect,
+            )
             self.repository.record_worker_turn(
                 invocation_id=invocation_id,
                 fencing_token=lease.fencing_token,
@@ -2899,7 +3457,12 @@ class MinionV2SemanticWorker:
                     artifact_type="ArchitectureReviewArtifact",
                     child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
                 )
-                self._dispatch_architecture_review_result(revision, mechanical, review_ref)
+                self._dispatch_architecture_review_result(
+                    revision,
+                    mechanical,
+                    review_ref,
+                    effect=effect,
+                )
                 return {"result_artifact_ref": review_ref.to_dict()}
             requirements_view_ref = self.service.artifacts.put_json(
                 requirements_semantic_view(requirements_payload),
@@ -2997,7 +3560,12 @@ class MinionV2SemanticWorker:
                 artifact_type="ArchitectureReviewArtifact",
                 child_refs=((manifest_ref.sha256, "architecture_skeleton"),),
             )
-            self._dispatch_architecture_review_result(revision, semantic, review_ref)
+            self._dispatch_architecture_review_result(
+                revision,
+                semantic,
+                review_ref,
+                effect=effect,
+            )
             self.repository.record_worker_turn(
                 invocation_id=invocation_id,
                 fencing_token=lease.fencing_token,
@@ -3636,6 +4204,21 @@ class MinionV2SemanticWorker:
             ]
         else:
             invocation_acceptance = ["Write the exact primary JSON artifact required by the profile output contract."]
+        input_fingerprint = authoring_input_fingerprint(
+            {
+                "role": role,
+                "references": {
+                    name: ref.to_dict()
+                    for name, ref in sorted(bound_reference_refs.items())
+                },
+                "architecture_revision_base_submission": workspace.get(
+                    "architecture_revision_base_submission"
+                ),
+                "architecture_revision_scope": workspace.get(
+                    "architecture_revision_scope"
+                ),
+            }
+        )
         pack = MinionInvocationPack(
             invocation_id=invocation_id,
             goal=instruction,
@@ -3657,19 +4240,7 @@ class MinionV2SemanticWorker:
                     "fencing_token": fencing_token,
                     "role": role,
                     "authoring_contract_version": AUTHORING_CONTRACT_VERSION,
-                    "authoring_input_fingerprint": authoring_input_fingerprint(
-                        {
-                            "role": role,
-                            "references": {
-                                name: ref.to_dict()
-                                for name, ref in sorted(bound_reference_refs.items())
-                            },
-                            "architecture_revision_base_submission": workspace.get(
-                                "architecture_revision_base_submission"
-                            ),
-                            "architecture_revision_scope": workspace.get("architecture_revision_scope"),
-                        }
-                    ),
+                    "authoring_input_fingerprint": input_fingerprint,
                 },
                 "agent_session": {
                     "session_id": invocation_id,
@@ -3832,6 +4403,137 @@ class MinionV2SemanticWorker:
                 self._base_contract_builder_payload_from_manifest(base_manifest_ref),
                 revision_scope=revision_scope,
             )
+        submission_kind = _worker_submission_kind(role, skeleton_mode=skeleton_mode)
+        durable_input_refs = {
+            name: ref.to_dict()
+            for name, ref in bound_reference_refs.items()
+            if ref.artifact_type != "LocalPathReference"
+        }
+        self.repository.ensure_worker_session(
+            session_id=invocation_id,
+            workflow_id=snapshot.workflow_id,
+            aggregate_type=snapshot.aggregate_type,
+            aggregate_id=snapshot.aggregate_id,
+            role=role,
+        )
+        assignment = self.repository.create_worker_assignment(
+            WorkerAssignmentRequest(
+                assignment_key=(
+                    f"{str(effect.get('effect_key') or effect.get('effect_id') or '')}:"
+                    f"{role}:{input_fingerprint}"
+                ),
+                session_id=invocation_id,
+                workflow_id=snapshot.workflow_id,
+                aggregate_type=snapshot.aggregate_type.value,
+                aggregate_id=snapshot.aggregate_id,
+                role=role,
+                input_fingerprint=input_fingerprint,
+                required_inputs=tuple(sorted(durable_input_refs)),
+                input_refs=durable_input_refs,
+                execution_spec={
+                    "effect_type": str(effect.get("effect_type") or "spawn_worker"),
+                    "effect_id": str(effect.get("effect_id") or ""),
+                    "effect_key": str(effect.get("effect_key") or ""),
+                    "workflow_id": snapshot.workflow_id,
+                    "aggregate_type": snapshot.aggregate_type.value,
+                    "aggregate_id": snapshot.aggregate_id,
+                    "payload": dict(effect.get("payload") or {}),
+                },
+                submission_kind=submission_kind,
+            )
+        )
+        self._signal_assignment_ready(effect, str(assignment["assignment_id"]))
+        if assignment["state"] in {
+            WorkerAssignmentState.CLAIMED.value,
+            WorkerAssignmentState.RUNNING.value,
+        }:
+            active_attempt = self.repository.read_worker_attempt(
+                str(assignment.get("active_attempt_id") or "")
+            )
+            active_lease = self.repository.read_lease(
+                str(dict(active_attempt or {}).get("lease_resource_key") or "")
+            )
+            if active_lease is not None and _lease_is_live(active_lease):
+                raise DeferredEffectError("worker assignment already has a live process attempt")
+            if active_attempt is not None:
+                assignment = self.repository.fail_worker_attempt(
+                    assignment_id=str(assignment["assignment_id"]),
+                    attempt_id_value=str(active_attempt["attempt_id"]),
+                    error_kind="attempt_lease_expired",
+                    error_text="worker attempt lease expired before submission settlement",
+                    retryable=True,
+                )
+
+        if assignment["state"] in {
+            WorkerAssignmentState.SUBMISSION_RECORDED.value,
+            WorkerAssignmentState.SETTLED.value,
+        }:
+            pack = sanitize_runner_session_pack(pack)
+            prompt_ref = self.service.artifacts.put_json(
+                pack.to_dict(),
+                artifact_type="WorkerPromptPackArtifact",
+                child_refs=tuple(
+                    (ref.sha256, name)
+                    for name, ref in bound_reference_refs.items()
+                    if ref.artifact_type != "LocalPathReference"
+                ),
+            )
+            terminal = self._terminal_from_assignment_receipt(
+                assignment,
+                role=role,
+                summary="Reconciled the exact durable worker submission receipt.",
+            )
+            terminal_ref = self.service.artifacts.put_json(
+                terminal,
+                artifact_type="WorkerTerminalArtifact",
+                child_refs=(
+                    (prompt_ref.sha256, "prompt_pack"),
+                    (
+                        str(dict(assignment["submission_artifact_ref"])["sha256"]),
+                        "submission_receipt",
+                    ),
+                ),
+            )
+            return terminal, prompt_ref, terminal_ref
+
+        if assignment["state"] not in {
+            WorkerAssignmentState.QUEUED.value,
+            WorkerAssignmentState.RETRYABLE.value,
+        }:
+            raise SubmissionInvariantError(
+                f"worker assignment cannot start from {assignment['state']}"
+            )
+        attempt = self.repository.claim_worker_assignment(str(assignment["assignment_id"]))
+        assignment_lease_resource = f"assignment:{assignment['assignment_id']}"
+        assignment_lease = self.repository.claim_lease(
+            assignment_lease_resource,
+            str(attempt["attempt_id"]),
+            ttl_seconds=120,
+            metadata={
+                "workflow_id": snapshot.workflow_id,
+                "aggregate_type": snapshot.aggregate_type.value,
+                "aggregate_id": snapshot.aggregate_id,
+                "role": role,
+            },
+        )
+        pack_value = pack.to_dict()
+        metadata = dict(pack_value.get("metadata") or {})
+        minion_v2 = dict(metadata.get("minion_v2") or {})
+        minion_v2.update(
+            {
+                "invocation_id": str(attempt["attempt_id"]),
+                "lease_resource": assignment_lease_resource,
+                "lease_resource_key": assignment_lease_resource,
+                "fencing_token": assignment_lease.fencing_token,
+            }
+        )
+        metadata["minion_v2"] = minion_v2
+        metadata["agent_session"] = {
+            "session_id": invocation_id,
+            "response_key": str(effect.get("effect_key") or effect.get("effect_id") or ""),
+            "fencing_token": assignment_lease.fencing_token,
+        }
+        pack = MinionInvocationPack.from_dict({**pack_value, "metadata": metadata})
         pack = sanitize_runner_session_pack(pack)
         pack = with_minion_sandbox_metadata(self.service.runtime_root, pack, run_id=run_id)
         prompt_ref = self.service.artifacts.put_json(
@@ -3842,6 +4544,18 @@ class MinionV2SemanticWorker:
                 for name, ref in bound_reference_refs.items()
                 if ref.artifact_type != "LocalPathReference"
             ),
+        )
+        self.repository.start_worker_attempt(
+            assignment_id=str(assignment["assignment_id"]),
+            attempt_id_value=str(attempt["attempt_id"]),
+            lease_resource_key=assignment_lease_resource,
+            fencing_token=assignment_lease.fencing_token,
+            prompt_pack_ref=prompt_ref.to_dict(),
+        )
+        assignment_access_token = self.repository.issue_worker_attempt_access_token(
+            assignment_id=str(assignment["assignment_id"]),
+            attempt_id_value=str(attempt["attempt_id"]),
+            fencing_token=assignment_lease.fencing_token,
         )
         self.repository.record_worker_invocation(
             invocation_id=invocation_id,
@@ -3854,90 +4568,6 @@ class MinionV2SemanticWorker:
             authoring_contract_version=AUTHORING_CONTRACT_VERSION,
             prompt_pack_ref=prompt_ref.to_dict(),
         )
-        if role in {"verifier", "reviewer"}:
-            binding = dict(pack.metadata.get("minion_v2") or {})
-            input_fingerprint = str(binding.get("authoring_input_fingerprint") or "").strip()
-            draft_kind = "standalone_review" if role == "reviewer" else "verification"
-            receipt = SubmissionDraftStore(self.service.runtime_root).latest_submitted(
-                workflow_id=snapshot.workflow_id,
-                invocation_id=invocation_id,
-                role=role,
-                draft_kind=draft_kind,
-                input_fingerprint=input_fingerprint,
-            )
-            if receipt is not None:
-                submitted = self.service.artifacts.read_json(receipt.submission_artifact_ref)
-                payload_hash = hashlib.sha256(
-                    json.dumps(
-                        submitted,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode("utf-8")
-                ).hexdigest()
-                if payload_hash != receipt.submission_payload_hash:
-                    raise SubmissionInvariantError(
-                        "durable submission receipt payload hash does not match its artifact"
-                    )
-                internal = dict(dict(submitted).get("internal_context") or {})
-                if (
-                    str(internal.get("draft_key") or "") != receipt.draft_key
-                    or str(internal.get("invocation_id") or "") != invocation_id
-                    or str(internal.get("input_fingerprint") or "") != input_fingerprint
-                    or int(internal.get("fencing_token") or 0) != receipt.fencing_token
-                ):
-                    raise SubmissionInvariantError(
-                        "durable submission receipt is not bound to this invocation input"
-                    )
-                artifact_record = self.repository.read_artifact_record(
-                    str(receipt.submission_artifact_ref.get("sha256") or "")
-                )
-                if artifact_record is None:
-                    raise SubmissionInvariantError(
-                        "durable submission receipt artifact metadata is unavailable"
-                    )
-                primary_artifact = {
-                    "path": str(artifact_record["storage_path"]),
-                    "relative_path": (
-                        "standalone_review.json"
-                        if role == "reviewer"
-                        else "verification_plan.json"
-                    ),
-                    "title": "Reconciled durable submission",
-                    "role": "primary",
-                    "mime_type": "application/json",
-                }
-                terminal = {
-                    "event_kind": "terminal",
-                    "phase": "completed",
-                    "payload": {
-                        "status": "completed",
-                        "summary": "Reused the exact-input durable submission receipt.",
-                        "artifacts": [primary_artifact],
-                        "primary_artifact": primary_artifact,
-                        "submission_receipt": dict(receipt.submission_artifact_ref),
-                        "reconciled_from_fencing_token": receipt.fencing_token,
-                        "v2_timing": {},
-                        "session_turn_index": 0,
-                    },
-                }
-                terminal_ref = self.service.artifacts.put_json(
-                    terminal,
-                    artifact_type="WorkerTerminalArtifact",
-                    child_refs=(
-                        (prompt_ref.sha256, "prompt_pack"),
-                        (
-                            str(receipt.submission_artifact_ref["sha256"]),
-                            "submission_receipt",
-                        ),
-                    ),
-                )
-                self.repository.finish_worker_invocation(
-                    invocation_id=invocation_id,
-                    fencing_token=fencing_token,
-                    status="completed",
-                )
-                return terminal, prompt_ref, terminal_ref
         invocation_dir = invocation_root(self.service.runtime_root) / invocation_id
         invocation_dir.mkdir(parents=True, exist_ok=True)
         attempt_dir = invocation_dir / "attempts" / f"fence-{fencing_token}"
@@ -3957,11 +4587,13 @@ class MinionV2SemanticWorker:
             "--run-id",
             run_id,
         ]
+        runner_env = python_subprocess_env()
+        runner_env[WORKER_GATEWAY_TOKEN_ENV] = assignment_access_token
         argv, env = build_sandboxed_runner_invocation(
             runtime_root=self.service.runtime_root,
             pack=pack,
             argv=argv,
-            env=python_subprocess_env(),
+            env=runner_env,
         )
         process = await asyncio.create_subprocess_exec(
             *argv,
@@ -3970,6 +4602,26 @@ class MinionV2SemanticWorker:
             stdin=asyncio.subprocess.PIPE,
             env=env,
             start_new_session=True,
+        )
+        self.repository.update_worker_attempt_process_group(
+            assignment_id=str(assignment["assignment_id"]),
+            attempt_id_value=str(attempt["attempt_id"]),
+            fencing_token=assignment_lease.fencing_token,
+            process_group_id=process.pid,
+        )
+        self.repository.update_lease_metadata(
+            assignment_lease_resource,
+            str(attempt["attempt_id"]),
+            assignment_lease.fencing_token,
+            {
+                "workflow_id": snapshot.workflow_id,
+                "aggregate_type": snapshot.aggregate_type.value,
+                "aggregate_id": snapshot.aggregate_id,
+                "role": role,
+                "process_group_id": process.pid,
+                "workspace_path": str(pack.workspace.get("repo_path") or ""),
+                "run_id": run_id,
+            },
         )
         self.repository.update_lease_metadata(
             lease_resource,
@@ -3991,6 +4643,14 @@ class MinionV2SemanticWorker:
         lease_heartbeat = asyncio.create_task(
             self._lease_heartbeat(lease_resource, invocation_id, fencing_token),
             name=f"minion-v2-lease-{invocation_id}",
+        )
+        assignment_heartbeat = asyncio.create_task(
+            self._lease_heartbeat(
+                assignment_lease_resource,
+                str(attempt["attempt_id"]),
+                assignment_lease.fencing_token,
+            ),
+            name=f"minion-v2-assignment-lease-{attempt['attempt_id']}",
         )
         try:
             stderr_task = asyncio.create_task(process.stderr.read())
@@ -4015,8 +4675,13 @@ class MinionV2SemanticWorker:
             stderr = await stderr_task
         finally:
             lease_heartbeat.cancel()
+            assignment_heartbeat.cancel()
             try:
                 await lease_heartbeat
+            except asyncio.CancelledError:
+                pass
+            try:
+                await assignment_heartbeat
             except asyncio.CancelledError:
                 pass
             if process.returncode is None:
@@ -4027,9 +4692,31 @@ class MinionV2SemanticWorker:
             self._run_to_invocation.pop(run_id, None)
             if self.unregister_broker_run is not None:
                 self.unregister_broker_run(run_id)
-        if process.returncode != 0:
+        assignment_after_process = self.repository.read_worker_assignment(
+            str(assignment["assignment_id"])
+        )
+        has_submission_receipt = bool(
+            dict((assignment_after_process or {}).get("submission_artifact_ref") or {})
+        )
+        if process.returncode != 0 and not has_submission_receipt:
             error_tail = _meaningful_stderr_tail(stderr.decode("utf-8", errors="replace"))
-            continuation_ref = self._publish_agent_session_checkpoint(invocation_id, fencing_token)
+            self.repository.fail_worker_attempt(
+                assignment_id=str(assignment["assignment_id"]),
+                attempt_id_value=str(attempt["attempt_id"]),
+                error_kind="worker_process_failed",
+                error_text=worker_error or error_tail or "worker emitted no structured error",
+                retryable=True,
+            )
+            with contextlib.suppress(Exception):
+                self.repository.release_lease(
+                    assignment_lease_resource,
+                    str(attempt["attempt_id"]),
+                    assignment_lease.fencing_token,
+                )
+            continuation_ref = self._publish_agent_session_checkpoint(
+                invocation_id,
+                assignment_lease.fencing_token,
+            )
             if continuation_ref is not None and role in {"architect", "producer", "repair"}:
                 self.repository.suspend_worker_invocation(
                     invocation_id=invocation_id,
@@ -4046,8 +4733,30 @@ class MinionV2SemanticWorker:
             details = worker_error or error_tail or "worker emitted no structured error"
             raise RuntimeError(f"V2 worker exited {process.returncode}: {details}")
         terminal = next((item for item in reversed(events) if str(item.get("event_kind") or "") == "terminal"), None)
+        if terminal is None and has_submission_receipt:
+            terminal = self._terminal_from_assignment_receipt(
+                dict(assignment_after_process or {}),
+                role=role,
+                summary="Recovered a durable submission after the worker process ended.",
+            )
         if terminal is None:
-            continuation_ref = self._publish_agent_session_checkpoint(invocation_id, fencing_token)
+            self.repository.fail_worker_attempt(
+                assignment_id=str(assignment["assignment_id"]),
+                attempt_id_value=str(attempt["attempt_id"]),
+                error_kind="missing_terminal_and_receipt",
+                error_text="worker ended without terminal event or durable submission receipt",
+                retryable=True,
+            )
+            with contextlib.suppress(Exception):
+                self.repository.release_lease(
+                    assignment_lease_resource,
+                    str(attempt["attempt_id"]),
+                    assignment_lease.fencing_token,
+                )
+            continuation_ref = self._publish_agent_session_checkpoint(
+                invocation_id,
+                assignment_lease.fencing_token,
+            )
             if continuation_ref is not None and role in {"architect", "producer", "repair"}:
                 self.repository.suspend_worker_invocation(
                     invocation_id=invocation_id,
@@ -4067,7 +4776,26 @@ class MinionV2SemanticWorker:
             str(terminal_payload.get("status") or "") == "suspended"
             and bool(terminal_payload.get("manager_restart"))
         ):
-            continuation_ref = self._publish_agent_session_checkpoint(invocation_id, fencing_token)
+            self.repository.fail_worker_attempt(
+                assignment_id=str(assignment["assignment_id"]),
+                attempt_id_value=str(attempt["attempt_id"]),
+                error_kind="manager_restart",
+                error_text=str(
+                    terminal_payload.get("summary")
+                    or "worker deferred for manager restart"
+                ),
+                retryable=True,
+            )
+            with contextlib.suppress(Exception):
+                self.repository.release_lease(
+                    assignment_lease_resource,
+                    str(attempt["attempt_id"]),
+                    assignment_lease.fencing_token,
+                )
+            continuation_ref = self._publish_agent_session_checkpoint(
+                invocation_id,
+                assignment_lease.fencing_token,
+            )
             if continuation_ref is None:
                 raise RuntimeError(
                     "worker reached a manager-restart safe point without a durable continuation"
@@ -4082,7 +4810,30 @@ class MinionV2SemanticWorker:
                 str(terminal_payload.get("summary") or "worker deferred for manager restart")
             )
         if str(terminal_payload.get("status") or "") != "completed":
-            continuation_ref = self._publish_agent_session_checkpoint(invocation_id, fencing_token)
+            summary = str(terminal_payload.get("summary") or "V2 semantic worker failed")
+            completion_stalled = (
+                str(terminal_payload.get("blocker_kind") or "")
+                == "completion_gate_stalled"
+            )
+            self.repository.fail_worker_attempt(
+                assignment_id=str(assignment["assignment_id"]),
+                attempt_id_value=str(attempt["attempt_id"]),
+                error_kind=(
+                    "completion_gate_stalled" if completion_stalled else "worker_terminal_failed"
+                ),
+                error_text=summary,
+                retryable=not completion_stalled,
+            )
+            with contextlib.suppress(Exception):
+                self.repository.release_lease(
+                    assignment_lease_resource,
+                    str(attempt["attempt_id"]),
+                    assignment_lease.fencing_token,
+                )
+            continuation_ref = self._publish_agent_session_checkpoint(
+                invocation_id,
+                assignment_lease.fencing_token,
+            )
             if continuation_ref is not None and role in {"architect", "producer", "repair"}:
                 self.repository.suspend_worker_invocation(
                     invocation_id=invocation_id,
@@ -4096,11 +4847,49 @@ class MinionV2SemanticWorker:
                     fencing_token=fencing_token,
                     status="failed",
                 )
-            summary = str(terminal_payload.get("summary") or "V2 semantic worker failed")
-            if str(terminal_payload.get("blocker_kind") or "") == "completion_gate_stalled":
+            if completion_stalled:
                 raise PermanentEffectError(summary)
             raise RuntimeError(summary)
-        continuation_ref = self._publish_agent_session_checkpoint(invocation_id, fencing_token)
+        assignment_after_process = self.repository.read_worker_assignment(
+            str(assignment["assignment_id"])
+        )
+        if assignment_after_process is None or assignment_after_process["state"] not in {
+            WorkerAssignmentState.SUBMISSION_RECORDED.value,
+            WorkerAssignmentState.SETTLED.value,
+        }:
+            self.repository.fail_worker_attempt(
+                assignment_id=str(assignment["assignment_id"]),
+                attempt_id_value=str(attempt["attempt_id"]),
+                error_kind="completion_without_receipt",
+                error_text="worker reported completion before its durable submission receipt",
+                retryable=False,
+            )
+            with contextlib.suppress(Exception):
+                self.repository.release_lease(
+                    assignment_lease_resource,
+                    str(attempt["attempt_id"]),
+                    assignment_lease.fencing_token,
+                )
+            raise SubmissionInvariantError(
+                "worker reported completion before its durable submission receipt"
+            )
+        with contextlib.suppress(Exception):
+            self.repository.release_lease(
+                assignment_lease_resource,
+                str(attempt["attempt_id"]),
+                assignment_lease.fencing_token,
+            )
+        terminal = self._terminal_from_assignment_receipt(
+            assignment_after_process,
+            role=role,
+            summary=str(dict(terminal.get("payload") or {}).get("summary") or "Worker submission recorded."),
+            original_terminal=terminal,
+        )
+        terminal_payload = dict(terminal.get("payload") or {})
+        continuation_ref = self._publish_agent_session_checkpoint(
+            invocation_id,
+            assignment_lease.fencing_token,
+        )
         terminal_payload["v2_timing"] = _worker_event_timing(events)
         if continuation_ref is not None:
             continuation_payload = self.service.artifacts.read_json(continuation_ref)
@@ -4111,6 +4900,10 @@ class MinionV2SemanticWorker:
             artifact_type="WorkerTerminalArtifact",
             child_refs=(
                 (prompt_ref.sha256, "prompt_pack"),
+                (
+                    str(dict(assignment_after_process["submission_artifact_ref"])["sha256"]),
+                    "submission_receipt",
+                ),
                 *(
                     ((continuation_ref.sha256, "agent_session_continuation"),)
                     if continuation_ref is not None
@@ -4133,6 +4926,60 @@ class MinionV2SemanticWorker:
                 status="completed",
             )
         return terminal, prompt_ref, terminal_ref
+
+    def _terminal_from_assignment_receipt(
+        self,
+        assignment: Mapping[str, Any],
+        *,
+        role: str,
+        summary: str,
+        original_terminal: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        artifact_ref = dict(assignment.get("submission_artifact_ref") or {})
+        if not artifact_ref:
+            raise SubmissionInvariantError("worker assignment has no submission artifact")
+        submitted = self.service.artifacts.read_json(artifact_ref)
+        if stable_hash(submitted) != str(assignment.get("submission_payload_hash") or ""):
+            raise SubmissionInvariantError(
+                "worker assignment submission payload hash does not match its artifact"
+            )
+        record = self.repository.read_artifact_record(str(artifact_ref.get("sha256") or ""))
+        if record is None:
+            raise SubmissionInvariantError("worker assignment submission artifact is unavailable")
+        filename = {
+            "architect": "architecture_submission.json",
+            "architecture_reviewer": "architecture_review.json",
+            "producer": "coder_report.json",
+            "repair": "coder_report.json",
+            "verifier": "verification_plan.json",
+            "scenario_verifier": "verification_plan.json",
+            "reviewer": "standalone_review.json",
+            "requirements": "requirements.json",
+        }.get(role, "architecture_bundle.json")
+        primary = {
+            "path": str(record["storage_path"]),
+            "relative_path": filename,
+            "title": "Durable worker submission",
+            "role": "primary",
+            "mime_type": "application/json",
+        }
+        original_payload = dict(dict(original_terminal or {}).get("payload") or {})
+        return {
+            "event_kind": "terminal",
+            "phase": "completed",
+            "payload": {
+                **original_payload,
+                "status": "completed",
+                "summary": str(summary or "Worker submission recorded."),
+                "artifacts": [primary],
+                "primary_artifact": primary,
+                "submission_receipt": artifact_ref,
+                "session_turn_index": int(
+                    original_payload.get("session_turn_index") or 0
+                ),
+                "v2_timing": dict(original_payload.get("v2_timing") or {}),
+            },
+        }
 
     def _publish_agent_session_checkpoint(
         self,
@@ -4365,6 +5212,8 @@ class MinionV2SemanticWorker:
         revision: AggregateSnapshot,
         review: ArchitectureReviewResult,
         review_ref: ArtifactRef,
+        *,
+        effect: Mapping[str, Any] | None = None,
     ) -> None:
         current = self.repository.read_snapshot(AggregateType.ARCHITECTURE_REVISION, revision.aggregate_id)
         if current is None:
@@ -4393,7 +5242,8 @@ class MinionV2SemanticWorker:
                 expected_version=current.version,
                 idempotency_key=f"architecture-review:{current.aggregate_id}:{review_ref.sha256}",
                 payload=payload,
-            )
+            ),
+            **self._worker_submission_settlement(effect or {}),
         )
 
     def _effect_snapshot(self, effect: Mapping[str, Any]) -> AggregateSnapshot:

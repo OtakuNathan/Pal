@@ -18,6 +18,18 @@ def bound_reference_payload(
         item = dict(raw or {})
         if str(item.get("name") or "") != name:
             continue
+        if bool(item.get("bound_input")):
+            from pal.minion.v2.worker_gateway import worker_gateway_client_from_env
+
+            gateway = worker_gateway_client_from_env(
+                Path(str(workspace.get("runtime_root") or ""))
+            )
+            if gateway is not None:
+                response = gateway.request_sync("bound_input_json", {"name": name})
+                value = response.get("value")
+                if not isinstance(value, Mapping):
+                    raise ValueError(f"bound input {name!r} must contain a JSON object")
+                return dict(value)
         path = Path(str(item.get("path") or "")).expanduser()
         if not path.is_file():
             raise ValueError(f"bound input {name!r} is unavailable at {path}")

@@ -205,19 +205,16 @@ class MinionManagerProvider:
     def _stop_manager_locked(self) -> None:
         self._event_stop.set()
         manager_pid = self._manager_pid()
-        with contextlib.suppress(Exception):
-            self._lifecycle_client.shutdown_sync(
-                graceful=True,
-                timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS,
-            )
+        graceful_requested = self._request_graceful_shutdown()
         process = self.process
-        if process is not None:
+        if process is not None and graceful_requested:
             with contextlib.suppress(Exception):
                 process.wait(timeout=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS + 1.0)
-        self._wait_for_pid_exit(
-            manager_pid,
-            timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS + 1.0,
-        )
+        if graceful_requested:
+            self._wait_for_pid_exit(
+                manager_pid,
+                timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS + 1.0,
+            )
         if self._pid_is_running(manager_pid):
             self._terminate_manager(manager_pid)
         self._stop_process_only(kill_process_group=True)
@@ -274,15 +271,12 @@ class MinionManagerProvider:
     def _retire_existing_manager(self, health: dict[str, Any] | None = None) -> None:
         payload = dict(health or {})
         manager_pid = self._pid_from_health(payload)
-        with contextlib.suppress(Exception):
-            self._lifecycle_client.shutdown_sync(
-                graceful=True,
-                timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS,
+        graceful_requested = self._request_graceful_shutdown()
+        if graceful_requested:
+            self._wait_for_pid_exit(
+                manager_pid,
+                timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS + 1.0,
             )
-        self._wait_for_pid_exit(
-            manager_pid,
-            timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS + 1.0,
-        )
         if self._pid_is_running(manager_pid):
             self._terminate_manager(manager_pid)
             self._wait_for_pid_exit(manager_pid, timeout_seconds=1.5)
@@ -292,6 +286,16 @@ class MinionManagerProvider:
         if self._manager_is_responding():
             raise RuntimeError("existing minion manager did not stop")
         self._cleanup_stale_endpoint()
+
+    def _request_graceful_shutdown(self) -> bool:
+        try:
+            result = self._lifecycle_client.shutdown_sync(
+                graceful=True,
+                timeout_seconds=_MANAGER_GRACEFUL_DRAIN_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            return False
+        return bool(result.get("ok"))
 
     def _manager_pid(self) -> int | None:
         health = dict(self.last_health or {})

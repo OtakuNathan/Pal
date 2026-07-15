@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from pal.minion.v2 import (
     ActionEnvelope,
@@ -40,6 +41,7 @@ from pal.minion.v2.submission_drafts import AUTHORING_CONTRACT_VERSION
 from pal.minion.v2.machines import all_transition_specs
 from pal.minion.v2.orchestration import MECHANICAL_EFFECT_TYPES
 from pal.minion.v2.workers import SEMANTIC_EFFECT_TYPES
+from pal.minion.v2.worker_protocol import WorkerAssignmentRequest
 
 
 class MinionV2TransitionKernelTests(unittest.TestCase):
@@ -1040,6 +1042,52 @@ class MinionV2PersistenceTests(unittest.TestCase):
         self.assertEqual(projection["current_phase"], "architecture")
         self.assertEqual(projection["liveness"], "orphaned")
 
+    def test_durable_worker_assignment_is_a_liveness_source(self) -> None:
+        self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="worker-create"))
+        self.repository.dispatch(self.action("START_WORKFLOW", version=1, key="worker-start"))
+        self.repository.dispatch(
+            ActionEnvelope(
+                action_type="CREATE_ARCHITECTURE_REVISION",
+                workflow_id="wf_1",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+                aggregate_id="arch_worker",
+                actor="test",
+                expected_version=0,
+                idempotency_key="worker-architecture",
+            )
+        )
+        self.repository.ensure_worker_session(
+            session_id="session-worker",
+            workflow_id="wf_1",
+            aggregate_type=AggregateType.ARCHITECTURE_REVISION,
+            aggregate_id="arch_worker",
+            role="architect",
+        )
+        self.repository.create_worker_assignment(
+            WorkerAssignmentRequest(
+                assignment_key="worker-liveness",
+                session_id="session-worker",
+                workflow_id="wf_1",
+                aggregate_type=AggregateType.ARCHITECTURE_REVISION.value,
+                aggregate_id="arch_worker",
+                role="architect",
+                input_fingerprint="worker-input",
+                required_inputs=(),
+                input_refs={},
+                execution_spec={"effect_type": "enqueue_architecture_stage"},
+                submission_kind="architecture",
+            )
+        )
+        with sqlite3.connect(str(self.repository.db_path)) as connection:
+            connection.execute(
+                "UPDATE minion_v2_outbox SET status = 'completed' WHERE workflow_id = ?",
+                ("wf_1",),
+            )
+        self.repository.rebuild_workflow_projections()
+
+        projection = self.repository.read_workflow_projection("wf_1")
+        self.assertEqual(projection["liveness"], "worker_assignment")
+
     def test_idempotency_key_cannot_hide_a_different_request(self) -> None:
         self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="same"))
         with self.assertRaises(ValueError):
@@ -1294,6 +1342,62 @@ class MinionV2PersistenceTests(unittest.TestCase):
         self.assertIn("worktree:recover", result["recovered_leases"])
         second = self.repository.claim_lease("worktree:recover", "new_worker", ttl_seconds=60)
         self.assertGreater(second.fencing_token, first.fencing_token)
+
+    def test_recovery_uses_attempt_process_group_when_lease_metadata_is_incomplete(self) -> None:
+        prompt_ref = self.artifacts.put_json(
+            {"instruction": "recover process"},
+            artifact_type="WorkerPromptPackArtifact",
+        )
+        self.repository.ensure_worker_session(
+            session_id="session-process-recovery",
+            workflow_id="workflow-process-recovery",
+            aggregate_type=AggregateType.DAG_NODE_RUN,
+            aggregate_id="node-process-recovery",
+            role="producer",
+        )
+        assignment = self.repository.create_worker_assignment(
+            WorkerAssignmentRequest(
+                assignment_key="process-recovery",
+                session_id="session-process-recovery",
+                workflow_id="workflow-process-recovery",
+                aggregate_type=AggregateType.DAG_NODE_RUN.value,
+                aggregate_id="node-process-recovery",
+                role="producer",
+                input_fingerprint="process-input",
+                required_inputs=(),
+                input_refs={},
+                execution_spec={"effect_type": "spawn_producer_worker"},
+                submission_kind="candidate",
+            )
+        )
+        attempt = self.repository.claim_worker_assignment(assignment["assignment_id"])
+        resource = f"assignment:{assignment['assignment_id']}"
+        lease = self.repository.claim_lease(
+            resource,
+            attempt["attempt_id"],
+            ttl_seconds=1,
+            metadata={"workflow_id": "workflow-process-recovery"},
+        )
+        self.repository.start_worker_attempt(
+            assignment_id=assignment["assignment_id"],
+            attempt_id_value=attempt["attempt_id"],
+            lease_resource_key=resource,
+            fencing_token=lease.fencing_token,
+            prompt_pack_ref=prompt_ref.to_dict(),
+        )
+        self.repository.update_worker_attempt_process_group(
+            assignment_id=assignment["assignment_id"],
+            attempt_id_value=attempt["attempt_id"],
+            fencing_token=lease.fencing_token,
+            process_group_id=777777,
+        )
+        time.sleep(1.05)
+
+        with patch.object(MinionV2Recovery, "_kill_and_reap", return_value=True) as reap:
+            result = MinionV2Recovery(MinionV2WorkflowService(self.runtime_root)).recover()
+
+        reap.assert_any_call(777777)
+        self.assertIn(resource, result["recovered_leases"])
 
 
 if __name__ == "__main__":

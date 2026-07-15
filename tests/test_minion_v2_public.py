@@ -31,6 +31,7 @@ from pal.minion.v2.workers import (
     apply_v2_revision_scope_capability_policy,
     apply_v2_role_capability_policy,
 )
+from pal.minion.v2.worker_protocol import WorkerAssignmentRequest
 from pal.minion.v2.skeleton import ArchitectureWorkspace
 from pal.minion.v2 import ActionEnvelope, AggregateType
 from pal.minion.v2.contracts import DeferredEffectError, StaleFencingToken, SubmissionInvariantError
@@ -159,6 +160,259 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.runtime_root, ignore_errors=True)
+
+    def test_background_effect_returns_after_durable_assignment_is_ready(self) -> None:
+        async def scenario() -> None:
+            worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+            release = asyncio.Event()
+            effect = {
+                "effect_id": "effect-background",
+                "effect_key": "effect-key-background",
+            }
+
+            async def runner(value):
+                worker._signal_assignment_ready(value, "assignment-background")
+                await release.wait()
+                return {"status": "completed"}
+
+            result = await worker._launch_background_worker(effect, runner)
+
+            self.assertEqual(result["status"], "assignment_started")
+            self.assertEqual(result["provider_request_id"], "assignment-background")
+            self.assertEqual(worker.active_background_count, 1)
+            release.set()
+            await asyncio.gather(*tuple(worker._background_workers.values()))
+            await asyncio.sleep(0)
+            self.assertEqual(worker.active_background_count, 0)
+
+        asyncio.run(scenario())
+
+    def test_background_worker_supervisor_enforces_global_slot_limit(self) -> None:
+        async def scenario() -> None:
+            worker = MinionV2SemanticWorker(
+                MinionV2WorkflowService(self.runtime_root),
+                max_parallel_workers=1,
+            )
+            release = asyncio.Event()
+            first_effect = {
+                "effect_id": "effect-slot-one",
+                "effect_key": "effect-key-slot-one",
+            }
+
+            async def first_runner(value):
+                worker._signal_assignment_ready(value, "assignment-slot-one")
+                await release.wait()
+                return {"status": "completed"}
+
+            await worker._launch_background_worker(first_effect, first_runner)
+            with self.assertRaisesRegex(DeferredEffectError, "no available execution slot"):
+                await worker._launch_background_worker(
+                    {
+                        "effect_id": "effect-slot-two",
+                        "effect_key": "effect-key-slot-two",
+                    },
+                    first_runner,
+                )
+            release.set()
+            await asyncio.gather(*tuple(worker._background_workers.values()))
+
+        asyncio.run(scenario())
+
+    def test_stopping_before_assignment_keeps_effect_deferred(self) -> None:
+        async def scenario() -> None:
+            worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+            worker.request_stop()
+
+            async def runner(_effect):
+                self.fail("runner must not start while the supervisor is stopping")
+
+            with self.assertRaisesRegex(DeferredEffectError, "durable assignment"):
+                await worker._background_worker_loop(
+                    {
+                        "effect_id": "effect-before-assignment",
+                        "effect_key": "effect-key-before-assignment",
+                    },
+                    runner,
+                )
+
+        asyncio.run(scenario())
+
+    def test_post_settlement_telemetry_failure_does_not_reopen_business_work(self) -> None:
+        async def scenario() -> None:
+            worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+            worker._assignment_ids_by_effect["effect-key-settled"] = "assignment-settled"
+            worker.repository.read_worker_assignment = lambda _assignment_id: {
+                "assignment_id": "assignment-settled",
+                "state": "settled",
+            }
+
+            async def failed_after_settlement(_effect):
+                raise RuntimeError("metrics sink unavailable")
+
+            result = await worker._background_worker_loop(
+                {
+                    "effect_id": "effect-settled",
+                    "effect_key": "effect-key-settled",
+                },
+                failed_after_settlement,
+            )
+
+            self.assertEqual(result["status"], "settled")
+
+        asyncio.run(scenario())
+
+    def test_recorded_submission_replays_business_action_before_triage(self) -> None:
+        async def scenario() -> None:
+            worker = MinionV2SemanticWorker(MinionV2WorkflowService(self.runtime_root))
+            effect = {
+                "effect_id": "effect-reconcile",
+                "effect_key": "effect-key-reconcile",
+            }
+            worker._assignment_ids_by_effect["effect-key-reconcile"] = (
+                "assignment-reconcile"
+            )
+            assignment_state = {"value": "submission_recorded"}
+            calls = 0
+
+            worker.repository.read_worker_assignment = lambda _assignment_id: {
+                "assignment_id": "assignment-reconcile",
+                "state": assignment_state["value"],
+                "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                "aggregate_id": "node-reconcile",
+            }
+            worker.repository.list_worker_attempts = lambda _assignment_id: [
+                {"attempt_id": "attempt-reconcile"}
+            ]
+            worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
+                SimpleNamespace(state="PRODUCING")
+            )
+
+            async def runner(_effect):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise RuntimeError("CAS conflict after recording submission")
+                assignment_state["value"] = "settled"
+                return {"status": "completed"}
+
+            async def no_wait(_seconds):
+                return None
+
+            with patch("pal.minion.v2.workers.asyncio.sleep", new=no_wait):
+                result = await worker._background_worker_loop(effect, runner)
+
+            self.assertEqual(calls, 2)
+            self.assertEqual(result["status"], "completed")
+            self.assertEqual(assignment_state["value"], "settled")
+
+        asyncio.run(scenario())
+
+    def test_recovery_restarts_a_durable_queued_assignment(self) -> None:
+        async def scenario() -> None:
+            service = MinionV2WorkflowService(self.runtime_root)
+            service.repository.ensure_worker_session(
+                session_id="session-recovery",
+                workflow_id="workflow-recovery",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-recovery",
+                role="producer",
+            )
+            assignment = service.repository.create_worker_assignment(
+                WorkerAssignmentRequest(
+                    assignment_key="recovery-assignment",
+                    session_id="session-recovery",
+                    workflow_id="workflow-recovery",
+                    aggregate_type=AggregateType.DAG_NODE_RUN.value,
+                    aggregate_id="node-recovery",
+                    role="producer",
+                    input_fingerprint="input-recovery",
+                    required_inputs=(),
+                    input_refs={},
+                    execution_spec={
+                        "effect_type": "spawn_producer_worker",
+                        "effect_key": "effect-key-recovery",
+                        "workflow_id": "workflow-recovery",
+                        "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                        "aggregate_id": "node-recovery",
+                        "payload": {},
+                    },
+                    submission_kind="candidate",
+                )
+            )
+            worker = MinionV2SemanticWorker(service)
+            started = asyncio.Event()
+            release = asyncio.Event()
+            worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
+                SimpleNamespace(state="PRODUCING")
+            )
+
+            async def recovered_runner(_effect):
+                started.set()
+                await release.wait()
+                return {"status": "completed"}
+
+            worker._runner_for_recovered_effect = lambda _effect: recovered_runner
+            count = await worker.recover_background_assignments()
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+
+            self.assertEqual(count, 1)
+            self.assertEqual(
+                worker._assignment_ids_by_effect["effect-key-recovery"],
+                assignment["assignment_id"],
+            )
+            release.set()
+            await asyncio.gather(*tuple(worker._background_workers.values()))
+
+        asyncio.run(scenario())
+
+    def test_recovery_cancels_assignment_for_a_paused_aggregate(self) -> None:
+        async def scenario() -> None:
+            service = MinionV2WorkflowService(self.runtime_root)
+            service.repository.ensure_worker_session(
+                session_id="session-paused",
+                workflow_id="workflow-paused",
+                aggregate_type=AggregateType.DAG_NODE_RUN,
+                aggregate_id="node-paused",
+                role="producer",
+            )
+            assignment = service.repository.create_worker_assignment(
+                WorkerAssignmentRequest(
+                    assignment_key="paused-assignment",
+                    session_id="session-paused",
+                    workflow_id="workflow-paused",
+                    aggregate_type=AggregateType.DAG_NODE_RUN.value,
+                    aggregate_id="node-paused",
+                    role="producer",
+                    input_fingerprint="input-paused",
+                    required_inputs=(),
+                    input_refs={},
+                    execution_spec={
+                        "effect_type": "spawn_producer_worker",
+                        "effect_key": "effect-key-paused",
+                        "workflow_id": "workflow-paused",
+                        "aggregate_type": AggregateType.DAG_NODE_RUN.value,
+                        "aggregate_id": "node-paused",
+                        "payload": {},
+                    },
+                    submission_kind="candidate",
+                )
+            )
+            worker = MinionV2SemanticWorker(service)
+            worker.repository.read_snapshot = lambda _aggregate_type, _aggregate_id: (
+                SimpleNamespace(state="PAUSED")
+            )
+
+            count = await worker.recover_background_assignments()
+
+            self.assertEqual(count, 0)
+            self.assertEqual(
+                service.repository.read_worker_assignment(assignment["assignment_id"])[
+                    "state"
+                ],
+                "cancelled",
+            )
+
+        asyncio.run(scenario())
 
     def test_revision_scope_read_is_not_exposed_to_initial_architect(self) -> None:
         pack = MinionInvocationPack(
@@ -1934,6 +2188,28 @@ class MinionV2PublicSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown Minion V2 manager method: spawn"):
             asyncio.run(manager._call_method("spawn", {"task_context_pack": {}}))
         self.assertEqual(asyncio.run(manager._call_method("v2_wake", {}))["status"], "woken")
+
+    def test_worker_token_cannot_borrow_another_broker_run(self) -> None:
+        manager = MinionManager(self.runtime_root)
+        manager.worker_gateway.authorize = lambda _token: {
+            "assignment": {"session_id": "inv-owner"}
+        }
+        manager.runs["run-other"] = MinionRunState(
+            minion_id="inv-other",
+            run_id="run-other",
+            pack=MinionInvocationPack(invocation_id="inv-other"),
+        )
+
+        with self.assertRaisesRegex(PermissionError, "does not own"):
+            asyncio.run(
+                manager._call_worker_method(
+                    "llm_resolve_max_output_tokens",
+                    {
+                        "access_token": "assignment-token",
+                        "run_id": "run-other",
+                    },
+                )
+            )
 
     def test_graceful_manager_shutdown_drains_before_stopping(self) -> None:
         async def scenario() -> None:

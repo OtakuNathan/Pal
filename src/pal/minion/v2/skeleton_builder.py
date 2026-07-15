@@ -424,6 +424,7 @@ def skeleton_builder_tool_result(
         SubmissionDraftStore(Path(str(workspace["runtime_root"]))).mark_submitted(
             context,
             expected_version=version,
+            submission_payload=output,
         )
         return CanonicalToolResult(
             name=name,
@@ -1203,18 +1204,12 @@ def _preflight_submission(payload: Mapping[str, Any], workspace: Mapping[str, An
     references = {
         str(item.get("name") or ""): Path(str(item.get("path") or ""))
         for item in list(workspace.get("reference_paths") or [])
-        if str(item.get("name") or "") and str(item.get("path") or "")
+        if str(item.get("name") or "")
+        and str(item.get("path") or "")
+        and not bool(item.get("bound_input"))
     }
-    requirements_path = references.pop("requirements", None)
-    if requirements_path is None or not requirements_path.is_file():
-        raise ValueError("bound RequirementsArtifact is unavailable for architecture preflight")
-    requirements = json.loads(requirements_path.read_text(encoding="utf-8"))
-    evidence_path = references.pop("evidence_catalog", None)
-    evidence = (
-        json.loads(evidence_path.read_text(encoding="utf-8"))
-        if evidence_path is not None and evidence_path.is_file()
-        else None
-    )
+    requirements = bound_reference_payload(workspace, "requirements")
+    evidence = bound_reference_payload(workspace, "evidence_catalog", required=False) or None
     repo_path = Path(str(workspace.get("repo_path") or "")).expanduser()
     if not repo_path.is_dir():
         raise ValueError("architecture worktree is unavailable for architecture preflight")
