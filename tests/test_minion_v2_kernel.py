@@ -1058,6 +1058,10 @@ class MinionV2PersistenceTests(unittest.TestCase):
         self.assertTrue(self.repository.complete_outbox_effect(claimed[0]["effect_id"], worker_id="outbox_worker"))
         self.assertFalse(self.repository.complete_outbox_effect(claimed[0]["effect_id"], worker_id="outbox_worker"))
         self.assertEqual(self.repository.claim_outbox("other_worker", limit=10), ())
+        attempts = self.repository.list_effect_attempts(claimed[0]["effect_id"])
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(attempts[0]["status"], "completed")
+        self.assertEqual(attempts[0]["worker_id"], "outbox_worker")
 
     def test_deferred_outbox_effect_returns_to_queue_without_spending_attempt(self) -> None:
         result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="defer"))
@@ -1127,6 +1131,29 @@ class MinionV2PersistenceTests(unittest.TestCase):
             "failed",
         )
         self.assertEqual(self.repository.claim_outbox("third_worker", limit=1), ())
+        attempts = self.repository.list_effect_attempts(effect_id)
+        self.assertEqual(
+            [(item["worker_id"], item["status"]) for item in attempts],
+            [("crashed_worker", "lost"), ("recovery_worker", "failed")],
+        )
+
+    def test_deferred_effect_records_claim_history_without_spending_retry_budget(self) -> None:
+        result = self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="defer-history"))
+        effect_id = result.outbox_effect_ids[0]
+        first = self.repository.claim_outbox("draining-manager", limit=1)[0]
+        self.repository.defer_outbox_effect(
+            effect_id,
+            worker_id="draining-manager",
+            reason="shutdown safe point",
+            attempt_was_incremented=first["claim_incremented_attempt"],
+        )
+        second = self.repository.claim_outbox("new-manager", limit=1)[0]
+        self.assertEqual(second["attempt_count"], 1)
+        attempts = self.repository.list_effect_attempts(effect_id)
+        self.assertEqual(
+            [(item["worker_id"], item["status"]) for item in attempts],
+            [("draining-manager", "deferred"), ("new-manager", "running")],
+        )
 
     def test_worker_timing_metrics_are_persisted_in_workflow_status_projection(self) -> None:
         self.repository.dispatch(self.action("CREATE_WORKFLOW", version=0, key="metrics-create"))

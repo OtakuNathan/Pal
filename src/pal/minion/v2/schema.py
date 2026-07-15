@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 
-MINION_V2_SCHEMA_VERSION = 11
+MINION_V2_SCHEMA_VERSION = 12
 
 
 def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
@@ -186,6 +186,95 @@ def ensure_minion_v2_schema(connection: sqlite3.Connection) -> None:
             total_wall_latency_ms INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS minion_v2_worker_sessions (
+            session_id TEXT PRIMARY KEY,
+            workflow_id TEXT NOT NULL,
+            aggregate_type TEXT NOT NULL,
+            aggregate_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            continuation_ref_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS minion_v2_worker_assignments (
+            assignment_id TEXT PRIMARY KEY,
+            assignment_key TEXT NOT NULL UNIQUE,
+            request_hash TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            workflow_id TEXT NOT NULL,
+            aggregate_type TEXT NOT NULL,
+            aggregate_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            input_fingerprint TEXT NOT NULL,
+            required_inputs_json TEXT NOT NULL DEFAULT '[]',
+            input_refs_json TEXT NOT NULL DEFAULT '{}',
+            submission_kind TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'queued',
+            active_attempt_id TEXT NOT NULL DEFAULT '',
+            submission_artifact_ref_json TEXT NOT NULL DEFAULT '{}',
+            submission_payload_hash TEXT NOT NULL DEFAULT '',
+            settlement_action_json TEXT NOT NULL DEFAULT '{}',
+            last_error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES minion_v2_worker_sessions(session_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS minion_v2_worker_assignments_ready
+        ON minion_v2_worker_assignments(state, updated_at, assignment_id);
+
+        CREATE INDEX IF NOT EXISTS minion_v2_worker_assignments_aggregate
+        ON minion_v2_worker_assignments(
+            workflow_id, aggregate_type, aggregate_id, created_at
+        );
+
+        CREATE TABLE IF NOT EXISTS minion_v2_worker_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            assignment_id TEXT NOT NULL,
+            attempt_index INTEGER NOT NULL,
+            lease_resource_key TEXT NOT NULL,
+            fencing_token INTEGER NOT NULL,
+            process_group_id INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'starting',
+            prompt_pack_ref_json TEXT NOT NULL DEFAULT '{}',
+            response_artifact_ref_json TEXT NOT NULL DEFAULT '{}',
+            error_kind TEXT NOT NULL DEFAULT '',
+            error_text TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL,
+            finished_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            UNIQUE(assignment_id, attempt_index),
+            FOREIGN KEY(assignment_id) REFERENCES minion_v2_worker_assignments(assignment_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS minion_v2_worker_attempts_assignment
+        ON minion_v2_worker_attempts(assignment_id, attempt_index);
+
+        CREATE TABLE IF NOT EXISTS minion_v2_worker_input_reads (
+            assignment_id TEXT NOT NULL,
+            input_name TEXT NOT NULL,
+            artifact_sha256 TEXT NOT NULL,
+            read_at TEXT NOT NULL,
+            PRIMARY KEY(assignment_id, input_name),
+            FOREIGN KEY(assignment_id) REFERENCES minion_v2_worker_assignments(assignment_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS minion_v2_effect_attempts (
+            effect_id TEXT NOT NULL,
+            attempt_index INTEGER NOT NULL,
+            worker_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error_kind TEXT NOT NULL DEFAULT '',
+            error_text TEXT NOT NULL DEFAULT '',
+            provider_request_id TEXT NOT NULL DEFAULT '',
+            result_artifact_ref_json TEXT NOT NULL DEFAULT '{}',
+            started_at TEXT NOT NULL,
+            finished_at TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(effect_id, attempt_index)
         );
 
         CREATE TABLE IF NOT EXISTS minion_v2_worker_events (
